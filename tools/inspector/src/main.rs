@@ -30,7 +30,7 @@ use bevy_immediate::{
     ui::{CapsUi, clicked::ImmUiClicked, text::ImmUiText},
 };
 
-use mimas::vm::Vm;
+use mimas::vm::{Captured, Vm};
 
 mod autoshot;
 mod theme;
@@ -195,9 +195,13 @@ fn main() {
         .map(PathBuf::from)
         .unwrap_or_else(default_script_path);
 
-    // written under `assets/` (Bevy's asset root) rather than a sibling dir, so
-    // `AssetServer::load` can actually see the generated PNGs -- see `TypstPreview::new`.
-    let typst_preview = TypstPreview::new(PathBuf::from("assets/preview"));
+    // main.typ is expected alongside the script itself -- a plain file the user edits, not
+    // something this app generates. PNG output goes under `assets/` (Bevy's asset root) rather
+    // than next to the script, so `AssetServer::load` can actually see it.
+    let typst_preview = TypstPreview::new(
+        script_path.with_file_name("main.typ"),
+        PathBuf::from("assets/preview"),
+    );
 
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.build().set(WindowPlugin {
@@ -404,6 +408,11 @@ fn frame_panel_node() -> (Node, BorderColor, BackgroundColor) {
 #[derive(bevy::ecs::resource::Resource, Default)]
 struct CurrentPreview {
     handle: Option<Handle<Image>>,
+    /// `Session::steps` as of the last frame we actually asked the program to typeset itself.
+    /// Calling `call_method_on_first_instance` runs real mimas bytecode (a full injected call,
+    /// recursing through the whole chain) -- worth doing on an actual step, not on every one of
+    /// the ~60 render frames a step sits idle for.
+    last_steps_seen: Option<u64>,
 }
 
 fn body_row_node() -> Node {
@@ -551,9 +560,24 @@ fn ui_system(
 
             let frames = session.vm.frames();
             let mut image_changed = false;
-            if let Some(path) = typst_preview.update(&frames) {
-                current_preview.handle = Some(asset_server.load(path));
-                image_changed = true;
+            // ask the program itself how to typeset itself (see `Node`'s `impl Typeset` in
+            // main.mim) -- this crate doesn't know what a `Node` is, or that there even is one.
+            // Only on an actual step: this runs real mimas bytecode, not a free data read.
+            if current_preview.last_steps_seen != Some(session.steps) {
+                current_preview.last_steps_seen = Some(session.steps);
+                let scene = session
+                    .vm
+                    .call_method_on_first_instance("typeset")
+                    .and_then(|c| match c {
+                        Captured::Str(s) => Some(s),
+                        _ => None,
+                    });
+                if let Some(scene) = scene
+                    && let Some(path) = typst_preview.update(&scene)
+                {
+                    current_preview.handle = Some(asset_server.load(path));
+                    image_changed = true;
+                }
             }
             let show_internals = session.show_internals;
             // the innermost (currently executing) frame's location -- `None` when there's no

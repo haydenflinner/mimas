@@ -554,6 +554,21 @@ impl Compiler {
             .collect::<Vec<_>>()
             .into();
 
+        let methods: IdVec<_, HashMap<String, BodyId>> = ir
+            .resolutions
+            .adts
+            .values()
+            .map(|adt| {
+                adt.methods
+                    .iter()
+                    .filter_map(|(name, &dec)| {
+                        ir.item_bodies.get(&dec).map(|&body| (name.clone(), body))
+                    })
+                    .collect()
+            })
+            .collect::<Vec<_>>()
+            .into();
+
         Program {
             entry: BodyId::ZERO,
             chunks: std::mem::replace(&mut self.chunks, IdVec::new()),
@@ -561,6 +576,7 @@ impl Compiler {
             bytes: bytes.finish(),
             items,
             struct_names,
+            methods,
         }
     }
 }

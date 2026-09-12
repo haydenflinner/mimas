@@ -19,6 +19,14 @@ pub struct Program {
     /// Struct/variant names, indexed by the same `AdtId`/`struct_id` that `NewInstance` and
     /// runtime instances carry -- lets `print`/`display` show `Node { .. }` instead of `@3 { .. }`.
     pub struct_names: IdVec<AdtId, String>,
+    /// Method name -> `BodyId`, indexed the same way as `struct_names` -- lets a host call an
+    /// instance method by name from outside the running program (a debugger asking a live value
+    /// to render itself via a user-defined pact, say) without the call needing to be written
+    /// into the script's own source. Not used by the interpreter itself: every in-script method
+    /// call already resolves straight to a `CallDirect` (monomorphic) or a compiled `IsInstance`
+    /// chain (dispatch through a pact-typed value) at compile time, neither of which needs a
+    /// runtime table -- see `emit_pact_dispatch`.
+    pub methods: IdVec<AdtId, HashMap<String, BodyId>>,
 }
 
 #[derive(Debug, Clone)]

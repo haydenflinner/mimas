@@ -99,6 +99,9 @@ pub struct Vm {
     /// `items` inverted, for labeling a frame with its source-level function name -- see
     /// [`Vm::chunk_name`]. Rebuilt whenever `items` is (`load_program`).
     pub(crate) chunk_names: HashMap<BodyId, String>,
+    /// Method name -> `BodyId` per struct, indexed by `struct_id` exactly like `struct_names`
+    /// (`State.struct_names`) is -- see [`Vm::call_method_on_first_instance`].
+    pub(crate) methods: Vec<HashMap<String, BodyId>>,
 }
 
 impl Vm {
@@ -119,6 +122,7 @@ impl Vm {
             sources: Sources::new(),
             items: HashMap::default(),
             chunk_names: HashMap::default(),
+            methods: Vec::new(),
         }
     }
 
@@ -130,6 +134,7 @@ impl Vm {
             bytes,
             items,
             struct_names,
+            methods,
         } = program;
         self.entry = entry;
         self.code = Decoder { bytes, ip: 0 };
@@ -137,6 +142,7 @@ impl Vm {
         self.c_strs = strs;
         self.chunk_names = items.iter().map(|(name, &body)| (body, name.clone())).collect();
         self.items = items;
+        self.methods = methods.into_values().collect();
         let entry_chunk = &self.chunks[self.entry];
         let regs_count = entry_chunk.regs as usize;
         let entry_offset = entry_chunk.offset;
@@ -1446,6 +1452,75 @@ impl Vm {
 
             let t = state.thread.borrow();
             Some(t.regs.first().unwrap().capture())
+        })
+    }
+
+    /// Finds the first live register (outermost frame first, then in register order) holding a
+    /// struct instance whose type implements `method_name`, calls that method with no arguments
+    /// beyond the implicit receiver, and returns the result -- or `None` if no such instance
+    /// exists, the call errors, or it needs more than a receiver.
+    ///
+    /// Meant for a debugger asking a live value to render itself via a user-defined pact (e.g.
+    /// `impl Typeset for Node { fn typeset(self) -> str { .. } }`), without that call needing to
+    /// be written into the script's own source. Unlike [`Vm::call_fn`] (which reuses register 0
+    /// of the frame it's invoked from -- fine between full runs, not fine mid-debug-session),
+    /// the injected call's return value lands in a register appended past everything currently
+    /// live, so this can't corrupt a real, still-paused program's state.
+    pub fn call_method_on_first_instance(&mut self, method_name: &str) -> Option<Captured> {
+        let Vm {
+            code,
+            chunks,
+            c_strs: strs,
+            arena,
+            sources,
+            methods,
+            ..
+        } = self;
+        arena.mutate(|mc, state| {
+            let ctx = state.ctx(mc);
+            let mut thread = state.thread.borrow_mut(mc);
+
+            let mut target = None;
+            'search: for frame in thread.frames.iter() {
+                let window_len = chunks[frame.chunk].regs as usize;
+                for reg in &thread.regs[frame.base..frame.base + window_len] {
+                    if let Val::Instance(inst) = reg {
+                        let struct_id = inst.0.borrow().struct_id as usize;
+                        if let Some(&body) =
+                            methods.get(struct_id).and_then(|m| m.get(method_name))
+                        {
+                            target = Some((body, *reg));
+                            break 'search;
+                        }
+                    }
+                }
+            }
+            let (body, receiver) = target?;
+
+            // a fresh register past everything currently live, so the injected call's return
+            // value can't land on top of (and corrupt) anything the paused program still needs.
+            let return_slot = thread.regs.len();
+            thread.regs.push(Val::Null);
+            let caller_base = thread.frames.last().unwrap().base;
+            let dst = Reg::from((return_slot - caller_base) as u32);
+
+            let stop_depth = thread.frames.len() + 1;
+            enter_call(&mut thread, code, chunks, body, dst, &[receiver], &[]);
+            run_dispatch(
+                ctx,
+                code,
+                chunks,
+                strs,
+                sources,
+                &mut thread,
+                usize::MAX,
+                stop_depth,
+            )
+            .ok()?;
+
+            let result = thread.regs[return_slot].capture();
+            thread.regs.truncate(return_slot);
+            Some(result)
         })
     }
 
