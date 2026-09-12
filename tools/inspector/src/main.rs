@@ -32,6 +32,9 @@ use mimas::vm::Vm;
 
 mod autoshot;
 mod theme;
+mod typst_preview;
+
+use typst_preview::TypstPreview;
 
 /// The single file every frame's source panel shows -- `Session::load` compiles exactly one
 /// file named `"main"`, so `compile_files` always assigns it id 0.
@@ -189,6 +192,20 @@ fn main() {
         .nth(1)
         .map(PathBuf::from)
         .unwrap_or_else(default_script_path);
+    let screenshot_mode = std::env::args().any(|a| a == "--screenshots");
+
+    let typst_preview = TypstPreview::new(PathBuf::from("preview"));
+    if !screenshot_mode {
+        println!(
+            "Typst live preview: open {} in a browser (it polls scene.svg every 400ms)",
+            typst_preview.index_html_path().display()
+        );
+        // best-effort: the harness runs with `screenshot_mode` precisely so it never does this.
+        #[cfg(target_os = "macos")]
+        let _ = std::process::Command::new("open")
+            .arg(typst_preview.index_html_path())
+            .spawn();
+    }
 
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.build().set(WindowPlugin {
@@ -200,6 +217,7 @@ fn main() {
     }))
     .add_plugins(BevyImmediatePlugin::<CapsUi>::new())
     .insert_non_send(Session::load(script_path))
+    .insert_resource(typst_preview)
     .init_resource::<AutoScrollState>()
     .add_systems(Startup, (setup_camera, setup_font))
     .add_systems(PreUpdate, keyboard_system)
@@ -417,6 +435,7 @@ fn ui_system(
     ctx: ImmCtx<CapsUi>,
     mut session: NonSendMut<Session>,
     mut auto_scroll: ResMut<AutoScrollState>,
+    mut typst_preview: ResMut<TypstPreview>,
     app_font: Res<AppFont>,
 ) {
     let font = app_font.0.clone();
@@ -489,6 +508,7 @@ fn ui_system(
             });
 
             let frames = session.vm.frames();
+            typst_preview.update(&frames);
             let show_internals = session.show_internals;
             // the innermost (currently executing) frame's location -- `None` when there's no
             // real source span (before the first real op runs, or after the program ends), in
