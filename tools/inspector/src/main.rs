@@ -38,9 +38,18 @@ mod typst_preview;
 
 use typst_preview::TypstPreview;
 
-/// The single file every frame's source panel shows -- `Session::load` compiles exactly one
-/// file named `"main"`, so `compile_files` always assigns it id 0.
-const MAIN_FILE_ID: usize = 0;
+/// The `Typeset` pact, injected ahead of every script so `impl Typeset for Node { .. }` (see
+/// `~/code/dsa/scripts/main.mim`) just works without the script itself declaring the pact it's
+/// implementing -- one less bit of boilerplate every program using the preview would otherwise
+/// need to repeat verbatim. Compiled as a literal prefix of the "main" source rather than a
+/// separate module: mimas has no prelude/auto-import mechanism (every cross-module item needs
+/// an explicit `use`), and requiring even one `use inspector::Typeset;` line would defeat the
+/// point.
+///
+/// The cost: every byte offset `Vm` reports is into *this plus the file*, not the file alone --
+/// see `Session::current_loc` and `display_source`, which exist to hide that from the rest of
+/// the UI so the source panel and line-stepping still line up with what's actually on disk.
+const TYPESET_PRELUDE: &str = "pact Typeset { fn typeset(self) -> str; }\n";
 
 fn default_script_path() -> PathBuf {
     let home = std::env::var("HOME").expect("HOME should be set");
@@ -54,6 +63,11 @@ fn default_script_path() -> PathBuf {
 pub(crate) struct Session {
     vm: Vm,
     path: PathBuf,
+    /// The file exactly as it is on disk -- what the source panel actually shows. `vm` compiled
+    /// `TYPESET_PRELUDE` plus this, so every offset `Vm` hands back is relative to *that*
+    /// concatenation; `current_loc` is the one place that gets translated back to an offset into
+    /// this string, and everything else in the UI works only in terms of `display_source`.
+    display_source: String,
     finished: bool,
     error: Option<String>,
     steps: u64,
@@ -68,12 +82,15 @@ pub(crate) struct Session {
 
 impl Session {
     pub(crate) fn load(path: PathBuf) -> Self {
-        let source = std::fs::read_to_string(&path)
+        let display_source = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
-        let vm = mimas::compile_files(&[("main", &source)]).expect("script should compile");
+        let compiled_source = format!("{TYPESET_PRELUDE}{display_source}");
+        let vm =
+            mimas::compile_files(&[("main", &compiled_source)]).expect("script should compile");
         Session {
             vm,
             path,
+            display_source,
             finished: false,
             error: None,
             steps: 0,
@@ -115,6 +132,10 @@ impl Session {
 
     /// `(file, byte offset)` of the innermost frame's active op, or `None` when there's no
     /// frame or its location is synthetic (compiler-generated, no real source span).
+    /// `(file, byte offset into `display_source`)` of the innermost frame's active op -- offsets
+    /// straight from `Vm` are into the *compiled* source (`TYPESET_PRELUDE` + the file), so this
+    /// is the one place that gets translated back; everywhere else in the UI works purely in
+    /// terms of `display_source`, matching what's actually on disk.
     fn current_loc(&mut self) -> Option<(usize, usize)> {
         // `current_position`, not `frames()`: this runs once per op inside `step_line`'s inner
         // loop, and `frames()` would re-capture every live register (expensively, if one cycles
@@ -123,7 +144,11 @@ impl Session {
         if loc.is_synthetic() {
             return None;
         }
-        Some((loc.file_id, loc.span.start))
+        // `None` if this op's location is somehow inside the injected prelude itself -- there's
+        // no corresponding offset in `display_source` to report. Shouldn't happen in practice
+        // (the prelude is a bare pact signature, no executable statements of its own).
+        let offset = loc.span.start.checked_sub(TYPESET_PRELUDE.len())?;
+        Some((loc.file_id, offset))
     }
 
     /// Runs ops until the innermost frame's active source line changes (or the program ends) --
@@ -135,11 +160,8 @@ impl Session {
             return;
         }
         let start = self.current_loc();
-        let start_line = start.and_then(|(file, offset)| {
-            self.vm
-                .source_text(file)
-                .map(|text| (file, line_byte_range(&text, offset)))
-        });
+        let start_line = start
+            .map(|(file, offset)| (file, line_byte_range(&self.display_source, offset)));
         for _ in 0..1_000_000 {
             self.step();
             if self.finished || self.error.is_some() {
@@ -580,13 +602,17 @@ fn ui_system(
                 }
             }
             let show_internals = session.show_internals;
-            // the innermost (currently executing) frame's location -- `None` when there's no
-            // real source span (before the first real op runs, or after the program ends), in
-            // which case the source is still shown in full, just with nothing highlighted.
+            // the innermost (currently executing) frame's location, translated from a compiled-
+            // source offset (prelude + file) back to one into `display_source` (the file alone)
+            // -- `None` when there's no real source span (before the first real op runs, or
+            // after the program ends, or -- shouldn't happen -- it's within the injected
+            // prelude), in which case the source is still shown in full, just nothing
+            // highlighted. See `TYPESET_PRELUDE` / `Session::current_loc`, which this mirrors
+            // for `frames()` instead of `current_position()`.
             let current_offset = frames
                 .last()
                 .filter(|f| !f.loc.is_synthetic())
-                .map(|f| f.loc.span.start);
+                .and_then(|f| f.loc.span.start.checked_sub(TYPESET_PRELUDE.len()));
 
             // body: the existing debugger panels on the left, the Typst preview pane on the
             // right -- a vertically split pane inside the app itself, no separate browser tab.
@@ -597,11 +623,7 @@ fn ui_system(
                     // moves through a stable view instead of the view itself jumping around.
                     // The panel scrolls (it's clipped to whatever space is left, see
                     // `source_panel_node`), and auto-scrolls to keep the current line in view.
-                    let text = session.vm.source_text(MAIN_FILE_ID);
-                    let lines = text
-                        .as_deref()
-                        .map(|t| all_lines(t, current_offset))
-                        .unwrap_or_default();
+                    let lines = all_lines(&session.display_source, current_offset);
                     let current_row = lines.iter().position(|&(_, _, is_current)| is_current);
 
                     let mut source_panel = ui
