@@ -14,28 +14,30 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
 }
 
 #[native]
-fn print<'gc>(ctx: Ctx<'gc>, msg: Val<'gc>) {
-    println!("{}", ctx.to_string(msg));
+fn print<'gc>(ctx: Ctx<'gc>, msg: Val<'gc>) -> Result<(), RtErr> {
+    println!("{}", ctx.to_string(msg)?);
+    Ok(())
 }
 
 #[native]
 fn panic<'gc>(ctx: Ctx<'gc>, msg: Option<anon::T<'gc>>) -> Result<NeverReturn, RtErr> {
-    Err(RtErr::Custom(
-        msg.map(|msg| format!("panic: {}", ctx.to_string(msg.0)))
-            .unwrap_or_else(|| "explicit panic".into()),
-    ))
+    let text = match msg {
+        Some(msg) => format!("panic: {}", ctx.to_string(msg.0)?),
+        None => "explicit panic".to_string(),
+    };
+    Err(RtErr::Custom(text))
 }
 
 #[native]
 fn todo<'gc>(ctx: Ctx<'gc>, msg: Option<anon::T<'gc>>) -> Result<NeverReturn, RtErr> {
     Err(match msg {
-        Some(m) => RtErr::Custom(format!("todo: {}", ctx.to_string(m.0))),
+        Some(m) => RtErr::Custom(format!("todo: {}", ctx.to_string(m.0)?)),
         None => RtErr::Custom("todo".into()),
     })
 }
 
 #[native]
-fn dbg<'gc>(ctx: Ctx<'gc>, val: anon::T<'gc>) -> anon::T<'gc> {
-    println!("dbg value: {}", ctx.display(val.0));
-    val
+fn dbg<'gc>(ctx: Ctx<'gc>, val: anon::T<'gc>) -> Result<anon::T<'gc>, RtErr> {
+    println!("dbg value: {}", ctx.display(val.0)?);
+    Ok(val)
 }

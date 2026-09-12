@@ -68,6 +68,9 @@ pub enum RtErr {
     #[error("integer arithmetic overflowed")]
     IntegerOverflow,
 
+    #[error("value nesting is too deep to display (possible reference cycle)")]
+    DisplayTooDeep,
+
     #[error("user-triggered panic")]
     UserPanic,
 
@@ -98,6 +101,7 @@ impl RtErr {
             Self::UnwrappedRaised(_) => "this unwrap found a raised error".to_string(),
             Self::InvalidUnaryOperand => "this operand does not support the operator".to_string(),
             Self::IntegerOverflow => "this arithmetic overflows a 64 bit integer".to_string(),
+            Self::DisplayTooDeep => "nesting exceeds the display depth limit here".to_string(),
             Self::UserPanic => "panicked here".to_string(),
             Self::InvalidArgument(_) | Self::Custom(_) => "here".to_string(),
         }

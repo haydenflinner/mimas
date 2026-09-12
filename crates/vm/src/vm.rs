@@ -1190,7 +1190,7 @@ fn cold_dispatch<'gc>(
             for _ in 0..len {
                 match OpFormatPart::decode(code) {
                     OpFormatPart::Literal(str_id) => text.push_str(strs.get(str_id)),
-                    OpFormatPart::Value(reg) => ctx.to_string_into(&mut text, rd!(regs, reg)),
+                    OpFormatPart::Value(reg) => ctx.to_string_into(&mut text, rd!(regs, reg))?,
                 }
             }
             wr!(regs, dst, Val::Str(ctx.intern(&text)));

@@ -5,11 +5,13 @@ use rustc_hash::FxHashMap;
 use std::{any::TypeId, fmt::Write as _, ops, sync::Arc};
 
 use crate::{
-    Fields,
+    Fields, RtErr, RtResult,
     val::{
         Array, Closure, ClosureData, Dict, DictMap, Instance, InstanceData, SharedStr, Str, Val,
     },
 };
+
+const MAX_DISPLAY_DEPTH: usize = 1000;
 
 #[derive(Default, Debug)]
 pub struct MimasBindings(pub FxHashMap<TypeId, AdtBinding>);
@@ -192,26 +194,32 @@ impl<'gc> Ctx<'gc> {
 
     /// Render a value being *shown* -- strings are quoted (`"x"`). Use this for anything
     /// inspection-shaped: dbg output, test harnesses, error reports.
-    pub fn display(self, value: Val<'gc>) -> String {
+    ///
+    /// Fails with [`RtErr::DisplayTooDeep`] if `value` nests (or cycles through arrays,
+    /// dicts, or instances) past [`MAX_DISPLAY_DEPTH`] -- see that constant's docs.
+    pub fn display(self, value: Val<'gc>) -> RtResult<String> {
         let mut out = String::new();
-        self.render_into(&mut out, value, true);
-        out
+        self.render_into(&mut out, value, true, 0)?;
+        Ok(out)
     }
 
     /// Render a value as *text* -- a string yields its own contents, unquoted. This is what
     /// f-strings and `print` use; every non-string renders the same as [Ctx::display].
-    pub fn to_string(self, value: Val<'gc>) -> String {
+    pub fn to_string(self, value: Val<'gc>) -> RtResult<String> {
         let mut out = String::new();
-        self.render_into(&mut out, value, false);
-        out
+        self.render_into(&mut out, value, false, 0)?;
+        Ok(out)
     }
 
     /// [Ctx::to_string], appending into an existing buffer (the f-string builder).
-    pub fn to_string_into(self, out: &mut String, value: Val<'gc>) {
-        self.render_into(out, value, false);
+    pub fn to_string_into(self, out: &mut String, value: Val<'gc>) -> RtResult<()> {
+        self.render_into(out, value, false, 0)
     }
 
-    fn render_into(self, out: &mut String, value: Val<'gc>, quote: bool) {
+    fn render_into(self, out: &mut String, value: Val<'gc>, quote: bool, depth: usize) -> RtResult<()> {
+        if depth > MAX_DISPLAY_DEPTH {
+            return Err(RtErr::DisplayTooDeep);
+        }
         match value {
             Val::Null => out.push_str("null"),
             Val::Bool(b) => out.push_str(if b { "true" } else { "false" }),
@@ -235,19 +243,20 @@ impl<'gc> Ctx<'gc> {
                     if i > 0 {
                         out.push_str(", ");
                     }
-                    self.render_into(out, v, true);
+                    self.render_into(out, v, true, depth + 1)?;
                 }
                 out.push(']');
             }
             Val::Dict(d) => {
-                // todo: this is still allocing
-                let entries =
-                    d.0.borrow()
-                        .iter()
-                        .map(|(k, v)| format!("{} = {}", k.as_str(), self.display(*v)))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                let _ = write!(out, "~{{{entries}}}");
+                out.push_str("~{");
+                for (i, (k, v)) in d.0.borrow().iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    let _ = write!(out, "{} = ", k.as_str());
+                    self.render_into(out, *v, true, depth + 1)?;
+                }
+                out.push('}');
             }
             Val::Fn(b) => {
                 let _ = write!(out, "<fn @{}>", b.index());
@@ -265,23 +274,23 @@ impl<'gc> Ctx<'gc> {
             }
             Val::Instance(i) => {
                 let inst = i.0.borrow();
-                let entries = inst
-                    .fields
-                    .iter()
-                    .copied()
-                    .map(|v| self.display(v))
-                    .collect::<Vec<_>>()
-                    .join(", ");
                 let names = self.state.struct_names.borrow();
                 match names.get(inst.struct_id as usize) {
-                    Some(name) => {
-                        let _ = write!(out, "{name} {{ {entries} }}");
-                    }
+                    Some(name) => out.push_str(name),
                     None => {
-                        let _ = write!(out, "@{} {{ {} }}", inst.struct_id, entries);
+                        let _ = write!(out, "@{}", inst.struct_id);
                     }
                 }
+                out.push_str(" { ");
+                for (i, &v) in inst.fields.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    self.render_into(out, v, true, depth + 1)?;
+                }
+                out.push_str(" }");
             }
         }
+        Ok(())
     }
 }
