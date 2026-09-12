@@ -17,7 +17,6 @@ use bevy::math::Vec2;
 use bevy::picking::events::{Pointer, Scroll};
 use bevy::prelude::Camera2d;
 use bevy::text::{Font, FontSize, FontSource, TextColor, TextFont};
-use bevy::ui::widget::TextShadow;
 use bevy::ui::{
     AlignItems, BackgroundColor, BorderColor, BorderRadius, FlexDirection, Node, Overflow,
     OverflowAxis, ScrollPosition, UiRect, Val,
@@ -32,6 +31,7 @@ use bevy_immediate::{
 use mimas::vm::Vm;
 
 mod autoshot;
+mod theme;
 
 /// The single file every frame's source panel shows -- `Session::load` compiles exactly one
 /// file named `"main"`, so `compile_files` always assigns it id 0.
@@ -240,15 +240,18 @@ fn keyboard_system(keys: Res<ButtonInput<KeyCode>>, mut session: NonSendMut<Sess
     }
 }
 
-fn root_node() -> Node {
-    Node {
-        flex_direction: FlexDirection::Column,
-        width: Val::Percent(100.0),
-        height: Val::Percent(100.0),
-        padding: UiRect::all(Val::Px(12.)),
-        row_gap: Val::Px(10.),
-        ..default()
-    }
+fn root_node() -> (Node, BackgroundColor) {
+    (
+        Node {
+            flex_direction: FlexDirection::Column,
+            width: Val::Percent(100.0),
+            height: Val::Percent(100.0),
+            padding: UiRect::all(Val::Px(12.)),
+            row_gap: Val::Px(10.),
+            ..default()
+        },
+        BackgroundColor(theme::base()),
+    )
 }
 
 fn row_node() -> Node {
@@ -268,8 +271,8 @@ fn button_node() -> (Node, BorderColor, BackgroundColor) {
             border_radius: BorderRadius::all(Val::Px(4.)),
             ..default()
         },
-        BorderColor::all(Color::srgb(0.6, 0.6, 0.6)),
-        BackgroundColor(Color::srgb(0.18, 0.18, 0.18)),
+        BorderColor::all(theme::overlay1()),
+        BackgroundColor(theme::surface1()),
     )
 }
 
@@ -287,20 +290,12 @@ fn text_font(font: Handle<Font>) -> TextFont {
     }
 }
 
-fn text_style(font: Handle<Font>) -> (TextColor, TextShadow, TextFont) {
-    (
-        TextColor(Color::srgb(0.9, 0.9, 0.9)),
-        TextShadow::default(),
-        text_font(font),
-    )
+fn text_style(font: Handle<Font>) -> (TextColor, TextFont) {
+    (TextColor(theme::text()), text_font(font))
 }
 
-fn dim_text_style(font: Handle<Font>) -> (TextColor, TextShadow, TextFont) {
-    (
-        TextColor(Color::srgb(0.55, 0.55, 0.55)),
-        TextShadow::default(),
-        text_font(font),
-    )
+fn dim_text_style(font: Handle<Font>) -> (TextColor, TextFont) {
+    (TextColor(theme::subtext0()), text_font(font))
 }
 
 /// Source-line row style. Unified into one bundle type (rather than two differently-shaped
@@ -309,19 +304,17 @@ fn dim_text_style(font: Handle<Font>) -> (TextColor, TextShadow, TextFont) {
 fn line_row_style(
     is_current: bool,
     font: Handle<Font>,
-) -> (TextColor, TextShadow, BackgroundColor, TextFont) {
+) -> (TextColor, BackgroundColor, TextFont) {
     let text_font = text_font(font);
     if is_current {
         (
-            TextColor(Color::srgb(1.0, 1.0, 0.6)),
-            TextShadow::default(),
-            BackgroundColor(Color::srgb(0.25, 0.25, 0.05)),
+            TextColor(theme::text()),
+            BackgroundColor(theme::yellow()),
             text_font,
         )
     } else {
         (
-            TextColor(Color::srgb(0.55, 0.55, 0.55)),
-            TextShadow::default(),
+            TextColor(theme::subtext1()),
             BackgroundColor(Color::NONE),
             text_font,
         )
@@ -348,8 +341,8 @@ fn source_panel_node() -> (Node, BorderColor, BackgroundColor) {
             },
             ..default()
         },
-        BorderColor::all(Color::srgb(0.4, 0.4, 0.4)),
-        BackgroundColor(Color::srgb(0.1, 0.1, 0.1)),
+        BorderColor::all(theme::overlay0()),
+        BackgroundColor(theme::surface0()),
     )
 }
 
@@ -390,8 +383,8 @@ fn frame_panel_node() -> (Node, BorderColor, BackgroundColor) {
             min_width: Val::Px(160.),
             ..default()
         },
-        BorderColor::all(Color::srgb(0.4, 0.4, 0.4)),
-        BackgroundColor(Color::srgb(0.1, 0.1, 0.1)),
+        BorderColor::all(theme::overlay0()),
+        BackgroundColor(theme::surface0()),
     )
 }
 
@@ -484,8 +477,8 @@ fn ui_system(
 
                 let status = status_text(&session);
                 ui.ch_id("status")
-                    .on_spawn_insert(|| text_style(font.clone()))
-                    .text(status);
+                    .text(status)
+                    .on_change_insert(true, || status_style(&session, font.clone()));
 
                 ui.ch_id("keys")
                     .on_spawn_insert(|| dim_text_style(font.clone()))
@@ -588,4 +581,18 @@ fn status_text(session: &Session) -> String {
     } else {
         format!("running ({} ops so far)", session.steps)
     }
+}
+
+/// Color-codes `status_text`'s three states, so error/finished/running read at a glance instead
+/// of only through the words. Re-applied every frame (`on_change_insert(true, ...)`, matching
+/// `line_row_style`): which state we're in can change on the same status-text entity.
+fn status_style(session: &Session, font: Handle<Font>) -> (TextColor, TextFont) {
+    let color = if session.error.is_some() {
+        theme::red()
+    } else if session.finished {
+        theme::green()
+    } else {
+        theme::text()
+    };
+    (TextColor(color), text_font(font))
 }
