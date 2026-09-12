@@ -11,3 +11,4 @@ temp/
 .vscode
 .claude/
 profile.json*
+.DS_Store

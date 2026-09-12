@@ -385,6 +385,15 @@ pub enum Captured {
     /// Catch-all for Fn / Closure -- these aren't expected to appear as test outputs, but
     /// if they do, comparing against `Other` will fail loudly rather than panic.
     Other,
+    /// An array/dict/instance that's already an ancestor of itself on the current path --
+    /// e.g. a doubly-linked list, where a node's `next` and `prev` both lead back into the
+    /// same live cycle. Detected by tracking the `Gc` pointers on the path down from the
+    /// snapshot's root, not by a recursion-depth cutoff: depth alone doesn't catch this once a
+    /// node has *two* live edges back into the cycle (as `next`/`prev` both do here) -- each
+    /// recursion re-enters the cycle from a different field, so the *work* is exponential in
+    /// the depth limit even though the call stack itself would happily fit. A depth cutoff only
+    /// ever bounded the crash; this bounds the work.
+    Cycle,
 }
 
 impl std::fmt::Display for Captured {
@@ -428,6 +437,7 @@ impl std::fmt::Display for Captured {
             Captured::Fn(body_id) => write!(f, "fn({})", body_id.index()),
             Captured::Raised(s) => write!(f, "raised({s:?})"),
             Captured::Other => f.write_str("<other>"),
+            Captured::Cycle => f.write_str("∞"),
         }
     }
 }
@@ -435,31 +445,61 @@ impl std::fmt::Display for Captured {
 impl<'gc> Val<'gc> {
     /// Recursively snapshot `self` into a gc-free [`Captured`] tree. Must be called
     /// inside the arena's `mutate` scope; the resulting `Captured` can safely escape.
+    ///
+    /// Cuts a cycle to [`Captured::Cycle`] as soon as it re-enters an array/dict/instance
+    /// that's already on the path down from `self` -- see that variant's docs for why a plain
+    /// recursion-depth cutoff isn't enough once a node has more than one live edge back into
+    /// the cycle (an ordinary doubly-linked list already does).
     pub fn capture(self) -> Captured {
+        let mut path = std::collections::HashSet::new();
+        self.capture_at(&mut path)
+    }
+
+    fn capture_at(self, path: &mut std::collections::HashSet<*const ()>) -> Captured {
+        // shared by the three `Gc`-backed cases: bail with `Cycle` if `ptr` is already an
+        // ancestor on this path, otherwise mark it visited for the duration of `body` and
+        // unmark it again on the way back out -- so sibling branches that happen to reach the
+        // same shared (non-cyclic) value are still captured in full, only a true cycle is cut.
+        fn guarded(
+            ptr: *const (),
+            path: &mut std::collections::HashSet<*const ()>,
+            body: impl FnOnce(&mut std::collections::HashSet<*const ()>) -> Captured,
+        ) -> Captured {
+            if !path.insert(ptr) {
+                return Captured::Cycle;
+            }
+            let result = body(path);
+            path.remove(&ptr);
+            result
+        }
+
         match self {
             Val::Null => Captured::Null,
             Val::Bool(b) => Captured::Bool(b),
             Val::Int(i) => Captured::Int(i),
             Val::Float(f) => Captured::Float(f),
             Val::Str(s) => Captured::Str(s.as_str().to_string()),
-            Val::Array(a) => {
-                Captured::Array(a.0.borrow().iter().copied().map(Val::capture).collect())
-            }
-            Val::Dict(d) => Captured::Dict(
-                d.0.borrow()
-                    .iter()
-                    .map(|(k, v)| (k.as_str().to_string(), v.capture()))
-                    .collect(),
-            ),
-            Val::Instance(inst) => Captured::Instance(
-                inst.0
-                    .borrow()
-                    .fields
-                    .iter()
-                    .copied()
-                    .map(Val::capture)
-                    .collect(),
-            ),
+            Val::Array(a) => guarded(Gc::as_ptr(a.0) as *const (), path, |path| {
+                Captured::Array(a.0.borrow().iter().map(|v| v.capture_at(path)).collect())
+            }),
+            Val::Dict(d) => guarded(Gc::as_ptr(d.0) as *const (), path, |path| {
+                Captured::Dict(
+                    d.0.borrow()
+                        .iter()
+                        .map(|(k, v)| (k.as_str().to_string(), v.capture_at(path)))
+                        .collect(),
+                )
+            }),
+            Val::Instance(inst) => guarded(Gc::as_ptr(inst.0) as *const (), path, |path| {
+                Captured::Instance(
+                    inst.0
+                        .borrow()
+                        .fields
+                        .iter()
+                        .map(|v| v.capture_at(path))
+                        .collect(),
+                )
+            }),
             Val::Fn(body_id) => Captured::Fn(body_id),
             Val::Raised(s) => Captured::Raised(s.as_str().to_string()),
             Val::Closure(_) => Captured::Other,

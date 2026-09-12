@@ -42,6 +42,51 @@ mod op_count {
     }
 }
 
+/// One call-stack frame's introspectable state -- for debuggers/visualizers built on top of
+/// [`Vm`], not used by the interpreter itself. See [`Vm::frames`].
+#[derive(Debug)]
+pub struct FrameView {
+    /// Stable identity for this specific live call, for diffing two snapshots against each
+    /// other (see [`DebugEvent`]) -- unique among frames alive at once, since it's the frame's
+    /// register-window offset into `ThreadState.regs`, and never reused while the frame lives.
+    pub base: usize,
+    pub chunk: BodyId,
+    /// The source-level name of the function this frame is running, when it's a named
+    /// top-level item (see [`Vm::chunk_name`]) -- `None` for closures and other synthetic
+    /// chunks, which a coder-facing view has no source name to show anyway.
+    pub function_name: Option<String>,
+    pub ip: usize,
+    pub loc: shared::Location,
+    /// Every register in this frame's window, positional -- the raw, VM-shaped view. Meant
+    /// for a "see deeper" / internals panel, not the coder-facing default.
+    pub registers: Vec<Captured>,
+    /// The subset of `registers` that are named source locals (`let x = ...`, params), in
+    /// declaration order -- what a coder-facing view should actually show.
+    pub locals: Vec<(String, Captured)>,
+}
+
+/// What changed on a single [`Vm::debug_step`], in source-level terms -- the vocabulary a
+/// coder-facing debugger/visualizer should drive its display from, rather than raw register
+/// writes. See [`Vm::debug_step_events`].
+#[derive(Debug, Clone)]
+pub enum DebugEvent {
+    /// A frame for `function_name` came into existence -- a call was made.
+    Called {
+        base: usize,
+        function_name: Option<String>,
+    },
+    /// A frame went out of existence -- it returned (or unwound via a raise).
+    Returned { base: usize },
+    /// A named local in a still-live frame took on a value it didn't have a moment ago --
+    /// freshly bound (`was: None`) or reassigned (`was: Some(..)`).
+    LocalChanged {
+        base: usize,
+        name: String,
+        was: Option<Captured>,
+        value: Captured,
+    },
+}
+
 pub struct Vm {
     pub(crate) entry: BodyId,
     pub(crate) code: Decoder,
@@ -51,6 +96,9 @@ pub struct Vm {
     pub(crate) arena: Arena<Rootable![State<'_>]>,
     pub(crate) sources: Sources,
     pub(crate) items: HashMap<String, BodyId>,
+    /// `items` inverted, for labeling a frame with its source-level function name -- see
+    /// [`Vm::chunk_name`]. Rebuilt whenever `items` is (`load_program`).
+    pub(crate) chunk_names: HashMap<BodyId, String>,
 }
 
 impl Vm {
@@ -70,6 +118,7 @@ impl Vm {
             arena,
             sources: Sources::new(),
             items: HashMap::default(),
+            chunk_names: HashMap::default(),
         }
     }
 
@@ -86,6 +135,7 @@ impl Vm {
         self.code = Decoder { bytes, ip: 0 };
         self.chunks = chunks;
         self.c_strs = strs;
+        self.chunk_names = items.iter().map(|(name, &body)| (body, name.clone())).collect();
         self.items = items;
         let entry_chunk = &self.chunks[self.entry];
         let regs_count = entry_chunk.regs as usize;
@@ -1289,6 +1339,51 @@ fn constant_to_val<'gc>(c: Constant, ctx: Ctx<'gc>, c_cstrs: &StrInterner) -> Va
     }
 }
 
+/// The diff behind [`Vm::debug_step_events`]: which frames appeared/disappeared and which
+/// locals changed value, between two [`FrameView`] snapshots taken a single [`Vm::debug_step`]
+/// apart.
+///
+/// A newly-created frame reports every one of its named locals as changed, not just its
+/// parameters -- mimas pre-allocates all of a function's local registers at frame entry (there's
+/// no per-line "the register for this `let` now exists" event at the VM level), so a `let` not
+/// yet reached shows up bound to `null` immediately, then `LocalChanged` again for real once its
+/// assignment actually executes. That's the honest picture of what the VM did, not a gloss over
+/// it -- a presentation layer is free to wait for the second event before drawing anything.
+fn diff_frames(before: &[FrameView], after: &[FrameView]) -> Vec<DebugEvent> {
+    let mut events = Vec::new();
+    for a in after {
+        let matched = before.iter().find(|b| b.base == a.base);
+        if matched.is_none() {
+            events.push(DebugEvent::Called {
+                base: a.base,
+                function_name: a.function_name.clone(),
+            });
+        }
+        let before_locals: &[(String, Captured)] =
+            matched.map(|b| b.locals.as_slice()).unwrap_or(&[]);
+        for (name, value) in &a.locals {
+            let was = before_locals
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, v)| v.clone());
+            if was.as_ref() != Some(value) {
+                events.push(DebugEvent::LocalChanged {
+                    base: a.base,
+                    name: name.clone(),
+                    was,
+                    value: value.clone(),
+                });
+            }
+        }
+    }
+    for b in before {
+        if !after.iter().any(|a| a.base == b.base) {
+            events.push(DebugEvent::Returned { base: b.base });
+        }
+    }
+    events
+}
+
 impl Vm {
     pub fn install_library<F>(&mut self, install_fn: F) -> ::api::Library<()>
     where
@@ -1352,6 +1447,123 @@ impl Vm {
             let t = state.thread.borrow();
             Some(t.regs.first().unwrap().capture())
         })
+    }
+
+    /// Executes exactly one bytecode op and reports whether the program has finished. Meant for
+    /// single-step debuggers: reuses the same fuel mechanism `run` uses to yield control, just
+    /// with a budget of one op instead of [`FUEL`].
+    pub fn debug_step(&mut self) -> Result<bool, Error> {
+        let Vm {
+            code,
+            chunks,
+            c_strs: strs,
+            arena,
+            sources,
+            ..
+        } = self;
+        arena.mutate(|mc, state| {
+            let ctx = state.ctx(mc);
+            let mut thread = state.thread.borrow_mut(mc);
+            let done = run_dispatch(ctx, code, chunks, strs, sources, &mut thread, 1, 1)?;
+            // `run_dispatch` only writes `code.ip` back into the top frame when a return crosses
+            // `stop_depth` (see its Flow::Return arm) -- for every other stopping point (which is
+            // all of them, at fuel budget 1) the top frame's own `ip` is stale until we sync it
+            // here, same as `Vm::run` relies on for `resolve_name` between calls.
+            if let Some(top) = thread.frames.last_mut() {
+                top.ip = code.ip;
+            }
+            Ok(done)
+        })
+    }
+
+    /// [`Vm::debug_step`], plus the source-level diff of what that one op did. Diffs two
+    /// [`Vm::frames`] snapshots by frame `base` (stable per live call) rather than hooking the
+    /// interpreter itself -- stays correct for free as the instruction set grows, at the cost of
+    /// an extra `frames()` pass per step. That's a fine trade for a debugger, not the VM itself.
+    pub fn debug_step_events(&mut self) -> Result<(bool, Vec<DebugEvent>), Error> {
+        let before = self.frames();
+        let done = self.debug_step()?;
+        let after = self.frames();
+        Ok((done, diff_frames(&before, &after)))
+    }
+
+    /// The innermost frame's `(chunk, ip, source location)`, with no register/local capture --
+    /// unlike [`Vm::frames`], safe to call once per op. Meant for a debugger's hot inner loop
+    /// (e.g. "run until the source line changes"), where capturing every register on every op
+    /// would be wasted work at best and, if a live value cycles through `Gc` handles (a
+    /// doubly-linked list, say), expensive at every single step -- each capture re-walks the
+    /// cycle up to `MAX_CAPTURE_DEPTH` deep.
+    pub fn current_position(&mut self) -> Option<(BodyId, usize, shared::Location)> {
+        let chunks = &self.chunks;
+        self.arena.mutate(|_mc, state| {
+            let t = state.thread.borrow();
+            let f = t.frames.last()?;
+            let chunk = &chunks[f.chunk];
+            let rel = u32::try_from(f.ip.saturating_sub(chunk.offset)).unwrap_or(0);
+            Some((f.chunk, f.ip, chunk.loc_at(rel)))
+        })
+    }
+
+    /// Snapshots every live call frame (oldest/entry frame first, matching `ThreadState.frames`)
+    /// for a debugger to render. Not on any hot path -- allocates freely, and its per-register
+    /// `Captured` values pay the same cycle-guarded recursion cost `Vm::current_position` avoids.
+    pub fn frames(&mut self) -> Vec<FrameView> {
+        let chunks = &self.chunks;
+        let chunk_names = &self.chunk_names;
+        self.arena.mutate(|_mc, state| {
+            let t = state.thread.borrow();
+            t.frames
+                .iter()
+                .map(|f| {
+                    let chunk = &chunks[f.chunk];
+                    let rel = u32::try_from(f.ip.saturating_sub(chunk.offset)).unwrap_or(0);
+                    let registers: Vec<Captured> = t.regs[f.base..f.base + chunk.regs as usize]
+                        .iter()
+                        .copied()
+                        .map(Val::capture)
+                        .collect();
+
+                    // `chunk.locals` has no declared order (it's a name -> Reg map); sorting by
+                    // register index reads as "declaration order" for the common case, since
+                    // the compiler allocates locals' registers as it walks the source.
+                    let mut locals: Vec<(&String, Reg)> =
+                        chunk.locals.iter().map(|(name, &reg)| (name, reg)).collect();
+                    locals.sort_by_key(|&(_, reg)| reg.index());
+                    let locals = locals
+                        .into_iter()
+                        .map(|(name, reg)| (name.clone(), registers[reg.index()].clone()))
+                        .collect();
+
+                    FrameView {
+                        base: f.base,
+                        chunk: f.chunk,
+                        function_name: chunk_names.get(&f.chunk).cloned(),
+                        ip: f.ip,
+                        loc: chunk.loc_at(rel),
+                        registers,
+                        locals,
+                    }
+                })
+                .collect()
+        })
+    }
+
+    /// Source-level name of a chunk, when it's a named top-level item -- `None` for closures
+    /// and other synthetic chunks.
+    pub fn chunk_name(&self, chunk: BodyId) -> Option<&str> {
+        self.chunk_names.get(&chunk).map(String::as_str)
+    }
+
+    /// Struct/variant names indexed by `struct_id`, for labeling instances in a debugger UI --
+    /// same table [`Ctx::display`] uses.
+    pub fn struct_names(&mut self) -> Vec<String> {
+        self.arena
+            .mutate(|_mc, state| state.struct_names.borrow().clone())
+    }
+
+    /// Raw source text for a file, for a debugger to highlight the active span against.
+    pub fn source_text(&self, file_id: shared::FileId) -> Option<Arc<str>> {
+        self.sources.get(&file_id).map(|s| s.inner().clone())
     }
 
     pub fn execute<F>(source: &str, install_lib: F) -> std::result::Result<Self, ExecuteError>
