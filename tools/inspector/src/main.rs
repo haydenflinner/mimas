@@ -38,18 +38,26 @@ mod typst_preview;
 
 use typst_preview::TypstPreview;
 
-/// The `Typeset` pact, injected ahead of every script so `impl Typeset for Node { .. }` (see
-/// `~/code/dsa/scripts/main.mim`) just works without the script itself declaring the pact it's
-/// implementing -- one less bit of boilerplate every program using the preview would otherwise
-/// need to repeat verbatim. Compiled as a literal prefix of the "main" source rather than a
-/// separate module: mimas has no prelude/auto-import mechanism (every cross-module item needs
-/// an explicit `use`), and requiring even one `use inspector::Typeset;` line would defeat the
-/// point.
-///
-/// The cost: every byte offset `Vm` reports is into *this plus the file*, not the file alone --
-/// see `Session::current_loc` and `display_source`, which exist to hide that from the rest of
-/// the UI so the source panel and line-stepping still line up with what's actually on disk.
-const TYPESET_PRELUDE: &str = "pact Typeset { fn typeset(self) -> str; }\n";
+/// Built-in `typst` module, compiled alongside every script as a second file (not a prefix of
+/// it) so scripts pick it up with a plain `use typst::*;` -- see `~/code/dsa/scripts/main.mim`,
+/// which implements `Typeset` for its own `Node` using this module's pact and helpers.
+/// `impl Typeset for Node` itself has to stay in the script: this module can't know about
+/// `Node`, and mimas has no prelude/auto-import (every cross-module item needs an explicit
+/// `use`), so there's no way to fold the impl in here too.
+const TYPST_MODULE_SOURCE: &str = r#"module typst;
+
+pub pact Typeset {
+    fn typeset(self) -> str;
+}
+
+pub fn typst_box(x: float, name: str, val: int) -> str {
+    f"content(({x},0),name:\"{name}\",frame:\"rect\",[{val}]);"
+}
+
+pub fn typst_arrow(from: str, to: str, color: str) -> str {
+    f"line(\"{from}\",\"{to}\",stroke:rgb(\"{color}\"),mark:(end:\"stealth\",fill:rgb(\"{color}\")));"
+}
+"#;
 
 fn default_script_path() -> PathBuf {
     let home = std::env::var("HOME").expect("HOME should be set");
@@ -63,10 +71,9 @@ fn default_script_path() -> PathBuf {
 pub(crate) struct Session {
     vm: Vm,
     path: PathBuf,
-    /// The file exactly as it is on disk -- what the source panel actually shows. `vm` compiled
-    /// `TYPESET_PRELUDE` plus this, so every offset `Vm` hands back is relative to *that*
-    /// concatenation; `current_loc` is the one place that gets translated back to an offset into
-    /// this string, and everything else in the UI works only in terms of `display_source`.
+    /// The file exactly as it is on disk -- what the source panel actually shows, and (since
+    /// it's compiled unmodified as file 0, with `typst` a separate file alongside it) also
+    /// exactly what every byte offset `Vm` reports is relative to, as long as it's for file 0.
     display_source: String,
     finished: bool,
     error: Option<String>,
@@ -84,9 +91,10 @@ impl Session {
     pub(crate) fn load(path: PathBuf) -> Self {
         let display_source = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
-        let compiled_source = format!("{TYPESET_PRELUDE}{display_source}");
-        let vm =
-            mimas::compile_files(&[("main", &compiled_source)]).expect("script should compile");
+        // `main` listed first so it's file 0, compiled byte-for-byte as `display_source` --
+        // no prefix, no offset translation needed to line up with what's on disk.
+        let vm = mimas::compile_files(&[("main", &display_source), ("typst", TYPST_MODULE_SOURCE)])
+            .expect("script should compile");
         Session {
             vm,
             path,
@@ -130,25 +138,19 @@ impl Session {
         }
     }
 
-    /// `(file, byte offset)` of the innermost frame's active op, or `None` when there's no
-    /// frame or its location is synthetic (compiler-generated, no real source span).
-    /// `(file, byte offset into `display_source`)` of the innermost frame's active op -- offsets
-    /// straight from `Vm` are into the *compiled* source (`TYPESET_PRELUDE` + the file), so this
-    /// is the one place that gets translated back; everywhere else in the UI works purely in
-    /// terms of `display_source`, matching what's actually on disk.
+    /// `(file, byte offset into `display_source`)` of the innermost frame's active op, or `None`
+    /// when there's no frame, its location is synthetic (compiler-generated, no real source
+    /// span), or it's not in `main` (file 0) at all -- e.g. mid-step inside the `typst` module,
+    /// which has no counterpart in `display_source` to report an offset into.
     fn current_loc(&mut self) -> Option<(usize, usize)> {
         // `current_position`, not `frames()`: this runs once per op inside `step_line`'s inner
         // loop, and `frames()` would re-capture every live register (expensively, if one cycles
         // through `Gc` handles -- see `Vm::current_position`'s doc) on every single one of them.
         let (_, _, loc) = self.vm.current_position()?;
-        if loc.is_synthetic() {
+        if loc.is_synthetic() || loc.file_id != 0 {
             return None;
         }
-        // `None` if this op's location is somehow inside the injected prelude itself -- there's
-        // no corresponding offset in `display_source` to report. Shouldn't happen in practice
-        // (the prelude is a bare pact signature, no executable statements of its own).
-        let offset = loc.span.start.checked_sub(TYPESET_PRELUDE.len())?;
-        Some((loc.file_id, offset))
+        Some((loc.file_id, loc.span.start))
     }
 
     /// Runs ops until the innermost frame's active source line changes (or the program ends) --
@@ -602,17 +604,16 @@ fn ui_system(
                 }
             }
             let show_internals = session.show_internals;
-            // the innermost (currently executing) frame's location, translated from a compiled-
-            // source offset (prelude + file) back to one into `display_source` (the file alone)
-            // -- `None` when there's no real source span (before the first real op runs, or
-            // after the program ends, or -- shouldn't happen -- it's within the injected
-            // prelude), in which case the source is still shown in full, just nothing
-            // highlighted. See `TYPESET_PRELUDE` / `Session::current_loc`, which this mirrors
-            // for `frames()` instead of `current_position()`.
+            // the innermost (currently executing) frame's location, as a byte offset into
+            // `display_source` -- `None` when there's no real source span (before the first
+            // real op runs, or after the program ends), or the frame is inside the `typst`
+            // module rather than `main` (file 0), in which case the source is still shown in
+            // full, just nothing highlighted. Mirrors `Session::current_loc`, which does the
+            // same for `current_position()` instead of `frames()`.
             let current_offset = frames
                 .last()
-                .filter(|f| !f.loc.is_synthetic())
-                .and_then(|f| f.loc.span.start.checked_sub(TYPESET_PRELUDE.len()));
+                .filter(|f| !f.loc.is_synthetic() && f.loc.file_id == 0)
+                .map(|f| f.loc.span.start);
 
             // body: the existing debugger panels on the left, the Typst preview pane on the
             // right -- a vertically split pane inside the app itself, no separate browser tab.
