@@ -1,5 +1,6 @@
 //! Live Typst preview: renders the running program's linked-list-shaped data as a cetz tree,
-//! compiled to SVG, and shown in a browser tab that polls the file for changes.
+//! compiled to PNG and shown in a pane inside the app itself (see `preview_panel_node` /
+//! `ui_system` in `main.rs`) -- no separate browser needed.
 //!
 //! This is a first, deliberately narrow cut: it finds the first `Node`-shaped (3-field
 //! instance) named local across the live frames and walks its field 0 ("next") as a chain,
@@ -18,92 +19,85 @@ use std::process::Command;
 
 use mimas::vm::{Captured, FrameView};
 
-const INDEX_HTML: &str = r#"<!doctype html>
-<html>
-<head>
-<meta charset="utf-8">
-<title>mimas live preview</title>
-<style>
-  body { margin: 0; height: 100vh; display: flex; align-items: center; justify-content: center; background: #f5efe6; }
-  img { max-width: 95vw; max-height: 95vh; }
-  #empty { font: 16px monospace; color: #576869; }
-</style>
-</head>
-<body>
-<img id="scene" src="scene.svg" onerror="this.style.display='none'; document.getElementById('empty').style.display='block';">
-<div id="empty" style="display:none;">(nothing to show yet)</div>
-<script>
-setInterval(() => {
-  const img = document.getElementById('scene');
-  img.style.display = '';
-  document.getElementById('empty').style.display = 'none';
-  img.src = 'scene.svg?t=' + Date.now();
-}, 400);
-</script>
-</body>
-</html>
-"#;
-
 #[derive(bevy::ecs::resource::Resource)]
 pub struct TypstPreview {
+    /// Where generated PNGs are written -- must be under Bevy's asset root (`assets/`) so
+    /// `AssetServer::load` can see them; see `TypstPreview::new`.
     dir: PathBuf,
     /// The last `.typ` source actually compiled -- skip re-running `typst` when the visualized
     /// chain hasn't changed, which is most render frames.
     last_source: Option<String>,
+    /// Bumped on every successful compile so each version gets a fresh filename: `AssetServer`
+    /// caches by path, and a fixed filename would mean a reload never picks up the new bytes
+    /// without fighting that cache directly. The two most recent files are kept (the current
+    /// one plus whatever `ui_system` might still be mid-load on), older ones deleted.
+    generation: u64,
 }
 
 impl TypstPreview {
+    /// `dir` must be a subdirectory of the app's asset root (`assets/`) -- e.g.
+    /// `assets/preview` -- so the paths `update` hands back are loadable via `AssetServer`.
     pub fn new(dir: PathBuf) -> Self {
         std::fs::create_dir_all(&dir)
             .unwrap_or_else(|e| panic!("failed to create {}: {e}", dir.display()));
-        std::fs::write(dir.join("index.html"), INDEX_HTML)
-            .expect("preview/index.html should be writable");
         Self {
             dir,
             last_source: None,
+            generation: 0,
         }
     }
 
-    pub fn index_html_path(&self) -> PathBuf {
-        self.dir.join("index.html")
-    }
-
-    /// Re-renders and recompiles if the visualized chain changed since the last call. Cheap
-    /// no-op otherwise (including when there's nothing chain-shaped to show).
-    pub fn update(&mut self, frames: &[FrameView]) {
-        let Some(source) = build_scene(frames) else {
-            return;
-        };
+    /// Re-renders and recompiles if the visualized chain changed since the last call, returning
+    /// the new PNG's path (relative to the asset root, ready for `AssetServer::load`) on success.
+    /// `None` otherwise -- including when there's nothing chain-shaped to show, or the chain is
+    /// unchanged since last call (most render frames), or the compile failed (logged to stderr).
+    pub fn update(&mut self, frames: &[FrameView]) -> Option<String> {
+        let source = build_scene(frames)?;
         if self.last_source.as_deref() == Some(source.as_str()) {
-            return;
+            return None;
         }
 
         let typ_path = self.dir.join("scene.typ");
         if let Err(e) = std::fs::write(&typ_path, &source) {
             eprintln!("typst preview: failed to write {}: {e}", typ_path.display());
-            return;
+            return None;
         }
 
-        let svg_path = self.dir.join("scene.svg");
-        match Command::new("typst")
-            .args(["compile", "--format", "svg"])
+        let generation = self.generation + 1;
+        let png_name = format!("scene_{generation}.png");
+        let png_path = self.dir.join(&png_name);
+        let result = Command::new("typst")
+            // high PPI relative to the small pane cetz actually draws into: the preview panel
+            // displays this at up to ~360px wide (see `preview_panel_node`), and a diagram this
+            // simple renders under 100px natively at a typical PPI -- upscaling that blurs it.
+            .args(["compile", "--format", "png", "--ppi", "600"])
             .arg(&typ_path)
-            .arg(&svg_path)
-            .output()
-        {
+            .arg(&png_path)
+            .output();
+        match result {
             Ok(output) if output.status.success() => {
                 self.last_source = Some(source);
+                self.generation = generation;
+                // keep this one and the previous one (in case a load is still in flight on
+                // it), delete anything older.
+                if generation >= 2 {
+                    let stale = self.dir.join(format!("scene_{}.png", generation - 2));
+                    let _ = std::fs::remove_file(stale);
+                }
+                Some(format!("preview/{png_name}"))
             }
             Ok(output) => {
                 eprintln!(
                     "typst preview: compile failed:\n{}",
                     String::from_utf8_lossy(&output.stderr)
                 );
+                None
             }
             Err(e) => {
                 eprintln!(
                     "typst preview: couldn't run `typst` ({e}) -- is it installed and on PATH?"
                 );
+                None
             }
         }
     }
@@ -150,9 +144,11 @@ fn render_typ(labels: &[String]) -> String {
             [first, rest @ ..] => format!("([{}], {})", typ_escape(first), nest(rest)),
         }
     }
+    // `fill: none`: a transparent page, so the PNG blends into the preview pane's own
+    // background instead of carrying its own white rectangle.
     format!(
         "#import \"@preview/cetz:0.5.2\": canvas, draw, tree\n\
-         #set page(width: auto, height: auto, margin: .5cm)\n\
+         #set page(width: auto, height: auto, margin: .5cm, fill: none)\n\
          #canvas({{\n\
          \x20 import draw: *\n\
          \x20 set-style(content: (padding: 0.5em))\n\

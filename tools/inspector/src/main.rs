@@ -10,6 +10,7 @@ use bevy::asset::{AssetServer, Handle};
 use bevy::color::Color;
 use bevy::ecs::observer::On;
 use bevy::ecs::system::{Commands, NonSendMut, Query, Res, ResMut};
+use bevy::image::Image;
 use bevy::input::ButtonInput;
 use bevy::input::keyboard::KeyCode;
 use bevy::input::mouse::MouseScrollUnit;
@@ -17,9 +18,10 @@ use bevy::math::Vec2;
 use bevy::picking::events::{Pointer, Scroll};
 use bevy::prelude::Camera2d;
 use bevy::text::{Font, FontSize, FontSource, TextColor, TextFont};
+use bevy::ui::widget::ImageNode;
 use bevy::ui::{
-    AlignItems, BackgroundColor, BorderColor, BorderRadius, FlexDirection, Node, Overflow,
-    OverflowAxis, ScrollPosition, UiRect, Val,
+    AlignItems, BackgroundColor, BorderColor, BorderRadius, FlexDirection, JustifyContent, Node,
+    Overflow, OverflowAxis, ScrollPosition, UiRect, Val,
 };
 use bevy::utils::default;
 use bevy::window::{Window, WindowPlugin};
@@ -192,20 +194,10 @@ fn main() {
         .nth(1)
         .map(PathBuf::from)
         .unwrap_or_else(default_script_path);
-    let screenshot_mode = std::env::args().any(|a| a == "--screenshots");
 
-    let typst_preview = TypstPreview::new(PathBuf::from("preview"));
-    if !screenshot_mode {
-        println!(
-            "Typst live preview: open {} in a browser (it polls scene.svg every 400ms)",
-            typst_preview.index_html_path().display()
-        );
-        // best-effort: the harness runs with `screenshot_mode` precisely so it never does this.
-        #[cfg(target_os = "macos")]
-        let _ = std::process::Command::new("open")
-            .arg(typst_preview.index_html_path())
-            .spawn();
-    }
+    // written under `assets/` (Bevy's asset root) rather than a sibling dir, so
+    // `AssetServer::load` can actually see the generated PNGs -- see `TypstPreview::new`.
+    let typst_preview = TypstPreview::new(PathBuf::from("assets/preview"));
 
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.build().set(WindowPlugin {
@@ -219,6 +211,7 @@ fn main() {
     .insert_non_send(Session::load(script_path))
     .insert_resource(typst_preview)
     .init_resource::<AutoScrollState>()
+    .init_resource::<CurrentPreview>()
     .add_systems(Startup, (setup_camera, setup_font))
     .add_systems(PreUpdate, keyboard_system)
     .add_systems(Update, ui_system);
@@ -406,6 +399,53 @@ fn frame_panel_node() -> (Node, BorderColor, BackgroundColor) {
     )
 }
 
+/// The most recently compiled Typst preview image, if any -- `None` until the first frame that
+/// finds something chain-shaped to show (see `TypstPreview::update`).
+#[derive(bevy::ecs::resource::Resource, Default)]
+struct CurrentPreview {
+    handle: Option<Handle<Image>>,
+}
+
+fn body_row_node() -> Node {
+    Node {
+        flex_direction: FlexDirection::Row,
+        column_gap: Val::Px(10.),
+        flex_grow: 1.0,
+        min_height: Val::Px(0.),
+        ..default()
+    }
+}
+
+fn main_column_node() -> Node {
+    Node {
+        flex_direction: FlexDirection::Column,
+        row_gap: Val::Px(10.),
+        flex_grow: 1.0,
+        min_width: Val::Px(0.),
+        min_height: Val::Px(0.),
+        ..default()
+    }
+}
+
+fn preview_panel_node() -> (Node, BorderColor, BackgroundColor) {
+    (
+        Node {
+            flex_direction: FlexDirection::Column,
+            padding: UiRect::all(Val::Px(8.)),
+            border: UiRect::all(Val::Px(1.)),
+            border_radius: BorderRadius::all(Val::Px(4.)),
+            width: Val::Px(380.),
+            min_height: Val::Px(0.),
+            align_items: AlignItems::Center,
+            justify_content: JustifyContent::Center,
+            overflow: Overflow::clip(),
+            ..default()
+        },
+        BorderColor::all(theme::overlay0()),
+        BackgroundColor(theme::surface0()),
+    )
+}
+
 /// Tracks the last line the source panel auto-scrolled to, so `ui_system` only re-applies
 /// `ScrollPosition` when that line actually changes -- otherwise re-inserting it every frame
 /// (needed so the *initial* follow-the-highlight scroll works at all) would fight a manual
@@ -436,7 +476,9 @@ fn ui_system(
     mut session: NonSendMut<Session>,
     mut auto_scroll: ResMut<AutoScrollState>,
     mut typst_preview: ResMut<TypstPreview>,
+    mut current_preview: ResMut<CurrentPreview>,
     app_font: Res<AppFont>,
+    asset_server: Res<AssetServer>,
 ) {
     let font = app_font.0.clone();
     ctx.build_immediate_root("inspector_root")
@@ -508,7 +550,11 @@ fn ui_system(
             });
 
             let frames = session.vm.frames();
-            typst_preview.update(&frames);
+            let mut image_changed = false;
+            if let Some(path) = typst_preview.update(&frames) {
+                current_preview.handle = Some(asset_server.load(path));
+                image_changed = true;
+            }
             let show_internals = session.show_internals;
             // the innermost (currently executing) frame's location -- `None` when there's no
             // real source span (before the first real op runs, or after the program ends), in
@@ -518,77 +564,110 @@ fn ui_system(
                 .filter(|f| !f.loc.is_synthetic())
                 .map(|f| f.loc.span.start);
 
-            // source panel: the whole program, current line highlighted. Always the full source
-            // (not a window around the current line) so the highlight moves through a stable
-            // view instead of the view itself jumping around. The panel scrolls (it's clipped to
-            // whatever space is left in the window, see `source_panel_node`), and auto-scrolls
-            // to keep the current line in view as the program steps.
-            let text = session.vm.source_text(MAIN_FILE_ID);
-            let lines = text
-                .as_deref()
-                .map(|t| all_lines(t, current_offset))
-                .unwrap_or_default();
-            let current_row = lines.iter().position(|&(_, _, is_current)| is_current);
+            // body: the existing debugger panels on the left, the Typst preview pane on the
+            // right -- a vertically split pane inside the app itself, no separate browser tab.
+            ui.ch_id("body").on_spawn_insert(body_row_node).add(|ui| {
+                ui.ch_id("main").on_spawn_insert(main_column_node).add(|ui| {
+                    // source panel: the whole program, current line highlighted. Always the
+                    // full source (not a window around the current line) so the highlight
+                    // moves through a stable view instead of the view itself jumping around.
+                    // The panel scrolls (it's clipped to whatever space is left, see
+                    // `source_panel_node`), and auto-scrolls to keep the current line in view.
+                    let text = session.vm.source_text(MAIN_FILE_ID);
+                    let lines = text
+                        .as_deref()
+                        .map(|t| all_lines(t, current_offset))
+                        .unwrap_or_default();
+                    let current_row = lines.iter().position(|&(_, _, is_current)| is_current);
 
-            let mut source_panel = ui
-                .ch_id("source")
-                .on_spawn_insert(source_panel_node)
-                .on_spawn_observe(on_source_scroll);
-            // only re-apply the auto-scroll when the highlighted line actually moved -- not
-            // every frame, or it would fight a manual scroll back to a different line.
-            let row_changed = current_row.is_some() && current_row != auto_scroll.last_row;
-            if let Some(row) = current_row {
-                let target_y = ((row as f32 - SOURCE_ROWS_ABOVE) * SOURCE_ROW_HEIGHT_PX).max(0.0);
-                source_panel = source_panel.on_change_insert(row_changed, move || {
-                    ScrollPosition(Vec2::new(0.0, target_y))
-                });
-            }
-            auto_scroll.last_row = current_row;
-            source_panel.add(|ui| {
-                if lines.is_empty() {
-                    ui.ch()
-                        .on_spawn_insert(|| dim_text_style(font.clone()))
-                        .text("(no source loaded)");
-                }
-                for (line_no, line_text, is_current) in lines {
-                    ui.ch_id(line_no)
-                        .text(format!("{line_no:>4} | {line_text}"))
-                        .on_change_insert(true, || line_row_style(is_current, font.clone()));
-                }
-            });
-
-            // call stack, oldest frame first (matches ThreadState.frames order)
-            ui.ch_id("frames").on_spawn_insert(row_node).add(|ui| {
-                for (depth, frame) in frames.iter().enumerate() {
-                    ui.ch_id(depth).on_spawn_insert(frame_panel_node).add(|ui| {
-                        let title = if depth == 0 {
-                            "script".to_string()
-                        } else {
-                            frame
-                                .function_name
-                                .clone()
-                                .unwrap_or_else(|| "<closure>".to_string())
-                        };
-                        ui.ch_id("header").on_spawn_insert(|| text_style(font.clone())).text(title);
-
-                        for (name, val) in &frame.locals {
-                            ui.ch_id(name.as_str())
-                                .on_spawn_insert(|| text_style(font.clone()))
-                                .text(format!("{name} = {val}"));
-                        }
-
-                        if show_internals {
-                            ui.ch_id("chunk_ip")
+                    let mut source_panel = ui
+                        .ch_id("source")
+                        .on_spawn_insert(source_panel_node)
+                        .on_spawn_observe(on_source_scroll);
+                    // only re-apply the auto-scroll when the highlighted line actually moved --
+                    // not every frame, or it would fight a manual scroll to a different line.
+                    let row_changed = current_row.is_some() && current_row != auto_scroll.last_row;
+                    if let Some(row) = current_row {
+                        let target_y =
+                            ((row as f32 - SOURCE_ROWS_ABOVE) * SOURCE_ROW_HEIGHT_PX).max(0.0);
+                        source_panel = source_panel.on_change_insert(row_changed, move || {
+                            ScrollPosition(Vec2::new(0.0, target_y))
+                        });
+                    }
+                    auto_scroll.last_row = current_row;
+                    source_panel.add(|ui| {
+                        if lines.is_empty() {
+                            ui.ch()
                                 .on_spawn_insert(|| dim_text_style(font.clone()))
-                                .text(format!("chunk #{} @ip={}", frame.chunk.index(), frame.ip));
-                            for (reg, val) in frame.registers.iter().enumerate() {
-                                ui.ch_id(("reg", reg))
-                                    .on_spawn_insert(|| dim_text_style(font.clone()))
-                                    .text(format!("r{reg} = {val}"));
-                            }
+                                .text("(no source loaded)");
+                        }
+                        for (line_no, line_text, is_current) in lines {
+                            ui.ch_id(line_no)
+                                .text(format!("{line_no:>4} | {line_text}"))
+                                .on_change_insert(true, || line_row_style(is_current, font.clone()));
                         }
                     });
-                }
+
+                    // call stack, oldest frame first (matches ThreadState.frames order)
+                    ui.ch_id("frames").on_spawn_insert(row_node).add(|ui| {
+                        for (depth, frame) in frames.iter().enumerate() {
+                            ui.ch_id(depth).on_spawn_insert(frame_panel_node).add(|ui| {
+                                let title = if depth == 0 {
+                                    "script".to_string()
+                                } else {
+                                    frame
+                                        .function_name
+                                        .clone()
+                                        .unwrap_or_else(|| "<closure>".to_string())
+                                };
+                                ui.ch_id("header")
+                                    .on_spawn_insert(|| text_style(font.clone()))
+                                    .text(title);
+
+                                for (name, val) in &frame.locals {
+                                    ui.ch_id(name.as_str())
+                                        .on_spawn_insert(|| text_style(font.clone()))
+                                        .text(format!("{name} = {val}"));
+                                }
+
+                                if show_internals {
+                                    ui.ch_id("chunk_ip")
+                                        .on_spawn_insert(|| dim_text_style(font.clone()))
+                                        .text(format!(
+                                            "chunk #{} @ip={}",
+                                            frame.chunk.index(),
+                                            frame.ip
+                                        ));
+                                    for (reg, val) in frame.registers.iter().enumerate() {
+                                        ui.ch_id(("reg", reg))
+                                            .on_spawn_insert(|| dim_text_style(font.clone()))
+                                            .text(format!("r{reg} = {val}"));
+                                    }
+                                }
+                            });
+                        }
+                    });
+                });
+
+                // Typst preview pane: a live cetz-rendered tree of the running program's linked
+                // Node chain, updated whenever `typst_preview.update` produces a new image.
+                ui.ch_id("preview").on_spawn_insert(preview_panel_node).add(|ui| {
+                    match current_preview.handle.clone() {
+                        Some(handle) => {
+                            ui.ch_id("image")
+                                .on_spawn_insert(|| Node {
+                                    width: Val::Percent(100.0),
+                                    ..default()
+                                })
+                                .on_change_insert(image_changed, move || ImageNode::new(handle.clone()));
+                        }
+                        None => {
+                            ui.ch_id("empty")
+                                .on_spawn_insert(|| dim_text_style(font.clone()))
+                                .text("(no chain to show yet)");
+                        }
+                    }
+                });
             });
         });
 }
