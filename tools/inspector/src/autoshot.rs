@@ -17,7 +17,7 @@ use bevy::ecs::system::{Commands, NonSendMut, Query, ResMut};
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 use bevy::ui::widget::TextScroll;
 
-use crate::{Editor, ManualEditorScroll, Session};
+use crate::{DataflowView, Editor, ManualEditorScroll, Session};
 
 enum Action {
     Screenshot(&'static str),
@@ -46,6 +46,10 @@ enum Action {
     /// discarded) `TextScroll` write -- see that system's doc comment for why the distinction
     /// matters.
     SetEditorScrollY(f32),
+    /// Simulates clicking the "Dataflow"/"Debugger" toggle.
+    ToggleDataflow,
+    /// Simulates typing a new function name into the dataflow view's name field.
+    SetDataflowFunction(&'static str),
     /// Skip this many frames before the next action -- bevy_ui needs a frame or two after a
     /// state change to re-measure text and settle layout, and a screenshot taken too eagerly
     /// would still show the stale frame.
@@ -63,6 +67,27 @@ fn script() -> VecDeque<Action> {
     use Action::*;
     VecDeque::from([
         Screenshot("01_initial"),
+        Wait(8),
+        // Dataflow view checks: typst_box (default function) should render a small clean
+        // circuit -- 3 params in, one `format` op, one `out`. Then switch to typst_arrow (also
+        // straight-line, different arity) to confirm re-extraction on a name change works, then
+        // to typeset (has a loop) to confirm the control-flow rejection surfaces as an error
+        // instead of a blank or bogus diagram.
+        ToggleDataflow,
+        Wait(8),
+        Screenshot("df_01_typst_box"),
+        Wait(8),
+        SetDataflowFunction("typst_arrow"),
+        Wait(8),
+        Screenshot("df_02_typst_arrow"),
+        Wait(8),
+        SetDataflowFunction("typeset"),
+        Wait(8),
+        Screenshot("df_03_typeset_rejected"),
+        Wait(8),
+        ToggleDataflow,
+        Wait(8),
+        Screenshot("df_04_back_to_debugger"),
         Wait(8),
         StepLineN(6),
         Wait(8),
@@ -182,6 +207,7 @@ fn drive(
     mut session: NonSendMut<Session>,
     mut editor: ResMut<Editor>,
     mut manual_scroll: ResMut<ManualEditorScroll>,
+    mut dataflow_view: ResMut<DataflowView>,
     scrolls: Query<(Entity, &TextScroll)>,
     mut exit: MessageWriter<AppExit>,
 ) {
@@ -240,6 +266,8 @@ fn drive(
                 manual_scroll.0 = Some((entity, y));
             }
         }
+        Action::ToggleDataflow => dataflow_view.active = !dataflow_view.active,
+        Action::SetDataflowFunction(name) => dataflow_view.function_name = name.to_string(),
         Action::Wait(n) => runner.waiting = n,
     }
 }

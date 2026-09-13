@@ -39,9 +39,11 @@ use bevy_immediate::{
 use mimas::vm::{Captured, Inspect, Vm};
 
 mod autoshot;
+mod dataflow_view;
 mod theme;
 mod typst_preview;
 
+pub(crate) use dataflow_view::DataflowView;
 use typst_preview::TypstPreview;
 
 /// Built-in `typst` module, compiled alongside every script as a second file (not a prefix of
@@ -306,6 +308,7 @@ fn main() {
         .init_resource::<CurrentPreview>()
         .init_resource::<Editor>()
         .init_resource::<ManualEditorScroll>()
+        .init_resource::<DataflowView>()
         .add_systems(Startup, (setup_camera, setup_font))
         .add_systems(PreUpdate, keyboard_system)
         .add_systems(Update, ui_system)
@@ -402,7 +405,7 @@ fn button_node() -> (Node, BorderColor, BackgroundColor) {
 /// against this value) stays roughly right.
 const UI_FONT_SIZE: f32 = 15.0;
 
-fn text_font(font: Handle<Font>) -> TextFont {
+pub(crate) fn text_font(font: Handle<Font>) -> TextFont {
     TextFont {
         font: FontSource::Handle(font),
         font_size: FontSize::Px(UI_FONT_SIZE),
@@ -732,6 +735,7 @@ fn ui_system(
     mut typst_preview: ResMut<TypstPreview>,
     mut current_preview: ResMut<CurrentPreview>,
     mut editor: ResMut<Editor>,
+    mut dataflow_view: ResMut<DataflowView>,
     app_font: Res<AppFont>,
     asset_server: Res<AssetServer>,
 ) {
@@ -789,6 +793,17 @@ fn ui_system(
                     });
                 if internals_btn.clicked() {
                     session.show_internals = !session.show_internals;
+                }
+
+                let mut dataflow_btn = ui
+                    .ch_id("dataflow_toggle")
+                    .on_spawn_insert(button_node)
+                    .add(|ui| {
+                        let label = if dataflow_view.active { "Debugger" } else { "Dataflow" };
+                        ui.ch().on_spawn_insert(|| text_style(font.clone())).text(label);
+                    });
+                if dataflow_btn.clicked() {
+                    dataflow_view.active = !dataflow_view.active;
                 }
 
                 if editor.editing {
@@ -892,6 +907,42 @@ fn ui_system(
                 .last()
                 .filter(|f| !f.loc.is_synthetic() && f.loc.file_id == 0)
                 .map(|f| f.loc.span.start);
+
+            if dataflow_view.active {
+                dataflow_view.refresh(&session.display_source, session.generation);
+                ui.ch_id("dataflow_name_row").on_spawn_insert(row_node).add(|ui| {
+                    ui.ch()
+                        .on_spawn_insert(|| dim_text_style(font.clone()))
+                        .text("function:");
+                    ui.ch_id("dataflow_name")
+                        .on_spawn_insert({
+                            let font = font.clone();
+                            move || {
+                                (
+                                    Node { width: Val::Px(220.0), ..default() },
+                                    text_style(font),
+                                    EditableText::default(),
+                                    TextCursorStyle {
+                                        color: theme::text(),
+                                        selection_color: theme::overlay0(),
+                                        unfocused_selection_color: theme::overlay0(),
+                                        selected_text_color: None,
+                                    },
+                                )
+                            }
+                        })
+                        .input_text(&mut dataflow_view.function_name);
+                });
+                if let Some(err) = dataflow_view.error.clone() {
+                    ui.ch_id("dataflow_error")
+                        .on_spawn_insert(|| error_text_style(font.clone()))
+                        .text(err);
+                }
+                if let Some(graph) = dataflow_view.graph() {
+                    dataflow_view::render(ui, font.clone(), graph);
+                }
+                return;
+            }
 
             // body: the existing debugger panels on the left, the Typst preview pane on the
             // right -- a vertically split pane inside the app itself, no separate browser tab.
