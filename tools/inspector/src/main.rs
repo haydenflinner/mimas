@@ -21,7 +21,7 @@ use bevy::picking::events::{Pointer, Scroll};
 use bevy::prelude::Camera2d;
 use bevy::text::{
     EditableText, EditableTextGeneration, Font, FontSize, FontSource, TextColor, TextCursorStyle,
-    TextFont, TextLayoutInfo,
+    TextEdit, TextFont, TextLayoutInfo,
 };
 use bevy::ui::widget::{ImageNode, TextScroll};
 use bevy::ui::{
@@ -134,21 +134,33 @@ impl Session {
     }
 
     /// Recompiles `new_source` and fast-forwards a fresh session back to where this one was, by
-    /// replaying `step_line` `line_steps` times -- the same trick `rewind_one_line` uses. Simpler
-    /// and safer than patching a live `Vm`'s bytecode/heap in place (no register layouts to
-    /// reconcile, no stale `Gc` pointers to worry about), and it can absorb *any* edit -- a
+    /// replaying `step` `steps` times -- the same trick `rewind_one_line` uses `step_line` for.
+    /// Raw op-steps, not `step_line`/`line_steps`: the "Step" button only advances `steps` (one
+    /// op), so anyone stepping op-by-op rather than by line would have `line_steps` stuck at
+    /// whatever it last was (often 0) -- replaying that many *lines* landed back near the very
+    /// start regardless of how far `steps` actually was. `steps` is the one counter every
+    /// stepping path (Step, Down-arrow, Run to end) advances consistently, so it's the only
+    /// reliable "how far in" this session actually is.
+    ///
+    /// Simpler and safer than patching a live `Vm`'s bytecode/heap in place (no register layouts
+    /// to reconcile, no stale `Gc` pointers to worry about), and it can absorb *any* edit -- a
     /// reordered declaration, a changed struct's fields, not just a tweaked function body --
     /// because it's not trying to reuse anything from the old compile. Cheap because this
     /// program runs end-to-end in microseconds; redoing that work against the edited source on
     /// every "Apply" is not something worth optimizing away.
     pub(crate) fn apply_edit(&mut self, new_source: String) -> Result<(), String> {
-        let target = self.line_steps;
+        let steps = self.steps;
+        let line_steps = self.line_steps;
         let generation = self.generation.wrapping_add(1);
         let mut replayed =
             Self::compile(new_source, self.path.clone(), self.show_internals, generation)?;
-        for _ in 0..target {
-            replayed.step_line();
+        for _ in 0..steps {
+            replayed.step();
         }
+        // `step` alone never updates `line_steps` (only `step_line` does) -- carry the old
+        // count across so the "N so far" display and the Up-arrow rewind stay consistent with
+        // wherever the user actually was, rather than silently resetting to 0.
+        replayed.line_steps = line_steps;
         *self = replayed;
         Ok(())
     }
@@ -617,6 +629,11 @@ pub(crate) struct Editor {
     pub(crate) editing: bool,
     pub(crate) buffer: String,
     pub(crate) error: Option<String>,
+    /// 0-indexed source line the debugger was on when "Edit" was clicked -- where the freshly
+    /// spawned `EditableText` positions its cursor (see the `editor_text` bundle in `ui_system`),
+    /// so opening the editor lands the view on the code you were just looking at instead of
+    /// snapping to the top of the file.
+    pub(crate) open_at_line: usize,
 }
 
 /// Tracks the last line the source panel auto-scrolled to, so `ui_system` only re-applies
@@ -812,6 +829,15 @@ fn ui_system(
                         editor.buffer = session.display_source.clone();
                         editor.editing = true;
                         editor.error = None;
+                        // Best-effort: land the view at the current execution line instead of
+                        // the top of the file. Counts *source* lines (newlines before the
+                        // current offset), not wrapped visual rows, so a long line that wraps
+                        // earlier in the file can land this a few rows early -- the same
+                        // approximation the read-only panel's own auto-scroll already makes.
+                        editor.open_at_line = session
+                            .current_loc()
+                            .map(|(_, offset)| session.display_source[..offset].matches('\n').count())
+                            .unwrap_or(0);
                     }
                 }
 
@@ -903,6 +929,7 @@ fn ui_system(
                             ui.ch_id("editor_text")
                                 .on_spawn_insert({
                                     let font = font.clone();
+                                    let open_at_line = editor.open_at_line;
                                     move || {
                                         (
                                             Node {
@@ -912,7 +939,16 @@ fn ui_system(
                                                 ..default()
                                             },
                                             text_style(font),
-                                            EditableText::default(),
+                                            EditableText {
+                                                // Queued rather than set directly on the
+                                                // `PlainEditor`: `apply_text_edits` (bevy_text)
+                                                // processes these *after* `input_text`'s own
+                                                // initial `set_text`, so by the time these
+                                                // `Down` moves run, there's real, laid-out
+                                                // content for the cursor to move down through.
+                                                pending_edits: vec![TextEdit::Down(false); open_at_line],
+                                                ..default()
+                                            },
                                             TextScroll::default(),
                                             TextCursorStyle {
                                                 color: theme::text(),

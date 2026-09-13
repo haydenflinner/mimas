@@ -23,6 +23,10 @@ enum Action {
     Screenshot(&'static str),
     /// `Session::step_line`, called this many times.
     StepLineN(u32),
+    /// `Session::step` (single-op, what the "Step" button calls), this many times -- unlike
+    /// `StepLineN`, this never touches `line_steps`, reproducing how someone who only ever
+    /// clicks "Step" (never the Down arrow) would leave `line_steps` stuck at 0.
+    StepN(u32),
     /// `Session::rewind_one_line`, once.
     RewindLine,
     RunToEnd,
@@ -80,6 +84,29 @@ fn script() -> VecDeque<Action> {
         ApplyEdit,
         Wait(8),
         Screenshot("03b_after_mid_debug_apply"),
+        Wait(8),
+        // Regression check for a second real bug: someone who only ever clicks "Step" (never
+        // the Down arrow) leaves `line_steps` at 0 even though `steps` is well into the
+        // program. `apply_edit` used to replay by `line_steps`, so Apply would silently discard
+        // all that progress and land back at the very start. Reset first for a clean, larger
+        // step count, then step by raw op only.
+        Reset,
+        StepN(40),
+        Wait(8),
+        Screenshot("03c_after_step_button_only"),
+        Wait(8),
+        // Bug 2 check, same setup: opening the editor here should land near the current
+        // execution line, not snap to the top of the file.
+        StartEdit,
+        Wait(8),
+        Screenshot("03d_editor_opened_at_current_line"),
+        Wait(8),
+        // Bug 1 check: apply a no-op edit and confirm the session is still ~40 ops in, not back
+        // at 0 -- this is the actual scenario the user hit (Step-only, then Apply).
+        EditReplace("struct Node {", "struct Node { // step-only apply check"),
+        ApplyEdit,
+        Wait(8),
+        Screenshot("03e_after_apply_following_step_only"),
         Wait(8),
         RewindLine,
         Wait(8),
@@ -178,6 +205,11 @@ fn drive(
                 session.step_line();
             }
         }
+        Action::StepN(n) => {
+            for _ in 0..n {
+                session.step();
+            }
+        }
         Action::RewindLine => session.rewind_one_line(),
         Action::RunToEnd => session.run_to_end(),
         Action::Reset => session.reload(),
@@ -186,6 +218,12 @@ fn drive(
             editor.buffer = session.display_source.clone();
             editor.editing = true;
             editor.error = None;
+            // Mirrors the real "Edit" button handler exactly, so this exercises the actual
+            // open-at-current-line logic instead of a stand-in.
+            editor.open_at_line = session
+                .current_loc()
+                .map(|(_, offset)| session.display_source[..offset].matches('\n').count())
+                .unwrap_or(0);
         }
         Action::EditReplace(from, to) => {
             editor.buffer = editor.buffer.replace(from, to);
