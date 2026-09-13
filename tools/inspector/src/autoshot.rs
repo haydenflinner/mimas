@@ -85,6 +85,19 @@ fn script() -> VecDeque<Action> {
         Wait(8),
         Screenshot("df_03_typeset_rejected"),
         Wait(8),
+        // Port regression check: `n * n` reads the same local twice (two separate `GetLocal`
+        // instructions, confirmed via `mimas-cli --dump-ir`), so `mult` gets two distinct edges
+        // from `n` -- one per operand. Before explicit ports, both edges routed to the same
+        // node-center point and silently drew on top of each other, looking like one wire.
+        // With ports, `n`'s single output jack should show two wires leaving it, landing on
+        // `mult`'s two separate input jacks.
+        StartEdit,
+        EditReplace("use typst::*;", "use typst::*;\n\nfn square(n: int) -> int {\n    n * n\n}"),
+        ApplyEdit,
+        SetDataflowFunction("square"),
+        Wait(8),
+        Screenshot("df_03b_square_two_ports"),
+        Wait(8),
         ToggleDataflow,
         Wait(8),
         Screenshot("df_04_back_to_debugger"),

@@ -9,7 +9,7 @@ use bevy::ecs::resource::Resource;
 use bevy::ecs::system::Query;
 use bevy::input::mouse::MouseScrollUnit;
 use bevy::picking::events::{Pointer, Scroll};
-use bevy::text::{Font, TextColor};
+use bevy::text::{Font, FontSize, FontSource, TextColor, TextFont};
 use bevy::ui::{
     AlignItems, BackgroundColor, BorderColor, BorderRadius, JustifyContent, Node, Overflow,
     OverflowAxis, PositionType, ScrollPosition, UiRect, Val,
@@ -91,6 +91,8 @@ const ROW_HEIGHT: f32 = 70.0;
 const NODE_WIDTH: f32 = 170.0;
 const NODE_HEIGHT: f32 = 44.0;
 const WIRE_THICKNESS: f32 = 2.0;
+const PORT_DIAMETER: f32 = 8.0;
+const PORT_LABEL_SIZE: f32 = 9.0;
 
 #[derive(Clone, Copy)]
 struct NodePos {
@@ -130,6 +132,39 @@ fn layout(graph: &DataflowGraph) -> Vec<NodePos> {
         }
     }
     positions
+}
+
+/// Every node gets explicit ports, like the jacks on a real router or phone -- one output port
+/// (right edge, if it produces a value at all) and one input port per operand it actually
+/// consumes, each a separate point along the left edge rather than everything converging on the
+/// box's center. That's what makes `n * n` visually honest: `n`'s one output port has two wires
+/// leaving it, landing on `mult`'s two *separate* input ports instead of stacking into what used
+/// to look like a single connection.
+///
+/// Returns, per edge, the exact (x, y) of the input port its wire should land on, and per node,
+/// every input port's (y, label) for drawing the dot (+ label, when the operand has a meaningful
+/// name like `"left"`/`"right"`) -- both derived from the same grouping-by-destination-node pass,
+/// so they can't disagree with each other.
+fn port_layout(
+    graph: &DataflowGraph,
+    positions: &[NodePos],
+) -> (Vec<(f32, f32)>, Vec<Vec<(f32, Option<&'static str>)>>) {
+    let n = graph.nodes.len();
+    let mut incoming: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (i, e) in graph.edges.iter().enumerate() {
+        incoming[e.to].push(i);
+    }
+    let mut edge_dest = vec![(0.0, 0.0); graph.edges.len()];
+    let mut node_inputs: Vec<Vec<(f32, Option<&'static str>)>> = vec![Vec::new(); n];
+    for (node_idx, edge_idxs) in incoming.iter().enumerate() {
+        let k = edge_idxs.len();
+        for (slot, &edge_idx) in edge_idxs.iter().enumerate() {
+            let y = positions[node_idx].y + (slot as f32 + 1.0) * NODE_HEIGHT / (k as f32 + 1.0);
+            edge_dest[edge_idx] = (positions[node_idx].x, y);
+            node_inputs[node_idx].push((y, graph.edges[edge_idx].port));
+        }
+    }
+    (edge_dest, node_inputs)
 }
 
 fn node_colors(kind: NodeKind) -> (Color, Color) {
@@ -181,15 +216,17 @@ pub(crate) fn render(
     graph: &DataflowGraph,
 ) {
     let positions = layout(graph);
+    let (edge_dest, node_inputs) = port_layout(graph, &positions);
+    let port_color = theme::overlay1();
 
     ui.ch_id("dataflow_canvas")
         .on_spawn_insert(canvas_node)
         .on_spawn_observe(on_dataflow_scroll)
         .add(|ui| {
-            // wires first so node boxes paint over the corner where a wire meets a port, not
-            // the reverse.
+            // wires first so node boxes and ports paint over the corner where a wire meets a
+            // port, not the reverse.
             for (i, edge) in graph.edges.iter().enumerate() {
-                draw_edge(ui, i, edge, &positions);
+                draw_edge(ui, i, edge, &positions, edge_dest[i]);
             }
             for (i, node) in graph.nodes.iter().enumerate() {
                 let pos = positions[i];
@@ -220,17 +257,74 @@ pub(crate) fn render(
                             .on_spawn_insert(move || (TextColor(theme::text()), crate::text_font(label_font)))
                             .text(node.label.clone());
                     });
+
+                // output jack -- every node that produces a value gets exactly one, on its right
+                // edge, regardless of how many wires end up leaving it (a value read twice is
+                // still one port with two wires soldered to it, same as a real jack with a
+                // splitter -- it's the *input* side where multiplicity needs separate pins).
+                if node.kind != NodeKind::Out {
+                    draw_port(ui, ("df_port_out", i), pos.x + NODE_WIDTH, pos.y + NODE_HEIGHT / 2.0, port_color);
+                }
+                // input jacks -- one per operand this node actually consumes, each its own point
+                // on the left edge (see `port_layout`), labeled when the operand has a
+                // meaningful name.
+                for (slot, &(y, label)) in node_inputs[i].iter().enumerate() {
+                    draw_port(ui, ("df_port_in", i, slot), pos.x, y, port_color);
+                    if let Some(label) = label {
+                        let label_font = font.clone();
+                        ui.ch_id(("df_port_label", i, slot))
+                            .on_spawn_insert(move || {
+                                (
+                                    Node {
+                                        position_type: PositionType::Absolute,
+                                        left: Val::Px(pos.x + PORT_DIAMETER + 3.0),
+                                        top: Val::Px(y - PORT_LABEL_SIZE),
+                                        ..default()
+                                    },
+                                    TextColor(theme::subtext0()),
+                                    TextFont {
+                                        font: FontSource::Handle(label_font),
+                                        font_size: FontSize::Px(PORT_LABEL_SIZE),
+                                        ..default()
+                                    },
+                                )
+                            })
+                            .text(label.to_string());
+                    }
+                }
             }
         });
 }
 
-fn draw_edge(ui: &mut Imm<CapsUi>, edge_idx: usize, edge: &DataflowEdge, positions: &[NodePos]) {
+/// One jack: a small filled circle centered on `(x, y)`.
+fn draw_port(ui: &mut Imm<CapsUi>, id: impl std::hash::Hash, x: f32, y: f32, color: Color) {
+    ui.ch_id(id).on_spawn_insert(move || {
+        (
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(x - PORT_DIAMETER / 2.0),
+                top: Val::Px(y - PORT_DIAMETER / 2.0),
+                width: Val::Px(PORT_DIAMETER),
+                height: Val::Px(PORT_DIAMETER),
+                border_radius: BorderRadius::all(Val::Px(PORT_DIAMETER / 2.0)),
+                ..default()
+            },
+            BackgroundColor(color),
+        )
+    });
+}
+
+fn draw_edge(
+    ui: &mut Imm<CapsUi>,
+    edge_idx: usize,
+    edge: &DataflowEdge,
+    positions: &[NodePos],
+    to: (f32, f32),
+) {
     let from = positions[edge.from];
-    let to = positions[edge.to];
     let from_x = from.x + NODE_WIDTH;
     let from_y = from.y + NODE_HEIGHT / 2.0;
-    let to_x = to.x;
-    let to_y = to.y + NODE_HEIGHT / 2.0;
+    let (to_x, to_y) = to;
     let mid_x = (from_x + to_x) / 2.0;
 
     let wire = theme::overlay1();
