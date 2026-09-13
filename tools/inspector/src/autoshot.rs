@@ -15,7 +15,7 @@ use bevy::ecs::resource::Resource;
 use bevy::ecs::system::{Commands, NonSendMut, ResMut};
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 
-use crate::Session;
+use crate::{Editor, Session};
 
 enum Action {
     Screenshot(&'static str),
@@ -26,6 +26,13 @@ enum Action {
     RunToEnd,
     Reset,
     ToggleInternals,
+    /// Simulates clicking "Edit": opens the editor on the current `display_source`.
+    StartEdit,
+    /// Simulates typing into the open editor: a plain string replace against the buffer, so the
+    /// script can target a substring instead of retyping the whole file.
+    EditReplace(&'static str, &'static str),
+    /// Simulates clicking "Apply" -- same call the button handler makes.
+    ApplyEdit,
     /// Skip this many frames before the next action -- bevy_ui needs a frame or two after a
     /// state change to re-measure text and settle layout, and a screenshot taken too eagerly
     /// would still show the stale frame.
@@ -68,6 +75,25 @@ fn script() -> VecDeque<Action> {
         Reset,
         Wait(8),
         Screenshot("07_reset"),
+        Wait(8),
+        StartEdit,
+        Wait(8),
+        Screenshot("08_editing"),
+        Wait(8),
+        EditReplace("struct Node {", "struct Node { // EDITED-MARKER"),
+        Wait(8),
+        Screenshot("09_editing_buffer_changed"),
+        Wait(8),
+        ApplyEdit,
+        Wait(8),
+        Screenshot("10_after_apply"),
+        Wait(8),
+        StartEdit,
+        EditReplace("struct Node {", "struct Node ??totally broken syntax"),
+        Wait(8),
+        ApplyEdit,
+        Wait(8),
+        Screenshot("11_apply_error"),
         // give the last screenshot's async GPU readback + disk write time to finish before exit.
         Wait(15),
     ])
@@ -97,6 +123,7 @@ fn drive(
     mut commands: Commands,
     mut runner: ResMut<AutoRunner>,
     mut session: NonSendMut<Session>,
+    mut editor: ResMut<Editor>,
     mut exit: MessageWriter<AppExit>,
 ) {
     if runner.waiting > 0 {
@@ -123,6 +150,21 @@ fn drive(
         Action::RunToEnd => session.run_to_end(),
         Action::Reset => session.reload(),
         Action::ToggleInternals => session.show_internals = !session.show_internals,
+        Action::StartEdit => {
+            editor.buffer = session.display_source.clone();
+            editor.editing = true;
+            editor.error = None;
+        }
+        Action::EditReplace(from, to) => {
+            editor.buffer = editor.buffer.replace(from, to);
+        }
+        Action::ApplyEdit => match session.apply_edit(editor.buffer.clone()) {
+            Ok(()) => {
+                editor.editing = false;
+                editor.error = None;
+            }
+            Err(e) => editor.error = Some(e),
+        },
         Action::Wait(n) => runner.waiting = n,
     }
 }

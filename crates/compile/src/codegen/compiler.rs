@@ -569,6 +569,14 @@ impl Compiler {
             .collect::<Vec<_>>()
             .into();
 
+        let field_names: IdVec<_, Vec<String>> = ir
+            .resolutions
+            .adts
+            .values()
+            .map(|adt| adt.fields.clone())
+            .collect::<Vec<_>>()
+            .into();
+
         Program {
             entry: BodyId::ZERO,
             chunks: std::mem::replace(&mut self.chunks, IdVec::new()),
@@ -577,6 +585,7 @@ impl Compiler {
             items,
             struct_names,
             methods,
+            field_names,
         }
     }
 }

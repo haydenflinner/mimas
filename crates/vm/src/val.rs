@@ -507,6 +507,118 @@ impl<'gc> Val<'gc> {
     }
 }
 
+/// Like [`Captured`], but keeps the type information `Captured` throws away -- an instance's
+/// struct name and each field's declared name, resolved via `Vm`'s `struct_names`/`field_names`
+/// tables -- so a debugger's structural inspector can show `Node { val: 391, next: .. }` instead
+/// of `{ 391, .. }`. Kept separate from `Captured` rather than adding names to it directly:
+/// `Captured` is compared for equality by the test suite, which should stay indifferent to what
+/// a struct's fields happen to be named.
+#[derive(Debug, Clone)]
+pub enum Inspect {
+    Null,
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    Str(String),
+    Array(Vec<Inspect>),
+    Dict(Vec<(String, Inspect)>),
+    Instance {
+        type_name: String,
+        fields: Vec<(String, Inspect)>,
+    },
+    Fn(BodyId),
+    Raised(String),
+    Other,
+    /// A true cycle back to an ancestor on the current path (see [`Captured::Cycle`]) -- *or*,
+    /// since `seen` in [`Val::inspect`] is shared across everything the caller inspects with it,
+    /// a value already shown in full somewhere earlier in that same pass (e.g. two locals that
+    /// alias into the same linked structure). Neither is a depth-limit cutoff: both are exact,
+    /// pointer-identity dedup, so a shared-but-acyclic DAG can't blow up into copies of itself
+    /// once per alias the way a naive per-value walk would.
+    Cycle,
+}
+
+impl<'gc> Val<'gc> {
+    /// Recursively snapshot `self` into a gc-free, name-labeled [`Inspect`] tree. Must be called
+    /// inside the arena's `mutate` scope, like [`Val::capture`]. `struct_names`/`field_names` are
+    /// `Vm`'s tables, indexed by `struct_id`; an id past either's end (shouldn't happen, but
+    /// isn't a safety issue if it does) falls back to `@<id>` / positional numeric names.
+    ///
+    /// `seen` is caller-owned and never cleared here: pass a fresh one for a single self-
+    /// contained snapshot, or thread the same one through several calls (e.g. every local in a
+    /// frame) to dedup sharing *across* them too -- see [`Inspect::Cycle`].
+    pub fn inspect(
+        self,
+        struct_names: &[String],
+        field_names: &[Vec<String>],
+        seen: &mut std::collections::HashSet<*const ()>,
+    ) -> Inspect {
+        // unlike `capture_at`'s guard, this never un-marks a pointer on the way back out --
+        // "seen" here means "already shown in full somewhere in this pass", not just "an
+        // ancestor on the current path", so a value reachable two different (non-cyclic) ways
+        // still only gets expanded once. See `Inspect::Cycle`.
+        fn guarded(
+            ptr: *const (),
+            seen: &mut std::collections::HashSet<*const ()>,
+            body: impl FnOnce(&mut std::collections::HashSet<*const ()>) -> Inspect,
+        ) -> Inspect {
+            if !seen.insert(ptr) {
+                return Inspect::Cycle;
+            }
+            body(seen)
+        }
+
+        match self {
+            Val::Null => Inspect::Null,
+            Val::Bool(b) => Inspect::Bool(b),
+            Val::Int(i) => Inspect::Int(i),
+            Val::Float(f) => Inspect::Float(f),
+            Val::Str(s) => Inspect::Str(s.as_str().to_string()),
+            Val::Array(a) => guarded(Gc::as_ptr(a.0) as *const (), seen, |seen| {
+                Inspect::Array(
+                    a.0.borrow()
+                        .iter()
+                        .map(|v| v.inspect(struct_names, field_names, seen))
+                        .collect(),
+                )
+            }),
+            Val::Dict(d) => guarded(Gc::as_ptr(d.0) as *const (), seen, |seen| {
+                Inspect::Dict(
+                    d.0.borrow()
+                        .iter()
+                        .map(|(k, v)| (k.as_str().to_string(), v.inspect(struct_names, field_names, seen)))
+                        .collect(),
+                )
+            }),
+            Val::Instance(inst) => guarded(Gc::as_ptr(inst.0) as *const (), seen, |seen| {
+                let inst_ref = inst.0.borrow();
+                let struct_id = inst_ref.struct_id as usize;
+                let type_name = struct_names
+                    .get(struct_id)
+                    .cloned()
+                    .unwrap_or_else(|| format!("@{struct_id}"));
+                let names = field_names.get(struct_id);
+                let fields = inst_ref
+                    .fields
+                    .iter()
+                    .enumerate()
+                    .map(|(i, v)| {
+                        let name = names
+                            .and_then(|n| n.get(i))
+                            .cloned()
+                            .unwrap_or_else(|| i.to_string());
+                        (name, v.inspect(struct_names, field_names, seen))
+                    })
+                    .collect();
+                Inspect::Instance { type_name, fields }
+            }),
+            Val::Fn(body_id) => Inspect::Fn(body_id),
+            Val::Raised(s) => Inspect::Raised(s.as_str().to_string()),
+            Val::Closure(_) => Inspect::Other,
+        }
+    }
+}
+
 pub fn bin<'gc>(this: Val<'gc>, ctx: Ctx<'gc>, other: Val<'gc>, op: BinOp) -> RtResult<Val<'gc>> {
     // inner helpers rebuild the operand `Val`s from their primitives so the
     // `InvalidBinOperands` error gets concrete context. for coerced operands

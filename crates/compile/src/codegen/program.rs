@@ -27,6 +27,11 @@ pub struct Program {
     /// chain (dispatch through a pact-typed value) at compile time, neither of which needs a
     /// runtime table -- see `emit_pact_dispatch`.
     pub methods: IdVec<AdtId, HashMap<String, BodyId>>,
+    /// Declared field names in slot order, indexed the same way as `struct_names` -- lets a
+    /// host label an instance's fields by name instead of position (a debugger's structural
+    /// inspector, say). Tuple-struct members show up as their positional index stringified
+    /// ("0", "1", ..), matching `solve::ResolvedAdt::fields`, which this is copied from.
+    pub field_names: IdVec<AdtId, Vec<String>>,
 }
 
 #[derive(Debug, Clone)]

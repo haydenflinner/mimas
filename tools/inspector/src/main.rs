@@ -17,20 +17,21 @@ use bevy::input::mouse::MouseScrollUnit;
 use bevy::math::Vec2;
 use bevy::picking::events::{Pointer, Scroll};
 use bevy::prelude::Camera2d;
-use bevy::text::{Font, FontSize, FontSource, TextColor, TextFont};
+use bevy::text::{EditableText, Font, FontSize, FontSource, TextColor, TextCursorStyle, TextFont};
 use bevy::ui::widget::ImageNode;
 use bevy::ui::{
     AlignItems, BackgroundColor, BorderColor, BorderRadius, FlexDirection, JustifyContent, Node,
     Overflow, OverflowAxis, ScrollPosition, UiRect, Val,
 };
+use bevy::ui_widgets::EditableTextInputPlugin;
 use bevy::utils::default;
 use bevy::window::{Window, WindowPlugin};
 use bevy_immediate::{
     BevyImmediatePlugin, ImmCtx,
-    ui::{CapsUi, clicked::ImmUiClicked, text::ImmUiText},
+    ui::{CapsUi, clicked::ImmUiClicked, text::ImmUiText, text_input::ImmUiTextInput},
 };
 
-use mimas::vm::{Captured, Vm};
+use mimas::vm::{Captured, Inspect, Vm};
 
 mod autoshot;
 mod theme;
@@ -88,14 +89,14 @@ pub(crate) struct Session {
 }
 
 impl Session {
-    pub(crate) fn load(path: PathBuf) -> Self {
-        let display_source = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
-        // `main` listed first so it's file 0, compiled byte-for-byte as `display_source` --
-        // no prefix, no offset translation needed to line up with what's on disk.
+    /// Compiles `display_source` as `main` (file 0, byte-for-byte -- no prefix, no offset
+    /// translation needed to line up with what's on disk) alongside the built-in `typst`
+    /// module. Shared by `load` (a bad file at startup is a real bug, so it panics) and
+    /// `apply_edit` (a bad in-progress edit is normal, so it reports the error instead).
+    fn compile(display_source: String, path: PathBuf, show_internals: bool) -> Result<Self, String> {
         let vm = mimas::compile_files(&[("main", &display_source), ("typst", TYPST_MODULE_SOURCE)])
-            .expect("script should compile");
-        Session {
+            .map_err(|e| e.to_string())?;
+        Ok(Session {
             vm,
             path,
             display_source,
@@ -103,8 +104,33 @@ impl Session {
             error: None,
             steps: 0,
             line_steps: 0,
-            show_internals: false,
+            show_internals,
+        })
+    }
+
+    pub(crate) fn load(path: PathBuf) -> Self {
+        let display_source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
+        Self::compile(display_source, path, false)
+            .unwrap_or_else(|e| panic!("script should compile: {e}"))
+    }
+
+    /// Recompiles `new_source` and fast-forwards a fresh session back to where this one was, by
+    /// replaying `step_line` `line_steps` times -- the same trick `rewind_one_line` uses. Simpler
+    /// and safer than patching a live `Vm`'s bytecode/heap in place (no register layouts to
+    /// reconcile, no stale `Gc` pointers to worry about), and it can absorb *any* edit -- a
+    /// reordered declaration, a changed struct's fields, not just a tweaked function body --
+    /// because it's not trying to reuse anything from the old compile. Cheap because this
+    /// program runs end-to-end in microseconds; redoing that work against the edited source on
+    /// every "Apply" is not something worth optimizing away.
+    pub(crate) fn apply_edit(&mut self, new_source: String) -> Result<(), String> {
+        let target = self.line_steps;
+        let mut replayed = Self::compile(new_source, self.path.clone(), self.show_internals)?;
+        for _ in 0..target {
+            replayed.step_line();
         }
+        *self = replayed;
+        Ok(())
     }
 
     /// Re-reads `self.path` into a fresh `Vm` -- what "Reset" actually does, since there's no
@@ -235,14 +261,18 @@ fn main() {
         }),
         ..default()
     }))
-    .add_plugins(BevyImmediatePlugin::<CapsUi>::new())
-    .insert_non_send(Session::load(script_path))
-    .insert_resource(typst_preview)
-    .init_resource::<AutoScrollState>()
-    .init_resource::<CurrentPreview>()
-    .add_systems(Startup, (setup_camera, setup_font))
-    .add_systems(PreUpdate, keyboard_system)
-    .add_systems(Update, ui_system);
+    .add_plugins(BevyImmediatePlugin::<CapsUi>::new());
+    if !app.is_plugin_added::<EditableTextInputPlugin>() {
+        app.add_plugins(EditableTextInputPlugin);
+    }
+    app.insert_non_send(Session::load(script_path))
+        .insert_resource(typst_preview)
+        .init_resource::<AutoScrollState>()
+        .init_resource::<CurrentPreview>()
+        .init_resource::<Editor>()
+        .add_systems(Startup, (setup_camera, setup_font))
+        .add_systems(PreUpdate, keyboard_system)
+        .add_systems(Update, ui_system);
 
     // `--screenshots <dir>`: drive the session through a fixed script, saving a PNG at each
     // checkpoint via Bevy's own screenshot API (reads the rendered frame back off the GPU, so
@@ -337,6 +367,10 @@ fn dim_text_style(font: Handle<Font>) -> (TextColor, TextFont) {
     (TextColor(theme::subtext0()), text_font(font))
 }
 
+fn error_text_style(font: Handle<Font>) -> (TextColor, TextFont) {
+    (TextColor(theme::red()), text_font(font))
+}
+
 /// Source-line row style. Unified into one bundle type (rather than two differently-shaped
 /// styles picked between) so it can go through `on_change_insert` every frame -- which line is
 /// "current" changes as the program steps, on the same set of row entities.
@@ -410,6 +444,59 @@ fn all_lines(source: &str, current_offset: Option<usize>) -> Vec<(usize, String,
         .collect()
 }
 
+/// Flattens an `Inspect` tree into indented, name-labeled display lines, depth-first -- one row
+/// per line, the same convention `all_lines` uses for the source panel. This is the structural
+/// inspector: unlike `Captured`'s flat positional dump (`{ 391, null, ∞ }`), every field is
+/// labeled with its declared name and every instance with its struct name (`Node { val: 391,
+/// .. }`), all the way down. `MAX_DEPTH` isn't the cycle guard's job -- `Inspect::Cycle` already
+/// terminates a real cycle -- it just keeps one big-but-acyclic value from producing unbounded
+/// rows.
+fn inspect_lines(name: &str, value: &Inspect, depth: usize, out: &mut Vec<String>) {
+    const MAX_DEPTH: usize = 8;
+    let indent = "  ".repeat(depth);
+    if depth > MAX_DEPTH {
+        out.push(format!("{indent}{name} = .."));
+        return;
+    }
+    match value {
+        Inspect::Null => out.push(format!("{indent}{name} = null")),
+        Inspect::Bool(b) => out.push(format!("{indent}{name} = {b}")),
+        Inspect::Int(i) => out.push(format!("{indent}{name} = {i}")),
+        Inspect::Float(f) => out.push(format!("{indent}{name} = {f}")),
+        Inspect::Str(s) => out.push(format!("{indent}{name} = {s:?}")),
+        Inspect::Fn(body) => out.push(format!("{indent}{name} = fn({})", body.index())),
+        Inspect::Raised(s) => out.push(format!("{indent}{name} = raised({s:?})")),
+        Inspect::Other => out.push(format!("{indent}{name} = <other>")),
+        Inspect::Cycle => out.push(format!("{indent}{name} = \u{221e}")),
+        Inspect::Array(items) if items.is_empty() => out.push(format!("{indent}{name} = []")),
+        Inspect::Array(items) => {
+            out.push(format!("{indent}{name} = ["));
+            for (i, v) in items.iter().enumerate() {
+                inspect_lines(&format!("[{i}]"), v, depth + 1, out);
+            }
+            out.push(format!("{indent}]"));
+        }
+        Inspect::Dict(entries) if entries.is_empty() => out.push(format!("{indent}{name} = ~{{}}")),
+        Inspect::Dict(entries) => {
+            out.push(format!("{indent}{name} = ~{{"));
+            for (k, v) in entries {
+                inspect_lines(k, v, depth + 1, out);
+            }
+            out.push(format!("{indent}}}"));
+        }
+        Inspect::Instance { type_name, fields } if fields.is_empty() => {
+            out.push(format!("{indent}{name}: {type_name} {{}}"));
+        }
+        Inspect::Instance { type_name, fields } => {
+            out.push(format!("{indent}{name}: {type_name} {{"));
+            for (k, v) in fields {
+                inspect_lines(k, v, depth + 1, out);
+            }
+            out.push(format!("{indent}}}"));
+        }
+    }
+}
+
 fn frame_panel_node() -> (Node, BorderColor, BackgroundColor) {
     (
         Node {
@@ -479,6 +566,18 @@ fn preview_panel_node() -> (Node, BorderColor, BackgroundColor) {
     )
 }
 
+/// Live-editing state for the source panel. `editing` toggles the panel between its normal
+/// read-only display and an `EditableText` bound to `buffer`; `buffer` only becomes real once
+/// "Apply" recompiles it (see `Session::apply_edit`), so half-finished edits never touch the
+/// running session. `error` holds the last compile failure so it stays on screen (next to the
+/// still-open editor) until the user fixes it and retries, rather than flashing by for one frame.
+#[derive(bevy::ecs::resource::Resource, Default)]
+pub(crate) struct Editor {
+    pub(crate) editing: bool,
+    pub(crate) buffer: String,
+    pub(crate) error: Option<String>,
+}
+
 /// Tracks the last line the source panel auto-scrolled to, so `ui_system` only re-applies
 /// `ScrollPosition` when that line actually changes -- otherwise re-inserting it every frame
 /// (needed so the *initial* follow-the-highlight scroll works at all) would fight a manual
@@ -510,6 +609,7 @@ fn ui_system(
     mut auto_scroll: ResMut<AutoScrollState>,
     mut typst_preview: ResMut<TypstPreview>,
     mut current_preview: ResMut<CurrentPreview>,
+    mut editor: ResMut<Editor>,
     app_font: Res<AppFont>,
     asset_server: Res<AssetServer>,
 ) {
@@ -569,6 +669,47 @@ fn ui_system(
                     session.show_internals = !session.show_internals;
                 }
 
+                if editor.editing {
+                    let mut apply_btn = ui
+                        .ch_id("apply")
+                        .on_spawn_insert(button_node)
+                        .add(|ui| {
+                            ui.ch().on_spawn_insert(|| text_style(font.clone())).text("Apply");
+                        });
+                    if apply_btn.clicked() {
+                        match session.apply_edit(editor.buffer.clone()) {
+                            Ok(()) => {
+                                editor.editing = false;
+                                editor.error = None;
+                            }
+                            Err(e) => editor.error = Some(e),
+                        }
+                    }
+
+                    let mut cancel_btn = ui
+                        .ch_id("cancel")
+                        .on_spawn_insert(button_node)
+                        .add(|ui| {
+                            ui.ch().on_spawn_insert(|| text_style(font.clone())).text("Cancel");
+                        });
+                    if cancel_btn.clicked() {
+                        editor.editing = false;
+                        editor.error = None;
+                    }
+                } else {
+                    let mut edit_btn = ui
+                        .ch_id("edit")
+                        .on_spawn_insert(button_node)
+                        .add(|ui| {
+                            ui.ch().on_spawn_insert(|| text_style(font.clone())).text("Edit");
+                        });
+                    if edit_btn.clicked() {
+                        editor.buffer = session.display_source.clone();
+                        editor.editing = true;
+                        editor.error = None;
+                    }
+                }
+
                 let status = status_text(&session);
                 ui.ch_id("status")
                     .text(status)
@@ -581,6 +722,12 @@ fn ui_system(
                         session.line_steps
                     ));
             });
+
+            if let Some(err) = editor.error.clone() {
+                ui.ch_id("edit_error")
+                    .on_spawn_insert(|| error_text_style(font.clone()))
+                    .text(err);
+            }
 
             let frames = session.vm.frames();
             let mut image_changed = false;
@@ -643,15 +790,43 @@ fn ui_system(
                     }
                     auto_scroll.last_row = current_row;
                     source_panel.add(|ui| {
-                        if lines.is_empty() {
+                        if editor.editing {
+                            // a raw editable buffer, not a per-line list -- there's no "current
+                            // line" highlight to preserve while editing, and the underlying
+                            // `EditableText` widget already handles multi-line text/newlines on
+                            // its own.
+                            ui.ch_id("editor_text")
+                                .on_spawn_insert({
+                                    let font = font.clone();
+                                    move || {
+                                        (
+                                            Node {
+                                                width: Val::Percent(100.0),
+                                                flex_grow: 1.0,
+                                                ..default()
+                                            },
+                                            text_style(font),
+                                            EditableText::default(),
+                                            TextCursorStyle {
+                                                color: theme::text(),
+                                                selection_color: theme::overlay0(),
+                                                unfocused_selection_color: theme::overlay0(),
+                                                selected_text_color: None,
+                                            },
+                                        )
+                                    }
+                                })
+                                .input_text(&mut editor.buffer);
+                        } else if lines.is_empty() {
                             ui.ch()
                                 .on_spawn_insert(|| dim_text_style(font.clone()))
                                 .text("(no source loaded)");
-                        }
-                        for (line_no, line_text, is_current) in lines {
-                            ui.ch_id(line_no)
-                                .text(format!("{line_no:>4} | {line_text}"))
-                                .on_change_insert(true, || line_row_style(is_current, font.clone()));
+                        } else {
+                            for (line_no, line_text, is_current) in lines {
+                                ui.ch_id(line_no)
+                                    .text(format!("{line_no:>4} | {line_text}"))
+                                    .on_change_insert(true, || line_row_style(is_current, font.clone()));
+                            }
                         }
                     });
 
@@ -671,10 +846,19 @@ fn ui_system(
                                     .on_spawn_insert(|| text_style(font.clone()))
                                     .text(title);
 
-                                for (name, val) in &frame.locals {
-                                    ui.ch_id(name.as_str())
+                                // structural inspector: every local, name-labeled all the way
+                                // down (struct name + field names, not `frame.locals`'s flat
+                                // positional dump) -- what makes a value inspectable by default
+                                // instead of only the ones a script bothers to implement a pact
+                                // rendering for.
+                                let mut inspect_rows = Vec::new();
+                                for (name, val) in &frame.locals_inspect {
+                                    inspect_lines(name, val, 0, &mut inspect_rows);
+                                }
+                                for (row, line) in inspect_rows.into_iter().enumerate() {
+                                    ui.ch_id(("local", row))
                                         .on_spawn_insert(|| text_style(font.clone()))
-                                        .text(format!("{name} = {val}"));
+                                        .text(line);
                                 }
 
                                 if show_internals {

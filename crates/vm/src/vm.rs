@@ -9,8 +9,8 @@ use shared::{Error, IdVec, StrInterner};
 use smallvec::SmallVec;
 
 use crate::{
-    Closure, Ctx, DictMap, Fields, Frame, INLINE_FIELDS, LocatedRtErr, RtErr, RtResult, Sources,
-    State, ThreadState, Val,
+    Closure, Ctx, DictMap, Fields, Frame, INLINE_FIELDS, Inspect, LocatedRtErr, RtErr, RtResult,
+    Sources, State, ThreadState, Val,
 };
 
 const FUEL: usize = 1024;
@@ -63,6 +63,9 @@ pub struct FrameView {
     /// The subset of `registers` that are named source locals (`let x = ...`, params), in
     /// declaration order -- what a coder-facing view should actually show.
     pub locals: Vec<(String, Captured)>,
+    /// `locals`, but name-labeled all the way down (struct name + field names, not positional)
+    /// -- what a structural inspector should show instead of `locals`'s flat `Captured` dump.
+    pub locals_inspect: Vec<(String, Inspect)>,
 }
 
 /// What changed on a single [`Vm::debug_step`], in source-level terms -- the vocabulary a
@@ -102,6 +105,9 @@ pub struct Vm {
     /// Method name -> `BodyId` per struct, indexed by `struct_id` exactly like `struct_names`
     /// (`State.struct_names`) is -- see [`Vm::call_method_on_first_instance`].
     pub(crate) methods: Vec<HashMap<String, BodyId>>,
+    /// Declared field names per struct, indexed by `struct_id` like `methods` -- see
+    /// [`Val::inspect`] and [`Vm::frames`]'s `locals_inspect`.
+    pub(crate) field_names: Vec<Vec<String>>,
 }
 
 impl Vm {
@@ -123,6 +129,7 @@ impl Vm {
             items: HashMap::default(),
             chunk_names: HashMap::default(),
             methods: Vec::new(),
+            field_names: Vec::new(),
         }
     }
 
@@ -135,6 +142,7 @@ impl Vm {
             items,
             struct_names,
             methods,
+            field_names,
         } = program;
         self.entry = entry;
         self.code = Decoder { bytes, ip: 0 };
@@ -143,6 +151,7 @@ impl Vm {
         self.chunk_names = items.iter().map(|(name, &body)| (body, name.clone())).collect();
         self.items = items;
         self.methods = methods.into_values().collect();
+        self.field_names = field_names.into_values().collect();
         let entry_chunk = &self.chunks[self.entry];
         let regs_count = entry_chunk.regs as usize;
         let entry_offset = entry_chunk.offset;
@@ -1585,18 +1594,18 @@ impl Vm {
     pub fn frames(&mut self) -> Vec<FrameView> {
         let chunks = &self.chunks;
         let chunk_names = &self.chunk_names;
+        let field_names = &self.field_names;
         self.arena.mutate(|_mc, state| {
+            let struct_names = state.struct_names.borrow();
             let t = state.thread.borrow();
             t.frames
                 .iter()
                 .map(|f| {
                     let chunk = &chunks[f.chunk];
                     let rel = u32::try_from(f.ip.saturating_sub(chunk.offset)).unwrap_or(0);
-                    let registers: Vec<Captured> = t.regs[f.base..f.base + chunk.regs as usize]
-                        .iter()
-                        .copied()
-                        .map(Val::capture)
-                        .collect();
+                    let window = &t.regs[f.base..f.base + chunk.regs as usize];
+                    let registers: Vec<Captured> =
+                        window.iter().copied().map(Val::capture).collect();
 
                     // `chunk.locals` has no declared order (it's a name -> Reg map); sorting by
                     // register index reads as "declaration order" for the common case, since
@@ -1604,6 +1613,20 @@ impl Vm {
                     let mut locals: Vec<(&String, Reg)> =
                         chunk.locals.iter().map(|(name, &reg)| (name, reg)).collect();
                     locals.sort_by_key(|&(_, reg)| reg.index());
+                    // one `seen` set shared across every local in this frame (not reset between
+                    // them) -- so two locals that alias into the same structure (a doubly-linked
+                    // list's `a`/`b`/`c`, say) only get it expanded once between them, not once
+                    // per alias. See `Inspect::Cycle`.
+                    let mut seen = std::collections::HashSet::new();
+                    let locals_inspect = locals
+                        .iter()
+                        .map(|&(name, reg)| {
+                            (
+                                name.clone(),
+                                window[reg.index()].inspect(&struct_names, field_names, &mut seen),
+                            )
+                        })
+                        .collect();
                     let locals = locals
                         .into_iter()
                         .map(|(name, reg)| (name.clone(), registers[reg.index()].clone()))
@@ -1617,6 +1640,7 @@ impl Vm {
                         loc: chunk.loc_at(rel),
                         registers,
                         locals,
+                        locals_inspect,
                     }
                 })
                 .collect()
