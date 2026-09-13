@@ -10,12 +10,14 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 
 use bevy::app::{App, AppExit, PreUpdate};
+use bevy::ecs::entity::Entity;
 use bevy::ecs::message::MessageWriter;
 use bevy::ecs::resource::Resource;
-use bevy::ecs::system::{Commands, NonSendMut, ResMut};
+use bevy::ecs::system::{Commands, NonSendMut, Query, ResMut};
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
+use bevy::ui::widget::TextScroll;
 
-use crate::{Editor, Session};
+use crate::{Editor, ManualEditorScroll, Session};
 
 enum Action {
     Screenshot(&'static str),
@@ -33,6 +35,13 @@ enum Action {
     EditReplace(&'static str, &'static str),
     /// Simulates clicking "Apply" -- same call the button handler makes.
     ApplyEdit,
+    /// Sets `ManualEditorScroll` to the open editor's entity at the given y -- what
+    /// `on_editor_scroll` does on a real wheel event, minus computing the delta/entity from a
+    /// `Pointer<Scroll>` this harness has no way to synthesize. Exercises the actual arbitration
+    /// path (`arbitrate_editor_scroll`), not just a direct (and, it turns out, immediately
+    /// discarded) `TextScroll` write -- see that system's doc comment for why the distinction
+    /// matters.
+    SetEditorScrollY(f32),
     /// Skip this many frames before the next action -- bevy_ui needs a frame or two after a
     /// state change to re-measure text and settle layout, and a screenshot taken too eagerly
     /// would still show the stale frame.
@@ -93,6 +102,14 @@ fn script() -> VecDeque<Action> {
         Wait(8),
         Screenshot("08_editing"),
         Wait(8),
+        // Scroll regression check: with the buffer's top visible (08_editing), force the
+        // editor's internal scroll offset down and confirm the *rendered* text actually shifts
+        // -- the render-side half of the mouse-wheel fix (`on_editor_scroll`), independent of
+        // whether a real wheel event reaches it.
+        SetEditorScrollY(300.0),
+        Wait(8),
+        Screenshot("08b_editor_scrolled"),
+        Wait(8),
         EditReplace("struct Node {", "struct Node { // EDITED-MARKER"),
         Wait(8),
         Screenshot("09_editing_buffer_changed"),
@@ -137,6 +154,8 @@ fn drive(
     mut runner: ResMut<AutoRunner>,
     mut session: NonSendMut<Session>,
     mut editor: ResMut<Editor>,
+    mut manual_scroll: ResMut<ManualEditorScroll>,
+    scrolls: Query<(Entity, &TextScroll)>,
     mut exit: MessageWriter<AppExit>,
 ) {
     if runner.waiting > 0 {
@@ -178,6 +197,11 @@ fn drive(
             }
             Err(e) => editor.error = Some(e),
         },
+        Action::SetEditorScrollY(y) => {
+            if let Some((entity, _)) = scrolls.iter().next() {
+                manual_scroll.0 = Some((entity, y));
+            }
+        }
         Action::Wait(n) => runner.waiting = n,
     }
 }

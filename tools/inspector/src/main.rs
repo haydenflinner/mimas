@@ -5,11 +5,13 @@
 use std::path::PathBuf;
 
 use bevy::DefaultPlugins;
-use bevy::app::{App, PluginGroup, PreUpdate, Startup, Update};
+use bevy::app::{App, PluginGroup, PostUpdate, PreUpdate, Startup, Update};
 use bevy::asset::{AssetServer, Handle};
 use bevy::color::Color;
+use bevy::ecs::entity::Entity;
 use bevy::ecs::observer::On;
-use bevy::ecs::system::{Commands, NonSendMut, Query, Res, ResMut};
+use bevy::ecs::schedule::IntoScheduleConfigs;
+use bevy::ecs::system::{Commands, Local, NonSendMut, Query, Res, ResMut};
 use bevy::image::Image;
 use bevy::input::ButtonInput;
 use bevy::input::keyboard::KeyCode;
@@ -17,11 +19,14 @@ use bevy::input::mouse::MouseScrollUnit;
 use bevy::math::Vec2;
 use bevy::picking::events::{Pointer, Scroll};
 use bevy::prelude::Camera2d;
-use bevy::text::{EditableText, Font, FontSize, FontSource, TextColor, TextCursorStyle, TextFont};
-use bevy::ui::widget::ImageNode;
+use bevy::text::{
+    EditableText, EditableTextGeneration, Font, FontSize, FontSource, TextColor, TextCursorStyle,
+    TextFont, TextLayoutInfo,
+};
+use bevy::ui::widget::{ImageNode, TextScroll};
 use bevy::ui::{
-    AlignItems, BackgroundColor, BorderColor, BorderRadius, FlexDirection, JustifyContent, Node,
-    Overflow, OverflowAxis, ScrollPosition, UiRect, Val,
+    AlignItems, BackgroundColor, BorderColor, BorderRadius, ComputedNode, FlexDirection,
+    JustifyContent, Node, Overflow, OverflowAxis, ScrollPosition, UiRect, Val,
 };
 use bevy::ui_widgets::EditableTextInputPlugin;
 use bevy::utils::default;
@@ -288,9 +293,16 @@ fn main() {
         .init_resource::<AutoScrollState>()
         .init_resource::<CurrentPreview>()
         .init_resource::<Editor>()
+        .init_resource::<ManualEditorScroll>()
         .add_systems(Startup, (setup_camera, setup_font))
         .add_systems(PreUpdate, keyboard_system)
-        .add_systems(Update, ui_system);
+        .add_systems(Update, ui_system)
+        // must run after bevy_ui's own auto-scroll-to-cursor system -- see
+        // `arbitrate_editor_scroll`'s doc comment for why.
+        .add_systems(
+            PostUpdate,
+            arbitrate_editor_scroll.after(bevy::ui::widget::scroll_editable_text),
+        );
 
     // `--screenshots <dir>`: drive the session through a fixed script, saving a PNG at each
     // checkpoint via Bevy's own screenshot API (reads the rendered frame back off the GPU, so
@@ -632,6 +644,70 @@ fn on_source_scroll(trigger: On<Pointer<Scroll>>, mut positions: Query<&mut Scro
     pos.0.y = (pos.0.y - delta).max(0.0);
 }
 
+/// A wheel-driven scroll position for whichever `EditableText` entity last received wheel input
+/// (see `on_editor_scroll`), tracked outside of `TextScroll` itself -- see
+/// `arbitrate_editor_scroll` for why a direct write to `TextScroll` doesn't stick.
+#[derive(bevy::ecs::resource::Resource, Default)]
+pub(crate) struct ManualEditorScroll(pub(crate) Option<(Entity, f32)>);
+
+/// `on_editor_scroll` (the wheel handler) only *proposes* a scroll position by updating
+/// `ManualEditorScroll`; this is what actually applies it to `TextScroll`, and it has to run
+/// after bevy_ui's own `scroll_editable_text` to win.
+///
+/// Why: `update_editable_text_layout` (bevy_ui, `PostLayout`) takes `&mut EditableText` and
+/// `&mut EditableTextGeneration` on every `EditableText` entity every single frame -- needed for
+/// cursor blinking, which has nothing to do with the text actually changing. That unconditional
+/// `&mut` access satisfies `scroll_editable_text`'s "did anything change" gate every frame
+/// regardless, so it recomputes and overwrites `TextScroll` back to wherever the cursor is on
+/// every frame, permanently discarding a plain external write to `TextScroll` -- confirmed by
+/// direct observation: a manual write was gone by the very next frame with no edits made at all.
+///
+/// The fix doesn't need to know anything about bevy_ui's scroll math: `EditableTextGeneration`'s
+/// *value* (not its perpetually-true ECS change flag) only actually changes on a real edit or
+/// cursor move, so comparing it frame-to-frame tells us whether `scroll_editable_text`'s output
+/// this frame was a real, meaningful auto-follow (in which case it wins, and we resync our
+/// tracked position to it) or just it re-asserting the same thing out of habit (in which case we
+/// reassert our own last wheel-scrolled position over it instead).
+fn arbitrate_editor_scroll(
+    mut last_generation: Local<Option<(Entity, EditableTextGeneration)>>,
+    mut manual_scroll: ResMut<ManualEditorScroll>,
+    mut editors: Query<(Entity, &EditableTextGeneration, &mut TextScroll)>,
+) {
+    for (entity, &generation, mut scroll) in &mut editors {
+        let real_change = *last_generation != Some((entity, generation));
+        *last_generation = Some((entity, generation));
+        if real_change {
+            manual_scroll.0 = Some((entity, scroll.0.y));
+        } else if let Some((e, y)) = manual_scroll.0
+            && e == entity
+        {
+            scroll.0.y = y;
+        }
+    }
+}
+
+fn on_editor_scroll(
+    trigger: On<Pointer<Scroll>>,
+    mut manual_scroll: ResMut<ManualEditorScroll>,
+    editors: Query<(&TextScroll, &ComputedNode, &TextLayoutInfo)>,
+) {
+    let event = trigger.event();
+    let Ok((scroll, node, info)) = editors.get(event.entity) else {
+        return;
+    };
+    let delta = match event.unit {
+        MouseScrollUnit::Line => event.y * SOURCE_ROW_HEIGHT_PX,
+        MouseScrollUnit::Pixel => event.y,
+    };
+    let view_height = node.content_box().size().y;
+    let max_scroll_y = (info.size.y - view_height).max(0.0);
+    let current = manual_scroll
+        .0
+        .filter(|&(e, _)| e == event.entity)
+        .map_or(scroll.0.y, |(_, y)| y);
+    manual_scroll.0 = Some((event.entity, (current - delta).clamp(0.0, max_scroll_y)));
+}
+
 fn ui_system(
     ctx: ImmCtx<CapsUi>,
     mut session: NonSendMut<Session>,
@@ -832,10 +908,12 @@ fn ui_system(
                                             Node {
                                                 width: Val::Percent(100.0),
                                                 flex_grow: 1.0,
+                                                overflow: Overflow::clip(),
                                                 ..default()
                                             },
                                             text_style(font),
                                             EditableText::default(),
+                                            TextScroll::default(),
                                             TextCursorStyle {
                                                 color: theme::text(),
                                                 selection_color: theme::overlay0(),
@@ -845,6 +923,7 @@ fn ui_system(
                                         )
                                     }
                                 })
+                                .on_spawn_observe(on_editor_scroll)
                                 .input_text(&mut editor.buffer);
                         } else if lines.is_empty() {
                             ui.ch()
