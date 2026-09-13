@@ -59,6 +59,19 @@ fn script() -> VecDeque<Action> {
         Wait(8),
         Screenshot("03_into_the_loop"),
         Wait(8),
+        // Regression check for a real bug: apply a no-op edit here, mid-debug, with the preview
+        // already showing a chain. The replay lands back on the exact same `steps` count the
+        // live session had (nothing before this point changed), which used to fool the preview
+        // cache into thinking nothing needed to be redrawn -- it kept showing the pre-edit
+        // picture until the next real Step broke the coincidental tie. This should refresh
+        // immediately, no extra Step, and the picture should look identical to 03 since the edit
+        // only adds a comment.
+        StartEdit,
+        EditReplace("struct Node {", "struct Node { // a no-op edit, mid-debug"),
+        ApplyEdit,
+        Wait(8),
+        Screenshot("03b_after_mid_debug_apply"),
+        Wait(8),
         RewindLine,
         Wait(8),
         Screenshot("04_after_rewind_one_line"),

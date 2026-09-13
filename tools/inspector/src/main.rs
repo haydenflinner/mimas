@@ -86,6 +86,13 @@ pub(crate) struct Session {
     /// Coder-facing view is the default: function names, named locals, current source line.
     /// This reveals the VM-shaped view underneath (chunk ids, raw register windows).
     pub(crate) show_internals: bool,
+    /// Bumped every time this `Session` is replaced wholesale (`reload`, `apply_edit`). `steps`
+    /// alone isn't a safe key for "has anything changed" -- a fresh replay after Reset or Apply
+    /// can land back on the exact same `steps` count the old (entirely different) `Vm` had, which
+    /// left the Typst preview showing a stale picture from before the edit until the next real
+    /// `Step` broke the coincidental tie. `ui_system` keys its preview cache off
+    /// `(generation, steps)` instead, so a fresh `Vm` always counts as "changed".
+    pub(crate) generation: u64,
 }
 
 impl Session {
@@ -93,7 +100,12 @@ impl Session {
     /// translation needed to line up with what's on disk) alongside the built-in `typst`
     /// module. Shared by `load` (a bad file at startup is a real bug, so it panics) and
     /// `apply_edit` (a bad in-progress edit is normal, so it reports the error instead).
-    fn compile(display_source: String, path: PathBuf, show_internals: bool) -> Result<Self, String> {
+    fn compile(
+        display_source: String,
+        path: PathBuf,
+        show_internals: bool,
+        generation: u64,
+    ) -> Result<Self, String> {
         let vm = mimas::compile_files(&[("main", &display_source), ("typst", TYPST_MODULE_SOURCE)])
             .map_err(|e| e.to_string())?;
         Ok(Session {
@@ -105,13 +117,14 @@ impl Session {
             steps: 0,
             line_steps: 0,
             show_internals,
+            generation,
         })
     }
 
     pub(crate) fn load(path: PathBuf) -> Self {
         let display_source = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
-        Self::compile(display_source, path, false)
+        Self::compile(display_source, path, false, 0)
             .unwrap_or_else(|e| panic!("script should compile: {e}"))
     }
 
@@ -125,7 +138,9 @@ impl Session {
     /// every "Apply" is not something worth optimizing away.
     pub(crate) fn apply_edit(&mut self, new_source: String) -> Result<(), String> {
         let target = self.line_steps;
-        let mut replayed = Self::compile(new_source, self.path.clone(), self.show_internals)?;
+        let generation = self.generation.wrapping_add(1);
+        let mut replayed =
+            Self::compile(new_source, self.path.clone(), self.show_internals, generation)?;
         for _ in 0..target {
             replayed.step_line();
         }
@@ -137,8 +152,11 @@ impl Session {
     /// `Vm::reset`. Preserves the "see deeper" toggle across the reload; nothing else.
     pub(crate) fn reload(&mut self) {
         let show_internals = self.show_internals;
-        *self = Self::load(self.path.clone());
-        self.show_internals = show_internals;
+        let generation = self.generation.wrapping_add(1);
+        let display_source = std::fs::read_to_string(&self.path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {e}", self.path.display()));
+        *self = Self::compile(display_source, self.path.clone(), show_internals, generation)
+            .unwrap_or_else(|e| panic!("script should compile: {e}"));
     }
 
     pub(crate) fn step(&mut self) {
@@ -300,7 +318,16 @@ fn setup_font(mut commands: Commands, asset_server: Res<AssetServer>) {
 
 /// Down arrow: run to the next source line. Up arrow: there's no real rewind, so this replays
 /// from a fresh `Vm` back up to one line-step short of here -- see `Session::rewind_one_line`.
-fn keyboard_system(keys: Res<ButtonInput<KeyCode>>, mut session: NonSendMut<Session>) {
+fn keyboard_system(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut session: NonSendMut<Session>,
+    editor: Res<Editor>,
+) {
+    // the arrow keys double as text-editing keys (moving the cursor, extending a selection) --
+    // while the source panel is an open `EditableText`, they belong to it, not to stepping.
+    if editor.editing {
+        return;
+    }
     if keys.just_pressed(KeyCode::ArrowDown) {
         session.step_line();
     }
@@ -519,11 +546,13 @@ fn frame_panel_node() -> (Node, BorderColor, BackgroundColor) {
 #[derive(bevy::ecs::resource::Resource, Default)]
 struct CurrentPreview {
     handle: Option<Handle<Image>>,
-    /// `Session::steps` as of the last frame we actually asked the program to typeset itself.
-    /// Calling `call_method_on_first_instance` runs real mimas bytecode (a full injected call,
-    /// recursing through the whole chain) -- worth doing on an actual step, not on every one of
-    /// the ~60 render frames a step sits idle for.
-    last_steps_seen: Option<u64>,
+    /// `(Session::generation, Session::steps)` as of the last frame we actually asked the
+    /// program to typeset itself. Calling `call_method_on_first_instance` runs real mimas
+    /// bytecode (a full injected call, recursing through the whole chain) -- worth doing on an
+    /// actual step, not on every one of the ~60 render frames a step sits idle for. `generation`
+    /// is part of the key (not just `steps`) so a fresh `Vm` from Reset/Apply always counts as
+    /// changed, even when it happens to replay back to the same step count the old one had.
+    last_seen: Option<(u64, u64)>,
 }
 
 fn body_row_node() -> Node {
@@ -734,8 +763,8 @@ fn ui_system(
             // ask the program itself how to typeset itself (see `Node`'s `impl Typeset` in
             // main.mim) -- this crate doesn't know what a `Node` is, or that there even is one.
             // Only on an actual step: this runs real mimas bytecode, not a free data read.
-            if current_preview.last_steps_seen != Some(session.steps) {
-                current_preview.last_steps_seen = Some(session.steps);
+            if current_preview.last_seen != Some((session.generation, session.steps)) {
+                current_preview.last_seen = Some((session.generation, session.steps));
                 let scene = session
                     .vm
                     .call_method_on_first_instance("typeset")
