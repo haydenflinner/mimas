@@ -36,6 +36,9 @@ mod codegen {
 }
 pub use codegen::*;
 
+mod dataflow;
+pub use dataflow::*;
+
 #[cfg(test)]
 mod tests {
     #[macro_use]

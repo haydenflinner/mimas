@@ -1740,6 +1740,52 @@ impl Vm {
         vm.set_sources(sources);
         Ok(vm)
     }
+
+    /// Extracts `function_name`'s pure dataflow graph -- see [`compile::function_dataflow`] --
+    /// without building a runnable `Vm`. Runs the same parse/solve/lower front end
+    /// `compile_files` does (a throwaway `Vm` is spun up only because that's currently the only
+    /// way to get a real, natives-registered `Library` for the solver to check calls against;
+    /// it's dropped once lowering is done).
+    pub fn function_dataflow<F>(
+        files: &[(&str, &str)],
+        install_lib: F,
+        function_name: &str,
+    ) -> std::result::Result<compile::DataflowGraph, FunctionDataflowError>
+    where
+        F: for<'gc> FnOnce(&mut crate::api::Api<'_, 'gc>),
+    {
+        use parse::{Parser, lex::Lexer};
+        use solve::{Resolutions, Solver};
+
+        let mut asts = Vec::with_capacity(files.len());
+        let mut sources = Sources::with_capacity(files.len());
+        for (file_id, (name, source)) in files.iter().enumerate() {
+            let lexer = Lexer::new(source, file_id, (*name).into());
+            asts.push(Parser::new(lexer).into_ast()?);
+            sources.insert(
+                file_id,
+                miette::NamedSource::new(*name, std::sync::Arc::from(*source)),
+            );
+        }
+
+        let mut vm = Self::new();
+        let library = vm.install_library(install_lib);
+
+        let mut solver = Solver::new();
+        solver.install_library(&library);
+        solver.set_sources(sources);
+        solver.solve_all(asts.iter())?;
+
+        let stmts: Vec<_> = asts.into_iter().flat_map(|ast| ast.unpack()).collect();
+        let resolutions = Resolutions::from(solver);
+        let mut ir = compile::Ir::new(
+            resolutions,
+            library.intrinsics().iter().map(|(a, b)| (*a, *b)).collect(),
+        );
+        ir.lower(&stmts);
+
+        compile::function_dataflow(&ir, function_name).map_err(FunctionDataflowError::Dataflow)
+    }
 }
 
 /// Single error surface for [`Vm::execute`]. Every stage (parse, solve, runtime) now emits
@@ -1757,6 +1803,30 @@ impl From<Error> for ExecuteError {
 impl std::fmt::Display for ExecuteError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:?}", self.0)
+    }
+}
+
+/// Error surface for [`Vm::function_dataflow`]: either the source didn't parse/solve (same
+/// failure [`Vm::compile_files`] would hit), or it did but the requested function isn't a
+/// straight-line body a dataflow graph can represent.
+#[derive(Debug)]
+pub enum FunctionDataflowError {
+    Compile(ExecuteError),
+    Dataflow(compile::DataflowError),
+}
+
+impl From<Error> for FunctionDataflowError {
+    fn from(e: Error) -> Self {
+        Self::Compile(ExecuteError(e))
+    }
+}
+
+impl std::fmt::Display for FunctionDataflowError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Compile(e) => write!(f, "{e}"),
+            Self::Dataflow(e) => write!(f, "{e}"),
+        }
     }
 }
 

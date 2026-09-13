@@ -30,3 +30,7 @@ pub use ::shared::{Literal, Ty};
 // crate has to be reachable through `vm`. re-exporting it here means downstream crates that
 // author natives only need a `vm` dependency, never a direct `inventory` one.
 pub use ::inventory;
+
+// `Vm::function_dataflow`'s return type -- re-exported so a `vm`-only dependent (the inspector,
+// say) can name `vm::DataflowGraph` etc. without also depending on `mimas-compile` directly.
+pub use ::compile::{DataflowEdge, DataflowError, DataflowGraph, DataflowNode, NodeKind};
