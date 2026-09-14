@@ -34,6 +34,11 @@ pub enum Val<'gc> {
     /// need a `RefLock` -- same reasoning as `Str`.
     #[cfg(feature = "dataframe")]
     PlExpr(PlExpr<'gc>),
+    /// A `polars::prelude::LazyGroupBy` -- `df.group_by([..])`'s result, before `.agg([..])`
+    /// turns it into a `DataFrame`. Same no-`RefLock` reasoning as `PlExpr`: nothing mutates one
+    /// in place, `.agg()` consumes it.
+    #[cfg(feature = "dataframe")]
+    GroupBy(GroupBy<'gc>),
 }
 
 impl<'gc> PartialEq for Val<'gc> {
@@ -63,6 +68,8 @@ impl<'gc> PartialEq for Val<'gc> {
             (Val::DataFrame(a), Val::DataFrame(b)) => Gc::ptr_eq(a.0, b.0),
             #[cfg(feature = "dataframe")]
             (Val::PlExpr(a), Val::PlExpr(b)) => Gc::ptr_eq(a.0, b.0),
+            #[cfg(feature = "dataframe")]
+            (Val::GroupBy(a), Val::GroupBy(b)) => Gc::ptr_eq(a.0, b.0),
             _ => false,
         }
     }
@@ -169,6 +176,16 @@ impl<'gc> Val<'gc> {
     pub fn as_plexpr(self) -> Option<PlExpr<'gc>> {
         if let Val::PlExpr(e) = self {
             Some(e)
+        } else {
+            None
+        }
+    }
+
+    #[cfg(feature = "dataframe")]
+    #[inline]
+    pub fn as_group_by(self) -> Option<GroupBy<'gc>> {
+        if let Val::GroupBy(g) = self {
+            Some(g)
         } else {
             None
         }
@@ -403,6 +420,22 @@ pub struct DataFrame<'gc>(pub Gc<'gc, RefLock<Static<polars::frame::DataFrame>>>
 #[collect(no_drop)]
 pub struct PlExpr<'gc>(pub Gc<'gc, Static<polars::prelude::Expr>>);
 
+/// A `polars::prelude::LazyGroupBy`, between `df.group_by([..])` and `.agg([..])`. No `RefLock`
+/// for the same reason as `PlExpr` -- `.agg()` consumes it, nothing mutates one in place.
+/// `LazyGroupBy` doesn't implement `Debug` (unlike `Expr`/`DataFrame`), so this gets a manual,
+/// placeholder `Debug` impl below instead of deriving one.
+#[cfg(feature = "dataframe")]
+#[derive(Copy, Clone, Collect)]
+#[collect(no_drop)]
+pub struct GroupBy<'gc>(pub Gc<'gc, Static<polars::prelude::LazyGroupBy>>);
+
+#[cfg(feature = "dataframe")]
+impl std::fmt::Debug for GroupBy<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("GroupBy(..)")
+    }
+}
+
 impl<'gc> Str<'gc> {
     pub fn as_str(self) -> &'gc str {
         Gc::as_ref(self.0).as_ref()
@@ -557,7 +590,7 @@ impl<'gc> Val<'gc> {
             Val::Raised(s) => Captured::Raised(s.as_str().to_string()),
             Val::Closure(_) => Captured::Other,
             #[cfg(feature = "dataframe")]
-            Val::DataFrame(_) | Val::PlExpr(_) => Captured::Other,
+            Val::DataFrame(_) | Val::PlExpr(_) | Val::GroupBy(_) => Captured::Other,
         }
     }
 }
@@ -671,7 +704,7 @@ impl<'gc> Val<'gc> {
             Val::Raised(s) => Inspect::Raised(s.as_str().to_string()),
             Val::Closure(_) => Inspect::Other,
             #[cfg(feature = "dataframe")]
-            Val::DataFrame(_) | Val::PlExpr(_) => Inspect::Other,
+            Val::DataFrame(_) | Val::PlExpr(_) | Val::GroupBy(_) => Inspect::Other,
         }
     }
 }

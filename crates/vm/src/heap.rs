@@ -179,6 +179,11 @@ impl<'gc> Ctx<'gc> {
         crate::val::PlExpr(Gc::new(self.mutation, gc_arena::Static(expr)))
     }
 
+    #[cfg(feature = "dataframe")]
+    pub fn new_group_by(self, gb: polars::prelude::LazyGroupBy) -> crate::val::GroupBy<'gc> {
+        crate::val::GroupBy(Gc::new(self.mutation, gc_arena::Static(gb)))
+    }
+
     // fresh allocation per container so the result shares no mutable state with `value`. scalars,
     // interned strs, fns and closures are copied by handle (immutable / callable). recurses like
     // `display`, so it shares display's no-cycles assumption.
@@ -318,6 +323,10 @@ impl<'gc> Ctx<'gc> {
             Val::PlExpr(e) => {
                 let _ = write!(out, "{}", e.0.0);
             }
+            // LazyGroupBy has no Display of its own (it's an uncollected plan, nothing to show
+            // rows/columns for) -- same placeholder style as Closure's `<closure @..>`.
+            #[cfg(feature = "dataframe")]
+            Val::GroupBy(_) => out.push_str("<group_by>"),
         }
         Ok(())
     }

@@ -11,7 +11,7 @@ use macros::native;
 use vm::{
     Ctx, Val,
     api::Api,
-    conversion::{DataFrameTy, PlExprTy, Raisable},
+    conversion::{DataFrameTy, GroupByTy, PlExprTy, Raisable},
 };
 
 pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
@@ -19,6 +19,7 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     // field/parameter types resolve eagerly through the registry.
     api.add_adt::<DataFrameTy>();
     api.add_adt::<PlExprTy>();
+    api.add_adt::<GroupByTy>();
     {
         let mut m = api.module("std::polars");
         m.add(col);
@@ -28,6 +29,19 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add_method(filter);
     api.add_method(select);
     api.add_method(sort);
+    api.add_method(group_by);
+    api.add_method(agg);
+    api.add_method(join);
+    // Expr aggregation/naming methods -- `col("age").mean().alias("avg_age")`, used inside
+    // `agg([..])`. Like `col()`, none of these can fail (they build a plan, they don't run one).
+    api.add_method(sum);
+    api.add_method(mean);
+    api.add_method(median);
+    api.add_method(min);
+    api.add_method(max);
+    api.add_method(count);
+    api.add_method(n_unique);
+    api.add_method(alias);
 }
 
 #[native]
@@ -81,6 +95,75 @@ fn sort<'gc>(ctx: Ctx<'gc>, df: vm::DataFrame<'gc>, by: Vec<String>) -> Raisable
         .sort(by, opts)
         .map(|d| ctx.new_dataframe(d))
         .into()
+}
+
+/// `df.group_by(["dept"]).agg([col("age").mean().alias("avg_age")])`. `group_by` alone can't
+/// fail -- like `col()`, it just builds a plan -- `agg` is what actually runs it.
+#[native]
+fn group_by<'gc>(ctx: Ctx<'gc>, df: vm::DataFrame<'gc>, by: Vec<String>) -> vm::GroupBy<'gc> {
+    use polars::prelude::{IntoLazy, col};
+    let by: Vec<polars::prelude::Expr> = by.iter().map(|n| col(n.as_str())).collect();
+    let lazy = df.0.borrow().0.clone().lazy();
+    ctx.new_group_by(lazy.group_by(by))
+}
+
+#[native]
+fn agg<'gc>(
+    ctx: Ctx<'gc>,
+    gb: vm::GroupBy<'gc>,
+    aggs: Vec<vm::PlExpr<'gc>>,
+) -> Raisable<vm::DataFrame<'gc>> {
+    let exprs: Vec<polars::prelude::Expr> = aggs.into_iter().map(|e| e.0.0.clone()).collect();
+    collect_in_memory(gb.0.0.clone().agg(exprs))
+        .map(|d| ctx.new_dataframe(d))
+        .into()
+}
+
+/// `df.join(other, ["id"], "inner")` -- the join key(s) must share a name on both sides (the
+/// common case); for differently-named keys, `select`/`alias` one side to match first.
+#[native]
+fn join<'gc>(
+    ctx: Ctx<'gc>,
+    df: vm::DataFrame<'gc>,
+    other: vm::DataFrame<'gc>,
+    on: Vec<String>,
+    how: &str,
+) -> Raisable<vm::DataFrame<'gc>> {
+    use polars::prelude::{IntoLazy, JoinArgs, JoinType, col};
+    let join_type = match how {
+        "inner" => JoinType::Inner,
+        "left" => JoinType::Left,
+        "right" => JoinType::Right,
+        "full" | "outer" => JoinType::Full,
+        other => {
+            return Raisable::Raised(format!(
+                "join: unknown join type {other:?} (expected \"inner\", \"left\", \"right\", or \"full\")"
+            ));
+        }
+    };
+    let on: Vec<polars::prelude::Expr> = on.iter().map(|n| col(n.as_str())).collect();
+    let left = df.0.borrow().0.clone().lazy();
+    let right = other.0.borrow().0.clone().lazy();
+    let joined = match left.join(right, on.clone(), on, JoinArgs::new(join_type)) {
+        Ok(lf) => lf,
+        Err(e) => return Raisable::Raised(e.to_string()),
+    };
+    collect_in_memory(joined).map(|d| ctx.new_dataframe(d)).into()
+}
+
+macro_rules! pl_expr_reducer {
+    ($($name:ident),+ $(,)?) => {$(
+        #[native]
+        fn $name<'gc>(ctx: Ctx<'gc>, e: vm::PlExpr<'gc>) -> vm::PlExpr<'gc> {
+            ctx.new_plexpr(e.0.0.clone().$name())
+        }
+    )+};
+}
+pl_expr_reducer!(sum, mean, median, min, max, count, n_unique);
+
+#[native]
+fn alias<'gc>(ctx: Ctx<'gc>, e: vm::PlExpr<'gc>, name: &str) -> vm::PlExpr<'gc> {
+    ctx.new_plexpr(e.0.0.clone().alias(name))
 }
 
 /// An array of same-shaped struct instances -> a `DataFrame` whose columns are named after the

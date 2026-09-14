@@ -100,6 +100,58 @@ test_run_display!(
 └───────┴─────┴───────┘"#,
 );
 
+test_run_display!(
+    group_by_agg_reduces_per_group,
+    EMPLOYEES,
+    r#"df.group_by(["dept"]).agg([col("age").mean().alias("avg_age"), col("age").count().alias("n")])!.sort(["dept"])!"# => r#"shape: (2, 3)
+┌───────┬─────────┬─────┐
+│ dept  ┆ avg_age ┆ n   │
+│ ---   ┆ ---     ┆ --- │
+│ str   ┆ f64     ┆ u32 │
+╞═══════╪═════════╪═════╡
+│ eng   ┆ 37.5    ┆ 2   │
+│ sales ┆ 27.0    ┆ 2   │
+└───────┴─────────┴─────┘"#,
+);
+
+const EMPLOYEES_AND_DEPTS: &str = "use std::polars::*;
+     struct Employee { name: str, age: int, dept: str }
+     let rows = [
+         Employee { name = \"Alice\", age = 34, dept = \"eng\" },
+         Employee { name = \"Bob\", age = 29, dept = \"sales\" },
+     ];
+     let df = to_dataframe(rows)!;
+     struct Dept { dept: str, manager: str }
+     let depts = [
+         Dept { dept = \"eng\", manager = \"Erin\" },
+         Dept { dept = \"sales\", manager = \"Sam\" },
+     ];
+     let dept_df = to_dataframe(depts)!;";
+
+test_run_display!(
+    join_matches_rows_on_a_shared_column_name,
+    EMPLOYEES_AND_DEPTS,
+    r#"df.join(dept_df, ["dept"], "inner")!.sort(["name"])!"# => r#"shape: (2, 4)
+┌───────┬─────┬───────┬─────────┐
+│ name  ┆ age ┆ dept  ┆ manager │
+│ ---   ┆ --- ┆ ---   ┆ ---     │
+│ str   ┆ i64 ┆ str   ┆ str     │
+╞═══════╪═════╪═══════╪═════════╡
+│ Alice ┆ 34  ┆ eng   ┆ Erin    │
+│ Bob   ┆ 29  ┆ sales ┆ Sam     │
+└───────┴─────┴───────┴─────────┘"#,
+);
+
+// unrecognized join type -> raises rather than silently defaulting
+test_fail!(
+    join_unknown_type_raises,
+    r#"use std::polars::*;
+       struct A { k: str } struct B { k: str }
+       let a = to_dataframe([A { k = "x" }])!;
+       let b = to_dataframe([B { k = "x" }])!;
+       let j = a.join(b, ["k"], "sideways")!;"#,
+);
+
 const CSV: &str = r#"use std::polars::*;
      let csv = "name,age,dept
 Alice,34,eng

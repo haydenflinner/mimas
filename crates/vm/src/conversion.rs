@@ -275,6 +275,38 @@ impl<'gc> MimasType<'gc> for crate::val::PlExpr<'gc> {
     }
 }
 
+#[cfg(feature = "dataframe")]
+pub struct GroupByTy;
+#[cfg(feature = "dataframe")]
+impl crate::adt::MimasAdt for GroupByTy {
+    fn descriptor(_reg: &Registry) -> crate::adt::ApiAdtDescriptor {
+        crate::adt::ApiAdtDescriptor {
+            name: "GroupBy",
+            module: &["std", "polars"],
+            kind: api::ApiAdtKind::Struct,
+            doc: "The result of `DataFrame::group_by`, before `.agg([..])`.",
+            variants: vec![crate::adt::ApiVariantShape {
+                name: "GroupBy".into(),
+                doc: "",
+                fields: api::ApiVariantFields::Unit,
+            }],
+        }
+    }
+}
+
+#[cfg(feature = "dataframe")]
+impl<'gc> MimasType<'gc> for crate::val::GroupBy<'gc> {
+    fn mimas_ty(reg: &Registry) -> Option<Ty> {
+        Some(Ty::Adt(reg.get::<GroupByTy>()?.adt_id))
+    }
+    fn from_value(_ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError> {
+        v.as_group_by().ok_or_else(|| ty_error("GroupBy", v))
+    }
+    fn into_value(self, _ctx: Ctx<'gc>) -> Val<'gc> {
+        Val::GroupBy(self)
+    }
+}
+
 impl<'gc> MimasType<'gc> for Instance<'gc> {
     fn mimas_ty(_: &Registry) -> Option<Ty> {
         None
