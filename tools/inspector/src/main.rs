@@ -49,6 +49,12 @@ pub(crate) use dataflow_view::DataflowView;
 pub(crate) use scene_view::SceneView;
 use typst_preview::TypstPreview;
 
+/// The Typst-rendered chain preview (right-hand pane, and the `typeset()` call that feeds it)
+/// is on hold in favor of `img`/`scene_view`'s native, interactive rendering -- not being pushed
+/// forward for now. Flip this back on to bring the pane and its per-step Typst run back; nothing
+/// else about the plumbing (`TypstPreview`, `CurrentPreview`, `main.typ`) was removed.
+const TYPST_PREVIEW_ENABLED: bool = false;
+
 /// Built-in `typst` module, compiled alongside every script as a second file (not a prefix of
 /// it) so scripts pick it up with a plain `use typst::*;` -- see `~/code/dsa/scripts/main.mim`,
 /// which implements `Typeset` for its own `Node` using this module's pact and helpers.
@@ -433,6 +439,7 @@ fn main() {
         .init_resource::<ManualEditorScroll>()
         .init_resource::<DataflowView>()
         .init_resource::<SceneView>()
+        .init_resource::<ShowLocals>()
         .add_systems(Startup, (setup_camera, setup_font))
         .add_systems(PreUpdate, keyboard_system)
         .add_systems(Update, ui_system)
@@ -845,7 +852,19 @@ pub(crate) struct Editor {
 #[derive(bevy::ecs::resource::Resource, Default)]
 struct AutoScrollState {
     last_row: Option<usize>,
+    /// The generation `line_span_style`/`HoverIdent` were last refreshed for -- see the source
+    /// panel's `line_dirty` gating: an edit can reshuffle which identifier lands at a given
+    /// `(line_no, tok_idx)`, so a generation change forces every line to refresh once, the same
+    /// way the very first frame would (a fresh entity always gets its bundle regardless of any
+    /// `changed` flag).
+    last_generation: Option<u64>,
 }
+
+/// Whether the call-stack/locals panel (below the source view) is shown. Hidden by default for
+/// now -- it's rarely what's being demoed and takes up vertical space the source panel could use
+/// -- but kept one click away (the "Locals"/"Hide locals" toggle) rather than removed outright.
+#[derive(bevy::ecs::resource::Resource, Default)]
+struct ShowLocals(bool);
 
 /// Mouse wheel over the source panel: bevy_ui's `Overflow::Scroll` + `ScrollPosition` don't come
 /// wired to the wheel on their own (see `bevy_immediate`'s own scrollarea example, which hand-
@@ -936,6 +955,7 @@ fn ui_system(
     mut editor: ResMut<Editor>,
     mut dataflow_view: ResMut<DataflowView>,
     mut scene_view: ResMut<SceneView>,
+    mut show_locals: ResMut<ShowLocals>,
     app_font: Res<AppFont>,
     asset_server: Res<AssetServer>,
 ) {
@@ -1004,6 +1024,17 @@ fn ui_system(
                     });
                 if dataflow_btn.clicked() {
                     dataflow_view.active = !dataflow_view.active;
+                }
+
+                let mut locals_btn = ui
+                    .ch_id("locals_toggle")
+                    .on_spawn_insert(button_node)
+                    .add(|ui| {
+                        let label = if show_locals.0 { "Hide locals" } else { "Locals" };
+                        ui.ch().on_spawn_insert(|| text_style(font.clone())).text(label);
+                    });
+                if locals_btn.clicked() {
+                    show_locals.0 = !show_locals.0;
                 }
 
                 if editor.editing {
@@ -1080,7 +1111,11 @@ fn ui_system(
             // ask the program itself how to typeset itself (see `Node`'s `impl Typeset` in
             // main.mim) -- this crate doesn't know what a `Node` is, or that there even is one.
             // Only on an actual step: this runs real mimas bytecode, not a free data read.
-            if current_preview.last_seen != Some((session.generation, session.steps)) {
+            // Disabled along with the preview pane itself -- see `TYPST_PREVIEW_ENABLED`, this
+            // skips the injected `typeset()` call (real bytecode execution) too, not just the UI.
+            if TYPST_PREVIEW_ENABLED
+                && current_preview.last_seen != Some((session.generation, session.steps))
+            {
                 current_preview.last_seen = Some((session.generation, session.steps));
                 let scene = session
                     .vm
@@ -1162,7 +1197,8 @@ fn ui_system(
                         .on_spawn_observe(on_source_scroll);
                     // only re-apply the auto-scroll when the highlighted line actually moved --
                     // not every frame, or it would fight a manual scroll to a different line.
-                    let row_changed = current_row.is_some() && current_row != auto_scroll.last_row;
+                    let prev_row = auto_scroll.last_row;
+                    let row_changed = current_row.is_some() && current_row != prev_row;
                     if let Some(row) = current_row {
                         let target_y =
                             ((row as f32 - SOURCE_ROWS_ABOVE) * SOURCE_ROW_HEIGHT_PX).max(0.0);
@@ -1171,6 +1207,22 @@ fn ui_system(
                         });
                     }
                     auto_scroll.last_row = current_row;
+                    // Which lines actually need their row/span bundles reinserted this frame --
+                    // unlike the scroll-jump above (gated to just "did the highlight move"),
+                    // this also has to cover "the highlight disappeared" (current_row: Some ->
+                    // None, e.g. the program finished) so the old current line's highlight
+                    // actually clears. A whole-file edit invalidates every line's tokenization at
+                    // once (an edit can reshuffle which identifier lands at a given index), so
+                    // that forces every line dirty for one frame instead of just the two whose
+                    // `is_current` flipped -- see `AutoScrollState::last_generation`. Without this
+                    // gating, reinserting every line's (and every token's) style bundle
+                    // unconditionally every frame was making bevy_ui re-measure the whole source
+                    // panel every frame regardless of whether anything changed, visibly janking
+                    // scroll compared to the edit-mode buffer (one `EditableText` entity, no
+                    // per-token ECS churn).
+                    let highlight_changed = current_row != prev_row;
+                    let generation_changed = auto_scroll.last_generation != Some(session.generation);
+                    auto_scroll.last_generation = Some(session.generation);
                     source_panel.add(|ui| {
                         if editor.editing {
                             // a raw editable buffer, not a per-line list -- there's no "current
@@ -1217,19 +1269,21 @@ fn ui_system(
                                 .on_spawn_insert(|| dim_text_style(font.clone()))
                                 .text("(no source loaded)");
                         } else {
-                            for (line_no, line_text, is_current) in lines {
+                            for (idx, (line_no, line_text, is_current)) in
+                                lines.into_iter().enumerate()
+                            {
+                                // see the `line_dirty`/`generation_changed` comment above: only
+                                // the (at most two) lines whose highlight actually flipped need
+                                // their bundles reinserted most frames, and every line does on a
+                                // generation change.
+                                let line_dirty = generation_changed
+                                    || (highlight_changed
+                                        && (Some(idx) == current_row || Some(idx) == prev_row));
                                 ui.ch_id(line_no)
-                                    .on_change_insert(true, move || line_row_bundle(is_current))
+                                    .on_change_insert(line_dirty, move || line_row_bundle(is_current))
                                     .add(|ui| {
-                                        // `on_change_insert(true, ..)` throughout, not
-                                        // `on_spawn_insert`: these ids persist across frames (a
-                                        // line's row/token count is usually stable), but
-                                        // `is_current` changes every step, and an edit can
-                                        // reshuffle which identifier lands at a given `tok_idx`
-                                        // -- both need to actually refresh, not just apply once
-                                        // at first spawn.
                                         ui.ch_id("prefix")
-                                            .on_change_insert(true, {
+                                            .on_change_insert(line_dirty, {
                                                 let font = font.clone();
                                                 move || line_span_style(is_current, font)
                                             })
@@ -1238,7 +1292,7 @@ fn ui_system(
                                             tokenize_line(&line_text).into_iter().enumerate()
                                         {
                                             let mut span = ui.ch_id(("tok", tok_idx)).on_change_insert(
-                                                true,
+                                                line_dirty,
                                                 {
                                                     let font = font.clone();
                                                     move || line_span_style(is_current, font)
@@ -1247,7 +1301,7 @@ fn ui_system(
                                             if is_ident {
                                                 let ident = text.clone();
                                                 span = span
-                                                    .on_change_insert(true, move || HoverIdent(ident))
+                                                    .on_change_insert(line_dirty, move || HoverIdent(ident))
                                                     .on_spawn_observe(on_ident_over)
                                                     .on_spawn_observe(on_ident_out);
                                             }
@@ -1258,7 +1312,9 @@ fn ui_system(
                         }
                     });
 
-                    // call stack, oldest frame first (matches ThreadState.frames order)
+                    // call stack, oldest frame first (matches ThreadState.frames order) --
+                    // hidden by default, see `ShowLocals`.
+                    if show_locals.0 {
                     ui.ch_id("frames").on_spawn_insert(row_node).add(|ui| {
                         for (depth, frame) in frames.iter().enumerate() {
                             ui.ch_id(depth).on_spawn_insert(frame_panel_node).add(|ui| {
@@ -1306,27 +1362,33 @@ fn ui_system(
                             });
                         }
                     });
+                    }
                 });
 
                 // Typst preview pane: a live cetz-rendered tree of the running program's linked
                 // Node chain, updated whenever `typst_preview.update` produces a new image.
-                ui.ch_id("preview").on_spawn_insert(preview_panel_node).add(|ui| {
-                    match current_preview.handle.clone() {
-                        Some(handle) => {
-                            ui.ch_id("image")
-                                .on_spawn_insert(|| Node {
-                                    width: Val::Percent(100.0),
-                                    ..default()
-                                })
-                                .on_change_insert(image_changed, move || ImageNode::new(handle.clone()));
+                // Hidden along with `TYPST_PREVIEW_ENABLED`.
+                if TYPST_PREVIEW_ENABLED {
+                    ui.ch_id("preview").on_spawn_insert(preview_panel_node).add(|ui| {
+                        match current_preview.handle.clone() {
+                            Some(handle) => {
+                                ui.ch_id("image")
+                                    .on_spawn_insert(|| Node {
+                                        width: Val::Percent(100.0),
+                                        ..default()
+                                    })
+                                    .on_change_insert(image_changed, move || {
+                                        ImageNode::new(handle.clone())
+                                    });
+                            }
+                            None => {
+                                ui.ch_id("empty")
+                                    .on_spawn_insert(|| dim_text_style(font.clone()))
+                                    .text("(no chain to show yet)");
+                            }
                         }
-                        None => {
-                            ui.ch_id("empty")
-                                .on_spawn_insert(|| dim_text_style(font.clone()))
-                                .text("(no chain to show yet)");
-                        }
-                    }
-                });
+                    });
+                }
             });
 
             // hover popup: floats above everything else (a top-level sibling, not nested inside

@@ -17,7 +17,7 @@ use bevy::ecs::system::{Commands, NonSendMut, Query, ResMut};
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 use bevy::ui::widget::TextScroll;
 
-use crate::{DataflowView, Editor, ManualEditorScroll, SceneView, Session};
+use crate::{DataflowView, Editor, ManualEditorScroll, SceneView, Session, ShowLocals};
 
 enum Action {
     Screenshot(&'static str),
@@ -50,6 +50,8 @@ enum Action {
     ToggleDataflow,
     /// Simulates typing a new function name into the dataflow view's name field.
     SetDataflowFunction(&'static str),
+    /// Simulates clicking the "Locals"/"Hide locals" toggle.
+    ToggleLocals,
     /// Simulates hovering an identifier in the source panel (bypassing real pointer events --
     /// there's no synthetic-mouse story in this harness): sets `SceneView::hovered` directly,
     /// same field the real `on_ident_over` observer writes.
@@ -73,6 +75,15 @@ fn script() -> VecDeque<Action> {
     use Action::*;
     VecDeque::from([
         Screenshot("01_initial"),
+        Wait(8),
+        // Locals panel check: hidden by default (see `ShowLocals`), toggled on then back off.
+        ToggleLocals,
+        Wait(8),
+        Screenshot("01b_locals_shown"),
+        Wait(8),
+        ToggleLocals,
+        Wait(8),
+        Screenshot("01c_locals_hidden_again"),
         Wait(8),
         // Dataflow view checks: typst_box (default function) should render a small clean
         // circuit -- 3 params in, one `format` op, one `out`. Then switch to typst_arrow (also
@@ -263,6 +274,7 @@ fn drive(
     mut manual_scroll: ResMut<ManualEditorScroll>,
     mut dataflow_view: ResMut<DataflowView>,
     mut scene_view: ResMut<SceneView>,
+    mut show_locals: ResMut<ShowLocals>,
     scrolls: Query<(Entity, &TextScroll)>,
     mut exit: MessageWriter<AppExit>,
 ) {
@@ -322,6 +334,7 @@ fn drive(
             }
         }
         Action::ToggleDataflow => dataflow_view.active = !dataflow_view.active,
+        Action::ToggleLocals => show_locals.0 = !show_locals.0,
         Action::HoverIdent(name) => scene_view.hovered = Some(name.to_string()),
         Action::ClearHover => scene_view.hovered = None,
         Action::SetDataflowFunction(name) => dataflow_view.function_name = name.to_string(),
