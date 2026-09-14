@@ -1,8 +1,8 @@
-//! Native (bevy_ui, not Typst) renderer for `img::Image` values -- the scene-description
-//! contract discussed for making these visualizations interactive: a mimas program hands back
-//! *data* (an `Image` tree: shapes and how they're composed), not typeset text, so the debugger
-//! can draw it with real, pickable entities instead of a static raster. Interaction itself
-//! (hover/click routed back into the VM) isn't wired up yet -- this is the rendering half that
+//! Native (bevy_ui, not Typst) renderer for `img::Image` values, shown as a small popup when the
+//! user hovers an identifier in the source panel -- a mimas program hands back *data* (an
+//! `Image` tree: shapes and how they're composed), not typeset text, so the debugger can draw it
+//! with real, pickable entities instead of a static raster. Click-through interaction (routing a
+//! click on the popup back into the VM) isn't wired up yet -- this is the rendering half that
 //! has to exist first.
 //!
 //! Pipeline: `Inspect` (generic, name-labeled reflection of *any* mimas value -- see
@@ -13,77 +13,101 @@
 //! computes each node's bounding box bottom-up, [`arrange`] walks back down assigning absolute
 //! positions, matching Pyret's actual composition semantics (`overlay` centers, `beside`/`above`
 //! concatenate and center-align the cross axis, `place-image` positions by center point, ..).
+//!
+//! Values whose type doesn't implement `img::Draw` still show *something*: `SceneView::refresh`
+//! falls back to the value's own to-string form (`Vm::resolve_for_scene`'s `Fallback` case),
+//! wrapped as a single [`Shape::Text`] so the popup renderer doesn't need a separate code path.
 
 use bevy::asset::Handle;
 use bevy::color::Color as BevyColor;
-use bevy::ecs::observer::On;
 use bevy::ecs::resource::Resource;
-use bevy::ecs::system::Query;
-use bevy::input::mouse::MouseScrollUnit;
-use bevy::picking::events::{Pointer, Scroll};
-use bevy::text::{Font, TextColor};
+use bevy::math::Vec2;
+use bevy::text::{Font, LineBreak, TextColor, TextLayout};
 use bevy::ui::{
     AlignItems, BackgroundColor, BorderColor, BorderRadius, JustifyContent, Node, Overflow,
-    OverflowAxis, PositionType, ScrollPosition, UiRect, Val,
+    PositionType, UiRect, Val,
 };
 use bevy::utils::default;
 use bevy_immediate::Imm;
 use bevy_immediate::ui::{CapsUi, text::ImmUiText};
 
-use mimas::vm::Inspect;
+use mimas::vm::{Inspect, SceneResult};
 
 use crate::theme;
 
 const SHAPE_BORDER_WIDTH: f32 = 2.0;
+/// Text color for the to-string fallback popup -- deliberately plain (no `img::Color` involved,
+/// there's no script-chosen color to use), just legible against the popup's card background.
+const FALLBACK_TEXT_COLOR: Rgba = Rgba { r: 30, g: 30, b: 30, a: 255 };
 
-/// Which scene is showing (the first live instance implementing `img::Draw`'s `draw()`), and
-/// the last parse/extraction failure. `last_seen`/`shape` memoize the same way `DataflowView`
-/// does, except keyed on `steps` instead of just `generation`: unlike a dataflow graph (a static
-/// property of a function), a scene is meant to change as the program runs, so it has to
-/// refresh on every step, not just when the whole program is replaced.
+/// Which identifier the mouse is currently over in the source panel (`None` when it's over
+/// nothing hoverable), the scene last extracted for it, and the last parse/extraction failure.
+/// `last_seen` memoizes the same way `DataflowView` does, except keyed on the hovered identifier
+/// too: unlike a dataflow graph (a static property of a function), a scene is meant to change as
+/// the program runs, so it has to refresh on every step, not just when the whole program is
+/// replaced -- and obviously also whenever the hovered identifier itself changes.
 #[derive(Resource, Default)]
 pub(crate) struct SceneView {
-    pub(crate) active: bool,
-    pub(crate) error: Option<String>,
+    /// Set by the source panel's hover observers; cleared when the pointer leaves every
+    /// identifier span. `pos` is the pointer's last window-pixel location, used to anchor the
+    /// popup near the cursor.
+    pub(crate) hovered: Option<String>,
+    pub(crate) pos: Vec2,
+    error: Option<String>,
     shape: Option<Shape>,
-    last_seen: Option<(u64, u64)>,
+    last_seen: Option<(u64, u64, String)>,
 }
 
 impl SceneView {
-    /// Re-extracts the scene by calling `draw()` on the first live instance implementing
-    /// `img::Draw`, if `(generation, steps)` has changed since the last call; otherwise a no-op.
-    /// Call once per frame before `render`, same split as `DataflowView::refresh`/`render`.
+    /// Re-extracts the popup's contents for the currently hovered identifier (see
+    /// [`SceneView::hovered`]), if `(generation, steps, identifier)` has changed since the last
+    /// call; otherwise a no-op. Call once per frame before [`render_popup`].
     pub(crate) fn refresh(&mut self, vm: &mut mimas::vm::Vm, generation: u64, steps: u64) {
-        let key = (generation, steps);
-        if self.last_seen == Some(key) {
+        let Some(name) = self.hovered.clone() else {
+            self.shape = None;
+            self.error = None;
+            self.last_seen = None;
+            return;
+        };
+        let key = (generation, steps, name.clone());
+        if self.last_seen.as_ref() == Some(&key) {
             return;
         }
         self.last_seen = Some(key);
-        let Some(inspect) = vm.call_method_on_first_instance_inspect("draw") else {
-            self.shape = None;
-            self.error = Some(
-                "no live value implementing `img::Draw` found (looked for a `draw()` method \
-                 on every instance reachable from the current call stack)"
-                    .to_string(),
-            );
-            return;
-        };
-        match parse_shape(&inspect) {
-            Some(shape) => {
-                self.shape = Some(shape);
+        match vm.resolve_for_scene(&name, "draw") {
+            Some(SceneResult::Drawn(inspect)) => match parse_shape(&inspect) {
+                Some(shape) => {
+                    self.shape = Some(shape);
+                    self.error = None;
+                }
+                None => {
+                    self.shape = None;
+                    self.error = Some(format!(
+                        "draw() returned something that isn't an img::Image: {inspect:?}"
+                    ));
+                }
+            },
+            Some(SceneResult::Fallback(text)) => {
+                self.shape =
+                    Some(Shape::Text { value: text, size: 16.0, color: FALLBACK_TEXT_COLOR });
                 self.error = None;
             }
+            // `name` isn't a live top-level local right now (stale hover, or an identifier
+            // that was never a binding -- a keyword, type name, or field name) -- show nothing
+            // rather than an error; this fires on almost every token in the file.
             None => {
                 self.shape = None;
-                self.error = Some(format!(
-                    "draw() returned something that isn't an img::Image: {inspect:?}"
-                ));
+                self.error = None;
             }
         }
     }
 
     pub(crate) fn shape(&self) -> Option<&Shape> {
         self.shape.as_ref()
+    }
+
+    pub(crate) fn error(&self) -> Option<&str> {
+        self.error.as_deref()
     }
 }
 
@@ -371,19 +395,22 @@ fn arrange(shape: &Shape, x: f32, y: f32, out: &mut Vec<DrawCmd>) {
             out.push(DrawCmd { x, y, w, h, kind: DrawKind::Line { color: *color } });
         }
         Shape::Overlay { top, bottom } => {
+            // `bottom` has to land in `out` (and so on screen -- later entries paint over
+            // earlier ones) before `top`, or "overlay(top, bottom)" would render upside down
+            // from what the name promises.
             let (w, h) = measure(shape);
             let (tw, th) = measure(top);
             let (bw, bh) = measure(bottom);
-            arrange(top, x + (w - tw) / 2.0, y + (h - th) / 2.0, out);
             arrange(bottom, x + (w - bw) / 2.0, y + (h - bh) / 2.0, out);
+            arrange(top, x + (w - tw) / 2.0, y + (h - th) / 2.0, out);
         }
         Shape::OverlayXy { top, dx, dy, bottom } => {
             let (bw, bh) = measure(bottom);
             let _ = (bw, bh);
             let min_x = dx.min(0.0);
             let min_y = dy.min(0.0);
-            arrange(top, x - min_x, y - min_y, out);
             arrange(bottom, x + dx - min_x, y + dy - min_y, out);
+            arrange(top, x - min_x, y - min_y, out);
         }
         Shape::Beside { left, right } => {
             let (_, h) = measure(shape);
@@ -408,41 +435,44 @@ fn arrange(shape: &Shape, x: f32, y: f32, out: &mut Vec<DrawCmd>) {
     }
 }
 
-fn canvas_node() -> (Node, BorderColor, BackgroundColor) {
+/// A small floating card anchored just past the pointer's last hover position (in window-pixel
+/// space -- close enough to the source panel's own coordinate space since `root_node` sits at
+/// the window origin with only a small fixed padding, and being off by that padding is
+/// imperceptible for a tooltip). Sized to the content, clamped so one huge scene can't cover the
+/// whole window.
+fn popup_node(pos: Vec2, w: f32, h: f32) -> (Node, BorderColor, BackgroundColor) {
     (
         Node {
-            position_type: PositionType::Relative,
-            flex_grow: 1.0,
-            min_height: Val::Px(0.),
-            overflow: Overflow { x: OverflowAxis::Clip, y: OverflowAxis::Clip },
+            position_type: PositionType::Absolute,
+            left: Val::Px(pos.x + 16.0),
+            top: Val::Px(pos.y + 16.0),
+            width: Val::Px(w),
+            height: Val::Px(h),
+            padding: UiRect::all(Val::Px(8.0)),
+            border: UiRect::all(Val::Px(1.0)),
+            border_radius: BorderRadius::all(Val::Px(6.0)),
+            overflow: Overflow::clip(),
             ..default()
         },
-        BorderColor::all(theme::overlay0()),
-        BackgroundColor(theme::surface0()),
+        BorderColor::all(theme::overlay1()),
+        BackgroundColor(theme::surface1()),
     )
 }
 
-/// Mouse wheel pans the canvas, same wiring/gap as `dataflow_view::on_dataflow_scroll`.
-fn on_scene_scroll(trigger: On<Pointer<Scroll>>, mut positions: Query<&mut ScrollPosition>) {
-    let event = trigger.event();
-    let Ok(mut pos) = positions.get_mut(event.entity) else {
-        return;
-    };
-    let (dx, dy) = match event.unit {
-        MouseScrollUnit::Line => (event.x * 20.0, event.y * 20.0),
-        MouseScrollUnit::Pixel => (event.x, event.y),
-    };
-    pos.0.x = (pos.0.x - dx).max(0.0);
-    pos.0.y = (pos.0.y - dy).max(0.0);
-}
-
-pub(crate) fn render(ui: &mut Imm<CapsUi>, font: Handle<Font>, root: &Shape) {
+/// Renders `root` as a popup card floating near `pos` (the hovered identifier's last known
+/// pointer position) -- called once per frame while [`SceneView::hovered`] is `Some` and a shape
+/// was successfully extracted.
+pub(crate) fn render_popup(ui: &mut Imm<CapsUi>, font: Handle<Font>, root: &Shape, pos: Vec2) {
+    let (content_w, content_h) = measure(root);
+    let w = content_w.clamp(32.0, 480.0) + 16.0;
+    let h = content_h.clamp(24.0, 360.0) + 16.0;
     let mut cmds = Vec::new();
     arrange(root, 0.0, 0.0, &mut cmds);
 
-    ui.ch_id("scene_canvas")
-        .on_spawn_insert(canvas_node)
-        .on_spawn_observe(on_scene_scroll)
+    ui.ch_id("hover_popup")
+        // always reinsert (not just on spawn): `pos` tracks the pointer, which can keep moving
+        // slightly while it's still over the same identifier's span.
+        .on_change_insert(true, move || popup_node(pos, w, h))
         .add(|ui| {
             for (i, cmd) in cmds.iter().enumerate() {
                 let node = Node {
@@ -459,17 +489,25 @@ pub(crate) fn render(ui: &mut Imm<CapsUi>, font: Handle<Font>, root: &Shape) {
                     border: UiRect::all(Val::Px(SHAPE_BORDER_WIDTH)),
                     ..default()
                 };
+                // `on_change_insert(true, ..)`, not `on_spawn_insert`, throughout this loop:
+                // unlike the dataflow graph or the old full-page scene view (long-lived, mostly
+                // stable content), a hover popup's shape tree is replaced wholesale every time
+                // the hovered identifier changes -- same `("scene_rect", i)`-shaped ids can end
+                // up reused for a completely different shape one hover to the next. With
+                // `on_spawn_insert`, only the *first* value ever written at that id would stick
+                // (a stale color/position left over from whatever was hovered before); this
+                // forces every bundle fresh each frame.
                 match &cmd.kind {
                     DrawKind::Rect { outline, color } => {
                         let (border, background) = fill_or_outline(*outline, *color);
-                        ui.ch_id(("scene_rect", i)).on_spawn_insert(move || {
+                        ui.ch_id(("scene_rect", i)).on_change_insert(true, move || {
                             (node.clone(), BorderColor::all(border), BackgroundColor(background))
                         });
                     }
                     DrawKind::Ellipse { outline, color } => {
                         let (border, background) = fill_or_outline(*outline, *color);
                         let radius = cmd.w.min(cmd.h) / 2.0;
-                        ui.ch_id(("scene_ellipse", i)).on_spawn_insert(move || {
+                        ui.ch_id(("scene_ellipse", i)).on_change_insert(true, move || {
                             (
                                 Node { border_radius: BorderRadius::all(Val::Px(radius)), ..node.clone() },
                                 BorderColor::all(border),
@@ -480,14 +518,20 @@ pub(crate) fn render(ui: &mut Imm<CapsUi>, font: Handle<Font>, root: &Shape) {
                     DrawKind::Triangle { color } => {
                         let c = *color;
                         ui.ch_id(("scene_triangle", i))
-                            .on_spawn_insert(move || {
+                            .on_change_insert(true, move || {
                                 (node.clone(), BorderColor::all(BevyColor::from(c)), BackgroundColor(BevyColor::NONE))
                             })
                             .add(|ui| {
                                 ui.ch()
-                                    .on_spawn_insert({
+                                    .on_change_insert(true, {
                                         let font = font.clone();
-                                        move || (TextColor(c.into()), crate::text_font(font))
+                                        move || {
+                                            (
+                                                TextColor(c.into()),
+                                                crate::text_font(font),
+                                                TextLayout::linebreak(LineBreak::NoWrap),
+                                            )
+                                        }
                                     })
                                     .text("\u{25b3}");
                             });
@@ -497,13 +541,17 @@ pub(crate) fn render(ui: &mut Imm<CapsUi>, font: Handle<Font>, root: &Shape) {
                         let size = *size;
                         let font = font.clone();
                         let value = value.clone();
-                        ui.ch_id(("scene_text", i)).on_spawn_insert(move || node.clone()).add(
+                        ui.ch_id(("scene_text", i)).on_change_insert(true, move || node.clone()).add(
                             move |ui| {
                                 ui.ch()
-                                    .on_spawn_insert(move || {
+                                    .on_change_insert(true, move || {
                                         let mut f = crate::text_font(font.clone());
                                         f.font_size = bevy::text::FontSize::Px(size);
-                                        (TextColor(color.into()), f)
+                                        (
+                                            TextColor(color.into()),
+                                            f,
+                                            TextLayout::linebreak(LineBreak::NoWrap),
+                                        )
                                     })
                                     .text(value.clone());
                             },
@@ -511,7 +559,7 @@ pub(crate) fn render(ui: &mut Imm<CapsUi>, font: Handle<Font>, root: &Shape) {
                     }
                     DrawKind::Line { color } => {
                         let c = *color;
-                        ui.ch_id(("scene_line", i)).on_spawn_insert(move || {
+                        ui.ch_id(("scene_line", i)).on_change_insert(true, move || {
                             (node.clone(), BorderColor::all(BevyColor::from(c)), BackgroundColor(BevyColor::NONE))
                         });
                     }

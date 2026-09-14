@@ -42,6 +42,14 @@ mod op_count {
     }
 }
 
+/// Result of [`Vm::resolve_for_scene`]: either a value drew itself via `img::Draw`, or (no such
+/// method) the plain to-string fallback.
+#[derive(Debug)]
+pub enum SceneResult {
+    Drawn(Inspect),
+    Fallback(String),
+}
+
 /// One call-stack frame's introspectable state -- for debuggers/visualizers built on top of
 /// [`Vm`], not used by the interpreter itself. See [`Vm::frames`].
 #[derive(Debug)]
@@ -1595,6 +1603,69 @@ impl Vm {
             let result = thread.regs[return_slot].inspect(&struct_names, field_names, &mut seen);
             thread.regs.truncate(return_slot);
             Some(result)
+        })
+    }
+
+    /// Resolves `name` as a top-level local and renders it for a hover/inspect popup: if its
+    /// type has a zero-arg method named `draw_method` (the `img::Draw` pact, in practice), calls
+    /// it and returns the resulting `Image` tree as an [`Inspect`] -- same mechanism as
+    /// [`Vm::call_method_on_first_instance_inspect`], except the receiver is *this specific*
+    /// value instead of a first-match search. Otherwise falls back to the value's own to-string
+    /// form (the same text `print` would show), so hovering *any* identifier shows something
+    /// instead of nothing. Returns `None` only when `name` isn't a live top-level local at all.
+    pub fn resolve_for_scene(&mut self, name: &str, draw_method: &str) -> Option<SceneResult> {
+        let Vm {
+            code,
+            chunks,
+            c_strs: strs,
+            arena,
+            sources,
+            methods,
+            field_names,
+            ..
+        } = self;
+        arena.mutate(|mc, state| {
+            let ctx = state.ctx(mc);
+            let mut thread = state.thread.borrow_mut(mc);
+
+            let frame = thread.frames.first()?;
+            let chunk = frame.chunk;
+            let base = frame.base;
+            let reg = *chunks[chunk].locals.get(name)?;
+            let receiver = *thread.regs.get(base + reg.index())?;
+
+            if let Val::Instance(inst) = receiver {
+                let struct_id = inst.0.borrow().struct_id as usize;
+                if let Some(&body) = methods.get(struct_id).and_then(|m| m.get(draw_method)) {
+                    let return_slot = thread.regs.len();
+                    thread.regs.push(Val::Null);
+                    let caller_base = thread.frames.last().unwrap().base;
+                    let dst = Reg::from((return_slot - caller_base) as u32);
+                    let stop_depth = thread.frames.len() + 1;
+                    enter_call(&mut thread, code, chunks, body, dst, &[receiver], &[]);
+                    let ok = run_dispatch(
+                        ctx,
+                        code,
+                        chunks,
+                        strs,
+                        sources,
+                        &mut thread,
+                        usize::MAX,
+                        stop_depth,
+                    )
+                    .is_ok();
+                    if ok {
+                        let struct_names = state.struct_names.borrow();
+                        let mut seen = std::collections::HashSet::new();
+                        let result =
+                            thread.regs[return_slot].inspect(&struct_names, field_names, &mut seen);
+                        thread.regs.truncate(return_slot);
+                        return Some(SceneResult::Drawn(result));
+                    }
+                    thread.regs.truncate(return_slot);
+                }
+            }
+            ctx.to_string(receiver).ok().map(SceneResult::Fallback)
         })
     }
 

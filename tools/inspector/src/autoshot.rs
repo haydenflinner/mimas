@@ -50,8 +50,12 @@ enum Action {
     ToggleDataflow,
     /// Simulates typing a new function name into the dataflow view's name field.
     SetDataflowFunction(&'static str),
-    /// Simulates clicking the "Scene"/"Debugger" toggle.
-    ToggleScene,
+    /// Simulates hovering an identifier in the source panel (bypassing real pointer events --
+    /// there's no synthetic-mouse story in this harness): sets `SceneView::hovered` directly,
+    /// same field the real `on_ident_over` observer writes.
+    HoverIdent(&'static str),
+    /// Simulates the pointer leaving every identifier span.
+    ClearHover,
     /// Skip this many frames before the next action -- bevy_ui needs a frame or two after a
     /// state change to re-measure text and settle layout, and a screenshot taken too eagerly
     /// would still show the stale frame.
@@ -104,10 +108,10 @@ fn script() -> VecDeque<Action> {
         Wait(8),
         Screenshot("df_04_back_to_debugger"),
         Wait(8),
-        // Scene view check: a value implementing img::Draw, exercising most of the primitive
-        // set in one go -- a solid rectangle background, place_image compositing three more
-        // shapes onto it (text, a solid circle, an outline circle) at explicit positions. This
-        // is the actual point of the img module: a script hands back *data* describing the
+        // Hover-popup scene check: a value implementing img::Draw, exercising most of the
+        // primitive set in one go -- a solid rectangle background, place_image compositing three
+        // more shapes onto it (text, a solid circle, an outline circle) at explicit positions.
+        // This is the actual point of the img module: a script hands back *data* describing the
         // scene, and the debugger draws it with real bevy_ui entities instead of shelling out
         // to Typst for a static PNG.
         StartEdit,
@@ -117,15 +121,27 @@ fn script() -> VecDeque<Action> {
         ),
         ApplyEdit,
         // `canvas` is constructed by the last statement in the (edited) program -- has to
-        // actually run before there's a live Draw-implementing instance to find.
+        // actually run before there's a live Draw-implementing instance to find. `a` (a `Node`,
+        // which itself implements Draw -- see `~/code/dsa/scripts/main.mim`) and `s` (a plain
+        // `str`, no Draw impl anywhere for it to have) are both still live at this point too:
+        // `a`'s hover exercises the same Draw path through a second, independent type, and `s`'s
+        // hover exercises the to-string fallback (`SceneResult::Fallback`) instead.
         RunToEnd,
-        ToggleScene,
+        HoverIdent("canvas"),
         Wait(8),
         Screenshot("scene_01_canvas"),
         Wait(8),
-        ToggleScene,
+        HoverIdent("a"),
         Wait(8),
-        Screenshot("scene_02_back_to_debugger"),
+        Screenshot("scene_02_node_draw"),
+        Wait(8),
+        HoverIdent("s"),
+        Wait(8),
+        Screenshot("scene_03_str_fallback"),
+        Wait(8),
+        ClearHover,
+        Wait(8),
+        Screenshot("scene_04_back_to_debugger"),
         Wait(8),
         StepLineN(6),
         Wait(8),
@@ -306,7 +322,8 @@ fn drive(
             }
         }
         Action::ToggleDataflow => dataflow_view.active = !dataflow_view.active,
-        Action::ToggleScene => scene_view.active = !scene_view.active,
+        Action::HoverIdent(name) => scene_view.hovered = Some(name.to_string()),
+        Action::ClearHover => scene_view.hovered = None,
         Action::SetDataflowFunction(name) => dataflow_view.function_name = name.to_string(),
         Action::Wait(n) => runner.waiting = n,
     }

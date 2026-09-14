@@ -8,6 +8,7 @@ use bevy::DefaultPlugins;
 use bevy::app::{App, PluginGroup, PostUpdate, PreUpdate, Startup, Update};
 use bevy::asset::{AssetServer, Handle};
 use bevy::color::Color;
+use bevy::ecs::component::Component;
 use bevy::ecs::entity::Entity;
 use bevy::ecs::observer::On;
 use bevy::ecs::schedule::IntoScheduleConfigs;
@@ -17,15 +18,15 @@ use bevy::input::ButtonInput;
 use bevy::input::keyboard::KeyCode;
 use bevy::input::mouse::MouseScrollUnit;
 use bevy::math::Vec2;
-use bevy::picking::events::{Pointer, Scroll};
+use bevy::picking::events::{Out, Over, Pointer, Scroll};
 use bevy::prelude::Camera2d;
 use bevy::text::{
-    EditableText, EditableTextGeneration, Font, FontSize, FontSource, TextColor, TextCursorStyle,
-    TextEdit, TextFont, TextLayoutInfo,
+    EditableText, EditableTextGeneration, Font, FontSize, FontSource, LineBreak, TextColor,
+    TextCursorStyle, TextEdit, TextFont, TextLayout, TextLayoutInfo,
 };
 use bevy::ui::widget::{ImageNode, TextScroll};
 use bevy::ui::{
-    AlignItems, BackgroundColor, BorderColor, BorderRadius, ComputedNode, FlexDirection,
+    AlignItems, BackgroundColor, BorderColor, BorderRadius, ComputedNode, FlexDirection, FlexWrap,
     JustifyContent, Node, Overflow, OverflowAxis, ScrollPosition, UiRect, Val,
 };
 use bevy::ui_widgets::EditableTextInputPlugin;
@@ -455,7 +456,7 @@ fn setup_camera(mut commands: Commands) {
 }
 
 /// The one font every text row in the UI renders with -- see `text_style`/`dim_text_style`/
-/// `line_row_style`, which all take a `Handle<Font>` for exactly this.
+/// `line_span_style`, which all take a `Handle<Font>` for exactly this.
 #[derive(bevy::ecs::resource::Resource)]
 struct AppFont(Handle<Font>);
 
@@ -548,26 +549,101 @@ fn error_text_style(font: Handle<Font>) -> (TextColor, TextFont) {
     (TextColor(theme::red()), text_font(font))
 }
 
-/// Source-line row style. Unified into one bundle type (rather than two differently-shaped
-/// styles picked between) so it can go through `on_change_insert` every frame -- which line is
-/// "current" changes as the program steps, on the same set of row entities.
-fn line_row_style(
-    is_current: bool,
-    font: Handle<Font>,
-) -> (TextColor, BackgroundColor, TextFont) {
-    let text_font = text_font(font);
-    if is_current {
-        (
-            TextColor(theme::text()),
-            BackgroundColor(theme::yellow()),
-            text_font,
-        )
-    } else {
-        (
-            TextColor(theme::subtext1()),
-            BackgroundColor(Color::NONE),
-            text_font,
-        )
+/// Source-line row container: a horizontal flex of spans (the line-number prefix, then one span
+/// per token -- see `tokenize_line`) rather than one plain text entity, so identifier tokens can
+/// carry their own hover observer without the whole line becoming one giant hit target. Only the
+/// background differs by `is_current`; goes through `on_change_insert` every frame since which
+/// line is "current" changes as the program steps, on the same set of row entities.
+fn line_row_bundle(is_current: bool) -> (Node, BackgroundColor) {
+    (
+        Node { flex_direction: FlexDirection::Row, flex_wrap: FlexWrap::NoWrap, ..default() },
+        BackgroundColor(if is_current { theme::yellow() } else { Color::NONE }),
+    )
+}
+
+/// Style for one span (prefix or token) inside a `line_row_bundle` row -- the per-entity
+/// counterpart of the old single-entity approach. `flex_shrink: 0.0` matters more than it looks:
+/// a `Text`-bearing entity gets an implicit default `Node` with the usual `flex_shrink: 1.0`, so
+/// without this, a long line's many spans get squeezed to fit the row's available width instead
+/// of overflowing it -- and a squeezed span's text then *word-wraps* inside its own shrunk box,
+/// scrambling the line across several visual rows. `NoWrap` on top is belt-and-suspenders
+/// against that same wrapping.
+fn line_span_style(is_current: bool, font: Handle<Font>) -> (Node, TextColor, TextFont, TextLayout) {
+    let color = if is_current { theme::text() } else { theme::subtext1() };
+    (
+        Node { flex_shrink: 0.0, ..default() },
+        TextColor(color),
+        text_font(font),
+        TextLayout::linebreak(LineBreak::NoWrap),
+    )
+}
+
+/// Splits a source line into runs of identifier characters (`[A-Za-z_][A-Za-z0-9_]*`) and
+/// everything else, preserving order and covering the whole line -- used to give each identifier
+/// its own hoverable span (see `HoverIdent`) without touching whitespace, punctuation, or
+/// numeric literals. Keywords, type names, and field names tokenize as "identifiers" too (the
+/// lexical shape is the same); hovering one just won't resolve to a live top-level local, and
+/// `SceneView::refresh` already treats that as "show nothing" rather than an error.
+fn tokenize_line(line: &str) -> Vec<(String, bool)> {
+    let is_ident_start = |c: char| c.is_alphabetic() || c == '_';
+    let is_ident_cont = |c: char| c.is_alphanumeric() || c == '_';
+    let chars: Vec<char> = line.chars().collect();
+    let mut runs = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let start = i;
+        if is_ident_start(chars[i]) {
+            i += 1;
+            while i < chars.len() && is_ident_cont(chars[i]) {
+                i += 1;
+            }
+            runs.push((chars[start..i].iter().collect(), true));
+        } else {
+            i += 1;
+            while i < chars.len() && !is_ident_start(chars[i]) {
+                i += 1;
+            }
+            runs.push((chars[start..i].iter().collect(), false));
+        }
+    }
+    runs
+}
+
+/// Marks a source-panel span as holding one identifier token, so `on_ident_over`/`on_ident_out`
+/// can read back which name to look up without re-tokenizing anything.
+#[derive(Component)]
+struct HoverIdent(String);
+
+/// Pointer enters an identifier span: resolve it as the hovered identifier and remember where
+/// the pointer is (window-pixel space), so the popup can anchor near it -- see
+/// `SceneView::refresh`/`scene_view::render_popup`.
+fn on_ident_over(
+    trigger: On<Pointer<Over>>,
+    idents: Query<&HoverIdent>,
+    mut scene_view: ResMut<SceneView>,
+) {
+    let event = trigger.event();
+    let Ok(HoverIdent(name)) = idents.get(event.entity) else {
+        return;
+    };
+    scene_view.hovered = Some(name.clone());
+    scene_view.pos = event.pointer_location.position;
+}
+
+/// Pointer leaves an identifier span: clear the hover, but only if this span is still the one
+/// that's showing -- guards against a stray `Out` from a span the pointer already left for
+/// another one clobbering that newer hover.
+fn on_ident_out(
+    trigger: On<Pointer<Out>>,
+    idents: Query<&HoverIdent>,
+    mut scene_view: ResMut<SceneView>,
+) {
+    let event = trigger.event();
+    let Ok(HoverIdent(name)) = idents.get(event.entity) else {
+        return;
+    };
+    if scene_view.hovered.as_deref() == Some(name.as_str()) {
+        scene_view.hovered = None;
     }
 }
 
@@ -928,23 +1004,6 @@ fn ui_system(
                     });
                 if dataflow_btn.clicked() {
                     dataflow_view.active = !dataflow_view.active;
-                    if dataflow_view.active {
-                        scene_view.active = false;
-                    }
-                }
-
-                let mut scene_btn = ui
-                    .ch_id("scene_toggle")
-                    .on_spawn_insert(button_node)
-                    .add(|ui| {
-                        let label = if scene_view.active { "Debugger" } else { "Scene" };
-                        ui.ch().on_spawn_insert(|| text_style(font.clone())).text(label);
-                    });
-                if scene_btn.clicked() {
-                    scene_view.active = !scene_view.active;
-                    if scene_view.active {
-                        dataflow_view.active = false;
-                    }
                 }
 
                 if editor.editing {
@@ -1085,23 +1144,6 @@ fn ui_system(
                 return;
             }
 
-            if scene_view.active {
-                // unlike the dataflow view (a static property of a function), a scene is meant
-                // to change as the program runs, so it refreshes on every step (`steps`), not
-                // just when the whole program is replaced (`generation`).
-                let (generation, steps) = (session.generation, session.steps);
-                scene_view.refresh(&mut session.vm, generation, steps);
-                if let Some(err) = scene_view.error.clone() {
-                    ui.ch_id("scene_error")
-                        .on_spawn_insert(|| error_text_style(font.clone()))
-                        .text(err);
-                }
-                if let Some(shape) = scene_view.shape() {
-                    scene_view::render(ui, font.clone(), shape);
-                }
-                return;
-            }
-
             // body: the existing debugger panels on the left, the Typst preview pane on the
             // right -- a vertically split pane inside the app itself, no separate browser tab.
             ui.ch_id("body").on_spawn_insert(body_row_node).add(|ui| {
@@ -1177,8 +1219,41 @@ fn ui_system(
                         } else {
                             for (line_no, line_text, is_current) in lines {
                                 ui.ch_id(line_no)
-                                    .text(format!("{line_no:>4} | {line_text}"))
-                                    .on_change_insert(true, || line_row_style(is_current, font.clone()));
+                                    .on_change_insert(true, move || line_row_bundle(is_current))
+                                    .add(|ui| {
+                                        // `on_change_insert(true, ..)` throughout, not
+                                        // `on_spawn_insert`: these ids persist across frames (a
+                                        // line's row/token count is usually stable), but
+                                        // `is_current` changes every step, and an edit can
+                                        // reshuffle which identifier lands at a given `tok_idx`
+                                        // -- both need to actually refresh, not just apply once
+                                        // at first spawn.
+                                        ui.ch_id("prefix")
+                                            .on_change_insert(true, {
+                                                let font = font.clone();
+                                                move || line_span_style(is_current, font)
+                                            })
+                                            .text(format!("{line_no:>4} | "));
+                                        for (tok_idx, (text, is_ident)) in
+                                            tokenize_line(&line_text).into_iter().enumerate()
+                                        {
+                                            let mut span = ui.ch_id(("tok", tok_idx)).on_change_insert(
+                                                true,
+                                                {
+                                                    let font = font.clone();
+                                                    move || line_span_style(is_current, font)
+                                                },
+                                            );
+                                            if is_ident {
+                                                let ident = text.clone();
+                                                span = span
+                                                    .on_change_insert(true, move || HoverIdent(ident))
+                                                    .on_spawn_observe(on_ident_over)
+                                                    .on_spawn_observe(on_ident_out);
+                                            }
+                                            span.text(text);
+                                        }
+                                    });
                             }
                         }
                     });
@@ -1253,6 +1328,24 @@ fn ui_system(
                     }
                 });
             });
+
+            // hover popup: floats above everything else (a top-level sibling, not nested inside
+            // the scrollable/clipped source panel, so it isn't cut off at the panel's edge) --
+            // shows the identifier under the mouse drawing itself via `img::Draw`, or (no such
+            // impl) its plain to-string form. Unlike the dataflow view (a static property of a
+            // function), a scene can change as the program runs, so it refreshes on every step
+            // (`steps`), not just when the whole program is replaced (`generation`) -- and also
+            // whenever the hovered identifier itself changes.
+            let (generation, steps) = (session.generation, session.steps);
+            scene_view.refresh(&mut session.vm, generation, steps);
+            if let Some(err) = scene_view.error().map(str::to_string) {
+                ui.ch_id("scene_error")
+                    .on_spawn_insert(|| error_text_style(font.clone()))
+                    .text(err);
+            }
+            if let Some(shape) = scene_view.shape() {
+                scene_view::render_popup(ui, font.clone(), shape, scene_view.pos);
+            }
         });
 }
 
@@ -1268,7 +1361,7 @@ fn status_text(session: &Session) -> String {
 
 /// Color-codes `status_text`'s three states, so error/finished/running read at a glance instead
 /// of only through the words. Re-applied every frame (`on_change_insert(true, ...)`, matching
-/// `line_row_style`): which state we're in can change on the same status-text entity.
+/// `line_row_bundle`): which state we're in can change on the same status-text entity.
 fn status_style(session: &Session, font: Handle<Font>) -> (TextColor, TextFont) {
     let color = if session.error.is_some() {
         theme::red()
