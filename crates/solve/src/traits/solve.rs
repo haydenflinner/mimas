@@ -950,10 +950,35 @@ impl Solve for Enum {
     }
 }
 
+/// `col("age") > 30` (and `==`/`!=`/`<`/`<=`/`>=`, and `+ - * /` in [`Evaluation::solve`]) build a
+/// real `polars::prelude::Expr` tree at runtime instead of evaluating anything -- see the
+/// `to_pl_expr`-gated block at the top of `bin()` in `crates/vm/src/val.rs`. That's a dynamic
+/// (VM-level) overload with no matching static concept, so the two solve impls special-case it
+/// here by name: whenever either operand's type is the native `PlExpr` adt, the whole expression's
+/// type is `PlExpr` too (an int/float/bool/str on the other side is fine -- the VM auto-promotes it
+/// via `lit(..)`; anything else is a runtime error, same tradeoff the VM side already made). This
+/// can't reach for a real vid-level "supports overload" trait bound; native adts are opaque to the
+/// solver, so matching by name against the one adt that opts in is what's available.
+fn plexpr_overload_ty(lhs: &Ty, rhs: &Ty, solver: &Solver) -> Option<Ty> {
+    let is_plexpr = |ty: &Ty| matches!(ty, Ty::Adt(id) if solver.adts[*id].name == "PlExpr");
+    if is_plexpr(lhs) {
+        Some(lhs.clone())
+    } else if is_plexpr(rhs) {
+        Some(rhs.clone())
+    } else {
+        None
+    }
+}
+
 impl Solve for Equality {
     fn solve(&self, _id: NodeId, location: Location, solver: &mut Solver) -> Result<Ty> {
         let lhs = self.left.query(solver)?;
         let rhs = self.right.query(solver)?;
+        let lhs_n = lhs.clone().normalized(solver);
+        let rhs_n = rhs.clone().normalized(solver);
+        if let Some(ty) = plexpr_overload_ty(&lhs_n, &rhs_n, solver) {
+            return Ok(ty);
+        }
         match (&lhs, &rhs) {
             (Ty::Null, Ty::Option(_)) | (Ty::Option(_), Ty::Null) => Ok(()),
             (l, r) if l.is_numeric() && r.is_numeric() => Ok(()),
@@ -1037,6 +1062,11 @@ impl Solve for Evaluation {
 
         let lhs = self.left.query(solver)?;
         let rhs = self.right.query(solver)?;
+        let lhs_n = lhs.clone().normalized(solver);
+        let rhs_n = rhs.clone().normalized(solver);
+        if let Some(ty) = plexpr_overload_ty(&lhs_n, &rhs_n, solver) {
+            return Ok(ty);
+        }
         eval(self.op, &lhs, &rhs, location, solver)
     }
 }
