@@ -10,7 +10,9 @@ use bevy::asset::{AssetServer, Handle};
 use bevy::color::Color;
 use bevy::ecs::component::Component;
 use bevy::ecs::entity::Entity;
+use bevy::ecs::hierarchy::Children;
 use bevy::ecs::observer::On;
+use bevy::ecs::query::With;
 use bevy::ecs::schedule::IntoScheduleConfigs;
 use bevy::ecs::system::{Commands, Local, NonSendMut, Query, Res, ResMut};
 use bevy::image::Image;
@@ -679,6 +681,13 @@ fn source_panel_node() -> (Node, BorderColor, BackgroundColor) {
     )
 }
 
+/// Wraps the source panel's line rows -- deliberately no explicit height, `flex_grow`, or
+/// `overflow`, so it sizes to its natural content height instead of the panel's clipped viewport.
+/// See `SourceContentMarker`.
+fn content_wrapper_node() -> Node {
+    Node { flex_direction: FlexDirection::Column, flex_shrink: 0.0, ..default() }
+}
+
 /// Approximate row height for the source panel's text rows at `UI_FONT_SIZE`, used only to
 /// scroll the current line into view (and to scale wheel-scroll deltas) -- not pixel-exact,
 /// just close enough that auto-scroll and the wheel both track it.
@@ -866,13 +875,16 @@ struct AutoScrollState {
 #[derive(bevy::ecs::resource::Resource, Default)]
 struct ShowLocals(bool);
 
-/// Total (unclamped) height of the source panel's rows -- `line_count * SOURCE_ROW_HEIGHT_PX`,
-/// refreshed on the panel entity every frame alongside its own `ComputedNode`, so
-/// `on_source_scroll` can compute an upper scroll bound the same way `on_editor_scroll` does from
-/// `TextLayoutInfo` -- the rows aren't one `Text` entity (see `tokenize_line`), so there's no
-/// single layout size to read them back from.
+/// Marks the "source_content" wrapper -- the sole child of the source panel that actually holds
+/// the line rows (see where it's spawned in `ui_system`) -- so `on_source_scroll` can find it via
+/// the panel's own `Children` and read *its* `ComputedNode` for the real, laid-out content
+/// height. It has to be a separate, unclipped child: the panel itself (`source_panel_node`) has
+/// `Overflow::Scroll`, so the panel's own `ComputedNode` reports the clipped viewport size, not
+/// the full content -- same reason `on_editor_scroll` reads `TextLayoutInfo` instead of the
+/// scrolling node's own size. There's no one-entity equivalent of `TextLayoutInfo` here (the rows
+/// are many entities, not one `Text` -- see `tokenize_line`), so this wrapper stands in for it.
 #[derive(Component)]
-struct SourceContentHeight(f32);
+struct SourceContentMarker;
 
 /// Mouse wheel over the source panel: bevy_ui's `Overflow::Scroll` + `ScrollPosition` don't come
 /// wired to the wheel on their own (see `bevy_immediate`'s own scrollarea example, which hand-
@@ -885,12 +897,23 @@ struct SourceContentHeight(f32);
 /// wind back through however far past the end you'd gone before the visible content moved at
 /// all. `on_editor_scroll` (below) already clamped both ends; this didn't, which is why edit-mode
 /// scrolling felt smoother than read-only.
+///
+/// An earlier version of this fix computed the content height as `line_count *
+/// SOURCE_ROW_HEIGHT_PX` instead of reading `SourceContentMarker`'s real layout -- that constant
+/// is explicitly documented as an *approximation* (see its own doc comment), close enough for
+/// nudging the auto-scroll target or scaling wheel deltas, but it undershot the real per-row
+/// height enough that the computed max was noticeably short of the actual bottom of a long file
+/// (stuck around line 54 of 98 in practice) -- clamped, just wrongly.
 fn on_source_scroll(
     trigger: On<Pointer<Scroll>>,
-    mut positions: Query<(&mut ScrollPosition, &ComputedNode, &SourceContentHeight)>,
+    mut panels: Query<(&mut ScrollPosition, &ComputedNode, &Children)>,
+    content_nodes: Query<&ComputedNode, With<SourceContentMarker>>,
 ) {
     let event = trigger.event();
-    let Ok((mut pos, node, content)) = positions.get_mut(event.entity) else {
+    let Ok((mut pos, node, children)) = panels.get_mut(event.entity) else {
+        return;
+    };
+    let Some(content_node) = children.iter().find_map(|c| content_nodes.get(*c).ok()) else {
         return;
     };
     let delta = match event.unit {
@@ -898,7 +921,8 @@ fn on_source_scroll(
         MouseScrollUnit::Pixel => event.y,
     };
     let view_height = node.content_box().size().y;
-    pos.0.y = clamped_scroll_y(pos.0.y, delta, content.0, view_height);
+    let content_height = content_node.size().y;
+    pos.0.y = clamped_scroll_y(pos.0.y, delta, content_height, view_height);
 }
 
 /// The actual clamp math `on_source_scroll` applies, pulled out so it's checkable without a real
@@ -1256,13 +1280,11 @@ fn ui_system(
                     // `source_panel_node`), and auto-scrolls to keep the current line in view.
                     let lines = all_lines(&session.display_source, current_offset);
                     let current_row = lines.iter().position(|&(_, _, is_current)| is_current);
-                    let content_height = lines.len() as f32 * SOURCE_ROW_HEIGHT_PX;
 
                     let mut source_panel = ui
                         .ch_id("source")
                         .on_spawn_insert(source_panel_node)
-                        .on_spawn_observe(on_source_scroll)
-                        .on_change_insert(true, move || SourceContentHeight(content_height));
+                        .on_spawn_observe(on_source_scroll);
                     // only re-apply the auto-scroll when the highlighted line actually moved --
                     // not every frame, or it would fight a manual scroll to a different line.
                     let prev_row = auto_scroll.last_row;
@@ -1337,46 +1359,64 @@ fn ui_system(
                                 .on_spawn_insert(|| dim_text_style(font.clone()))
                                 .text("(no source loaded)");
                         } else {
-                            for (idx, (line_no, line_text, is_current)) in
-                                lines.into_iter().enumerate()
-                            {
-                                // see the `line_dirty`/`generation_changed` comment above: only
-                                // the (at most two) lines whose highlight actually flipped need
-                                // their bundles reinserted most frames, and every line does on a
-                                // generation change.
-                                let line_dirty = generation_changed
-                                    || (highlight_changed
-                                        && (Some(idx) == current_row || Some(idx) == prev_row));
-                                ui.ch_id(line_no)
-                                    .on_change_insert(line_dirty, move || line_row_bundle(is_current))
-                                    .add(|ui| {
-                                        ui.ch_id("prefix")
-                                            .on_change_insert(line_dirty, {
-                                                let font = font.clone();
-                                                move || line_span_style(is_current, font)
+                            // wrapped in its own naturally-sized child (not spread as direct
+                            // children of "source" itself) so `on_source_scroll` has something
+                            // whose `ComputedNode` reports the *real* total content height,
+                            // unclipped by the panel's own `Overflow::Scroll` -- see
+                            // `SourceContentMarker`.
+                            ui.ch_id("source_content")
+                                .on_spawn_insert(content_wrapper_node)
+                                .on_spawn_insert(|| SourceContentMarker)
+                                .add(|ui| {
+                                    for (idx, (line_no, line_text, is_current)) in
+                                        lines.into_iter().enumerate()
+                                    {
+                                        // see the `line_dirty`/`generation_changed` comment
+                                        // above: only the (at most two) lines whose highlight
+                                        // actually flipped need their bundles reinserted most
+                                        // frames, and every line does on a generation change.
+                                        let line_dirty = generation_changed
+                                            || (highlight_changed
+                                                && (Some(idx) == current_row
+                                                    || Some(idx) == prev_row));
+                                        ui.ch_id(line_no)
+                                            .on_change_insert(line_dirty, move || {
+                                                line_row_bundle(is_current)
                                             })
-                                            .text(format!("{line_no:>4} | "));
-                                        for (tok_idx, (text, is_ident)) in
-                                            tokenize_line(&line_text).into_iter().enumerate()
-                                        {
-                                            let mut span = ui.ch_id(("tok", tok_idx)).on_change_insert(
-                                                line_dirty,
+                                            .add(|ui| {
+                                                ui.ch_id("prefix")
+                                                    .on_change_insert(line_dirty, {
+                                                        let font = font.clone();
+                                                        move || line_span_style(is_current, font)
+                                                    })
+                                                    .text(format!("{line_no:>4} | "));
+                                                for (tok_idx, (text, is_ident)) in
+                                                    tokenize_line(&line_text).into_iter().enumerate()
                                                 {
-                                                    let font = font.clone();
-                                                    move || line_span_style(is_current, font)
-                                                },
-                                            );
-                                            if is_ident {
-                                                let ident = text.clone();
-                                                span = span
-                                                    .on_change_insert(line_dirty, move || HoverIdent(ident))
-                                                    .on_spawn_observe(on_ident_over)
-                                                    .on_spawn_observe(on_ident_out);
-                                            }
-                                            span.text(text);
-                                        }
-                                    });
-                            }
+                                                    let mut span =
+                                                        ui.ch_id(("tok", tok_idx)).on_change_insert(
+                                                            line_dirty,
+                                                            {
+                                                                let font = font.clone();
+                                                                move || {
+                                                                    line_span_style(is_current, font)
+                                                                }
+                                                            },
+                                                        );
+                                                    if is_ident {
+                                                        let ident = text.clone();
+                                                        span = span
+                                                            .on_change_insert(line_dirty, move || {
+                                                                HoverIdent(ident)
+                                                            })
+                                                            .on_spawn_observe(on_ident_over)
+                                                            .on_spawn_observe(on_ident_out);
+                                                    }
+                                                    span.text(text);
+                                                }
+                                            });
+                                    }
+                                });
                         }
                     });
 
