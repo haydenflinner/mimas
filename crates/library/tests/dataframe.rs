@@ -2,13 +2,10 @@
 //! See `crates/library/src/std_lib/dataframe.rs`.
 //!
 //! `DataFrame`/`PlExpr` are real `Val` variants, not `#[mimas] struct`s, so the harness's
-//! `Captured` inspection (used by `test_runner::render`) can't see inside them -- it reports them
-//! as `Captured::Other` by design (see the comment on that variant). Every case here goes through
-//! an f-string (`f"{df}"`) instead, which routes through the VM's own `Display` (the same path
-//! `print` uses) and hands the harness a plain `Captured::Str` to compare. A quote *inside* an
-//! f-string interpolation doesn't need escaping -- `Parser::construct_fstring` tracks `{...}`
-//! depth precisely so a nested string (`f"{col("age")}"`) opens its own string instead of closing
-//! the f-string early.
+//! `Captured` inspection (used by `test_run!`/`render`) can't see inside them -- it reports them
+//! as `Captured::Other` by design. `test_run_display!`/`render_display` sidesteps that by reading
+//! the value back through its real `Display` (the same path `print` uses) instead, which also
+//! means the expected side here is the plain, unescaped table text.
 
 #[macro_use]
 mod test_runner;
@@ -23,36 +20,80 @@ const EMPLOYEES: &str = "use std::polars::*;
      ];
      let df = to_dataframe(rows)!;";
 
-test_run!(
+test_run_display!(
     to_dataframe_builds_columns_named_after_struct_fields,
     EMPLOYEES,
-    r#"f"{df}""# => "\"shape: (4, 3)\\n┌───────┬─────┬───────┐\\n│ name  ┆ age ┆ dept  │\\n│ ---   ┆ --- ┆ ---   │\\n│ str   ┆ i64 ┆ str   │\\n╞═══════╪═════╪═══════╡\\n│ Alice ┆ 34  ┆ eng   │\\n│ Bob   ┆ 29  ┆ sales │\\n│ Carol ┆ 41  ┆ eng   │\\n│ Dave  ┆ 25  ┆ sales │\\n└───────┴─────┴───────┘\"",
+    "df" => r#"shape: (4, 3)
+┌───────┬─────┬───────┐
+│ name  ┆ age ┆ dept  │
+│ ---   ┆ --- ┆ ---   │
+│ str   ┆ i64 ┆ str   │
+╞═══════╪═════╪═══════╡
+│ Alice ┆ 34  ┆ eng   │
+│ Bob   ┆ 29  ┆ sales │
+│ Carol ┆ 41  ┆ eng   │
+│ Dave  ┆ 25  ┆ sales │
+└───────┴─────┴───────┘"#,
 );
 
-test_run!(
+test_run_display!(
     filter_builds_a_real_expr_tree_via_gt,
     EMPLOYEES,
-    r#"f"{df.filter(col("age") > 30)!}""# => "\"shape: (2, 3)\\n┌───────┬─────┬──────┐\\n│ name  ┆ age ┆ dept │\\n│ ---   ┆ --- ┆ ---  │\\n│ str   ┆ i64 ┆ str  │\\n╞═══════╪═════╪══════╡\\n│ Alice ┆ 34  ┆ eng  │\\n│ Carol ┆ 41  ┆ eng  │\\n└───────┴─────┴──────┘\"",
+    r#"df.filter(col("age") > 30)!"# => r#"shape: (2, 3)
+┌───────┬─────┬──────┐
+│ name  ┆ age ┆ dept │
+│ ---   ┆ --- ┆ ---  │
+│ str   ┆ i64 ┆ str  │
+╞═══════╪═════╪══════╡
+│ Alice ┆ 34  ┆ eng  │
+│ Carol ┆ 41  ┆ eng  │
+└───────┴─────┴──────┘"#,
 );
 
-test_run!(
+test_run_display!(
     filter_combines_predicates_with_single_ampersand,
     // `&`, not `&&` -- mimas's `&&`/`||` short-circuit and hard-require `Bool` on both sides
     // (see `Logical::solve`), so they never reach `bin()`'s `PlExpr` overload at all.
     EMPLOYEES,
-    r#"f"{df.filter((col("age") > 25) & (col("dept") == "eng"))!}""# => "\"shape: (2, 3)\\n┌───────┬─────┬──────┐\\n│ name  ┆ age ┆ dept │\\n│ ---   ┆ --- ┆ ---  │\\n│ str   ┆ i64 ┆ str  │\\n╞═══════╪═════╪══════╡\\n│ Alice ┆ 34  ┆ eng  │\\n│ Carol ┆ 41  ┆ eng  │\\n└───────┴─────┴──────┘\"",
+    r#"df.filter((col("age") > 25) & (col("dept") == "eng"))!"# => r#"shape: (2, 3)
+┌───────┬─────┬──────┐
+│ name  ┆ age ┆ dept │
+│ ---   ┆ --- ┆ ---  │
+│ str   ┆ i64 ┆ str  │
+╞═══════╪═════╪══════╡
+│ Alice ┆ 34  ┆ eng  │
+│ Carol ┆ 41  ┆ eng  │
+└───────┴─────┴──────┘"#,
 );
 
-test_run!(
+test_run_display!(
     select_narrows_to_the_chosen_columns,
     EMPLOYEES,
-    r#"f"{df.filter(col("age") > 30)!.select([col("name"), col("age")])!}""# => "\"shape: (2, 2)\\n┌───────┬─────┐\\n│ name  ┆ age │\\n│ ---   ┆ --- │\\n│ str   ┆ i64 │\\n╞═══════╪═════╡\\n│ Alice ┆ 34  │\\n│ Carol ┆ 41  │\\n└───────┴─────┘\"",
+    r#"df.filter(col("age") > 30)!.select([col("name"), col("age")])!"# => r#"shape: (2, 2)
+┌───────┬─────┐
+│ name  ┆ age │
+│ ---   ┆ --- │
+│ str   ┆ i64 │
+╞═══════╪═════╡
+│ Alice ┆ 34  │
+│ Carol ┆ 41  │
+└───────┴─────┘"#,
 );
 
-test_run!(
+test_run_display!(
     sort_orders_ascending_by_column_name,
     EMPLOYEES,
-    r#"f"{df.sort(["age"])!}""# => "\"shape: (4, 3)\\n┌───────┬─────┬───────┐\\n│ name  ┆ age ┆ dept  │\\n│ ---   ┆ --- ┆ ---   │\\n│ str   ┆ i64 ┆ str   │\\n╞═══════╪═════╪═══════╡\\n│ Dave  ┆ 25  ┆ sales │\\n│ Bob   ┆ 29  ┆ sales │\\n│ Alice ┆ 34  ┆ eng   │\\n│ Carol ┆ 41  ┆ eng   │\\n└───────┴─────┴───────┘\"",
+    r#"df.sort(["age"])!"# => r#"shape: (4, 3)
+┌───────┬─────┬───────┐
+│ name  ┆ age ┆ dept  │
+│ ---   ┆ --- ┆ ---   │
+│ str   ┆ i64 ┆ str   │
+╞═══════╪═════╪═══════╡
+│ Dave  ┆ 25  ┆ sales │
+│ Bob   ┆ 29  ┆ sales │
+│ Alice ┆ 34  ┆ eng   │
+│ Carol ┆ 41  ┆ eng   │
+└───────┴─────┴───────┘"#,
 );
 
 // no rows -> nothing to infer a schema from

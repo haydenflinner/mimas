@@ -1437,6 +1437,26 @@ impl Vm {
         })
     }
 
+    /// Like [`Vm::resolve_name`], but renders the value through its real `Display` (the same
+    /// path `print` uses) instead of taking a [`Captured`] snapshot. `Captured` is a lossy,
+    /// escaped inspection format (e.g. `Captured::Other` for anything it can't see into, like
+    /// closures or a native `Val` variant that doesn't decompose into fields, and
+    /// `Captured::Str`'s `Display` debug-escapes newlines/quotes) -- this gives the value's
+    /// natural rendering instead, for callers (tests, mainly) that want to compare against what
+    /// a person would actually see.
+    pub fn resolve_name_to_string(&mut self, lexeme: &str) -> Option<RtResult<String>> {
+        let chunks = &self.chunks;
+        self.arena.mutate(|mc, state| {
+            let val = {
+                let t = state.thread.borrow();
+                let frame = t.frames.first()?;
+                let reg = *chunks[frame.chunk].locals.get(lexeme)?;
+                t.regs.get(frame.base + reg.index()).copied()?
+            };
+            Some(state.ctx(mc).to_string(val))
+        })
+    }
+
     /// Calls a function by name. Must be within the root of the program. Must require 0 arguments.
     pub fn call_fn(&mut self, name: &str) -> Option<Captured> {
         let body_id = self.items.get(name).copied()?;
