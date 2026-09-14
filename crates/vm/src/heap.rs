@@ -73,6 +73,12 @@ pub struct State<'gc> {
     /// rendering instances as `Name { .. }` instead of `@id { .. }`. Filled in by
     /// `Vm::load_program`.
     pub struct_names: Gc<'gc, RefLock<Vec<String>>>,
+    /// Declared field names per struct, indexed by `struct_id` like `struct_names` -- a duplicate
+    /// of `Vm::field_names` (which natives can't reach; they only ever see a `Ctx`, never the
+    /// outer `Vm`), kept in the arena so a native fn can do name-aware reflection over an
+    /// `Instance` (e.g. `to_dataframe`, converting an array of structs into DataFrame columns
+    /// named after their declared fields). Filled in by `Vm::load_program`.
+    pub field_names: Gc<'gc, RefLock<Vec<Vec<String>>>>,
 }
 
 impl<'gc> State<'gc> {
@@ -88,6 +94,7 @@ impl<'gc> State<'gc> {
         let mimas_bindings = Gc::new(mc, RefLock::new(MimasBindings::default()));
         let fixtures = Gc::new(mc, crate::fixtures::Fixtures::default());
         let struct_names = Gc::new(mc, RefLock::new(Vec::new()));
+        let field_names = Gc::new(mc, RefLock::new(Vec::new()));
         State {
             strings: InternedStrings::new(mc),
             thread,
@@ -95,6 +102,7 @@ impl<'gc> State<'gc> {
             mimas_bindings,
             fixtures,
             struct_names,
+            field_names,
         }
     }
 
@@ -159,6 +167,14 @@ impl<'gc> Ctx<'gc> {
 
     pub fn new_closure(self, function: BodyId, captures: Vec<Val<'gc>>) -> Closure<'gc> {
         Closure(Gc::new(self.mutation, ClosureData { function, captures }))
+    }
+
+    pub fn new_dataframe(self, df: polars::frame::DataFrame) -> crate::val::DataFrame<'gc> {
+        crate::val::DataFrame(Gc::new(self.mutation, RefLock::new(gc_arena::Static(df))))
+    }
+
+    pub fn new_plexpr(self, expr: polars::prelude::Expr) -> crate::val::PlExpr<'gc> {
+        crate::val::PlExpr(Gc::new(self.mutation, gc_arena::Static(expr)))
     }
 
     // fresh allocation per container so the result shares no mutable state with `value`. scalars,
@@ -289,6 +305,14 @@ impl<'gc> Ctx<'gc> {
                     self.render_into(out, v, true, depth + 1)?;
                 }
                 out.push_str(" }");
+            }
+            Val::DataFrame(d) => {
+                // polars' own Display (the "fmt" feature) -- a real formatted table, not just a
+                // shape summary.
+                let _ = write!(out, "{}", d.0.borrow().0);
+            }
+            Val::PlExpr(e) => {
+                let _ = write!(out, "{}", e.0.0);
             }
         }
         Ok(())

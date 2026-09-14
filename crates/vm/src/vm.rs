@@ -159,7 +159,8 @@ impl Vm {
         self.chunk_names = items.iter().map(|(name, &body)| (body, name.clone())).collect();
         self.items = items;
         self.methods = methods.into_values().collect();
-        self.field_names = field_names.into_values().collect();
+        let field_names: Vec<Vec<String>> = field_names.into_values().collect();
+        self.field_names = field_names.clone();
         let entry_chunk = &self.chunks[self.entry];
         let regs_count = entry_chunk.regs as usize;
         let entry_offset = entry_chunk.offset;
@@ -176,6 +177,7 @@ impl Vm {
                 base: 0,
             });
             *state.struct_names.borrow_mut(mc) = struct_names.into_values().collect();
+            *state.field_names.borrow_mut(mc) = field_names;
         });
     }
 

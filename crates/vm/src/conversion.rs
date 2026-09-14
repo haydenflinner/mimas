@@ -203,6 +203,72 @@ impl<'gc> MimasType<'gc> for Dict<'gc> {
     }
 }
 
+// ----- DataFrame / PlExpr -----------------------------------------------------------------------
+//
+// Unlike a `#[mimas] struct`, these are real `Val` variants (see `val::DataFrame`/`val::PlExpr`),
+// not `Val::Instance`s decomposed field-by-field -- there's no way to fit an opaque, `Arc`-backed
+// `polars::frame::DataFrame` through `Val`'s closed set of field types otherwise. But the type
+// checker still wants a `Ty::Adt(AdtId)` to hang parameter/return types off of, so these two
+// lifetime-free marker types exist purely to be `add_adt`'d (by `library::std_lib::dataframe`) and
+// hand out an `AdtId` -- they carry no data of their own and are never constructed.
+pub struct DataFrameTy;
+impl crate::adt::MimasAdt for DataFrameTy {
+    fn descriptor(_reg: &Registry) -> crate::adt::ApiAdtDescriptor {
+        crate::adt::ApiAdtDescriptor {
+            name: "DataFrame",
+            module: &["std", "polars"],
+            kind: api::ApiAdtKind::Struct,
+            doc: "A polars DataFrame -- a column-oriented, `Arc`-backed table.",
+            variants: vec![crate::adt::ApiVariantShape {
+                name: "DataFrame".into(),
+                doc: "",
+                fields: api::ApiVariantFields::Unit,
+            }],
+        }
+    }
+}
+
+pub struct PlExprTy;
+impl crate::adt::MimasAdt for PlExprTy {
+    fn descriptor(_reg: &Registry) -> crate::adt::ApiAdtDescriptor {
+        crate::adt::ApiAdtDescriptor {
+            name: "PlExpr",
+            module: &["std", "polars"],
+            kind: api::ApiAdtKind::Struct,
+            doc: "A polars expression tree, e.g. `col(\"age\") > 30`.",
+            variants: vec![crate::adt::ApiVariantShape {
+                name: "PlExpr".into(),
+                doc: "",
+                fields: api::ApiVariantFields::Unit,
+            }],
+        }
+    }
+}
+
+impl<'gc> MimasType<'gc> for crate::val::DataFrame<'gc> {
+    fn mimas_ty(reg: &Registry) -> Option<Ty> {
+        Some(Ty::Adt(reg.get::<DataFrameTy>()?.adt_id))
+    }
+    fn from_value(_ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError> {
+        v.as_dataframe().ok_or_else(|| ty_error("DataFrame", v))
+    }
+    fn into_value(self, _ctx: Ctx<'gc>) -> Val<'gc> {
+        Val::DataFrame(self)
+    }
+}
+
+impl<'gc> MimasType<'gc> for crate::val::PlExpr<'gc> {
+    fn mimas_ty(reg: &Registry) -> Option<Ty> {
+        Some(Ty::Adt(reg.get::<PlExprTy>()?.adt_id))
+    }
+    fn from_value(_ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError> {
+        v.as_plexpr().ok_or_else(|| ty_error("PlExpr", v))
+    }
+    fn into_value(self, _ctx: Ctx<'gc>) -> Val<'gc> {
+        Val::PlExpr(self)
+    }
+}
+
 impl<'gc> MimasType<'gc> for Instance<'gc> {
     fn mimas_ty(_: &Registry) -> Option<Ty> {
         None

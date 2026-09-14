@@ -1,7 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use compile::{BinFault, BinOp, Scalar, UnaryOp};
-use gc_arena::{Collect, Gc, RefLock};
+use gc_arena::{Collect, Gc, RefLock, Static};
 use shared::BodyId;
 use smallvec::SmallVec;
 
@@ -24,6 +24,12 @@ pub enum Val<'gc> {
     Instance(Instance<'gc>),
     Closure(Closure<'gc>),
     Raised(Str<'gc>),
+    DataFrame(DataFrame<'gc>),
+    /// A `polars::prelude::Expr` under construction -- `col("x")`, `col("x") > 5`, and so on all
+    /// build one of these instead of evaluating anything. Immutable once built (every polars
+    /// `Expr` combinator consumes and returns a new node), so unlike `DataFrame` this doesn't
+    /// need a `RefLock` -- same reasoning as `Str`.
+    PlExpr(PlExpr<'gc>),
 }
 
 impl<'gc> PartialEq for Val<'gc> {
@@ -47,6 +53,10 @@ impl<'gc> PartialEq for Val<'gc> {
             }
             (Val::Closure(a), Val::Closure(b)) => Gc::ptr_eq(a.0, b.0),
             (Val::Raised(a), Val::Raised(b)) => a == b,
+            // no cheap/sensible structural equality for a polars DataFrame or an in-progress
+            // Expr tree -- same handle only, like Closure.
+            (Val::DataFrame(a), Val::DataFrame(b)) => Gc::ptr_eq(a.0, b.0),
+            (Val::PlExpr(a), Val::PlExpr(b)) => Gc::ptr_eq(a.0, b.0),
             _ => false,
         }
     }
@@ -133,6 +143,24 @@ impl<'gc> Val<'gc> {
     pub fn as_raised(self) -> Option<Str<'gc>> {
         if let Val::Raised(s) = self {
             Some(s)
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    pub fn as_dataframe(self) -> Option<DataFrame<'gc>> {
+        if let Val::DataFrame(d) = self {
+            Some(d)
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    pub fn as_plexpr(self) -> Option<PlExpr<'gc>> {
+        if let Val::PlExpr(e) = self {
+            Some(e)
         } else {
             None
         }
@@ -350,6 +378,21 @@ pub struct ClosureData<'gc> {
     pub captures: Vec<Val<'gc>>,
 }
 
+/// A `polars::frame::DataFrame`, heap-allocated like `Array`/`Dict`/`Instance` -- `RefLock` for
+/// the same reason those have it (aliasing, mutation-through-reference). `Static` is
+/// gc-arena's zero-cost "trust me, no `Gc` pointers inside" wrapper (`NEEDS_TRACE = false`):
+/// a `polars::frame::DataFrame` is an ordinary `'static` Rust value (its own internal sharing is
+/// `Arc`-based, nothing gc-arena needs to trace), so this is exactly what it's for.
+#[derive(Copy, Clone, Collect, Debug)]
+#[collect(no_drop)]
+pub struct DataFrame<'gc>(pub Gc<'gc, RefLock<Static<polars::frame::DataFrame>>>);
+
+/// A `polars::prelude::Expr` under construction. No `RefLock`: `Expr` combinators are purely
+/// functional (each one consumes and returns a new node), so nothing ever mutates one in place.
+#[derive(Copy, Clone, Collect, Debug)]
+#[collect(no_drop)]
+pub struct PlExpr<'gc>(pub Gc<'gc, Static<polars::prelude::Expr>>);
+
 impl<'gc> Str<'gc> {
     pub fn as_str(self) -> &'gc str {
         Gc::as_ref(self.0).as_ref()
@@ -502,7 +545,7 @@ impl<'gc> Val<'gc> {
             }),
             Val::Fn(body_id) => Captured::Fn(body_id),
             Val::Raised(s) => Captured::Raised(s.as_str().to_string()),
-            Val::Closure(_) => Captured::Other,
+            Val::Closure(_) | Val::DataFrame(_) | Val::PlExpr(_) => Captured::Other,
         }
     }
 }
@@ -614,7 +657,7 @@ impl<'gc> Val<'gc> {
             }),
             Val::Fn(body_id) => Inspect::Fn(body_id),
             Val::Raised(s) => Inspect::Raised(s.as_str().to_string()),
-            Val::Closure(_) => Inspect::Other,
+            Val::Closure(_) | Val::DataFrame(_) | Val::PlExpr(_) => Inspect::Other,
         }
     }
 }
@@ -659,6 +702,52 @@ pub fn bin<'gc>(this: Val<'gc>, ctx: Ctx<'gc>, other: Val<'gc>, op: BinOp) -> Rt
                 BinFault::InvalidShift => RtErr::InvalidShift,
                 BinFault::Type => RtErr::invalid_bin(Val::Int(a), op, Val::Int(b)),
             })
+    }
+
+    // `col("age") > 30 & col("city") == "SF"` -- builds a real `polars::prelude::Expr` tree
+    // instead of evaluating anything, so any op where *either* side is already a `PlExpr` takes
+    // over here first (ahead of the generic `NotEqual`/`Identity` catch-alls below, which would
+    // otherwise compare `Val`s by `PartialEq` -- i.e. by-handle, not "build a polars `.neq()`").
+    // A scalar on the other side is auto-promoted via `lit(..)`, matching how you'd write the
+    // same comparison directly against polars' own Rust API. Note this is single `&`/`|`
+    // (EvaluationOp::And/Or), not `&&`/`||` -- mimas's `&&`/`||` hard-require `Bool` on both
+    // sides and short-circuit at codegen (see `Logical::solve`), so they never reach `bin()` at
+    // all; `&`/`|` don't short-circuit and already double as mimas's boolean and/or, so they're
+    // the only combinator PlExpr composition can actually reach.
+    fn to_pl_expr(v: Val<'_>) -> Option<polars::prelude::Expr> {
+        use polars::prelude::lit;
+        Some(match v {
+            Val::PlExpr(e) => e.0.0.clone(),
+            Val::Int(i) => lit(i),
+            Val::Float(f) => lit(f),
+            Val::Bool(b) => lit(b),
+            Val::Str(s) => lit(s.as_str()),
+            _ => return None,
+        })
+    }
+    if matches!(this, Val::PlExpr(_)) || matches!(other, Val::PlExpr(_)) {
+        let (Some(a), Some(b)) = (to_pl_expr(this), to_pl_expr(other)) else {
+            Err(RtErr::invalid_bin(this, op, other))?
+        };
+        let expr = match op {
+            BinOp::Add => a + b,
+            BinOp::Sub => a - b,
+            BinOp::Mult => a * b,
+            BinOp::Div => a / b,
+            BinOp::GreaterThan => a.gt(b),
+            BinOp::GreaterEqual => a.gt_eq(b),
+            BinOp::LessThan => a.lt(b),
+            BinOp::LessEqual => a.lt_eq(b),
+            BinOp::Identity => a.eq(b),
+            BinOp::NotEqual => a.neq(b),
+            // single `&`/`|` (`EvaluationOp::And`/`Or`) lower to `BinOp::BitAnd`/`BitOr`, not
+            // `BinOp::And`/`Or` -- those are `&&`/`||`'s (`LogicalOp`), which short-circuit at
+            // codegen and never reach `bin()` at all (see the note on `to_pl_expr` above).
+            BinOp::BitAnd => a.and(b),
+            BinOp::BitOr => a.or(b),
+            _ => Err(RtErr::invalid_bin(this, op, other))?,
+        };
+        return Ok(Val::PlExpr(ctx.new_plexpr(expr)));
     }
 
     Ok(match (op, this, other) {

@@ -29,6 +29,19 @@ thiserror.workspace = true
 smallvec = "1.15.1"
 rustc-hash = "2"
 itoa = "1.0.18"
+# the local clone at ~/code/dsa/polars, not crates.io -- `lazy` pulls in polars-plan's `Expr`
+# builder (needed for the `df.filter(col("x") > 5)` query surface), `fmt` gives DataFrame a real
+# Display impl (used by `print`/f-strings), the rest is polars' own "default" feature set. NOT
+# enabling `streaming`: this local clone's `polars-io` cloud module doesn't build against its
+# pinned `object_store` version, and we don't need it anyway -- every query we ever build here is
+# a small in-memory transform, so `library::std_lib::dataframe` always calls
+# `collect_with_engine(Engine::InMemory)` explicitly instead of plain `collect()` (whose
+# `Engine::Auto` would otherwise pick the streaming engine and panic without the feature).
+polars = { path = "/Users/wow/code/dsa/polars/crates/polars", default-features = false, features = [
+    "lazy",
+    "fmt",
+    "dtype-full",
+] }
 
 [features]
 op-count = []
