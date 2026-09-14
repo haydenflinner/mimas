@@ -40,10 +40,12 @@ use mimas::vm::{Captured, Inspect, Vm};
 
 mod autoshot;
 mod dataflow_view;
+mod scene_view;
 mod theme;
 mod typst_preview;
 
 pub(crate) use dataflow_view::DataflowView;
+pub(crate) use scene_view::SceneView;
 use typst_preview::TypstPreview;
 
 /// Built-in `typst` module, compiled alongside every script as a second file (not a prefix of
@@ -64,6 +66,122 @@ pub fn typst_box(x: float, name: str, val: int) -> str {
 
 pub fn typst_arrow(from: str, to: str, color: str) -> str {
     f"line(\"{from}\",\"{to}\",stroke:rgb(\"{color}\"),mark:(end:\"stealth\",fill:rgb(\"{color}\")));"
+}
+"#;
+
+/// Built-in `img` module -- Pyret's `image` drawing primitives (https://pyret.org/docs/horizon/
+/// image.html), ported as real mimas data rather than a rendering call: `Image` is a plain enum
+/// tree (shapes + combinators), so a script builds a *description* of a scene, not a picture.
+/// `draw()` (the `Draw` pact) is `scene_view`'s entry point -- see that module for the native
+/// bevy_ui renderer that interprets the tree, the point being that interaction (hover, click,
+/// eventually in-mimas callbacks) is reachable from here in a way a Typst-rendered PNG never
+/// could be.
+///
+/// Deliberate departure from Pyret: shape constructors take a `Color` value (`named("red")`,
+/// `rgb(r,g,b)`), not a bare string -- Pyret's `ImageColor` is string-or-color-struct, which
+/// isn't expressible as one static type in mimas without a real union type.
+const IMG_MODULE_SOURCE: &str = r#"module img;
+
+pub enum Color {
+    Named(str),
+    Rgb(int, int, int),
+    Rgba(int, int, int, int),
+}
+
+pub enum Mode {
+    Solid,
+    Outline,
+}
+
+pub enum Image {
+    Circle { radius: float, mode: Mode, color: Color },
+    Ellipse { width: float, height: float, mode: Mode, color: Color },
+    Rectangle { width: float, height: float, mode: Mode, color: Color },
+    Triangle { side: float, mode: Mode, color: Color },
+    Text { value: str, size: float, color: Color },
+    Line { x: float, y: float, color: Color },
+    Overlay { top: Image, bottom: Image },
+    OverlayXy { top: Image, dx: float, dy: float, bottom: Image },
+    Beside { left: Image, right: Image },
+    Above { top: Image, bottom: Image },
+    EmptyScene { width: float, height: float },
+    PlaceImage { pic: Image, x: float, y: float, background: Image },
+}
+
+pub pact Draw {
+    fn draw(self) -> Image;
+}
+
+fn mode_of(s: str) -> Mode {
+    if s == "outline" {
+        Mode::Outline
+    } else {
+        Mode::Solid
+    }
+}
+
+pub fn named(name: str) -> Color {
+    Color::Named(name)
+}
+
+pub fn rgb(r: int, g: int, b: int) -> Color {
+    Color::Rgb(r, g, b)
+}
+
+pub fn rgba(r: int, g: int, b: int, a: int) -> Color {
+    Color::Rgba(r, g, b, a)
+}
+
+pub fn circle(radius: float, mode: str, color: Color) -> Image {
+    Image::Circle { radius = radius, mode = mode_of(mode), color = color }
+}
+
+pub fn ellipse(width: float, height: float, mode: str, color: Color) -> Image {
+    Image::Ellipse { width = width, height = height, mode = mode_of(mode), color = color }
+}
+
+pub fn rectangle(width: float, height: float, mode: str, color: Color) -> Image {
+    Image::Rectangle { width = width, height = height, mode = mode_of(mode), color = color }
+}
+
+pub fn square(side: float, mode: str, color: Color) -> Image {
+    rectangle(side, side, mode, color)
+}
+
+pub fn triangle(side: float, mode: str, color: Color) -> Image {
+    Image::Triangle { side = side, mode = mode_of(mode), color = color }
+}
+
+pub fn text(value: str, size: float, color: Color) -> Image {
+    Image::Text { value = value, size = size, color = color }
+}
+
+pub fn line(x: float, y: float, color: Color) -> Image {
+    Image::Line { x = x, y = y, color = color }
+}
+
+pub fn overlay(top: Image, bottom: Image) -> Image {
+    Image::Overlay { top = top, bottom = bottom }
+}
+
+pub fn overlay_xy(top: Image, dx: float, dy: float, bottom: Image) -> Image {
+    Image::OverlayXy { top = top, dx = dx, dy = dy, bottom = bottom }
+}
+
+pub fn beside(left: Image, right: Image) -> Image {
+    Image::Beside { left = left, right = right }
+}
+
+pub fn above(top: Image, bottom: Image) -> Image {
+    Image::Above { top = top, bottom = bottom }
+}
+
+pub fn empty_scene(width: float, height: float) -> Image {
+    Image::EmptyScene { width = width, height = height }
+}
+
+pub fn place_image(pic: Image, x: float, y: float, background: Image) -> Image {
+    Image::PlaceImage { pic = pic, x = x, y = y, background = background }
 }
 "#;
 
@@ -113,8 +231,12 @@ impl Session {
         show_internals: bool,
         generation: u64,
     ) -> Result<Self, String> {
-        let vm = mimas::compile_files(&[("main", &display_source), ("typst", TYPST_MODULE_SOURCE)])
-            .map_err(|e| e.to_string())?;
+        let vm = mimas::compile_files(&[
+            ("main", &display_source),
+            ("typst", TYPST_MODULE_SOURCE),
+            ("img", IMG_MODULE_SOURCE),
+        ])
+        .map_err(|e| e.to_string())?;
         Ok(Session {
             vm,
             path,
@@ -309,6 +431,7 @@ fn main() {
         .init_resource::<Editor>()
         .init_resource::<ManualEditorScroll>()
         .init_resource::<DataflowView>()
+        .init_resource::<SceneView>()
         .add_systems(Startup, (setup_camera, setup_font))
         .add_systems(PreUpdate, keyboard_system)
         .add_systems(Update, ui_system)
@@ -736,6 +859,7 @@ fn ui_system(
     mut current_preview: ResMut<CurrentPreview>,
     mut editor: ResMut<Editor>,
     mut dataflow_view: ResMut<DataflowView>,
+    mut scene_view: ResMut<SceneView>,
     app_font: Res<AppFont>,
     asset_server: Res<AssetServer>,
 ) {
@@ -804,6 +928,23 @@ fn ui_system(
                     });
                 if dataflow_btn.clicked() {
                     dataflow_view.active = !dataflow_view.active;
+                    if dataflow_view.active {
+                        scene_view.active = false;
+                    }
+                }
+
+                let mut scene_btn = ui
+                    .ch_id("scene_toggle")
+                    .on_spawn_insert(button_node)
+                    .add(|ui| {
+                        let label = if scene_view.active { "Debugger" } else { "Scene" };
+                        ui.ch().on_spawn_insert(|| text_style(font.clone())).text(label);
+                    });
+                if scene_btn.clicked() {
+                    scene_view.active = !scene_view.active;
+                    if scene_view.active {
+                        dataflow_view.active = false;
+                    }
                 }
 
                 if editor.editing {
@@ -940,6 +1081,23 @@ fn ui_system(
                 }
                 if let Some(graph) = dataflow_view.graph() {
                     dataflow_view::render(ui, font.clone(), graph);
+                }
+                return;
+            }
+
+            if scene_view.active {
+                // unlike the dataflow view (a static property of a function), a scene is meant
+                // to change as the program runs, so it refreshes on every step (`steps`), not
+                // just when the whole program is replaced (`generation`).
+                let (generation, steps) = (session.generation, session.steps);
+                scene_view.refresh(&mut session.vm, generation, steps);
+                if let Some(err) = scene_view.error.clone() {
+                    ui.ch_id("scene_error")
+                        .on_spawn_insert(|| error_text_style(font.clone()))
+                        .text(err);
+                }
+                if let Some(shape) = scene_view.shape() {
+                    scene_view::render(ui, font.clone(), shape);
                 }
                 return;
             }

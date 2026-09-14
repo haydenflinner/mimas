@@ -55,9 +55,9 @@ impl Default for DataflowView {
 }
 
 impl DataflowView {
-    /// Re-extracts `function_name`'s graph from `(display_source, TYPST_MODULE_SOURCE)` if the
-    /// name or `generation` has changed since the last call; otherwise a no-op. Call once per
-    /// frame before `render`, not inside it -- keeps the (potentially fallible, always
+    /// Re-extracts `function_name`'s graph from `display_source` plus the built-in modules if
+    /// the name or `generation` has changed since the last call; otherwise a no-op. Call once
+    /// per frame before `render`, not inside it -- keeps the (potentially fallible, always
     /// `&mut`-needing) refresh separate from the (infallible, `&self`-only) drawing.
     pub(crate) fn refresh(&mut self, display_source: &str, generation: u64) {
         let key = (self.function_name.clone(), generation);
@@ -66,7 +66,11 @@ impl DataflowView {
         }
         self.cache_key = Some(key);
         match mimas::vm::Vm::function_dataflow(
-            &[("main", display_source), ("typst", crate::TYPST_MODULE_SOURCE)],
+            &[
+                ("main", display_source),
+                ("typst", crate::TYPST_MODULE_SOURCE),
+                ("img", crate::IMG_MODULE_SOURCE),
+            ],
             mimas::library::std,
             &self.function_name,
         ) {

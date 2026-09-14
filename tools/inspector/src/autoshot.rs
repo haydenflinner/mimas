@@ -17,7 +17,7 @@ use bevy::ecs::system::{Commands, NonSendMut, Query, ResMut};
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 use bevy::ui::widget::TextScroll;
 
-use crate::{DataflowView, Editor, ManualEditorScroll, Session};
+use crate::{DataflowView, Editor, ManualEditorScroll, SceneView, Session};
 
 enum Action {
     Screenshot(&'static str),
@@ -50,6 +50,8 @@ enum Action {
     ToggleDataflow,
     /// Simulates typing a new function name into the dataflow view's name field.
     SetDataflowFunction(&'static str),
+    /// Simulates clicking the "Scene"/"Debugger" toggle.
+    ToggleScene,
     /// Skip this many frames before the next action -- bevy_ui needs a frame or two after a
     /// state change to re-measure text and settle layout, and a screenshot taken too eagerly
     /// would still show the stale frame.
@@ -101,6 +103,29 @@ fn script() -> VecDeque<Action> {
         ToggleDataflow,
         Wait(8),
         Screenshot("df_04_back_to_debugger"),
+        Wait(8),
+        // Scene view check: a value implementing img::Draw, exercising most of the primitive
+        // set in one go -- a solid rectangle background, place_image compositing three more
+        // shapes onto it (text, a solid circle, an outline circle) at explicit positions. This
+        // is the actual point of the img module: a script hands back *data* describing the
+        // scene, and the debugger draws it with real bevy_ui entities instead of shelling out
+        // to Typst for a static PNG.
+        StartEdit,
+        EditReplace(
+            "use typst::*;",
+            "use typst::*;\nuse img::*;\n\nstruct Canvas {\n}\n\nimpl Draw for Canvas {\n    fn draw(self) -> Image {\n        let bg = rectangle(220.0, 140.0, \"solid\", named(\"white\"));\n        let title = text(\"mimas\", 20.0, named(\"black\"));\n        let c1 = circle(18.0, \"solid\", named(\"red\"));\n        let c2 = circle(14.0, \"outline\", named(\"blue\"));\n        let with_title = place_image(title, 110.0, 20.0, bg);\n        let with_c1 = place_image(c1, 60.0, 90.0, with_title);\n        place_image(c2, 160.0, 90.0, with_c1)\n    }\n}\n\nlet canvas = Canvas {\n};",
+        ),
+        ApplyEdit,
+        // `canvas` is constructed by the last statement in the (edited) program -- has to
+        // actually run before there's a live Draw-implementing instance to find.
+        RunToEnd,
+        ToggleScene,
+        Wait(8),
+        Screenshot("scene_01_canvas"),
+        Wait(8),
+        ToggleScene,
+        Wait(8),
+        Screenshot("scene_02_back_to_debugger"),
         Wait(8),
         StepLineN(6),
         Wait(8),
@@ -221,6 +246,7 @@ fn drive(
     mut editor: ResMut<Editor>,
     mut manual_scroll: ResMut<ManualEditorScroll>,
     mut dataflow_view: ResMut<DataflowView>,
+    mut scene_view: ResMut<SceneView>,
     scrolls: Query<(Entity, &TextScroll)>,
     mut exit: MessageWriter<AppExit>,
 ) {
@@ -280,6 +306,7 @@ fn drive(
             }
         }
         Action::ToggleDataflow => dataflow_view.active = !dataflow_view.active,
+        Action::ToggleScene => scene_view.active = !scene_view.active,
         Action::SetDataflowFunction(name) => dataflow_view.function_name = name.to_string(),
         Action::Wait(n) => runner.waiting = n,
     }
