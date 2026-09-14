@@ -185,6 +185,13 @@ impl Rib {
         self.table.insert(ident.lexeme, dec_id);
     }
 
+    /// Removes a binding, if present. Used to undo an import that was wrongly inserted into
+    /// this rib before a same-named local declaration existed to shadow it -- see
+    /// `Solver::declare_import`.
+    pub(crate) fn remove(&mut self, ident: &Ident) {
+        self.table.remove(&ident.lexeme);
+    }
+
     fn get(&self, ident: &Ident) -> Option<DecId> {
         self.table.get(&ident.lexeme).copied()
     }

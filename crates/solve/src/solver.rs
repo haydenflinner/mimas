@@ -1811,6 +1811,29 @@ impl Solver {
 
     fn declare_import(&mut self, import: ImportBinding) -> Result<Ty> {
         let ident = Ident::synthetic(import.name);
+        // A name this file declares itself always wins over one pulled in through `use`
+        // (singular, multi, or wildcard alike) -- mirrors a C++ using-directive: names it
+        // brings in are visible only where nothing declared directly in the importing scope
+        // already claims that name, so the file's own `fn square` can't be silently shadowed
+        // by an unrelated `img::square` just because `use img::*;` happens to come first (or
+        // second -- source order never mattered here, since Import and Module are sibling
+        // ribs, not nested lexical scopes; see `Ribs::resolve`).
+        //
+        // Checking (and, crucially, *removing*) rather than just skipping the insert: for a
+        // plain script file (no `module` decl), `run_phase` never pushes a fresh per-phase rib
+        // pair (that only happens for named modules -- see the `if let Some(name) = module`
+        // guard in `solve_all`), so every phase's `process_use` call writes into the *same*,
+        // never-popped Import rib. `hoist_callables` runs its own `process_use` pass *before*
+        // hoisting local `fn`/`impl` items (so an imported type can appear in a local
+        // signature), which means the very first time this runs, `square` isn't hoisted into
+        // the module rib yet -- `module_lookup` misses, the import goes in unshadowed, and
+        // every later pass (now correctly seeing the local decl) would just skip re-inserting,
+        // leaving that first pass's wrong entry sitting there uncorrected. Removing it here
+        // instead self-heals regardless of which pass got there first.
+        if self.ribs.module_lookup(&ident).is_some() {
+            self.ribs.import_mut().remove(&ident);
+            return Ok(import.ty);
+        }
         let dec_id = if let Some(dec) = import.dec {
             dec
         } else {
