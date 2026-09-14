@@ -17,6 +17,7 @@ mod methods {
 }
 
 mod std_lib {
+    pub(crate) mod dataframe;
     pub(crate) mod fs;
     pub(crate) mod math;
     pub(crate) mod parse;
@@ -40,6 +41,7 @@ pub fn std<'gc>(api: &mut Api<'_, 'gc>) {
     methods::int::install(api);
     methods::str::install(api);
     methods::bool::install(api);
+    std_lib::dataframe::install(api);
     std_lib::fs::install(api);
     std_lib::math::install(api);
     std_lib::parse::install(api);

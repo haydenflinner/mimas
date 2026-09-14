@@ -25,6 +25,11 @@ rand.workspace = true
 camino = "1.2.2"
 serde_json = "1.0.145"
 walkdir.workspace = true
+polars = { path = "/Users/wow/code/dsa/polars/crates/polars", default-features = false, features = [
+    "lazy",
+    "fmt",
+    "dtype-full",
+] }
 
 [dev-dependencies]
 parse = { package = "mimas-parse", path = "../parse", version = "0.1.0" }
