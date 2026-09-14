@@ -17,6 +17,10 @@ pub struct Parser<'s> {
     file_id: FileId,
     file_name: String,
     src: NamedSource<Arc<str>>,
+    /// The same source `src` renders for diagnostics, kept as a plain slice too so
+    /// `newline_before_next` can scan an arbitrary byte range without going through miette's
+    /// `SourceCode` machinery.
+    source: &'s str,
     restrictions: Restriction,
     depth: usize,
 }
@@ -27,7 +31,8 @@ impl<'s> Parser<'s> {
     pub fn new(lexer: Lexer<'s>) -> Self {
         let file_id = lexer.file_id();
         let file_name: String = lexer.file_name().into();
-        let src = NamedSource::new(file_name.clone(), Arc::<str>::from(lexer.source()));
+        let source = lexer.source();
+        let src = NamedSource::new(file_name.clone(), Arc::<str>::from(source));
         let mut lexer = lexer.peekable();
         let cursor = lexer
             .peek()
@@ -38,6 +43,7 @@ impl<'s> Parser<'s> {
             cursor,
             file_name,
             src,
+            source,
             restrictions: Restriction::default(),
             depth: 0,
         }
@@ -185,7 +191,7 @@ impl<'s> Parser<'s> {
 
         let location = self.location(start);
         if requires_semi {
-            if self.match_take(TokKind::SemiColon).is_none() {
+            if self.match_take(TokKind::SemiColon).is_none() && !self.newline_before_next() {
                 Err(MissingSemiColon {
                     src: self.src(),
                     at: location.into(),
@@ -498,7 +504,10 @@ impl<'s> Parser<'s> {
                     .into());
                 }
             };
-            if self.match_take(TokKind::SemiColon).is_none() && requires_semi {
+            if self.match_take(TokKind::SemiColon).is_none()
+                && requires_semi
+                && !self.newline_before_next()
+            {
                 let location = self.peek()?.location();
                 return Err(MissingSemiColon {
                     src: self.src(),
@@ -604,7 +613,8 @@ impl<'s> Parser<'s> {
                 };
                 let location = self.location(item_start);
                 if requires_semi {
-                    if self.match_take(TokKind::SemiColon).is_none() {
+                    if self.match_take(TokKind::SemiColon).is_none() && !self.newline_before_next()
+                    {
                         Err(MissingSemiColon {
                             src: self.src(),
                             at: location.into(),
@@ -1495,17 +1505,16 @@ impl<'s> Parser<'s> {
 // General/helpers
 impl<'s> Parser<'s> {
     fn ok_if_semicolon(&mut self, stmt: Stmt) -> Result<Stmt> {
-        if self.match_take(TokKind::SemiColon).is_none() {
-            if let Some(err) = self.misdirection(&stmt) {
-                return Err(err);
-            }
-            Err(MissingSemiColon {
-                src: self.src(),
-                at: stmt.location().into(),
-            })?
-        } else {
-            Ok(stmt)
+        if self.match_take(TokKind::SemiColon).is_some() || self.newline_before_next() {
+            return Ok(stmt);
         }
+        if let Some(err) = self.misdirection(&stmt) {
+            return Err(err);
+        }
+        Err(MissingSemiColon {
+            src: self.src(),
+            at: stmt.location().into(),
+        })?
     }
 
     // after a condition parses, a trailing `= 5` or `and b` means the user reached for
@@ -1630,7 +1639,7 @@ impl<'s> Parser<'s> {
             matches!(stmt.kind(), StmtKind::Item(_))
         };
 
-        if semicolon_optional || has_semicolon {
+        if semicolon_optional || has_semicolon || self.newline_before_next() {
             Ok(())
         } else {
             if let Some(err) = self.misdirection(stmt) {
@@ -1658,9 +1667,15 @@ impl<'s> Parser<'s> {
     fn optional_expr(&mut self) -> Option<Expr> {
         // valueless return/break: the next token can't start a value. crucially, do NOT consume
         // the `;` -- it terminates the enclosing statement, not the return/break (otherwise
-        // `let x = y else return;` steals the let's own terminator).
+        // `let x = y else return;` steals the let's own terminator). `}` is the other common
+        // "nothing follows" case -- a bare `break`/`return` as a block's last statement, with no
+        // `;` at all (semicolon-optional already permitted this before ASI existed; ASI just
+        // makes people actually write it that way). Without this, `}` looked like the start of
+        // a value expression, `self.expr()` failed trying to parse it as one, and `.ok()`
+        // silently swallowed that failure -- surfacing as a confusing "unexpected end of input"
+        // far past the real problem instead of here.
         match self.soft_peek().ok().flatten().map(|t| t.kind()) {
-            Some(TokKind::SemiColon) | None => None,
+            Some(TokKind::SemiColon | TokKind::RightBrace) | None => None,
             _ => self.expr().ok(),
         }
     }
@@ -2038,6 +2053,38 @@ impl<'s> Parser<'s> {
         self.lexer.peek().map_or(cursor, |tok| {
             tok.as_ref().map_or(cursor, |tok| tok.span().start())
         })
+    }
+
+    /// Automatic semicolon insertion (Go's rules, `https://go.dev/ref/spec#Semicolons`, applied
+    /// at exactly the handful of places that already ask "is a `;` here mandatory, optional, or
+    /// satisfied" -- `expect`-style call sites around `MissingSemiColon`): whether a newline
+    /// (including one hiding inside a comment -- a `//` comment always ends in one; a `/* */`
+    /// containing one counts too, mirroring Go's own spec note) separates the last consumed
+    /// token from the next one. Where a `;` is mandatory and absent, this is treated as
+    /// equivalent to one, same as Go treating a line break as a statement terminator.
+    ///
+    /// This is a parser-level check, not a lexer-level one that unconditionally inserts a `;`
+    /// into the token stream, on purpose: mimas is expression-oriented (a block's last
+    /// statement, with no trailing `;`, *yields* that block's value), and `}` closes far more
+    /// than statement blocks (enum variant bodies, struct/dict literals, match arms) -- only the
+    /// parser, already mid-`semicolon_check`/`ok_if_semicolon` for a *specific, already-known*
+    /// statement kind, can tell "a `;` was never optional here" apart from "this is a tail
+    /// expression, or we're not even in a statement list at all" apart from "we're inside a
+    /// struct/enum/dict literal, which uses `,` and never `;`". A lexer blindly inserting on
+    /// every trigger-token-then-newline would get all three wrong.
+    pub(crate) fn newline_before_next(&mut self) -> bool {
+        // Not `next_tok_boundary()`: at true end-of-input that falls back to `self.cursor`
+        // itself (an empty, never-a-newline gap), which would make a file's *last* statement
+        // -- extremely common to end without an explicit `;`, relying on the file's own
+        // trailing newline -- never eligible for ASI. Scanning to the end of the source instead
+        // still correctly rejects a truly newline-free tail (nothing between the last token and
+        // EOF, e.g. a one-line snippet with no trailing newline at all).
+        let next = match self.lexer.peek() {
+            Some(Ok(tok)) => tok.span().start(),
+            _ => self.source.len(),
+        };
+        let start = self.cursor.min(next);
+        self.source.get(start..next).is_some_and(|gap| gap.contains('\n'))
     }
 
     /// Borrow the next token without advancing. Surfaces lex errors and end-of-input as
