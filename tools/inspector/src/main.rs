@@ -866,20 +866,86 @@ struct AutoScrollState {
 #[derive(bevy::ecs::resource::Resource, Default)]
 struct ShowLocals(bool);
 
+/// Total (unclamped) height of the source panel's rows -- `line_count * SOURCE_ROW_HEIGHT_PX`,
+/// refreshed on the panel entity every frame alongside its own `ComputedNode`, so
+/// `on_source_scroll` can compute an upper scroll bound the same way `on_editor_scroll` does from
+/// `TextLayoutInfo` -- the rows aren't one `Text` entity (see `tokenize_line`), so there's no
+/// single layout size to read them back from.
+#[derive(Component)]
+struct SourceContentHeight(f32);
+
 /// Mouse wheel over the source panel: bevy_ui's `Overflow::Scroll` + `ScrollPosition` don't come
 /// wired to the wheel on their own (see `bevy_immediate`'s own scrollarea example, which hand-
 /// rolls the same thing) -- this is that wiring, scoped to just the source panel entity via
 /// `on_spawn_observe`.
-fn on_source_scroll(trigger: On<Pointer<Scroll>>, mut positions: Query<&mut ScrollPosition>) {
+///
+/// Clamps to `max_scroll_y`, not just `0.0` on the low end: without an upper bound, scrolling
+/// past the last line kept incrementing `ScrollPosition` forever (bevy_ui itself clips the
+/// *display* to the real content, so this was invisible) -- so scrolling back up had to first
+/// wind back through however far past the end you'd gone before the visible content moved at
+/// all. `on_editor_scroll` (below) already clamped both ends; this didn't, which is why edit-mode
+/// scrolling felt smoother than read-only.
+fn on_source_scroll(
+    trigger: On<Pointer<Scroll>>,
+    mut positions: Query<(&mut ScrollPosition, &ComputedNode, &SourceContentHeight)>,
+) {
     let event = trigger.event();
-    let Ok(mut pos) = positions.get_mut(event.entity) else {
+    let Ok((mut pos, node, content)) = positions.get_mut(event.entity) else {
         return;
     };
     let delta = match event.unit {
         MouseScrollUnit::Line => event.y * SOURCE_ROW_HEIGHT_PX,
         MouseScrollUnit::Pixel => event.y,
     };
-    pos.0.y = (pos.0.y - delta).max(0.0);
+    let view_height = node.content_box().size().y;
+    pos.0.y = clamped_scroll_y(pos.0.y, delta, content.0, view_height);
+}
+
+/// The actual clamp math `on_source_scroll` applies, pulled out so it's checkable without a real
+/// `Pointer<Scroll>` event (this crate's screenshot harness deliberately has no synthetic-mouse
+/// story -- see `HoverIdent`'s doc comment) or a laid-out `ComputedNode`.
+fn clamped_scroll_y(current_y: f32, delta: f32, content_height: f32, view_height: f32) -> f32 {
+    let max_scroll_y = (content_height - view_height).max(0.0);
+    (current_y - delta).clamp(0.0, max_scroll_y)
+}
+
+#[cfg(test)]
+mod scroll_tests {
+    use super::clamped_scroll_y;
+
+    // The bug this guards against: scrolling past the last line kept incrementing
+    // `ScrollPosition` with no upper bound (bevy_ui clips the *display* to the real content, so
+    // this was invisible) -- scrolling back up then had to first wind back through however far
+    // past the end you'd gone before the visible content moved at all.
+    #[test]
+    fn scrolling_past_the_bottom_stays_clamped() {
+        // content 500px tall, 200px visible -> 300px of real scroll range. Negative delta is
+        // "scroll down" (increasing y), matching `pos.0.y = current_y - delta`.
+        let mut y = 0.0;
+        for _ in 0..50 {
+            y = clamped_scroll_y(y, -100.0, 500.0, 200.0);
+        }
+        assert_eq!(y, 300.0);
+    }
+
+    #[test]
+    fn scrolling_past_the_top_stays_clamped() {
+        let mut y = 300.0;
+        for _ in 0..50 {
+            y = clamped_scroll_y(y, 100.0, 500.0, 200.0);
+        }
+        assert_eq!(y, 0.0);
+    }
+
+    #[test]
+    fn a_mid_range_scroll_passes_through_unclamped() {
+        assert_eq!(clamped_scroll_y(150.0, 40.0, 500.0, 200.0), 110.0);
+    }
+
+    #[test]
+    fn content_shorter_than_the_viewport_has_no_scroll_range() {
+        assert_eq!(clamped_scroll_y(0.0, 40.0, 100.0, 200.0), 0.0);
+    }
 }
 
 /// A wheel-driven scroll position for whichever `EditableText` entity last received wheel input
@@ -1190,11 +1256,13 @@ fn ui_system(
                     // `source_panel_node`), and auto-scrolls to keep the current line in view.
                     let lines = all_lines(&session.display_source, current_offset);
                     let current_row = lines.iter().position(|&(_, _, is_current)| is_current);
+                    let content_height = lines.len() as f32 * SOURCE_ROW_HEIGHT_PX;
 
                     let mut source_panel = ui
                         .ch_id("source")
                         .on_spawn_insert(source_panel_node)
-                        .on_spawn_observe(on_source_scroll);
+                        .on_spawn_observe(on_source_scroll)
+                        .on_change_insert(true, move || SourceContentHeight(content_height));
                     // only re-apply the auto-scroll when the highlighted line actually moved --
                     // not every frame, or it would fight a manual scroll to a different line.
                     let prev_row = auto_scroll.last_row;
