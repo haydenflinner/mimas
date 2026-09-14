@@ -30,6 +30,16 @@ polars = { path = "/Users/wow/code/dsa/polars/crates/polars", default-features =
     "fmt",
     "dtype-full",
 ] }
+# depended on directly (not via `polars`'s own `csv` feature) for `CsvReadOptions`/`CsvReader`,
+# used by `std_lib::dataframe::from_csv` to read an in-memory CSV string into a `DataFrame`.
+# `polars`'s own `csv` feature unconditionally bundles in `streaming`, which this local clone's
+# `polars-io` cloud module doesn't build against (an unrelated `object_store` version mismatch --
+# see the note on the `polars` dep above); `polars-io/csv` on its own pulls in neither. Same repo
+# path as the `polars` dep above, so Cargo resolves this to the identical `DataFrame`/`Column`
+# types `polars::frame`/`polars::prelude` re-export, not a second copy.
+polars-io = { path = "/Users/wow/code/dsa/polars/crates/polars-io", default-features = false, features = [
+    "csv",
+] }
 
 [dev-dependencies]
 parse = { package = "mimas-parse", path = "../parse", version = "0.1.0" }

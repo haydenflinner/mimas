@@ -96,6 +96,47 @@ test_run_display!(
 └───────┴─────┴───────┘"#,
 );
 
+const CSV: &str = r#"use std::polars::*;
+     let csv = "name,age,dept
+Alice,34,eng
+Bob,29,sales
+";
+     let df = from_csv(csv)!;"#;
+
+test_run_display!(
+    from_csv_infers_columns_from_the_header_row,
+    CSV,
+    "df" => r#"shape: (2, 3)
+┌───────┬─────┬───────┐
+│ name  ┆ age ┆ dept  │
+│ ---   ┆ --- ┆ ---   │
+│ str   ┆ i64 ┆ str   │
+╞═══════╪═════╪═══════╡
+│ Alice ┆ 34  ┆ eng   │
+│ Bob   ┆ 29  ┆ sales │
+└───────┴─────┴───────┘"#,
+);
+
+// a from_csv DataFrame interops with the rest of std::polars just like a to_dataframe one
+test_run_display!(
+    from_csv_dataframe_can_be_filtered,
+    CSV,
+    r#"df.filter(col("age") > 30)!"# => r#"shape: (1, 3)
+┌───────┬─────┬──────┐
+│ name  ┆ age ┆ dept │
+│ ---   ┆ --- ┆ ---  │
+│ str   ┆ i64 ┆ str  │
+╞═══════╪═════╪══════╡
+│ Alice ┆ 34  ┆ eng  │
+└───────┴─────┴──────┘"#,
+);
+
+// malformed csv (ragged row) -> from_csv raises
+test_fail!(
+    from_csv_malformed_raises,
+    r#"use std::polars::*; let df = from_csv("a,b\n1,2,3\n")!;"#,
+);
+
 // no rows -> nothing to infer a schema from
 test_fail!(
     to_dataframe_empty_array_raises,

@@ -1868,6 +1868,7 @@ dependencies = [
  "mimas-solve",
  "mimas-vm",
  "polars",
+ "polars-io",
  "pretty_assertions",
  "rand",
  "regex",

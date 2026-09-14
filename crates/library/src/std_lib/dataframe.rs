@@ -2,9 +2,10 @@
 //! `DataFrame`/`PlExpr` are genuine `Val` variants (see `vm::val::DataFrame`/`vm::val::PlExpr`),
 //! not `#[mimas] struct`s decomposed into `Val::Instance` fields -- `vm`'s own operator dispatch
 //! (`bin()` in `crates/vm/src/val.rs`) already knows how to build a `polars::prelude::Expr` tree
-//! out of `col("age") > 30 && col("city") == "SF"`, so this module only needs to wire up the
-//! DataFrame-shaped verbs (`filter`/`select`/`sort`) plus the array-of-structs -> columns
-//! conversion (`to_dataframe`).
+//! out of `col("age") > 30 & col("city") == "SF"`, so this module only needs to wire up the
+//! DataFrame-shaped verbs (`filter`/`select`/`sort`) plus the two ways to get a `DataFrame` in
+//! the first place: `to_dataframe` (array-of-structs -> columns) and `from_csv` (an in-memory
+//! CSV string -> columns, via polars' own reader).
 
 use macros::native;
 use vm::{
@@ -22,6 +23,7 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
         let mut m = api.module("std::polars");
         m.add(col);
         m.add(to_dataframe);
+        m.add(from_csv);
     }
     api.add_method(filter);
     api.add_method(select);
@@ -130,6 +132,19 @@ fn to_dataframe<'gc>(ctx: Ctx<'gc>, rows: Vec<Val<'gc>>) -> Raisable<vm::DataFra
         }
     }
     polars::frame::DataFrame::new_infer_height(pl_columns)
+        .map(|d| ctx.new_dataframe(d))
+        .into()
+}
+
+/// Parses an in-memory CSV string (header row required) into a `DataFrame`, inferring each
+/// column's dtype from its values the same way polars' own file-based CSV reader does.
+#[native]
+fn from_csv<'gc>(ctx: Ctx<'gc>, csv: &str) -> Raisable<vm::DataFrame<'gc>> {
+    use polars_io::prelude::{CsvReadOptions, SerReader};
+    CsvReadOptions::default()
+        .with_has_header(true)
+        .into_reader_with_file_handle(std::io::Cursor::new(csv.as_bytes()))
+        .finish()
         .map(|d| ctx.new_dataframe(d))
         .into()
 }
