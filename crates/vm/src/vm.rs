@@ -1533,6 +1533,71 @@ impl Vm {
         })
     }
 
+    /// Like [`Vm::call_method_on_first_instance`], but captures the result as a name-labeled
+    /// [`Inspect`] tree instead of [`Captured`] -- for a caller (a scene renderer, say) that has
+    /// to know *which* struct or enum variant a returned value is, not just its shape.
+    /// `Captured::Instance` is positional and name-free by design (it's for test equality,
+    /// independent of what a struct happens to be called); this is the counterpart for when the
+    /// name is exactly the thing you need, e.g. dispatching on an `img::Image` variant.
+    pub fn call_method_on_first_instance_inspect(&mut self, method_name: &str) -> Option<Inspect> {
+        let Vm {
+            code,
+            chunks,
+            c_strs: strs,
+            arena,
+            sources,
+            methods,
+            field_names,
+            ..
+        } = self;
+        arena.mutate(|mc, state| {
+            let ctx = state.ctx(mc);
+            let mut thread = state.thread.borrow_mut(mc);
+
+            let mut target = None;
+            'search: for frame in thread.frames.iter() {
+                let window_len = chunks[frame.chunk].regs as usize;
+                for reg in &thread.regs[frame.base..frame.base + window_len] {
+                    if let Val::Instance(inst) = reg {
+                        let struct_id = inst.0.borrow().struct_id as usize;
+                        if let Some(&body) =
+                            methods.get(struct_id).and_then(|m| m.get(method_name))
+                        {
+                            target = Some((body, *reg));
+                            break 'search;
+                        }
+                    }
+                }
+            }
+            let (body, receiver) = target?;
+
+            let return_slot = thread.regs.len();
+            thread.regs.push(Val::Null);
+            let caller_base = thread.frames.last().unwrap().base;
+            let dst = Reg::from((return_slot - caller_base) as u32);
+
+            let stop_depth = thread.frames.len() + 1;
+            enter_call(&mut thread, code, chunks, body, dst, &[receiver], &[]);
+            run_dispatch(
+                ctx,
+                code,
+                chunks,
+                strs,
+                sources,
+                &mut thread,
+                usize::MAX,
+                stop_depth,
+            )
+            .ok()?;
+
+            let struct_names = state.struct_names.borrow();
+            let mut seen = std::collections::HashSet::new();
+            let result = thread.regs[return_slot].inspect(&struct_names, field_names, &mut seen);
+            thread.regs.truncate(return_slot);
+            Some(result)
+        })
+    }
+
     /// Executes exactly one bytecode op and reports whether the program has finished. Meant for
     /// single-step debuggers: reuses the same fuel mechanism `run` uses to yield control, just
     /// with a budget of one op instead of [`FUEL`].
