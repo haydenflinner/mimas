@@ -6,6 +6,10 @@
 //! as `Captured::Other` by design. `test_run_display!`/`render_display` sidesteps that by reading
 //! the value back through its real `Display` (the same path `print` uses) instead, which also
 //! means the expected side here is the plain, unescaped table text.
+//!
+//! The whole file is a no-op without the `dataframe` feature: `std::polars` isn't registered, so
+//! every case here would just fail to resolve rather than being skipped.
+#![cfg(feature = "dataframe")]
 
 #[macro_use]
 mod test_runner;

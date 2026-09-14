@@ -38,13 +38,19 @@ itoa = "1.0.18"
 # a small in-memory transform, so `library::std_lib::dataframe` always calls
 # `collect_with_engine(Engine::InMemory)` explicitly instead of plain `collect()` (whose
 # `Engine::Auto` would otherwise pick the streaming engine and panic without the feature).
-polars = { path = "/Users/wow/code/dsa/polars/crates/polars", default-features = false, features = [
+# `optional = true`: gated behind the `dataframe` feature below so an embedder who never touches
+# `Val::DataFrame`/`Val::PlExpr` doesn't pay for polars's dependency tree at all.
+polars = { path = "/Users/wow/code/dsa/polars/crates/polars", optional = true, default-features = false, features = [
     "lazy",
     "fmt",
     "dtype-full",
 ] }
 
 [features]
+default = ["dataframe"]
+# Val::DataFrame/Val::PlExpr, operator overloading for them in bin(), and the polars dependency
+# itself. On by default so existing embedders see no change; `default-features = false` opts out.
+dataframe = ["dep:polars"]
 op-count = []
 
 [dev-dependencies]

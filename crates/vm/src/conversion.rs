@@ -211,7 +211,9 @@ impl<'gc> MimasType<'gc> for Dict<'gc> {
 // checker still wants a `Ty::Adt(AdtId)` to hang parameter/return types off of, so these two
 // lifetime-free marker types exist purely to be `add_adt`'d (by `library::std_lib::dataframe`) and
 // hand out an `AdtId` -- they carry no data of their own and are never constructed.
+#[cfg(feature = "dataframe")]
 pub struct DataFrameTy;
+#[cfg(feature = "dataframe")]
 impl crate::adt::MimasAdt for DataFrameTy {
     fn descriptor(_reg: &Registry) -> crate::adt::ApiAdtDescriptor {
         crate::adt::ApiAdtDescriptor {
@@ -228,7 +230,9 @@ impl crate::adt::MimasAdt for DataFrameTy {
     }
 }
 
+#[cfg(feature = "dataframe")]
 pub struct PlExprTy;
+#[cfg(feature = "dataframe")]
 impl crate::adt::MimasAdt for PlExprTy {
     fn descriptor(_reg: &Registry) -> crate::adt::ApiAdtDescriptor {
         crate::adt::ApiAdtDescriptor {
@@ -245,6 +249,7 @@ impl crate::adt::MimasAdt for PlExprTy {
     }
 }
 
+#[cfg(feature = "dataframe")]
 impl<'gc> MimasType<'gc> for crate::val::DataFrame<'gc> {
     fn mimas_ty(reg: &Registry) -> Option<Ty> {
         Some(Ty::Adt(reg.get::<DataFrameTy>()?.adt_id))
@@ -257,6 +262,7 @@ impl<'gc> MimasType<'gc> for crate::val::DataFrame<'gc> {
     }
 }
 
+#[cfg(feature = "dataframe")]
 impl<'gc> MimasType<'gc> for crate::val::PlExpr<'gc> {
     fn mimas_ty(reg: &Registry) -> Option<Ty> {
         Some(Ty::Adt(reg.get::<PlExprTy>()?.adt_id))

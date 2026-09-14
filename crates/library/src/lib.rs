@@ -17,6 +17,7 @@ mod methods {
 }
 
 mod std_lib {
+    #[cfg(feature = "dataframe")]
     pub(crate) mod dataframe;
     pub(crate) mod fs;
     pub(crate) mod math;
@@ -41,6 +42,7 @@ pub fn std<'gc>(api: &mut Api<'_, 'gc>) {
     methods::int::install(api);
     methods::str::install(api);
     methods::bool::install(api);
+    #[cfg(feature = "dataframe")]
     std_lib::dataframe::install(api);
     std_lib::fs::install(api);
     std_lib::math::install(api);

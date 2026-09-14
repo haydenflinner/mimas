@@ -18,14 +18,19 @@ name = "mimas"
 [dependencies]
 api = { package = "mimas-api", path = "../api", version = "0.1.0" }
 compile = { package = "mimas-compile", path = "../compile", version = "0.1.0" }
-library = { package = "mimas-library", path = "../library", version = "0.1.0" }
+library = { package = "mimas-library", path = "../library", version = "0.1.0", default-features = false }
 macros = { package = "mimas-macros", path = "../macros", version = "0.1.0" }
 parse = { package = "mimas-parse", path = "../parse", version = "0.1.0" }
 shared = { package = "mimas-shared", path = "../shared", version = "0.1.0" }
 solve = { package = "mimas-solve", path = "../solve", version = "0.1.0" }
-vm = { package = "mimas-vm", path = "../vm", version = "0.1.0" }
+vm = { package = "mimas-vm", path = "../vm", version = "0.1.0", default-features = false }
 
 [features]
+default = ["dataframe"]
+# DataFrame/PlExpr querying via std::polars, backed by a real polars dependency -- see the
+# `dataframe` feature notes on the `vm`/`library` crates. On by default; `default-features =
+# false` (or `features = []`) opts out for an embedder who doesn't want polars pulled in at all.
+dataframe = ["vm/dataframe", "library/dataframe"]
 op-count = ["vm/op-count"]
 
 [dev-dependencies]

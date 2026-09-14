@@ -13,7 +13,7 @@ name = "library"
 path = "src/lib.rs"
 
 [dependencies]
-vm = { package = "mimas-vm", path = "../vm", version = "0.1.0" }
+vm = { package = "mimas-vm", path = "../vm", version = "0.1.0", default-features = false }
 api = { package = "mimas-api", path = "../api", version = "0.1.0" }
 shared = { package = "mimas-shared", path = "../shared", version = "0.1.0" }
 macros = { package = "mimas-macros", path = "../macros", version = "0.1.0" }
@@ -25,7 +25,9 @@ rand.workspace = true
 camino = "1.2.2"
 serde_json = "1.0.145"
 walkdir.workspace = true
-polars = { path = "/Users/wow/code/dsa/polars/crates/polars", default-features = false, features = [
+# both optional, gated behind the `dataframe` feature below -- see the note on `vm`'s `polars` dep
+# for why `lazy`/`fmt`/`dtype-full` and not `streaming`.
+polars = { path = "/Users/wow/code/dsa/polars/crates/polars", optional = true, default-features = false, features = [
     "lazy",
     "fmt",
     "dtype-full",
@@ -37,9 +39,13 @@ polars = { path = "/Users/wow/code/dsa/polars/crates/polars", default-features =
 # see the note on the `polars` dep above); `polars-io/csv` on its own pulls in neither. Same repo
 # path as the `polars` dep above, so Cargo resolves this to the identical `DataFrame`/`Column`
 # types `polars::frame`/`polars::prelude` re-export, not a second copy.
-polars-io = { path = "/Users/wow/code/dsa/polars/crates/polars-io", default-features = false, features = [
+polars-io = { path = "/Users/wow/code/dsa/polars/crates/polars-io", optional = true, default-features = false, features = [
     "csv",
 ] }
+
+[features]
+default = ["dataframe"]
+dataframe = ["dep:polars", "dep:polars-io", "vm/dataframe"]
 
 [dev-dependencies]
 parse = { package = "mimas-parse", path = "../parse", version = "0.1.0" }

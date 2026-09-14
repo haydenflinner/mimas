@@ -169,10 +169,12 @@ impl<'gc> Ctx<'gc> {
         Closure(Gc::new(self.mutation, ClosureData { function, captures }))
     }
 
+    #[cfg(feature = "dataframe")]
     pub fn new_dataframe(self, df: polars::frame::DataFrame) -> crate::val::DataFrame<'gc> {
         crate::val::DataFrame(Gc::new(self.mutation, RefLock::new(gc_arena::Static(df))))
     }
 
+    #[cfg(feature = "dataframe")]
     pub fn new_plexpr(self, expr: polars::prelude::Expr) -> crate::val::PlExpr<'gc> {
         crate::val::PlExpr(Gc::new(self.mutation, gc_arena::Static(expr)))
     }
@@ -306,11 +308,13 @@ impl<'gc> Ctx<'gc> {
                 }
                 out.push_str(" }");
             }
+            #[cfg(feature = "dataframe")]
             Val::DataFrame(d) => {
                 // polars' own Display (the "fmt" feature) -- a real formatted table, not just a
                 // shape summary.
                 let _ = write!(out, "{}", d.0.borrow().0);
             }
+            #[cfg(feature = "dataframe")]
             Val::PlExpr(e) => {
                 let _ = write!(out, "{}", e.0.0);
             }
