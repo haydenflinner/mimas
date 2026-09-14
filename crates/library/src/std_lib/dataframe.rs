@@ -3,9 +3,9 @@
 //! not `#[mimas] struct`s decomposed into `Val::Instance` fields -- `vm`'s own operator dispatch
 //! (`bin()` in `crates/vm/src/val.rs`) already knows how to build a `polars::prelude::Expr` tree
 //! out of `col("age") > 30 & col("city") == "SF"`, so this module only needs to wire up the
-//! DataFrame-shaped verbs (`filter`/`select`/`sort`) plus the two ways to get a `DataFrame` in
-//! the first place: `to_dataframe` (array-of-structs -> columns) and `from_csv` (an in-memory
-//! CSV string -> columns, via polars' own reader).
+//! DataFrame-shaped verbs (`filter`/`select`/`sort`/`group_by`+`agg`/`join`/`pivot`) plus the two
+//! ways to get a `DataFrame` in the first place: `to_dataframe` (array-of-structs -> columns) and
+//! `from_csv` (an in-memory CSV string -> columns, via polars' own reader).
 
 use macros::native;
 use vm::{
@@ -32,6 +32,7 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add_method(group_by);
     api.add_method(agg);
     api.add_method(join);
+    api.add_method(pivot);
     // Expr aggregation/naming methods -- `col("age").mean().alias("avg_age")`, used inside
     // `agg([..])`. Like `col()`, none of these can fail (they build a plan, they don't run one).
     api.add_method(sum);
@@ -149,6 +150,67 @@ fn join<'gc>(
         Err(e) => return Raisable::Raised(e.to_string()),
     };
     collect_in_memory(joined).map(|d| ctx.new_dataframe(d)).into()
+}
+
+/// `df.pivot(["quarter"], ["region"], ["revenue"], "sum")` -- wide-format table: one row per
+/// distinct `index` combination, one column per distinct `on` value, cells filled by aggregating
+/// matching `values` with `agg` ("sum"/"mean"/"median"/"min"/"max"/"count"/"n_unique"). `agg`
+/// takes a function name rather than a `PlExpr` (unlike `group_by`'s `agg`) because pivot's
+/// aggregate expression isn't allowed to reference a column by name at all -- it runs against an
+/// anonymous per-group "element" placeholder polars builds internally (`values` already says
+/// which column). `on`'s distinct values must be known up front to name the output columns
+/// (pivot's own requirement, same as Python polars' `DataFrame.pivot`), so this computes them
+/// eagerly (`select(on).unique()`) before building the pivot itself.
+#[native]
+fn pivot<'gc>(
+    ctx: Ctx<'gc>,
+    df: vm::DataFrame<'gc>,
+    on: Vec<String>,
+    index: Vec<String>,
+    values: Vec<String>,
+    agg: &str,
+) -> Raisable<vm::DataFrame<'gc>> {
+    use polars::frame::PivotColumnNaming;
+    use polars::prelude::{IntoLazy, UniqueKeepStrategy, cols, element};
+    let agg_expr = match agg {
+        "sum" => element().sum(),
+        "mean" => element().mean(),
+        "median" => element().median(),
+        "min" => element().min(),
+        "max" => element().max(),
+        "count" => element().count(),
+        "n_unique" => element().n_unique(),
+        other => {
+            return Raisable::Raised(format!(
+                "pivot: unknown aggregate function {other:?} (expected \"sum\", \"mean\", \"median\", \"min\", \"max\", \"count\", or \"n_unique\")"
+            ));
+        }
+    };
+    let on_selector = cols(on);
+    let base = df.0.borrow().0.clone();
+    // `unique` (unlike `unique_stable`) doesn't maintain row order, which would make the pivot's
+    // output *column* order nondeterministic between runs -- `on_columns`' row order is what
+    // decides it.
+    let on_columns = match collect_in_memory(
+        base.clone()
+            .lazy()
+            .select([on_selector.clone().into()])
+            .unique_stable(None, UniqueKeepStrategy::First),
+    ) {
+        Ok(d) => std::sync::Arc::new(d),
+        Err(e) => return Raisable::Raised(e.to_string()),
+    };
+    let pivoted = base.lazy().pivot(
+        on_selector,
+        on_columns,
+        cols(index),
+        cols(values),
+        agg_expr,
+        false,
+        "_".into(),
+        PivotColumnNaming::default(),
+    );
+    collect_in_memory(pivoted).map(|d| ctx.new_dataframe(d)).into()
 }
 
 macro_rules! pl_expr_reducer {

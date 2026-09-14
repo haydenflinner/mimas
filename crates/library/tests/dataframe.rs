@@ -114,6 +114,39 @@ test_run_display!(
 └───────┴─────────┴─────┘"#,
 );
 
+const SALES: &str = "use std::polars::*;
+     struct Sale { region: str, quarter: str, revenue: int }
+     let rows = [
+         Sale { region = \"east\", quarter = \"Q1\", revenue = 100 },
+         Sale { region = \"east\", quarter = \"Q2\", revenue = 150 },
+         Sale { region = \"west\", quarter = \"Q1\", revenue = 200 },
+         Sale { region = \"west\", quarter = \"Q2\", revenue = 250 },
+     ];
+     let df = to_dataframe(rows)!;";
+
+test_run_display!(
+    pivot_makes_a_wide_table_from_on_values,
+    SALES,
+    r#"df.pivot(["quarter"], ["region"], ["revenue"], "sum")!.sort(["region"])!"# => r#"shape: (2, 3)
+┌────────┬─────┬─────┐
+│ region ┆ Q1  ┆ Q2  │
+│ ---    ┆ --- ┆ --- │
+│ str    ┆ i64 ┆ i64 │
+╞════════╪═════╪═════╡
+│ east   ┆ 100 ┆ 150 │
+│ west   ┆ 200 ┆ 250 │
+└────────┴─────┴─────┘"#,
+);
+
+// unrecognized aggregate function name -> raises rather than silently defaulting
+test_fail!(
+    pivot_unknown_agg_raises,
+    r#"use std::polars::*;
+       struct S { region: str, quarter: str, revenue: int }
+       let df = to_dataframe([S { region = "e", quarter = "Q1", revenue = 1 }])!;
+       let p = df.pivot(["quarter"], ["region"], ["revenue"], "nonsense")!;"#,
+);
+
 const EMPLOYEES_AND_DEPTS: &str = "use std::polars::*;
      struct Employee { name: str, age: int, dept: str }
      let rows = [

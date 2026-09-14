@@ -26,11 +26,14 @@ camino = "1.2.2"
 serde_json = "1.0.145"
 walkdir.workspace = true
 # both optional, gated behind the `dataframe` feature below -- see the note on `vm`'s `polars` dep
-# for why `lazy`/`fmt`/`dtype-full` and not `streaming`.
+# for why `lazy`/`fmt`/`dtype-full` and not `streaming`. `pivot` (unlike `csv`) doesn't bundle
+# `streaming` at the umbrella-crate level, so it's safe to enable directly here -- needed for
+# `std_lib::dataframe::pivot`.
 polars = { path = "/Users/wow/code/dsa/polars/crates/polars", optional = true, default-features = false, features = [
     "lazy",
     "fmt",
     "dtype-full",
+    "pivot",
 ] }
 # depended on directly (not via `polars`'s own `csv` feature) for `CsvReadOptions`/`CsvReader`,
 # used by `std_lib::dataframe::from_csv` to read an in-memory CSV string into a `DataFrame`.
