@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use compile::{BinFault, BinOp, Scalar, UnaryOp};
 use gc_arena::{Collect, Gc, RefLock};
-#[cfg(feature = "dataframe")]
+#[cfg(any(feature = "dataframe", feature = "darkly"))]
 use gc_arena::Static;
 use shared::BodyId;
 use smallvec::SmallVec;
@@ -39,6 +39,10 @@ pub enum Val<'gc> {
     /// in place, `.agg()` consumes it.
     #[cfg(feature = "dataframe")]
     GroupBy(GroupBy<'gc>),
+    /// Decoded pixel bytes from a `.darkly` raster/mask layer (`std::darkly::open`). Immutable
+    /// once decoded (nothing mutates one in place), so no `RefLock` -- same reasoning as `PlExpr`.
+    #[cfg(feature = "darkly")]
+    DarklyImage(DarklyImage<'gc>),
 }
 
 impl<'gc> PartialEq for Val<'gc> {
@@ -70,6 +74,8 @@ impl<'gc> PartialEq for Val<'gc> {
             (Val::PlExpr(a), Val::PlExpr(b)) => Gc::ptr_eq(a.0, b.0),
             #[cfg(feature = "dataframe")]
             (Val::GroupBy(a), Val::GroupBy(b)) => Gc::ptr_eq(a.0, b.0),
+            #[cfg(feature = "darkly")]
+            (Val::DarklyImage(a), Val::DarklyImage(b)) => Gc::ptr_eq(a.0, b.0),
             _ => false,
         }
     }
@@ -186,6 +192,16 @@ impl<'gc> Val<'gc> {
     pub fn as_group_by(self) -> Option<GroupBy<'gc>> {
         if let Val::GroupBy(g) = self {
             Some(g)
+        } else {
+            None
+        }
+    }
+
+    #[cfg(feature = "darkly")]
+    #[inline]
+    pub fn as_darkly_image(self) -> Option<DarklyImage<'gc>> {
+        if let Val::DarklyImage(i) = self {
+            Some(i)
         } else {
             None
         }
@@ -436,6 +452,26 @@ impl std::fmt::Debug for GroupBy<'_> {
     }
 }
 
+/// Decoded pixel bytes from a `.darkly` raster/mask layer -- `width * height * channels` bytes,
+/// tightly packed, no compression (that's exactly how `.darkly`'s own `.pixels` files store them
+/// on disk, so `std_lib::darkly::open` reads them straight in with no decode step). `Static`
+/// because `RawImage` is a plain owned Rust value with no `Gc` pointers inside, same reasoning as
+/// `DataFrame`/`PlExpr`'s own wrapped external types. No `RefLock`: immutable once decoded.
+#[cfg(feature = "darkly")]
+#[derive(Copy, Clone, Collect, Debug)]
+#[collect(no_drop)]
+pub struct DarklyImage<'gc>(pub Gc<'gc, Static<RawImage>>);
+
+#[cfg(feature = "darkly")]
+#[derive(Debug)]
+pub struct RawImage {
+    pub width: u32,
+    pub height: u32,
+    /// 4 for `rgba8unorm` (a raster layer's own pixels), 1 for `r8unorm` (a mask).
+    pub channels: u8,
+    pub bytes: Box<[u8]>,
+}
+
 impl<'gc> Str<'gc> {
     pub fn as_str(self) -> &'gc str {
         Gc::as_ref(self.0).as_ref()
@@ -591,6 +627,8 @@ impl<'gc> Val<'gc> {
             Val::Closure(_) => Captured::Other,
             #[cfg(feature = "dataframe")]
             Val::DataFrame(_) | Val::PlExpr(_) | Val::GroupBy(_) => Captured::Other,
+            #[cfg(feature = "darkly")]
+            Val::DarklyImage(_) => Captured::Other,
         }
     }
 }
@@ -705,6 +743,8 @@ impl<'gc> Val<'gc> {
             Val::Closure(_) => Inspect::Other,
             #[cfg(feature = "dataframe")]
             Val::DataFrame(_) | Val::PlExpr(_) | Val::GroupBy(_) => Inspect::Other,
+            #[cfg(feature = "darkly")]
+            Val::DarklyImage(_) => Inspect::Other,
         }
     }
 }

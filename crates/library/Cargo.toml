@@ -45,10 +45,17 @@ polars = { path = "/Users/wow/code/dsa/polars/crates/polars", optional = true, d
 polars-io = { path = "/Users/wow/code/dsa/polars/crates/polars-io", optional = true, default-features = false, features = [
     "csv",
 ] }
+# `std_lib::darkly` (a `.darkly` file's own layer/manifest format, not a game-engine dependency):
+# `zip` unpacks the container, `serde`+`serde_json` deserialize `manifest.json` into local
+# structs. Both optional, gated behind the `darkly` feature below -- see the note on `vm`'s
+# `polars` dep for why this isn't just an unconditional dependency.
+zip = { version = "2", optional = true, default-features = false, features = ["deflate"] }
+serde = { version = "1", optional = true, features = ["derive"] }
 
 [features]
-default = ["dataframe"]
+default = ["dataframe", "darkly"]
 dataframe = ["dep:polars", "dep:polars-io", "vm/dataframe"]
+darkly = ["dep:zip", "dep:serde", "vm/darkly"]
 
 [dev-dependencies]
 parse = { package = "mimas-parse", path = "../parse", version = "0.1.0" }

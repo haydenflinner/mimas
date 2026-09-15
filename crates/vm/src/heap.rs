@@ -184,6 +184,11 @@ impl<'gc> Ctx<'gc> {
         crate::val::GroupBy(Gc::new(self.mutation, gc_arena::Static(gb)))
     }
 
+    #[cfg(feature = "darkly")]
+    pub fn new_darkly_image(self, image: crate::val::RawImage) -> crate::val::DarklyImage<'gc> {
+        crate::val::DarklyImage(Gc::new(self.mutation, gc_arena::Static(image)))
+    }
+
     // fresh allocation per container so the result shares no mutable state with `value`. scalars,
     // interned strs, fns and closures are copied by handle (immutable / callable). recurses like
     // `display`, so it shares display's no-cycles assumption.
@@ -327,6 +332,11 @@ impl<'gc> Ctx<'gc> {
             // rows/columns for) -- same placeholder style as Closure's `<closure @..>`.
             #[cfg(feature = "dataframe")]
             Val::GroupBy(_) => out.push_str("<group_by>"),
+            // raw pixel bytes have no meaningful text rendering -- dims are the useful summary.
+            #[cfg(feature = "darkly")]
+            Val::DarklyImage(img) => {
+                let _ = write!(out, "<image {}x{}>", img.0.0.width, img.0.0.height);
+            }
         }
         Ok(())
     }

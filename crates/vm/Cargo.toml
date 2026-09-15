@@ -47,10 +47,16 @@ polars = { path = "/Users/wow/code/dsa/polars/crates/polars", optional = true, d
 ] }
 
 [features]
-default = ["dataframe"]
+default = ["dataframe", "darkly"]
 # Val::DataFrame/Val::PlExpr, operator overloading for them in bin(), and the polars dependency
 # itself. On by default so existing embedders see no change; `default-features = false` opts out.
 dataframe = ["dep:polars"]
+# Val::DarklyImage -- decoded pixel bytes from a `.darkly` layer (std::darkly::open, in
+# `library`). No extra dependency at this layer: `RawImage` is a plain owned Rust struct, so this
+# feature only exists for symmetry with `dataframe` (an embedder who never touches
+# `std::darkly` can still opt the variant itself out) and to gate `library`'s actual `zip`/`serde`
+# dependencies behind its own same-named feature.
+darkly = []
 op-count = []
 
 [dev-dependencies]

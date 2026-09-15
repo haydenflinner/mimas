@@ -307,6 +307,43 @@ impl<'gc> MimasType<'gc> for crate::val::GroupBy<'gc> {
     }
 }
 
+// ----- DarklyImage -------------------------------------------------------------------------
+//
+// Same reasoning as DataFrame/PlExpr above: a decoded pixel buffer doesn't fit Val's closed set
+// of field types, so it's a real Val variant with a marker adt to hang a Ty off of, not a
+// `#[mimas] struct`.
+#[cfg(feature = "darkly")]
+pub struct DarklyImageTy;
+#[cfg(feature = "darkly")]
+impl crate::adt::MimasAdt for DarklyImageTy {
+    fn descriptor(_reg: &Registry) -> crate::adt::ApiAdtDescriptor {
+        crate::adt::ApiAdtDescriptor {
+            name: "DarklyImage",
+            module: &["std", "darkly"],
+            kind: api::ApiAdtKind::Struct,
+            doc: "Decoded pixel bytes from a `.darkly` raster/mask layer.",
+            variants: vec![crate::adt::ApiVariantShape {
+                name: "DarklyImage".into(),
+                doc: "",
+                fields: api::ApiVariantFields::Unit,
+            }],
+        }
+    }
+}
+
+#[cfg(feature = "darkly")]
+impl<'gc> MimasType<'gc> for crate::val::DarklyImage<'gc> {
+    fn mimas_ty(reg: &Registry) -> Option<Ty> {
+        Some(Ty::Adt(reg.get::<DarklyImageTy>()?.adt_id))
+    }
+    fn from_value(_ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError> {
+        v.as_darkly_image().ok_or_else(|| ty_error("DarklyImage", v))
+    }
+    fn into_value(self, _ctx: Ctx<'gc>) -> Val<'gc> {
+        Val::DarklyImage(self)
+    }
+}
+
 impl<'gc> MimasType<'gc> for Instance<'gc> {
     fn mimas_ty(_: &Registry) -> Option<Ty> {
         None
