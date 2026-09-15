@@ -17,7 +17,7 @@ use bevy::ecs::system::{Commands, NonSendMut, Query, ResMut};
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 use bevy::ui::widget::TextScroll;
 
-use crate::{DataflowView, Editor, ManualEditorScroll, SceneView, Session, ShowLocals};
+use crate::{DarklyView, DataflowView, Editor, ManualEditorScroll, SceneView, Session, ShowLocals};
 
 enum Action {
     Screenshot(&'static str),
@@ -48,6 +48,8 @@ enum Action {
     SetEditorScrollY(f32),
     /// Simulates clicking the "Dataflow"/"Debugger" toggle.
     ToggleDataflow,
+    /// Simulates clicking the "Darkly"/"Debugger" toggle.
+    ToggleDarkly,
     /// Simulates typing a new function name into the dataflow view's name field.
     SetDataflowFunction(&'static str),
     /// Simulates clicking the "Locals"/"Hide locals" toggle.
@@ -118,6 +120,16 @@ fn script() -> VecDeque<Action> {
         ToggleDataflow,
         Wait(8),
         Screenshot("df_04_back_to_debugger"),
+        Wait(8),
+        // Darkly view check: opens the layer-tree panel for the example .darkly file (see
+        // `darkly_view.rs`) and confirms it's showing real content, not a blank/error panel.
+        ToggleDarkly,
+        Wait(8),
+        Screenshot("dk_01_layer_tree"),
+        Wait(8),
+        ToggleDarkly,
+        Wait(8),
+        Screenshot("dk_02_back_to_debugger"),
         Wait(8),
         // Hover-popup scene check: a value implementing img::Draw, exercising most of the
         // primitive set in one go -- a solid rectangle background, place_image compositing three
@@ -272,6 +284,7 @@ fn drive(
     mut session: NonSendMut<Session>,
     mut editor: ResMut<Editor>,
     mut manual_scroll: ResMut<ManualEditorScroll>,
+    mut darkly_view: ResMut<DarklyView>,
     mut dataflow_view: ResMut<DataflowView>,
     mut scene_view: ResMut<SceneView>,
     mut show_locals: ResMut<ShowLocals>,
@@ -334,6 +347,7 @@ fn drive(
             }
         }
         Action::ToggleDataflow => dataflow_view.active = !dataflow_view.active,
+        Action::ToggleDarkly => darkly_view.active = !darkly_view.active,
         Action::ToggleLocals => show_locals.0 = !show_locals.0,
         Action::HoverIdent(name) => scene_view.hovered = Some(name.to_string()),
         Action::ClearHover => scene_view.hovered = None,

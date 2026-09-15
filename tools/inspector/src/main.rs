@@ -42,11 +42,13 @@ use bevy_immediate::{
 use mimas::vm::{Captured, Inspect, Vm};
 
 mod autoshot;
+mod darkly_view;
 mod dataflow_view;
 mod scene_view;
 mod theme;
 mod typst_preview;
 
+pub(crate) use darkly_view::DarklyView;
 pub(crate) use dataflow_view::DataflowView;
 pub(crate) use scene_view::SceneView;
 use typst_preview::TypstPreview;
@@ -439,6 +441,7 @@ fn main() {
         .init_resource::<CurrentPreview>()
         .init_resource::<Editor>()
         .init_resource::<ManualEditorScroll>()
+        .init_resource::<DarklyView>()
         .init_resource::<DataflowView>()
         .init_resource::<SceneView>()
         .init_resource::<ShowLocals>()
@@ -1043,6 +1046,7 @@ fn ui_system(
     mut typst_preview: ResMut<TypstPreview>,
     mut current_preview: ResMut<CurrentPreview>,
     mut editor: ResMut<Editor>,
+    mut darkly_view: ResMut<DarklyView>,
     mut dataflow_view: ResMut<DataflowView>,
     mut scene_view: ResMut<SceneView>,
     mut show_locals: ResMut<ShowLocals>,
@@ -1114,6 +1118,19 @@ fn ui_system(
                     });
                 if dataflow_btn.clicked() {
                     dataflow_view.active = !dataflow_view.active;
+                    darkly_view.active = false;
+                }
+
+                let mut darkly_btn = ui
+                    .ch_id("darkly_toggle")
+                    .on_spawn_insert(button_node)
+                    .add(|ui| {
+                        let label = if darkly_view.active { "Debugger" } else { "Darkly" };
+                        ui.ch().on_spawn_insert(|| text_style(font.clone())).text(label);
+                    });
+                if darkly_btn.clicked() {
+                    darkly_view.active = !darkly_view.active;
+                    dataflow_view.active = false;
                 }
 
                 let mut locals_btn = ui
@@ -1266,6 +1283,12 @@ fn ui_system(
                 if let Some(graph) = dataflow_view.graph() {
                     dataflow_view::render(ui, font.clone(), graph);
                 }
+                return;
+            }
+
+            if darkly_view.active {
+                darkly_view.refresh();
+                darkly_view::render(ui, font.clone(), &darkly_view);
                 return;
             }
 

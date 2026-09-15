@@ -26,11 +26,14 @@ solve = { package = "mimas-solve", path = "../solve", version = "0.1.0" }
 vm = { package = "mimas-vm", path = "../vm", version = "0.1.0", default-features = false }
 
 [features]
-default = ["dataframe"]
+default = ["dataframe", "darkly"]
 # DataFrame/PlExpr querying via std::polars, backed by a real polars dependency -- see the
 # `dataframe` feature notes on the `vm`/`library` crates. On by default; `default-features =
 # false` (or `features = []`) opts out for an embedder who doesn't want polars pulled in at all.
 dataframe = ["vm/dataframe", "library/dataframe"]
+# std::darkly (.darkly layer-tree reading) -- see the `darkly` feature notes on the `vm`/
+# `library` crates. On by default, same opt-out story as `dataframe`.
+darkly = ["vm/darkly", "library/darkly"]
 op-count = ["vm/op-count"]
 
 [dev-dependencies]
