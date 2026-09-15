@@ -215,6 +215,39 @@ impl<'s> Lex<'s, Tok<TokKind<'s>>, TokKind<'s>> for Lexer<'s> {
         &mut self.char_stream
     }
 
+    /// Overrides `Lex`'s default (alphanumeric-or-`_` only) to also allow internal `-`s, kebab-
+    /// case style (`my-var`) -- but only when the `-` sits directly between two identifier chars
+    /// with no whitespace on either side. `-` next to whitespace (`foo - bar`, `foo- bar`, `foo
+    /// -bar`) is never absorbed here, so it's left for the ordinary `Minus` token exactly as
+    /// before -- which is what actually disambiguates `foo-bar` (one identifier) from `foo - bar`
+    /// (subtraction): write the operator with spaces, or it reads as part of the name.
+    ///
+    /// A leading `-` (nothing consumed yet) is never treated as a continuation, whatever follows
+    /// it -- `can_extend` guards that, so a bare `-foo` still lexes as `Minus` then `Ident(foo)`,
+    /// same as before. A `-` not immediately followed by an identifier char (`foo-)`, `foo- `,
+    /// `foo--bar`) rolls back to just after the last committed segment via `reset_peeks`, leaving
+    /// the `-` itself untouched for the next `lex()` call.
+    fn construct_ident(&mut self) -> Option<&'s str> {
+        let is_continue = |c: char| c.is_alphanumeric() || c == '_';
+        let stream = self.char_stream();
+        let start = stream.position();
+        loop {
+            while stream.match_peek_with(is_continue) {}
+            stream.chomp_peeks();
+            let can_extend = stream.position() > start;
+            if can_extend
+                && stream.match_peek_with(|c: char| c == '-')
+                && stream.match_peek_with(is_continue)
+            {
+                continue;
+            }
+            stream.reset_peeks();
+            break;
+        }
+        let end = stream.position();
+        (end > start).then(|| stream.slice(start..end))
+    }
+
     fn lex(&mut self) -> ChompyResult<Option<Tok<TokKind<'s>>>> {
         // whitespace in one go -- massive amounts of whitespace can cause enormously deep stacks
         loop {

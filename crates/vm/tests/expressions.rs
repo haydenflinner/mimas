@@ -36,6 +36,17 @@ test_vm!(
 );
 
 test_vm!(
+    // `-` continues an identifier (kebab-case) only when it sits directly between two identifier
+    // chars with no whitespace on either side -- that's what disambiguates it from subtraction,
+    // which needs spaces around the `-`. See crates/parse/src/tests/lex_tokens.rs for the
+    // lexer-level cases this rests on.
+    kebab_case_identifiers,
+    "let my-var = 5; let other-var = 3;",
+    "my-var" => Int(5),
+    "my-var - other-var" => Int(2),
+);
+
+test_vm!(
     block,
     "{ 0 }" => Int(0),
     "{ let a = 0; { let b = 1; a + b } }" => Int(1),

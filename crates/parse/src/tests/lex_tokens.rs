@@ -25,6 +25,21 @@ tok_test!(fstring_with_quoted_index: "f\"{m[\"k\"]}\"" => FString("{m[\"k\"]}"))
 tok_test!(fstring_with_quoted_brace: "f\"{m[\"}\"]}\"" => FString("{m[\"}\"]}"));
 tok_test!(ident: "foo" => Ident("foo"));
 
+// kebab-case identifiers: `-` continues an identifier only when it sits directly between two
+// identifier chars with no whitespace on either side. That's the whole disambiguation from the
+// `Minus` token -- a `-` next to whitespace (or at the very start) is never absorbed here, so
+// writing the operator with spaces around it is what keeps `foo - bar` meaning subtraction.
+tok_test!(kebab_ident: "my-var" => Ident("my-var"));
+tok_test!(kebab_ident_multi_segment: "my-long-var-name" => Ident("my-long-var-name"));
+tok_test!(kebab_ident_trailing_digit: "x-1" => Ident("x-1"));
+tok_test!(kebab_ident_with_underscore: "my_var-2" => Ident("my_var-2"));
+tok_test!(kebab_ident_vs_spaced_minus: "foo - bar" => Ident("foo"), Minus, Ident("bar"));
+tok_test!(kebab_ident_space_before_minus: "foo -bar" => Ident("foo"), Minus, Ident("bar"));
+tok_test!(kebab_ident_space_after_minus: "foo- bar" => Ident("foo"), Minus, Ident("bar"));
+tok_test!(kebab_ident_trailing_hyphen_not_absorbed: "foo-)" => Ident("foo"), Minus, RightParenthesis);
+tok_test!(kebab_ident_double_hyphen_not_absorbed: "foo--bar" => Ident("foo"), Minus, Minus, Ident("bar"));
+tok_test!(kebab_ident_leading_hyphen_is_minus: "-foo" => Minus, Ident("foo"));
+
 tok_test!(tykw_int: "int" => TyKw(TyKw::Int));
 tok_test!(tykw_float: "float" => TyKw(TyKw::Float));
 tok_test!(tykw_str: "str" => TyKw(TyKw::Str));
