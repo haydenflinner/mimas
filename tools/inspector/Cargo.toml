@@ -8,6 +8,11 @@ publish = false
 
 [dependencies]
 mimas = { path = "../../crates/mimas" }
+# just for pulling `composite.png` (a plain, already-rendered PNG) out of a `.darkly` file's zip
+# container for `darkly_view`'s preview image -- unrelated to (and much lighter than) the actual
+# `darkly` GPU paint engine. `std::darkly` itself has no concept of the composite; it's an
+# inspector-only convenience, not something a game loading layer data needs.
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 # default-features off + this curated list keeps the build to what an inspector actually needs
 # (no scene notation, no feathers widgets, no non-macOS windowing backends).

@@ -1287,7 +1287,7 @@ fn ui_system(
             }
 
             if darkly_view.active {
-                darkly_view.refresh();
+                darkly_view.refresh(&asset_server);
                 darkly_view::render(ui, font.clone(), &darkly_view);
                 return;
             }

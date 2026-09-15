@@ -3679,6 +3679,7 @@ dependencies = [
  "bevy",
  "bevy_immediate",
  "mimas",
+ "zip",
 ]
 
 [[package]]
