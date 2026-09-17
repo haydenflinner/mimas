@@ -58,8 +58,6 @@ jobs:
           version=$(grep -A1 'name = "wasm-bindgen"$' examples/bevy/Cargo.lock \
             | sed -n 's/version = "\(.*\)"/\1/p')
           cargo install wasm-bindgen-cli --version "$version" --locked
-          sudo apt-get update
-          sudo apt-get install -y binaryen
 
       - name: Setup Pages
         id: pages
@@ -77,7 +75,6 @@ jobs:
           wasm-bindgen --target web --no-typescript \
             --out-dir "$out" --out-name breakout \
             examples/bevy/target/wasm32-unknown-unknown/release/bevy.wasm
-          wasm-opt -Oz "$out/breakout_bg.wasm" -o "$out/breakout_bg.wasm"
           cp -r examples/bevy/assets "$out/assets"
 
       - name: Upload artifact

@@ -26,10 +26,5 @@ wasm-bindgen --target web --no-typescript \
     "$example/target/wasm32-unknown-unknown/release/bevy.wasm"
 cp -r "$example/assets" "$out/assets"
 
-# optional, but it roughly halves the download
-if command -v wasm-opt >/dev/null; then
-    wasm-opt -Oz "$out/breakout_bg.wasm" -o "$out/breakout_bg.wasm"
-fi
-
 echo "serving http://localhost:$port/extension/bevy.html"
 python3 -m http.server -d book/book "$port"
