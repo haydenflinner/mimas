@@ -69,7 +69,7 @@ Additionally, `bevy_mod_scripting`'s API is built for dynamic languages. mimas i
 ```toml
 [dependencies]
 bevy = "0.19"
-mimas = { version = "0.1", features = ["bevy"] }
+mimas = { version = "0.2", features = ["bevy"] }
 ```
 
 ```rust

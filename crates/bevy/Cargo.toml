@@ -8,7 +8,7 @@ repository = "https://github.com/imlazyeye/mimas"
 homepage = "https://mim.as"
 rust-version = "1.95"
 readme = "../../README.md"
-documentation = "https://docs.rs/mimas"
+documentation = "https://docs.rs/mimas-bevy"
 keywords = ["scripting", "language", "embedded", "gamedev", "interpreter"]
 categories = ["compilers", "game-development"]
 
