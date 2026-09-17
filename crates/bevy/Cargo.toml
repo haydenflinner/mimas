@@ -2,11 +2,15 @@
 name = "mimas-bevy"
 version = "0.1.0"
 edition = "2024"
-description = "todo"
+description = "A plugin for Bevy to support the usage of mimas for scripting."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/imlazyeye/mimas"
 homepage = "https://mim.as"
 rust-version = "1.95"
+readme = "../../README.md"
+documentation = "https://docs.rs/mimas"
+keywords = ["scripting", "language", "embedded", "gamedev", "interpreter"]
+categories = ["compilers", "game-development"]
 
 [dependencies]
 api = { package = "mimas-api", path = "../api", version = "0.1.0" }

@@ -1438,8 +1438,9 @@ impl Vm {
         })
     }
 
-    /// The script's items as the host sees them: its root fns and consts, and each module's
-    /// `pub` ones.
+    /// The script's items as the host sees them: its fns, consts and types, and the same for
+    /// every module. Privacy is a rule for scripts, not for the host, so private items are here
+    /// too -- a `Type` carries its own `vis` if you care to check.
     pub fn root(&self) -> &Module {
         &self.root
     }
