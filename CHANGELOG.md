@@ -2,6 +2,8 @@
 
 Notable changes to mimas. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and mimas aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reaches `1.0.0`. Until then, expect breaking changes in minor releases.
 
+## [Unreleased]
+
 ## [0.2.0] - 2026-09-17
 
 This marks the first update for mimas, which is primarily focused on the new [Bevy](https://bevy.org) plugin. Like everything else, it is very young, so it will no doubt require further work and expansion. Please submit an issue if you find any problems or have any requests!
@@ -62,5 +64,6 @@ These are rejected with a clear error rather than misbehaving, and are documente
 - Mutating a collection while iterating it is not caught, and can loop forever.
 - No generics, no async, and dictionary keys must be strings.
 
+<!-- next-release -->
 [0.2.0]: https://github.com/imlazyeye/mimas/releases/tag/v0.2.0
 [0.1.0]: https://github.com/imlazyeye/mimas/releases/tag/v0.1.0
