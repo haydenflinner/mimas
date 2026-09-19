@@ -6,7 +6,7 @@ use chompy::{
 };
 use lex::{Lexer, TokKind};
 use miette::NamedSource;
-use shared::{FileId, Located, Location, Result, Span};
+use shared::{Error, FileId, Located, Location, Result, Span};
 use std::{iter::Peekable, sync::Arc};
 
 /// Recursively descends mimas source, incrementally returning various
@@ -27,6 +27,9 @@ pub struct Parser<'s> {
     /// while this is non-zero -- Go's ASI would otherwise terminate the expression after the
     /// operand (`a\n+ b` is not addition). Parentheses are the explicit opt-in (`(a\n+ b)`).
     paren_depth: usize,
+    /// Monotonic counter for `__assert_left_N` / `__assert_right_N` names minted by `assert!`
+    /// rewriting, so nested asserts don't collide.
+    assert_id: u32,
 }
 
 // Basic features
@@ -51,6 +54,7 @@ impl<'s> Parser<'s> {
             restrictions: Restriction::default(),
             depth: 0,
             paren_depth: 0,
+            assert_id: 0,
         }
     }
 
@@ -134,7 +138,8 @@ impl<'s> Parser<'s> {
         match self.peek()?.kind() {
             TokKind::Let => self.let_stmt().map(BlockElement::Stmt),
             TokKind::Module => self.module_stmt().map(BlockElement::Stmt),
-            TokKind::Pub
+            TokKind::Hash
+            | TokKind::Pub
             | TokKind::Fn
             | TokKind::Struct
             | TokKind::Pact
@@ -180,6 +185,7 @@ impl<'s> Parser<'s> {
 
     fn item(&mut self) -> Result<Item> {
         let start = self.next_tok_boundary();
+        let attrs = self.attributes()?;
         let public = self.match_take(TokKind::Pub).is_some();
 
         let (kind, requires_semi): (ItemKind, bool) = match self.peek()?.kind() {
@@ -196,6 +202,8 @@ impl<'s> Parser<'s> {
             }
         };
 
+        self.validate_attrs(&attrs, &kind, true)?;
+
         let location = self.location(start);
         if requires_semi {
             if self.match_take(TokKind::SemiColon).is_none() && !self.newline_before_next() {
@@ -209,7 +217,73 @@ impl<'s> Parser<'s> {
             self.match_take(TokKind::SemiColon);
         }
 
-        Ok(Item::new(kind, location, public))
+        Ok(Item::new(kind, location, public).with_attrs(attrs))
+    }
+
+    /// Zero or more `#[name]` markers sitting immediately before an item.
+    fn attributes(&mut self) -> Result<Vec<Attribute>> {
+        let mut attrs = vec![];
+        while self.soft_peek()?.is_some_and(|tok| tok.kind() == TokKind::Hash) {
+            attrs.push(self.attribute()?);
+        }
+        Ok(attrs)
+    }
+
+    fn attribute(&mut self) -> Result<Attribute> {
+        self.take_known(TokKind::Hash)?;
+        self.expect(TokKind::LeftSquare)?;
+        let name = self.require_ident()?;
+        self.expect(TokKind::RightSquare)?;
+        Ok(Attribute { name })
+    }
+
+    fn validate_attrs(&self, attrs: &[Attribute], kind: &ItemKind, allow_test: bool) -> Result<()> {
+        let mut seen_test = false;
+        for attr in attrs {
+            match attr.name.lexeme.as_str() {
+                "test" => {
+                    if seen_test {
+                        Err(DuplicateAttribute {
+                            src: self.src(),
+                            at: attr.name.location.into(),
+                            name: attr.name.lexeme.clone(),
+                        })?;
+                    }
+                    seen_test = true;
+                    match kind {
+                        ItemKind::Function(f) if allow_test => {
+                            if f.is_method() {
+                                Err(TestOnMethod {
+                                    src: self.src(),
+                                    at: attr.name.location.into(),
+                                })?;
+                            }
+                            if !f.parameters.is_empty() {
+                                Err(TestTakesParameters {
+                                    src: self.src(),
+                                    at: attr.name.location.into(),
+                                })?;
+                            }
+                        }
+                        ItemKind::Function(_) => Err(TestOnMethod {
+                            src: self.src(),
+                            at: attr.name.location.into(),
+                        })?,
+                        _ => Err(AttributeNotOnFunction {
+                            src: self.src(),
+                            at: attr.name.location.into(),
+                            name: attr.name.lexeme.clone(),
+                        })?,
+                    }
+                }
+                _ => Err(UnknownAttribute {
+                    src: self.src(),
+                    at: attr.name.location.into(),
+                    name: attr.name.lexeme.clone(),
+                })?,
+            }
+        }
+        Ok(())
     }
 
     fn use_decl(&mut self) -> Result<Use> {
@@ -606,6 +680,7 @@ impl<'s> Parser<'s> {
                 break;
             } else {
                 let item_start = self.next_tok_boundary();
+                let attrs = self.attributes()?;
                 let public = self.match_take(TokKind::Pub).is_some();
                 let (kind, requires_semi): (ItemKind, bool) = match self.peek()?.kind() {
                     TokKind::Const => (self.const_decl()?.into(), true),
@@ -618,6 +693,7 @@ impl<'s> Parser<'s> {
                         .into());
                     }
                 };
+                self.validate_attrs(&attrs, &kind, false)?;
                 let location = self.location(item_start);
                 if requires_semi {
                     if self.match_take(TokKind::SemiColon).is_none() && !self.newline_before_next()
@@ -630,7 +706,7 @@ impl<'s> Parser<'s> {
                 } else {
                     self.match_take(TokKind::SemiColon);
                 }
-                items.push(Item::new(kind, location, public));
+                items.push(Item::new(kind, location, public).with_attrs(attrs));
             }
         }
         Ok(Impl::new(target, pact, items))
@@ -1240,6 +1316,14 @@ impl<'s> Parser<'s> {
         let mut expr = Some(expr);
         loop {
             expr = match self.soft_peek()?.map(|v| v.kind()) {
+                Some(TokKind::Bang)
+                    if expr
+                        .as_ref()
+                        .and_then(Expr::as_ident)
+                        .is_some_and(|i| i.lexeme == "assert") =>
+                {
+                    Some(self.assert_or_unwrap(expr.take().unwrap())?)
+                }
                 Some(TokKind::LeftParenthesis) => Some(self.call(expr)?),
                 Some(TokKind::LeftSquare | TokKind::HookLeftSquare) => {
                     Some(self.square_access(expr)?)
@@ -1271,6 +1355,225 @@ impl<'s> Parser<'s> {
             ) => self.chain_accesses(expr),
             _ => Ok(expr),
         }
+    }
+
+    /// `assert!(expr)` rewrites to an `if`/`panic` block. Bare `assert!` (no following `(`) is
+    /// still unwrap of a binding named `assert`.
+    fn assert_or_unwrap(&mut self, assert_ident: Expr) -> Result<Expr> {
+        let start = assert_ident.span().start();
+        self.take_known(TokKind::Bang)?;
+        if !matches!(
+            self.soft_peek()?.map(|t| t.kind()),
+            Some(TokKind::LeftParenthesis)
+        ) {
+            return Ok(self.new_expr(Unwrap { expr: assert_ident }, start));
+        }
+        self.expect(TokKind::LeftParenthesis)?;
+        let inner = self.in_parens(|p| {
+            if matches!(
+                p.soft_peek()?.map(|t| t.kind()),
+                Some(TokKind::RightParenthesis)
+            ) {
+                let at = shared::Location::from(p.peek()?.location());
+                return Err(p.assert_arity(at));
+            }
+            let expr = p.expr()?;
+            if p.match_take(TokKind::Comma).is_some()
+                && !matches!(
+                    p.soft_peek()?.map(|t| t.kind()),
+                    Some(TokKind::RightParenthesis)
+                )
+            {
+                let at = shared::Location::from(p.peek()?.location());
+                return Err(p.assert_arity(at));
+            }
+            p.expect(TokKind::RightParenthesis)?;
+            Ok(expr)
+        })?;
+        Ok(self.rewrite_assert(start, inner))
+    }
+
+    fn assert_arity(&self, at: shared::Location) -> Error {
+        AssertArity {
+            src: self.src(),
+            at: at.into(),
+        }
+        .into()
+    }
+
+    fn rewrite_assert(&mut self, start: usize, inner: Expr) -> Expr {
+        match Self::skip_groups(&inner).kind().clone() {
+            ExprKind::Equality(eq) => {
+                let op_text = eq.op.to_string();
+                self.rewrite_assert_cmp(start, eq.left, eq.right, eq.op.invert(), op_text)
+            }
+            ExprKind::In(inn) => {
+                let op_text = if inn.condition { "in" } else { "!in" };
+                self.rewrite_assert_in(start, inn.left, inn.right, !inn.condition, op_text)
+            }
+            _ => self.rewrite_assert_bool(start, inner),
+        }
+    }
+
+    fn skip_groups(mut expr: &Expr) -> &Expr {
+        while let ExprKind::Grouping(grouping) = expr.kind() {
+            expr = &grouping.inner;
+        }
+        expr
+    }
+
+    fn rewrite_assert_cmp(
+        &mut self,
+        start: usize,
+        left: Expr,
+        right: Expr,
+        inverted: EqualityOp,
+        op_text: String,
+    ) -> Expr {
+        let (left_ident, right_ident) = self.next_assert_temps(start);
+        let left_expr = self.new_expr(left_ident.clone(), start);
+        let right_expr = self.new_expr(right_ident.clone(), start);
+        let condition = self.new_expr(
+            Equality::new(left_expr.clone(), inverted, right_expr.clone()),
+            start,
+        );
+        let message = self.assert_pair_message(left_expr, right_expr, &op_text, start);
+        self.assert_lets_if(
+            start,
+            vec![
+                self.synthetic_let(left_ident, left, start),
+                self.synthetic_let(right_ident, right, start),
+            ],
+            condition,
+            message,
+        )
+    }
+
+    fn rewrite_assert_in(
+        &mut self,
+        start: usize,
+        left: Expr,
+        right: Expr,
+        fail_when: bool,
+        op_text: &str,
+    ) -> Expr {
+        let (left_ident, right_ident) = self.next_assert_temps(start);
+        let left_expr = self.new_expr(left_ident.clone(), start);
+        let right_expr = self.new_expr(right_ident.clone(), start);
+        let condition = self.new_expr(
+            In::new(left_expr.clone(), right_expr.clone(), fail_when),
+            start,
+        );
+        let message = self.assert_pair_message(left_expr, right_expr, op_text, start);
+        self.assert_lets_if(
+            start,
+            vec![
+                self.synthetic_let(left_ident, left, start),
+                self.synthetic_let(right_ident, right, start),
+            ],
+            condition,
+            message,
+        )
+    }
+
+    fn rewrite_assert_bool(&mut self, start: usize, inner: Expr) -> Expr {
+        let snippet = self.source_of(&inner);
+        let condition = self.new_expr(Unary::new(UnaryOp::Not, inner), start);
+        let message = self.new_expr(
+            Literal::String(format!("assertion failed: {snippet}")),
+            start,
+        );
+        self.assert_lets_if(start, vec![], condition, message)
+    }
+
+    fn next_assert_temps(&mut self, start: usize) -> (Ident, Ident) {
+        self.assert_id += 1;
+        let n = self.assert_id;
+        (
+            self.ident_at(format!("__assert_left_{n}"), start),
+            self.ident_at(format!("__assert_right_{n}"), start),
+        )
+    }
+
+    fn ident_at(&self, name: impl Into<String>, start: usize) -> Ident {
+        Ident::new(name, self.location(start))
+    }
+
+    fn synthetic_let(&self, name: Ident, value: Expr, start: usize) -> Stmt {
+        self.new_stmt(
+            Let {
+                left: Pat::new(PatKind::Ident(name), self.location(start)),
+                annotation: None,
+                right: value,
+                else_branch: None,
+            },
+            start,
+        )
+    }
+
+    fn assert_pair_message(&self, left: Expr, right: Expr, op: &str, start: usize) -> Expr {
+        self.new_expr(
+            FString::new(vec![
+                FStringPart::Literal("assertion failed: ".into()),
+                FStringPart::Expr(left),
+                FStringPart::Literal(format!(" {op} ")),
+                FStringPart::Expr(right),
+            ]),
+            start,
+        )
+    }
+
+    fn assert_lets_if(
+        &self,
+        start: usize,
+        mut body: Vec<Stmt>,
+        condition: Expr,
+        message: Expr,
+    ) -> Expr {
+        let panic_call = self.new_expr(
+            Call::new(
+                self.new_expr(self.ident_at("panic", start), start),
+                vec![Argument {
+                    name: None,
+                    value: message,
+                }],
+            ),
+            start,
+        );
+        let then_body = self.new_expr(
+            Block {
+                body: vec![self.new_stmt(StmtKind::Expr(panic_call), start)],
+                yielded_expr: None,
+            },
+            start,
+        );
+        let iff = self.new_expr(
+            If {
+                condition,
+                main_body: then_body,
+                else_expr: None,
+                binding: None,
+            },
+            start,
+        );
+        body.push(self.new_stmt(StmtKind::Expr(iff), start));
+        self.new_expr(
+            Block {
+                body,
+                yielded_expr: None,
+            },
+            start,
+        )
+    }
+
+    fn source_of(&self, expr: &Expr) -> String {
+        let span = expr.span();
+        self.source
+            .get(span.start()..span.end())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| expr.to_string())
     }
 
     fn unwrap(&mut self, left: Option<Expr>) -> Result<Expr> {

@@ -14,6 +14,7 @@ tok_test!(lex_const: "const" => Const);
 tok_test!(lex_pub: "pub" => Pub);
 tok_test!(lex_module: "module" => Module);
 tok_test!(lex_at: "@" => At);
+tok_test!(lex_hash: "#" => Hash);
 tok_test!(lex_colon: ":" => Colon);
 tok_test!(lex_double_colon: "::" => DoubleColon);
 tok_test!(lex_dot: "." => Dot);

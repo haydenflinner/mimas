@@ -118,3 +118,31 @@ fn host_function_call() {
     let mut vm = vm::Vm::execute(SOURCE, |_| {}).unwrap();
     assert_eq!(vm.call_fn("foo"), Some(vm::Captured::Int(1)));
 }
+
+#[test]
+fn test_attribute_runs_on_compile() {
+    const SOURCE: &str = "
+        #[test]
+        fn it_works() {}
+
+        #[test]
+        fn it_fails() {
+            let x: int? = null;
+            x!;
+        }
+    ";
+    let mut vm = vm::Vm::compile(SOURCE, |_| {}).unwrap();
+    let results = vm.run_tests();
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].name, "it_works");
+    assert!(results[0].passed(), "{:?}", results[0]);
+    assert_eq!(results[1].name, "it_fails");
+    assert!(!results[1].passed(), "{:?}", results[1]);
+    // injected test calls must not leave the debug session mid-test
+    assert!(vm.debug_step().is_ok());
+}
+
+#[test]
+fn test_attribute_is_rejected_on_parameterized_fn() {
+    vm_test_utils::assert_fails("#[test] fn foo(x: int) {}");
+}

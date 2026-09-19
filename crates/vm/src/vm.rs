@@ -98,6 +98,19 @@ pub enum DebugEvent {
     },
 }
 
+/// Outcome of running one `#[test]` function via [`Vm::run_tests`]. `error` is `None` on pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TestResult {
+    pub name: String,
+    pub error: Option<String>,
+}
+
+impl TestResult {
+    pub fn passed(&self) -> bool {
+        self.error.is_none()
+    }
+}
+
 pub struct Vm {
     pub(crate) entry: BodyId,
     pub(crate) code: Decoder,
@@ -107,6 +120,8 @@ pub struct Vm {
     pub(crate) arena: Arena<Rootable![State<'_>]>,
     pub(crate) sources: Sources,
     pub(crate) items: HashMap<String, BodyId>,
+    /// Functions marked `#[test]`, in source order. Each name is a key in `items`.
+    pub(crate) tests: Vec<String>,
     /// `items` inverted, for labeling a frame with its source-level function name -- see
     /// [`Vm::chunk_name`]. Rebuilt whenever `items` is (`load_program`).
     pub(crate) chunk_names: HashMap<BodyId, String>,
@@ -135,6 +150,7 @@ impl Vm {
             arena,
             sources: Sources::new(),
             items: HashMap::default(),
+            tests: Vec::new(),
             chunk_names: HashMap::default(),
             methods: Vec::new(),
             field_names: Vec::new(),
@@ -151,6 +167,7 @@ impl Vm {
             struct_names,
             methods,
             field_names,
+            tests,
         } = program;
         self.entry = entry;
         self.code = Decoder { bytes, ip: 0 };
@@ -161,13 +178,26 @@ impl Vm {
             .map(|(name, &body)| (body, name.clone()))
             .collect();
         self.items = items;
+        self.tests = tests;
         self.methods = methods.into_values().collect();
         let field_names: Vec<Vec<String>> = field_names.into_values().collect();
         self.field_names = field_names.clone();
+        self.arena.mutate(|mc, state| {
+            *state.struct_names.borrow_mut(mc) = struct_names.into_values().collect();
+            *state.field_names.borrow_mut(mc) = field_names;
+        });
+        self.reset_to_entry();
+    }
+
+    /// Rewind the thread to a fresh entry frame so a later `debug_step`/`run` starts at the
+    /// program root. Used after an injected call (`call_fn`, `run_tests`) that would otherwise
+    /// leave register 0 / extra frames dirty.
+    fn reset_to_entry(&mut self) {
         let entry_chunk = &self.chunks[self.entry];
         let regs_count = entry_chunk.regs as usize;
         let entry_offset = entry_chunk.offset;
         let entry_body = self.entry;
+        self.code.ip = entry_offset;
         self.arena.mutate(|mc, state| {
             let mut t = state.thread.borrow_mut(mc);
             t.regs.clear();
@@ -179,8 +209,6 @@ impl Vm {
                 return_reg: 0,
                 base: 0,
             });
-            *state.struct_names.borrow_mut(mc) = struct_names.into_values().collect();
-            *state.field_names.borrow_mut(mc) = field_names;
         });
     }
 
@@ -1462,7 +1490,16 @@ impl Vm {
 
     /// Calls a function by name. Must be within the root of the program. Must require 0 arguments.
     pub fn call_fn(&mut self, name: &str) -> Option<Captured> {
-        let body_id = self.items.get(name).copied()?;
+        self.call_fn_result(name).ok()
+    }
+
+    /// [`Vm::call_fn`], but surfaces a runtime fault instead of swallowing it. Leaves the thread
+    /// dirty on error -- [`Vm::run_tests`] resets afterwards so a debug session still starts at
+    /// program entry.
+    pub fn call_fn_result(&mut self, name: &str) -> Result<Captured, Error> {
+        let Some(body_id) = self.items.get(name).copied() else {
+            return Err(miette::miette!("no fn {name}"));
+        };
 
         let Vm {
             code,
@@ -1488,13 +1525,31 @@ impl Vm {
                     &mut thread,
                     usize::MAX,
                     stop_depth,
-                )
-                .ok()?;
+                )?;
             }
 
             let t = state.thread.borrow();
-            Some(t.regs.first().unwrap().capture())
+            Ok(t.regs.first().unwrap().capture())
         })
+    }
+
+    /// Functions marked `#[test]`, in source order.
+    pub fn tests(&self) -> &[String] {
+        &self.tests
+    }
+
+    /// Runs every `#[test]` function to completion (not through `debug_step`). A panic or other
+    /// runtime fault is a failure; any other return is a pass. Resets the thread afterwards so a
+    /// debug session still starts at program entry.
+    pub fn run_tests(&mut self) -> Vec<TestResult> {
+        let names = self.tests.clone();
+        let mut results = Vec::with_capacity(names.len());
+        for name in names {
+            let error = self.call_fn_result(&name).err().map(|e| format!("{e}"));
+            self.reset_to_entry();
+            results.push(TestResult { name, error });
+        }
+        results
     }
 
     /// Finds the first live register (outermost frame first, then in register order) holding a

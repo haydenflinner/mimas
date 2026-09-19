@@ -61,7 +61,7 @@ impl Compiler {
         self
     }
 
-    pub fn compile(&mut self, ir: Ir) -> Program {
+    pub fn compile(&mut self, mut ir: Ir) -> Program {
         let mut bytes = Encoder::new();
 
         // body -> source name, for the --disasm dump only
@@ -577,6 +577,8 @@ impl Compiler {
             .collect::<Vec<_>>()
             .into();
 
+        let tests = std::mem::take(&mut ir.tests);
+
         Program {
             entry: BodyId::ZERO,
             chunks: std::mem::replace(&mut self.chunks, IdVec::new()),
@@ -586,6 +588,7 @@ impl Compiler {
             struct_names,
             methods,
             field_names,
+            tests,
         }
     }
 }

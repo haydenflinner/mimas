@@ -338,6 +338,7 @@ impl<'s> Lex<'s, Tok<TokKind<'s>>, TokKind<'s>> for Lexer<'s> {
                 '[' => TokKind::LeftSquare,
                 ']' => TokKind::RightSquare,
                 '@' => TokKind::At,
+                '#' => TokKind::Hash,
                 '=' => {
                     if self.match_chomp('=') {
                         TokKind::DoubleEqual

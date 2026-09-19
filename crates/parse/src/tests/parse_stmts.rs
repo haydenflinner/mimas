@@ -950,6 +950,27 @@ stmt_test!(
 );
 
 stmt_test!(
+    test_attribute,
+    "#[test] fn foo() {}",
+    Function::new(ident!("foo"), vec![], None, block!())
+        .into_item()
+        .with_attrs(vec![Attribute {
+            name: ident!("test"),
+        }])
+);
+
+stmt_test!(
+    test_attribute_before_pub,
+    "#[test] pub fn foo() {}",
+    Function::new(ident!("foo"), vec![], None, block!())
+        .into_item()
+        .with_attrs(vec![Attribute {
+            name: ident!("test"),
+        }])
+        .with_public()
+);
+
+stmt_test!(
     method,
     "fn foo(self) {}",
     Function {

@@ -39,7 +39,7 @@ use bevy_immediate::{
     ui::{CapsUi, clicked::ImmUiClicked, text::ImmUiText, text_input::ImmUiTextInput},
 };
 
-use mimas::vm::{Captured, Inspect, Vm};
+use mimas::vm::{Captured, Inspect, TestResult, Vm};
 
 mod autoshot;
 mod darkly_view;
@@ -229,6 +229,10 @@ pub(crate) struct Session {
     /// `Step` broke the coincidental tie. `ui_system` keys its preview cache off
     /// `(generation, steps)` instead, so a fresh `Vm` always counts as "changed".
     pub(crate) generation: u64,
+    /// Results of running every `#[test]` function at compile time (load / reset / apply). Empty
+    /// when the file has no tests. Failures live here rather than in `error`, so a failing test
+    /// doesn't freeze the debugger.
+    test_results: Vec<TestResult>,
 }
 
 impl Session {
@@ -242,12 +246,13 @@ impl Session {
         show_internals: bool,
         generation: u64,
     ) -> Result<Self, String> {
-        let vm = mimas::compile_files(&[
+        let mut vm = mimas::compile_files(&[
             ("main", &display_source),
             ("typst", TYPST_MODULE_SOURCE),
             ("img", IMG_MODULE_SOURCE),
         ])
         .map_err(|e| e.to_string())?;
+        let test_results = vm.run_tests();
         Ok(Session {
             vm,
             path,
@@ -258,6 +263,7 @@ impl Session {
             line_steps: 0,
             show_internals,
             generation,
+            test_results,
         })
     }
 
@@ -1062,6 +1068,13 @@ fn ui_system(
                 .on_spawn_insert(|| text_style(font.clone()))
                 .text(format!("mimas inspector -- {}", session.path.display()));
 
+            if !session.test_results.is_empty() {
+                let tests = tests_text(&session.test_results);
+                ui.ch_id("tests")
+                    .text(tests)
+                    .on_change_insert(true, || tests_style(&session.test_results, font.clone()));
+            }
+
             // controls row
             ui.ch().on_spawn_insert(row_node).add(|ui| {
                 let mut step_btn = ui
@@ -1550,6 +1563,35 @@ fn status_text(session: &Session) -> String {
     } else {
         format!("running ({} ops so far)", session.steps)
     }
+}
+
+fn tests_text(results: &[TestResult]) -> String {
+    let total = results.len();
+    let passed = results.iter().filter(|r| r.passed()).count();
+    let failed: Vec<_> = results.iter().filter(|r| !r.passed()).collect();
+    if failed.is_empty() {
+        format!("tests: {passed}/{total} passed")
+    } else {
+        let details = failed
+            .iter()
+            .map(|r| {
+                let err = r.error.as_deref().unwrap_or("failed");
+                let err = err.lines().next().unwrap_or(err);
+                format!("{}: {err}", r.name)
+            })
+            .collect::<Vec<_>>()
+            .join(" | ");
+        format!("tests: {passed}/{total} passed — {details}")
+    }
+}
+
+fn tests_style(results: &[TestResult], font: Handle<Font>) -> (TextColor, TextFont) {
+    let color = if results.iter().all(|r| r.passed()) {
+        theme::green()
+    } else {
+        theme::red()
+    };
+    (TextColor(color), text_font(font))
 }
 
 /// Color-codes `status_text`'s three states, so error/finished/running read at a glance instead

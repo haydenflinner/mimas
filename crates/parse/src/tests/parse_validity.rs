@@ -108,6 +108,42 @@ test_fail!(
 test_ok!(fn_with_body_ok, "fn foo() {}", "fn foo() -> int { 0 }");
 test_fail!(missing_fn_body_toplevel, "fn foo();", "fn foo() -> int;");
 
+// `#[test]` attributes
+test_ok!(
+    test_attribute_ok,
+    "#[test] fn foo() {}",
+    "#[test]\nfn foo() {}",
+    "#[test] pub fn foo() {}"
+);
+test_fail!(
+    test_attribute_rejected,
+    "#[test] fn foo(x: int) {}",
+    "#[test] fn foo(self) {}",
+    "#[test] struct Foo {}",
+    "#[test] const X = 1;",
+    "#[unknown] fn foo() {}",
+    "#[test] #[test] fn foo() {}",
+    "impl Foo { #[test] fn foo() {} }"
+);
+
+// `assert!(expr)` -- parse-time rewrite; empty / extra args are rejected
+test_ok!(
+    assert_bang_ok,
+    "assert!(true);",
+    "assert!(1 == 2);",
+    "assert!((1 == 2));",
+    "assert!(1 in [1]);",
+    "assert!(1 !in [2]);",
+    "assert!(foo());",
+    "assert!(1 == 2,);"
+);
+test_fail!(
+    assert_bang_arity,
+    "assert!();",
+    "assert!(1, 2);",
+    "assert!(1, 2, 3);"
+);
+
 // modules
 test_ok!(single_module_ok, "module a;");
 test_ok!(nested_module_path_ok, "module a::b;");

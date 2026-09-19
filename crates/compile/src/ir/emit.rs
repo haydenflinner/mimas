@@ -59,6 +59,9 @@ impl Ir {
                 match item.kind() {
                     // function bodies need to be lowered into their own Body
                     parse::ItemKind::Function(f) => {
+                        if item.is_test() {
+                            ir.tests.push(f.name.lexeme.clone());
+                        }
                         let _ = f.emit(item.id(), ir);
                     }
                     // impl walks its inner items

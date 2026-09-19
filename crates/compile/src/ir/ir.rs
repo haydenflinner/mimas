@@ -19,6 +19,9 @@ pub struct Ir {
     pub bodies: IdVec<BodyId, Body>,
     pub str_interner: StrInterner,
     pub item_bodies: HashMap<DecId, BodyId>,
+    /// Names of functions marked `#[test]`, in source order -- the inspector (and anything else
+    /// that wants to run tests) looks these up in `Program::items` after compile.
+    pub tests: Vec<String>,
     pub(crate) resolutions: Resolutions,
     pub(crate) intrinsics: HashMap<NativeId, Intrinsic>,
 
@@ -40,6 +43,7 @@ impl Ir {
             current_body: BodyId::ZERO,
             body_stack: Vec::new(),
             item_bodies: HashMap::new(),
+            tests: Vec::new(),
             current_loc: Location::SYNTHETIC,
         }
     }

@@ -268,3 +268,62 @@ pub struct PactSigDefaultParam {
     #[label("pact method signatures cannot give parameters default values")]
     pub at: SourceSpan,
 }
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("unknown attribute")]
+#[diagnostic(help("the only supported attribute is `#[test]`"))]
+pub struct UnknownAttribute {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("`{name}` is not a known attribute")]
+    pub at: SourceSpan,
+    pub name: String,
+}
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("duplicate attribute")]
+pub struct DuplicateAttribute {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("`#[{name}]` was already specified")]
+    pub at: SourceSpan,
+    pub name: String,
+}
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("`#[{name}]` is only valid on functions")]
+pub struct AttributeNotOnFunction {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("this attribute cannot go on this item")]
+    pub at: SourceSpan,
+    pub name: String,
+}
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("`#[test]` functions cannot take parameters")]
+pub struct TestTakesParameters {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("a test is called with no arguments")]
+    pub at: SourceSpan,
+}
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("`#[test]` cannot annotate a method")]
+pub struct TestOnMethod {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("tests must be free functions")]
+    pub at: SourceSpan,
+}
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("`assert!` takes exactly one expression")]
+#[diagnostic(help("write `assert!(add(1, 2) == 3)`"))]
+pub struct AssertArity {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("`assert!` is not a call -- it wraps a single expression")]
+    pub at: SourceSpan,
+}

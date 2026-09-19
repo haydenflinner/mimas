@@ -32,6 +32,8 @@ pub struct Program {
     /// inspector, say). Tuple-struct members show up as their positional index stringified
     /// ("0", "1", ..), matching `solve::ResolvedAdt::fields`, which this is copied from.
     pub field_names: IdVec<AdtId, Vec<String>>,
+    /// Functions marked `#[test]`, in source order. Each name is a key in `items`.
+    pub tests: Vec<String>,
 }
 
 #[derive(Debug, Clone)]

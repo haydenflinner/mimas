@@ -1698,3 +1698,57 @@ expr_test!(
 expr_test!(membership, "1 in 1", In::new(int!(1), int!(1), true));
 
 expr_test!(not_membership, "1 !in 1", In::new(int!(1), int!(1), false));
+
+fn parse_expr(source: &str) -> String {
+    let lexer = crate::lex::Lexer::new(source, 0, "test".into());
+    crate::Parser::new(lexer).expr().unwrap().to_string()
+}
+
+#[test]
+fn assert_eq_rewrites_to_inverted_if() {
+    let text = parse_expr("assert!(1 == 2)");
+    assert!(text.contains("__assert_left_1"), "{text}");
+    assert!(text.contains("__assert_right_1"), "{text}");
+    assert!(text.contains("!="), "{text}");
+    assert!(text.contains("=="), "{text}");
+    assert!(text.contains("panic"), "{text}");
+    assert!(text.contains("assertion failed:"), "{text}");
+}
+
+#[test]
+fn assert_grouped_eq_still_rewrites() {
+    let text = parse_expr("assert!((1 == 2))");
+    assert!(text.contains("!="), "{text}");
+    assert!(text.contains("panic"), "{text}");
+}
+
+#[test]
+fn assert_in_rewrites_to_not_in() {
+    let text = parse_expr("assert!(1 in xs)");
+    assert!(text.contains("!in"), "{text}");
+    assert!(text.contains("panic"), "{text}");
+}
+
+#[test]
+fn assert_bool_rewrites_to_not() {
+    let text = parse_expr("assert!(ready)");
+    assert!(text.contains("!ready") || text.contains("! ready"), "{text}");
+    assert!(text.contains("panic"), "{text}");
+    assert!(text.contains("assertion failed:"), "{text}");
+}
+
+#[test]
+fn nested_asserts_get_distinct_temps() {
+    let text = parse_expr("assert!(assert!(1 == 1) == ())");
+    assert!(text.contains("__assert_left_1"), "{text}");
+    assert!(text.contains("__assert_left_2"), "{text}");
+}
+
+#[test]
+fn other_ident_bang_call_is_still_unwrap() {
+    let text = parse_expr("foo!(1)");
+    assert!(
+        text.contains("foo?!"),
+        "expected unwrap-then-call, got {text}"
+    );
+}

@@ -19,7 +19,7 @@ mimas example.mim
 | [Collections](./reference/collections.md) | Arrays, dictionaries, tuples, and the `in` operator |
 | [Options](./reference/options.md) | `T?`, `null`, and the operators that handle them |
 | [Results & Error Handling](./reference/error-handling.md) | `T!`, `raise`, and `absolve` |
-| [Functions & Closures](./reference/functions.md) | Declarations, defaults and named arguments, closures |
+| [Functions & Closures](./reference/functions.md) | Declarations, defaults and named arguments, closures, `#[test]` |
 | [User-Defined Types](./reference/types.md) | Structs, enums, and `impl` blocks |
 | [Pacts](./reference/pacts.md) | Abstracting over types without generics |
 | [Privacy](./reference/privacy.md) | `pub` and the module boundary |

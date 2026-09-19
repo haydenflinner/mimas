@@ -61,6 +61,25 @@ fn style(text: str, bold=false, italic=false, size=12) {}
 style("hi", size=18, bold=true); // skip `italic`, set the other two
 ```
 
+## Tests
+
+A function marked `#[test]` is a check the inspector runs when it loads the file -- it is not part of the script's top-to-bottom execution. Tests take no parameters and are called with none; a panic (or any other runtime error) is a failure, anything else is a pass.
+
+```mimas
+fn add(a: int, b: int) -> int {
+    a + b
+}
+
+#[test]
+fn add_works() {
+    assert!(add(1, 2) == 3)
+}
+```
+
+`assert!(expr)` is rewritten at parse time into an `if`/`panic` check. Comparisons (`==`, `!=`, `<`, `>`, `<=`, `>=`) and membership (`in`, `!in`) evaluate each side once and interpolate the values into the panic message, pytest-style; any other expression becomes `if !expr { panic("assertion failed: ...") }`. `assert` is a normal name -- only `assert!(...)` is special.
+
+`#[test]` sits in front of `pub` when both are present (`#[test] pub fn ...`). It is only valid on free functions -- not methods, and not other items.
+
 ## Closures
 
 A closure is an inline, anonymous function written with pipes. Its return type is optional and inferred when left off.

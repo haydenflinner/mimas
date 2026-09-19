@@ -245,9 +245,14 @@ connect("localhost", port=9090);     // name an optional to skip earlier ones
 // closures: inline, anonymous, pipe-delimited. return type optionally inferred
 let add = |a: int, b: int| a + b;
 let now = || current_time();         // no args
+
+#[test]
+fn square_of_zero() {                // inspector runs these on load
+    assert!(square(0) == 0)
+}
 ```
 
-`fn`s live only at the file's top level and capture nothing -- they're *second-class* (passable as arguments, but not bindable). Closures are *first-class* (bindable, storable) and capture their surrounding scope.
+`fn`s live only at the file's top level and capture nothing -- they're *second-class* (passable as arguments, but not bindable). Closures are *first-class* (bindable, storable) and capture their surrounding scope. Mark a function `#[test]` and the inspector will run it when the file loads.
 
 ```mimas
 let g = add;       // ok -- closures are values

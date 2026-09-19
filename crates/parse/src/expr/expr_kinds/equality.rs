@@ -35,6 +35,20 @@ op!(
     }
 );
 
+impl EqualityOp {
+    /// The operator that makes the original comparison fail -- used by `assert!` rewriting.
+    pub(crate) fn invert(self) -> Self {
+        match self {
+            Self::Equal => Self::NotEqual,
+            Self::NotEqual => Self::Equal,
+            Self::Greater => Self::LessOrEqual,
+            Self::GreaterOrEqual => Self::Less,
+            Self::Less => Self::GreaterOrEqual,
+            Self::LessOrEqual => Self::Greater,
+        }
+    }
+}
+
 #[mutants::skip]
 impl std::fmt::Display for Equality {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
