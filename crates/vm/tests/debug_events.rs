@@ -47,7 +47,9 @@ fn debug_step_events_report_calls_locals_and_returns() {
 
     // ...the frame disappears on return...
     assert!(
-        events.iter().any(|e| matches!(e, DebugEvent::Returned { .. })),
+        events
+            .iter()
+            .any(|e| matches!(e, DebugEvent::Returned { .. })),
         "expected a Returned event, got: {events:#?}"
     );
 

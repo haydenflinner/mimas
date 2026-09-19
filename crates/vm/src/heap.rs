@@ -244,7 +244,13 @@ impl<'gc> Ctx<'gc> {
         self.render_into(out, value, false, 0)
     }
 
-    fn render_into(self, out: &mut String, value: Val<'gc>, quote: bool, depth: usize) -> RtResult<()> {
+    fn render_into(
+        self,
+        out: &mut String,
+        value: Val<'gc>,
+        quote: bool,
+        depth: usize,
+    ) -> RtResult<()> {
         if depth > MAX_DISPLAY_DEPTH {
             return Err(RtErr::DisplayTooDeep);
         }

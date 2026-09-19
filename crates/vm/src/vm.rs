@@ -156,7 +156,10 @@ impl Vm {
         self.code = Decoder { bytes, ip: 0 };
         self.chunks = chunks;
         self.c_strs = strs;
-        self.chunk_names = items.iter().map(|(name, &body)| (body, name.clone())).collect();
+        self.chunk_names = items
+            .iter()
+            .map(|(name, &body)| (body, name.clone()))
+            .collect();
         self.items = items;
         self.methods = methods.into_values().collect();
         let field_names: Vec<Vec<String>> = field_names.into_values().collect();
@@ -1525,8 +1528,7 @@ impl Vm {
                 for reg in &thread.regs[frame.base..frame.base + window_len] {
                     if let Val::Instance(inst) = reg {
                         let struct_id = inst.0.borrow().struct_id as usize;
-                        if let Some(&body) =
-                            methods.get(struct_id).and_then(|m| m.get(method_name))
+                        if let Some(&body) = methods.get(struct_id).and_then(|m| m.get(method_name))
                         {
                             target = Some((body, *reg));
                             break 'search;
@@ -1590,8 +1592,7 @@ impl Vm {
                 for reg in &thread.regs[frame.base..frame.base + window_len] {
                     if let Val::Instance(inst) = reg {
                         let struct_id = inst.0.borrow().struct_id as usize;
-                        if let Some(&body) =
-                            methods.get(struct_id).and_then(|m| m.get(method_name))
+                        if let Some(&body) = methods.get(struct_id).and_then(|m| m.get(method_name))
                         {
                             target = Some((body, *reg));
                             break 'search;
@@ -1768,8 +1769,11 @@ impl Vm {
                     // `chunk.locals` has no declared order (it's a name -> Reg map); sorting by
                     // register index reads as "declaration order" for the common case, since
                     // the compiler allocates locals' registers as it walks the source.
-                    let mut locals: Vec<(&String, Reg)> =
-                        chunk.locals.iter().map(|(name, &reg)| (name, reg)).collect();
+                    let mut locals: Vec<(&String, Reg)> = chunk
+                        .locals
+                        .iter()
+                        .map(|(name, &reg)| (name, reg))
+                        .collect();
                     locals.sort_by_key(|&(_, reg)| reg.index());
                     // one `seen` set shared across every local in this frame (not reset between
                     // them) -- so two locals that alias into the same structure (a doubly-linked

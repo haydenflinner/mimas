@@ -105,7 +105,10 @@ fn open_reads_the_document_and_root_group() {
         &preamble,
         r#"match doc { DarklyDocument::Document { name, width, height, root } => f"{name} {width}x{height} " + (match root { DarklyLayer::Group { id, name, visible, opacity, children } => f"group '{name}' with {children.len()} children", _ => "not a group" }) }"#,
     );
-    pretty_assertions::assert_eq!(root_kind_and_count, "Test Doc 4x4 group 'Root' with 2 children");
+    pretty_assertions::assert_eq!(
+        root_kind_and_count,
+        "Test Doc 4x4 group 'Root' with 2 children"
+    );
 
     std::fs::remove_file(&path).ok();
 }

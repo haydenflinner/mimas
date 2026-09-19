@@ -1,9 +1,9 @@
 use std::{collections::HashMap, sync::Arc};
 
 use compile::{BinFault, BinOp, Scalar, UnaryOp};
-use gc_arena::{Collect, Gc, RefLock};
 #[cfg(any(feature = "dataframe", feature = "darkly"))]
 use gc_arena::Static;
+use gc_arena::{Collect, Gc, RefLock};
 use shared::BodyId;
 use smallvec::SmallVec;
 
@@ -712,7 +712,12 @@ impl<'gc> Val<'gc> {
                 Inspect::Dict(
                     d.0.borrow()
                         .iter()
-                        .map(|(k, v)| (k.as_str().to_string(), v.inspect(struct_names, field_names, seen)))
+                        .map(|(k, v)| {
+                            (
+                                k.as_str().to_string(),
+                                v.inspect(struct_names, field_names, seen),
+                            )
+                        })
                         .collect(),
                 )
             }),

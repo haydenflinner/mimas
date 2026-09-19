@@ -43,8 +43,11 @@ fn call_method_on_first_instance_runs_a_user_pact_method() {
 
 #[test]
 fn call_method_on_first_instance_finds_nothing_when_no_type_implements_it() {
-    let mut vm = Vm::compile("struct Node { val: int }\nlet a = Node { val = 1 };", |_| {})
-        .expect("source should compile");
+    let mut vm = Vm::compile(
+        "struct Node { val: int }\nlet a = Node { val = 1 };",
+        |_| {},
+    )
+    .expect("source should compile");
     vm.run().expect("script should run to completion");
 
     assert_eq!(vm.call_method_on_first_instance("typeset"), None);

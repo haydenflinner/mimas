@@ -111,7 +111,10 @@ pub fn function_dataflow(ir: &Ir, function_name: &str) -> Result<DataflowGraph, 
     for &param in &body.params {
         let name = local_name(ir, body_id, param);
         let idx = nodes.len();
-        nodes.push(DataflowNode { label: name, kind: NodeKind::In });
+        nodes.push(DataflowNode {
+            label: name,
+            kind: NodeKind::In,
+        });
         local_source.insert(param, idx);
     }
 
@@ -132,7 +135,10 @@ pub fn function_dataflow(ir: &Ir, function_name: &str) -> Result<DataflowGraph, 
                 Inst::Jump { target } => next_block = Some(*target),
                 // an actual decision: which block runs next depends on a runtime value. No
                 // dataflow-only rendering of "which" is honest, so this is where it stops.
-                Inst::JumpIfFalse { .. } | Inst::Switch { .. } | Inst::ForNext { .. } | Inst::Phi(_) => {
+                Inst::JumpIfFalse { .. }
+                | Inst::Switch { .. }
+                | Inst::ForNext { .. }
+                | Inst::Phi(_) => {
                     return Err(DataflowError::HasControlFlow);
                 }
                 // a read of a mutable local -- not an operation of its own, just a reference to
@@ -154,9 +160,16 @@ pub fn function_dataflow(ir: &Ir, function_name: &str) -> Result<DataflowGraph, 
                 // op. Can only be reached once: every path here has been checked branch-free.
                 Inst::Return(value) => {
                     let idx = nodes.len();
-                    nodes.push(DataflowNode { label: "out".to_string(), kind: NodeKind::Out });
+                    nodes.push(DataflowNode {
+                        label: "out".to_string(),
+                        kind: NodeKind::Out,
+                    });
                     if let Some(&src) = inst_node.get(value) {
-                        edges.push(DataflowEdge { from: src, to: idx, port: None });
+                        edges.push(DataflowEdge {
+                            from: src,
+                            to: idx,
+                            port: None,
+                        });
                     }
                     inst_node.insert(inst_id, idx);
                 }
@@ -168,7 +181,11 @@ pub fn function_dataflow(ir: &Ir, function_name: &str) -> Result<DataflowGraph, 
                     });
                     for (operand, port) in operands_of(other) {
                         if let Some(&src) = inst_node.get(&operand) {
-                            edges.push(DataflowEdge { from: src, to: idx, port });
+                            edges.push(DataflowEdge {
+                                from: src,
+                                to: idx,
+                                port,
+                            });
                         }
                     }
                     inst_node.insert(inst_id, idx);
@@ -181,7 +198,11 @@ pub fn function_dataflow(ir: &Ir, function_name: &str) -> Result<DataflowGraph, 
         }
     }
 
-    Ok(DataflowGraph { function_name: function_name.to_string(), nodes, edges })
+    Ok(DataflowGraph {
+        function_name: function_name.to_string(),
+        nodes,
+        edges,
+    })
 }
 
 fn local_name(ir: &Ir, body_id: BodyId, local: Local) -> String {
@@ -211,11 +232,17 @@ fn operands_of(inst: &Inst) -> Vec<(InstId, Option<&'static str>)> {
         Inst::BinOp { left, right, .. } => vec![(*left, Some("left")), (*right, Some("right"))],
         Inst::UnaryOp { right, .. } => vec![(*right, None)],
         Inst::SetIndex { set, index, value } => {
-            vec![(*set, Some("set")), (*index, Some("index")), (*value, Some("value"))]
+            vec![
+                (*set, Some("set")),
+                (*index, Some("index")),
+                (*value, Some("value")),
+            ]
         }
         Inst::GetIndex { set, index, .. } => vec![(*set, Some("set")), (*index, Some("index"))],
         Inst::GetField { src, .. } => vec![(*src, None)],
-        Inst::SetField { receiver, value, .. } => {
+        Inst::SetField {
+            receiver, value, ..
+        } => {
             vec![(*receiver, Some("self")), (*value, Some("value"))]
         }
         Inst::Push { array, value } => vec![(*array, Some("array")), (*value, Some("value"))],
@@ -276,9 +303,7 @@ fn node_label(ir: &Ir, inst: &Inst, body_names: &HashMap<BodyId, &str>) -> Strin
             format!("closure {}", body_names.get(body).copied().unwrap_or("?"))
         }
         Inst::Call { .. } => "call".to_string(),
-        Inst::CallDirect { body, .. } => {
-            body_names.get(body).copied().unwrap_or("?").to_string()
-        }
+        Inst::CallDirect { body, .. } => body_names.get(body).copied().unwrap_or("?").to_string(),
         Inst::CallNative { id, .. } => format!("native #{}", id.index()),
         Inst::NewInstance { adt, .. } => {
             format!("new {}", ir.resolutions.adts[*adt].name)
@@ -305,7 +330,14 @@ fn constant_label(ir: &Ir, c: &crate::Constant) -> String {
         crate::Constant::Str(s) => format!("{:?}", ir.str(*s)),
         crate::Constant::Null => "null".to_string(),
         crate::Constant::Array(items) => {
-            format!("[{}]", items.iter().map(|i| constant_label(ir, i)).collect::<Vec<_>>().join(", "))
+            format!(
+                "[{}]",
+                items
+                    .iter()
+                    .map(|i| constant_label(ir, i))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
         }
     }
 }

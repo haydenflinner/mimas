@@ -14,8 +14,22 @@ fn extracts_a_straight_line_function() {
     assert_eq!(graph.function_name, "typst_box");
     // 3 params (x, name, val) + 1 Format node + 1 Out node.
     assert_eq!(graph.nodes.len(), 5);
-    assert_eq!(graph.nodes.iter().filter(|n| n.kind == NodeKind::In).count(), 3);
-    assert_eq!(graph.nodes.iter().filter(|n| n.kind == NodeKind::Out).count(), 1);
+    assert_eq!(
+        graph
+            .nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::In)
+            .count(),
+        3
+    );
+    assert_eq!(
+        graph
+            .nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Out)
+            .count(),
+        1
+    );
     let param_names: Vec<&str> = graph
         .nodes
         .iter()
@@ -31,14 +45,26 @@ fn extracts_a_straight_line_function() {
         .iter()
         .position(|n| n.kind == NodeKind::Op && n.label == "format")
         .expect("should have a single `format` op node");
-    let out_idx = graph.nodes.iter().position(|n| n.kind == NodeKind::Out).unwrap();
+    let out_idx = graph
+        .nodes
+        .iter()
+        .position(|n| n.kind == NodeKind::Out)
+        .unwrap();
     for (i, _) in param_names.iter().enumerate() {
         assert!(
-            graph.edges.iter().any(|e| e.from == i && e.to == format_idx),
+            graph
+                .edges
+                .iter()
+                .any(|e| e.from == i && e.to == format_idx),
             "param {i} should wire into the format node"
         );
     }
-    assert!(graph.edges.iter().any(|e| e.from == format_idx && e.to == out_idx));
+    assert!(
+        graph
+            .edges
+            .iter()
+            .any(|e| e.from == format_idx && e.to == out_idx)
+    );
 }
 
 #[test]
@@ -55,7 +81,10 @@ fn rejects_a_function_with_control_flow() {
     "#;
     let err = Vm::function_dataflow(&[("main", source)], |_| {}, "choose")
         .expect_err("an `if` should be rejected as control flow, not silently misdrawn");
-    assert!(matches!(err, FunctionDataflowError::Dataflow(DataflowError::HasControlFlow)));
+    assert!(matches!(
+        err,
+        FunctionDataflowError::Dataflow(DataflowError::HasControlFlow)
+    ));
 }
 
 #[test]
@@ -96,8 +125,22 @@ fn collapses_a_reassigned_local_to_its_last_writer() {
         .map(|(i, _)| i)
         .collect();
     assert_eq!(add_idxs.len(), 2);
-    let out_idx = graph.nodes.iter().position(|n| n.kind == NodeKind::Out).unwrap();
+    let out_idx = graph
+        .nodes
+        .iter()
+        .position(|n| n.kind == NodeKind::Out)
+        .unwrap();
     // Out must be fed by the *second* add, not the first.
-    assert!(graph.edges.iter().any(|e| e.from == add_idxs[1] && e.to == out_idx));
-    assert!(!graph.edges.iter().any(|e| e.from == add_idxs[0] && e.to == out_idx));
+    assert!(
+        graph
+            .edges
+            .iter()
+            .any(|e| e.from == add_idxs[1] && e.to == out_idx)
+    );
+    assert!(
+        !graph
+            .edges
+            .iter()
+            .any(|e| e.from == add_idxs[0] && e.to == out_idx)
+    );
 }

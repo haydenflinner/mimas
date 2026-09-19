@@ -97,7 +97,10 @@ enum DarklyLayer {
 /// layer's stringified `id` to its decoded `DarklyImage` -- separate because a `DarklyLayer`
 /// value can't hold one directly (see the comment on `DarklyLayer::Raster`'s `id` field).
 #[native]
-fn open<'gc>(ctx: Ctx<'gc>, path: &str) -> Raisable<(DarklyDocument, HashMap<String, vm::DarklyImage<'gc>>)> {
+fn open<'gc>(
+    ctx: Ctx<'gc>,
+    path: &str,
+) -> Raisable<(DarklyDocument, HashMap<String, vm::DarklyImage<'gc>>)> {
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
         Err(e) => return Raisable::Raised(format!("darkly::open: {e}")),
@@ -154,7 +157,9 @@ fn build_layer<'gc>(
     pixels: &mut HashMap<String, vm::DarklyImage<'gc>>,
 ) -> Result<Option<DarklyLayer>, String> {
     let Some(node) = nodes.get(&id) else {
-        return Err(format!("darkly::open: node {id} referenced but not defined"));
+        return Err(format!(
+            "darkly::open: node {id} referenced but not defined"
+        ));
     };
     match node.kind.as_str() {
         "divider" => Ok(None),
@@ -185,8 +190,9 @@ fn build_layer<'gc>(
                 )
             })?;
             let bytes = read_zip_entry(archive, &body.pixels.pixels)?;
-            let expected =
-                body.pixels.bounds.width as usize * body.pixels.bounds.height as usize * channels as usize;
+            let expected = body.pixels.bounds.width as usize
+                * body.pixels.bounds.height as usize
+                * channels as usize;
             if bytes.len() != expected {
                 return Err(format!(
                     "darkly::open: node {id}: pixel data is {} bytes, expected {expected} ({}x{}x{channels})",
@@ -223,7 +229,9 @@ fn build_layer<'gc>(
                 params_json: serde_json::to_string(&body.params).unwrap_or_default(),
             }))
         }
-        other => Err(format!("darkly::open: node {id}: unsupported layer kind {other:?}")),
+        other => Err(format!(
+            "darkly::open: node {id}: unsupported layer kind {other:?}"
+        )),
     }
 }
 

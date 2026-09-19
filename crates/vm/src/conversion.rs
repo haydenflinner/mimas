@@ -337,7 +337,8 @@ impl<'gc> MimasType<'gc> for crate::val::DarklyImage<'gc> {
         Some(Ty::Adt(reg.get::<DarklyImageTy>()?.adt_id))
     }
     fn from_value(_ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError> {
-        v.as_darkly_image().ok_or_else(|| ty_error("DarklyImage", v))
+        v.as_darkly_image()
+            .ok_or_else(|| ty_error("DarklyImage", v))
     }
     fn into_value(self, _ctx: Ctx<'gc>) -> Val<'gc> {
         Val::DarklyImage(self)

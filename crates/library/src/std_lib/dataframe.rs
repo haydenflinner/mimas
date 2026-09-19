@@ -54,7 +54,9 @@ fn col<'gc>(ctx: Ctx<'gc>, name: &str) -> vm::PlExpr<'gc> {
 // instead of plain `collect()` sidesteps `Engine::Auto` reaching for the streaming engine, which
 // needs a polars feature this workspace doesn't enable (see the comment on the `polars`
 // dependency in Cargo.toml).
-fn collect_in_memory(lazy: polars::prelude::LazyFrame) -> polars::prelude::PolarsResult<polars::frame::DataFrame> {
+fn collect_in_memory(
+    lazy: polars::prelude::LazyFrame,
+) -> polars::prelude::PolarsResult<polars::frame::DataFrame> {
     // `collect()`'s `Engine::Auto` picks `InMemory` whenever `opt_state.eager()` is set --
     // `_with_eager` is the only public way to set that flag (`QueryResult`/`Engine::InMemory`
     // aren't reachable through the `polars` umbrella crate's public API).
@@ -89,7 +91,11 @@ fn select<'gc>(
 }
 
 #[native]
-fn sort<'gc>(ctx: Ctx<'gc>, df: vm::DataFrame<'gc>, by: Vec<String>) -> Raisable<vm::DataFrame<'gc>> {
+fn sort<'gc>(
+    ctx: Ctx<'gc>,
+    df: vm::DataFrame<'gc>,
+    by: Vec<String>,
+) -> Raisable<vm::DataFrame<'gc>> {
     let opts = polars::prelude::SortMultipleOptions::new();
     df.0.borrow()
         .0
@@ -149,7 +155,9 @@ fn join<'gc>(
         Ok(lf) => lf,
         Err(e) => return Raisable::Raised(e.to_string()),
     };
-    collect_in_memory(joined).map(|d| ctx.new_dataframe(d)).into()
+    collect_in_memory(joined)
+        .map(|d| ctx.new_dataframe(d))
+        .into()
 }
 
 /// `df.pivot(["quarter"], ["region"], ["revenue"], "sum")` -- wide-format table: one row per
@@ -210,7 +218,9 @@ fn pivot<'gc>(
         "_".into(),
         PivotColumnNaming::default(),
     );
-    collect_in_memory(pivoted).map(|d| ctx.new_dataframe(d)).into()
+    collect_in_memory(pivoted)
+        .map(|d| ctx.new_dataframe(d))
+        .into()
 }
 
 macro_rules! pl_expr_reducer {
@@ -244,9 +254,7 @@ fn to_dataframe<'gc>(ctx: Ctx<'gc>, rows: Vec<Val<'gc>>) -> Raisable<vm::DataFra
         match all.get(struct_id as usize) {
             Some(names) => names.clone(),
             None => {
-                return Raisable::Raised(
-                    "to_dataframe: no declared fields for this struct".into(),
-                );
+                return Raisable::Raised("to_dataframe: no declared fields for this struct".into());
             }
         }
     };
@@ -324,7 +332,11 @@ fn column_from_vals(name: &str, vals: &[Val<'_>]) -> Result<polars::prelude::Col
         Some(Val::Str(_)) => {
             let v: Vec<String> = vals
                 .iter()
-                .map(|v| v.as_str().map(|s| s.as_str().to_string()).ok_or_else(mismatch))
+                .map(|v| {
+                    v.as_str()
+                        .map(|s| s.as_str().to_string())
+                        .ok_or_else(mismatch)
+                })
                 .collect::<Result<_, _>>()?;
             Ok(Column::new(name, v))
         }

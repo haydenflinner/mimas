@@ -17,10 +17,10 @@ mod methods {
 }
 
 mod std_lib {
-    #[cfg(feature = "dataframe")]
-    pub(crate) mod dataframe;
     #[cfg(feature = "darkly")]
     pub(crate) mod darkly;
+    #[cfg(feature = "dataframe")]
+    pub(crate) mod dataframe;
     pub(crate) mod fs;
     pub(crate) mod math;
     pub(crate) mod parse;

@@ -53,7 +53,11 @@ fn struct_variant_reports_variant_name_and_field_names() {
     assert_eq!(fields[0].0, "top");
     assert_eq!(fields[1].0, "bottom");
 
-    let Inspect::Instance { type_name: top_name, fields: top_fields } = &fields[0].1 else {
+    let Inspect::Instance {
+        type_name: top_name,
+        fields: top_fields,
+    } = &fields[0].1
+    else {
         panic!("expected `top` to be an Instance, got {:?}", fields[0].1);
     };
     assert_eq!(top_name, "Image::Circle");
@@ -64,8 +68,15 @@ fn struct_variant_reports_variant_name_and_field_names() {
     // a tuple-style variant (`Named(str)`, not `Named { .. }`) still reports its variant name,
     // with its single positional field labeled "0" -- confirms the numeric fallback in
     // `Val::inspect` kicks in here rather than leaving the field unlabeled.
-    let Inspect::Instance { type_name: color_name, fields: color_fields } = &top_fields[1].1 else {
-        panic!("expected `color` to be an Instance, got {:?}", top_fields[1].1);
+    let Inspect::Instance {
+        type_name: color_name,
+        fields: color_fields,
+    } = &top_fields[1].1
+    else {
+        panic!(
+            "expected `color` to be an Instance, got {:?}",
+            top_fields[1].1
+        );
     };
     assert_eq!(color_name, "Color::Named");
     assert_eq!(color_fields[0].0, "0");
