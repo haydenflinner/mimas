@@ -558,6 +558,42 @@ expr_test!(
 );
 
 expr_test!(
+    semicolon_consequences_block,
+    "{
+        c = a
+        -b
+    }",
+    Block::new_with_yield(
+        vec![
+            Assignment::new(ident_expr!("c"), AssignmentOp::Identity, ident_expr!("a")).into_stmt()
+        ],
+        Unary::new(UnaryOp::Negative, ident_expr!("b")).into_expr(),
+    )
+);
+
+expr_test!(
+    infix_continues_inside_parens,
+    "(1
+        + 2
+        + 3)",
+    Grouping::new(
+        Evaluation::new(
+            Evaluation::new(int!(1), EvaluationOp::Plus, int!(2)).into_expr(),
+            EvaluationOp::Plus,
+            int!(3),
+        )
+        .into_expr(),
+    )
+);
+
+expr_test!(
+    infix_continues_when_operator_at_end_of_line,
+    "1 +
+        2",
+    Evaluation::new(int!(1), EvaluationOp::Plus, int!(2))
+);
+
+expr_test!(
     block_in_block,
     "{{0}}",
     Block::new_with_yield(vec![], Block::new_with_yield(vec![], int!(0)).into_expr())

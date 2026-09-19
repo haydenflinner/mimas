@@ -23,6 +23,10 @@ pub struct Parser<'s> {
     source: &'s str,
     restrictions: Restriction,
     depth: usize,
+    /// How many unclosed `(` groupings we're inside. Infix operators may cross a newline only
+    /// while this is non-zero -- Go's ASI would otherwise terminate the expression after the
+    /// operand (`a\n+ b` is not addition). Parentheses are the explicit opt-in (`(a\n+ b)`).
+    paren_depth: usize,
 }
 
 // Basic features
@@ -46,6 +50,7 @@ impl<'s> Parser<'s> {
             source,
             restrictions: Restriction::default(),
             depth: 0,
+            paren_depth: 0,
         }
     }
 
@@ -150,8 +155,10 @@ impl<'s> Parser<'s> {
                 let expr = self.expr()?;
 
                 // TODO: assignment does not belong here... I think
-                if let Some(operator) = self.soft_peek()?.and_then(|tok| tok.kind().try_into().ok())
-                {
+                // `c\n= a` is not an assignment: a newline after the target ends the
+                // expression (Go's ASI), so the `=` would start a new statement.
+                let operator = self.peek_infix()?;
+                if let Some(operator) = operator {
                     // Ensure the left is a valid assignment target
                     if !matches!(expr.kind(), ExprKind::Access(_) | ExprKind::Ident(_)) {
                         Err(errors::InvalidAssignmentTarget {
@@ -826,16 +833,20 @@ impl<'s> Parser<'s> {
 
         let iterator = self.expr()?;
 
-        let iterator = if let Some(dot) =
-            self.match_take_possibilities(&[TokKind::DoubleDot, TokKind::DoubleDotEqual])
-        {
-            let start = iterator;
-            let start_boundary = start.span().start();
-            let end = self.expr()?;
-            self.new_expr(
-                Range::new(start, end, dot.kind() == TokKind::DoubleDotEqual),
-                start_boundary,
-            )
+        let iterator = if self.infix_binds() {
+            if let Some(dot) =
+                self.match_take_possibilities(&[TokKind::DoubleDot, TokKind::DoubleDotEqual])
+            {
+                let start = iterator;
+                let start_boundary = start.span().start();
+                let end = self.expr()?;
+                self.new_expr(
+                    Range::new(start, end, dot.kind() == TokKind::DoubleDotEqual),
+                    start_boundary,
+                )
+            } else {
+                iterator
+            }
         } else {
             iterator
         };
@@ -922,6 +933,9 @@ impl<'s> Parser<'s> {
     fn null_coalecence(&mut self) -> Result<Expr> {
         let start = self.next_tok_boundary();
         let expr = self.logical()?;
+        if !self.infix_binds() {
+            return Ok(expr);
+        }
         if self.match_take(TokKind::DoubleHook).is_some() {
             let value = self.expr()?;
             Ok(self.new_expr(Coalescence::new(expr, value), start))
@@ -936,7 +950,7 @@ impl<'s> Parser<'s> {
     fn logical(&mut self) -> Result<Expr> {
         let start = self.next_tok_boundary();
         let mut expr = self.equality()?;
-        while let Some(operator) = self.soft_peek()?.and_then(|tok| tok.kind().try_into().ok()) {
+        while let Some(operator) = self.peek_infix()? {
             self.take()?;
             let right = self.equality()?;
             expr = self.new_expr(Logical::new(expr, operator, right), start);
@@ -947,7 +961,7 @@ impl<'s> Parser<'s> {
     fn equality(&mut self) -> Result<Expr> {
         let start = self.next_tok_boundary();
         let mut expr = self.membership()?;
-        while let Some(operator) = self.soft_peek()?.and_then(|tok| tok.kind().try_into().ok()) {
+        while let Some(operator) = self.peek_infix()? {
             self.take()?;
             let right = self.membership()?;
             expr = self.new_expr(Equality::new(expr, operator, right), start);
@@ -958,6 +972,9 @@ impl<'s> Parser<'s> {
     fn membership(&mut self) -> Result<Expr> {
         let start = self.next_tok_boundary();
         let expr = self.evaluation()?;
+        if !self.infix_binds() {
+            return Ok(expr);
+        }
         let condition = if self.match_take(TokKind::In).is_some() {
             true
         } else if self.match_take(TokKind::NotIn).is_some() {
@@ -973,11 +990,7 @@ impl<'s> Parser<'s> {
     fn evaluation(&mut self) -> Result<Expr> {
         let start = self.next_tok_boundary();
         let mut expr = self.bitshift()?;
-        while let Some(operator) = self
-            .soft_peek()?
-            .and_then(|tok| tok.kind().try_into().ok())
-            .filter(EvaluationOp::is_binary)
-        {
+        while let Some(operator) = self.peek_infix()?.filter(EvaluationOp::is_binary) {
             self.take()?;
             let right = self.bitshift()?;
             expr = self.new_expr(Evaluation::new(expr, operator, right), start);
@@ -988,11 +1001,7 @@ impl<'s> Parser<'s> {
     fn bitshift(&mut self) -> Result<Expr> {
         let start = self.next_tok_boundary();
         let mut expr = self.addition()?;
-        while let Some(operator) = self
-            .soft_peek()?
-            .and_then(|tok| tok.kind().try_into().ok())
-            .filter(EvaluationOp::is_bit_shift)
-        {
+        while let Some(operator) = self.peek_infix()?.filter(EvaluationOp::is_bit_shift) {
             self.take()?;
             let right = self.addition()?;
             expr = self.new_expr(Evaluation::new(expr, operator, right), start);
@@ -1003,11 +1012,7 @@ impl<'s> Parser<'s> {
     fn addition(&mut self) -> Result<Expr> {
         let start = self.next_tok_boundary();
         let mut expr = self.multiplication()?;
-        while let Some(operator) = self
-            .soft_peek()?
-            .and_then(|tok| tok.kind().try_into().ok())
-            .filter(EvaluationOp::is_additive)
-        {
+        while let Some(operator) = self.peek_infix()?.filter(EvaluationOp::is_additive) {
             self.take()?;
             let right = self.multiplication()?;
             expr = self.new_expr(Evaluation::new(expr, operator, right), start);
@@ -1018,11 +1023,7 @@ impl<'s> Parser<'s> {
     fn multiplication(&mut self) -> Result<Expr> {
         let start = self.next_tok_boundary();
         let mut expr = self.unary()?;
-        while let Some(operator) = self
-            .soft_peek()?
-            .and_then(|tok| tok.kind().try_into().ok())
-            .filter(EvaluationOp::is_multiplicative)
-        {
+        while let Some(operator) = self.peek_infix()?.filter(EvaluationOp::is_multiplicative) {
             self.take()?;
             let right = self.unary()?;
             expr = self.new_expr(Evaluation::new(expr, operator, right), start);
@@ -1305,29 +1306,32 @@ impl<'s> Parser<'s> {
             (start, dot)
         };
         self.expect(TokKind::LeftParenthesis)?;
-        let mut arguments = vec![];
-        let mut positional_allowed = true;
-        while self.match_take(TokKind::RightParenthesis).is_none() {
-            let expr = self.expr()?;
-            let (name, value) = if let Some(tok) = self.match_take(TokKind::Equal) {
-                let ExprKind::Ident(ident) = expr.kind() else {
-                    Err(self.unexpected(tok))?
+        let arguments = self.in_parens(|p| {
+            let mut arguments = vec![];
+            let mut positional_allowed = true;
+            while p.match_take(TokKind::RightParenthesis).is_none() {
+                let expr = p.expr()?;
+                let (name, value) = if let Some(tok) = p.match_take(TokKind::Equal) {
+                    let ExprKind::Ident(ident) = expr.kind() else {
+                        Err(p.unexpected(tok))?
+                    };
+                    let assigned_value = p.expr()?;
+                    positional_allowed = false;
+                    (Some(ident.clone()), assigned_value)
+                } else if !positional_allowed {
+                    return Err(NamedBeforePositional {
+                        src: p.src(),
+                        at: expr.location().into(),
+                    }
+                    .into());
+                } else {
+                    (None, expr)
                 };
-                let assigned_value = self.expr()?;
-                positional_allowed = false;
-                (Some(ident.clone()), assigned_value)
-            } else if !positional_allowed {
-                return Err(NamedBeforePositional {
-                    src: self.src(),
-                    at: expr.location().into(),
-                }
-                .into());
-            } else {
-                (None, expr)
-            };
-            arguments.push(Argument { name, value });
-            self.match_take(TokKind::Comma);
-        }
+                arguments.push(Argument { name, value });
+                p.match_take(TokKind::Comma);
+            }
+            Ok(arguments)
+        })?;
 
         Ok(self.new_expr(Call::new(left, arguments), start))
     }
@@ -1438,21 +1442,23 @@ impl<'s> Parser<'s> {
             if self.match_take(TokKind::RightParenthesis).is_some() {
                 Ok(self.new_expr(Literal::Unit, start))
             } else {
-                let expr = self.expr()?;
-                if self.match_take(TokKind::Comma).is_some() {
-                    let mut members = vec![expr];
-                    while self.match_take(TokKind::RightParenthesis).is_none() {
-                        members.push(self.expr()?);
-                        if self.match_take(TokKind::Comma).is_none() {
-                            self.expect(TokKind::RightParenthesis)?;
-                            break;
+                self.in_parens(|p| {
+                    let expr = p.expr()?;
+                    if p.match_take(TokKind::Comma).is_some() {
+                        let mut members = vec![expr];
+                        while p.match_take(TokKind::RightParenthesis).is_none() {
+                            members.push(p.expr()?);
+                            if p.match_take(TokKind::Comma).is_none() {
+                                p.expect(TokKind::RightParenthesis)?;
+                                break;
+                            }
                         }
+                        Ok(p.new_expr(Literal::Tuple(members), start))
+                    } else {
+                        p.expect(TokKind::RightParenthesis)?;
+                        Ok(p.new_expr(Grouping::new(expr), start))
                     }
-                    Ok(self.new_expr(Literal::Tuple(members), start))
-                } else {
-                    self.expect(TokKind::RightParenthesis)?;
-                    Ok(self.new_expr(Grouping::new(expr), start))
-                }
+                })
             }
         } else {
             self.block()
@@ -1462,26 +1468,31 @@ impl<'s> Parser<'s> {
     fn block(&mut self) -> Result<Expr> {
         let start = self.next_tok_boundary();
         if self.match_take(TokKind::LeftBrace).is_some() {
-            let mut body: Vec<Stmt> = vec![];
-            let yielded_expr = loop {
-                if self.match_take(TokKind::RightBrace).is_some() {
-                    break None;
-                }
-                let node_start = self.next_tok_boundary();
-                match self.node()? {
-                    BlockElement::Stmt(stmt) => body.push(stmt),
-                    BlockElement::MaybeYield(expr) => {
-                        if self.match_take(TokKind::RightBrace).is_some() {
-                            // last node in the block -- this is the yield, not a new stmt
-                            break Some(expr);
-                        }
-                        let stmt = self.new_stmt(StmtKind::Expr(expr), node_start);
-                        self.semicolon_check(&stmt)?;
-                        body.push(stmt);
+            // A block is a fresh statement list. Even when the block sits inside `(...)`,
+            // statements inside must not inherit infix-across-newline permission -- otherwise
+            // `({ c = a\n-b })` would still parse as `c = a - b`.
+            self.with_paren_depth(0, |p| {
+                let mut body: Vec<Stmt> = vec![];
+                let yielded_expr = loop {
+                    if p.match_take(TokKind::RightBrace).is_some() {
+                        break None;
                     }
-                }
-            };
-            Ok(self.new_expr(Block { body, yielded_expr }, start))
+                    let node_start = p.next_tok_boundary();
+                    match p.node()? {
+                        BlockElement::Stmt(stmt) => body.push(stmt),
+                        BlockElement::MaybeYield(expr) => {
+                            if p.match_take(TokKind::RightBrace).is_some() {
+                                // last node in the block -- this is the yield, not a new stmt
+                                break Some(expr);
+                            }
+                            let stmt = p.new_stmt(StmtKind::Expr(expr), node_start);
+                            p.semicolon_check(&stmt)?;
+                            body.push(stmt);
+                        }
+                    }
+                };
+                Ok(p.new_expr(Block { body, yielded_expr }, start))
+            })
         } else {
             self.ident()
         }
@@ -2057,11 +2068,13 @@ impl<'s> Parser<'s> {
 
     /// Automatic semicolon insertion (Go's rules, `https://go.dev/ref/spec#Semicolons`, applied
     /// at exactly the handful of places that already ask "is a `;` here mandatory, optional, or
-    /// satisfied" -- `expect`-style call sites around `MissingSemiColon`): whether a newline
-    /// (including one hiding inside a comment -- a `//` comment always ends in one; a `/* */`
-    /// containing one counts too, mirroring Go's own spec note) separates the last consumed
-    /// token from the next one. Where a `;` is mandatory and absent, this is treated as
-    /// equivalent to one, same as Go treating a line break as a statement terminator.
+    /// satisfied" -- `expect`-style call sites around `MissingSemiColon`, plus infix binding via
+    /// `infix_binds`): whether a newline (including one hiding inside a comment -- a `//` comment
+    /// always ends in one; a `/* */` containing one counts too, mirroring Go's own spec note)
+    /// separates the last consumed token from the next one. Where a `;` is mandatory and absent,
+    /// this is treated as equivalent to one, same as Go treating a line break as a statement
+    /// terminator. Infix operators similarly refuse to bind across that gap unless we're inside
+    /// `()` -- so `a\n- b` is not subtraction, matching Go's "semicolon consequences."
     ///
     /// This is a parser-level check, not a lexer-level one that unconditionally inserts a `;`
     /// into the token stream, on purpose: mimas is expression-oriented (a block's last
@@ -2084,7 +2097,48 @@ impl<'s> Parser<'s> {
             _ => self.source.len(),
         };
         let start = self.cursor.min(next);
-        self.source.get(start..next).is_some_and(|gap| gap.contains('\n'))
+        self.source
+            .get(start..next)
+            .is_some_and(|gap| gap.contains('\n'))
+    }
+
+    /// Whether an infix operator at the peek position may bind to the expression we just
+    /// finished. Go inserts a semicolon after an operand at end-of-line, so `a\n+ b` is not
+    /// addition; `a +\n b` still is, because the operator itself is on the same line as `a`.
+    /// Parentheses opt back into newline-crossing (`(a\n+ b)`), which Go's lexer would reject
+    /// but which is the continuation form we want.
+    fn infix_binds(&mut self) -> bool {
+        self.paren_depth > 0 || !self.newline_before_next()
+    }
+
+    /// Peek an infix operator, but only if `infix_binds` says it may attach to the
+    /// expression we just finished. Does not consume -- caller `take`s on match.
+    fn peek_infix<T>(&mut self) -> Result<Option<T>>
+    where
+        T: TryFrom<TokKind<'s>, Error = ()>,
+    {
+        if !self.infix_binds() {
+            return Ok(None);
+        }
+        Ok(self.soft_peek()?.and_then(|tok| tok.kind().try_into().ok()))
+    }
+
+    /// Parse `f` with `paren_depth` bumped so infix operators inside may cross newlines.
+    fn in_parens<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        let next = self.paren_depth + 1;
+        self.with_paren_depth(next, f)
+    }
+
+    fn with_paren_depth<T>(
+        &mut self,
+        depth: usize,
+        f: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<T> {
+        let saved = self.paren_depth;
+        self.paren_depth = depth;
+        let result = f(self);
+        self.paren_depth = saved;
+        result
     }
 
     /// Borrow the next token without advancing. Surfaces lex errors and end-of-input as
