@@ -144,6 +144,124 @@ test_fail!(
     "assert!(1, 2, 3);"
 );
 
+// `#[tests] [ expr, ... ]`
+test_ok!(
+    tests_list_ok,
+    "#[tests] [ true ]",
+    "#[tests] [ true, false ]",
+    "#[tests] [\n    1 == 1,\n    2 == 2,\n]",
+    "#[tests] [ true, ]"
+);
+test_fail!(
+    tests_list_rejected,
+    "#[tests] []",
+    "#[tests] fn foo() {}",
+    "#[tests] struct Foo {}",
+    "pub #[tests] [ true ]",
+    "#[tests] pub [ true ]",
+    "#[test] [ true ]",
+    "#[tests] #[tests] [ true ]"
+);
+
+#[test]
+fn tests_list_keeps_expressions() {
+    let lexer = crate::lex::Lexer::new("#[tests] [ 1 == 2, true ]", 0, "test".into());
+    let ast = crate::Parser::new(lexer).into_ast().unwrap();
+    assert_eq!(ast.stmts().len(), 1);
+    let text = ast.stmts()[0].to_string();
+    assert!(text.contains("#[tests]"), "{text}");
+    assert!(text.contains("1 == 2"), "{text}");
+    assert!(text.contains("true"), "{text}");
+    assert!(!text.contains("panic"), "{text}");
+}
+
+// `where:` / `examples { }` check lists -- the literate spelling of `#[tests]`
+test_ok!(
+    check_blocks_ok,
+    "where: x is 1",
+    "where: x",
+    "where: x is 1, y is 2",
+    "where { x is 1 }",
+    "where { x is 1, y is 2 }",
+    "where {\n    x is 1\n    y is 2\n}",
+    "where: { x is 1 }",
+    "examples { x }",
+    "examples: x is 1",
+    "example: x is 1",
+    "example { x is 1 }"
+);
+test_fail!(
+    check_blocks_rejected,
+    "where:",
+    "where { }",
+    "where { x is }",
+    "where { x is 1 y is 2 }"
+);
+
+fn check_item(source: &str) -> crate::Tests {
+    let lexer = crate::lex::Lexer::new(source, 0, "test".into());
+    let ast = crate::Parser::new(lexer).into_ast().unwrap();
+    let stmts = ast.stmts();
+    assert_eq!(stmts.len(), 1, "{source} should be one item");
+    let crate::StmtKind::Item(item) = stmts[0].kind() else {
+        panic!("{source} should be an item")
+    };
+    let crate::ItemKind::Tests(tests) = item.kind() else {
+        panic!("{source} should be a check list")
+    };
+    tests.clone()
+}
+
+#[test]
+fn where_block_lowers_is_to_equality() {
+    let tests = check_item("where:\n    square(0) is 0\n    square(4) is 16\n");
+    assert_eq!(tests.cases.len(), 2);
+    assert_eq!(tests.cases[0].name.lexeme, "square(0) is 0");
+    assert_eq!(tests.cases[1].name.lexeme, "square(4) is 16");
+    for case in &tests.cases {
+        assert!(
+            matches!(case.expr.kind(), crate::ExprKind::Equality(_)),
+            "{:?} should be an equality",
+            case.expr
+        );
+    }
+    // a bare expr (no `is`) stays a bare check
+    let tests = check_item("examples { alive() }");
+    assert_eq!(tests.cases[0].name.lexeme, "alive()");
+    assert!(!matches!(
+        tests.cases[0].expr.kind(),
+        crate::ExprKind::Equality(_)
+    ));
+}
+
+#[test]
+fn where_block_is_a_paragraph() {
+    // consecutive lines belong to the block; a blank line or an item ends it
+    let lexer = crate::lex::Lexer::new(
+        "fn f() -> int { 0 }\nwhere:\n    f() is 0\n    f() is 1\n\nfn g() {}\n",
+        0,
+        "test".into(),
+    );
+    let ast = crate::Parser::new(lexer).into_ast().unwrap();
+    assert_eq!(ast.stmts().len(), 3);
+    let crate::StmtKind::Item(item) = ast.stmts()[1].kind() else {
+        panic!("where: should be an item")
+    };
+    let crate::ItemKind::Tests(tests) = item.kind() else {
+        panic!("where: should be a check list")
+    };
+    assert_eq!(tests.cases.len(), 2);
+}
+
+#[test]
+fn check_words_still_lex_as_idents() {
+    // `examples`/`where`/`example` are only special before `:` or `{`
+    let lexer = crate::lex::Lexer::new("examples.push(x);", 0, "test".into());
+    assert!(crate::Parser::new(lexer).into_ast().is_ok());
+    let lexer = crate::lex::Lexer::new("let where = 5;", 0, "test".into());
+    assert!(crate::Parser::new(lexer).into_ast().is_ok());
+}
+
 // modules
 test_ok!(single_module_ok, "module a;");
 test_ok!(nested_module_path_ok, "module a::b;");

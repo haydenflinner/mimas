@@ -308,6 +308,7 @@ impl Solver {
             match item.kind() {
                 ItemKind::Impl(i) => i.hoist(ctx),
                 ItemKind::Function(f) => f.hoist(ctx),
+                ItemKind::Tests(tests) => tests.hoist(ctx),
                 _ => Ok(()),
             }
         })
@@ -1622,6 +1623,26 @@ impl Solver {
                         self.ribs.pop();
                     }
                     self.pact_self = prev_self;
+                }
+                ItemKind::Tests(tests) => {
+                    for case in &tests.cases {
+                        if !self.touch_node(case.id) {
+                            continue;
+                        }
+                        self.ribs.push_function();
+                        self.fn_stack.push(FnRun {
+                            expected_ty: Ty::Bool,
+                        });
+                        self.control_flow.enter();
+                        case.expr.fulfill_ty(Ty::Bool, self)?;
+                        self.fn_stack.pop();
+                        self.control_flow.exit();
+                        self.ribs.pop();
+                        let ty = Ty::Fn(FnHeader::new(vec![], Ty::Bool, false));
+                        let vid = self.node_vid(case.id);
+                        self.register_sub(vid, ty)
+                            .map_err(|e| e.into_type_mismatch(self, case.expr.location()))?;
+                    }
                 }
                 // each of these needs its inner Solve impl run during the body pass -- that's
                 // where field-annotation unification (Struct/Enum), body type-checking

@@ -80,6 +80,32 @@ fn add_works() {
 
 `#[test]` sits in front of `pub` when both are present (`#[test] pub fn ...`). It is only valid on free functions -- not methods, and not other items.
 
+A `#[tests]` list is a compact form of the same thing -- a list of boolean expressions the inspector evaluates when it loads the file. `true` is a pass; `false` or a panic is a failure. The check's source is its name.
+
+```mimas
+fn add(a: int, b: int) -> int { a + b }
+
+#[tests] [
+    add(1, 2) == 3,
+    add(0, 0) == 0,
+]
+```
+
+The literate spelling of the same list is a `where:`/`examples`/`example` check block, which lowers to exactly a `#[tests]` item. Each line is an expression, or `expr is expr` where `is` means `==`. A `where:` paragraph runs to the next blank line or item; braces make the boundary explicit.
+
+```mimas
+fn add(a: int, b: int) -> int { a + b }
+
+where:
+    add(1, 2) is 3
+    add(0, 0) is 0
+
+examples {
+    add(-1, 1) is 0
+    add(2, 2) is 4
+}
+```
+
 ## Closures
 
 A closure is an inline, anonymous function written with pipes. Its return type is optional and inferred when left off.

@@ -1732,7 +1732,10 @@ fn assert_in_rewrites_to_not_in() {
 #[test]
 fn assert_bool_rewrites_to_not() {
     let text = parse_expr("assert!(ready)");
-    assert!(text.contains("!ready") || text.contains("! ready"), "{text}");
+    assert!(
+        text.contains("!ready") || text.contains("! ready"),
+        "{text}"
+    );
     assert!(text.contains("panic"), "{text}");
     assert!(text.contains("assertion failed:"), "{text}");
 }

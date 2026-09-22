@@ -271,7 +271,7 @@ pub struct PactSigDefaultParam {
 
 #[derive(Error, Debug, Diagnostic)]
 #[error("unknown attribute")]
-#[diagnostic(help("the only supported attribute is `#[test]`"))]
+#[diagnostic(help("supported attributes are `#[test]` and `#[tests]`"))]
 pub struct UnknownAttribute {
     #[source_code]
     pub src: NamedSource<Arc<str>>,
@@ -325,5 +325,35 @@ pub struct AssertArity {
     #[source_code]
     pub src: NamedSource<Arc<str>>,
     #[label("`assert!` is not a call -- it wraps a single expression")]
+    pub at: SourceSpan,
+}
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("`#[tests]` annotates a list of expressions")]
+#[diagnostic(help(
+    "write `#[tests] [ add(1, 2) == 3, add(0, 0) == 0 ]`, or mark a function `#[test]`"
+))]
+pub struct TestsNeedsList {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("expected `[` here")]
+    pub at: SourceSpan,
+}
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("`#[tests]` list cannot be empty")]
+pub struct TestsEmpty {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("add at least one expression")]
+    pub at: SourceSpan,
+}
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("`#[tests]` cannot be `pub`")]
+pub struct TestsNotPublic {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("test lists are not part of a module's public API")]
     pub at: SourceSpan,
 }

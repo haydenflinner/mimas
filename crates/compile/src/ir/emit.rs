@@ -64,6 +64,14 @@ impl Ir {
                         }
                         let _ = f.emit(item.id(), ir);
                     }
+                    parse::ItemKind::Tests(tests) => {
+                        for case in &tests.cases {
+                            ir.tests.push(case.name.lexeme.clone());
+                            let dec = ir.node_dec(case.id);
+                            let bid = ir.item_body_for(dec);
+                            ir.in_body(bid, |ir| ir.lower_fn_body(&[], &case.expr));
+                        }
+                    }
                     // impl walks its inner items
                     parse::ItemKind::Impl(i) => {
                         let _ = i.emit(item.id(), ir);

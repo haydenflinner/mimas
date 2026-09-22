@@ -1538,14 +1538,74 @@ impl Vm {
         &self.tests
     }
 
-    /// Runs every `#[test]` function to completion (not through `debug_step`). A panic or other
-    /// runtime fault is a failure; any other return is a pass. Resets the thread afterwards so a
+    /// Every top-level callable name (the `items` keys), sorted. Hosts that
+    /// dispatch on naming conventions — `live*` draw functions, `main` — use
+    /// this instead of re-parsing the source.
+    pub fn item_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.items.keys().cloned().collect();
+        names.sort();
+        names
+    }
+
+    /// [`Vm::call_fn_result`], but captures the result as a name-labeled
+    /// [`Inspect`] tree — for hosts that render a function's return value
+    /// (e.g. an `img::Draw` scene) rather than compare it in a test. Like
+    /// `call_fn_result`, a runtime fault leaves the thread dirty.
+    pub fn call_fn_inspect(&mut self, name: &str) -> Result<Inspect, Error> {
+        let Some(body_id) = self.items.get(name).copied() else {
+            return Err(miette::miette!("no fn {name}"));
+        };
+
+        let Vm {
+            code,
+            chunks,
+            c_strs: strs,
+            arena,
+            sources,
+            field_names,
+            ..
+        } = self;
+        arena.mutate(|mc, state| {
+            let ctx = state.ctx(mc);
+            {
+                let mut thread = state.thread.borrow_mut(mc);
+                let stop_depth = thread.frames.len() + 1;
+                enter_call(&mut thread, code, chunks, body_id, Reg::ZERO, &[], &[]);
+                run_dispatch(
+                    ctx,
+                    code,
+                    chunks,
+                    strs,
+                    sources,
+                    &mut thread,
+                    usize::MAX,
+                    stop_depth,
+                )?;
+            }
+
+            let struct_names = state.struct_names.borrow();
+            let mut seen = std::collections::HashSet::new();
+            let t = state.thread.borrow();
+            Ok(t.regs
+                .first()
+                .unwrap()
+                .inspect(&struct_names, field_names, &mut seen))
+        })
+    }
+
+    /// Runs every `#[test]` function and every `#[tests]` expression to completion (not through
+    /// `debug_step`). A panic or other runtime fault is a failure; a `false` bool is a failure
+    /// (for `#[tests]` checks); any other return is a pass. Resets the thread afterwards so a
     /// debug session still starts at program entry.
     pub fn run_tests(&mut self) -> Vec<TestResult> {
         let names = self.tests.clone();
         let mut results = Vec::with_capacity(names.len());
         for name in names {
-            let error = self.call_fn_result(&name).err().map(|e| format!("{e}"));
+            let error = match self.call_fn_result(&name) {
+                Err(e) => Some(format!("{e}")),
+                Ok(Captured::Bool(false)) => Some("assertion failed".into()),
+                Ok(_) => None,
+            };
             self.reset_to_entry();
             results.push(TestResult { name, error });
         }

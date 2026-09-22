@@ -105,3 +105,21 @@ fn assert_in_test_fn() {
         results[1]
     );
 }
+
+#[test]
+fn tests_list_runs() {
+    const SOURCE: &str = r#"
+        fn add(a: int, b: int) -> int { a + b }
+        #[tests] [
+            add(1, 2) == 3,
+            add(1, 2) == 4,
+        ]
+    "#;
+    let mut vm = vm::Vm::compile(SOURCE, library::std).unwrap();
+    let results = vm.run_tests();
+    assert_eq!(results.len(), 2, "{results:?}");
+    assert_eq!(results[0].name, "add(1, 2) == 3");
+    assert!(results[0].passed(), "{:?}", results[0]);
+    assert_eq!(results[1].name, "add(1, 2) == 4");
+    assert!(!results[1].passed(), "{:?}", results[1]);
+}

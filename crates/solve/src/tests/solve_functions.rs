@@ -391,3 +391,11 @@ test_fail!(
     "fn outer() { fn inner() {} }",
     "fn outer() { { fn inner() {} } }",
 );
+
+test_ty!(
+    tests_list_typechecks,
+    "fn add(a: int, b: int) -> int { a + b }
+     #[tests] [ add(1, 2) == 3, true ]",
+    "add" => func!((Int, Int) -> Int)
+);
+test_fail!(tests_list_requires_bool, "#[tests] [ 1 ]");

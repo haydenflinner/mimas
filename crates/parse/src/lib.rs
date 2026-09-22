@@ -115,6 +115,7 @@ pub mod item {
         mod r#impl;
         mod pact;
         mod r#struct;
+        mod tests;
         mod r#use;
         pub use r#const::*;
         pub use r#enum::*;
@@ -122,6 +123,7 @@ pub mod item {
         pub use r#impl::*;
         pub use pact::*;
         pub use r#struct::*;
+        pub use tests::*;
         pub use r#use::*;
     }
     pub use item_kinds::*;

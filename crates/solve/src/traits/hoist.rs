@@ -478,6 +478,24 @@ impl Hoist for Function {
     }
 }
 
+impl Hoist for Tests {
+    fn hoist(&self, ctx: HoistCtx) -> Result<()> {
+        let HoistCtx { solver, vis, .. } = ctx;
+        for case in &self.cases {
+            let mut case_ctx = HoistCtx::new(
+                solver,
+                HoistTarget::Scope,
+                Some(case.id),
+                case.expr.location(),
+                vis,
+            );
+            let ty = Ty::Fn(FnHeader::new(vec![], Ty::Bool, false));
+            case_ctx.write(&case.name, ty, false)?;
+        }
+        Ok(())
+    }
+}
+
 impl Hoist for Const {
     fn hoist(&self, mut ctx: HoistCtx) -> Result<()> {
         let vid = ctx.solver.node_vid(self.right.id());

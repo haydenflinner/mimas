@@ -156,6 +156,13 @@ impl<'s> Parser<'s> {
                 let tok = self.take()?;
                 Err(self.unexpected(tok).into())
             }
+            // `where:` / `examples { }` check lists -- the literate spelling of `#[tests]`.
+            // The words stay contextual: they only open a block when `:` or `{` follows, so
+            // `examples.push(x)` or `where = 5` still parse as ordinary expressions.
+            TokKind::Ident("where" | "examples" | "example") if self.check_intro() => {
+                let item = Item::new(self.check_block()?.into(), self.location(start), false);
+                Ok(BlockElement::Stmt(self.new_stmt(item, start)))
+            }
             _ => {
                 let expr = self.expr()?;
 
@@ -188,17 +195,42 @@ impl<'s> Parser<'s> {
         let attrs = self.attributes()?;
         let public = self.match_take(TokKind::Pub).is_some();
 
-        let (kind, requires_semi): (ItemKind, bool) = match self.peek()?.kind() {
-            TokKind::Fn => (self.function()?.into(), false),
-            TokKind::Struct => (self.struct_decl()?.into(), false),
-            TokKind::Pact => (self.pact_decl()?.into(), false),
-            TokKind::Enum => (self.enum_decl()?.into(), false),
-            TokKind::Impl => (self.impl_decl()?.into(), false),
-            TokKind::Const => (self.const_decl()?.into(), true),
-            TokKind::Use => (self.use_decl()?.into(), true),
-            _ => {
-                let tok = self.take()?;
-                Err(self.unexpected(tok))?
+        let has_tests = attrs.iter().any(|a| a.name.lexeme == "tests");
+        if has_tests {
+            if public {
+                let at = self.location(start);
+                Err(TestsNotPublic {
+                    src: self.src(),
+                    at: at.into(),
+                })?;
+            }
+            if !matches!(
+                self.soft_peek()?.map(|t| t.kind()),
+                Some(TokKind::LeftSquare)
+            ) {
+                let at = self.peek()?.location();
+                Err(TestsNeedsList {
+                    src: self.src(),
+                    at: shared::Location::from(at).into(),
+                })?;
+            }
+        }
+
+        let (kind, requires_semi): (ItemKind, bool) = if has_tests {
+            (self.tests_list()?.into(), false)
+        } else {
+            match self.peek()?.kind() {
+                TokKind::Fn => (self.function()?.into(), false),
+                TokKind::Struct => (self.struct_decl()?.into(), false),
+                TokKind::Pact => (self.pact_decl()?.into(), false),
+                TokKind::Enum => (self.enum_decl()?.into(), false),
+                TokKind::Impl => (self.impl_decl()?.into(), false),
+                TokKind::Const => (self.const_decl()?.into(), true),
+                TokKind::Use => (self.use_decl()?.into(), true),
+                _ => {
+                    let tok = self.take()?;
+                    Err(self.unexpected(tok))?
+                }
             }
         };
 
@@ -223,7 +255,10 @@ impl<'s> Parser<'s> {
     /// Zero or more `#[name]` markers sitting immediately before an item.
     fn attributes(&mut self) -> Result<Vec<Attribute>> {
         let mut attrs = vec![];
-        while self.soft_peek()?.is_some_and(|tok| tok.kind() == TokKind::Hash) {
+        while self
+            .soft_peek()?
+            .is_some_and(|tok| tok.kind() == TokKind::Hash)
+        {
             attrs.push(self.attribute()?);
         }
         Ok(attrs)
@@ -239,6 +274,7 @@ impl<'s> Parser<'s> {
 
     fn validate_attrs(&self, attrs: &[Attribute], kind: &ItemKind, allow_test: bool) -> Result<()> {
         let mut seen_test = false;
+        let mut seen_tests = false;
         for attr in attrs {
             match attr.name.lexeme.as_str() {
                 "test" => {
@@ -276,6 +312,27 @@ impl<'s> Parser<'s> {
                         })?,
                     }
                 }
+                "tests" => {
+                    if seen_tests {
+                        Err(DuplicateAttribute {
+                            src: self.src(),
+                            at: attr.name.location.into(),
+                            name: attr.name.lexeme.clone(),
+                        })?;
+                    }
+                    seen_tests = true;
+                    match kind {
+                        ItemKind::Tests(_) if allow_test => {}
+                        ItemKind::Tests(_) => Err(TestOnMethod {
+                            src: self.src(),
+                            at: attr.name.location.into(),
+                        })?,
+                        _ => Err(TestsNeedsList {
+                            src: self.src(),
+                            at: attr.name.location.into(),
+                        })?,
+                    }
+                }
                 _ => Err(UnknownAttribute {
                     src: self.src(),
                     at: attr.name.location.into(),
@@ -284,6 +341,227 @@ impl<'s> Parser<'s> {
             }
         }
         Ok(())
+    }
+
+    /// `#[tests] [ expr, expr, ... ]` -- each expression is a check the inspector runs.
+    fn tests_list(&mut self) -> Result<Tests> {
+        self.expect(TokKind::LeftSquare)?;
+        self.with_paren_depth(self.paren_depth + 1, |p| {
+            if matches!(p.soft_peek()?.map(|t| t.kind()), Some(TokKind::RightSquare)) {
+                let at = shared::Location::from(p.peek()?.location());
+                return Err(TestsEmpty {
+                    src: p.src(),
+                    at: at.into(),
+                }
+                .into());
+            }
+            let mut cases = vec![];
+            let mut names = std::collections::HashSet::new();
+            loop {
+                let inner = p.expr()?;
+                let name = unique_test_name(&mut names, p.source_of(&inner));
+                let location = inner.location();
+                cases.push(TestCase {
+                    id: NodeId::new(),
+                    name: Ident::new(name, location),
+                    expr: inner,
+                });
+                if p.match_take(TokKind::Comma).is_none() {
+                    p.expect(TokKind::RightSquare)?;
+                    break;
+                }
+                if p.match_take(TokKind::RightSquare).is_some() {
+                    break;
+                }
+            }
+            Ok(Tests::new(cases))
+        })
+    }
+
+    /// Two-token lookahead for the contextual check keywords: `where`/`examples`/`example`
+    /// open a check block only when `:` or `{` follows. `Peekable` fronts just one token, so
+    /// the second comes from a throwaway lexer over the remaining source -- the token spans
+    /// it reports are never used.
+    fn check_intro(&mut self) -> bool {
+        let mut lex = Lexer::new(
+            &self.source[self.cursor..],
+            self.file_id,
+            self.file_name.clone(),
+        );
+        lex.next();
+        matches!(
+            lex.next(),
+            Some(Ok(tok)) if matches!(tok.kind(), TokKind::Colon | TokKind::LeftBrace)
+        )
+    }
+
+    /// `where:` / `examples { }` check lists. Each check is `expr` or `expr is expr` and
+    /// becomes one [TestCase] in a [Tests] item, so `Vm::run_tests` sees them exactly like a
+    /// `#[tests]` list. Two shapes:
+    ///
+    /// - braced (`where { a is b, c is d }`): checks separated by `,` or newlines.
+    /// - colon (`where:` then check lines): a paragraph -- consecutive non-blank lines each
+    ///   holding a check, ended by a blank line, an item/statement keyword, `}`, or EOF.
+    ///   `,` and `;` also work as separators/terminators.
+    fn check_block(&mut self) -> Result<Tests> {
+        let word = self.take()?;
+        let at = shared::Location::from(word.location());
+        self.match_take(TokKind::Colon);
+        let braced = self.match_take(TokKind::LeftBrace).is_some();
+        let mut names = std::collections::HashSet::new();
+        let mut cases = vec![];
+        if braced {
+            loop {
+                if self.match_take(TokKind::RightBrace).is_some() {
+                    break;
+                }
+                cases.push(self.check_case(&mut names)?);
+                if self.match_take(TokKind::Comma).is_some()
+                    || self.newline_before_next()
+                    || matches!(
+                        self.soft_peek()?.map(|tok| tok.kind()),
+                        Some(TokKind::RightBrace)
+                    )
+                {
+                    continue;
+                }
+                let tok = self.take()?;
+                Err(Misdirection {
+                    src: self.src(),
+                    at: shared::Location::from(tok.location()).into(),
+                    msg: "checks need `,` or a newline between them".into(),
+                    label: "expected `,` or `}` here".into(),
+                })?;
+            }
+        } else {
+            loop {
+                cases.push(self.check_case(&mut names)?);
+                // `,`/`;` chain more checks on the same line.
+                while self
+                    .match_take_possibilities(&[TokKind::Comma, TokKind::SemiColon])
+                    .is_some()
+                {
+                    if !self.check_continues(true)? {
+                        break;
+                    }
+                    cases.push(self.check_case(&mut names)?);
+                }
+                if self.check_continues(false)? {
+                    continue;
+                }
+                // same-line junk after a check (`a is b c`) gets a pointed diagnostic.
+                let next = match self.soft_peek()? {
+                    Some(tok) => Some((tok.span().start(), tok.location())),
+                    None => None,
+                };
+                if let Some((gap_end, at)) = next {
+                    let gap = self.source.get(self.cursor..gap_end).unwrap_or_default();
+                    if !gap.contains('\n') {
+                        Err(Misdirection {
+                            src: self.src(),
+                            at: shared::Location::from(at).into(),
+                            msg: "checks need `,` or a newline between them".into(),
+                            label: "unexpected token here".into(),
+                        })?;
+                    }
+                }
+                break;
+            }
+        }
+        if cases.is_empty() {
+            Err(Misdirection {
+                src: self.src(),
+                at: at.into(),
+                msg: format!("`{}` opens a check list but none follow", word.kind()),
+                label: "expected `expr` or `expr is expr` after this".into(),
+            })?;
+        }
+        Ok(Tests::new(cases))
+    }
+
+    /// One `expr` or `expr is expr` check. `is` lowers to `==` and sits inside the case's
+    /// span, so the test's name -- its source snippet -- reads exactly as written.
+    fn check_case(&mut self, names: &mut std::collections::HashSet<String>) -> Result<TestCase> {
+        let start = self.next_tok_boundary();
+        let left = self.expr()?;
+        let is_next = matches!(
+            self.soft_peek()?.map(|tok| tok.kind()),
+            Some(TokKind::Ident("is"))
+        ) && !self
+            .source
+            .get(self.cursor..self.next_tok_boundary())
+            .unwrap_or_default()
+            .contains('\n');
+        let expr = if is_next {
+            self.take()?;
+            let right = self.expr()?;
+            self.new_expr(Equality::new(left, EqualityOp::Equal, right), start)
+        } else {
+            left
+        };
+        let name = unique_test_name(names, self.source_of(&expr));
+        let location = expr.location();
+        Ok(TestCase {
+            id: NodeId::new(),
+            name: Ident::new(name, location),
+            expr,
+        })
+    }
+
+    /// Whether a `where:` block takes another check. `same_line` answers for a `,`/`;`
+    /// continuation; otherwise the next token must sit on a later line with no blank line in
+    /// between (the paragraph rule) and must not open the next statement instead.
+    fn check_continues(&mut self, same_line: bool) -> Result<bool> {
+        let Some((kind, gap_end)) = self
+            .soft_peek()?
+            .map(|tok| (tok.kind(), tok.span().start()))
+        else {
+            return Ok(false);
+        };
+        let gap = self.source.get(self.cursor..gap_end).unwrap_or_default();
+        if same_line {
+            if gap.contains('\n') {
+                return Ok(false);
+            }
+        } else {
+            // split off the check's own line tail and the next token's line head; a wholly
+            // empty middle line is a paragraph break (comment lines are not blank).
+            let mut lines = gap.split('\n');
+            lines.next();
+            lines.next_back();
+            if !gap.contains('\n') || lines.any(|line| line.trim().is_empty()) {
+                return Ok(false);
+            }
+        }
+        // a line that opens the next statement -- an item, a control-flow keyword, `}`, or
+        // a fresh check block -- ends this one.
+        let ends = matches!(
+            kind,
+            TokKind::RightBrace
+                | TokKind::Fn
+                | TokKind::Let
+                | TokKind::Pub
+                | TokKind::Struct
+                | TokKind::Enum
+                | TokKind::Impl
+                | TokKind::Pact
+                | TokKind::Use
+                | TokKind::Const
+                | TokKind::Module
+                | TokKind::Hash
+                | TokKind::If
+                | TokKind::Match
+                | TokKind::For
+                | TokKind::While
+                | TokKind::Loop
+                | TokKind::Return
+                | TokKind::Raise
+                | TokKind::Break
+                | TokKind::Continue
+                | TokKind::Collect
+        ) || matches!(kind, TokKind::Ident("where" | "examples" | "example"))
+            && self.check_intro();
+        Ok(!ends)
     }
 
     fn use_decl(&mut self) -> Result<Use> {
@@ -2542,6 +2820,20 @@ impl<'s> Parser<'s> {
 enum BlockElement {
     Stmt(Stmt),
     MaybeYield(Expr),
+}
+
+fn unique_test_name(seen: &mut std::collections::HashSet<String>, name: String) -> String {
+    if seen.insert(name.clone()) {
+        return name;
+    }
+    let mut n = 2;
+    loop {
+        let candidate = format!("{name} #{n}");
+        if seen.insert(candidate.clone()) {
+            return candidate;
+        }
+        n += 1;
+    }
 }
 
 bitflags! {

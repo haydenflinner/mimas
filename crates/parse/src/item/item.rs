@@ -36,10 +36,11 @@ declare_item_kinds!(
         Impl,
         Const,
         Use,
+        Tests,
     }
 );
 
-/// A `#[name]` marker on an item. Only `#[test]` is recognized today.
+/// A `#[name]` marker on an item. Only `#[test]` and `#[tests]` are recognized today.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Attribute {
     pub name: Ident,
@@ -103,6 +104,14 @@ impl Item {
     /// Whether this item is marked `#[test]`.
     pub fn is_test(&self) -> bool {
         self.attrs.iter().any(|a| a.name.lexeme == "test")
+    }
+
+    /// The function this item declares, if it is one.
+    pub fn as_function(&self) -> Option<&Function> {
+        match self.kind() {
+            ItemKind::Function(f) => Some(f),
+            _ => None,
+        }
     }
 }
 
