@@ -27,7 +27,7 @@ pub struct Solver {
     pub(crate) adts: IdVec<AdtId, Adt>,
     pub(crate) pacts: IdVec<PactId, shared::Pact>,
     pub(crate) pact_impls: HashSet<(PactId, AdtId)>,
-    pub(crate) pact_default_decs: HashMap<(PactId, String), DecId>,
+    pub(crate) pact_members: HashMap<(PactId, String), DecId>,
     pub(crate) pact_self: Option<PactId>,
     pub(crate) node_to_vid: IndexMap<NodeId, Vid>,
     pub(crate) node_decs: IndexMap<NodeId, DecId>,
@@ -60,7 +60,7 @@ impl Solver {
             adts: IdVec::new(),
             pacts: IdVec::new(),
             pact_impls: HashSet::new(),
-            pact_default_decs: HashMap::new(),
+            pact_members: HashMap::new(),
             pact_self: None,
             node_to_vid: IndexMap::new(),
             node_decs: IndexMap::new(),
@@ -1433,6 +1433,8 @@ impl Solver {
                                     name: right.lexeme.clone(),
                                 })?
                             }
+                            let dec = self.adts[adt].variants[&right.lexeme].dec();
+                            self.note(right, Ty::Adt(adt), dec);
                             (adt, Some(right.lexeme.clone()))
                         }
                     }
@@ -1640,9 +1642,9 @@ impl Solver {
                     for item in pact.items.iter() {
                         let PactItem::Fn {
                             default: Some(body),
-                            name: _,
                             parameters,
                             return_type,
+                            ..
                         } = item
                         else {
                             continue;

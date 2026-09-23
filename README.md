@@ -11,7 +11,7 @@
 [![built with Rust](https://img.shields.io/badge/built_with-Rust-dea584?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![license](https://img.shields.io/badge/license-MIT_OR_Apache--2.0-8E9BFF?style=flat-square)](#license)
 [![ci](https://img.shields.io/github/actions/workflow/status/imlazyeye/mimas/test.yml?branch=main&style=flat-square&label=ci)](https://github.com/imlazyeye/mimas/actions/workflows/test.yml)
-[![tests](https://img.shields.io/badge/tests-1%2C700%2B_passing-5BD6B0?style=flat-square)](https://mim.as)
+[![tests](https://img.shields.io/badge/tests-1%2C900%2B_passing-5BD6B0?style=flat-square)](https://mim.as)
 
 [**Get started**](https://mim.as/introduction/getting-started.html) ·
 [Tour the language](https://mim.as/introduction/tour.html) ·
@@ -51,7 +51,7 @@ print(f"area of {shapes.len()} shapes: {total}");
 | 🪶 **Flexible** | Inference writes your types, compiles stay fast, and errors point toward the fix instead of just turning you away. Garbage collected -- no borrow checker, no lifetimes. |
 | 🛡️ **Typed** | Static typing with inference, user-defined types, exhaustive [pattern matching](https://mim.as/reference/control-flow/match.html), and `T?` option safety so an unexpected `null` can't reach you. |
 | 🧩 **Extendable** | Share Rust types and functions with the `#[mimas]` macro -- they're type-checked just like native ones. |
-| ✅ **Robust** | Every panic is treated as a bug, top to bottom. Over **1,700 tests** (the tests are tested, via [cargo mutants](https://mutants.rs)), with clear diagnostics powered by [miette](https://github.com/zkat/miette). |
+| ✅ **Robust** | Every panic is treated as a bug, top to bottom. Over **1,900 tests** (the tests are tested, via [cargo mutants](https://mutants.rs)), with clear diagnostics powered by [miette](https://github.com/zkat/miette). |
 
 Read the [full tour](https://mim.as/introduction/tour.html) for a quick pass over the whole language.
 
@@ -112,7 +112,9 @@ Runnable projects live in [`examples/`](examples):
 
 ## Editor support
 
-A VS Code extension lives in [`tools/vscode`](tools/vscode) -- syntax highlighting, snippets, and language configuration for `.mim` files. Build it with `vsce package` and install the `.vsix`. The TextMate grammar it uses ([`tools/highlighter`](tools/highlighter)) is written in mimas, and is the same one that colors the docs.
+A language server, `mimas-lsp`, gives any LSP-capable editor diagnostics, hover, go to definition, references, rename, outlines, and inlay hints. It only knows the standard library for now, so it doesn't yet work for scripts that use types or functions from a Rust host. See the [Language Server](https://mim.as/introduction/lsp.html) page for setup and limitations.
+
+A VS Code extension lives in [`tools/vscode`](tools/vscode) -- syntax highlighting, snippets, and language configuration for `.mim` files, plus the language server when `mimas-lsp` is installed. Build it with `vsce package` and install the `.vsix`. The TextMate grammar it uses ([`tools/highlighter`](tools/highlighter)) is written in mimas, and is the same one that colors the docs.
 
 ## Status
 

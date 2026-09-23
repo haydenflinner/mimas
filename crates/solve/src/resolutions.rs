@@ -112,6 +112,7 @@ pub struct ResolvedDecl {
     pub location: Location,
     pub module: AdtId,
     pub owner: Option<AdtId>,
+    pub implements: Option<DecId>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -239,6 +240,19 @@ impl From<Solver> for Resolutions {
             }
         }
 
+        // a pact impl's methods pair with the pact's members by name (a default the impl left out
+        // is already the member's own dec)
+        let mut implements: HashMap<DecId, DecId> = HashMap::new();
+        for &(pid, aid) in &solver.pact_impls {
+            for (name, field) in &solver.adts[aid].impls {
+                if let Some(&member) = solver.pact_members.get(&(pid, name.clone()))
+                    && member != field.dec
+                {
+                    implements.insert(field.dec, member);
+                }
+            }
+        }
+
         let tys: Vec<Ty> = solver
             .decs
             .iter()
@@ -275,6 +289,7 @@ impl From<Solver> for Resolutions {
                 location: dec.location,
                 module: dec.module,
                 owner: owners.get(&id).copied(),
+                implements: implements.get(&id).copied(),
             });
         }
 

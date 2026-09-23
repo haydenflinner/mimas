@@ -6,7 +6,14 @@ Notable changes to mimas. The format follows [Keep a Changelog](https://keepacha
 
 ### Added
 
+- mimas now has a language server, `mimas-lsp`, installed with `cargo install mimas-lsp`. It offers diagnostics, hover (with `///` doc comments), go to definition, find references, rename, outlines, and inlay hints. The VS Code extension in `tools/vscode` uses it when it's installed. It only knows the standard library for now, so scripts that use a Rust host's types or functions will report errors that aren't real. See [Language Server](https://mim.as/introduction/lsp.html). ([#37](https://github.com/imlazyeye/mimas/pull/37))
 - `std::sys::file()`: Returns the absolute path to the file this function is written within, similar to Rust's `file!()` and Python's `__file__`.
+- `std::process::run_attached(cmd, args)`: Runs a command without capturing its output and returns its exit code. Unlike `std::process::run`, a non-zero exit isn't raised.
+
+### Changed
+
+- The parser now recovers from syntax errors, so the `mimas` CLI reports every syntax error in a file instead of stopping at the first. Embedding through the `mimas` crate still returns only the first.
+- Using a module, a library namespace, or a method without calling it as a value (i.e.: `let a = std::fs;`, `1.max;`) is now a type error with a hint.
 
 ## [0.2.0] - 2026-09-17
 
