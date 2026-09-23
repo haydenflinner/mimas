@@ -1,15 +1,19 @@
+use std::rc::Rc;
+
 use api::{
     AdtBinding, ApiAdt, ApiAdtKind, ApiConstant, ApiFunction, ApiMethod, ApiVariant, Intrinsic,
     Library, NativeId,
 };
+use compile::{BinOp, UnaryOp};
 use shared::{Literal, Ty};
 
 use crate::{
-    RtErr,
+    RtErr, RtResult, Val,
     adt::MimasAdt,
     conversion::{IntoNativeResult, MimasType},
     heap::Ctx,
     native::{NativeRef, make_native},
+    val::InstanceOps,
 };
 
 /// A single native-registration request, emitted by the `#[mimas]` attribute macro and
@@ -130,6 +134,66 @@ impl<'a, 'gc> Api<'a, 'gc> {
         f.install_assoc(self, recv_ty, name.into());
     }
 
+    /// `a <op> b` for `T` instances — `f` receives both operands as `Val`s
+    /// in source order plus the `op`, and declines shapes/ops it doesn't
+    /// handle via `RtErr::invalid_bin`. Dispatch consults the LHS's type
+    /// first, then the RHS's, so one impl can cover `v * s` and `s * v`.
+    /// `==`/`!=` can't be overridden — instance equality is structural and
+    /// is handled before this dispatch.
+    ///
+    /// Panics if `add_adt::<T>()` hasn't run yet.
+    pub fn add_bin_op<T, F>(&mut self, f: F)
+    where
+        T: MimasType<'gc> + 'static,
+        F: for<'g> Fn(Ctx<'g>, Val<'g>, Val<'g>, BinOp) -> RtResult<Val<'g>> + 'static,
+    {
+        let f = Rc::new(f);
+        let ops = &self.ctx.fixture::<InstanceOps>().bin;
+        for sid in self.layout_ids::<T>("add_bin_op") {
+            ops.borrow_mut().insert(sid, f.clone());
+        }
+        self.mark_op_overloads::<T>();
+    }
+
+    /// `-a`/`+a`/`!a`/`~a` for `T` instances — see [`Self::add_bin_op`];
+    /// decline via `RtErr::InvalidUnaryOperand`.
+    ///
+    /// Panics if `add_adt::<T>()` hasn't run yet.
+    pub fn add_unary_op<T, F>(&mut self, f: F)
+    where
+        T: MimasType<'gc> + 'static,
+        F: for<'g> Fn(Ctx<'g>, Val<'g>, UnaryOp) -> RtResult<Val<'g>> + 'static,
+    {
+        let f = Rc::new(f);
+        let ops = &self.ctx.fixture::<InstanceOps>().unary;
+        for sid in self.layout_ids::<T>("add_unary_op") {
+            ops.borrow_mut().insert(sid, f.clone());
+        }
+        self.mark_op_overloads::<T>();
+    }
+
+    /// Flag the adt so the solver accepts infix/unary ops on it — the
+    /// operand shapes themselves stay a runtime concern of the impl.
+    fn mark_op_overloads<T: MimasType<'gc> + 'static>(&mut self) {
+        let adt = self.library.registry().get::<T>().expect("adt").adt_id;
+        if let Some(a) = self.library.adt_mut(adt) {
+            a.op_overloads = true;
+        }
+    }
+
+    /// The `struct_id`s an instance of `T` can carry — one for structs, one
+    /// per variant for enums.
+    fn layout_ids<T: MimasType<'gc> + 'static>(&self, api: &str) -> Vec<u32> {
+        self.library
+            .registry()
+            .get::<T>()
+            .unwrap_or_else(|| panic!("{api} requires add_adt::<T>() first"))
+            .variant_layout_ids
+            .iter()
+            .map(|id| u32::from(*id))
+            .collect()
+    }
+
     pub fn mark_intrinsic(&mut self, nid: NativeId, i: Intrinsic) {
         self.library.mark_instrinsic(nid, i);
     }
@@ -184,6 +248,7 @@ impl<'a, 'gc> Api<'a, 'gc> {
             adt_id,
             doc: desc.doc.to_string(),
             variants,
+            op_overloads: false,
         });
 
         let binding = AdtBinding {

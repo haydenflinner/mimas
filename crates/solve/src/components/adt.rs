@@ -363,5 +363,9 @@ bitflags! {
         const IS_ENUM = 1 << 0;
         const IS_MODULE = 1 << 1;
         const IS_BUILTIN = 1 << 2;
+        /// `Api::add_bin_op`/`add_unary_op` registered runtime impls — infix
+        /// and unary ops on this adt typecheck against the impl's operand
+        /// shapes at runtime instead of failing at solve time.
+        const HAS_OPS = 1 << 3;
     }
 }

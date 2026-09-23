@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
 
 use compile::{BinFault, BinOp, Scalar, UnaryOp};
 #[cfg(any(feature = "dataframe", feature = "darkly"))]
@@ -754,6 +754,47 @@ impl<'gc> Val<'gc> {
     }
 }
 
+/// `a <op> b` on an ADT instance — libraries register impls keyed by
+/// `struct_id` through [`crate::api::Api::add_bin_op`]; the impl receives
+/// the `op` and declines the ones it doesn't handle via
+/// `RtErr::invalid_bin`. `Rc` so the dispatch can clone the impl out of
+/// the `RefCell` before calling it: the impl may itself recurse into
+/// [`bin`]/[`unary`].
+pub type InstanceBin =
+    dyn for<'gc> Fn(Ctx<'gc>, Val<'gc>, Val<'gc>, BinOp) -> RtResult<Val<'gc>>;
+pub type InstanceUnary =
+    dyn for<'gc> Fn(Ctx<'gc>, Val<'gc>, UnaryOp) -> RtResult<Val<'gc>>;
+
+#[derive(Default)]
+pub struct InstanceOps {
+    pub bin: RefCell<HashMap<u32, Rc<InstanceBin>>>,
+    pub unary: RefCell<HashMap<u32, Rc<InstanceUnary>>>,
+}
+
+/// Infix dispatch for `Val::Instance` operands — the impl registered on the
+/// LHS's `struct_id` wins; when only the RHS is an instance its impl sees
+/// both operands in source order, so one impl can cover `v * s` and
+/// `s * v` alike. Returns `None` when no impl is registered.
+fn instance_bin<'gc>(
+    a: Val<'gc>,
+    ctx: Ctx<'gc>,
+    b: Val<'gc>,
+    op: BinOp,
+) -> Option<RtResult<Val<'gc>>> {
+    let sid = |v: Val<'gc>| match v {
+        Val::Instance(i) => Some(i.0.borrow().struct_id),
+        _ => None,
+    };
+    let ops = &ctx.fixture::<InstanceOps>().bin;
+    for v in [a, b] {
+        let f = sid(v).and_then(|id| ops.borrow().get(&id).cloned());
+        if let Some(f) = f {
+            return Some(f(ctx, a, b, op));
+        }
+    }
+    None
+}
+
 pub fn bin<'gc>(this: Val<'gc>, ctx: Ctx<'gc>, other: Val<'gc>, op: BinOp) -> RtResult<Val<'gc>> {
     // inner helpers rebuild the operand `Val`s from their primitives so the
     // `InvalidBinOperands` error gets concrete context. for coerced operands
@@ -892,7 +933,10 @@ pub fn bin<'gc>(this: Val<'gc>, ctx: Ctx<'gc>, other: Val<'gc>, op: BinOp) -> Rt
             Val::Array(ctx.new_array(out))
         }
         (BinOp::Identity, left, right) => Val::Bool(left == right),
-        _ => Err(RtErr::invalid_bin(this, op, other))?,
+        _ => match instance_bin(this, ctx, other, op) {
+            Some(v) => v?,
+            None => Err(RtErr::invalid_bin(this, op, other))?,
+        },
     })
 }
 
@@ -927,6 +971,16 @@ pub fn unary<'gc>(this: Val<'gc>, ctx: Ctx<'gc>, op: UnaryOp) -> RtResult<Val<'g
             }
             Val::Array(ctx.new_array(out))
         }
-        _ => Err(RtErr::InvalidUnaryOperand)?,
+        _ => match this {
+            Val::Instance(i) => {
+                let id = i.0.borrow().struct_id;
+                let f = ctx.fixture::<InstanceOps>().unary.borrow().get(&id).cloned();
+                match f {
+                    Some(f) => f(ctx, this, op)?,
+                    None => Err(RtErr::InvalidUnaryOperand)?,
+                }
+            }
+            _ => Err(RtErr::InvalidUnaryOperand)?,
+        },
     })
 }

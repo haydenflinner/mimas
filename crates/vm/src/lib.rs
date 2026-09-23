@@ -33,4 +33,7 @@ pub use ::inventory;
 
 // `Vm::function_dataflow`'s return type -- re-exported so a `vm`-only dependent (the inspector,
 // say) can name `vm::DataflowGraph` etc. without also depending on `mimas-compile` directly.
-pub use ::compile::{DataflowEdge, DataflowError, DataflowGraph, DataflowNode, NodeKind};
+// `BinOp`/`UnaryOp` join them: `Api::add_bin_op`/`add_unary_op` take them as args.
+pub use ::compile::{
+    BinOp, DataflowEdge, DataflowError, DataflowGraph, DataflowNode, NodeKind, UnaryOp,
+};

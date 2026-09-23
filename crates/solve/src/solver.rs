@@ -840,6 +840,10 @@ impl Solver {
             flags: match api_adt.kind {
                 ApiAdtKind::Enum => AdtFlags::IS_ENUM,
                 ApiAdtKind::Struct => AdtFlags::empty(),
+            } | if api_adt.op_overloads {
+                AdtFlags::HAS_OPS
+            } else {
+                AdtFlags::empty()
             },
         };
         let pushed = self.push_adt(umbrella);

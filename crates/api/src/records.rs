@@ -42,6 +42,9 @@ pub struct ApiAdt {
     pub adt_id: AdtId,
     pub doc: String,
     pub variants: Vec<ApiVariant>,
+    /// `Api::add_bin_op`/`add_unary_op` set this — the solver accepts infix
+    /// and unary ops on the type and defers the operand shapes to runtime.
+    pub op_overloads: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

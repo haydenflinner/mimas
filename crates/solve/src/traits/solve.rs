@@ -1049,6 +1049,16 @@ impl Solve for Evaluation {
                     .collect::<Result<Vec<Ty>>>()
                     .map(Ty::Tuple),
 
+                // adts with registered operator impls (`Api::add_bin_op`) typecheck
+                // here and dispatch at runtime — the result is the flagged operand's
+                // type by convention (LHS wins when both are flagged).
+                (Ty::Adt(l), _) if solver.adts[*l].flags.contains(AdtFlags::HAS_OPS) => {
+                    Ok(lhs.clone())
+                }
+                (_, Ty::Adt(r)) if solver.adts[*r].flags.contains(AdtFlags::HAS_OPS) => {
+                    Ok(rhs.clone())
+                }
+
                 (lhs, rhs) => Err(InvalidEvaluation {
                     src: solver.src(location),
                     at: location.into(),
@@ -1812,6 +1822,11 @@ impl Solve for Unary {
                     .map(|e| unary(op, e, location, solver))
                     .collect::<Result<Vec<Ty>>>()
                     .map(Ty::Tuple),
+                // adts with registered operator impls (`Api::add_unary_op`)
+                // typecheck here and dispatch at runtime, same as `eval`'s.
+                (_, Ty::Adt(id)) if solver.adts[*id].flags.contains(AdtFlags::HAS_OPS) => {
+                    Ok(ty.clone())
+                }
                 _ => Err(InvalidUnary {
                     src: solver.src(location),
                     at: location.into(),
