@@ -41,6 +41,7 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
         m.add(tail);
         m.add(slice);
         m.add(rename);
+        m.add(col_names);
         m.add(pull);
         m.add(group_by);
         m.add(agg);
@@ -59,6 +60,7 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add_method(tail);
     api.add_method(slice);
     api.add_method(rename);
+    api.add_method(col_names);
     api.add_method(pull);
     api.add_method(group_by);
     api.add_method(agg);
@@ -265,6 +267,20 @@ fn rename<'gc>(
     out.rename(from, to.into())
         .map(|d| ctx.new_dataframe(d.clone()))
         .into()
+}
+
+/// `df.col_names()` — the column names, in order, as a mimas `[str]` (for
+/// inspection and for driving table renderers/query UIs).
+#[native]
+fn col_names<'gc>(ctx: Ctx<'gc>, df: vm::DataFrame<'gc>) -> vm::Array<'gc> {
+    let names: Vec<Val<'gc>> = {
+        let d = df.0.borrow();
+        d.0.get_column_names()
+            .iter()
+            .map(|n| Val::Str(ctx.intern(n.as_str())))
+            .collect()
+    };
+    ctx.new_array(names)
 }
 
 /// `df.pull("name")` — one column as a plain mimas array (ints, floats, bools

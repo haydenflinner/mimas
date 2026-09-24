@@ -363,3 +363,9 @@ test_fail!(
        let df = to_dataframe([Employee { name = "A", age = 1, dept = "x" }])!;
        let _ = df.pull("nope")!;"#,
 );
+
+test_run!(
+    col_names_lists_columns_in_order,
+    EMPLOYEES,
+    r#"df.col_names().join(",")"# => r#""name,age,dept""#,
+);
