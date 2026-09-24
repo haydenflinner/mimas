@@ -44,6 +44,7 @@ impl TyExt for Ty {
             Ty::Identity(_)
             | Ty::Anon(_)
             | Ty::Pacts(_) // annotations always required, never holds vids
+            | Ty::Skolem(_)
             | Ty::Unit
             | Ty::Never
             | Ty::Null
@@ -83,8 +84,7 @@ impl TyExt for Ty {
                         .map(|(pid, _)| *pid)
                         .collect(),
                 ),
-                Ty::Pacts(pids) => Some(pids.clone()),
-                _ => None,
+                _ => ty.as_pacts(),
             }
         }
 
@@ -100,6 +100,7 @@ impl TyExt for Ty {
     fn from_annotation(annotation: Annotation, solver: &mut Solver) -> Result<Ty> {
         match annotation {
             Annotation::Unit => Ok(Ty::Unit),
+            Annotation::Poison(poison) => poison.escaped(),
             Annotation::Kw(kw) => Ok(ty_from_kw(kw)),
             Annotation::Option(ty) => Ok(Ty::Option(Box::new(Ty::from_annotation(*ty, solver)?))),
             Annotation::Result(ty) => Ok(Ty::Result(Box::new(Ty::from_annotation(*ty, solver)?))),
@@ -119,13 +120,20 @@ impl TyExt for Ty {
                     .map(|v| Ty::from_annotation(v, solver))
                     .collect::<Result<_>>()?,
             )),
-            Annotation::Ty(ident) => ident.query(solver),
+            Annotation::Ty(ident) => {
+                let ty = ident.query(solver)?;
+                let dec = solver.ribs.resolve(&ident);
+                solver.note(&ident, ty.clone(), dec);
+                Ok(ty)
+            }
             Annotation::Path(segments) => {
                 let mut iter = segments.into_iter();
                 let head = iter
                     .next()
                     .expect("path annotation has at least two segments");
                 let mut ty = head.query(solver)?;
+                let dec = solver.ribs.resolve(&head);
+                solver.note(&head, ty.clone(), dec);
                 for segment in iter {
                     let adt = match ty.clone().normalized(solver) {
                         Ty::Adt(adt) | Ty::Identity(adt) => adt,
@@ -152,6 +160,7 @@ impl TyExt for Ty {
                             at: segment.location.into(),
                             field_name: segment.lexeme.clone(),
                         })?;
+                    solver.note(&segment, field.ty.clone(), Some(field.dec));
                     ty = field.ty;
                 }
                 Ok(ty.normalized(solver))
@@ -160,6 +169,8 @@ impl TyExt for Ty {
                 let mut pacts = Vec::with_capacity(idents.len());
                 for ident in idents {
                     let ty = ident.query(solver)?;
+                    let dec = solver.ribs.resolve(&ident);
+                    solver.note(&ident, ty.clone(), dec);
                     let Some(pid) = ty.as_single_pact() else {
                         return Err(NotAPact {
                             src: solver.src(ident.location),
@@ -210,6 +221,7 @@ impl TyExt for Ty {
             }
             Ty::Adt(adt) => Ty::Adt(adt),
             Ty::Pacts(pacts) => Ty::Pacts(pacts),
+            Ty::Skolem(pid) => Ty::Skolem(pid),
             Ty::Anon(n) => Ty::Anon(n),
             Ty::Identity(adt) => Ty::Identity(adt),
             Ty::Option(inner) => {
@@ -243,6 +255,7 @@ impl TyExt for Ty {
             Ty::Result(inner) => Ty::Result(Box::new(inner.filter_adt(adt))),
             Ty::Adt(_)
             | Ty::Pacts(_)
+            | Ty::Skolem(_)
             | Ty::Identity(_)
             | Ty::Anon(_)
             | Ty::Vid(_)

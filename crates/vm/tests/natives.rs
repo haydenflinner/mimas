@@ -286,6 +286,9 @@ native_tests! { install_all;
     native_method_on_struct_receiver:
         "let TEST_VALUE = vec2_len2(Vec2 { x = 1.0, y = 0.0 }.doubled());" => Captured::Float(4.0);
     native_assoc_fn_on_float: "let TEST_VALUE = vec2_len2(float::splat(2.0));" => Captured::Float(8.0);
+
+    // regression check for #10
+    native_assoc_fn_on_value: "let f = 2.0; let TEST_VALUE = vec2_len2(f.splat(3.0));" => Captured::Float(18.0)
 }
 
 fn opt_tail(_ctx: Ctx<'_>, a: i64, b: Option<i64>) -> i64 {
@@ -396,4 +399,34 @@ native_tests! { install_geo;
         "let TEST_VALUE = match geo::Shape::Circle(9.0) { geo::Shape::Circle(r) => r, _ => 0.0 };" => Captured::Float(9.0);
     module_enum_array_annotation:
         "let xs: [geo::Shape] = [geo::Shape::Circle(8.0)]; let TEST_VALUE = describe_shape(xs[0]);" => Captured::Str("circle:8".into())
+}
+
+#[test]
+fn runtime_described_types_and_natives() {
+    struct Point;
+    let value = run_with(
+        |api| {
+            let binding = api.add_adt_described(std::any::TypeId::of::<Point>(), |_| {
+                vm::adt::ApiAdtDescriptor {
+                    name: "Point",
+                    module: &["geo"],
+                    kind: vm::ApiAdtKind::Struct,
+                    doc: "",
+                    variants: vec![vm::adt::ApiVariantShape {
+                        name: "@".into(),
+                        doc: "",
+                        fields: vm::ApiVariantFields::Named(vec![("x".into(), Ty::Int)]),
+                    }],
+                }
+            });
+            let point = Ty::Adt(binding.adt_id);
+            api.add_assoc_described(point, "double", vec![Ty::Int], Ty::Int, |_, args| {
+                Ok(vm::Val::Int(args[0].as_int().unwrap_or_default() * 2))
+            });
+            api.module("geo")
+                .add_described("origin_x", Vec::new(), Ty::Int, |_, _| Ok(vm::Val::Int(0)));
+        },
+        "use geo::Point; let TEST_VALUE = Point::double(Point { x = 21 }.x) + geo::origin_x();",
+    );
+    assert_eq!(value, Captured::Int(42));
 }

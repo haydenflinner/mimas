@@ -13,27 +13,138 @@ impl Vid {
 /// user-facing -- a real mimas bug, not the user's fault. See [INTERNAL_TY_LEAK_NOTE].
 pub const INTERNAL_TY_MARKER: &str = "?mimas<";
 
+/// Every type that mimas works off of. Check the [book](https://mim.as/reference/basic-types.html)
+/// for more details.
 #[derive(Debug, Clone, Default)]
 pub enum Ty {
+    /// The unit type, written `()`: truly nothing, the result of an expression that was never
+    /// going to hand back a value. An empty block, a `for` loop, and a function with no return all
+    /// yield `()`. This is not [Ty::Null], where there _could_ be a value but right now there
+    /// isn't.
+    ///
+    /// ```mimas
+    /// let a = {}; // `{}` yields nothing, so `a` is `()`.
+    /// ```
+    ///
+    /// See more in the [book](https://mim.as/reference/special-types.html#unit--).
     #[default]
     Unit,
+    /// The never type, written `!`: the type of an expression that diverges, meaning no code can
+    /// run after it. It arises from `return`, `panic`, `todo`, and a `loop {}` that never breaks.
+    /// Because a diverging branch can never actually supply a value, `!` coerces into any type.
+    ///
+    /// ```mimas
+    /// let a: int = if foo() {
+    ///     1
+    /// } else {
+    ///     return; // `return` is `!`, so it fits where an `int` is expected
+    /// };
+    /// ```
+    ///
+    /// See more in the [book](https://mim.as/reference/special-types.html#never--).
     Never,
+    /// The type of `null`: there _could_ be a value, but right now there isn't. It only lives
+    /// behind a [Ty::Option] -- where it meets another type, the two settle on that type's option,
+    /// so `[0, null]` is `[int?]`.
+    ///
+    /// See more in the [book](https://mim.as/reference/options.html#creating-options).
     Null,
+    /// `true` or `false`. Comparisons and logical operators produce `bool`s, and conditions in
+    /// `if`, `while`, and friends must be `bool`.
+    ///
+    /// See more in the [book](https://mim.as/reference/basic-types.html#booleans).
     Bool,
+    /// A 64-bit signed integer, an `i64` at runtime. Arithmetic is checked: overflowing the range
+    /// is a runtime error rather than silently wrapping.
+    ///
+    /// See more in the [book](https://mim.as/reference/basic-types.html#integers).
     Int,
+    /// A 64-bit IEEE-754 floating-point number, an `f64` at runtime. An `int` combined with a
+    /// `float` is promoted, so the result is a `float`, and `/` yields a `float` even between two
+    /// `int`s.
+    ///
+    /// See more in the [book](https://mim.as/reference/basic-types.html#floats).
     Float,
+    /// Text is always `str`. There's no split between Rust's `&str` and `String`, and no separate
+    /// character type -- a single character is a one-character `str`. All strings are interned in
+    /// the garbage collector.
+    ///
+    /// See more in the [book](https://mim.as/reference/basic-types.html#strings).
     Str,
+    /// A type variable: a type the solver hasn't narrowed yet. None should remain by the end of a
+    /// successful compilation.
     Vid(Vid),
+    /// A slot in a native signature that stands for one type, whichever it turns out to be at each
+    /// call. mimas has no generics, but native signatures still need to express things like "the
+    /// value pushed must match the array's element type." Scripts can't write these; the host
+    /// does, through `vm::anon`, whose `T`, `U`, `V`, and `W` are slots 0 through 3.
+    ///
+    /// ```rust,ignore
+    /// #[mimas]
+    /// fn push(arr: &mut Vec<anon::T<'gc>>, value: anon::T<'gc>) {
+    ///     arr.push(value);
+    /// }
+    /// ```
+    ///
+    /// Notice that both the inner type of the `Vec` and the type of `value` are `anon::T`. This is
+    /// what makes it different from an any-type -- the `T` enforces that they are the _same_ type,
+    /// regardless of what they may be. Slots are local to their call: the solver swaps each one for
+    /// a fresh [Ty::Vid], so an `anon::T` in one function has no relation to one in another.
+    ///
+    /// See more in the [book](https://mim.as/extension/working-with-types.html#anonymous-types).
     Anon(u32),
+    /// An ordered, growable sequence of values that all share one type, like a `Vec` in Rust.
+    /// Written `[T]`.
+    ///
+    /// See more in the [book](https://mim.as/reference/collections/arrays.html).
     Array(Box<Ty>),
+    /// A hash map from string keys to values of one type, like a `HashMap<String, T>` in Rust.
+    /// Written `~{T}`. Any key might be absent, so indexing one yields `T?`.
+    ///
+    /// See more in the [book](https://mim.as/reference/collections/dictionaries.html).
     Dict(Box<Ty>),
+    /// A fixed-length, heterogeneous sequence. Written as a parenthesized list, like `(int, str)`.
+    ///
+    /// See more in the [book](https://mim.as/reference/collections/tuples.html).
     Tuple(Vec<Ty>),
+    /// Anything callable: a top-level `fn`, a method or associated function from an `impl` block,
+    /// a closure, a native, or a tuple struct's constructor. Written `(A, B) -> R`.
+    ///
+    /// See more in the [book](https://mim.as/reference/functions.html).
     Fn(FnHeader),
+    /// A user-defined type: a `struct` (a product type) or an `enum` (a sum type). Modules are
+    /// adts internally too, flagged `IS_MODULE`.
+    ///
+    /// See more in the [book](https://mim.as/reference/types.html).
     Adt(AdtId),
+    /// A value that is either `T` or `null`, written `T?`. There's no option of an option: a `T??`
+    /// flattens to `T?`.
+    ///
+    /// See more in the [book](https://mim.as/reference/options.html).
     Option(Box<Ty>),
+    /// A recoverable failure, written `T!`: either a success carrying `T`, or an error produced by
+    /// `raise`. The error is always a `str` for now.
+    ///
+    /// See more in the [book](https://mim.as/reference/error-handling.html#results).
     Result(Box<Ty>),
+    /// `Self` inside an `impl` block: the adt being implemented. References to an adt within its
+    /// own impl items are rewritten to this by `filter_adt`, and it's otherwise interchangeable
+    /// with a [Ty::Adt] of the same id.
+    ///
+    /// See more in the [book](https://mim.as/reference/types/structs.html#methods-and-associated-items).
     Identity(AdtId),
+    /// A pact bound: any value whose type implements every pact listed. Written as a pact's name,
+    /// or several joined with `+` (`Named + Aged`). The concrete type isn't known statically, so
+    /// method calls through a bound dispatch at runtime.
+    ///
+    /// See more in the [book](https://mim.as/reference/pacts.html).
     Pacts(Vec<PactId>),
+    /// `Self` inside a pact: the implementing type, whichever one it turns out to be. Unlike
+    /// `Pacts`, two skolems of the same pact are known to be the *same* type, which is what lets
+    /// `fn plus(self, other: Self)` mean "same type as the receiver" rather than "any implementer".
+    /// It never leaves the pact it belongs to: impl checks substitute the impl target, and calls
+    /// through a bound widen it back to the bound.
+    Skolem(PactId),
 }
 
 impl PartialEq for Ty {
@@ -50,6 +161,7 @@ impl PartialEq for Ty {
             (Self::Adt(l), Self::Adt(r)) => l == r,
             (Self::Identity(l), Self::Identity(r)) => l == r,
             (Self::Pacts(l), Self::Pacts(r)) => l == r,
+            (Self::Skolem(l), Self::Skolem(r)) => l == r,
             _ => core::mem::discriminant(self) == core::mem::discriminant(other),
         }
     }
@@ -69,6 +181,16 @@ impl Ty {
         Ty::Pacts(pacts)
     }
 
+    /// The pacts a value of this type is known to implement without knowing its concrete type: a
+    /// bound's pacts, or the one pact a `Self` belongs to.
+    pub fn as_pacts(&self) -> Option<Vec<PactId>> {
+        match self {
+            Ty::Pacts(pacts) => Some(pacts.clone()),
+            Ty::Skolem(pact) => Some(vec![*pact]),
+            _ => None,
+        }
+    }
+
     pub fn as_single_pact(&self) -> Option<PactId> {
         match self {
             Ty::Pacts(pacts) if pacts.len() == 1 => Some(pacts[0]),
@@ -85,6 +207,32 @@ impl Ty {
 
     pub fn is_numeric(&self) -> bool {
         matches!(self, Ty::Float | Ty::Int)
+    }
+
+    /// Whether a pact's `Self` appears anywhere in this type, however deeply nested.
+    pub fn contains_skolem(&self) -> bool {
+        match self {
+            Ty::Skolem(_) => true,
+            Ty::Array(inner) | Ty::Dict(inner) | Ty::Option(inner) | Ty::Result(inner) => {
+                inner.contains_skolem()
+            }
+            Ty::Tuple(members) => members.iter().any(Ty::contains_skolem),
+            Ty::Fn(h) => {
+                h.parameters.iter().any(|p| p.ty.contains_skolem()) || h.return_ty.contains_skolem()
+            }
+            Ty::Unit
+            | Ty::Never
+            | Ty::Null
+            | Ty::Bool
+            | Ty::Int
+            | Ty::Float
+            | Ty::Str
+            | Ty::Vid(_)
+            | Ty::Anon(_)
+            | Ty::Adt(_)
+            | Ty::Identity(_)
+            | Ty::Pacts(_) => false,
+        }
     }
 }
 
@@ -143,11 +291,64 @@ impl FnHeader {
     }
 }
 
+impl FnHeader {
+    /// The header as a type, e.g. `(int, str) -> bool`.
+    pub fn display(&self, names: &dyn TyNames) -> String {
+        let params = self
+            .parameters
+            .iter()
+            .map(|p| p.ty.display(names))
+            .join(", ");
+        format!("({params}) -> {}", self.return_ty.display(names))
+    }
+
+    /// The header as it would be declared, e.g. `fn bar(self, fizz: int) -> Self`. `takes_self`
+    /// covers natives, whose receiver isn't in their parameters.
+    pub fn signature(&self, name: &str, takes_self: bool, names: &dyn TyNames) -> String {
+        let mut parameters = Vec::new();
+        if takes_self && !self.is_method {
+            parameters.push("self".to_owned());
+        }
+        for (i, param) in self.parameters.iter().enumerate() {
+            if i == 0 && self.is_method {
+                parameters.push("self".to_owned());
+                continue;
+            }
+            let name = param.name.as_deref().unwrap_or("_");
+            parameters.push(format!("{name}: {}", param.ty.display(names)));
+        }
+        let mut text = format!("fn {name}({})", parameters.join(", "));
+        if *self.return_ty != Ty::Unit {
+            text.push_str(&format!(" -> {}", self.return_ty.display(names)));
+        }
+        text
+    }
+}
+
 #[mutants::skip]
 impl std::fmt::Display for FnHeader {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let param_str = self.parameters.iter().map(|p| &p.ty).join(", ");
-        f.pad(&format!("({param_str}) -> {}", self.return_ty))
+        f.pad(&self.display(&ThreadNames))
+    }
+}
+
+/// Where adt and pact names come from when a type is printed. The solver's tables implement
+/// this, as do the names it registered on the current thread (what `Display` uses).
+pub trait TyNames {
+    fn adt(&self, id: AdtId) -> Option<String>;
+    fn pact(&self, id: PactId) -> Option<String>;
+}
+
+/// The names the solver registered on this thread.
+pub struct ThreadNames;
+
+impl TyNames for ThreadNames {
+    fn adt(&self, id: AdtId) -> Option<String> {
+        TY_NAMES.with_borrow(|(adts, _)| adts.get(id.index()).filter(|n| !n.is_empty()).cloned())
+    }
+
+    fn pact(&self, id: PactId) -> Option<String> {
+        TY_NAMES.with_borrow(|(_, pacts)| pacts.get(id.index()).filter(|n| !n.is_empty()).cloned())
     }
 }
 
@@ -177,30 +378,10 @@ pub fn name_pact(index: usize, name: &str) {
     });
 }
 
-fn adt_display(index: usize) -> Option<String> {
-    TY_NAMES.with_borrow(|(adts, _)| {
-        let name = adts.get(index).filter(|n| !n.is_empty())?;
-        // module adts are spelled `<module:foo>` internally
-        Some(
-            match name
-                .strip_prefix("<module:")
-                .and_then(|r| r.strip_suffix('>'))
-            {
-                Some(module) => format!("module `{module}`"),
-                None => name.clone(),
-            },
-        )
-    })
-}
-
-fn pact_display(index: usize) -> Option<String> {
-    TY_NAMES.with_borrow(|(_, pacts)| pacts.get(index).filter(|n| !n.is_empty()).cloned())
-}
-
-#[mutants::skip]
-impl std::fmt::Display for Ty {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let string = match self {
+impl Ty {
+    /// The type as the user would write it, with adt and pact names looked up in `names`.
+    pub fn display(&self, names: &dyn TyNames) -> String {
+        match self {
             Ty::Unit => "()".into(),
             Ty::Never => "!".into(),
             Ty::Null => "null".into(),
@@ -208,26 +389,44 @@ impl std::fmt::Display for Ty {
             Ty::Int => "int".into(),
             Ty::Float => "float".into(),
             Ty::Str => "str".into(),
-            Ty::Array(ty) => format!("[{ty}]"),
-            Ty::Dict(ty) => format!("~{{{ty}}}"),
-            Ty::Tuple(members) => format!("({})", members.iter().map(|v| v.to_string()).join(", ")),
-            Ty::Fn(h) => h.to_string(),
+            Ty::Array(ty) => format!("[{}]", ty.display(names)),
+            Ty::Dict(ty) => format!("~{{{}}}", ty.display(names)),
+            Ty::Tuple(members) => {
+                format!("({})", members.iter().map(|v| v.display(names)).join(", "))
+            }
+            Ty::Fn(h) => h.display(names),
             // both vids and anons mark "an internal type slot that should have been resolved
             // before reaching a user-visible message". the shared `?mimas<...>` prefix lets the
             // diag emitter recognize either as a leak and attach an explanatory note.
             Ty::Vid(vid) => format!("{INTERNAL_TY_MARKER}T{}>", vid.index()),
             Ty::Anon(n) => format!("{INTERNAL_TY_MARKER}A{n}>"),
-            Ty::Identity(_) => "Self".into(),
-            Ty::Adt(id) => adt_display(id.index()).unwrap_or_else(|| "<adt>".into()),
-            Ty::Option(inner) => format!("{inner}?"),
-            Ty::Result(inner) => format!("{inner}!"),
+            Ty::Identity(_) | Ty::Skolem(_) => "Self".into(),
+            Ty::Adt(id) => match names.adt(*id) {
+                // module adts are spelled `<module:foo>` internally
+                Some(name) => match name
+                    .strip_prefix("<module:")
+                    .and_then(|r| r.strip_suffix('>'))
+                {
+                    Some(module) => format!("module `{module}`"),
+                    None => name,
+                },
+                None => "<adt>".into(),
+            },
+            Ty::Option(inner) => format!("{}?", inner.display(names)),
+            Ty::Result(inner) => format!("{}!", inner.display(names)),
             Ty::Pacts(ids) => ids
                 .iter()
-                .map(|p| pact_display(p.index()))
+                .map(|p| names.pact(*p))
                 .collect::<Option<Vec<_>>>()
                 .map(|names| names.join(" + "))
                 .unwrap_or_else(|| "<pacts>".into()),
-        };
-        f.pad(&string)
+        }
+    }
+}
+
+#[mutants::skip]
+impl std::fmt::Display for Ty {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.pad(&self.display(&ThreadNames))
     }
 }

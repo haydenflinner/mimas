@@ -74,6 +74,12 @@ pub enum RtErr {
     #[error("user-triggered panic")]
     UserPanic,
 
+    #[error("called a value that isn't a function")]
+    NotCallable { callee: Captured },
+
+    #[error("this fn takes {wanted} arguments, got {got}")]
+    WrongArity { wanted: usize, got: usize },
+
     #[error("{0}")]
     InvalidArgument(String),
 
@@ -103,6 +109,8 @@ impl RtErr {
             Self::IntegerOverflow => "this arithmetic overflows a 64 bit integer".to_string(),
             Self::DisplayTooDeep => "nesting exceeds the display depth limit here".to_string(),
             Self::UserPanic => "panicked here".to_string(),
+            Self::NotCallable { callee } => format!("`{callee}` cannot be called"),
+            Self::WrongArity { got, .. } => format!("this call passes {got}"),
             Self::InvalidArgument(_) | Self::Custom(_) => "here".to_string(),
         }
     }

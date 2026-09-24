@@ -27,7 +27,7 @@ pub struct Solver {
     pub(crate) adts: IdVec<AdtId, Adt>,
     pub(crate) pacts: IdVec<PactId, shared::Pact>,
     pub(crate) pact_impls: HashSet<(PactId, AdtId)>,
-    pub(crate) pact_default_decs: HashMap<(PactId, String), DecId>,
+    pub(crate) pact_members: HashMap<(PactId, String), DecId>,
     pub(crate) pact_self: Option<PactId>,
     pub(crate) node_to_vid: IndexMap<NodeId, Vid>,
     pub(crate) node_decs: IndexMap<NodeId, DecId>,
@@ -37,7 +37,9 @@ pub struct Solver {
     subs: IdVec<Vid, Option<Ty>>,
     node_visits: HashSet<NodeId>,
     library: HashMap<String, AdtId>,
-    sources: HashMap<FileId, NamedSource<Arc<str>>>,
+    pub(crate) root_modules: IndexMap<String, AdtId>,
+    pub(crate) module_items: IndexMap<AdtId, IndexMap<String, DecId>>,
+    pub(crate) sources: HashMap<FileId, NamedSource<Arc<str>>>,
 
     pub(crate) dec_to_native: HashMap<DecId, NativeBinding>,
 
@@ -45,6 +47,7 @@ pub struct Solver {
     pub(crate) ribs: Ribs,
     pub(crate) loop_stack: Vec<LoopRun>,
     pub(crate) fn_stack: Vec<FnRun>,
+    pub(crate) non_value: Option<NodeId>,
 }
 
 // Public impls
@@ -57,7 +60,7 @@ impl Solver {
             adts: IdVec::new(),
             pacts: IdVec::new(),
             pact_impls: HashSet::new(),
-            pact_default_decs: HashMap::new(),
+            pact_members: HashMap::new(),
             pact_self: None,
             node_to_vid: IndexMap::new(),
             node_decs: IndexMap::new(),
@@ -69,8 +72,11 @@ impl Solver {
             loop_stack: vec![],
             fn_stack: vec![],
             library: HashMap::new(),
+            root_modules: IndexMap::new(),
+            module_items: IndexMap::new(),
             sources: HashMap::new(),
             dec_to_native: HashMap::new(),
+            non_value: None,
         };
         solver.ribs.push_import();
         solver.ribs.push_block();
@@ -154,6 +160,8 @@ impl Solver {
             let segments: Vec<String> = name.split("::").map(str::to_string).collect();
             let id = self.ensure_module_path(&segments);
             module_adts.insert(name.clone(), id);
+            self.root_modules
+                .insert(segments[0].clone(), self.library[&segments[0]]);
         }
 
         // each ast's module rib accumulates across phases -- saved between visits
@@ -459,6 +467,7 @@ impl Solver {
             dec: None,
             constant: false,
         };
+        self.note(first, target.ty.clone(), None);
 
         for ident in walk_segments.iter().skip(1) {
             let Some(adt) = target.ty.as_adt().copied() else {
@@ -468,6 +477,7 @@ impl Solver {
                 })?
             };
             target = self.module_field(adt, ident)?;
+            self.note(ident, target.ty.clone(), target.dec);
         }
 
         let imports: Vec<ImportBinding> = match us {
@@ -481,7 +491,11 @@ impl Solver {
                 };
                 items
                     .iter()
-                    .map(|i| self.module_field(adt, i))
+                    .map(|i| {
+                        let binding = self.module_field(adt, i)?;
+                        self.note(i, binding.ty.clone(), binding.dec);
+                        Ok(binding)
+                    })
                     .collect::<Result<Vec<_>>>()?
             }
             Use::All(_) => {
@@ -652,8 +666,14 @@ impl Solver {
             Vis::Public,
         );
         self.ribs.module_mut().insert(ident, dec_id);
-        self.dec_to_native
-            .insert(dec_id, NativeBinding { id: native_id, sig });
+        self.dec_to_native.insert(
+            dec_id,
+            NativeBinding {
+                id: native_id,
+                sig,
+                takes_self: false,
+            },
+        );
         dec_id
     }
 
@@ -700,30 +720,40 @@ impl Solver {
     /// pollute the shared signature. A pact header holds vids minted once at hoist (notably the
     /// `self` slot, left unbound); without freshening, the first `impl Pact for A` binds those
     /// vids globally and a later `impl Pact for B` would unify against the stale binding.
-    pub(crate) fn instantiate_pact_fn(&mut self, header: &FnHeader) -> Ty {
+    ///
+    /// The header's `Self` becomes `self_ty` -- the impl target when checking or grafting an impl,
+    /// the bound when calling through one, or `Self` itself inside a default body.
+    pub(crate) fn instantiate_pact_fn(&mut self, header: &FnHeader, self_ty: &Ty) -> Ty {
         let mut memo: HashMap<Vid, Vid> = HashMap::new();
-        self.fresh_vids(&Ty::Fn(header.clone()), &mut memo)
+        self.fresh_vids(&Ty::Fn(header.clone()), self_ty, &mut memo)
     }
 
-    /// Normalize `t`, then replace any still-unbound vid with a fresh memoized one. Bound vids
-    /// resolve to their concrete types and stay put; only the open slots get fresh handles.
-    fn fresh_vids(&mut self, t: &Ty, memo: &mut HashMap<Vid, Vid>) -> Ty {
+    /// Normalize `t`, then replace any still-unbound vid with a fresh memoized one and any `Self`
+    /// with `self_ty`. Bound vids resolve to their concrete types and stay put; only the open
+    /// slots get fresh handles.
+    fn fresh_vids(&mut self, t: &Ty, self_ty: &Ty, memo: &mut HashMap<Vid, Vid>) -> Ty {
         match t.clone().normalized(self) {
             Ty::Vid(v) => Ty::Vid(*memo.entry(v).or_insert_with(|| self.vid())),
-            Ty::Array(inner) => Ty::Array(Box::new(self.fresh_vids(&inner, memo))),
-            Ty::Dict(inner) => Ty::Dict(Box::new(self.fresh_vids(&inner, memo))),
-            Ty::Option(inner) => Ty::Option(Box::new(self.fresh_vids(&inner, memo))),
-            Ty::Result(inner) => Ty::Result(Box::new(self.fresh_vids(&inner, memo))),
-            Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| self.fresh_vids(t, memo)).collect()),
+            Ty::Skolem(_) => self_ty.clone(),
+            Ty::Array(inner) => Ty::Array(Box::new(self.fresh_vids(&inner, self_ty, memo))),
+            Ty::Dict(inner) => Ty::Dict(Box::new(self.fresh_vids(&inner, self_ty, memo))),
+            Ty::Option(inner) => Ty::Option(Box::new(self.fresh_vids(&inner, self_ty, memo))),
+            Ty::Result(inner) => Ty::Result(Box::new(self.fresh_vids(&inner, self_ty, memo))),
+            Ty::Tuple(ts) => Ty::Tuple(
+                ts.iter()
+                    .map(|t| self.fresh_vids(t, self_ty, memo))
+                    .collect(),
+            ),
             Ty::Fn(h) => {
                 let parameters = h
                     .parameters
                     .iter()
                     .map(|p| {
-                        FnParam::new(p.name.clone(), self.fresh_vids(&p.ty, memo), p.has_default)
+                        let ty = self.fresh_vids(&p.ty, self_ty, memo);
+                        FnParam::new(p.name.clone(), ty, p.has_default)
                     })
                     .collect();
-                let return_ty = self.fresh_vids(&h.return_ty, memo);
+                let return_ty = self.fresh_vids(&h.return_ty, self_ty, memo);
                 Ty::Fn(FnHeader::new(parameters, return_ty, h.is_method))
             }
             other => other,
@@ -769,6 +799,7 @@ impl Solver {
             | Ty::Vid(_)
             | Ty::Adt(_)
             | Ty::Pacts(_)
+            | Ty::Skolem(_)
             | Ty::Identity(_) => t.clone(),
         }
     }
@@ -965,7 +996,14 @@ impl Solver {
                         DecKind::Item { defaults: vec![] },
                         Vis::Public,
                     );
-                    self.dec_to_native.insert(dec_id, NativeBinding { id, sig });
+                    self.dec_to_native.insert(
+                        dec_id,
+                        NativeBinding {
+                            id,
+                            sig,
+                            takes_self: false,
+                        },
+                    );
                     self.adts[leaf].as_struct_mut().insert(
                         f.name.clone(),
                         Field {
@@ -1000,7 +1038,14 @@ impl Solver {
                         DecKind::Item { defaults: vec![] },
                         Vis::Public,
                     );
-                    self.dec_to_native.insert(dec_id, NativeBinding { id, sig });
+                    self.dec_to_native.insert(
+                        dec_id,
+                        NativeBinding {
+                            id,
+                            sig,
+                            takes_self: m.takes_self,
+                        },
+                    );
                     let field = Field {
                         ty,
                         constant: true,
@@ -1190,14 +1235,16 @@ impl Solver {
             }
         };
         let module = self.ribs.current_module();
-        self.decs.push(Dec {
+        let dec = self.decs.push(Dec {
             name: ident.lexeme.clone(),
             location: ident.location,
             kind,
             vid,
             vis,
             module,
-        })
+        });
+        self.note(ident, Ty::Vid(vid), Some(dec));
+        dec
     }
 }
 
@@ -1239,15 +1286,17 @@ impl Solver {
         let mut stack = vec![pat];
         while let Some(pat) = stack.pop() {
             match pat.kind() {
-                PatKind::Ident(ident) => {
+                PatKind::Ident(ident) if ident.lexeme != "_" => {
                     out.insert(ident.lexeme.clone());
                 }
+                PatKind::Ident(_) => {}
                 PatKind::Tuple(pats) | PatKind::TupleVariant(_, pats) | PatKind::Or(pats) => {
                     stack.extend(pats);
                 }
                 PatKind::Struct(_, fields) => stack.extend(fields.values()),
                 PatKind::NullBind(inner) => stack.push(inner),
                 PatKind::Variant(_) | PatKind::Literal(_) => {}
+                PatKind::Poison(poison) => poison.escaped(),
             }
         }
         out
@@ -1276,7 +1325,7 @@ impl Solver {
         };
 
         match pat.kind() {
-            PatKind::Ident(ident) if reuse => {
+            PatKind::Ident(ident) if reuse && ident.lexeme != "_" => {
                 // the or-pattern already checked every alternative binds the same names, so the
                 // first alternative's dec is guaranteed present in this arm's rib.
                 let dec = self
@@ -1287,6 +1336,7 @@ impl Solver {
                 unify(self, Ty::Vid(self.decs[dec].vid), ty, pat.location())
             }
             PatKind::Ident(ident) => self.declare(ident, pat.id(), ty).map(|_| ()),
+            PatKind::Poison(poison) => poison.escaped(),
             PatKind::Literal(lit) => unify(
                 self,
                 ty,
@@ -1359,7 +1409,7 @@ impl Solver {
                         (adt, None)
                     }
                     ExprKind::Access(Access::DoubleColon { left, right }) => {
-                        let adt = match left.query(self)? {
+                        let adt = match self.resolve_path_head(left)? {
                             Ty::Adt(adt) | Ty::Identity(adt) => adt,
                             lty => Err(bad(&lty))?,
                         };
@@ -1388,6 +1438,8 @@ impl Solver {
                                     name: right.lexeme.clone(),
                                 })?
                             }
+                            let dec = self.adts[adt].variants[&right.lexeme].dec();
+                            self.note(right, Ty::Adt(adt), dec);
                             (adt, Some(right.lexeme.clone()))
                         }
                     }
@@ -1582,6 +1634,7 @@ impl Solver {
                 // re-runs `process_use` so the imports land in the body-solve phase's fresh
                 // import rib (hoist_uses pushed them, but its rib was popped at phase end).
                 ItemKind::Use(us) => self.process_use(us, item.location())?,
+                ItemKind::Poison(poison) => poison.escaped(),
                 // all we need to do at this point is process the fn defaults
                 ItemKind::Pact(pact) => {
                     let Some(pid) = self
@@ -1594,9 +1647,9 @@ impl Solver {
                     for item in pact.items.iter() {
                         let PactItem::Fn {
                             default: Some(body),
-                            name: _,
                             parameters,
                             return_type,
+                            ..
                         } = item
                         else {
                             continue;
@@ -1676,50 +1729,84 @@ impl Solver {
         Ok(())
     }
 
+    /// Resolves the left of a `::` path (or a struct literal's name) at the type level. Unlike
+    /// [Solve for Ident], a bare ident here may name a module or a builtin namespace.
+    pub(crate) fn resolve_path_head(&mut self, expr: &parse::Expr) -> Result<Ty> {
+        match expr.kind() {
+            parse::ExprKind::Ident(ident) => self.resolve_name(ident, expr.location()),
+            _ => self.query_non_value(expr),
+        }
+    }
+
+    /// Queries `expr` somewhere it doesn't have to be a value. See [Self::non_value].
+    pub(crate) fn query_non_value(&mut self, expr: &parse::Expr) -> Result<Ty> {
+        let outer = self.non_value.replace(expr.id());
+        let ty = expr.query(self);
+        self.non_value = outer;
+        ty
+    }
+
     pub fn resolve_name(&mut self, ident: &Ident, read_location: Location) -> Result<Ty> {
-        if ident.is_identity() {
-            // inside a pact, both `self` and `Self` resolve to the pact itself (any impl type)
-            if let Some(pid) = self.pact_self {
-                return Ok(Ty::pacts(vec![pid]));
-            }
-            return self.impl_target().map(Ty::Adt).ok_or_else(|| {
-                SelfOutOfContext {
-                    src: self.src(read_location),
-                    at: read_location.into(),
-                }
-                .into()
-            });
-        }
-        match self.ribs.resolve(ident) {
-            Some(dec_id) => {
-                self.check_vis(dec_id, read_location)?;
-                // natives carry a fresh `Ty::Fn` per use so each call gets its own type vars;
-                // without this, two calls with different types unify and the second fails.
-                if let Some(binding) = self.dec_to_native.get(&dec_id) {
-                    let sig = NativeFnSig {
-                        params: binding.sig.params.clone(),
-                        return_ty: binding.sig.return_ty.clone(),
-                        recv: binding.sig.recv.clone(),
+        let (ty, dec) = if ident.is_identity() {
+            // inside a pact, both `self` and `Self` are the implementing type -- one fixed but
+            // unknown type, so two `Self`s are known to match (unlike two values of the bound)
+            let ty = match self.pact_self {
+                Some(pid) => Ty::Skolem(pid),
+                None => self.impl_target().map(Ty::Adt).ok_or_else(|| {
+                    Error::from(SelfOutOfContext {
+                        src: self.src(read_location),
+                        at: read_location.into(),
+                    })
+                })?,
+            };
+            (ty, None)
+        } else {
+            match self.ribs.resolve(ident) {
+                Some(dec_id) => {
+                    self.check_vis(dec_id, read_location)?;
+                    // natives carry a fresh `Ty::Fn` per use so each call gets its own type vars;
+                    // without this, two calls with different types unify and the second fails.
+                    let ty = if let Some(binding) = self.dec_to_native.get(&dec_id) {
+                        let sig = NativeFnSig {
+                            params: binding.sig.params.clone(),
+                            return_ty: binding.sig.return_ty.clone(),
+                            recv: binding.sig.recv.clone(),
+                        };
+                        self.instantiate_native(&sig, None)?
+                    } else {
+                        Ty::Vid(self.decs[dec_id].vid).normalized(self)
                     };
-                    return self.instantiate_native(&sig, None);
+                    (ty, Some(dec_id))
                 }
-                Ok(Ty::Vid(self.decs[dec_id].vid).normalized(self))
-            }
-            None if self.library.contains_key(&ident.lexeme) => {
-                Ok(Ty::Adt(self.library[&ident.lexeme]))
-            }
-            None => {
-                if let Some((pid, _)) = self.pacts.iter().find(|(_, p)| p.name == ident.lexeme) {
-                    return Ok(Ty::pacts(vec![pid]));
+                None if self.library.contains_key(&ident.lexeme) => {
+                    (Ty::Adt(self.library[&ident.lexeme]), None)
                 }
-                Err(NotFound {
-                    src: self.src(read_location),
-                    at: read_location.into(),
-                    name: ident.lexeme.clone(),
+                None => {
+                    let pact = self.pacts.iter().find(|(_, p)| p.name == ident.lexeme);
+                    let Some((pid, _)) = pact else {
+                        Err(NotFound {
+                            src: self.src(read_location),
+                            at: read_location.into(),
+                            name: ident.lexeme.clone(),
+                        })?
+                    };
+                    (Ty::pacts(vec![pid]), None)
                 }
-                .into())
             }
+        };
+        self.note(ident, ty.clone(), dec);
+        Ok(ty)
+    }
+
+    /// Records what `ident` resolved to. This is only used by tooling.
+    pub(crate) fn note(&mut self, ident: &Ident, ty: Ty, dec: Option<DecId>) {
+        if let Some(dec) = dec {
+            self.node_decs.insert(ident.id, dec);
         }
+        let vid = self.node_vid(ident.id);
+        // a name resolved twice yields the same type both times (a fresh native instantiation
+        // just links to the earlier one), and nothing downstream depends on this vid
+        let _ = self.register_sub(vid, ty);
     }
 
     /// Const-folds an expr using the solver's dec/lit tables to resolve Ident leaves. Returns
@@ -1922,6 +2009,10 @@ impl Solver {
         };
         let dec_id = self.dec_id(ident, ty.clone(), kind, vis);
         self.ribs.module_mut().insert(ident.clone(), dec_id);
+        self.module_items
+            .entry(self.ribs.current_module())
+            .or_default()
+            .insert(ident.lexeme.clone(), dec_id);
 
         if let Some(node_id) = node_id {
             self.node_decs.insert(node_id, dec_id);
@@ -2008,6 +2099,7 @@ pub(crate) struct NativeFnSig {
 pub(crate) struct NativeBinding {
     pub id: NativeId,
     pub sig: NativeFnSig,
+    pub takes_self: bool,
 }
 
 /// One module-nested native function, as handed to [`Solver::register_native_module`].

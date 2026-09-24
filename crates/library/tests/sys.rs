@@ -95,6 +95,25 @@ test_fail!(
     r#"let TEST_VALUE = std::process::run("echo")!;"#
 );
 
+test_run!(
+    process_run_attached_returns_exit_code,
+    r#"std::process::run_attached("true", [])!"# => "0",
+    r#"std::process::run_attached("false", [])!"# => "1",
+    r#"std::process::run_attached("sh", ["-c", "exit 3"])!"# => "3"
+);
+
+test_run!(
+    process_run_attached_missing_binary_is_raised,
+    r#"std::process::run_attached("definitely_not_a_real_cmd_xyz_123", []) absolve |_| -1"# => "-1"
+);
+
+test_fail!(
+    process_run_attached_arg_type_and_arity_checks,
+    r#"let TEST_VALUE = std::process::run_attached(42, [])!;"#,
+    r#"let TEST_VALUE = std::process::run_attached("true", [1, 2])!;"#,
+    r#"let TEST_VALUE = std::process::run_attached("true")!;"#
+);
+
 // std::sys::arg -- in the test harness ScriptArgs is never set, so every index is null
 test_run!(
     sys_arg_unset_is_null,
@@ -129,4 +148,9 @@ test_fail!(
     sys_stdin_exit_type_shape,
     r#"let TEST_VALUE = std::sys::stdin().len();"#,
     r#"let TEST_VALUE = std::sys::exit("nope");"#
+);
+
+test_run!(
+    file_intrinisc,
+    "std::sys::file()" => r#""<execute>""#
 );

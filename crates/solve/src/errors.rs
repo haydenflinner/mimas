@@ -275,6 +275,25 @@ pub struct PactConstantNotDispatchable {
     pub via: String,
 }
 
+/// Calling a pact method that takes `Self` through the abstract pact type. `Self` is the
+/// receiver's concrete type, which a bound doesn't pin down, so any implementer would satisfy the
+/// parameter and the callee would read another type's fields by slot.
+#[derive(Error, Debug, Diagnostic)]
+#[error("pact method `{member}` can't be called through `{via}`")]
+#[diagnostic(help(
+    "`{member}` takes `{param}`, which must be the receiver's concrete type -- call it on a \
+     concrete type instead"
+))]
+pub struct PactMethodNotDispatchable {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("the receiver is only known as `{via}` here, so `Self` isn't decided yet")]
+    pub at: SourceSpan,
+    pub member: String,
+    pub param: String,
+    pub via: String,
+}
+
 #[derive(Error, Debug, Diagnostic)]
 #[error("'{member}' is declared by more than one pact in this bound")]
 #[diagnostic(help("a `+` bound can't combine pacts that share a member name -- rename one"))]
@@ -621,6 +640,25 @@ pub struct PactIsNotAValue {
     #[source_code]
     pub src: NamedSource<Arc<str>>,
     #[label("a pact names a behavior, not a value -- bind a type that implements it instead")]
+    pub at: SourceSpan,
+}
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("`{name}` is not a value")]
+pub struct NotAValue {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("this names a module or a type -- reach into it with `::` instead")]
+    pub at: SourceSpan,
+    pub name: String,
+}
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("methods are not values")]
+pub struct MethodIsNotAValue {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("call it -- a method can't be bound or passed around on its own")]
     pub at: SourceSpan,
 }
 

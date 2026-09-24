@@ -1,10 +1,15 @@
-use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
+use std::{
+    cell::{Ref, RefCell},
+    collections::HashMap,
+    rc::Rc,
+    sync::Arc,
+};
 
 use compile::{BinFault, BinOp, Scalar, UnaryOp};
 #[cfg(any(feature = "dataframe", feature = "darkly"))]
 use gc_arena::Static;
 use gc_arena::{Collect, Gc, RefLock};
-use shared::BodyId;
+use shared::{BodyId, FnHeader};
 use smallvec::SmallVec;
 
 use crate::{RtErr, RtResult, heap::Ctx};
@@ -156,6 +161,15 @@ impl<'gc> Val<'gc> {
     #[inline]
     pub fn as_fn(self) -> Option<BodyId> {
         if let Val::Fn(b) = self { Some(b) } else { None }
+    }
+
+    /// The signature of the header and return from what the compiler found. Read in place out of
+    /// the loaded program's table rather than copied out of it -- see [`Ctx::signature`].
+    pub fn signature(self, ctx: Ctx<'gc>) -> Option<Ref<'gc, FnHeader>> {
+        let body = self
+            .as_fn()
+            .or_else(|| self.as_closure().map(|c| c.0.function))?;
+        ctx.signature(body)
     }
 
     #[inline]

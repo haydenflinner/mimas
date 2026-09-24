@@ -57,6 +57,7 @@ impl Ir {
             StmtKind::Module(_) => Some(()),
             StmtKind::Item(item) => {
                 match item.kind() {
+                    parse::ItemKind::Poison(poison) => poison.escaped(),
                     // function bodies need to be lowered into their own Body
                     parse::ItemKind::Function(f) => {
                         if item.is_test() {
@@ -373,6 +374,37 @@ impl Emit for Call {
             .unwrap_or_default()
         }
 
+        fn emit_intrinsic(
+            ir: &mut Ir,
+            intrinsic: api::Intrinsic,
+            args: &[InstId],
+            call: &Call,
+        ) -> InstId {
+            match intrinsic {
+                api::Intrinsic::Len => ir.current().len(args[0]),
+                api::Intrinsic::In => ir.current().check_in(args[1], args[0], true),
+                api::Intrinsic::Push => {
+                    ir.current().push(args[0], args[1]);
+                    ir.current().constant(Constant::Null)
+                }
+                api::Intrinsic::ToFloat => ir.current().to_float(args[0]),
+                api::Intrinsic::Sqrt => ir.current().sqrt(args[0]),
+                api::Intrinsic::File => {
+                    let name = ir
+                        .resolutions
+                        .sources
+                        .get(&call.left.location().file_id)
+                        .unwrap()
+                        .name()
+                        .to_string();
+                    let path = std::fs::canonicalize(&name)
+                        .map_or(name, |path| path.to_string_lossy().into_owned());
+                    let path = ir.intern_str(&path);
+                    ir.current().constant(Constant::Str(path))
+                }
+            }
+        }
+
         // pact-typed receiver dispatch: a runtime IsInstance chain over implementors of the bound,
         // each arm CallDirect-ing that adt's body for the method. one implementor => skip the test.
         fn emit_pact_dispatch(
@@ -386,7 +418,7 @@ impl Emit for Call {
             let recv = receiver.lower(ir)?;
             // lower args once -- fill_call_args evaluates them, so per-arm calls re-run side
             // effects.
-            let args = fill_call_args(ir, fn_ty, &[], arguments, Some(recv))?;
+            let args = fill_call_args(ir, fn_ty, &[], arguments, fn_ty.is_method.then_some(recv))?;
 
             let candidates: Vec<_> = ir
                 .resolutions
@@ -471,10 +503,12 @@ impl Emit for Call {
             // pact-typed receiver (`g: Greet`): no single concrete callee, so dispatch at runtime
             // over every implementor of the bound. a grafted default lands in each impl's table,
             // so default methods dispatch here for free.
-            let pact_pids = match ir.resolutions.node_tys.get(&left.id()) {
-                Some(Ty::Pacts(pids)) => Some(pids.clone()),
-                _ => None,
-            };
+            // `self` inside a default body counts too: one implementer, decided at runtime
+            let pact_pids = ir
+                .resolutions
+                .node_tys
+                .get(&left.id())
+                .and_then(Ty::as_pacts);
             if let Some(pids) = pact_pids {
                 let method = right
                     .as_ident()
@@ -486,7 +520,9 @@ impl Emit for Call {
 
             let access_id = self.left.id();
             if let Some(&dec) = ir.resolutions.node_decs.get(&access_id)
-                && let ResolvedDeclKind::Item { native, .. } = ir.resolutions.decs[dec].kind
+                && let ResolvedDeclKind::Item {
+                    native, takes_self, ..
+                } = ir.resolutions.decs[dec].kind
             {
                 let native_id = native;
                 let body = (native_id.is_none()).then(|| ir.item_body_for(dec));
@@ -494,27 +530,13 @@ impl Emit for Call {
                 let receiver = left.lower(ir)?;
 
                 let do_call = |ir: &mut Ir, receiver: InstId| -> Option<InstId> {
-                    let args =
-                        fill_call_args(ir, &fn_ty, &defaults, &self.arguments, Some(receiver))?;
+                    let receiver = takes_self.then_some(receiver);
+                    let args = fill_call_args(ir, &fn_ty, &defaults, &self.arguments, receiver)?;
                     Some(match (native_id, body) {
-                        (Some(id), _) => {
-                            if let Some(i) = ir.intrinsics.get(&id) {
-                                match i {
-                                    api::Intrinsic::Len => ir.current().len(args[0]),
-                                    api::Intrinsic::In => {
-                                        ir.current().check_in(args[1], args[0], true)
-                                    }
-                                    api::Intrinsic::Push => {
-                                        ir.current().push(args[0], args[1]);
-                                        ir.current().constant(Constant::Null)
-                                    }
-                                    api::Intrinsic::ToFloat => ir.current().to_float(args[0]),
-                                    api::Intrinsic::Sqrt => ir.current().sqrt(args[0]),
-                                }
-                            } else {
-                                ir.current().call_native(id, args)
-                            }
-                        }
+                        (Some(id), _) => match ir.intrinsics.get(&id) {
+                            Some(&i) => emit_intrinsic(ir, i, &args, self),
+                            None => ir.current().call_native(id, args),
+                        },
                         (None, Some(body)) => ir.current().call_direct(body, args),
                         _ => unreachable!(),
                     })
@@ -584,7 +606,10 @@ impl Emit for Call {
 
         Some(match static_callee {
             Some(StaticCallee::Body(body)) => ir.current().call_direct(body, args),
-            Some(StaticCallee::Native(id)) => ir.current().call_native(id, args),
+            Some(StaticCallee::Native(id)) => match ir.intrinsics.get(&id) {
+                Some(&i) => emit_intrinsic(ir, i, &args, self),
+                None => ir.current().call_native(id, args),
+            },
             None => {
                 let callee = self.left.lower(ir)?;
                 ir.current().call(callee, args)
@@ -612,6 +637,7 @@ impl Emit for Closure {
             .collect();
 
         let bid = ir.bodies.push(crate::ir::Body::new());
+        ir.closure_bodies.insert(bid, id);
 
         ir.in_body(bid, |ir| {
             let capture_locals: Vec<_> = captured_decs.iter().map(|&d| ir.local_for(d)).collect();
@@ -711,6 +737,7 @@ impl Lower for Expr {
     fn lower(&self, ir: &mut Ir) -> Option<InstId> {
         let id = self.id();
         ir.with_loc(self.location(), |ir| match self.kind() {
+            ExprKind::Poison(poison) => poison.escaped(),
             ExprKind::Absolve(absolve) => absolve.emit(id, ir),
             ExprKind::Access(access) => access.emit(id, ir),
             ExprKind::Block(block) => block.emit(id, ir),

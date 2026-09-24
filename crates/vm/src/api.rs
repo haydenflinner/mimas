@@ -1,15 +1,16 @@
+use std::any::TypeId;
 use std::rc::Rc;
 
 use api::{
     AdtBinding, ApiAdt, ApiAdtKind, ApiConstant, ApiFunction, ApiMethod, ApiVariant, Intrinsic,
-    Library, NativeId,
+    Library, NativeId, Registry,
 };
 use compile::{BinOp, UnaryOp};
 use shared::{Literal, Ty};
 
 use crate::{
     RtErr, RtResult, Val,
-    adt::MimasAdt,
+    adt::{ApiAdtDescriptor, MimasAdt},
     conversion::{IntoNativeResult, MimasType},
     heap::Ctx,
     native::{NativeRef, make_native},
@@ -76,12 +77,12 @@ fn doc_for(path: &str) -> String {
 }
 
 impl<'a, 'gc> Api<'a, 'gc> {
-    pub fn add<F, Marker>(&mut self, f: F)
+    pub fn add<F, Marker>(&mut self, f: F) -> NativeId
     where
         F: IntoFn<'gc, Marker>,
     {
         let name = short_name_of_val(&f);
-        f.install(self, name, Vec::new());
+        f.install(self, name, Vec::new())
     }
 
     pub fn add_named<F, Marker>(&mut self, name: impl Into<String>, f: F)
@@ -203,17 +204,35 @@ impl<'a, 'gc> Api<'a, 'gc> {
     //
     // todo, make this order independent
     pub fn add_adt<T: MimasAdt>(&mut self) {
-        self.add_adt_in::<T>(None);
+        self.add_adt_in(TypeId::of::<T>(), None, T::descriptor);
     }
 
-    fn add_adt_in<T: MimasAdt>(&mut self, module: Option<Vec<String>>) {
+    /// Registers a type whose shape is only known at runtime, such as one described through
+    /// reflection. `type_id` keys it the way [`Self::add_adt`] keys a Rust type.
+    pub fn add_adt_described(
+        &mut self,
+        type_id: TypeId,
+        describe: impl FnOnce(&Registry) -> ApiAdtDescriptor,
+    ) -> AdtBinding {
+        self.add_adt_in(type_id, None, describe)
+    }
+
+    fn add_adt_in(
+        &mut self,
+        type_id: TypeId,
+        module: Option<Vec<String>>,
+        describe: impl FnOnce(&Registry) -> ApiAdtDescriptor,
+    ) -> AdtBinding {
         let adt_id = self.library.registry_mut().alloc();
-        // pre-bind T so that it can be self-referential
-        self.library.registry_mut().bind::<T>(AdtBinding {
-            adt_id,
-            variant_layout_ids: Vec::new(),
-        });
-        let desc = T::descriptor(self.library.registry());
+        // pre-bind so the type can be self-referential
+        self.library.registry_mut().bind_id(
+            type_id,
+            AdtBinding {
+                adt_id,
+                variant_layout_ids: Vec::new(),
+            },
+        );
+        let desc = describe(self.library.registry());
         let variant_layout_ids: Vec<_> = match desc.kind {
             ApiAdtKind::Enum => desc
                 .variants
@@ -222,10 +241,13 @@ impl<'a, 'gc> Api<'a, 'gc> {
                 .collect(),
             ApiAdtKind::Struct => vec![adt_id],
         };
-        self.library.registry_mut().bind::<T>(AdtBinding {
+        let binding = AdtBinding {
             adt_id,
             variant_layout_ids: variant_layout_ids.clone(),
-        });
+        };
+        self.library
+            .registry_mut()
+            .bind_id(type_id, binding.clone());
 
         let variants = desc
             .variants
@@ -251,12 +273,32 @@ impl<'a, 'gc> Api<'a, 'gc> {
             op_overloads: false,
         });
 
-        let binding = AdtBinding {
-            adt_id,
-            variant_layout_ids,
-        };
         let mut bindings = self.ctx.state().mimas_bindings.borrow_mut(&self.ctx);
-        bindings.0.insert(std::any::TypeId::of::<T>(), binding);
+        bindings.0.insert(type_id, binding.clone());
+        binding
+    }
+
+    /// An associated fn whose signature is only known at runtime. `call` receives the arguments
+    /// in order, and it has to be `'static`, so it can't hold on to anything the Vm collects.
+    pub fn add_assoc_described(
+        &mut self,
+        recv_ty: Ty,
+        name: impl Into<String>,
+        parameters: Vec<Ty>,
+        return_ty: Ty,
+        call: impl for<'g> Fn(Ctx<'g>, &[Val<'g>]) -> RtResult<Val<'g>> + 'static,
+    ) {
+        let native = make_native(&self.ctx, move |ctx, args| call(ctx, args));
+        let id = self.library.method(ApiMethod {
+            recv_ty,
+            name: name.into(),
+            parameters: parameters.into_iter().map(Some).collect(),
+            return_ty: Some(return_ty),
+            takes_self: false,
+            doc: String::new(),
+            call: (),
+        });
+        self.store_native(id, native);
     }
 
     /// Prelude-level constant (no module). The module-scoped counterpart is
@@ -318,12 +360,12 @@ pub struct ModuleApi<'b, 'a, 'gc> {
 }
 
 impl<'b, 'a, 'gc> ModuleApi<'b, 'a, 'gc> {
-    pub fn add<F, Marker>(&mut self, f: F)
+    pub fn add<F, Marker>(&mut self, f: F) -> NativeId
     where
         F: IntoFn<'gc, Marker>,
     {
         let name = short_name_of_val(&f);
-        f.install(self.parent, name, self.path.clone());
+        f.install(self.parent, name, self.path.clone())
     }
 
     pub fn add_named<F, Marker>(&mut self, name: impl Into<String>, f: F)
@@ -334,7 +376,29 @@ impl<'b, 'a, 'gc> ModuleApi<'b, 'a, 'gc> {
     }
 
     pub fn add_adt<T: MimasAdt>(&mut self) {
-        self.parent.add_adt_in::<T>(Some(self.path.clone()));
+        self.parent
+            .add_adt_in(TypeId::of::<T>(), Some(self.path.clone()), T::descriptor);
+    }
+
+    /// A module fn whose signature is only known at runtime, like [`Api::add_assoc_described`].
+    /// A `None` parameter takes any value, the way `print` does.
+    pub fn add_described(
+        &mut self,
+        name: impl Into<String>,
+        parameters: Vec<Option<Ty>>,
+        return_ty: Ty,
+        call: impl for<'g> Fn(Ctx<'g>, &[Val<'g>]) -> RtResult<Val<'g>> + 'static,
+    ) {
+        let native = make_native(&self.parent.ctx, move |ctx, args| call(ctx, args));
+        let id = self.parent.library.function(ApiFunction {
+            name: name.into(),
+            module: self.path.clone(),
+            parameters,
+            return_ty: Some(return_ty),
+            doc: String::new(),
+            call: (),
+        });
+        self.parent.store_native(id, native);
     }
 
     pub fn constant(

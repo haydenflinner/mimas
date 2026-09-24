@@ -1,14 +1,20 @@
 use shared::IdVec;
 
 use colored::Colorize;
-use shared::{FileId, Location};
+use parse::Literal;
+use shared::{FileId, Location, Ty};
+use solve::{
+    ResolvedDeclKind, ResolvedModule,
+    components::{DecId, Vis},
+};
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
 };
 
 use crate::{
-    BinOp, BlockId, BlockTarget, BodyId, Constant, Inst, InstId, Ir, Local, Op, OperandKind,
+    BinOp, BlockId, BlockTarget, BodyId, Constant, Function, Inst, InstId, Ir, Local, Module, Op,
+    OperandKind,
     codegen::{
         clean::{self, uses},
         program::{Chunk, Encoder, Program},
@@ -73,6 +79,117 @@ impl Compiler {
         } else {
             HashMap::new()
         };
+
+        /// A dec the host can call: everything but a native, which has no body of its own. Hands
+        /// back the `Function` already built for `signatures` instead of building a second one, so
+        /// the two views of the same dec can't drift apart.
+        fn exported_fn(
+            ir: &Ir,
+            signatures: &IdVec<BodyId, Option<Function>>,
+            dec: DecId,
+        ) -> Option<Function> {
+            let body = *ir.item_bodies.get(&dec)?;
+            signatures.get(body)?.clone()
+        }
+
+        fn export(
+            ir: &mut Ir,
+            signatures: &IdVec<BodyId, Option<Function>>,
+            module: ResolvedModule,
+        ) -> Module {
+            let mut out = Module::default();
+            for (name, dec) in module.items {
+                match ir.resolutions.decs[dec].kind.clone() {
+                    ResolvedDeclKind::Item { .. } => {
+                        let f = exported_fn(ir, signatures, dec)
+                            .unwrap_or_else(|| unreachable!("item `{name}` is not a callable fn"));
+                        out.functions.insert(name, f);
+                    }
+                    // dicts and structs have no constant form, see `Constant::emit_const_dec`
+                    ResolvedDeclKind::Constant(lit)
+                        if !matches!(lit, Literal::Dictionary(_) | Literal::Struct(_)) =>
+                    {
+                        out.constants.insert(name, Constant::from_literal(ir, lit));
+                    }
+                    ResolvedDeclKind::Adt(adt) => {
+                        let resolved = &ir.resolutions.adts[adt];
+                        let fields = resolved.fields.clone();
+                        // the solver keeps impls in a `HashMap`, whose order is randomized per
+                        // process -- sort so the export reads the same on every run
+                        let mut methods: Vec<(String, DecId)> = resolved
+                            .methods
+                            .iter()
+                            .map(|(name, &dec)| (name.clone(), dec))
+                            .collect();
+                        methods.sort_by(|(a, _), (b, _)| a.cmp(b));
+                        let methods = methods
+                            .into_iter()
+                            .filter_map(|(name, dec)| {
+                                Some((name, exported_fn(ir, signatures, dec)?))
+                            })
+                            .collect();
+                        out.types.insert(
+                            name,
+                            crate::Type {
+                                vis: ir.resolutions.decs[dec].vis,
+                                fields,
+                                methods,
+                            },
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            for (name, module) in module.modules {
+                out.modules.insert(name, export(ir, signatures, module));
+            }
+            out
+        }
+        // every body's own signature keyed by body rather than by dec so a function value can be
+        // called from a `BodyId` alone. a closure's defaults are never reachable from a call site
+        // that only has the value, so it reports none -- same as what a dynamic call lowers to.
+        let mut signatures: IdVec<BodyId, Option<Function>> = vec![None; ir.bodies.len()].into();
+        // read rather than drained -- `export` still needs `item_bodies` to find each dec's body
+        let item_bodies: Vec<(DecId, BodyId)> = ir
+            .item_bodies
+            .iter()
+            .map(|(&dec, &body)| (dec, body))
+            .collect();
+        for (dec, body) in item_bodies {
+            let ResolvedDeclKind::Item { defaults, .. } = ir.resolutions.decs[dec].kind.clone()
+            else {
+                continue;
+            };
+            let Ty::Fn(header) = ir.resolutions.decs[dec].ty.clone() else {
+                continue;
+            };
+            let vis = ir.resolutions.decs[dec].vis;
+            let defaults = defaults
+                .into_iter()
+                .map(|d| d.map(|lit| Constant::from_literal(&mut ir, lit)))
+                .collect();
+            signatures[body] = Some(Function {
+                body,
+                vis,
+                header,
+                defaults,
+            });
+        }
+        for (body, node) in std::mem::take(&mut ir.closure_bodies) {
+            let Some(Ty::Fn(header)) = ir.resolutions.node_tys.get(&node).cloned() else {
+                continue;
+            };
+            let defaults = vec![None; header.parameters.len()];
+            signatures[body] = Some(Function {
+                body,
+                vis: Vis::Private,
+                header,
+                defaults,
+            });
+        }
+
+        let root = std::mem::take(&mut ir.resolutions.root);
+        let root = export(&mut ir, &signatures, root);
 
         for (body_id, mut body) in ir.bodies {
             clean::clean(&mut body);
@@ -540,12 +657,6 @@ impl Compiler {
             self.ops.extend(body_ops);
         }
 
-        let items: HashMap<String, BodyId> = ir
-            .item_bodies
-            .iter()
-            .map(|(&dec, &body)| (ir.resolutions.decs[dec].name.clone(), body))
-            .collect();
-
         let struct_names: IdVec<_, String> = ir
             .resolutions
             .adts
@@ -581,10 +692,11 @@ impl Compiler {
 
         Program {
             entry: BodyId::ZERO,
+            root,
             chunks: std::mem::replace(&mut self.chunks, IdVec::new()),
+            signatures,
             strs: ir.str_interner,
             bytes: bytes.finish(),
-            items,
             struct_names,
             methods,
             field_names,

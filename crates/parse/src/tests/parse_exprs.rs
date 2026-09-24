@@ -13,7 +13,8 @@ macro_rules! expr_test {
             let expected: crate::expr::Expr = crate::expr::ExprKind::from($expected).into_expr();
             let lexer = crate::lex::Lexer::new($source, 0, "test".into());
             let mut parser = crate::Parser::new(lexer);
-            let output = parser.expr().unwrap();
+            let output = parser.expr();
+            assert!(parser.errors().is_empty(), "{:?}", parser.errors());
             if output.kind() != expected.kind() {
                 assert_eq!(output.to_string(), expected.to_string());
                 assert_eq!(output.kind(), expected.kind());
@@ -1060,11 +1061,7 @@ expr_test!(
     "self.bar()",
     Call::new(
         Access::Dot {
-            left: Ident {
-                lexeme: "self".into(),
-                location: Default::default(),
-            }
-            .into_expr(),
+            left: Ident::new("self", Default::default()).into_expr(),
             right: ident_expr!("bar"),
             kind: AccessKind::Direct,
         }
@@ -1196,11 +1193,7 @@ expr_test!(
     identity_access,
     "self.bar",
     Access::Dot {
-        left: Ident {
-            lexeme: "self".into(),
-            location: Default::default(),
-        }
-        .into_expr(),
+        left: Ident::new("self", Default::default()).into_expr(),
         right: ident_expr!("bar"),
         kind: AccessKind::Direct,
     }
@@ -1701,7 +1694,7 @@ expr_test!(not_membership, "1 !in 1", In::new(int!(1), int!(1), false));
 
 fn parse_expr(source: &str) -> String {
     let lexer = crate::lex::Lexer::new(source, 0, "test".into());
-    crate::Parser::new(lexer).expr().unwrap().to_string()
+    crate::Parser::new(lexer).expr().to_string()
 }
 
 #[test]

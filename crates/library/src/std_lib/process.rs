@@ -5,6 +5,7 @@ use vm::{api::Api, conversion::Raisable};
 pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     let mut m = api.module("std::process");
     m.add(run);
+    m.add(run_attached);
 }
 
 #[native]
@@ -43,6 +44,25 @@ fn run<'gc>(cmd: &str, args: Vec<&str>, stdin: Option<&str>) -> Raisable<String>
         }
 
         String::from_utf8(output.stdout).map_err(|e| format!("non-utf8 stdout: {e}"))
+    };
+
+    inner().into()
+}
+
+/// Runs `cmd` with `args` and returns its exit code. Unlike `run`, the command's output isn't
+/// captured (it goes straight to wherever the script's output goes, usually the terminal) and a
+/// non-zero exit isn't raised. Raises if the command can't be started or gets killed by a signal.
+#[native]
+fn run_attached<'gc>(cmd: &str, args: Vec<&str>) -> Raisable<i64> {
+    let inner = || -> Result<i64, String> {
+        let status = std::process::Command::new(cmd)
+            .args(args)
+            .status()
+            .map_err(|e| format!("spawn {cmd:?}: {e}"))?;
+        status
+            .code()
+            .map(i64::from)
+            .ok_or_else(|| format!("{cmd:?} was killed by a signal"))
     };
 
     inner().into()

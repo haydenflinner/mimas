@@ -257,6 +257,7 @@ impl Ctor {
     fn from_pat(pat: &Pat, ty: &Ty, solver: &Solver) -> Option<(Self, Vec<Pat>)> {
         match pat.kind() {
             PatKind::Ident(_) | PatKind::Or(_) => None,
+            PatKind::Poison(poison) => poison.escaped(),
             PatKind::NullBind(pat) => Some((Ctor::Some, vec![pat.as_ref().clone()])),
             PatKind::Literal(lit) => match lit {
                 LitVal::True => Some((Ctor::Bool(true), vec![])),
@@ -550,11 +551,5 @@ impl Matrix {
 }
 
 fn wildcard_pat(location: shared::Location) -> Pat {
-    Pat::new(
-        PatKind::Ident(parse::Ident {
-            lexeme: "_".into(),
-            location,
-        }),
-        location,
-    )
+    Pat::new(PatKind::Ident(parse::Ident::new("_", location)), location)
 }

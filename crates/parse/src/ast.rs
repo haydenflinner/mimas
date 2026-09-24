@@ -1,9 +1,13 @@
 use std::sync::Arc;
 
+use hashbrown::HashMap;
 use miette::NamedSource;
-use shared::Result;
+use shared::{Located, Result, Span};
 
-use crate::{Expr, Stmt, StmtKind, errors::AlreadyInsideModule};
+use crate::{
+    Expr, Ident, Stmt, StmtKind, components::Pat, errors::AlreadyInsideModule, visit::Visitor,
+    walk_stmts,
+};
 
 /// A collection of statements.
 #[derive(Debug, Clone)]
@@ -13,11 +17,23 @@ pub struct Ast {
     /// from post-parse checks (e.g. [`Self::module_name`]) so they render with snippets.
     src: NamedSource<Arc<str>>,
     stmts: Vec<Stmt>,
+    /// Doc comments without their slashes, keyed by where the token after each starts.
+    docs: HashMap<usize, String>,
 }
 impl Ast {
     /// Creates a new Ast with the given statements.
-    pub(crate) fn new(name: String, src: NamedSource<Arc<str>>, stmts: Vec<Stmt>) -> Self {
-        Self { name, src, stmts }
+    pub(crate) fn new(
+        name: String,
+        src: NamedSource<Arc<str>>,
+        stmts: Vec<Stmt>,
+        docs: HashMap<usize, String>,
+    ) -> Self {
+        Self {
+            name,
+            src,
+            stmts,
+            docs,
+        }
     }
 
     /// Consumes the Ast into its inner collection of statements.
@@ -37,6 +53,52 @@ impl Ast {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// The innermost node whose span covers `offset` (a byte offset into the source), with that
+    /// span. Idents count as nodes, so a name wins over the expr or pat it sits in.
+    pub fn node_at(&self, offset: usize) -> Option<(NodeId, Span)> {
+        struct Innermost {
+            offset: usize,
+            found: Option<(NodeId, Span)>,
+        }
+        impl Innermost {
+            fn consider(&mut self, id: NodeId, span: Span) {
+                let covers = span.start <= self.offset && self.offset < span.end;
+                let tighter = self
+                    .found
+                    .is_none_or(|(_, found)| span.len() <= found.len());
+                if covers && tighter {
+                    self.found = Some((id, span));
+                }
+            }
+        }
+        impl Visitor for Innermost {
+            fn expr(&mut self, expr: &Expr) {
+                self.consider(expr.id(), expr.span());
+            }
+
+            fn pat(&mut self, pat: &Pat) {
+                self.consider(pat.id(), pat.span());
+            }
+
+            fn ident(&mut self, ident: &Ident) {
+                self.consider(ident.id, ident.span());
+            }
+        }
+
+        let mut innermost = Innermost {
+            offset,
+            found: None,
+        };
+        walk_stmts(&self.stmts, &mut innermost);
+        innermost.found
+    }
+
+    /// The doc comment above the token starting at `position` (a byte offset into the source),
+    /// without its slashes. An item's doc is at the start of its span.
+    pub fn docs_for(&self, position: usize) -> Option<&str> {
+        self.docs.get(&position).map(String::as_str)
     }
 
     pub fn module_name(&self) -> Result<Option<String>> {
