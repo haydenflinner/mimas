@@ -1,4 +1,4 @@
-use std::{rc::Rc, sync::Arc};
+use std::{collections::HashMap, rc::Rc, sync::Arc};
 
 use api::Registry;
 use compile::{
@@ -13,6 +13,7 @@ use crate::{
     Closure, Ctx, DictMap, Fields, Frame, INLINE_FIELDS, Inspect, LocatedRtErr, RtErr, RtResult,
     Sources, Stashed, State, ThreadState, Val,
     conversion::{Args, MimasType},
+    fixtures::DebugInfo,
 };
 
 const FUEL: usize = 1024;
@@ -209,9 +210,23 @@ impl Vm {
         self.methods = methods.into_values().collect();
         let field_names: Vec<Vec<String>> = field_names.into_values().collect();
         self.field_names = field_names.clone();
+        let chunks = &self.chunks;
         self.arena.mutate(|mc, state| {
             *state.struct_names.borrow_mut(mc) = struct_names.into_values().collect();
             *state.field_names.borrow_mut(mc) = field_names;
+            // refresh the debug fixture's loc tables so `std::dbg` maps (chunk, ip) → loc
+            // against the program just loaded, never a stale one
+            let dbg = state.fixtures.get::<DebugInfo>();
+            *dbg.locs.borrow_mut() = chunks
+                .iter()
+                .map(|(_, chunk)| chunk.locs.clone())
+                .collect::<Vec<_>>()
+                .into();
+            *dbg.offsets.borrow_mut() = chunks
+                .iter()
+                .map(|(_, chunk)| chunk.offset as u32)
+                .collect::<Vec<_>>()
+                .into();
         });
         self.reset_to_entry();
     }
@@ -255,6 +270,12 @@ impl Vm {
     }
 
     pub fn set_sources(&mut self, sources: Sources) {
+        self.arena.mutate(|_, state| {
+            *state.fixtures.get::<DebugInfo>().sources.borrow_mut() = sources
+                .iter()
+                .map(|(id, src)| (*id, src.inner().clone()))
+                .collect();
+        });
         self.sources = sources;
     }
 
@@ -593,7 +614,7 @@ fn run_dispatch<'gc>(
         // refreshes touches thread.regs, so the pointer stays valid and this is the only live
         // reference into the window.
         let regs = unsafe { std::slice::from_raw_parts_mut(regs_ptr, regs_len) };
-        match step_one(regs, code, ctx, strs) {
+        match step_one(regs, code, ctx, strs, &thread.frames) {
             Ok(Flow::Next) => {}
             Ok(Flow::Call { target, dst, args }) => {
                 let (body, captures): (BodyId, &[Val<'gc>]) = match &target {
@@ -611,7 +632,7 @@ fn run_dispatch<'gc>(
                     }
                 };
                 if let Err(kind) = enter_call(thread, code, chunks, body, dst, &args, captures) {
-                    return Err(locate(kind, op_ip, thread, chunks, sources));
+                    return Err(locate(kind, op_ip, thread, chunks, sources)).map_err(Error::msg)?;
                 }
                 (regs_ptr, regs_len) = window(thread, chunks);
             }
@@ -680,6 +701,7 @@ fn step_one<'gc>(
     code: &mut Decoder,
     ctx: Ctx<'gc>,
     strs: &StrInterner,
+    frames: &[Frame],
 ) -> RtResult<Flow<'gc>> {
     match OpCode::decode(code) {
         OpCode::LoadConst => {
@@ -872,6 +894,17 @@ fn step_one<'gc>(
                     .and_then(|o| o.as_ref())
                     .expect("native id has no installed entry")
             };
+            // refresh the debug mirror before the native runs: natives can't borrow `thread`
+            // (dispatch holds it for the whole run), so `std::dbg` reads this copy -- the top
+            // entry's ip sits just past this call op, which loc_at maps to the call's span
+            {
+                let mut stack = ctx.fixture::<DebugInfo>().stack.borrow_mut();
+                stack.clear();
+                stack.extend(frames.iter().map(|f| (f.chunk, f.ip as u32)));
+                if let Some(top) = stack.last_mut() {
+                    top.1 = code.ip as u32;
+                }
+            }
             let v = native.call(ctx, &args)?;
             wr!(regs, dst, v);
         }
@@ -1646,6 +1679,7 @@ impl Vm {
             code,
             chunks,
             c_strs: strs,
+            signatures,
             arena,
             sources,
             ..
@@ -1656,11 +1690,12 @@ impl Vm {
             {
                 let mut thread = state.thread.borrow_mut(mc);
                 let stop_depth = thread.frames.len() + 1;
-                enter_call(&mut thread, code, chunks, body_id, Reg::ZERO, &[], &[]);
+                enter_call(&mut thread, code, chunks, body_id, Reg::ZERO, &[], &[]).map_err(Error::msg)?;
                 run_dispatch(
                     ctx,
                     code,
                     chunks,
+                    signatures,
                     strs,
                     sources,
                     &mut thread,
@@ -1821,7 +1856,7 @@ impl Vm {
                 other => {
                     return Err(miette::miette!(
                         "the host called `{}`, which isn't a function",
-                        ctx.display(other)
+                        ctx.display(other).unwrap_or_else(|_| "?".into())
                     ));
                 }
             };
@@ -1830,7 +1865,7 @@ impl Vm {
             let Some(signature) = signatures.get(body).and_then(Option::as_ref) else {
                 return Err(miette::miette!(
                     "the host called `{}`, which has no function body",
-                    ctx.display(ctx.fetch(f))
+                    ctx.display(ctx.fetch(f)).unwrap_or_else(|_| "?".into())
                 ));
             };
             // `enter_call` is what rejects a wrong argument count, for the host and script alike
@@ -1872,6 +1907,7 @@ impl Vm {
             code,
             chunks,
             c_strs: strs,
+            signatures,
             arena,
             sources,
             field_names,
@@ -1882,11 +1918,12 @@ impl Vm {
             {
                 let mut thread = state.thread.borrow_mut(mc);
                 let stop_depth = thread.frames.len() + 1;
-                enter_call(&mut thread, code, chunks, body_id, Reg::ZERO, &[], &[]);
+                enter_call(&mut thread, code, chunks, body_id, Reg::ZERO, &[], &[]).map_err(Error::msg)?;
                 run_dispatch(
                     ctx,
                     code,
                     chunks,
+                    signatures,
                     strs,
                     sources,
                     &mut thread,
@@ -1940,6 +1977,7 @@ impl Vm {
             code,
             chunks,
             c_strs: strs,
+            signatures,
             arena,
             sources,
             methods,
@@ -1973,11 +2011,12 @@ impl Vm {
             let dst = Reg::from((return_slot - caller_base) as u32);
 
             let stop_depth = thread.frames.len() + 1;
-            enter_call(&mut thread, code, chunks, body, dst, &[receiver], &[]);
+            enter_call(&mut thread, code, chunks, body, dst, &[receiver], &[]).ok()?;
             run_dispatch(
                 ctx,
                 code,
                 chunks,
+                    signatures,
                 strs,
                 sources,
                 &mut thread,
@@ -2003,6 +2042,7 @@ impl Vm {
             code,
             chunks,
             c_strs: strs,
+            signatures,
             arena,
             sources,
             methods,
@@ -2035,11 +2075,12 @@ impl Vm {
             let dst = Reg::from((return_slot - caller_base) as u32);
 
             let stop_depth = thread.frames.len() + 1;
-            enter_call(&mut thread, code, chunks, body, dst, &[receiver], &[]);
+            enter_call(&mut thread, code, chunks, body, dst, &[receiver], &[]).ok()?;
             run_dispatch(
                 ctx,
                 code,
                 chunks,
+                    signatures,
                 strs,
                 sources,
                 &mut thread,
@@ -2068,6 +2109,7 @@ impl Vm {
             code,
             chunks,
             c_strs: strs,
+            signatures,
             arena,
             sources,
             methods,
@@ -2092,11 +2134,12 @@ impl Vm {
                     let caller_base = thread.frames.last().unwrap().base;
                     let dst = Reg::from((return_slot - caller_base) as u32);
                     let stop_depth = thread.frames.len() + 1;
-                    enter_call(&mut thread, code, chunks, body, dst, &[receiver], &[]);
+                    enter_call(&mut thread, code, chunks, body, dst, &[receiver], &[]).ok()?;
                     let ok = run_dispatch(
                         ctx,
                         code,
                         chunks,
+                    signatures,
                         strs,
                         sources,
                         &mut thread,
@@ -2127,6 +2170,7 @@ impl Vm {
             code,
             chunks,
             c_strs: strs,
+            signatures,
             arena,
             sources,
             ..
@@ -2134,7 +2178,7 @@ impl Vm {
         arena.mutate(|mc, state| {
             let ctx = state.ctx(mc);
             let mut thread = state.thread.borrow_mut(mc);
-            let done = run_dispatch(ctx, code, chunks, strs, sources, &mut thread, 1, 1)?;
+            let done = run_dispatch(ctx, code, chunks, signatures, strs, sources, &mut thread, 1, 1)?;
             // `run_dispatch` only writes `code.ip` back into the top frame when a return crosses
             // `stop_depth` (see its Flow::Return arm) -- for every other stopping point (which is
             // all of them, at fuel budget 1) the top frame's own `ip` is stale until we sync it
@@ -2353,7 +2397,10 @@ impl Vm {
         let mut sources = Sources::with_capacity(files.len());
         for (file_id, (name, source)) in files.iter().enumerate() {
             let lexer = Lexer::new(source, file_id, (*name).into());
-            asts.push(Parser::new(lexer).into_ast()?);
+            let ast = Parser::new(lexer)
+                .try_into_ast()
+                .map_err(|mut errs| FunctionDataflowError::from(errs.swap_remove(0)))?;
+            asts.push(ast);
             sources.insert(
                 file_id,
                 miette::NamedSource::new(*name, std::sync::Arc::from(*source)),

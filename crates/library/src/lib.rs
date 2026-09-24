@@ -21,6 +21,7 @@ mod std_lib {
     pub(crate) mod darkly;
     #[cfg(feature = "dataframe")]
     pub(crate) mod dataframe;
+    pub(crate) mod debug;
     pub(crate) mod fs;
     pub(crate) mod math;
     pub(crate) mod parse;
@@ -48,6 +49,7 @@ pub fn std<'gc>(api: &mut Api<'_, 'gc>) {
     std_lib::dataframe::install(api);
     #[cfg(feature = "darkly")]
     std_lib::darkly::install(api);
+    std_lib::debug::install(api);
     std_lib::fs::install(api);
     std_lib::math::install(api);
     std_lib::parse::install(api);

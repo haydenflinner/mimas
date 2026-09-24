@@ -137,7 +137,6 @@ impl Function {
         }
         Ok(())
     }
->>>>>>> origin/main
 }
 
 #[derive(Debug, Clone)]

@@ -41,12 +41,34 @@ use std::{
     any::{Any, TypeId},
     cell::RefCell,
     collections::HashMap,
+    sync::Arc,
 };
+
+use shared::{BodyId, FileId, IdVec, Location};
 
 /// Marker for types that can live as a per-Vm fixture. Must be `Default`-constructible and
 /// `'static` -- see the module docs for why both bounds are load-bearing.
 pub trait Fixture: Default + Any + 'static {}
 impl<T: Default + Any + 'static> Fixture for T {}
+
+/// Debug info for the loaded program: per-chunk loc tables (indexed by `BodyId`) and each
+/// file's source text. `Vm::load_program`/`Vm::set_sources` refresh it so `std::dbg` natives
+/// can map a live frame's `(chunk, ip)` back to a source line -- natives see only a `Ctx`,
+/// never the `Vm`, so this is where the mapping has to live.
+///
+/// `stack` mirrors the live `(chunk, ip)` of every frame. The dispatch loop holds `thread`
+/// mutably borrowed for the whole run, so a native can never read the real stack; the
+/// `CallNative` arm re-syncs this copy instead (parents' ips are their frozen return-site
+/// saves, the top entry gets the ip just past the call op).
+#[derive(Default)]
+pub struct DebugInfo {
+    pub locs: RefCell<IdVec<BodyId, Vec<(u32, Location)>>>,
+    /// Each chunk's byte offset into the shared program bytes -- `Frame::ip` is absolute, the
+    /// loc tables are chunk-relative, so callers subtract this before probing them.
+    pub offsets: RefCell<IdVec<BodyId, u32>>,
+    pub sources: RefCell<HashMap<FileId, Arc<str>>>,
+    pub stack: RefCell<Vec<(BodyId, u32)>>,
+}
 
 /// Per-Vm type-keyed storage for host-shared state. Lazily creates entries on first access via
 /// `T::default()`. Designed to hold things like [FreezeCell](crate::freeze::FreezeCell)s that

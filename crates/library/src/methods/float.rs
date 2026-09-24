@@ -14,9 +14,6 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add_method(max);
     api.add_method(min);
     let id = api.add_method(sqrt);
-    api.add_method(sin);
-    api.add_method(cos);
-    api.add_method(atan2);
     api.add_method(hypot);
     api.mark_intrinsic(id, Intrinsic::Sqrt);
     api.add_method(format);
@@ -133,21 +130,6 @@ fn min(a: f64, b: f64) -> f64 {
 #[native]
 fn sqrt(n: f64) -> f64 {
     n.sqrt()
-}
-
-#[native]
-fn sin(n: f64) -> f64 {
-    n.sin()
-}
-
-#[native]
-fn cos(n: f64) -> f64 {
-    n.cos()
-}
-
-#[native]
-fn atan2(y: f64, x: f64) -> f64 {
-    y.atan2(x)
 }
 
 #[native]

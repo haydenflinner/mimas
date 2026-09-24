@@ -80,7 +80,7 @@ pub(crate) fn register<'gc>(
         return Err(RtErr::InvalidArgument(format!(
             "`bevy::{}` takes a function, but a `{}` was passed",
             hook.name(),
-            ctx.display(f)
+            ctx.display(f).unwrap_or_else(|_| "?".into())
         )));
     };
     let mut params = Vec::new();

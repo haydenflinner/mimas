@@ -124,7 +124,7 @@ impl SourceFile {
                     };
                     (&imp.target, SymbolKind::Class, Some(detail), methods)
                 }
-                ItemKind::Use(_) | ItemKind::Poison(_) => return None,
+                ItemKind::Use(_) | ItemKind::Tests(_) | ItemKind::Poison(_) => return None,
             };
             let mut symbol = symbol(file, name, kind, item.span())?;
             symbol.detail = detail;
@@ -205,7 +205,8 @@ impl SourceFile {
                         }
                     }
                     // the walk visits impl methods as items of their own
-                    ItemKind::Impl(_) | ItemKind::Use(_) | ItemKind::Poison(_) => {}
+                    ItemKind::Impl(_) | ItemKind::Use(_) | ItemKind::Tests(_)
+                    | ItemKind::Poison(_) => {}
                 }
             }
         }
