@@ -1224,7 +1224,7 @@ impl<'s> Parser<'s> {
 
     fn null_coalecence(&mut self) -> Expr {
         let start = self.next_start();
-        let expr = self.binary(1);
+        let expr = self.binary(0);
         if !self.infix_binds() {
             return expr;
         }
@@ -1256,12 +1256,32 @@ impl<'s> Parser<'s> {
                 BinaryOp::Equality(op) => self.new_expr(Equality::new(left, op, right), start),
                 BinaryOp::In(condition) => self.new_expr(In::new(left, right, condition), start),
                 BinaryOp::Eval(op) => self.new_expr(Evaluation::new(left, op, right), start),
+                BinaryOp::Pipe => self.pipe(left, right, start),
             };
             if !chains {
                 break;
             }
         }
         left
+    }
+
+    /// `x |> f(a, b)` is `f(x, a, b)` — the piped value leads the argument
+    /// list. A bare callee pipes with no extras: `x |> f` is `f(x)`.
+    fn pipe(&mut self, left: Expr, right: Expr, start: usize) -> Expr {
+        let loc = right.location();
+        match right.into_kind() {
+            ExprKind::Call(mut call) => {
+                call.arguments.insert(0, Argument { name: None, value: left });
+                self.new_expr(call, start)
+            }
+            kind => {
+                let callee = Expr::new(kind, loc);
+                self.new_expr(
+                    Call::new(callee, vec![Argument { name: None, value: left }]),
+                    start,
+                )
+            }
+        }
     }
 
     fn unary(&mut self) -> Expr {
@@ -2440,6 +2460,8 @@ enum BlockElement {
 
 /// A binary operator, paired with how tightly it binds (loosest is 1).
 enum BinaryOp {
+    /// `|>` — the loosest operator of all; desugars to a call.
+    Pipe,
     Logical(LogicalOp),
     Equality(EqualityOp),
     /// `in` when true, `!in` when false.
@@ -2450,6 +2472,9 @@ enum BinaryOp {
 impl BinaryOp {
     /// Returns the operator `kind` is, if it is one.
     fn of(kind: TokKind) -> Option<(Self, u8)> {
+        if kind == TokKind::PipeGreater {
+            return Some((Self::Pipe, 0));
+        }
         if let Ok(op) = LogicalOp::try_from(kind) {
             return Some((Self::Logical(op), 1));
         }

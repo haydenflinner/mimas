@@ -1748,3 +1748,63 @@ fn other_ident_bang_call_is_still_unwrap() {
         "expected unwrap-then-call, got {text}"
     );
 }
+
+// — `|>` pipe: the loosest infix, desugared to a leading call argument —
+
+expr_test!(
+    pipe_bare_callee,
+    "x |> f",
+    Call::new(ident_expr!("f"), vec![Argument::new(ident_expr!("x"))])
+);
+
+expr_test!(
+    pipe_call,
+    "x |> f(1, 2)",
+    Call::new(
+        ident_expr!("f"),
+        vec![
+            Argument::new(ident_expr!("x")),
+            Argument::new(int!(1)),
+            Argument::new(int!(2)),
+        ]
+    )
+);
+
+expr_test!(
+    pipe_chains_left,
+    "x |> f |> g(2)",
+    Call::new(
+        ident_expr!("g"),
+        vec![
+            Argument::new(
+                Call::new(ident_expr!("f"), vec![Argument::new(ident_expr!("x"))]).into_expr(),
+            ),
+            Argument::new(int!(2)),
+        ]
+    )
+);
+
+expr_test!(
+    pipe_looser_than_everything,
+    "a + b |> f",
+    Call::new(
+        ident_expr!("f"),
+        vec![Argument::new(
+            Evaluation::new(ident_expr!("a"), EvaluationOp::Plus, ident_expr!("b")).into_expr(),
+        )]
+    )
+);
+
+expr_test!(
+    pipe_onto_access_call,
+    "x |> n.f(1)",
+    Call::new(
+        Access::Dot {
+            left: ident_expr!("n"),
+            right: ident_expr!("f"),
+            kind: AccessKind::Direct,
+        }
+        .into_expr(),
+        vec![Argument::new(ident_expr!("x")), Argument::new(int!(1))]
+    )
+);

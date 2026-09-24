@@ -82,6 +82,12 @@ impl Expr {
         self.kind.as_ref()
     }
 
+    /// Take the inner ExprKind, leaving the expr hollow — for rewrites
+    /// like `|>` that rebuild the node they parsed.
+    pub(crate) fn into_kind(self) -> ExprKind {
+        *self.kind
+    }
+
     /// Get the expr's id.
     pub fn id(&self) -> NodeId {
         self.id

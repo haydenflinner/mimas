@@ -151,6 +151,8 @@ tok_test!(tilde_slash: "a ~/ b" => Ident("a"), TildeSlash, Ident("b"));
 tok_test!(hook_dot: "a?.b" => Ident("a"), HookDot, Ident("b"));
 tok_test!(hook_left_square: "a?[0]" => Ident("a"), HookLeftSquare, Int(0), RightSquare);
 tok_test!(double_hook_eq: "a ??= b" => Ident("a"), DoubleHookEqual, Ident("b"));
+tok_test!(pipe_greater: "a |> b" => Ident("a"), PipeGreater, Ident("b"));
+tok_test!(pipe_greater_vs_closure: "a ||> b" => Ident("a"), DoublePipe, Greater, Ident("b"));
 tok_test!(compound_assigns: "+= -= *= /= %= |= &= ^= ~/=" =>
     PlusEqual, MinusEqual, StarEqual, SlashEqual, PercentEqual,
     PipeEqual, AmpersandEqual, CaretEqual, TildeSlashEqual);
