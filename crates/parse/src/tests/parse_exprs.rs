@@ -1808,3 +1808,51 @@ expr_test!(
         vec![Argument::new(ident_expr!("x")), Argument::new(int!(1))]
     )
 );
+
+expr_test!(
+    pipe_call_then_unwrap,
+    "x |> f(1)!",
+    Unwrap {
+        expr: Call::new(
+            ident_expr!("f"),
+            vec![Argument::new(ident_expr!("x")), Argument::new(int!(1))],
+        )
+        .into_expr(),
+    }
+);
+
+expr_test!(
+    pipe_into_first_call_of_chain,
+    "x |> f(1)!.g(2)",
+    Call::new(
+        Access::Dot {
+            left: Unwrap {
+                expr: Call::new(
+                    ident_expr!("f"),
+                    vec![Argument::new(ident_expr!("x")), Argument::new(int!(1))],
+                )
+                .into_expr(),
+            }
+            .into_expr(),
+            right: ident_expr!("g"),
+            kind: AccessKind::Direct,
+        }
+        .into_expr(),
+        vec![Argument::new(int!(2))]
+    )
+);
+
+expr_test!(
+    pipe_continues_on_next_line,
+    "x\n  |> f\n  |> g(2)",
+    Call::new(
+        ident_expr!("g"),
+        vec![
+            Argument::new(
+                Call::new(ident_expr!("f"), vec![Argument::new(ident_expr!("x"))])
+                    .into_expr(),
+            ),
+            Argument::new(int!(2)),
+        ]
+    )
+);

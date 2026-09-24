@@ -237,3 +237,129 @@ test_fail!(
     to_dataframe_non_struct_elements_raises,
     r#"use std::polars::*; let df = to_dataframe([1, 2, 3])!;"#,
 );
+
+test_run_display!(
+    arrange_orders_with_a_per_key_direction,
+    EMPLOYEES,
+    r#"df.arrange(["dept", "age"], [false, true])!"# => r#"shape: (4, 3)
+┌───────┬─────┬───────┐
+│ name  ┆ age ┆ dept  │
+│ ---   ┆ --- ┆ ---   │
+│ str   ┆ i64 ┆ str   │
+╞═══════╪═════╪═══════╡
+│ Carol ┆ 41  ┆ eng   │
+│ Alice ┆ 34  ┆ eng   │
+│ Bob   ┆ 29  ┆ sales │
+│ Dave  ┆ 25  ┆ sales │
+└───────┴─────┴───────┘"#,
+);
+
+test_run_display!(
+    mutate_appends_a_computed_column,
+    EMPLOYEES,
+    r#"df.mutate([(col("age") * 2).alias("double")])!.select_names(["name", "double"])!"# => r#"shape: (4, 2)
+┌───────┬────────┐
+│ name  ┆ double │
+│ ---   ┆ ---    │
+│ str   ┆ i64    │
+╞═══════╪════════╡
+│ Alice ┆ 68     │
+│ Bob   ┆ 58     │
+│ Carol ┆ 82     │
+│ Dave  ┆ 50     │
+└───────┴────────┘"#,
+);
+
+test_run_display!(
+    select_names_picks_columns_by_bare_name,
+    EMPLOYEES,
+    r#"df.select_names(["name"])!"# => r#"shape: (4, 1)
+┌───────┐
+│ name  │
+│ ---   │
+│ str   │
+╞═══════╡
+│ Alice │
+│ Bob   │
+│ Carol │
+│ Dave  │
+└───────┘"#,
+);
+
+test_run_display!(
+    n_counts_rows_per_group,
+    EMPLOYEES,
+    r#"df.group_by(["dept"]).agg([n().alias("n")])!.sort(["dept"])!"# => r#"shape: (2, 2)
+┌───────┬─────┐
+│ dept  ┆ n   │
+│ ---   ┆ --- │
+│ str   ┆ u32 │
+╞═══════╪═════╡
+│ eng   ┆ 2   │
+│ sales ┆ 2   │
+└───────┴─────┘"#,
+);
+
+test_run!(
+    pull_reads_a_column_back_as_an_array,
+    EMPLOYEES,
+    r#"df.pull("name")!"# => r#"["Alice", "Bob", "Carol", "Dave"]"#,
+);
+
+test_run_display!(
+    distinct_keeps_first_row_per_key,
+    EMPLOYEES,
+    r#"df.distinct(["dept"])!"# => r#"shape: (2, 3)
+┌───────┬─────┬───────┐
+│ name  ┆ age ┆ dept  │
+│ ---   ┆ --- ┆ ---   │
+│ str   ┆ i64 ┆ str   │
+╞═══════╪═════╪═══════╡
+│ Alice ┆ 34  ┆ eng   │
+│ Bob   ┆ 29  ┆ sales │
+└───────┴─────┴───────┘"#,
+);
+
+test_run_display!(
+    head_tail_slice_window_the_rows,
+    EMPLOYEES,
+    r#"df.tail(1)"# => r#"shape: (1, 3)
+┌──────┬─────┬───────┐
+│ name ┆ age ┆ dept  │
+│ ---  ┆ --- ┆ ---   │
+│ str  ┆ i64 ┆ str   │
+╞══════╪═════╪═══════╡
+│ Dave ┆ 25  ┆ sales │
+└──────┴─────┴───────┘"#,
+);
+
+test_run_display!(
+    rename_relabels_a_column,
+    EMPLOYEES,
+    r#"df.rename("dept", "team")!.head(1)"# => r#"shape: (1, 3)
+┌───────┬─────┬──────┐
+│ name  ┆ age ┆ team │
+│ ---   ┆ --- ┆ ---  │
+│ str   ┆ i64 ┆ str  │
+╞═══════╪═════╪══════╡
+│ Alice ┆ 34  ┆ eng  │
+└───────┴─────┴──────┘"#,
+);
+
+// mismatched direction list -> arrange raises rather than guessing
+test_fail!(
+    arrange_rejects_a_mismatched_direction_list,
+    r#"use std::polars::*;
+       struct Employee { name: str, age: int, dept: str }
+       let df = to_dataframe([Employee { name = "A", age = 1, dept = "x" }])!;
+       let _ = df.arrange(["dept", "age"], [true, false, true])!;"#,
+);
+
+// a column that doesn't exist -> pull raises
+test_fail!(
+    pull_rejects_an_unknown_column,
+    r#"use std::polars::*;
+       struct Employee { name: str, age: int, dept: str }
+       let df = to_dataframe([Employee { name = "A", age = 1, dept = "x" }])!;
+       let _ = df.pull("nope")!;"#,
+);

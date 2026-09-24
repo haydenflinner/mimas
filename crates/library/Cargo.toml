@@ -31,7 +31,7 @@ walkdir.workspace = true
 # `std_lib::dataframe::pivot`.
 polars = { path = "/Users/wow/code/dsa/polars/crates/polars", optional = true, default-features = false, features = [
     "lazy",
-    "fmt",
+    "fmt_no_tty",
     "dtype-full",
     "pivot",
 ] }

@@ -43,7 +43,7 @@ glam.workspace = true
 # `Val::DataFrame`/`Val::PlExpr` doesn't pay for polars's dependency tree at all.
 polars = { path = "/Users/wow/code/dsa/polars/crates/polars", optional = true, default-features = false, features = [
     "lazy",
-    "fmt",
+    "fmt_no_tty",
     "dtype-full",
 ] }
 

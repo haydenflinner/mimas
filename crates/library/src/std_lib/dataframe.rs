@@ -23,12 +23,43 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     {
         let mut m = api.module("std::polars");
         m.add(col);
+        m.add(n);
         m.add(to_dataframe);
         m.add(from_csv);
+        // the verbs are also free functions so `df |> filter(..)` pipes
+        // resolve -- `|>` desugars `x |> f(a)` to `f(x, a)`, and methods alone
+        // would leave `f` unbound.
+        m.add(filter);
+        m.add(select);
+        m.add(select_names);
+        m.add(sort);
+        m.add(arrange);
+        m.add(mutate);
+        m.add(distinct);
+        m.add(drop_nulls);
+        m.add(head);
+        m.add(tail);
+        m.add(slice);
+        m.add(rename);
+        m.add(pull);
+        m.add(group_by);
+        m.add(agg);
+        m.add(join);
+        m.add(pivot);
     }
     api.add_method(filter);
     api.add_method(select);
+    api.add_method(select_names);
     api.add_method(sort);
+    api.add_method(arrange);
+    api.add_method(mutate);
+    api.add_method(distinct);
+    api.add_method(drop_nulls);
+    api.add_method(head);
+    api.add_method(tail);
+    api.add_method(slice);
+    api.add_method(rename);
+    api.add_method(pull);
     api.add_method(group_by);
     api.add_method(agg);
     api.add_method(join);
@@ -42,12 +73,21 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add_method(max);
     api.add_method(count);
     api.add_method(n_unique);
+    api.add_method(first);
+    api.add_method(last);
     api.add_method(alias);
 }
 
 #[native]
 fn col<'gc>(ctx: Ctx<'gc>, name: &str) -> vm::PlExpr<'gc> {
     ctx.new_plexpr(polars::prelude::col(name))
+}
+
+/// `n()` — the row-count expr for `agg`/`summarise`: `gb.agg([n().alias("n")])`
+/// (polars `len()`; dplyr's `n()`).
+#[native]
+fn n<'gc>(ctx: Ctx<'gc>) -> vm::PlExpr<'gc> {
+    ctx.new_plexpr(polars::prelude::len())
 }
 
 // every query built here is a small in-memory transform -- `collect_with_engine(InMemory)`
@@ -102,6 +142,177 @@ fn sort<'gc>(
         .sort(by, opts)
         .map(|d| ctx.new_dataframe(d))
         .into()
+}
+
+/// `df.select_names(["name", "age"])` — `select` by bare column names, no `col()`
+/// exprs needed (the tidy layer's name-driven `select`).
+#[native]
+fn select_names<'gc>(
+    ctx: Ctx<'gc>,
+    df: vm::DataFrame<'gc>,
+    names: Vec<String>,
+) -> Raisable<vm::DataFrame<'gc>> {
+    use polars::prelude::{IntoLazy, col};
+    let exprs: Vec<polars::prelude::Expr> = names.iter().map(|n| col(n.as_str())).collect();
+    let lazy = df.0.borrow().0.clone().lazy();
+    collect_in_memory(lazy.select(exprs))
+        .map(|d| ctx.new_dataframe(d))
+        .into()
+}
+
+/// `df.arrange(["laps", "elapsed"], [true, false])` — multi-key sort with a
+/// per-key direction; a single-element `desc` broadcasts to every key.
+#[native]
+fn arrange<'gc>(
+    ctx: Ctx<'gc>,
+    df: vm::DataFrame<'gc>,
+    by: Vec<String>,
+    desc: Vec<bool>,
+) -> Raisable<vm::DataFrame<'gc>> {
+    if desc.len() != by.len() && desc.len() != 1 {
+        return Raisable::Raised(format!(
+            "arrange: expected {} or 1 direction flags, got {}",
+            by.len(),
+            desc.len()
+        ));
+    }
+    let opts = polars::prelude::SortMultipleOptions::new().with_order_descending_multi(desc);
+    df.0.borrow()
+        .0
+        .sort(by, opts)
+        .map(|d| ctx.new_dataframe(d))
+        .into()
+}
+
+/// `df.mutate([col("price") * col("qty") | alias "gross"])` — append or replace
+/// columns without dropping the rest (polars `with_columns`, dplyr's `mutate`).
+#[native]
+fn mutate<'gc>(
+    ctx: Ctx<'gc>,
+    df: vm::DataFrame<'gc>,
+    exprs: Vec<vm::PlExpr<'gc>>,
+) -> Raisable<vm::DataFrame<'gc>> {
+    use polars::prelude::IntoLazy;
+    let exprs: Vec<polars::prelude::Expr> = exprs.into_iter().map(|e| e.0.0.clone()).collect();
+    let lazy = df.0.borrow().0.clone().lazy();
+    collect_in_memory(lazy.with_columns(exprs))
+        .map(|d| ctx.new_dataframe(d))
+        .into()
+}
+
+/// `df.distinct(["dept"])` — first row per unique key combination; an empty
+/// `by` dedups whole rows.
+#[native]
+fn distinct<'gc>(
+    ctx: Ctx<'gc>,
+    df: vm::DataFrame<'gc>,
+    by: Vec<String>,
+) -> Raisable<vm::DataFrame<'gc>> {
+    use polars::prelude::UniqueKeepStrategy;
+    let subset = if by.is_empty() { None } else { Some(by.as_slice()) };
+    df.0.borrow()
+        .0
+        .unique_stable(subset, UniqueKeepStrategy::First, None)
+        .map(|d| ctx.new_dataframe(d))
+        .into()
+}
+
+/// `df.drop_nulls(["age"])` — drop rows with nulls in the named columns; an
+/// empty `by` drops rows with a null anywhere.
+#[native]
+fn drop_nulls<'gc>(
+    ctx: Ctx<'gc>,
+    df: vm::DataFrame<'gc>,
+    by: Vec<String>,
+) -> Raisable<vm::DataFrame<'gc>> {
+    let subset = if by.is_empty() { None } else { Some(by.as_slice()) };
+    df.0.borrow()
+        .0
+        .drop_nulls(subset)
+        .map(|d| ctx.new_dataframe(d))
+        .into()
+}
+
+#[native]
+fn head<'gc>(ctx: Ctx<'gc>, df: vm::DataFrame<'gc>, n: i64) -> vm::DataFrame<'gc> {
+    ctx.new_dataframe(df.0.borrow().0.head(Some(n.max(0) as usize)))
+}
+
+#[native]
+fn tail<'gc>(ctx: Ctx<'gc>, df: vm::DataFrame<'gc>, n: i64) -> vm::DataFrame<'gc> {
+    ctx.new_dataframe(df.0.borrow().0.tail(Some(n.max(0) as usize)))
+}
+
+#[native]
+fn slice<'gc>(
+    ctx: Ctx<'gc>,
+    df: vm::DataFrame<'gc>,
+    offset: i64,
+    len: i64,
+) -> vm::DataFrame<'gc> {
+    ctx.new_dataframe(df.0.borrow().0.slice(offset, len.max(0) as usize))
+}
+
+/// `df.rename("old", "new")` — rename one column, non-destructively.
+#[native]
+fn rename<'gc>(
+    ctx: Ctx<'gc>,
+    df: vm::DataFrame<'gc>,
+    from: &str,
+    to: &str,
+) -> Raisable<vm::DataFrame<'gc>> {
+    let mut out = df.0.borrow().0.clone();
+    out.rename(from, to.into())
+        .map(|d| ctx.new_dataframe(d.clone()))
+        .into()
+}
+
+/// `df.pull("name")` — one column as a plain mimas array (ints, floats, bools
+/// and strings come through natively; anything else raises).
+#[native]
+fn pull<'gc>(
+    ctx: Ctx<'gc>,
+    df: vm::DataFrame<'gc>,
+    name: &str,
+) -> Raisable<vm::Array<'gc>> {
+    use polars::prelude::AnyValue;
+    let col = {
+        let d = df.0.borrow();
+        match d.0.column(name) {
+            Ok(c) => c.clone(),
+            Err(e) => return Raisable::Raised(format!("pull: {e}")),
+        }
+    };
+    let s = col.as_materialized_series();
+    let mut out = Vec::with_capacity(s.len());
+    for v in s.iter() {
+        let v = match v {
+            AnyValue::Null => Val::Null,
+            AnyValue::Boolean(b) => Val::Bool(b),
+            AnyValue::Int8(x) => Val::Int(x as i64),
+            AnyValue::Int16(x) => Val::Int(x as i64),
+            AnyValue::Int32(x) => Val::Int(x as i64),
+            AnyValue::Int64(x) => Val::Int(x),
+            AnyValue::UInt8(x) => Val::Int(x as i64),
+            AnyValue::UInt16(x) => Val::Int(x as i64),
+            AnyValue::UInt32(x) => Val::Int(x as i64),
+            AnyValue::UInt64(x) => match i64::try_from(x) {
+                Ok(x) => Val::Int(x),
+                Err(_) => return Raisable::Raised(format!("pull: {x} overflows int")),
+            },
+            AnyValue::Float32(x) => Val::Float(x as f64),
+            AnyValue::Float64(x) => Val::Float(x),
+            AnyValue::String(x) => Val::Str(ctx.intern(x)),
+            AnyValue::StringOwned(x) => Val::Str(ctx.intern(x.as_str())),
+            other => {
+                return Raisable::Raised(format!(
+                    "pull: column {name:?} has an unsupported dtype ({other:?})"
+                ));
+            }
+        };
+        out.push(v);
+    }
+    Raisable::Ok(ctx.new_array(out))
 }
 
 /// `df.group_by(["dept"]).agg([col("age").mean().alias("avg_age")])`. `group_by` alone can't
@@ -231,7 +442,7 @@ macro_rules! pl_expr_reducer {
         }
     )+};
 }
-pl_expr_reducer!(sum, mean, median, min, max, count, n_unique);
+pl_expr_reducer!(sum, mean, median, min, max, count, n_unique, first, last);
 
 #[native]
 fn alias<'gc>(ctx: Ctx<'gc>, e: vm::PlExpr<'gc>, name: &str) -> vm::PlExpr<'gc> {

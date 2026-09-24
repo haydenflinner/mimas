@@ -197,9 +197,11 @@ impl<'s> Parser<'s> {
     /// Whether an infix operator at the peek position may bind to the expression we just
     /// finished. A newline before the operator ends the expression (the semicolon-insertion
     /// rule), so `a\n+ b` is not addition; `a +\n b` still is, because the operator itself is
-    /// on the same line as `a`. A `(...)` group opts back into newline-crossing.
+    /// on the same line as `a`. A `(...)` group opts back into newline-crossing, and so does
+    /// `|>` at a line start: it can never open an expression, so `a\n|> f` can only mean the
+    /// pipeline `a |> f`.
     fn infix_binds(&self) -> bool {
-        self.group_depth > 0 || !self.at_line_start()
+        self.group_depth > 0 || !self.at_line_start() || self.at(TokKind::PipeGreater)
     }
 
     /// Runs `body` with struct literals allowed or not, then puts that back as it was. A
@@ -1266,13 +1268,39 @@ impl<'s> Parser<'s> {
     }
 
     /// `x |> f(a, b)` is `f(x, a, b)` — the piped value leads the argument
-    /// list. A bare callee pipes with no extras: `x |> f` is `f(x)`.
+    /// list. A bare callee pipes with no extras: `x |> f` is `f(x)`. When the
+    /// right side is a postfix chain (`f(a)!.g(b)`), the value goes to the
+    /// chain's first call — `f(x, a)!.g(b)` — not the trailing one.
     fn pipe(&mut self, left: Expr, right: Expr, start: usize) -> Expr {
         let loc = right.location();
         match right.into_kind() {
             ExprKind::Call(mut call) => {
-                call.arguments.insert(0, Argument { name: None, value: left });
+                if callee_holds_call(&call.left) {
+                    call.left = self.pipe(left, call.left, start);
+                } else {
+                    call.arguments.insert(0, Argument { name: None, value: left });
+                }
                 self.new_expr(call, start)
+            }
+            ExprKind::Unwrap(unwrap) => {
+                let expr = self.pipe(left, unwrap.expr, start);
+                self.new_expr(Unwrap { expr }, start)
+            }
+            ExprKind::Grouping(group) => {
+                let inner = self.pipe(left, group.inner, start);
+                self.new_expr(Grouping::new(inner), start)
+            }
+            ExprKind::Access(Access::Dot { left: obj, right, kind })
+                if callee_holds_call(&obj) =>
+            {
+                let obj = self.pipe(left, obj, start);
+                self.new_expr(Access::Dot { left: obj, right, kind }, start)
+            }
+            ExprKind::Access(Access::Square { left: obj, key, kind })
+                if callee_holds_call(&obj) =>
+            {
+                let obj = self.pipe(left, obj, start);
+                self.new_expr(Access::Square { left: obj, key, kind }, start)
             }
             kind => {
                 let callee = Expr::new(kind, loc);
@@ -2435,6 +2463,21 @@ impl<'s> Parser<'s> {
 /// stays in the dozens. The exception is backing out of the depth guard, where each of the 100
 /// levels looks at whatever stopped it about a dozen times on its way out.
 const FUEL: u32 = 4096;
+
+/// Whether a postfix chain's spine reaches a call — `f(a).g` yes, `o.m` no.
+/// `|>` uses this to feed the piped value into the chain's first call rather
+/// than the trailing one.
+fn callee_holds_call(expr: &Expr) -> bool {
+    match expr.kind() {
+        ExprKind::Call(_) => true,
+        ExprKind::Unwrap(unwrap) => callee_holds_call(&unwrap.expr),
+        ExprKind::Grouping(group) => callee_holds_call(&group.inner),
+        ExprKind::Access(Access::Dot { left, .. } | Access::Square { left, .. }) => {
+            callee_holds_call(left)
+        }
+        _ => false,
+    }
+}
 
 /// Operators and keywords from other languages, with what to say about them.
 fn foreign_spelling(name: &str) -> Option<(&'static str, &'static str)> {
