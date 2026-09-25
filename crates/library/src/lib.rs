@@ -23,6 +23,7 @@ mod std_lib {
     pub(crate) mod dataframe;
     pub(crate) mod debug;
     pub(crate) mod fs;
+    pub(crate) mod interval;
     pub(crate) mod math;
     pub(crate) mod parse;
     pub(crate) mod process;
@@ -51,6 +52,7 @@ pub fn std<'gc>(api: &mut Api<'_, 'gc>) {
     std_lib::darkly::install(api);
     std_lib::debug::install(api);
     std_lib::fs::install(api);
+    std_lib::interval::install(api);
     std_lib::math::install(api);
     std_lib::parse::install(api);
     std_lib::process::install(api);

@@ -1057,6 +1057,16 @@ impl Solve for Equality {
         if let Some(ty) = plexpr_overload_ty(&lhs_n, &rhs_n, solver) {
             return Ok(ty);
         }
+        // `<` `<=` `>` `>=` on an adt with registered operator impls (`Api::add_bin_op`)
+        // dispatch at runtime and answer a bool -- `==`/`!=` stay structural
+        if !matches!(self.op, EqualityOp::Equal | EqualityOp::NotEqual) {
+            let has_ops = |t: &Ty| {
+                matches!(t, Ty::Adt(id) if solver.adts[*id].flags.contains(AdtFlags::HAS_OPS))
+            };
+            if has_ops(&lhs_n) || has_ops(&rhs_n) {
+                return Ok(Ty::Bool);
+            }
+        }
         match (&lhs, &rhs) {
             (Ty::Null, Ty::Option(_)) | (Ty::Option(_), Ty::Null) => Ok(()),
             (l, r) if l.is_numeric() && r.is_numeric() => Ok(()),
