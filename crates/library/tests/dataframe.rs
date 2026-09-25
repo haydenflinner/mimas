@@ -527,9 +527,9 @@ test_run!(
 );
 
 test_run!(
-    query_column_functions_and_outside_values,
-    // a second function argument is a plain value -- that's how an outside value (a list, a
-    // computed scalar) reaches a column expression
+    query_column_functions_and_splices,
+    // `$expr` is the escape: inside a verb every bare name is a column, so an outside
+    // value (a list, a computed scalar) splices in with a leading `$`
     r#"use std::polars::*;
        fn known_codes() -> [str] { ["birthday", "student"] }
        let events = from_csv("name,discount
@@ -540,7 +540,7 @@ Zach,none")!;"#,
     r#"query {
         events
         derive discount = to_lower(discount)
-        derive discount = if is_in(discount, known_codes()) { discount } else { "" }
+        derive discount = if is_in(discount, $known_codes()) { discount } else { "" }
         sort name
     }.pull("discount")!.join(",")"# => r#""student,birthday,,""#,
     r#"query {
@@ -550,10 +550,10 @@ Zach,none")!;"#,
     }.pull("name")!.join(",")"# => r#""Zach,Sam""#,
 );
 
-// `eq(col, v)` / `neq(col, v)` take a plain value, so a column can meet an outside
-// value (a parameter, a `let`) -- `name == who` would read `who` as a column
+// `name == $who` -- the `$` splice evaluates `who` outside the query's column
+// namespace, so a column can meet a parameter or a `let`
 test_run!(
-    query_eq_compares_a_column_to_an_outside_value,
+    query_splices_reach_outside_values,
     r#"use std::polars::*;
        fn people() -> DataFrame {
            table { name, age
@@ -564,15 +564,34 @@ test_run!(
        fn row_for(t: DataFrame, who: str) -> str {
            let row = query {
                t
-               filter eq(name, who)
+               filter name == $who
            };
            row.pull("name")![0]
-       }"#,
+       }
+       let decade = 10;"#,
     r#"row_for(people(), "Susan")"# => r#""Susan""#,
     r#"query {
         people()
-        filter neq(name, "Anna")
+        filter name != $"Anna"
     }.pull("name")!.join(",")"# => r#""Susan""#,
+    // a splice is a whole outside expression, not just a name
+    r#"query {
+        people()
+        derive score = age * $decade
+    }.pull("score")![1]"# => "540",
+    // `eq` still works -- now uniformly a column-vs-column (or vs `$`-value) test
+    r#"query {
+        people()
+        filter eq(name, $"Anna")
+    }.pull("name")!.join(",")"# => r#""Anna""#,
+);
+
+// `$` outside a `query { }` isn't an escape from anything -- the marker reaches
+// the `__q_splice` native, which says so
+test_fail!(
+    query_splice_outside_a_query_raises,
+    r#"let who = "Anna";
+       let x = $who;"#,
 );
 
 // a verb line that isn't a verb -> a parse error pointing at it

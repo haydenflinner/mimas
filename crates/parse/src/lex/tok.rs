@@ -81,6 +81,7 @@ pub enum TokKind<'s> {
     AmpersandEqual,
     CaretEqual,
     Tilde,
+    Dollar,
     DoubleLeftCaret,
     DoubleRightCaret,
     Continue,
@@ -182,6 +183,7 @@ impl Display for TokKind<'_> {
             TokKind::AmpersandEqual => "&=",
             TokKind::CaretEqual => "^=",
             TokKind::Tilde => "~",
+            TokKind::Dollar => "$",
             TokKind::DoubleLeftCaret => "<<",
             TokKind::DoubleRightCaret => ">>",
             TokKind::Continue => "continue",
@@ -264,6 +266,7 @@ impl TokKind<'_> {
                     | TokKind::LeftSquare
                     | TokKind::LeftBrace
                     | TokKind::TildeLeftBrace
+                    | TokKind::Dollar
                     | TokKind::Pipe
                     | TokKind::DoublePipe
                     | TokKind::Loop

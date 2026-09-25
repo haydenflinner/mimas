@@ -47,7 +47,7 @@ tok_test!(tykw_bool: "bool" => TyKw(TyKw::Bool));
 
 tok_test!(invalid_backtick: "`" => Invalid("`"));
 tok_test!(hash: "#" => Hash);
-tok_test!(invalid_dollar: "$" => Invalid("$"));
+tok_test!(dollar: "$" => Dollar);
 tok_test!(invalid_backslash: "\\" => Invalid("\\"));
 tok_test!(invalid_multibyte: "a § b" => Ident("a"), Invalid("§"), Ident("b"));
 

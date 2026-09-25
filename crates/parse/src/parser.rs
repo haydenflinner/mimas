@@ -1473,6 +1473,22 @@ impl<'s> Parser<'s> {
         {
             let expr = self.query_literal();
             self.chain_accesses(expr)
+        } else if self.at(TokKind::Dollar) {
+            // `$expr` — a `query { }` splice: `expr` is a value from the
+            // surrounding scope, not a column. Emitted as `__q_splice(expr)`;
+            // `q_lower` unwraps the marker untouched. Outside a query the call
+            // reaches the `__q_splice` native, which explains the escape only
+            // applies inside a query.
+            self.advance();
+            let inner = self.nested(Self::unary).unwrap_or_else(|| self.poison_expr(start));
+            let callee = self.new_expr(
+                Ident::new("__q_splice", self.location(start)),
+                start,
+            );
+            self.new_expr(
+                Call::new(callee, vec![Argument { name: None, value: inner }]),
+                start,
+            )
         } else {
             let name = self.supreme();
             if !self.struct_literals || !self.eat(TokKind::LeftBrace) {
@@ -1584,10 +1600,9 @@ impl<'s> Parser<'s> {
     // The first line is an ordinary expression (optionally `from <expr>`) that yields the
     // table; each later line is a verb. Inside a verb's expressions a bare name is a *column*,
     // `&&`/`||` combine column tests, `if c { a } else { b }` is a conditional column, and a few
-    // functions (`sum`, `mean`, `count`, `to_lower`, `contains`, …) apply to columns. Anything
-    // else in an expression is an ordinary Mimas value only when wrapped as `(expr)` -- no, it
-    // isn't: parentheses group like everywhere else, so pass outside values through a `let`
-    // *before* the query and name them with a leading `$` -- see `q_lower`.
+    // functions (`sum`, `mean`, `count`, `to_lower`, `contains`, …) apply to columns. To reach a
+    // value from the surrounding scope -- a `let` or a parameter -- write it `$name`d: the `$`
+    // splice evaluates its expression outside the column namespace (see `q_lower`).
     // It lowers to one `__q_*` native call per verb (see `library::std_lib::dataframe`).
     fn query_literal(&mut self) -> Expr {
         let start = self.next_start();
@@ -1819,9 +1834,8 @@ impl<'s> Parser<'s> {
 
     /// Rewrites an expression so bare names mean columns: names -> `__q_col("x")`, `&&`/`||` ->
     /// `&`/`|` (column tests don't short-circuit), `if c { a } else { b }` -> `__q_when`, and the
-    /// column functions -> `__q_apply(col, "fn", extra)`. Literals and operators carry over.
-    /// `$name` (a name written with a leading `$`) would be how to reach an outside value; it
-    /// isn't lexed yet, so today an outside value goes through a function argument instead.
+    /// column functions -> `__q_apply(col, "fn", extra)`. Literals and operators carry over, and
+    /// `$expr` splices pass through untouched -- the escape back to the surrounding scope.
     fn q_lower(&self, e: &Expr) -> Expr {
         let start = e.span().start();
         match e.kind() {
@@ -1859,6 +1873,15 @@ impl<'s> Parser<'s> {
                 }
             }
             ExprKind::Call(c) => {
+                // `$expr` — the splice marker from `literal`: emit the inside
+                // untouched so it evaluates as an ordinary value in scope.
+                if c.left.as_ident().is_some_and(|i| i.lexeme == "__q_splice") {
+                    return c
+                        .arguments
+                        .first()
+                        .map(|a| a.value.clone())
+                        .unwrap_or_else(|| e.clone());
+                }
                 let args: Vec<Expr> = c.arguments.iter().map(|a| self.q_lower(&a.value)).collect();
                 match c.left.as_ident().map(|i| i.lexeme.as_str()) {
                     Some("count") if args.is_empty() => self.q_call("__q_n", vec![], start),
@@ -1871,9 +1894,9 @@ impl<'s> Parser<'s> {
                         let mut it = args.into_iter();
                         let first = it.next().unwrap();
                         let name = self.new_expr(Literal::String(f.to_string()), start);
-                        // a second argument is a plain value (text to search for, a fill value)
+                        // a second argument lowers like the first — `is_in(discount, $codes)`
                         let extra = match c.arguments.get(1) {
-                            Some(a) => a.value.clone(),
+                            Some(a) => self.q_lower(&a.value),
                             None => self.new_expr(Literal::Null, start),
                         };
                         self.q_call("__q_apply", vec![first, name, extra], start)

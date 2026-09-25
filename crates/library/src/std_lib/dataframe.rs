@@ -40,6 +40,7 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add(__q_rename);
     api.add(__q_distinct);
     api.add(__q_join);
+    api.add(__q_splice);
     {
         let mut m = api.module("std::polars");
         m.add(col);
@@ -873,13 +874,20 @@ fn __q_apply<'gc>(
         "cast_int" => e.cast(polars::prelude::DataType::Int64),
         "cast_float" => e.cast(polars::prelude::DataType::Float64),
         "cast_str" => e.cast(polars::prelude::DataType::String),
-        // a second argument is a plain value, so `eq(name, who)` is how a column meets an
-        // outside value (a `let` or a parameter) -- `name == who` would read `who` as a column
+        // `eq(a, b)` compares two columns; for a column against an outside
+        // value write `a == $who` (the `$` splice) or `eq(a, $who)`
         "eq" => e.eq(q_expr(arg)?),
         "neq" => e.neq(q_expr(arg)?),
         other => return Err(q_err(format!("unknown column function `{other}`"))),
     };
     Ok(ctx.new_plexpr(out))
+}
+
+/// `$expr` outside a `query { }` — `q_lower` unwraps the marker inside one,
+/// so reaching this call means the escape ran where it isn't an escape.
+#[native]
+fn __q_splice<'gc>(_ctx: Ctx<'gc>, _value: Val<'gc>) -> Result<Val<'gc>, vm::RtErr> {
+    Err(q_err("`$` names an outside value only inside `query { … }`"))
 }
 
 /// `if c { a } else { b }` inside a query
