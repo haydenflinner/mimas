@@ -195,7 +195,11 @@ test_fail!(
     "where:",
     "where { }",
     "where { x is }",
-    "where { x is 1 y is 2 }"
+    "where { x is 1 y is 2 }",
+    // junk after a check used to spin the parser until its fuel guard panicked
+    "where {\n    xs[1..] is [2]\n}",
+    "where { a[1..] is b",
+    "where:\n    xs[1..] is [2]"
 );
 
 fn check_item(source: &str) -> crate::Tests {

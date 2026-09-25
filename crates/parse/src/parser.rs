@@ -515,6 +515,17 @@ impl<'s> Parser<'s> {
                     msg: "checks need `,` or a newline between them".into(),
                     label: "expected `,` or `}` here".into(),
                 });
+                // Skip the junk up to the next line / `}` so the next check starts somewhere
+                // new -- retrying at the same token would spin until the fuel guard panics.
+                if self.at(TokKind::Eof) {
+                    break;
+                }
+                while !self.at(TokKind::Eof)
+                    && !self.at(TokKind::RightBrace)
+                    && !self.at_line_start()
+                {
+                    self.advance();
+                }
             }
         } else {
             loop {
