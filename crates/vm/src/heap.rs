@@ -46,6 +46,9 @@ pub struct Frame {
 pub struct ThreadState<'gc> {
     pub regs: Vec<Val<'gc>>,
     pub frames: Vec<Frame>,
+    /// Ops this thread may still run before `RtErr::OutOfFuel`; the host re-arms it per entry
+    /// (`Vm::set_op_budget`). `u64::MAX` (the default) is effectively unlimited.
+    pub ops_left: u64,
 }
 
 pub type Thread<'gc> = Gc<'gc, RefLock<ThreadState<'gc>>>;
@@ -102,6 +105,7 @@ impl<'gc> State<'gc> {
             RefLock::new(ThreadState {
                 regs: Vec::new(),
                 frames: Vec::new(),
+                ops_left: u64::MAX,
             }),
         );
         let natives = Gc::new(mc, RefLock::new(Vec::new()));

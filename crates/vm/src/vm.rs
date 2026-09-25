@@ -290,6 +290,12 @@ impl Vm {
         FixtureRef { ptr }
     }
 
+    /// Let the thread run at most `ops` more ops before `RtErr::OutOfFuel` (re-arm per entry:
+    /// per check, per live scene, per game frame). `u64::MAX` lifts the limit.
+    pub fn set_op_budget(&mut self, ops: u64) {
+        self.arena.mutate(|mc, state| state.thread.borrow_mut(mc).ops_left = ops);
+    }
+
     pub fn run(&mut self) -> Result<(), Error> {
         loop {
             let Vm {
@@ -606,6 +612,12 @@ fn run_dispatch<'gc>(
         }
         fuel -= 1;
         let op_ip = code.ip;
+        // the host's budget for this entry (checks, live scenes, game frames): a loop with no
+        // end becomes an error instead of a hung page
+        if thread.ops_left == 0 {
+            return Err(locate(RtErr::OutOfFuel, op_ip, thread, chunks, sources));
+        }
+        thread.ops_left -= 1;
         #[cfg(feature = "op-count")]
         op_count::COUNTS[code.bytes[op_ip] as usize]
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
