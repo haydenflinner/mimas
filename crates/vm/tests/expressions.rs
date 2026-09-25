@@ -456,10 +456,24 @@ test_fail!(
     "struct P { a: int }\nlet p: P? = null;\np!.a = 1;"
 );
 
-// two types with one name is an error, not a solver panic
-test_fail!(
-    duplicate_type_names_are_rejected,
-    "struct P { a: int }\nstruct P { b: int }",
-    "struct P { a: int }\nenum P { X }",
-    "enum E { A }\nenum E { B }"
+// a type name declared twice (two scripts each defining `Shape`) resolves, at each use, to the most
+// recent declaration before it -- reading order
+test_vm!(
+    redeclared_types_resolve_by_reading_order,
+    "struct P { a: int }
+     fn first() -> int { let p = P { a = 1 }; p.a }
+     struct P { b: int }
+     fn second() -> int { let p = P { b = 2 }; p.b }",
+    "first()" => Int(1),
+    "second()" => Int(2)
+);
+
+test_vm!(
+    a_later_enum_shadows_an_earlier_struct,
+    "struct S { a: int }
+     fn old() -> int { let s = S { a = 5 }; s.a }
+     enum S { X, Y { n: int } }
+     fn new() -> int { let v = S::Y { n = 7 }; match v { S::X => 0, S::Y { n } => n } }",
+    "old()" => Int(5),
+    "new()" => Int(7)
 );

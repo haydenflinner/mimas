@@ -170,6 +170,11 @@ impl Ribs {
 #[derive(Debug, Clone)]
 pub(crate) struct Rib {
     pub(crate) table: HashMap<String, DecId>,
+    /// Every declaration a module-level name has had, with where its name appears in the
+    /// source. A name declared more than once (two scripts each defining `struct Shape`)
+    /// resolves, at each use, to the most recent declaration that precedes it -- reading
+    /// order, so an include placed after your own struct wins from there on.
+    history: HashMap<String, Vec<(usize, DecId)>>,
     pub(crate) kind: RibKind,
 }
 
@@ -177,11 +182,18 @@ impl Rib {
     pub(crate) fn new(kind: RibKind) -> Self {
         Self {
             table: HashMap::new(),
+            history: HashMap::new(),
             kind,
         }
     }
 
     pub(crate) fn insert(&mut self, ident: Ident, dec_id: DecId) {
+        if matches!(self.kind, RibKind::Module(_)) {
+            self.history
+                .entry(ident.lexeme.clone())
+                .or_default()
+                .push((ident.location.span.start, dec_id));
+        }
         self.table.insert(ident.lexeme, dec_id);
     }
 
@@ -193,6 +205,21 @@ impl Rib {
     }
 
     fn get(&self, ident: &Ident) -> Option<DecId> {
+        // a redeclared module-level name: the latest declaration at or before this use
+        if let Some(decls) = self.history.get(&ident.lexeme)
+            && decls.len() > 1
+        {
+            let at = ident.location.span.start;
+            let mut best: Option<(usize, DecId)> = None;
+            for &(start, id) in decls {
+                if start <= at && best.is_none_or(|(b, _)| start >= b) {
+                    best = Some((start, id));
+                }
+            }
+            if let Some((_, id)) = best {
+                return Some(id);
+            }
+        }
         self.table.get(&ident.lexeme).copied()
     }
 }
