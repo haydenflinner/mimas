@@ -769,7 +769,10 @@ fn step_one<'gc>(
             let v = match receiver {
                 Val::Instance(i) => i.0.borrow().fields[slot],
                 Val::Array(a) => a.0.borrow()[slot],
-                _ => todo!(),
+                Val::Null => return Err(RtErr::UnwrappedNull.into()),
+                other => {
+                    return Err(RtErr::Custom(format!("no fields on {:?}", other.capture())).into());
+                }
             };
             wr!(regs, dst, v);
         }
@@ -782,7 +785,10 @@ fn step_one<'gc>(
             match receiver {
                 Val::Instance(i) => i.0.borrow_mut(&ctx).fields[slot] = value,
                 Val::Array(a) => a.0.borrow_mut(&ctx)[slot] = value,
-                _ => todo!(),
+                Val::Null => return Err(RtErr::UnwrappedNull.into()),
+                other => {
+                    return Err(RtErr::Custom(format!("no fields on {:?}", other.capture())).into());
+                }
             }
         }
         OpCode::Push => {
@@ -800,7 +806,11 @@ fn step_one<'gc>(
                 Val::Dict(d) => d.0.borrow().len(),
                 Val::Str(s) => s.as_str().chars().count(),
                 Val::Int(i) => i as usize,
-                _ => todo!(),
+                // `null.len()` (a missing cell read as a string, say) is a runtime error, not a
+                // VM abort
+                other => {
+                    return Err(RtErr::Custom(format!("len: {:?} has no length", other.capture())).into());
+                }
             };
             wr!(regs, dst, Val::Int(len as i64));
         }

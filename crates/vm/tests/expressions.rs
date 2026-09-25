@@ -441,3 +441,17 @@ test_fail!(
     nested_match_arm_error_is_reported,
     "fn h() -> int? { null }\nfn g(l: int, a: int) -> int? { match l { 0 => null, _ => { match h() { null => a, m => if a > m { a } else { m } } } } }"
 );
+
+// `len` on a value without one is a runtime error, not a VM abort
+test_fail!(
+    len_of_null_is_an_error,
+    "let x: str? = null; let n = x!.len();",
+    "fn f(s: str?) -> int { s.len() }"
+);
+
+// reading or writing a field of `null` is a runtime error, not a VM abort
+test_fail!(
+    field_of_null_is_an_error,
+    "struct P { a: int }\nlet p: P? = null;\nlet x = p!.a;",
+    "struct P { a: int }\nlet p: P? = null;\np!.a = 1;"
+);
