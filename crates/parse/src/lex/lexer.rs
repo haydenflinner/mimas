@@ -47,6 +47,21 @@ pub struct Lexer<'s> {
 }
 
 impl<'s> Lexer<'s> {
+    /// A number directly followed by a unit (`25kW`, `0.14usd/kWh`) is a quantity: consume the
+    /// suffix and say so. Anything else after a number is left for the parser, as before.
+    fn with_unit(&mut self, plain: TokKind<'s>, value: f64) -> TokKind<'s> {
+        let source = self.source;
+        let rest = &source[self.char_stream.position()..];
+        let Some(len) = shared::units::scan_suffix(rest) else {
+            return plain;
+        };
+        let unit = &rest[..len];
+        for c in unit.chars() {
+            self.match_chomp(c);
+        }
+        TokKind::Quantity(value, unit)
+    }
+
     /// Creates a new Lexer, taking a string of mimas source.
     pub fn new(source: &'s str, file_id: FileId, file_name: String) -> Self {
         Self {
@@ -229,10 +244,10 @@ impl<'s> Lex<'s, Tok<TokKind<'s>>, TokKind<'s>> for Lexer<'s> {
                 }
             }
         } else if let Some(float) = self.construct_float(true, true) {
-            TokKind::Float(float)
+            self.with_unit(TokKind::Float(float), float)
         } else if rest.starts_with(|c: char| c.is_ascii_digit()) {
             match self.construct_integer(true) {
-                Some(int) => TokKind::Int(int),
+                Some(int) => self.with_unit(TokKind::Int(int), int as f64),
                 // on a digit, the only way for that to fail is a number too big to hold
                 None => {
                     let location = self.location(start, self.char_stream.position());

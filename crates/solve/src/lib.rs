@@ -44,6 +44,7 @@ pub use resolutions::*;
 pub use solver::*;
 use unify::*;
 
+mod dims;
 pub mod errors;
 pub use errors::{Error, Result};
 

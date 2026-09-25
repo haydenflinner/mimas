@@ -838,3 +838,29 @@ pub(crate) fn elide(s: String) -> String {
         format!("{}...", s.chars().take(MAX).collect::<String>())
     }
 }
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("unknown unit")]
+#[diagnostic(help("units are things like m, s, kg, W, kWh, usd -- see the Units page of the book"))]
+pub struct UnknownUnit {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("`{name}` isn't a unit")]
+    pub at: SourceSpan,
+    pub name: String,
+}
+
+/// Dimensional analysis: two quantities that don't agree, or a quantity where a plain number (or
+/// another dimension) was declared.
+#[derive(Error, Debug, Diagnostic)]
+#[error("{what}")]
+#[diagnostic(help("{help}"))]
+pub struct DimensionMismatch {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("{label}")]
+    pub at: SourceSpan,
+    pub what: String,
+    pub label: String,
+    pub help: String,
+}

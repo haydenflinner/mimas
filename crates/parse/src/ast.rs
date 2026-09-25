@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use hashbrown::HashMap;
 use miette::NamedSource;
-use shared::{Located, Result, Span};
+use shared::{Located, Result, Span, units::Dim};
 
 use crate::{
     Expr, Ident, Stmt, StmtKind, components::Pat, errors::AlreadyInsideModule, visit::Visitor,
@@ -19,6 +19,9 @@ pub struct Ast {
     stmts: Vec<Stmt>,
     /// Doc comments without their slashes, keyed by where the token after each starts.
     docs: HashMap<usize, String>,
+    /// Dimension of every unit-suffixed number literal (`25kW`), by node. The literal's value is
+    /// already in coherent base units; this is what the dimension checker reads.
+    quantities: HashMap<NodeId, Dim>,
 }
 impl Ast {
     /// Creates a new Ast with the given statements.
@@ -27,13 +30,20 @@ impl Ast {
         src: NamedSource<Arc<str>>,
         stmts: Vec<Stmt>,
         docs: HashMap<usize, String>,
+        quantities: HashMap<NodeId, Dim>,
     ) -> Self {
         Self {
             name,
             src,
             stmts,
             docs,
+            quantities,
         }
+    }
+
+    /// The dimension of the unit-suffixed literal `id`, when it is one.
+    pub fn quantity(&self, id: NodeId) -> Option<Dim> {
+        self.quantities.get(&id).copied()
     }
 
     /// Consumes the Ast into its inner collection of statements.

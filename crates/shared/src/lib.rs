@@ -3,6 +3,7 @@ mod interner;
 mod literal;
 mod location;
 mod ty;
+pub mod units;
 
 pub use id::*;
 pub use interner::*;

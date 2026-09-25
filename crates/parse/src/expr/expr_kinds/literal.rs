@@ -93,6 +93,10 @@ impl TryFrom<TokKind<'_>> for Literal {
             TokKind::String(s) => Ok(Literal::String(chompy::utils::unescape(s, &['\\'], &['"']))),
             TokKind::Int(n) => Ok(Literal::Int(n)),
             TokKind::Float(n) => Ok(Literal::Float(n)),
+            // a quantity is a float in the coherent base unit; its dimension rides in the ast
+            TokKind::Quantity(n, unit) => shared::units::parse(unit)
+                .map(|(_, scale)| Literal::Float(n * scale))
+                .ok_or(()),
             TokKind::Hex(n) => Ok(Literal::Hex(n.to_string())),
             _ => Err(()),
         }

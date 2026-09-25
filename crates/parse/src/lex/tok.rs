@@ -93,6 +93,8 @@ pub enum TokKind<'s> {
     Ident(&'s str),
     Int(i64),
     Float(f64),
+    /// A number with a unit suffix, `25kW`: the value as written and the unit text.
+    Quantity(f64, &'s str),
     String(&'s str),
     FString(&'s str),
     Hex(&'s str),
@@ -195,6 +197,7 @@ impl Display for TokKind<'_> {
             TokKind::Ident(iden) => iden,
             TokKind::Int(r) => return f.pad(&r.to_string()),
             TokKind::Float(r) => return f.pad(&r.to_string()),
+            TokKind::Quantity(r, unit) => return f.pad(&format!("{r}{unit}")),
             TokKind::String(s) => return f.pad(&format!("\"{s}\"")),
             TokKind::FString(s) => return f.pad(&format!("f\"{s}\"")),
             TokKind::Hex(hex) => hex,

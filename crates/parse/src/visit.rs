@@ -362,6 +362,8 @@ pub fn walk_annotation(annotation: &Annotation, visitor: &mut impl Visitor) {
             }
             walk_annotation(ret, visitor);
         }
+        // unit names aren't names in scope; nothing to visit
+        Annotation::Quantity(_) => {}
         Annotation::Unit | Annotation::Kw(_) | Annotation::Poison(_) => {}
     }
 }

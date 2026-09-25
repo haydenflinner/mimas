@@ -42,6 +42,8 @@ pub struct Parser<'s> {
     /// rewriting, so nested asserts don't collide.
     assert_id: u32,
     depth: usize,
+    /// The dimension of each unit-suffixed literal (`25kW`), by the literal's node.
+    quantities: HashMap<NodeId, shared::units::Dim>,
 }
 
 // Basic features
@@ -99,6 +101,7 @@ impl<'s> Parser<'s> {
             group_depth: 0,
             assert_id: 0,
             depth: 0,
+            quantities: HashMap::new(),
         }
     }
 
@@ -134,7 +137,7 @@ impl<'s> Parser<'s> {
             })
             .collect();
         (
-            Ast::new(self.file_name, self.src, statements, docs),
+            Ast::new(self.file_name, self.src, statements, docs, self.quantities),
             self.errors,
         )
     }
@@ -1442,8 +1445,15 @@ impl<'s> Parser<'s> {
     fn literal(&mut self) -> Expr {
         let start = self.next_start();
         if let Ok(literal) = Literal::try_from(self.peek()) {
+            let dim = match self.peek() {
+                TokKind::Quantity(_, unit) => shared::units::parse(unit).map(|(dim, _)| dim),
+                _ => None,
+            };
             self.advance();
             let expr = self.new_expr(literal, start);
+            if let Some(dim) = dim {
+                self.quantities.insert(expr.id(), dim);
+            }
 
             // todo: this might allow "hello"() or true[]" etc. only dot accesses are okay on lits"
             self.chain_accesses(expr)
@@ -2491,6 +2501,9 @@ impl<'s> Parser<'s> {
                     segments.push(self.require_ident());
                 }
                 match segments.len() {
+                    1 if matches!(self.peek(), TokKind::Slash | TokKind::Star | TokKind::Caret) => {
+                        self.quantity_annotation(segments.remove(0))
+                    }
                     1 => Annotation::Ty(segments.remove(0)),
                     _ => Annotation::Path(segments),
                 }
@@ -2515,6 +2528,41 @@ impl<'s> Parser<'s> {
             _ => {
                 self.expected("type");
                 Annotation::Poison(Poison)
+            }
+        }
+    }
+
+    /// The rest of a compound unit type (`usd/kWh`, `m/s^2`, `W*h`) after its first name: signed
+    /// exponents, `/` flipping the next term.
+    fn quantity_annotation(&mut self, first: Ident) -> Annotation {
+        let mut parts = vec![(first, self.unit_exponent())];
+        loop {
+            let sign = match self.peek() {
+                TokKind::Star => 1,
+                TokKind::Slash => -1,
+                _ => break,
+            };
+            self.advance();
+            let unit = self.require_ident();
+            parts.push((unit, sign * self.unit_exponent()));
+        }
+        Annotation::Quantity(parts)
+    }
+
+    /// An optional `^n` (or `^-n`) after a unit name.
+    fn unit_exponent(&mut self) -> i8 {
+        if !self.eat(TokKind::Caret) {
+            return 1;
+        }
+        let neg = self.eat(TokKind::Minus);
+        match self.peek() {
+            TokKind::Int(n) if n <= i8::MAX as i64 => {
+                self.advance();
+                if neg { -(n as i8) } else { n as i8 }
+            }
+            _ => {
+                self.expected("exponent");
+                1
             }
         }
     }

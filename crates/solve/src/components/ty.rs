@@ -1,7 +1,7 @@
 use crate::{
     Result, Solver, Unification, UnificationError,
     components::AdtFlags,
-    errors::{FieldNotFound, NotAPact, NotAStruct, TypeHasNoFields},
+    errors::{FieldNotFound, NotAPact, NotAStruct, TypeHasNoFields, UnknownUnit},
     traits::Query,
 };
 use parse::{components::Annotation, lex::TyKw};
@@ -120,6 +120,26 @@ impl TyExt for Ty {
                     .map(|v| Ty::from_annotation(v, solver))
                     .collect::<Result<_>>()?,
             )),
+            // a unit written where a type goes (`kW`, `usd`) is a float whose dimension the
+            // checker tracks -- unless the program declares a type by that name, which wins
+            Annotation::Ty(ident)
+                if solver.ribs.resolve(&ident).is_none()
+                    && shared::units::lookup(&ident.lexeme).is_some() =>
+            {
+                Ok(Ty::Float)
+            }
+            Annotation::Quantity(parts) => {
+                for (unit, _) in &parts {
+                    if shared::units::lookup(&unit.lexeme).is_none() {
+                        Err(UnknownUnit {
+                            src: solver.src(unit.location),
+                            at: unit.location.into(),
+                            name: unit.lexeme.clone(),
+                        })?;
+                    }
+                }
+                Ok(Ty::Float)
+            }
             Annotation::Ty(ident) => {
                 let ty = ident.query(solver)?;
                 let dec = solver.ribs.resolve(&ident);

@@ -15,6 +15,17 @@ tok_test!(hex_upper: "0xFF" => Hex("FF"));
 tok_test!(neg_int: "-1" => Minus, Int(1));
 tok_test!(neg_float: "-1.5" => Minus, Float(1.5));
 
+// a number glued to a unit is one token; anything else after a number stays as it was
+tok_test!(quantity_int: "25kW" => Quantity(25.0, "kW"));
+tok_test!(quantity_float: "0.14usd/kWh" => Quantity(0.14, "usd/kWh"));
+tok_test!(quantity_exponent: "9.81m/s^2" => Quantity(9.81, "m/s^2"));
+tok_test!(quantity_then_operator: "5kW+3kW" => Quantity(5.0, "kW"), Plus, Quantity(3.0, "kW"));
+tok_test!(quantity_slash_variable_is_division: "5W/x" => Quantity(5.0, "W"), Slash, Ident("x"));
+tok_test!(quantity_slash_number_is_division: "5W/2" => Quantity(5.0, "W"), Slash, Int(2));
+tok_test!(quantity_method_call: "5kW.abs" => Quantity(5.0, "kW"), Dot, Ident("abs"));
+tok_test!(spaced_unit_is_not_a_quantity: "5 kW" => Int(5), Ident("kW"));
+tok_test!(number_then_non_unit_ident: "3x" => Int(3), Ident("x"));
+
 tok_test!(empty_string: "\"\"" => String(""));
 tok_test!(string: "\"foo\"" => String("foo"));
 tok_test!(multiline_string: "\"foo\nfoo\"" => String("foo\nfoo"));

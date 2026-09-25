@@ -236,6 +236,8 @@ impl Solver {
         self.control_flow = ControlFlow::default();
         assert!(self.fn_stack.is_empty());
         assert!(self.loop_stack.is_empty());
+        // last, once every node has its type: do the units add up?
+        crate::dims::check(self, &asts)?;
         Ok(())
     }
 

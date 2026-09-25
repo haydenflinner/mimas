@@ -19,6 +19,9 @@ pub enum Annotation {
     Ty(Ident),
     Path(Vec<Ident>),
     Bounds(Vec<Ident>),
+    /// A compound unit, `usd/kWh` or `m/s^2`: each unit with its signed exponent. Whether the
+    /// names are units is for the checker to say. (A lone unit name is a plain `Ty`.)
+    Quantity(Vec<(Ident, i8)>),
     Poison(Poison),
 }
 
@@ -43,6 +46,20 @@ impl std::fmt::Display for Annotation {
             Annotation::Ty(ident) => f.pad(&format!("{ident}")),
             Annotation::Path(idents) => f.pad(&idents.iter().map(|i| i.to_string()).join("::")),
             Annotation::Bounds(idents) => f.pad(&idents.iter().map(|i| i.to_string()).join(" + ")),
+            Annotation::Quantity(parts) => f.pad(
+                &parts
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (unit, exp))| match (i, exp) {
+                        (0, 1) => unit.to_string(),
+                        (0, e) => format!("{unit}^{e}"),
+                        (_, 1) => format!("*{unit}"),
+                        (_, -1) => format!("/{unit}"),
+                        (_, e) if *e > 0 => format!("*{unit}^{e}"),
+                        (_, e) => format!("/{unit}^{}", -e),
+                    })
+                    .join(""),
+            ),
             Annotation::Poison(_) => f.pad(POISON),
         }
     }

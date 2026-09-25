@@ -30,6 +30,7 @@
   - [User-Defined Types](./reference/types.md)
     - [Structs](./reference/types/structs.md)
     - [Enums](./reference/types/enums.md)
+    - [Units](./reference/types/units.md)
     - [Intervals](./reference/types/intervals.md)
   - [Pacts](./reference/pacts.md)
   - [Privacy](./reference/privacy.md)
