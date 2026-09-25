@@ -66,6 +66,7 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
         m.add(rename);
         m.add(col_names);
         m.add(pull);
+        m.add(pull_as);
         m.add(group_by);
         m.add(agg);
         m.add(join);
@@ -86,6 +87,7 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add_method(rename);
     api.add_method(col_names);
     api.add_method(pull);
+    api.add_method(pull_as);
     api.add_method(group_by);
     api.add_method(agg);
     api.add_method(join);
@@ -365,6 +367,53 @@ fn pull<'gc>(
         out.push(v);
     }
     Raisable::Ok(ctx.new_array(out))
+}
+
+/// `df.pull_as("kwh", "kWh")` -- a numeric column read as quantities in `unit`. The table holds
+/// bare numbers; this says what they measure. Each value is scaled into base units, exactly as
+/// `25kW` would be, so the result is a `[float]` the dimension checker sees as a list of
+/// quantities (and it checks nothing else about the column). Ints come through as floats.
+#[native]
+fn pull_as<'gc>(
+    _ctx: Ctx<'gc>,
+    df: vm::DataFrame<'gc>,
+    name: &str,
+    unit: &str,
+) -> Raisable<Vec<f64>> {
+    use polars::prelude::AnyValue;
+    let Some((_, scale)) = shared::units::parse(unit) else {
+        return Raisable::Raised(format!("pull_as: `{unit}` isn't a unit"));
+    };
+    let col = {
+        let d = df.0.borrow();
+        match d.0.column(name) {
+            Ok(c) => c.clone(),
+            Err(e) => return Raisable::Raised(format!("pull_as: {e}")),
+        }
+    };
+    let s = col.as_materialized_series();
+    let mut out = Vec::with_capacity(s.len());
+    for v in s.iter() {
+        let x = match v {
+            AnyValue::Int8(x) => x as f64,
+            AnyValue::Int16(x) => x as f64,
+            AnyValue::Int32(x) => x as f64,
+            AnyValue::Int64(x) => x as f64,
+            AnyValue::UInt8(x) => x as f64,
+            AnyValue::UInt16(x) => x as f64,
+            AnyValue::UInt32(x) => x as f64,
+            AnyValue::UInt64(x) => x as f64,
+            AnyValue::Float32(x) => x as f64,
+            AnyValue::Float64(x) => x,
+            other => {
+                return Raisable::Raised(format!(
+                    "pull_as: column {name:?} isn't numeric ({other:?})"
+                ));
+            }
+        };
+        out.push(x * scale);
+    }
+    Raisable::Ok(out)
 }
 
 /// `df.group_by(["dept"]).agg([col("age").mean().alias("avg_age")])`. `group_by` alone can't

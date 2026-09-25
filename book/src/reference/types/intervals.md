@@ -34,6 +34,10 @@ Every input is assumed to sit at its worst *independently*, and the same estimat
 
 `<`, `<=`, `>` and `>=` against another interval or a plain number are **certain**: `a < b` is true only if it holds for every value in both ranges (`a.hi < b.lo`). So `!(a < b)` does *not* mean `a >= b` — the ranges may overlap. Ask `a.overlaps(b)`, or compare the `mid`s for the best guess. `==` and `!=` are structural, as for any struct.
 
+## Units
+
+Intervals of quantities keep their [units](./units.md): `Interval::pm(5kW, 0.1) * Interval::pm(2h, 0.1)` is an `Interval<kWh>`, and adding it to a time is a compile error.
+
 ## Other methods
 
 `x.width()` is `hi - lo`; `x.contains(v)` asks whether `v` is inside the range.

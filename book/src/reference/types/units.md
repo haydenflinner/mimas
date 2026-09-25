@@ -56,6 +56,18 @@ Money and the graphics units are dimensions of their own: `usd` can't be added t
 
 Anything the checker can't follow -- what a native function returns, an unannotated closure -- is simply *unknown*, and unknown never causes an error. So code without units is unaffected, and you can adopt them one function at a time.
 
+## Intervals and columns keep their units
+
+An `Interval` of quantities is an interval *in that unit*. `Interval::pm(30000.0usd, 0.1)` is a range of dollars; `+ - * /` carry the unit through it like they do for a single number, and `.lo`, `.mid`, `.hi` come out as plain quantities. Write the type as `Interval<usd>`:
+
+```mimas
+fn payback(net: Interval<usd>, saved: Interval<usd>) -> Interval<yr> {
+    net / saved * 1yr
+}
+```
+
+Table columns are bare numbers until you say what they measure. `df.pull_as("kwh", "kWh")` reads a numeric column as a list of quantities in that unit (scaled to base units, like a literal), so `let load: [kWh] = df.pull_as("kwh", "kWh")!` is checked from there on. In the literate environment a data cell's header can carry the unit -- `month,kwh (kWh)` -- and the page gets a typed accessor for it.
+
 ## Reading a number back
 
 `q.to("unit")` turns a quantity into a plain float in that unit, and the compiler checks the unit measures the same kind of thing:

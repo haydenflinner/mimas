@@ -45,14 +45,18 @@ enum D {
     Q(Dim),
     /// A list whose items share one dimension.
     Arr(Box<D>),
+    /// An `Interval` of numbers in this dimension: `lo`, `mid` and `hi` are all quantities of it,
+    /// and arithmetic on it keeps the unit like arithmetic on a plain quantity does.
+    Iv(Dim),
 }
 
 const PLAIN: D = D::Q(Dim::NONE);
 
 impl D {
+    /// The dimension of a quantity or an interval of them.
     fn dim(&self) -> Option<Dim> {
         match self {
-            D::Q(d) => Some(*d),
+            D::Q(d) | D::Iv(d) => Some(*d),
             _ => None,
         }
     }
@@ -61,7 +65,7 @@ impl D {
 /// Two known dimensions that differ; `None` when either is unknown or they agree.
 fn clash(a: &D, b: &D) -> Option<(Dim, Dim)> {
     match (a, b) {
-        (D::Q(x), D::Q(y)) if x != y => Some((*x, *y)),
+        (D::Q(x) | D::Iv(x), D::Q(y) | D::Iv(y)) if x != y => Some((*x, *y)),
         (D::Arr(x), D::Arr(y)) => clash(x, y),
         _ => None,
     }
@@ -70,7 +74,7 @@ fn clash(a: &D, b: &D) -> Option<(Dim, Dim)> {
 /// The dimension two agreeing values share (unknown wins, so a doubt propagates as a doubt).
 fn join(a: D, b: &D) -> D {
     match (&a, b) {
-        (D::Q(x), D::Q(y)) if x == y => a,
+        (D::Q(x), D::Q(y)) | (D::Iv(x), D::Iv(y)) if x == y => a,
         (D::Arr(x), D::Arr(y)) => D::Arr(Box::new(join((**x).clone(), y))),
         _ => D::Any,
     }
@@ -217,6 +221,10 @@ impl<'a> Pass<'a> {
                 }
                 D::Q(dim)
             }
+            Annotation::Of(ty, inner) if ty.lexeme == "Interval" => match self.annotation(inner) {
+                D::Q(d) => D::Iv(d),
+                _ => D::Any,
+            },
             Annotation::Option(inner) | Annotation::Result(inner) => self.annotation(inner),
             Annotation::Array(inner) => D::Arr(Box::new(self.annotation(inner))),
             _ => D::Any,
@@ -627,16 +635,21 @@ impl<'a> Pass<'a> {
                         "quantities only add and subtract in the same dimension -- convert one with `.to(unit)`, or multiply/divide to make a new quantity",
                     );
                 }
-                join(l, &r)
+                match (&l, &r) {
+                    (D::Iv(a), D::Iv(b) | D::Q(b)) | (D::Q(a), D::Iv(b)) if a == b => D::Iv(*a),
+                    _ => join(l, &r),
+                }
             }
-            EvaluationOp::Multiply => match (l.dim(), r.dim()) {
-                (Some(a), Some(b)) => D::Q(a.mul(b)),
-                _ => D::Any,
-            },
-            EvaluationOp::Divide | EvaluationOp::Div => match (l.dim(), r.dim()) {
-                (Some(a), Some(b)) => D::Q(a.div(b)),
-                _ => D::Any,
-            },
+            EvaluationOp::Multiply | EvaluationOp::Divide | EvaluationOp::Div => {
+                let interval = matches!(l, D::Iv(_)) || matches!(r, D::Iv(_));
+                match (l.dim(), r.dim()) {
+                    (Some(a), Some(b)) => {
+                        let d = if op == EvaluationOp::Multiply { a.mul(b) } else { a.div(b) };
+                        if interval { D::Iv(d) } else { D::Q(d) }
+                    }
+                    _ => D::Any,
+                }
+            }
             _ => D::Any,
         }
     }
@@ -654,9 +667,14 @@ impl<'a> Pass<'a> {
     fn access(&mut self, a: &'a Access) -> D {
         match a {
             Access::Dot { left, right, .. } => {
-                self.expr(left);
+                let recv = self.expr(left);
                 // a field: look its declaration up by the receiver's struct
                 if let ExprKind::Ident(field) = right.kind() {
+                    if let D::Iv(d) = recv {
+                        if matches!(field.lexeme.as_str(), "lo" | "mid" | "hi") {
+                            return D::Q(d);
+                        }
+                    }
                     if let Some(ty) = self.adt_name(left) {
                         if let Some(decl) = self.structs.get(&ty).copied() {
                             if let Some(f) = decl.fields.iter().find(
@@ -701,6 +719,9 @@ impl<'a> Pass<'a> {
             if let ExprKind::Ident(ty) = left.kind() {
                 if let Some(f) = self.methods.get(&(ty.lexeme.clone(), right.lexeme.clone())).copied() {
                     return self.apply(f, c, &args, false);
+                }
+                if ty.lexeme == "Interval" {
+                    return self.interval_ctor(&right.lexeme, c, &args);
                 }
             }
             return D::Any;
@@ -749,9 +770,79 @@ impl<'a> Pass<'a> {
         f.return_type.as_ref().map_or(D::Any, |a| self.annotation(a))
     }
 
+    /// `Interval::pm(x, rel)` and friends: an interval in the unit of its number arguments.
+    fn interval_ctor(&mut self, name: &str, c: &'a parse::Call, args: &[D]) -> D {
+        // which arguments are numbers in the interval's unit (`pm`'s second is a plain fraction)
+        let measured: &[usize] = match name {
+            "pm" | "exact" => &[0],
+            "within" | "span" => &[0, 1],
+            "of" => &[0, 1, 2],
+            _ => return D::Any,
+        };
+        let Some(first) = measured.first().and_then(|i| args.get(*i)) else {
+            return D::Any;
+        };
+        for &i in &measured[1..] {
+            if let Some(a) = args.get(i) {
+                self.expect(first, a, c.arguments[i].value.location(), &format!("`Interval::{name}` bounds need the same dimension"));
+            }
+        }
+        if name == "pm" {
+            if let Some(rel) = args.get(1) {
+                self.expect(&PLAIN, rel, c.arguments[1].value.location(), "`Interval::pm` takes a plain fraction");
+            }
+        }
+        match first {
+            D::Q(d) => D::Iv(*d),
+            _ => D::Any,
+        }
+    }
+
     /// Methods of the built-in float/int/list types.
     fn builtin(&mut self, e: &'a Expr, name: &str, recv: D, c: &'a parse::Call, args: &[D]) -> D {
         match (&recv, name) {
+            // `df.pull_as("kwh", "kWh")`: a column of quantities in that unit
+            (_, "pull_as") => match c.arguments.get(1).map(|a| a.value.kind()) {
+                Some(ExprKind::Literal(Literal::String(u))) => match units::parse(u) {
+                    Some((d, _)) => D::Arr(Box::new(D::Q(d))),
+                    None => {
+                        self.fail(
+                            c.arguments[1].value.location(),
+                            format!("`{u}` isn't a unit"),
+                            "unknown unit".into(),
+                            "units are things like m, s, kg, W, kWh, usd -- see the Units page of the book",
+                        );
+                        D::Any
+                    }
+                },
+                _ => D::Any,
+            },
+            (D::Iv(d), "width") => D::Q(*d),
+            (D::Iv(d), "sample") => D::Q(*d),
+            (D::Iv(d), "contains") => {
+                if let Some(a) = args.first() {
+                    self.expect(&D::Q(*d), a, c.arguments[0].value.location(), "`contains` needs the same dimension");
+                }
+                PLAIN
+            }
+            (D::Iv(d), "overlaps") => {
+                if let Some(a) = args.first() {
+                    self.expect(&D::Iv(*d), a, c.arguments[0].value.location(), "`overlaps` needs the same dimension");
+                }
+                PLAIN
+            }
+            (D::Iv(d), "pow") => {
+                let n = c.arguments.first().and_then(|a| match a.value.kind() {
+                    ExprKind::Literal(Literal::Int(n)) => Some(*n as f64),
+                    ExprKind::Literal(Literal::Float(n)) => Some(*n),
+                    _ => None,
+                });
+                match n {
+                    Some(n) if n.fract() == 0.0 && n.abs() < 100.0 => D::Iv(d.powi(n as i8)),
+                    _ if d.is_none() => D::Iv(*d),
+                    _ => D::Any,
+                }
+            }
             (D::Q(d), "abs" | "round" | "floor" | "ceil" | "to_int" | "to_float" | "neg") => D::Q(*d),
             (D::Q(_), "signum") => PLAIN,
             (D::Q(d), "min" | "max" | "hypot") => {

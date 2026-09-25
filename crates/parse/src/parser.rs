@@ -1379,6 +1379,8 @@ impl<'s> Parser<'s> {
                 parser.error(parser.unexpected_token());
             }
             outer.errors.extend(parser.errors);
+            // units written inside the interpolation belong to the whole file's ast
+            outer.quantities.extend(parser.quantities);
             expr
         }
         // `{` and `}` join the quote-chars so chompy's unescape resolves `\{` -> `{` and
@@ -2503,6 +2505,14 @@ impl<'s> Parser<'s> {
                 match segments.len() {
                     1 if matches!(self.peek(), TokKind::Slash | TokKind::Star | TokKind::Caret) => {
                         self.quantity_annotation(segments.remove(0))
+                    }
+                    // `Interval<kW>`: a type applied to a unit
+                    1 if self.at(TokKind::Less) => {
+                        let ty = segments.remove(0);
+                        self.bump(TokKind::Less);
+                        let unit = self.annotation();
+                        self.expect(TokKind::Greater);
+                        Annotation::Of(ty, Box::new(unit))
                     }
                     1 => Annotation::Ty(segments.remove(0)),
                     _ => Annotation::Path(segments),

@@ -128,6 +128,8 @@ impl TyExt for Ty {
             {
                 Ok(Ty::Float)
             }
+            // `Interval<kW>` is an `Interval` to the type checker; the unit is the dimension pass's
+            Annotation::Of(ty, _) => Ty::from_annotation(Annotation::Ty(ty), solver),
             Annotation::Quantity(parts) => {
                 for (unit, _) in &parts {
                     if shared::units::lookup(&unit.lexeme).is_none() {
