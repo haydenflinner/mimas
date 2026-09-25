@@ -124,6 +124,7 @@ pub fn walk_item(item: &Item, visitor: &mut impl Visitor) {
                 Use::Singular(path, item) => (path, std::slice::from_ref(item)),
                 Use::Multi(path, items) => (path, items),
                 Use::All(path) => (path, &[]),
+                Use::Host(_) => (&[], &[]),
             };
             for ident in path.iter().chain(items) {
                 visitor.ident(ident);

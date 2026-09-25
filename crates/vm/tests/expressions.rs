@@ -477,3 +477,10 @@ test_vm!(
     "old()" => Int(5),
     "new()" => Int(7)
 );
+
+// `use "page";` compiles (the host splices that script in beforehand); the compiler ignores it
+test_vm!(
+    use_a_host_script_is_accepted,
+    "use \"some-page\";\nfn f() -> int { 3 }",
+    "f()" => Int(3)
+);

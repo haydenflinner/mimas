@@ -668,6 +668,12 @@ impl<'s> Parser<'s> {
             return None;
         }
 
+        // `use "page-name";` asks the host for another script (see `Use::Host`)
+        if let TokKind::String(lit) = self.peek() {
+            self.advance();
+            return Some(Use::Host(lit.trim_matches('"').to_string()));
+        }
+
         let mut path = vec![self.require_ident()];
         while self.eat(TokKind::DoubleColon) {
             match self.peek() {
@@ -1174,6 +1180,7 @@ impl<'s> Parser<'s> {
             binding
         });
         let condition = self.struct_literals(false, Self::expr);
+        self.head_struct_literal_hint(None);
 
         // a trailing `= 5` or `and b` means the user reached for another language's syntax --
         // catch it before the body parse swallows the token. the rest of the condition gets
@@ -1197,10 +1204,30 @@ impl<'s> Parser<'s> {
         (binding, self.poison_expr(condition.span().start()))
     }
 
+    /// After a `match`/`if`/`while` head: a `{ name = value` right where the body should start
+    /// is a struct literal that needs parentheses (`match (P { a = 1 }) { .. }`) -- a bare
+    /// `P { .. }` there would be ambiguous with the body's own `{`, as in Rust.
+    fn head_struct_literal_hint(&mut self, from: Option<usize>) {
+        if self.at(TokKind::LeftBrace)
+            && matches!(self.nth(1), TokKind::Ident(_))
+            && self.nth(2) == TokKind::Equal
+        {
+            self.error(Misdirection {
+                src: self.src(),
+                // from the keyword when we have it, so this reads before the
+                // statement-level errors the stray braces set off
+                at: from.map_or_else(|| self.next_location(), |f| self.location(f)).into(),
+                msg: "struct literals need parentheses here".into(),
+                label: "wrap the struct literal in `( )`; a `{` here starts the body".into(),
+            });
+        }
+    }
+
     fn match_expr(&mut self) -> Expr {
         let start = self.next_start();
         self.bump(TokKind::Match);
         let expr = self.struct_literals(false, Self::expr);
+        self.head_struct_literal_hint(Some(start));
         let mut panic_terminator = false;
         let members = if self.expect(TokKind::LeftBrace) {
             self.sequence(

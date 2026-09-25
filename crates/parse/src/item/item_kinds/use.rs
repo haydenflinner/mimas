@@ -10,6 +10,9 @@ pub enum Use {
     Singular(Vec<Ident>, Ident),
     Multi(Vec<Ident>, Vec<Ident>),
     All(Vec<Ident>),
+    /// `use "page-name";` -- a request to the host, which provides that script's items before
+    /// compiling (splicing its source in). The compiler itself has nothing to resolve.
+    Host(String),
 }
 impl From<Use> for ItemKind {
     fn from(us: Use) -> Self {
@@ -31,6 +34,7 @@ impl std::fmt::Display for Use {
                 items.iter().join(", ")
             )),
             Use::All(path) => f.pad(&format!("use {}::*;", path.iter().join("::"))),
+            Use::Host(name) => f.pad(&format!("use {name:?};")),
         }
     }
 }

@@ -446,9 +446,14 @@ impl Solver {
     }
 
     fn process_use(&mut self, us: &Use, location: Location) -> Result<()> {
+        // `use "page";` is the host's business (it splices that script in first)
+        if matches!(us, Use::Host(_)) {
+            return Ok(());
+        }
         let walk_segments: Vec<&Ident> = match us {
             Use::Singular(path, item) => path.iter().chain(std::iter::once(item)).collect(),
             Use::Multi(path, _) | Use::All(path) => path.iter().collect(),
+            Use::Host(_) => unreachable!("handled above"),
         };
 
         let first = *walk_segments.first().unwrap();
@@ -481,6 +486,7 @@ impl Solver {
         }
 
         let imports: Vec<ImportBinding> = match us {
+            Use::Host(_) => unreachable!("handled above"),
             Use::Singular(_, _) => vec![target],
             Use::Multi(_, items) => {
                 let Some(adt) = target.ty.as_adt().copied() else {

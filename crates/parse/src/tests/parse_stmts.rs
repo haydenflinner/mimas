@@ -1069,3 +1069,27 @@ stmt_test!(
      let a = 0;",
     Let::new(ident!("a").into(), int!(0), None)
 );
+
+// `use "page";` is a request to the host, kept as an item
+#[test]
+fn use_a_host_script_by_name() {
+    let ast = crate::Parser::new(crate::lex::Lexer::new("use \"dcic-kit\";", 0, "t".into()))
+        .try_into_ast()
+        .unwrap();
+    assert_eq!(ast.stmts().len(), 1);
+}
+
+// a struct literal straight after `match`/`if` needs parentheses; say so
+#[test]
+fn head_struct_literal_gets_a_pointed_error() {
+    for src in [
+        "fn a() { match P { n = 7 } { _ => 1 } }",
+        "fn a() { if P { n = 7 }.n > 0 { 1 } else { 0 } }",
+    ] {
+        let err = crate::Parser::new(crate::lex::Lexer::new(src, 0, "t".into()))
+            .try_into_ast()
+            .unwrap_err();
+        let text = format!("{err:?}");
+        assert!(text.contains("struct literals need parentheses"), "{src}: {text}");
+    }
+}
