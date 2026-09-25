@@ -2293,6 +2293,12 @@ impl Vm {
             .mutate(|_mc, state| state.struct_names.borrow().clone())
     }
 
+    /// Field names indexed by `struct_id` then field slot — the second table
+    /// [`Val::inspect`] needs to label instance fields.
+    pub fn field_names(&self) -> Vec<Vec<String>> {
+        self.field_names.clone()
+    }
+
     /// Raw source text for a file, for a debugger to highlight the active span against.
     pub fn source_text(&self, file_id: shared::FileId) -> Option<Arc<str>> {
         self.sources.get(&file_id).map(|s| s.inner().clone())

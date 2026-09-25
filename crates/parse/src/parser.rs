@@ -1484,13 +1484,13 @@ impl<'s> Parser<'s> {
         }
         let mut expr = expr;
         loop {
-            // `(` / `[` opening a line start the next expression, the same newline rule
+            // `(` / `[` / `!` opening a line start the next expression (`!x` is a prefix not), the same newline rule
             // `infix_binds` applies to operators -- so `2 * 6 is 12` followed by a line
             // `(3 + 4) * 5 is 35` is two checks, not a call on `12`. Inside a group the
             // newline doesn't matter.
             let fresh_line = self.group_depth == 0 && self.at_line_start();
             expr = match self.peek() {
-                TokKind::LeftParenthesis | TokKind::LeftSquare if fresh_line => break expr,
+                TokKind::LeftParenthesis | TokKind::LeftSquare | TokKind::Bang if fresh_line => break expr,
                 TokKind::LeftParenthesis => self.call(expr),
                 TokKind::LeftSquare | TokKind::HookLeftSquare => self.square_access(expr),
                 TokKind::DoubleColon => self.colon_access(expr),
