@@ -455,3 +455,11 @@ test_fail!(
     "struct P { a: int }\nlet p: P? = null;\nlet x = p!.a;",
     "struct P { a: int }\nlet p: P? = null;\np!.a = 1;"
 );
+
+// two types with one name is an error, not a solver panic
+test_fail!(
+    duplicate_type_names_are_rejected,
+    "struct P { a: int }\nstruct P { b: int }",
+    "struct P { a: int }\nenum P { X }",
+    "enum E { A }\nenum E { B }"
+);

@@ -517,6 +517,18 @@ pub struct MultipleConstDeclarations {
 }
 
 #[derive(Error, Debug, Diagnostic)]
+#[error("type declared multiple times")]
+pub struct MultipleTypeDeclarations {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("'{name}' is already defined as a type")]
+    pub at: SourceSpan,
+    pub name: String,
+    #[related]
+    pub original: Vec<ConstDefinedHere>,
+}
+
+#[derive(Error, Debug, Diagnostic)]
 #[error("`{name}` defined here")]
 #[diagnostic(severity(Advice))]
 pub struct ConstDefinedHere {

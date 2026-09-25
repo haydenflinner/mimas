@@ -50,6 +50,24 @@ impl<'a> HoistCtx<'a> {
             matches!(self.target, HoistTarget::Scope),
             "adt decls only hoist at scope level"
         );
+        // a second `struct`/`enum` with the same name would leave the first's variants and
+        // fields unresolved for later passes (an emitter panic), so reject it here
+        if let Some(prev_id) = self.solver.ribs.module_lookup(ident) {
+            let prev = &self.solver.decs[prev_id];
+            if matches!(prev.kind, DecKind::Adt(_)) {
+                let prev_location = prev.location;
+                Err(crate::errors::MultipleTypeDeclarations {
+                    src: self.solver.src(ident.location),
+                    name: ident.lexeme.clone(),
+                    at: ident.location.into(),
+                    original: vec![crate::errors::ConstDefinedHere {
+                        src: self.solver.src(prev_location),
+                        at: prev_location.into(),
+                        name: ident.lexeme.clone(),
+                    }],
+                })?;
+            }
+        }
         let ty = Ty::Adt(adt_id);
         let dec_id = self
             .solver
