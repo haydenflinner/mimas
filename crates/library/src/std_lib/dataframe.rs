@@ -23,6 +23,8 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     {
         let mut m = api.module("std::polars");
         m.add(col);
+        m.add(lit);
+        m.add(when);
         m.add(n);
         m.add(to_dataframe);
         m.add(from_csv);
@@ -47,6 +49,7 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
         m.add(agg);
         m.add(join);
         m.add(pivot);
+        m.add(unpivot);
     }
     api.add_method(filter);
     api.add_method(select);
@@ -78,6 +81,16 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add_method(first);
     api.add_method(last);
     api.add_method(alias);
+    api.add_method(is_null);
+    api.add_method(is_not_null);
+    api.add_method(fill_null);
+    api.add_method(unpivot);
+    api.add_method(str_to_upper);
+    api.add_method(str_to_lower);
+    api.add_method(str_contains);
+    api.add_method(str_starts_with);
+    api.add_method(str_ends_with);
+    api.add_method(str_len);
 }
 
 #[native]
@@ -571,4 +584,104 @@ fn column_from_vals(name: &str, vals: &[Val<'_>]) -> Result<polars::prelude::Col
             "to_dataframe: column {name:?} has an unsupported field type: {other:?}"
         )),
     }
+}
+
+/// `lit(3)` / `lit("x")` -- a constant as an expression, for the places a scalar isn't
+/// auto-promoted (`when(..).then` arms, `fill_null`).
+#[native]
+fn lit<'gc>(ctx: Ctx<'gc>, v: Val<'gc>) -> Result<vm::PlExpr<'gc>, vm::RtErr> {
+    use polars::prelude::lit;
+    let e = match v {
+        Val::Int(i) => lit(i),
+        Val::Float(f) => lit(f),
+        Val::Bool(b) => lit(b),
+        Val::Str(s) => lit(s.as_str()),
+        _ => return Err(vm::RtErr::Custom("lit: expected an int, float, bool or str".into())),
+    };
+    Ok(ctx.new_plexpr(e))
+}
+
+/// `when(cond, then, otherwise)` -- polars' conditional column: `then` where `cond` holds,
+/// `otherwise` elsewhere (dplyr's `if_else`). Arms are expressions; wrap constants in `lit`.
+#[native]
+fn when<'gc>(
+    ctx: Ctx<'gc>,
+    cond: vm::PlExpr<'gc>,
+    then: vm::PlExpr<'gc>,
+    otherwise: vm::PlExpr<'gc>,
+) -> vm::PlExpr<'gc> {
+    ctx.new_plexpr(
+        polars::prelude::when(cond.0.0.clone())
+            .then(then.0.0.clone())
+            .otherwise(otherwise.0.0.clone()),
+    )
+}
+
+#[native]
+fn is_null<'gc>(ctx: Ctx<'gc>, e: vm::PlExpr<'gc>) -> vm::PlExpr<'gc> {
+    ctx.new_plexpr(e.0.0.clone().is_null())
+}
+
+#[native]
+fn is_not_null<'gc>(ctx: Ctx<'gc>, e: vm::PlExpr<'gc>) -> vm::PlExpr<'gc> {
+    ctx.new_plexpr(e.0.0.clone().is_not_null())
+}
+
+/// `col("discount").fill_null(lit("none"))` -- replace missing cells.
+#[native]
+fn fill_null<'gc>(ctx: Ctx<'gc>, e: vm::PlExpr<'gc>, with: vm::PlExpr<'gc>) -> vm::PlExpr<'gc> {
+    ctx.new_plexpr(e.0.0.clone().fill_null(with.0.0.clone()))
+}
+
+/// `df.unpivot(["region"], ["q1", "q2"])` -- wide to tall: the `index` columns stay, every `on`
+/// column becomes rows of `variable` (its name) and `value` (its cell). The inverse of `pivot`.
+#[native]
+fn unpivot<'gc>(
+    ctx: Ctx<'gc>,
+    df: vm::DataFrame<'gc>,
+    index: Vec<String>,
+    on: Vec<String>,
+) -> Raisable<vm::DataFrame<'gc>> {
+    use polars::prelude::{IntoLazy, UnpivotArgsDSL, cols};
+    let args = UnpivotArgsDSL {
+        on: Some(cols(on)),
+        index: cols(index),
+        variable_name: Some("variable".into()),
+        value_name: Some("value".into()),
+    };
+    let lf = df.0.borrow().0.clone().lazy().unpivot(args);
+    collect_in_memory(lf).map(|d| ctx.new_dataframe(d)).into()
+}
+
+// text operations on a string column, as expressions (`col("email").str_ends_with(".org")`)
+#[native]
+fn str_to_upper<'gc>(ctx: Ctx<'gc>, e: vm::PlExpr<'gc>) -> vm::PlExpr<'gc> {
+    ctx.new_plexpr(e.0.0.clone().str().to_uppercase())
+}
+
+#[native]
+fn str_to_lower<'gc>(ctx: Ctx<'gc>, e: vm::PlExpr<'gc>) -> vm::PlExpr<'gc> {
+    ctx.new_plexpr(e.0.0.clone().str().to_lowercase())
+}
+
+/// does the cell contain this literal text (not a pattern)?
+#[native]
+fn str_contains<'gc>(ctx: Ctx<'gc>, e: vm::PlExpr<'gc>, text: &str) -> vm::PlExpr<'gc> {
+    ctx.new_plexpr(e.0.0.clone().str().contains_literal(polars::prelude::lit(text)))
+}
+
+#[native]
+fn str_starts_with<'gc>(ctx: Ctx<'gc>, e: vm::PlExpr<'gc>, text: &str) -> vm::PlExpr<'gc> {
+    ctx.new_plexpr(e.0.0.clone().str().starts_with(polars::prelude::lit(text)))
+}
+
+#[native]
+fn str_ends_with<'gc>(ctx: Ctx<'gc>, e: vm::PlExpr<'gc>, text: &str) -> vm::PlExpr<'gc> {
+    ctx.new_plexpr(e.0.0.clone().str().ends_with(polars::prelude::lit(text)))
+}
+
+/// number of characters in each cell
+#[native]
+fn str_len<'gc>(ctx: Ctx<'gc>, e: vm::PlExpr<'gc>) -> vm::PlExpr<'gc> {
+    ctx.new_plexpr(e.0.0.clone().str().len_chars())
 }

@@ -369,3 +369,36 @@ test_run!(
     EMPLOYEES,
     r#"df.col_names().join(",")"# => r#""name,age,dept""#,
 );
+
+// missing cells, conditional columns, text operations, wide -> tall
+test_run!(
+    fill_null_and_is_null,
+    r#"use std::polars::*;
+       let df = from_csv("a,b\nx,\ny,z\n")!;"#,
+    r#"df.mutate([col("b").fill_null(lit("none")).alias("b")])!.pull("b")!.join(",")"# => r#""none,z""#,
+    r#"df.filter(col("b").is_null())!.pull("a")!.join(",")"# => r#""x""#,
+);
+
+test_run!(
+    when_builds_a_conditional_column,
+    EMPLOYEES,
+    r#"df.mutate([when(col("age") > 30, lit("senior"), lit("junior")).alias("level")])!.pull("level")!.join(",")"# => r#""senior,junior,senior,junior""#,
+);
+
+test_run!(
+    string_expressions,
+    EMPLOYEES,
+    r#"df.mutate([col("name").str_to_upper().alias("name")])!.pull("name")!.join(",")"# => r#""ALICE,BOB,CAROL,DAVE""#,
+    r#"df.filter(col("name").str_starts_with("C"))!.pull("name")!.join(",")"# => r#""Carol""#,
+    r#"df.filter(col("name").str_ends_with("e"))!.pull("name")!.join(",")"# => r#""Alice,Dave""#,
+    r#"df.filter(col("name").str_contains("ar"))!.pull("name")!.join(",")"# => r#""Carol""#,
+    r#"df.mutate([col("name").str_len().alias("n")])!.pull("n")!.len()"# => "4",
+);
+
+test_run!(
+    unpivot_makes_a_wide_table_tall,
+    r#"use std::polars::*;
+       let df = from_csv("who,q1,q2\nann,1,2\nbob,3,4\n")!;"#,
+    r#"df.unpivot(["who"], ["q1", "q2"])!.pull("value")!.len()"# => "4",
+    r#"df.unpivot(["who"], ["q1", "q2"])!.col_names().join(",")"# => r#""who,variable,value""#,
+);

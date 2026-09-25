@@ -34,6 +34,8 @@ polars = { path = "/Users/wow/code/dsa/polars/crates/polars", optional = true, d
     "fmt_no_tty",
     "dtype-full",
     "pivot",
+    "strings",
+    "regex",
 ] }
 # depended on directly (not via `polars`'s own `csv` feature) for `CsvReadOptions`/`CsvReader`,
 # used by `std_lib::dataframe::from_csv` to read an in-memory CSV string into a `DataFrame`.
