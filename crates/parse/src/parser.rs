@@ -1864,8 +1864,8 @@ impl<'s> Parser<'s> {
                     Some("count") if args.is_empty() => self.q_call("__q_n", vec![], start),
                     Some(f @ ("sum" | "mean" | "average" | "median" | "min" | "max" | "count" | "n_unique"
                         | "first" | "last" | "is_null" | "is_not_null" | "to_upper" | "to_lower" | "len"
-                        | "contains" | "starts_with" | "ends_with" | "fill_null" | "is_in" | "cast_int"
-                        | "cast_float" | "cast_str"))
+                        | "contains" | "starts_with" | "ends_with" | "fill_null" | "is_in" | "eq" | "neq"
+                        | "cast_int" | "cast_float" | "cast_str"))
                         if !args.is_empty() =>
                     {
                         let mut it = args.into_iter();

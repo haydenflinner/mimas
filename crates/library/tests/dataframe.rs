@@ -550,6 +550,31 @@ Zach,none")!;"#,
     }.pull("name")!.join(",")"# => r#""Zach,Sam""#,
 );
 
+// `eq(col, v)` / `neq(col, v)` take a plain value, so a column can meet an outside
+// value (a parameter, a `let`) -- `name == who` would read `who` as a column
+test_run!(
+    query_eq_compares_a_column_to_an_outside_value,
+    r#"use std::polars::*;
+       fn people() -> DataFrame {
+           table { name, age
+               "Anna", 28
+               "Susan", 54
+           }
+       }
+       fn row_for(t: DataFrame, who: str) -> str {
+           let row = query {
+               t
+               filter eq(name, who)
+           };
+           row.pull("name")![0]
+       }"#,
+    r#"row_for(people(), "Susan")"# => r#""Susan""#,
+    r#"query {
+        people()
+        filter neq(name, "Anna")
+    }.pull("name")!.join(",")"# => r#""Susan""#,
+);
+
 // a verb line that isn't a verb -> a parse error pointing at it
 test_fail!(
     query_unknown_verb_raises,

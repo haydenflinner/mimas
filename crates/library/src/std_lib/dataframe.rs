@@ -873,6 +873,10 @@ fn __q_apply<'gc>(
         "cast_int" => e.cast(polars::prelude::DataType::Int64),
         "cast_float" => e.cast(polars::prelude::DataType::Float64),
         "cast_str" => e.cast(polars::prelude::DataType::String),
+        // a second argument is a plain value, so `eq(name, who)` is how a column meets an
+        // outside value (a `let` or a parameter) -- `name == who` would read `who` as a column
+        "eq" => e.eq(q_expr(arg)?),
+        "neq" => e.neq(q_expr(arg)?),
         other => return Err(q_err(format!("unknown column function `{other}`"))),
     };
     Ok(ctx.new_plexpr(out))
