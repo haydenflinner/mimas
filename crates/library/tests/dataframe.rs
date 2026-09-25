@@ -410,3 +410,36 @@ test_run!(
     r#"df.filter(col("a").is_in(["x", "z"]))!.pull("a")!.join(",")"# => r#""x,z""#,
     r#"df.filter(col("n") != "three")!.mutate([col("n").cast("int").alias("n")])!.pull("n")!.len()"# => "2",
 );
+
+// the `table { … }` literal: header line, then one row per line; columns can differ in type
+test_run!(
+    table_literal_builds_columns,
+    r#"use std::polars::*;
+       let df = table {
+           name        age   "full name"
+           "Denmark"   25    "example1"
+           "Hello"     42    "yep!"
+       };"#,
+    r#"df.col_names().join(",")"# => r#""name,age,full name""#,
+    r#"df.pull("age")!.len()"# => "2",
+    r#"df.filter(col("age") > 30)!.pull("name")!.join(",")"# => r#""Hello""#,
+);
+
+test_run!(
+    table_literal_accepts_commas_negatives_and_parens,
+    r#"use std::polars::*;
+       let df = table { a, b
+           1, -2.5
+           (1 + 2), 0.5
+       };"#,
+    r#"df.pull("a")!.len()"# => "2",
+    r#"df.filter(col("b") < 0.0)!.pull("a")!.len()"# => "1",
+);
+
+test_fail!(
+    table_literal_rejects_a_ragged_row,
+    r#"let df = table { a b
+           1 2
+           3
+       };"#,
+);

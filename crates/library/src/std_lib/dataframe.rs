@@ -20,6 +20,10 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add_adt::<DataFrameTy>();
     api.add_adt::<PlExprTy>();
     api.add_adt::<GroupByTy>();
+    // the `table { … }` literal lowers to these (see `Parser::table_literal`); prelude-level so
+    // the desugaring needs no `use`
+    api.add(__table_new);
+    api.add(__table_col);
     {
         let mut m = api.module("std::polars");
         m.add(col);
@@ -727,4 +731,29 @@ fn is_in<'gc>(
         out = out.or(e.0.0.clone().eq(one));
     }
     Ok(ctx.new_plexpr(out))
+}
+
+/// `table { … }`'s starting point: a table with no columns.
+#[native]
+fn __table_new<'gc>(ctx: Ctx<'gc>) -> vm::DataFrame<'gc> {
+    ctx.new_dataframe(polars::frame::DataFrame::empty())
+}
+
+/// Adds one column (its dtype inferred from the values) to a table under construction. A
+/// problem (ragged columns, mixed types) is a runtime error, so `table { … }` is a plain
+/// `DataFrame`, not a result.
+#[native]
+fn __table_col<'gc>(
+    ctx: Ctx<'gc>,
+    df: vm::DataFrame<'gc>,
+    name: &str,
+    values: Vec<Val<'gc>>,
+) -> Result<vm::DataFrame<'gc>, vm::RtErr> {
+    let column = column_from_vals(name, &values)
+        .map_err(|e| vm::RtErr::Custom(e.replacen("to_dataframe", "table", 1)))?;
+    let mut columns = df.0.borrow().0.columns().to_vec();
+    columns.push(column);
+    let out = polars::frame::DataFrame::new_infer_height(columns)
+        .map_err(|e| vm::RtErr::Custom(format!("table: {e}")))?;
+    Ok(ctx.new_dataframe(out))
 }

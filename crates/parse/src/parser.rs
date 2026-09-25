@@ -1461,6 +1461,12 @@ impl<'s> Parser<'s> {
             });
             let expr = self.new_expr(Literal::Dictionary(elements), start);
             self.chain_accesses(expr)
+        } else if self.struct_literals
+            && self.peek() == TokKind::Ident("table")
+            && self.nth(1) == TokKind::LeftBrace
+        {
+            let expr = self.table_literal();
+            self.chain_accesses(expr)
         } else {
             let name = self.supreme();
             if !self.struct_literals || !self.eat(TokKind::LeftBrace) {
@@ -1480,6 +1486,81 @@ impl<'s> Parser<'s> {
             let expr = self.new_expr(Literal::Struct(StructLiteral { name, fields }), start);
             self.chain_accesses(expr)
         }
+    }
+
+    /// `table { name age \n "Denmark" 25 \n … }` -- a table literal. The first line names the
+    /// columns (identifiers or strings); each later line is one row, its cells separated by
+    /// whitespace/tabs (commas are optional). A cell is one unary expression, so wrap anything
+    /// bigger in parentheses. It lowers to `__table_col(… __table_col(__table_new(), "a", [..]) …)`
+    /// -- one call per column, so columns of different types need no shared element type.
+    fn table_literal(&mut self) -> Expr {
+        let start = self.next_start();
+        self.advance(); // `table`
+        self.bump(TokKind::LeftBrace);
+        let here = self.location(start);
+
+        let mut names: Vec<String> = vec![];
+        let mut first = true;
+        while !self.at(TokKind::RightBrace) && !self.at(TokKind::Eof) && (first || !self.at_line_start()) {
+            first = false;
+            let cell = self.unary();
+            match cell.kind() {
+                ExprKind::Ident(id) => names.push(id.lexeme.clone()),
+                ExprKind::Literal(Literal::String(s)) => names.push(s.clone()),
+                _ => self.error(Misdirection {
+                    src: self.src(),
+                    at: cell.location().into(),
+                    msg: "a table's first line names its columns".into(),
+                    label: "use a plain name or a \"string\" here".into(),
+                }),
+            }
+            self.eat(TokKind::Comma);
+        }
+
+        let mut rows: Vec<Vec<Expr>> = vec![];
+        while !self.at(TokKind::RightBrace) && !self.at(TokKind::Eof) {
+            let mut row = vec![];
+            let mut first = true;
+            while !self.at(TokKind::RightBrace) && !self.at(TokKind::Eof) && (first || !self.at_line_start()) {
+                first = false;
+                if !self.peek().starts_expr() {
+                    self.expected("a table cell");
+                    self.advance();
+                    continue;
+                }
+                row.push(self.unary());
+                self.eat(TokKind::Comma);
+            }
+            if !row.is_empty() {
+                if row.len() != names.len() {
+                    let at = row[0].location();
+                    self.error(Misdirection {
+                        src: self.src(),
+                        at: at.into(),
+                        msg: format!("this row has {} cells but the table names {} columns", row.len(), names.len()),
+                        label: "every row needs one cell per column".into(),
+                    });
+                }
+                rows.push(row);
+            }
+        }
+        self.expect(TokKind::RightBrace);
+
+        // build the column-by-column call chain
+        let ident = |p: &Self, name: &str| p.new_expr(Ident::new(name.to_string(), here), start);
+        let arg = |value: Expr| Argument { name: None, value };
+        let mut table = {
+            let callee = ident(self, "__table_new");
+            self.new_expr(Call::new(callee, vec![]), start)
+        };
+        for (j, name) in names.iter().enumerate() {
+            let cells: Vec<Expr> = rows.iter().filter_map(|r| r.get(j).cloned()).collect();
+            let column = self.new_expr(Literal::Array(cells), start);
+            let title = self.new_expr(Literal::String(name.clone()), start);
+            let callee = ident(self, "__table_col");
+            table = self.new_expr(Call::new(callee, vec![arg(table), arg(title), arg(column)]), start);
+        }
+        table
     }
 
     fn supreme(&mut self) -> Expr {
