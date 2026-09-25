@@ -443,3 +443,120 @@ test_fail!(
            3
        };"#,
 );
+
+// ---- `query { … }`: PRQL-style verb lines over a table --------------------------------------
+// Bare names are columns, `&&`/`||` combine column tests, `if` is a conditional column. A query
+// needs no `use` -- it lowers to `__q_*` natives (the table/preamble below uses `std::polars`
+// only for `pull`/`col_names` in the assertions).
+
+const QEVENTS: &str = r#"let events = table {
+        name      numtix   delivery
+        "Ellie"   2        "email"
+        "Bonnie"  1        "pickup"
+        "Sam"     5        "pickup"
+        "Zach"    0        "email"
+        "Parrot"  10       "pickup"
+        "Ana"     3        "email"
+    };"#;
+
+test_run_display!(
+    query_filter_sort_take_select,
+    QEVENTS,
+    r#"query {
+        events
+        filter numtix > 0 && delivery == "pickup"
+        derive cost = numtix * 25
+        sort -cost
+        take 2
+        select name cost
+    }"# => r#"shape: (2, 2)
+┌────────┬──────┐
+│ name   ┆ cost │
+│ ---    ┆ ---  │
+│ str    ┆ i64  │
+╞════════╪══════╡
+│ Parrot ┆ 250  │
+│ Sam    ┆ 125  │
+└────────┴──────┘"#,
+);
+
+test_run_display!(
+    query_group_aggregate,
+    QEVENTS,
+    r#"query {
+        events
+        group delivery {
+            aggregate { tickets = sum(numtix), orders = count() }
+        }
+        sort delivery
+    }"# => r#"shape: (2, 3)
+┌──────────┬─────────┬────────┐
+│ delivery ┆ tickets ┆ orders │
+│ ---      ┆ ---     ┆ ---    │
+│ str      ┆ i64     ┆ u32    │
+╞══════════╪═════════╪════════╡
+│ email    ┆ 5       ┆ 3      │
+│ pickup   ┆ 16      ┆ 3      │
+└──────────┴─────────┴────────┘"#,
+);
+
+test_run!(
+    query_if_rename_distinct_join,
+    r#"use std::polars::*;
+       let events = table { name, numtix, delivery
+           "Ellie", 2, "email"
+           "Bonnie", 1, "pickup"
+       };
+       let fees = table { delivery, fee
+           "email", 0
+           "pickup", 3
+       };"#,
+    // if c { a } else { b } is a conditional column
+    r#"query {
+        events
+        derive size = if numtix >= 2 { "large" } else { "small" }
+        sort name
+    }.pull("size")!.join(",")"# => r#""small,large""#,
+    // join takes the other table then key names; rename and distinct take bare names
+    r#"query {
+        events
+        join fees delivery
+        rename delivery ship_via
+        distinct ship_via
+    }.pull("ship_via")!.join(",")"# => r#""email,pickup""#,
+);
+
+test_run!(
+    query_column_functions_and_outside_values,
+    // a second function argument is a plain value -- that's how an outside value (a list, a
+    // computed scalar) reaches a column expression
+    r#"use std::polars::*;
+       fn known_codes() -> [str] { ["birthday", "student"] }
+       let events = from_csv("name,discount
+Ellie,Birthday
+Bonnie,STUDENT
+Sam,
+Zach,none")!;"#,
+    r#"query {
+        events
+        derive discount = to_lower(discount)
+        derive discount = if is_in(discount, known_codes()) { discount } else { "" }
+        sort name
+    }.pull("discount")!.join(",")"# => r#""student,birthday,,""#,
+    r#"query {
+        events
+        filter contains(name, "a")
+        sort -name
+    }.pull("name")!.join(",")"# => r#""Zach,Sam""#,
+);
+
+// a verb line that isn't a verb -> a parse error pointing at it
+test_fail!(
+    query_unknown_verb_raises,
+    r#"let df = query {
+        table { a
+            1
+        }
+        frobnicate a
+    };"#,
+);

@@ -24,6 +24,22 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     // the desugaring needs no `use`
     api.add(__table_new);
     api.add(__table_col);
+    // the `query { … }` block lowers to these (see `Parser::query_literal`)
+    api.add(__q_col);
+    api.add(__q_n);
+    api.add(__q_named);
+    api.add(__q_apply);
+    api.add(__q_when);
+    api.add(__q_filter);
+    api.add(__q_mutate);
+    api.add(__q_select);
+    api.add(__q_sort);
+    api.add(__q_take);
+    api.add(__q_group);
+    api.add(__q_agg);
+    api.add(__q_rename);
+    api.add(__q_distinct);
+    api.add(__q_join);
     {
         let mut m = api.module("std::polars");
         m.add(col);
@@ -756,4 +772,243 @@ fn __table_col<'gc>(
     let out = polars::frame::DataFrame::new_infer_height(columns)
         .map_err(|e| vm::RtErr::Custom(format!("table: {e}")))?;
     Ok(ctx.new_dataframe(out))
+}
+
+// ---- the `query { … }` block ---------------------------------------------------------------
+// PRQL-flavored: bare names are columns, verbs read top to bottom. Every native here reports a
+// problem as a runtime error (not a result), so a whole query is one plain `DataFrame`.
+
+fn q_err(e: impl std::fmt::Display) -> vm::RtErr {
+    vm::RtErr::Custom(format!("query: {e}"))
+}
+
+/// A scalar or an expression, as an expression (`lit` for scalars).
+fn q_expr<'gc>(v: Val<'gc>) -> Result<polars::prelude::Expr, vm::RtErr> {
+    use polars::prelude::lit;
+    Ok(match v {
+        Val::PlExpr(e) => e.0.0.clone(),
+        Val::Int(i) => lit(i),
+        Val::Float(f) => lit(f),
+        Val::Bool(b) => lit(b),
+        Val::Str(s) => lit(s.as_str()),
+        other => return Err(q_err(format!("expected a column expression or a value, got {other:?}"))),
+    })
+}
+
+fn q_run<'gc>(
+    ctx: Ctx<'gc>,
+    lazy: polars::prelude::LazyFrame,
+) -> Result<vm::DataFrame<'gc>, vm::RtErr> {
+    collect_in_memory(lazy).map(|d| ctx.new_dataframe(d)).map_err(q_err)
+}
+
+/// a column, by name
+#[native]
+fn __q_col<'gc>(ctx: Ctx<'gc>, name: &str) -> vm::PlExpr<'gc> {
+    ctx.new_plexpr(polars::prelude::col(name))
+}
+
+/// the row count (`count()`)
+#[native]
+fn __q_n<'gc>(ctx: Ctx<'gc>) -> vm::PlExpr<'gc> {
+    ctx.new_plexpr(polars::prelude::len())
+}
+
+/// name a computed column (`derive total = price * qty`)
+#[native]
+fn __q_named<'gc>(ctx: Ctx<'gc>, value: Val<'gc>, name: &str) -> Result<vm::PlExpr<'gc>, vm::RtErr> {
+    Ok(ctx.new_plexpr(q_expr(value)?.alias(name)))
+}
+
+/// Function-call syntax on columns: `sum(x)`, `to_lower(name)`, `contains(name, "a")`, …
+/// `arg` is the extra argument (or null).
+#[native]
+fn __q_apply<'gc>(
+    ctx: Ctx<'gc>,
+    value: Val<'gc>,
+    func: &str,
+    arg: Val<'gc>,
+) -> Result<vm::PlExpr<'gc>, vm::RtErr> {
+    let e = q_expr(value)?;
+    let text = |a: Val<'gc>| match a {
+        Val::Str(s) => Ok(s.as_str().to_string()),
+        _ => Err(q_err(format!("{func} needs a text argument"))),
+    };
+    let out = match func {
+        "sum" => e.sum(),
+        "mean" | "average" => e.mean(),
+        "median" => e.median(),
+        "min" => e.min(),
+        "max" => e.max(),
+        "count" => e.count(),
+        "n_unique" => e.n_unique(),
+        "first" => e.first(),
+        "last" => e.last(),
+        "is_null" => e.is_null(),
+        "is_not_null" => e.is_not_null(),
+        "to_upper" => e.str().to_uppercase(),
+        "to_lower" => e.str().to_lowercase(),
+        "len" => e.str().len_chars(),
+        "contains" => e.str().contains_literal(polars::prelude::lit(text(arg)?)),
+        "starts_with" => e.str().starts_with(polars::prelude::lit(text(arg)?)),
+        "ends_with" => e.str().ends_with(polars::prelude::lit(text(arg)?)),
+        "fill_null" => e.fill_null(q_expr(arg)?),
+        "is_in" => {
+            let Val::Array(items) = arg else {
+                return Err(q_err("is_in needs a list of values"));
+            };
+            let mut out = polars::prelude::lit(false);
+            for v in items.0.borrow().iter() {
+                let one = match v {
+                    Val::Int(i) => polars::prelude::lit(*i),
+                    Val::Float(f) => polars::prelude::lit(*f),
+                    Val::Bool(b) => polars::prelude::lit(*b),
+                    Val::Str(s) => polars::prelude::lit(s.as_str()),
+                    _ => return Err(q_err("is_in: expected ints, floats, bools or strs")),
+                };
+                out = out.or(e.clone().eq(one));
+            }
+            out
+        }
+        "cast_int" => e.cast(polars::prelude::DataType::Int64),
+        "cast_float" => e.cast(polars::prelude::DataType::Float64),
+        "cast_str" => e.cast(polars::prelude::DataType::String),
+        other => return Err(q_err(format!("unknown column function `{other}`"))),
+    };
+    Ok(ctx.new_plexpr(out))
+}
+
+/// `if c { a } else { b }` inside a query
+#[native]
+fn __q_when<'gc>(
+    ctx: Ctx<'gc>,
+    cond: Val<'gc>,
+    then: Val<'gc>,
+    otherwise: Val<'gc>,
+) -> Result<vm::PlExpr<'gc>, vm::RtErr> {
+    Ok(ctx.new_plexpr(
+        polars::prelude::when(q_expr(cond)?)
+            .then(q_expr(then)?)
+            .otherwise(q_expr(otherwise)?),
+    ))
+}
+
+#[native]
+fn __q_filter<'gc>(
+    ctx: Ctx<'gc>,
+    df: vm::DataFrame<'gc>,
+    pred: Val<'gc>,
+) -> Result<vm::DataFrame<'gc>, vm::RtErr> {
+    use polars::prelude::IntoLazy;
+    let lazy = df.0.borrow().0.clone().lazy().filter(q_expr(pred)?);
+    q_run(ctx, lazy)
+}
+
+#[native]
+fn __q_mutate<'gc>(
+    ctx: Ctx<'gc>,
+    df: vm::DataFrame<'gc>,
+    exprs: Vec<vm::PlExpr<'gc>>,
+) -> Result<vm::DataFrame<'gc>, vm::RtErr> {
+    use polars::prelude::IntoLazy;
+    let exprs: Vec<_> = exprs.into_iter().map(|e| e.0.0.clone()).collect();
+    q_run(ctx, df.0.borrow().0.clone().lazy().with_columns(exprs))
+}
+
+#[native]
+fn __q_select<'gc>(
+    ctx: Ctx<'gc>,
+    df: vm::DataFrame<'gc>,
+    names: Vec<String>,
+) -> Result<vm::DataFrame<'gc>, vm::RtErr> {
+    use polars::prelude::{IntoLazy, col};
+    let exprs: Vec<_> = names.iter().map(|n| col(n.as_str())).collect();
+    q_run(ctx, df.0.borrow().0.clone().lazy().select(exprs))
+}
+
+#[native]
+fn __q_sort<'gc>(
+    ctx: Ctx<'gc>,
+    df: vm::DataFrame<'gc>,
+    names: Vec<String>,
+    descending: Vec<bool>,
+) -> Result<vm::DataFrame<'gc>, vm::RtErr> {
+    let opts = polars::prelude::SortMultipleOptions::new().with_order_descending_multi(descending);
+    df.0.borrow()
+        .0
+        .sort(names, opts)
+        .map(|d| ctx.new_dataframe(d))
+        .map_err(q_err)
+}
+
+#[native]
+fn __q_take<'gc>(ctx: Ctx<'gc>, df: vm::DataFrame<'gc>, n: i64) -> vm::DataFrame<'gc> {
+    ctx.new_dataframe(df.0.borrow().0.head(Some(n.max(0) as usize)))
+}
+
+#[native]
+fn __q_group<'gc>(ctx: Ctx<'gc>, df: vm::DataFrame<'gc>, names: Vec<String>) -> vm::GroupBy<'gc> {
+    use polars::prelude::{IntoLazy, col};
+    let by: Vec<_> = names.iter().map(|n| col(n.as_str())).collect();
+    ctx.new_group_by(df.0.borrow().0.clone().lazy().group_by(by))
+}
+
+#[native]
+fn __q_agg<'gc>(
+    ctx: Ctx<'gc>,
+    gb: vm::GroupBy<'gc>,
+    aggs: Vec<vm::PlExpr<'gc>>,
+) -> Result<vm::DataFrame<'gc>, vm::RtErr> {
+    let exprs: Vec<_> = aggs.into_iter().map(|e| e.0.0.clone()).collect();
+    q_run(ctx, gb.0.0.clone().agg(exprs))
+}
+
+#[native]
+fn __q_rename<'gc>(
+    ctx: Ctx<'gc>,
+    df: vm::DataFrame<'gc>,
+    from: &str,
+    to: &str,
+) -> Result<vm::DataFrame<'gc>, vm::RtErr> {
+    let mut out = df.0.borrow().0.clone();
+    out.rename(from, to.into()).map_err(q_err)?;
+    Ok(ctx.new_dataframe(out))
+}
+
+#[native]
+fn __q_distinct<'gc>(
+    ctx: Ctx<'gc>,
+    df: vm::DataFrame<'gc>,
+    names: Vec<String>,
+) -> Result<vm::DataFrame<'gc>, vm::RtErr> {
+    use polars::prelude::UniqueKeepStrategy;
+    let subset = if names.is_empty() { None } else { Some(names.as_slice()) };
+    df.0.borrow()
+        .0
+        .unique_stable(subset, UniqueKeepStrategy::First, None)
+        .map(|d| ctx.new_dataframe(d))
+        .map_err(q_err)
+}
+
+#[native]
+fn __q_join<'gc>(
+    ctx: Ctx<'gc>,
+    df: vm::DataFrame<'gc>,
+    other: vm::DataFrame<'gc>,
+    on: Vec<String>,
+    how: &str,
+) -> Result<vm::DataFrame<'gc>, vm::RtErr> {
+    use polars::prelude::{IntoLazy, JoinArgs, JoinType, col};
+    let join_type = match how {
+        "inner" => JoinType::Inner,
+        "left" => JoinType::Left,
+        "right" => JoinType::Right,
+        "full" | "outer" => JoinType::Full,
+        other => return Err(q_err(format!("unknown join type {other:?}"))),
+    };
+    let on: Vec<_> = on.iter().map(|n| col(n.as_str())).collect();
+    let left = df.0.borrow().0.clone().lazy();
+    let right = other.0.borrow().0.clone().lazy();
+    let joined = left.join(right, on.clone(), on, JoinArgs::new(join_type));
+    q_run(ctx, joined.map_err(q_err)?)
 }

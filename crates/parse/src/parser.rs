@@ -1467,6 +1467,12 @@ impl<'s> Parser<'s> {
         {
             let expr = self.table_literal();
             self.chain_accesses(expr)
+        } else if self.struct_literals
+            && self.peek() == TokKind::Ident("query")
+            && self.nth(1) == TokKind::LeftBrace
+        {
+            let expr = self.query_literal();
+            self.chain_accesses(expr)
         } else {
             let name = self.supreme();
             if !self.struct_literals || !self.eat(TokKind::LeftBrace) {
@@ -1561,6 +1567,322 @@ impl<'s> Parser<'s> {
             table = self.new_expr(Call::new(callee, vec![arg(table), arg(title), arg(column)]), start);
         }
         table
+    }
+
+    // ---- `query { … }` ----------------------------------------------------------------------
+    // A PRQL-flavored block over a table:
+    //
+    //     query {
+    //         events()
+    //         filter delivery == "email" && numtix > 2
+    //         derive cost = numtix * 25
+    //         group delivery { aggregate { tickets = sum(numtix), orders = count() } }
+    //         sort -tickets
+    //         take 5
+    //     }
+    //
+    // The first line is an ordinary expression (optionally `from <expr>`) that yields the
+    // table; each later line is a verb. Inside a verb's expressions a bare name is a *column*,
+    // `&&`/`||` combine column tests, `if c { a } else { b }` is a conditional column, and a few
+    // functions (`sum`, `mean`, `count`, `to_lower`, `contains`, …) apply to columns. Anything
+    // else in an expression is an ordinary Mimas value only when wrapped as `(expr)` -- no, it
+    // isn't: parentheses group like everywhere else, so pass outside values through a `let`
+    // *before* the query and name them with a leading `$` -- see `q_lower`.
+    // It lowers to one `__q_*` native call per verb (see `library::std_lib::dataframe`).
+    fn query_literal(&mut self) -> Expr {
+        let start = self.next_start();
+        self.advance(); // `query`
+        self.bump(TokKind::LeftBrace);
+        if self.peek() == TokKind::Ident("from") {
+            self.advance();
+        }
+        let mut table = self.struct_literals(true, Self::expr);
+
+        while !self.at(TokKind::RightBrace) && !self.at(TokKind::Eof) {
+            let verb_start = self.next_start();
+            let TokKind::Ident(verb) = self.peek() else {
+                self.expected("a query verb (filter, derive, select, sort, take, group, rename, distinct, join)");
+                self.advance();
+                continue;
+            };
+            self.advance();
+            table = match verb {
+                "filter" => {
+                    let cond = self.q_column_expr();
+                    self.q_call("__q_filter", vec![table, cond], verb_start)
+                }
+                "derive" => {
+                    let cols = self.q_named_columns();
+                    let list = self.new_expr(Literal::Array(cols), verb_start);
+                    self.q_call("__q_mutate", vec![table, list], verb_start)
+                }
+                "select" => {
+                    let names = self.q_names(false);
+                    let list = self.q_str_list(names.iter().map(|(n, _)| n.clone()).collect(), verb_start);
+                    self.q_call("__q_select", vec![table, list], verb_start)
+                }
+                "sort" => {
+                    let names = self.q_names(true);
+                    let cols = self.q_str_list(names.iter().map(|(n, _)| n.clone()).collect(), verb_start);
+                    let dirs = names
+                        .iter()
+                        .map(|(_, desc)| {
+                            self.new_expr(if *desc { Literal::True } else { Literal::False }, verb_start)
+                        })
+                        .collect();
+                    let dirs = self.new_expr(Literal::Array(dirs), verb_start);
+                    self.q_call("__q_sort", vec![table, cols, dirs], verb_start)
+                }
+                "take" => {
+                    let n = self.expr();
+                    self.q_call("__q_take", vec![table, n], verb_start)
+                }
+                "distinct" => {
+                    let names = self.q_names(false);
+                    let list = self.q_str_list(names.into_iter().map(|(n, _)| n).collect(), verb_start);
+                    self.q_call("__q_distinct", vec![table, list], verb_start)
+                }
+                "rename" => {
+                    let names = self.q_names(false);
+                    if names.len() != 2 {
+                        self.error(Misdirection {
+                            src: self.src(),
+                            at: self.location(verb_start).into(),
+                            msg: "rename takes an old name and a new name".into(),
+                            label: "`rename old new`".into(),
+                        });
+                        table
+                    } else {
+                        let a = self.new_expr(Literal::String(names[0].0.clone()), verb_start);
+                        let b = self.new_expr(Literal::String(names[1].0.clone()), verb_start);
+                        self.q_call("__q_rename", vec![table, a, b], verb_start)
+                    }
+                }
+                "group" => {
+                    let names = self.q_names_until_brace();
+                    let list = self.q_str_list(names, verb_start);
+                    let grouped = self.q_call("__q_group", vec![table, list], verb_start);
+                    self.expect(TokKind::LeftBrace);
+                    if self.peek() == TokKind::Ident("aggregate") {
+                        self.advance();
+                    } else {
+                        self.expected("`aggregate { … }` inside `group`");
+                    }
+                    let aggs = self.q_named_columns();
+                    self.expect(TokKind::RightBrace);
+                    let list = self.new_expr(Literal::Array(aggs), verb_start);
+                    self.q_call("__q_agg", vec![grouped, list], verb_start)
+                }
+                "join" => {
+                    // `join other key [key…] ["kind"]`
+                    let other = self.unary();
+                    let mut keys = vec![];
+                    let mut kind = "inner".to_string();
+                    while !self.at_line_start() && !self.at(TokKind::RightBrace) && !self.at(TokKind::Eof) {
+                        match self.peek() {
+                            TokKind::Ident(n) => {
+                                keys.push(n.to_string());
+                                self.advance();
+                            }
+                            TokKind::String(s) => {
+                                kind = s.trim_matches('"').to_string();
+                                self.advance();
+                            }
+                            _ => {
+                                self.expected("a join key");
+                                self.advance();
+                            }
+                        }
+                    }
+                    let keys = self.q_str_list(keys, verb_start);
+                    let kind = self.new_expr(Literal::String(kind), verb_start);
+                    self.q_call("__q_join", vec![table, other, keys, kind], verb_start)
+                }
+                _ => {
+                    self.error(Misdirection {
+                        src: self.src(),
+                        at: self.location(verb_start).into(),
+                        msg: format!("`{verb}` isn't a query verb"),
+                        label: "try filter, derive, select, sort, take, group, rename, distinct or join".into(),
+                    });
+                    // skip the rest of this line
+                    while !self.at_line_start() && !self.at(TokKind::RightBrace) && !self.at(TokKind::Eof) {
+                        self.advance();
+                    }
+                    table
+                }
+            };
+        }
+        self.expect(TokKind::RightBrace);
+        // keep the whole block's span on the result for error labels
+        let _ = start;
+        table
+    }
+
+    fn q_call(&self, name: &str, args: Vec<Expr>, start: usize) -> Expr {
+        let callee = self.new_expr(Ident::new(name.to_string(), self.location(start)), start);
+        let args = args.into_iter().map(|value| Argument { name: None, value }).collect();
+        self.new_expr(Call::new(callee, args), start)
+    }
+
+    fn q_str_list(&self, names: Vec<String>, start: usize) -> Expr {
+        let items = names.into_iter().map(|n| self.new_expr(Literal::String(n), start)).collect();
+        self.new_expr(Literal::Array(items), start)
+    }
+
+    /// A verb's column expression: parsed as normal Mimas, then its bare names become columns.
+    fn q_column_expr(&mut self) -> Expr {
+        let e = self.struct_literals(true, Self::expr);
+        self.q_lower(&e)
+    }
+
+    /// Names (identifiers or strings) up to the end of the line; with `desc`, `-name` is
+    /// descending. Returns `(name, descending)`.
+    fn q_names(&mut self, desc: bool) -> Vec<(String, bool)> {
+        let mut out = vec![];
+        while !self.at_line_start() && !self.at(TokKind::RightBrace) && !self.at(TokKind::Eof) {
+            let mut down = false;
+            if desc && self.eat(TokKind::Minus) {
+                down = true;
+            }
+            match self.peek() {
+                TokKind::Ident(n) => {
+                    out.push((n.to_string(), down));
+                    self.advance();
+                }
+                TokKind::String(s) => {
+                    out.push((s.trim_matches('"').to_string(), down));
+                    self.advance();
+                }
+                _ => {
+                    self.expected("a column name");
+                    self.advance();
+                }
+            }
+            self.eat(TokKind::Comma);
+        }
+        out
+    }
+
+    /// Names up to a `{` (the `group` verb's keys).
+    fn q_names_until_brace(&mut self) -> Vec<String> {
+        let mut out = vec![];
+        while !self.at(TokKind::LeftBrace) && !self.at(TokKind::Eof) && !self.at_line_start() {
+            match self.peek() {
+                TokKind::Ident(n) => {
+                    out.push(n.to_string());
+                    self.advance();
+                }
+                TokKind::String(s) => {
+                    out.push(s.trim_matches('"').to_string());
+                    self.advance();
+                }
+                _ => {
+                    self.expected("a column name");
+                    self.advance();
+                }
+            }
+            self.eat(TokKind::Comma);
+        }
+        out
+    }
+
+    /// `name = expr` on one line, or `{ name = expr, name = expr }`: each becomes a
+    /// `__q_named(expr, "name")` call.
+    fn q_named_columns(&mut self) -> Vec<Expr> {
+        let braced = self.eat(TokKind::LeftBrace);
+        let mut out = vec![];
+        loop {
+            if braced && (self.at(TokKind::RightBrace) || self.at(TokKind::Eof)) {
+                break;
+            }
+            let start = self.next_start();
+            let TokKind::Ident(name) = self.peek() else {
+                self.expected("a column name");
+                break;
+            };
+            self.advance();
+            self.expect(TokKind::Equal);
+            let value = self.q_column_expr();
+            let title = self.new_expr(Literal::String(name.to_string()), start);
+            out.push(self.q_call("__q_named", vec![value, title], start));
+            self.eat(TokKind::Comma);
+            if !braced && (self.at_line_start() || self.at(TokKind::RightBrace) || self.at(TokKind::Eof)) {
+                break;
+            }
+        }
+        if braced {
+            self.expect(TokKind::RightBrace);
+        }
+        out
+    }
+
+    /// Rewrites an expression so bare names mean columns: names -> `__q_col("x")`, `&&`/`||` ->
+    /// `&`/`|` (column tests don't short-circuit), `if c { a } else { b }` -> `__q_when`, and the
+    /// column functions -> `__q_apply(col, "fn", extra)`. Literals and operators carry over.
+    /// `$name` (a name written with a leading `$`) would be how to reach an outside value; it
+    /// isn't lexed yet, so today an outside value goes through a function argument instead.
+    fn q_lower(&self, e: &Expr) -> Expr {
+        let start = e.span().start();
+        match e.kind() {
+            ExprKind::Ident(id) => {
+                let name = self.new_expr(Literal::String(id.lexeme.clone()), start);
+                self.q_call("__q_col", vec![name], start)
+            }
+            ExprKind::Grouping(g) => self.new_expr(Grouping::new(self.q_lower(&g.inner)), start),
+            ExprKind::Evaluation(ev) => {
+                self.new_expr(Evaluation::new(self.q_lower(&ev.left), ev.op, self.q_lower(&ev.right)), start)
+            }
+            ExprKind::Equality(eq) => {
+                self.new_expr(Equality::new(self.q_lower(&eq.left), eq.op, self.q_lower(&eq.right)), start)
+            }
+            ExprKind::Logical(l) => {
+                let op = match l.op {
+                    LogicalOp::And => EvaluationOp::And,
+                    LogicalOp::Or => EvaluationOp::Or,
+                };
+                self.new_expr(Evaluation::new(self.q_lower(&l.left), op, self.q_lower(&l.right)), start)
+            }
+            ExprKind::Unary(u) => self.new_expr(Unary::new(u.op, self.q_lower(&u.right)), start),
+            ExprKind::If(i) => {
+                let tail = |b: &Expr| match b.kind() {
+                    ExprKind::Block(blk) if blk.body.is_empty() => blk.yielded_expr.clone(),
+                    _ => Some(b.clone()),
+                };
+                match (tail(&i.main_body), i.else_expr.as_ref().and_then(tail)) {
+                    (Some(a), Some(b)) => self.q_call(
+                        "__q_when",
+                        vec![self.q_lower(&i.condition), self.q_lower(&a), self.q_lower(&b)],
+                        start,
+                    ),
+                    _ => e.clone(),
+                }
+            }
+            ExprKind::Call(c) => {
+                let args: Vec<Expr> = c.arguments.iter().map(|a| self.q_lower(&a.value)).collect();
+                match c.left.as_ident().map(|i| i.lexeme.as_str()) {
+                    Some("count") if args.is_empty() => self.q_call("__q_n", vec![], start),
+                    Some(f @ ("sum" | "mean" | "average" | "median" | "min" | "max" | "count" | "n_unique"
+                        | "first" | "last" | "is_null" | "is_not_null" | "to_upper" | "to_lower" | "len"
+                        | "contains" | "starts_with" | "ends_with" | "fill_null" | "is_in" | "cast_int"
+                        | "cast_float" | "cast_str"))
+                        if !args.is_empty() =>
+                    {
+                        let mut it = args.into_iter();
+                        let first = it.next().unwrap();
+                        let name = self.new_expr(Literal::String(f.to_string()), start);
+                        // a second argument is a plain value (text to search for, a fill value)
+                        let extra = match c.arguments.get(1) {
+                            Some(a) => a.value.clone(),
+                            None => self.new_expr(Literal::Null, start),
+                        };
+                        self.q_call("__q_apply", vec![first, name, extra], start)
+                    }
+                    _ => e.clone(),
+                }
+            }
+            _ => e.clone(),
+        }
     }
 
     fn supreme(&mut self) -> Expr {
