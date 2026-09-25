@@ -1082,14 +1082,21 @@ fn use_a_host_script_by_name() {
 // a struct literal straight after `match`/`if` needs parentheses; say so
 #[test]
 fn head_struct_literal_gets_a_pointed_error() {
-    for src in [
-        "fn a() { match P { n = 7 } { _ => 1 } }",
-        "fn a() { if P { n = 7 }.n > 0 { 1 } else { 0 } }",
-    ] {
+    for src in ["fn a() { match P { n = 7 } { _ => 1 } }"] {
         let err = crate::Parser::new(crate::lex::Lexer::new(src, 0, "t".into()))
             .try_into_ast()
             .unwrap_err();
         let text = format!("{err:?}");
         assert!(text.contains("struct literals need parentheses"), "{src}: {text}");
+    }
+}
+
+// ...but an `if`/`while` body may begin with an assignment
+#[test]
+fn if_body_starting_with_an_assignment_is_fine() {
+    for src in ["fn a() { let x = 0; if true { x = 1; } }", "fn a() { let x = 0; while x < 3 { x = x + 1; } }"] {
+        crate::Parser::new(crate::lex::Lexer::new(src, 0, "t".into()))
+            .try_into_ast()
+            .unwrap_or_else(|e| panic!("{src}: {e:?}"));
     }
 }

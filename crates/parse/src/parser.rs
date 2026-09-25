@@ -1180,7 +1180,6 @@ impl<'s> Parser<'s> {
             binding
         });
         let condition = self.struct_literals(false, Self::expr);
-        self.head_struct_literal_hint(None);
 
         // a trailing `= 5` or `and b` means the user reached for another language's syntax --
         // catch it before the body parse swallows the token. the rest of the condition gets
@@ -1204,9 +1203,10 @@ impl<'s> Parser<'s> {
         (binding, self.poison_expr(condition.span().start()))
     }
 
-    /// After a `match`/`if`/`while` head: a `{ name = value` right where the body should start
-    /// is a struct literal that needs parentheses (`match (P { a = 1 }) { .. }`) -- a bare
-    /// `P { .. }` there would be ambiguous with the body's own `{`, as in Rust.
+    /// After a `match` head: a `{ name = value` right where the arms should start is a struct
+    /// literal that needs parentheses (`match (P { a = 1 }) { .. }`) -- a bare `P { .. }` there
+    /// would be ambiguous with the arms' own `{`, as in Rust. (Only for `match`: an `if`/`while`
+    /// body may legitimately begin `name = value`.)
     fn head_struct_literal_hint(&mut self, from: Option<usize>) {
         if self.at(TokKind::LeftBrace)
             && matches!(self.nth(1), TokKind::Ident(_))
