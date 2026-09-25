@@ -424,3 +424,13 @@ test_vm!(
      let b = Outer { i = Inner { v = 5 } };",
     "a == b" => Bool(true),
 );
+
+// `==` is structural (one bool) on every type — it used to broadcast over lists
+test_vm!(
+    list_equality_is_structural,
+    "[1, 2] == [1, 2]" => Bool(true),
+    "[1, 2] == [5, 6]" => Bool(false),
+    "[1, 2] == [2, 1]" => Bool(false),
+    "[[1], [2]] == [[1], [2]]" => Bool(true),
+    "[1, 2] != [1, 2]" => Bool(false)
+);

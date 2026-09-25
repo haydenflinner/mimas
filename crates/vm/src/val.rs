@@ -71,10 +71,13 @@ impl<'gc> PartialEq for Val<'gc> {
             }
             (Val::Closure(a), Val::Closure(b)) => Gc::ptr_eq(a.0, b.0),
             (Val::Raised(a), Val::Raised(b)) => a == b,
-            // no cheap/sensible structural equality for a polars DataFrame or an in-progress
-            // Expr tree -- same handle only, like Closure.
+            // an in-progress Expr tree has no structural equality -- same handle only, like
+            // Closure. (A DataFrame compares by content, below.)
             #[cfg(feature = "dataframe")]
-            (Val::DataFrame(a), Val::DataFrame(b)) => Gc::ptr_eq(a.0, b.0),
+            (Val::DataFrame(a), Val::DataFrame(b)) => {
+                // same columns, in order, holding the same cells (nulls equal nulls)
+                Gc::ptr_eq(a.0, b.0) || a.0.borrow().0.equals_missing(&b.0.borrow().0)
+            }
             #[cfg(feature = "dataframe")]
             (Val::PlExpr(a), Val::PlExpr(b)) => Gc::ptr_eq(a.0, b.0),
             #[cfg(feature = "dataframe")]
@@ -911,6 +914,9 @@ pub fn bin<'gc>(this: Val<'gc>, ctx: Ctx<'gc>, other: Val<'gc>, op: BinOp) -> Rt
         (BinOp::GreaterEqual, Val::Str(a), Val::Str(b)) => Val::Bool(a.as_str() >= b.as_str()),
         (BinOp::Coalesce, Val::Null, other) => other,
         (BinOp::Coalesce, this, _) => this,
+        // `==` is structural on every type, arrays included (element-wise `==` returned a list
+        // where the checker promised a `bool`). Ordering and arithmetic still broadcast.
+        (BinOp::Identity, left, right) => Val::Bool(left == right),
         (BinOp::NotEqual, left, right) => Val::Bool(left != right),
         (op, Val::Bool(a), Val::Bool(b)) => bool_bin(op, a, b)?,
         (op, Val::Float(a), Val::Float(b)) => float_bin(op, a, b)?,
@@ -946,7 +952,6 @@ pub fn bin<'gc>(this: Val<'gc>, ctx: Ctx<'gc>, other: Val<'gc>, op: BinOp) -> Rt
             }
             Val::Array(ctx.new_array(out))
         }
-        (BinOp::Identity, left, right) => Val::Bool(left == right),
         _ => match instance_bin(this, ctx, other, op) {
             Some(v) => v?,
             None => Err(RtErr::invalid_bin(this, op, other))?,

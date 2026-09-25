@@ -1953,7 +1953,10 @@ impl Vm {
             let error = match self.call_fn_result(&name) {
                 Err(e) => Some(format!("{e}")),
                 Ok(Captured::Bool(false)) => Some("assertion failed".into()),
-                Ok(_) => None,
+                // `true` for a check case, unit for a `#[test]` fn (which asserts or panics)
+                Ok(Captured::Bool(true) | Captured::Null) => None,
+                // anything else is a broken check, not a pass
+                Ok(other) => Some(format!("check produced {other:?}, expected a bool")),
             };
             self.reset_to_entry();
             results.push(TestResult { name, error });
