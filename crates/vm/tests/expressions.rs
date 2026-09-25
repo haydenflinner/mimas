@@ -434,3 +434,10 @@ test_vm!(
     "[[1], [2]] == [[1], [2]]" => Bool(true),
     "[1, 2] != [1, 2]" => Bool(false)
 );
+
+// a type error inside a later match arm nested in another match arm is reported, not swallowed
+// into an emitter panic
+test_fail!(
+    nested_match_arm_error_is_reported,
+    "fn h() -> int? { null }\nfn g(l: int, a: int) -> int? { match l { 0 => null, _ => { match h() { null => a, m => if a > m { a } else { m } } } } }"
+);

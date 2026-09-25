@@ -1807,6 +1807,11 @@ impl Solve for Match {
             result = Some(match result.take() {
                 None => body.query(solver)?,
                 Some(acc) => {
+                    // an error *inside* the arm is real -- only a failure to unify the arm's
+                    // type with the earlier arms' may fall back to option coercion (otherwise
+                    // the retry below re-reads a half-solved cache and swallows the error,
+                    // leaving unresolved nodes for the emitter to panic on)
+                    body.query(solver)?;
                     if let Err(e) = body.fulfill_ty(acc.clone(), solver) {
                         Ty::coerce_option(body.query(solver)?, acc, solver).ok_or(e)?
                     } else {
