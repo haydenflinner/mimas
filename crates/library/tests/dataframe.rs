@@ -402,3 +402,11 @@ test_run!(
     r#"df.unpivot(["who"], ["q1", "q2"])!.pull("value")!.len()"# => "4",
     r#"df.unpivot(["who"], ["q1", "q2"])!.col_names().join(",")"# => r#""who,variable,value""#,
 );
+
+test_run!(
+    cast_and_is_in,
+    r#"use std::polars::*;
+       let df = from_csv("a,n\nx,1\ny,three\nz,3\n")!;"#,
+    r#"df.filter(col("a").is_in(["x", "z"]))!.pull("a")!.join(",")"# => r#""x,z""#,
+    r#"df.filter(col("n") != "three")!.mutate([col("n").cast("int").alias("n")])!.pull("n")!.len()"# => "2",
+);

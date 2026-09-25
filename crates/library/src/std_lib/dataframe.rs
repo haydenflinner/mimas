@@ -91,6 +91,8 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add_method(str_starts_with);
     api.add_method(str_ends_with);
     api.add_method(str_len);
+    api.add_method(cast);
+    api.add_method(is_in);
 }
 
 #[native]
@@ -684,4 +686,45 @@ fn str_ends_with<'gc>(ctx: Ctx<'gc>, e: vm::PlExpr<'gc>, text: &str) -> vm::PlEx
 #[native]
 fn str_len<'gc>(ctx: Ctx<'gc>, e: vm::PlExpr<'gc>) -> vm::PlExpr<'gc> {
     ctx.new_plexpr(e.0.0.clone().str().len_chars())
+}
+
+/// `col("numtix").cast("int")` -- convert a column's type: "int", "float", "str" or "bool".
+/// A cell that can't convert becomes null (strict conversion is a later refinement).
+#[native]
+fn cast<'gc>(ctx: Ctx<'gc>, e: vm::PlExpr<'gc>, to: &str) -> Result<vm::PlExpr<'gc>, vm::RtErr> {
+    use polars::prelude::DataType;
+    let dt = match to {
+        "int" => DataType::Int64,
+        "float" => DataType::Float64,
+        "str" => DataType::String,
+        "bool" => DataType::Boolean,
+        other => {
+            return Err(vm::RtErr::Custom(format!(
+                "cast: unknown type {other:?} (expected \"int\", \"float\", \"str\" or \"bool\")"
+            )));
+        }
+    };
+    Ok(ctx.new_plexpr(e.0.0.clone().cast(dt)))
+}
+
+/// `col("discount").is_in(["birthday", "student"])` -- is the cell one of these values?
+#[native]
+fn is_in<'gc>(
+    ctx: Ctx<'gc>,
+    e: vm::PlExpr<'gc>,
+    values: Vec<Val<'gc>>,
+) -> Result<vm::PlExpr<'gc>, vm::RtErr> {
+    use polars::prelude::lit;
+    let mut out = lit(false);
+    for v in values {
+        let one = match v {
+            Val::Int(i) => lit(i),
+            Val::Float(f) => lit(f),
+            Val::Bool(b) => lit(b),
+            Val::Str(s) => lit(s.as_str()),
+            _ => return Err(vm::RtErr::Custom("is_in: expected ints, floats, bools or strs".into())),
+        };
+        out = out.or(e.0.0.clone().eq(one));
+    }
+    Ok(ctx.new_plexpr(out))
 }
