@@ -35,4 +35,13 @@ pub enum Intrinsic {
     /// `xs.all(f)` -- `false` as soon as one `f(elem)` returns `false`. Signature:
     /// `[T] -> ((T) -> bool) -> bool`.
     All,
+    /// `xs.flat_map(f)` -- like [`Intrinsic::Map`], but `f` returns `[U]` and each
+    /// element of it lands in `out`. Signature: `[T] -> ((T) -> [U]) -> [U]`.
+    FlatMap,
+    /// `xs.mapi(f)` -- like [`Intrinsic::Map`], but `f` also gets the index.
+    /// Signature: `[T] -> ((int, T) -> U) -> [U]`.
+    MapI,
+    /// `xs.foldi(init, f)` -- like [`Intrinsic::Fold`], but `f` also gets the
+    /// index. Signature: `[T] -> (U, (int, U, T) -> U) -> U`.
+    FoldI,
 }

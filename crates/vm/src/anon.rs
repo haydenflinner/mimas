@@ -57,17 +57,22 @@ pub fn as_dict_mut<'a, 'gc, const N: u32>(
 }
 
 /// Placeholder for a one-argument callable in a native signature: `Fn1<'gc, A, R>` registers as
-/// `(Anon<A>) -> R`, where `R` is any [`MimasType`](crate::conversion::MimasType) -- `bool` for
-/// predicates (`filter`'s `f`), another slot like [`U`] for transforms (`map`'s).
+/// `(A) -> R`, where `A` and `R` are any [`MimasType`](crate::conversion::MimasType) --
+/// [`Anon`] slots for genericity (`map`'s `Fn1<T, U>`), or concrete types (`mapi`'s
+/// `Fn2<i64, T, U>` pins the index param to `int`).
 ///
 /// The runtime value is the `Val` itself (`Val::Fn` / `Val::Closure`). Natives that take these
 /// are intrinsics -- compile lowers the method call to a loop that emits the calls itself -- so
 /// the signature is the entire point of the marker; `from_value` never needs to decompose it.
-pub struct Fn1<'gc, const A: u32, R>(pub Val<'gc>, pub PhantomData<R>);
+pub struct Fn1<'gc, A, R>(pub Val<'gc>, pub PhantomData<fn(A) -> R>);
 
-/// Two-argument variant of [`Fn1`]: registers as `(Anon<A>, Anon<B>) -> R` -- e.g. `fold`'s
-/// `(acc, elem) -> acc` written `Fn2<'gc, 1, 0, U<'gc>>` for `(U, T) -> U`.
-pub struct Fn2<'gc, const A: u32, const B: u32, R>(pub Val<'gc>, pub PhantomData<R>);
+/// Two-argument variant of [`Fn1`]: registers as `(A, B) -> R` -- e.g. `fold`'s
+/// `(acc, elem) -> acc` written `Fn2<U, T, U>`.
+pub struct Fn2<'gc, A, B, R>(pub Val<'gc>, pub PhantomData<fn(A, B) -> R>);
+
+/// Three-argument variant of [`Fn1`]: registers as `(A, B, C) -> R` -- e.g. `foldi`'s
+/// `(i, acc, elem) -> acc` written `Fn3<i64, U, T, U>`.
+pub struct Fn3<'gc, A, B, C, R>(pub Val<'gc>, pub PhantomData<fn(A, B, C) -> R>);
 
 /// Placeholder parameter type for native signatures. Can represent any type but must be the same as
 /// every other `T` within the context of this specific signature.

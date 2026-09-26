@@ -798,3 +798,62 @@ test_run!(
      a.push(2);",
     "a.len()" => "2",
 );
+
+// -- flat_map / mapi / foldi / zip ---------------------------------------------
+// flat_map/mapi/foldi are intrinsics like map (the index variants ride the same
+// generated loop -- `i` is a real int local), zip is a plain native: pairs are
+// just 2-element arrays.
+
+test_run!(
+    flat_map_basic,
+    "[1, 2].flat_map(|x| [x, x * 10])" => "[1, 10, 2, 20]",
+    "[] .flat_map(|x: int| [x])" => "[]",
+);
+
+test_run!(
+    flat_map_shrinks_and_grows,
+    "[1, 2, 3].flat_map(|x| if x % 2 == 0 { [x] } else { [] })" => "[2]",
+    r#"[1, 2].flat_map(|x| ["a", "b"])"# => r#"["a", "b", "a", "b"]"#,
+);
+
+test_run!(
+    mapi_indexes,
+    "[10, 20, 30].mapi(|i, x| x + i)" => "[10, 21, 32]",
+    r#"["a", "b"].mapi(|i, s| s + i.to_str())"# => r#"["a0", "b1"]"#,
+);
+
+test_run!(
+    foldi_index_and_acc,
+    "[10, 20, 30].foldi(0, |i, acc, x| acc + i * x)" => "80",
+    "[] .foldi(7, |i: int, acc: int, x: int| acc)" => "7",
+);
+
+test_run!(
+    zip_pairs,
+    "[1, 2, 3].zip([10, 20, 30])" => "[[1, 10], [2, 20], [3, 30]]",
+    // truncates to the shorter side
+    "[1, 2, 3].zip([10, 20])" => "[[1, 10], [2, 20]]",
+    "[] .zip([1])" => "[]",
+);
+
+test_run!(
+    zip_pairs_are_indexable,
+    "let p = [1, 2].zip([3, 4]);
+     let (a, b) = p[0];",
+    "p[1].0" => "2",
+    "p[0].1" => "3",
+    // tuple patterns destructure a pair in one let
+    "a * 10 + b" => "13",
+);
+
+test_run!(
+    mapi_named_fn,
+    "fn scale(i: int, x: int) -> int { i * x }",
+    "[5, 5, 5].mapi(scale)" => "[0, 5, 10]",
+);
+
+test_fail!(flat_map_rejects_non_array, "let _ = [1, 2].flat_map(|x| x);");
+test_fail!(mapi_rejects_one_arg, "let _ = [1, 2].mapi(|x| x);");
+test_fail!(mapi_rejects_str_index, r#"let _ = [1, 2].mapi(|i: str, x| x);"#);
+test_fail!(foldi_rejects_wrong_arity, "let _ = [1, 2].foldi(0, |i, acc| acc);");
+test_fail!(zip_rejects_non_array, "let _ = [1, 2].zip(5);");

@@ -492,10 +492,10 @@ impl<'gc, const N: u32> MimasType<'gc> for crate::anon::DictOf<'gc, N> {
     }
 }
 
-impl<'gc, const A: u32, R: MimasType<'gc>> MimasType<'gc> for crate::anon::Fn1<'gc, A, R> {
+impl<'gc, A: MimasType<'gc>, R: MimasType<'gc>> MimasType<'gc> for crate::anon::Fn1<'gc, A, R> {
     fn mimas_ty(reg: &Registry) -> Option<Ty> {
         Some(Ty::Fn(FnHeader::new(
-            vec![FnParam::new(None, Ty::Anon(A), false)],
+            vec![FnParam::new(None, A::mimas_ty(reg)?, false)],
             R::mimas_ty(reg)?,
             false,
         )))
@@ -508,14 +508,17 @@ impl<'gc, const A: u32, R: MimasType<'gc>> MimasType<'gc> for crate::anon::Fn1<'
     }
 }
 
-impl<'gc, const A: u32, const B: u32, R: MimasType<'gc>> MimasType<'gc>
-    for crate::anon::Fn2<'gc, A, B, R>
+impl<'gc, A, B, R> MimasType<'gc> for crate::anon::Fn2<'gc, A, B, R>
+where
+    A: MimasType<'gc>,
+    B: MimasType<'gc>,
+    R: MimasType<'gc>,
 {
     fn mimas_ty(reg: &Registry) -> Option<Ty> {
         Some(Ty::Fn(FnHeader::new(
             vec![
-                FnParam::new(None, Ty::Anon(A), false),
-                FnParam::new(None, Ty::Anon(B), false),
+                FnParam::new(None, A::mimas_ty(reg)?, false),
+                FnParam::new(None, B::mimas_ty(reg)?, false),
             ],
             R::mimas_ty(reg)?,
             false,
@@ -523,6 +526,32 @@ impl<'gc, const A: u32, const B: u32, R: MimasType<'gc>> MimasType<'gc>
     }
     fn from_value(_ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError> {
         Ok(crate::anon::Fn2(v, std::marker::PhantomData))
+    }
+    fn into_value(self, _ctx: Ctx<'gc>) -> Val<'gc> {
+        self.0
+    }
+}
+
+impl<'gc, A, B, C, R> MimasType<'gc> for crate::anon::Fn3<'gc, A, B, C, R>
+where
+    A: MimasType<'gc>,
+    B: MimasType<'gc>,
+    C: MimasType<'gc>,
+    R: MimasType<'gc>,
+{
+    fn mimas_ty(reg: &Registry) -> Option<Ty> {
+        Some(Ty::Fn(FnHeader::new(
+            vec![
+                FnParam::new(None, A::mimas_ty(reg)?, false),
+                FnParam::new(None, B::mimas_ty(reg)?, false),
+                FnParam::new(None, C::mimas_ty(reg)?, false),
+            ],
+            R::mimas_ty(reg)?,
+            false,
+        )))
+    }
+    fn from_value(_ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError> {
+        Ok(crate::anon::Fn3(v, std::marker::PhantomData))
     }
     fn into_value(self, _ctx: Ctx<'gc>) -> Val<'gc> {
         self.0

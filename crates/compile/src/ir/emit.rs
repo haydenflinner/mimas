@@ -409,7 +409,7 @@ impl Emit for Call {
                 // fold takes `init, f` at [1], [2].
                 api::Intrinsic::Map => {
                     let out = ir.current().new_array();
-                    let exit = emit_array_walk(ir, args[0], |ir, elem, _| {
+                    let exit = emit_array_walk(ir, args[0], |ir, elem, _i, _latch| {
                         let mapped = ir.current().call(args[1], vec![elem]);
                         ir.current().push(out, mapped);
                     });
@@ -418,7 +418,7 @@ impl Emit for Call {
                 }
                 api::Intrinsic::Filter => {
                     let out = ir.current().new_array();
-                    let exit = emit_array_walk(ir, args[0], |ir, elem, latch| {
+                    let exit = emit_array_walk(ir, args[0], |ir, elem, _i, latch| {
                         let keep = ir.current().call(args[1], vec![elem]);
                         ir.current().jump_if_false(keep, latch);
                         ir.current().push(out, elem);
@@ -429,7 +429,7 @@ impl Emit for Call {
                 api::Intrinsic::Fold => {
                     let acc = ir.synthetic_local("$fold_acc");
                     ir.current().set_local(acc, args[1]);
-                    let exit = emit_array_walk(ir, args[0], |ir, elem, _| {
+                    let exit = emit_array_walk(ir, args[0], |ir, elem, _i, _latch| {
                         let cur = ir.current().get_local(acc);
                         let next = ir.current().call(args[2], vec![cur, elem]);
                         ir.current().set_local(acc, next);
@@ -440,7 +440,7 @@ impl Emit for Call {
                 api::Intrinsic::Find => {
                     let merge = ir.push_block("find_merge");
                     let mut branches = Vec::new();
-                    let exit = emit_array_walk(ir, args[0], |ir, elem, latch| {
+                    let exit = emit_array_walk(ir, args[0], |ir, elem, _i, latch| {
                         let hit = ir.current().call(args[1], vec![elem]);
                         ir.current().jump_if_false(hit, latch);
                         let end = ir.current_block_id();
@@ -458,7 +458,7 @@ impl Emit for Call {
                 api::Intrinsic::Any => {
                     let merge = ir.push_block("any_merge");
                     let mut branches = Vec::new();
-                    let exit = emit_array_walk(ir, args[0], |ir, elem, latch| {
+                    let exit = emit_array_walk(ir, args[0], |ir, elem, _i, latch| {
                         let hit = ir.current().call(args[1], vec![elem]);
                         ir.current().jump_if_false(hit, latch);
                         let yes = ir.current().constant(true);
@@ -478,7 +478,7 @@ impl Emit for Call {
                     let miss = ir.push_block("all_miss");
                     let merge = ir.push_block("all_merge");
                     let mut branches = Vec::new();
-                    let exit = emit_array_walk(ir, args[0], |ir, elem, _| {
+                    let exit = emit_array_walk(ir, args[0], |ir, elem, _i, _latch| {
                         let ok = ir.current().call(args[1], vec![elem]);
                         ir.current().jump_if_false(ok, miss);
                     });
@@ -494,6 +494,38 @@ impl Emit for Call {
                     branches.push((end, yes));
                     merge_branches(ir, merge, branches)
                         .expect("all always emits miss and exhausted edges")
+                }
+                api::Intrinsic::FlatMap => {
+                    let out = ir.current().new_array();
+                    let exit = emit_array_walk(ir, args[0], |ir, elem, _i, _latch| {
+                        let inner = ir.current().call(args[1], vec![elem]);
+                        let inner_exit = emit_array_walk(ir, inner, |ir, ielem, _ii, _ilatch| {
+                            ir.current().push(out, ielem);
+                        });
+                        ir.target(inner_exit);
+                    });
+                    ir.target(exit);
+                    out
+                }
+                api::Intrinsic::MapI => {
+                    let out = ir.current().new_array();
+                    let exit = emit_array_walk(ir, args[0], |ir, elem, i, _latch| {
+                        let mapped = ir.current().call(args[1], vec![i, elem]);
+                        ir.current().push(out, mapped);
+                    });
+                    ir.target(exit);
+                    out
+                }
+                api::Intrinsic::FoldI => {
+                    let acc = ir.synthetic_local("$fold_acc");
+                    ir.current().set_local(acc, args[1]);
+                    let exit = emit_array_walk(ir, args[0], |ir, elem, i, _latch| {
+                        let cur = ir.current().get_local(acc);
+                        let next = ir.current().call(args[2], vec![i, cur, elem]);
+                        ir.current().set_local(acc, next);
+                    });
+                    ir.target(exit);
+                    ir.current().get_local(acc)
                 }
             }
         }
@@ -1679,7 +1711,7 @@ fn merge_branches(
 fn emit_array_walk(
     ir: &mut Ir,
     arr: InstId,
-    per_elem: impl FnOnce(&mut Ir, InstId, BlockId),
+    per_elem: impl FnOnce(&mut Ir, InstId, InstId, BlockId),
 ) -> BlockId {
     let header = ir.push_block("hof_header");
     let latch = ir.push_block("hof_latch");
@@ -1702,7 +1734,7 @@ fn emit_array_walk(
     ir.target(header);
     let i = ir.current().get_local(idx);
     let elem = ir.current().get_index(arr, i, AccessKind::Direct);
-    per_elem(ir, elem, latch);
+    per_elem(ir, elem, i, latch);
     let capped = matches!(
         ir.current_body()
             .current_stream()

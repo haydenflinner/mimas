@@ -32,6 +32,7 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add_method_named("argsort", argsort_int);
     api.add_method_named("argsort", argsort_float);
     api.add_method(reorder);
+    api.add_method(zip);
     // higher-order: signatures only -- each lowers to a generated loop that calls the
     // closure itself (a `#[native]` can't call back into the VM). see emit_intrinsic.
     let id = api.add_method(map);
@@ -46,6 +47,12 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.mark_intrinsic(id, Intrinsic::Any);
     let id = api.add_method(all);
     api.mark_intrinsic(id, Intrinsic::All);
+    let id = api.add_method(flat_map);
+    api.mark_intrinsic(id, Intrinsic::FlatMap);
+    let id = api.add_method(mapi);
+    api.mark_intrinsic(id, Intrinsic::MapI);
+    let id = api.add_method(foldi);
+    api.mark_intrinsic(id, Intrinsic::FoldI);
 }
 
 #[native]
@@ -190,13 +197,13 @@ fn argsort_float(keys: &[f64]) -> Vec<i64> {
 
 /// `xs.map(f)` -> `[U]` -- `f: (T) -> U` applied element-wise.
 #[native]
-fn map<'gc>(_arr: &[anon::T<'gc>], _f: anon::Fn1<'gc, 0, anon::U<'gc>>) -> Vec<anon::U<'gc>> {
+fn map<'gc>(_arr: &[anon::T<'gc>], _f: anon::Fn1<'gc, anon::T<'gc>, anon::U<'gc>>) -> Vec<anon::U<'gc>> {
     unreachable!("intrinsics cannot be reached")
 }
 
 /// `xs.filter(f)` -> `[T]` -- keeps the elements `f` returns `true` for.
 #[native]
-fn filter<'gc>(_arr: &[anon::T<'gc>], _f: anon::Fn1<'gc, 0, bool>) -> Vec<anon::T<'gc>> {
+fn filter<'gc>(_arr: &[anon::T<'gc>], _f: anon::Fn1<'gc, anon::T<'gc>, bool>) -> Vec<anon::T<'gc>> {
     unreachable!("intrinsics cannot be reached")
 }
 
@@ -205,27 +212,61 @@ fn filter<'gc>(_arr: &[anon::T<'gc>], _f: anon::Fn1<'gc, 0, bool>) -> Vec<anon::
 fn fold<'gc>(
     _arr: &[anon::T<'gc>],
     _init: anon::U<'gc>,
-    _f: anon::Fn2<'gc, 1, 0, anon::U<'gc>>,
+    _f: anon::Fn2<'gc, anon::U<'gc>, anon::T<'gc>, anon::U<'gc>>,
 ) -> anon::U<'gc> {
     unreachable!("intrinsics cannot be reached")
 }
 
 /// `xs.find(f)` -> `T?` -- the first element `f` returns `true` for, else `null`.
 #[native]
-fn find<'gc>(_arr: &[anon::T<'gc>], _f: anon::Fn1<'gc, 0, bool>) -> Option<anon::T<'gc>> {
+fn find<'gc>(_arr: &[anon::T<'gc>], _f: anon::Fn1<'gc, anon::T<'gc>, bool>) -> Option<anon::T<'gc>> {
     unreachable!("intrinsics cannot be reached")
 }
 
 /// `xs.any(f)` -> `bool` -- whether `f` returns `true` for any element.
 #[native]
-fn any<'gc>(_arr: &[anon::T<'gc>], _f: anon::Fn1<'gc, 0, bool>) -> bool {
+fn any<'gc>(_arr: &[anon::T<'gc>], _f: anon::Fn1<'gc, anon::T<'gc>, bool>) -> bool {
     unreachable!("intrinsics cannot be reached")
 }
 
 /// `xs.all(f)` -> `bool` -- whether `f` returns `true` for every element.
 #[native]
-fn all<'gc>(_arr: &[anon::T<'gc>], _f: anon::Fn1<'gc, 0, bool>) -> bool {
+fn all<'gc>(_arr: &[anon::T<'gc>], _f: anon::Fn1<'gc, anon::T<'gc>, bool>) -> bool {
     unreachable!("intrinsics cannot be reached")
+}
+
+/// `xs.flat_map(f)` -> `[U]` -- `f: (T) -> [U]`, each element of each result appended in order.
+#[native]
+fn flat_map<'gc>(
+    _arr: &[anon::T<'gc>],
+    _f: anon::Fn1<'gc, anon::T<'gc>, Vec<anon::U<'gc>>>,
+) -> Vec<anon::U<'gc>> {
+    unreachable!("intrinsics cannot be reached")
+}
+
+/// `xs.mapi(f)` -> `[U]` -- `f: (int, T) -> U` gets each element's index.
+#[native]
+fn mapi<'gc>(
+    _arr: &[anon::T<'gc>],
+    _f: anon::Fn2<'gc, i64, anon::T<'gc>, anon::U<'gc>>,
+) -> Vec<anon::U<'gc>> {
+    unreachable!("intrinsics cannot be reached")
+}
+
+/// `xs.foldi(init, f)` -> `U` -- `f: (int, U, T) -> U` threads an accumulator with the index.
+#[native]
+fn foldi<'gc>(
+    _arr: &[anon::T<'gc>],
+    _init: anon::U<'gc>,
+    _f: anon::Fn3<'gc, i64, anon::U<'gc>, anon::T<'gc>, anon::U<'gc>>,
+) -> anon::U<'gc> {
+    unreachable!("intrinsics cannot be reached")
+}
+
+/// `xs.zip(ys)` -> `[(T, U)]` -- index-paired elements, truncated to the shorter array.
+#[native]
+fn zip<'gc>(a: &[anon::T<'gc>], b: &[anon::U<'gc>]) -> Vec<(anon::T<'gc>, anon::U<'gc>)> {
+    a.iter().copied().zip(b.iter().copied()).collect()
 }
 
 #[native]
