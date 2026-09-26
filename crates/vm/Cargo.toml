@@ -41,7 +41,7 @@ glam.workspace = true
 # `Engine::Auto` would otherwise pick the streaming engine and panic without the feature).
 # `optional = true`: gated behind the `dataframe` feature below so an embedder who never touches
 # `Val::DataFrame`/`Val::PlExpr` doesn't pay for polars's dependency tree at all.
-polars = { path = "/Users/wow/code/dsa/polars/crates/polars", optional = true, default-features = false, features = [
+polars = { path = "../../../polars/crates/polars", optional = true, default-features = false, features = [
     "lazy",
     "fmt_no_tty",
     "dtype-full",

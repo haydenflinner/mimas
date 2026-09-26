@@ -29,7 +29,7 @@ walkdir.workspace = true
 # for why `lazy`/`fmt`/`dtype-full` and not `streaming`. `pivot` (unlike `csv`) doesn't bundle
 # `streaming` at the umbrella-crate level, so it's safe to enable directly here -- needed for
 # `std_lib::dataframe::pivot`.
-polars = { path = "/Users/wow/code/dsa/polars/crates/polars", optional = true, default-features = false, features = [
+polars = { path = "../../../polars/crates/polars", optional = true, default-features = false, features = [
     "lazy",
     "fmt_no_tty",
     "dtype-full",
@@ -46,7 +46,7 @@ polars = { path = "/Users/wow/code/dsa/polars/crates/polars", optional = true, d
 # see the note on the `polars` dep above); `polars-io/csv` on its own pulls in neither. Same repo
 # path as the `polars` dep above, so Cargo resolves this to the identical `DataFrame`/`Column`
 # types `polars::frame`/`polars::prelude` re-export, not a second copy.
-polars-io = { path = "/Users/wow/code/dsa/polars/crates/polars-io", optional = true, default-features = false, features = [
+polars-io = { path = "../../../polars/crates/polars-io", optional = true, default-features = false, features = [
     "csv",
 ] }
 # `std_lib::darkly` (a `.darkly` file's own layer/manifest format, not a game-engine dependency):
