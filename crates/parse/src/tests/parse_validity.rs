@@ -199,7 +199,14 @@ test_fail!(
     // junk after a check used to spin the parser until its fuel guard panicked
     "where {\n    xs[1..] is [2]\n}",
     "where { a[1..] is b",
-    "where:\n    xs[1..] is [2]"
+    "where:\n    xs[1..] is [2]",
+    // an unclosed `where {` followed by an item -- deleting the `}` used to
+    // loop forever on `fn` (it can't open a check) until the fuel guard
+    // panicked; panic-fuzzing found this as `guide.lit` minus one `}` token
+    "where {\n    1 is 1\n\nfn f() -> int { 1 }",
+    // same hole in the colon form: a non-expr continuation line (`]`) isn't
+    // a check and isn't a statement ender, so `check_continues` spun on it
+    "where:\n    1 is 1\n]"
 );
 
 fn check_item(source: &str) -> crate::Tests {
@@ -514,6 +521,24 @@ test_fail!(misdirect_and, "if a and b {}");
 test_fail!(misdirect_or, "let c = a or b;");
 test_fail!(misdirect_as, "let y = x as float;");
 test_fail!(misdirect_if_assign, "if x = 5 {}");
+
+// generics: decls take params, annotations take applications, impls take neither
+test_ok!(
+    generic_declarations_parse,
+    "fn id<T>(x: T) -> T { x }",
+    "fn map<T, U>(xs: [T], f: (T) -> U) -> [U] { [] }",
+    "struct Pair<A, B> { first: A, second: B }",
+    "struct Point<T>(T, T)",
+    "enum List<T> { E, C { first: T, rest: List<T> } }",
+    "let p: Pair<int, str> = x;",
+    "let l: List<int> = y;",
+    "impl List { fn f(self) {} }"
+);
+test_fail!(
+    impl_specialization_rejected,
+    "impl List<T> {}",
+    "impl Pact for List<T> {}"
+);
 
 #[test]
 fn misdirection_renders_spelling() {

@@ -505,6 +505,14 @@ impl<'s> Parser<'s> {
                 if self.eat(TokKind::RightBrace) {
                     break;
                 }
+                // A token that can't open a check where a check or `}` should be means the
+                // brace never closed (`where { ... \nfn f() ...`). Flag the missing `}` and
+                // leave the token for whatever's further out -- parsing it as a check would
+                // go nowhere, and looping here spins until the fuel guard panics.
+                if !self.peek().starts_expr() {
+                    self.expect(TokKind::RightBrace);
+                    break;
+                }
                 cases.push(self.check_case(&mut names));
                 if self.eat(TokKind::Comma)
                     || self.at_line_start()
@@ -617,33 +625,36 @@ impl<'s> Parser<'s> {
             }
         }
         // a line that opens the next statement -- an item, a control-flow keyword, `}`, or
-        // a fresh check block -- ends this one.
-        let ends = matches!(
-            kind,
-            TokKind::RightBrace
-                | TokKind::Fn
-                | TokKind::Let
-                | TokKind::Pub
-                | TokKind::Struct
-                | TokKind::Enum
-                | TokKind::Impl
-                | TokKind::Pact
-                | TokKind::Use
-                | TokKind::Const
-                | TokKind::Module
-                | TokKind::Hash
-                | TokKind::If
-                | TokKind::Match
-                | TokKind::For
-                | TokKind::While
-                | TokKind::Loop
-                | TokKind::Return
-                | TokKind::Raise
-                | TokKind::Break
-                | TokKind::Continue
-                | TokKind::Collect
-        ) || matches!(kind, TokKind::Ident("where" | "examples" | "example"))
-            && self.check_intro();
+        // a fresh check block -- ends this one. So does anything that can't start a check
+        // at all (`]`, a stray operator): a check is an expr, so nothing follows for us here.
+        let ends = !kind.starts_expr()
+            || matches!(
+                kind,
+                TokKind::RightBrace
+                    | TokKind::Fn
+                    | TokKind::Let
+                    | TokKind::Pub
+                    | TokKind::Struct
+                    | TokKind::Enum
+                    | TokKind::Impl
+                    | TokKind::Pact
+                    | TokKind::Use
+                    | TokKind::Const
+                    | TokKind::Module
+                    | TokKind::Hash
+                    | TokKind::If
+                    | TokKind::Match
+                    | TokKind::For
+                    | TokKind::While
+                    | TokKind::Loop
+                    | TokKind::Return
+                    | TokKind::Raise
+                    | TokKind::Break
+                    | TokKind::Continue
+                    | TokKind::Collect
+            )
+            || matches!(kind, TokKind::Ident("where" | "examples" | "example"))
+                && self.check_intro();
         !ends
     }
 
