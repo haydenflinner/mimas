@@ -4,6 +4,7 @@ use vm::{
     anon::{self},
     api::Api,
     conversion::NeverReturn,
+    fixtures::Out,
 };
 
 pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
@@ -15,7 +16,7 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
 
 #[native]
 fn print<'gc>(ctx: Ctx<'gc>, msg: Val<'gc>) -> Result<(), RtErr> {
-    println!("{}", ctx.to_string(msg)?);
+    ctx.fixture::<Out>().write(&ctx.to_string(msg)?);
     Ok(())
 }
 
@@ -38,6 +39,6 @@ fn todo<'gc>(ctx: Ctx<'gc>, msg: Option<anon::T<'gc>>) -> Result<NeverReturn, Rt
 
 #[native]
 fn dbg<'gc>(ctx: Ctx<'gc>, val: anon::T<'gc>) -> Result<anon::T<'gc>, RtErr> {
-    println!("dbg value: {}", ctx.display(val.0)?);
+    ctx.fixture::<Out>().write(&format!("dbg value: {}", ctx.display(val.0)?));
     Ok(val)
 }

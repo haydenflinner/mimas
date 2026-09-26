@@ -59,7 +59,18 @@ let first_big: int? = for n in numbers {
 A `for` loop that never breaks a value evaluates to `()`. To *build* a value out of every iteration instead of breaking once, use [`collect`](./collection.md).
 
 ```admonish warning title="Mutation during iteration"
-Avoid mutating a collection while you are iterating over it. mimas does not catch this today -- it has no borrow checker, and a purely-runtime check would either reject safe code or ambush you mid-loop, both of which cut against the language's goals. A compile-time check is planned. Until then, mutating the collection you are looping over can behave unexpectedly; pushing to an array inside its own `for`, for instance, may not terminate.
+Do not mutate a collection while you are iterating over it. The compiler rejects direct cases -- writing to it by index (`xs[i] = v`) or calling a method that modifies it (`xs.push(0)`, `d.insert(k, v)`) inside the loop body:
 
-When the compiler can prove a loop does not change the length of what it iterates, it computes that length once instead of on every pass. This is only an optimization, and the cost of missing it is negligible unless you run many thousands of iterations. If you do need to grow a collection as you walk it, iterate a copy or use a `loop` with the bounds handled yourself.
+```mimas
+let xs = [1, 2];
+for x in xs {
+    xs.push(x); // error: cannot mutate `xs` while iterating over it
+}
+```
+
+The guard follows the place being iterated, so it also sees through field and index accesses (`for x in w.arr { w.arr[0] = 0 }` is likewise rejected). It is a lint for the common trap, not an alias analysis: mutation reached through another binding for the same collection (`let ys = xs; ys.push(0)`), through a helper function, or through an indirect call is still possible and can skip elements, visit them twice, or loop forever. <!-- TODO: a runtime check (e.g. a mutation counter or an iteration lock on the collection) could catch the indirect cases at some per-write cost. -->
+
+If you need to change a collection as you walk it, gather the changes and apply them afterward, loop over a snapshot instead (`let snapshot = for x in xs collect x;` then `for x in snapshot`), or use a `loop` with the bounds handled yourself. Mutating the *elements* (`inner.push(0)` on an array of arrays, `xs[i].field = v`) is fine -- it is changes to the collection's own contents that are rejected.
+
+When the compiler can prove a loop does not change the length of what it iterates, it computes that length once instead of on every pass. This is only an optimization, and the cost of missing it is negligible unless you run many thousands of iterations.
 ```

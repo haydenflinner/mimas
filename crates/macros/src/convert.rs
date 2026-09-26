@@ -6,17 +6,24 @@ use syn::{
     spanned::Spanned,
 };
 
-/// Returns the name of the ctx binding so callers can reference it in generated code.
-pub fn expand_conversion(input: &mut ItemFn) -> Result<Ident, syn::Error> {
+/// Returns the name of the ctx binding so callers can reference it in generated code, plus the
+/// indices of parameters written `&mut` (counting from the first non-ctx arg: 0 is a method's
+/// receiver or a free fn's first param). The indices ride into `vm::api::NativeMutates`
+/// submissions so `install_method` can flag mutating receivers for the solver.
+pub fn expand_conversion(input: &mut ItemFn) -> Result<(Ident, Vec<usize>), syn::Error> {
     let ctx = prepare_ctx(input)?;
     let mut preludes: Vec<syn::Stmt> = Vec::new();
-    for arg in input.sig.inputs.iter_mut().skip(1) {
+    let mut mutating = Vec::new();
+    for (index, arg) in input.sig.inputs.iter_mut().skip(1).enumerate() {
         let FnArg::Typed(pt) = arg else { continue };
         let Pat::Ident(pi) = &*pt.pat else { continue };
         let name = pi.ident.clone();
         let Some(shape) = detect_shape(&pt.ty)? else {
             continue;
         };
+        if shape.mutable {
+            mutating.push(index);
+        }
         // the rebinding is annotated with the user's written type -- that's what keeps their
         // `use HashMap` / `use Str` imports live after the swap
         let original_ty = (*pt.ty).clone();
@@ -26,7 +33,7 @@ pub fn expand_conversion(input: &mut ItemFn) -> Result<Ident, syn::Error> {
     for stmt in preludes.into_iter().rev() {
         input.block.stmts.insert(0, stmt);
     }
-    Ok(ctx)
+    Ok((ctx, mutating))
 }
 
 fn prepare_ctx(input: &mut ItemFn) -> Result<Ident, syn::Error> {

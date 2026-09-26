@@ -46,6 +46,9 @@ pub fn walk_item(item: &Item, visitor: &mut impl Visitor) {
     match item.kind() {
         ItemKind::Function(function) => {
             visitor.ident(&function.name);
+            for param in &function.type_params {
+                visitor.ident(param);
+            }
             for parameter in &function.parameters {
                 walk_binding(parameter, visitor);
             }
@@ -103,10 +106,16 @@ pub fn walk_item(item: &Item, visitor: &mut impl Visitor) {
         }
         ItemKind::Struct(struc) => {
             visitor.ident(&struc.name);
+            for param in &struc.type_params {
+                visitor.ident(param);
+            }
             walk_fields(&struc.fields, visitor);
         }
         ItemKind::Enum(en) => {
             visitor.ident(&en.head);
+            for param in &en.type_params {
+                visitor.ident(param);
+            }
             for (name, member) in &en.members {
                 visitor.ident(name);
                 match member {
@@ -364,9 +373,13 @@ pub fn walk_annotation(annotation: &Annotation, visitor: &mut impl Visitor) {
         }
         // unit names aren't names in scope; nothing to visit
         Annotation::Quantity(_) => {}
-        Annotation::Of(ty, unit) => {
-            visitor.ident(ty);
-            walk_annotation(unit, visitor);
+        Annotation::Applied(ty, args) => {
+            for segment in ty {
+                visitor.ident(segment);
+            }
+            for arg in args {
+                walk_annotation(arg, visitor);
+            }
         }
         Annotation::Unit | Annotation::Kw(_) | Annotation::Poison(_) => {}
     }

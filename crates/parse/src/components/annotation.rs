@@ -22,9 +22,10 @@ pub enum Annotation {
     /// A compound unit, `usd/kWh` or `m/s^2`: each unit with its signed exponent. Whether the
     /// names are units is for the checker to say. (A lone unit name is a plain `Ty`.)
     Quantity(Vec<(Ident, i8)>),
-    /// A type applied to a unit, `Interval<kW>`: the type, and what its numbers measure. The
-    /// type is all the compiler sees; the unit is for the dimension checker.
-    Of(Ident, Box<Annotation>),
+    /// A type applied to arguments in `<>`, `Pair<A, B>` or `mod::Pair<A, B>`: either real
+    /// type arguments for a generic type, or a single unit (`Interval<kW>`) -- the checker
+    /// knows which the head is.
+    Applied(Vec<Ident>, Vec<Annotation>),
     Poison(Poison),
 }
 
@@ -63,7 +64,13 @@ impl std::fmt::Display for Annotation {
                     })
                     .join(""),
             ),
-            Annotation::Of(ty, unit) => f.pad(&format!("{ty}<{unit}>")),
+            Annotation::Applied(ty, args) => {
+                f.pad(&format!(
+                    "{}<{}>",
+                    ty.iter().map(|i| i.to_string()).join("::"),
+                    args.iter().join(", ")
+                ))
+            }
             Annotation::Poison(_) => f.pad(POISON),
         }
     }

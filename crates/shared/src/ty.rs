@@ -2,7 +2,7 @@ use crate::AdtId;
 use indexmap::IndexMap;
 use itertools::Itertools;
 
-crate::id!(pub Vid, pub PactId);
+crate::id!(pub Vid, pub PactId, pub ParamId);
 
 impl Vid {
     pub const UNKNOWN: Vid = Vid(u32::MAX);
@@ -93,6 +93,14 @@ pub enum Ty {
     ///
     /// See more in the [book](https://mim.as/extension/working-with-types.html#anonymous-types).
     Anon(u32),
+    /// A declared type parameter of a generic `fn`/`struct`/`enum`/`impl` -- the `T` in
+    /// `fn map<T>(xs: [T]) -> [T]`. Params are rigid: inside the generic body one only unifies
+    /// with itself (a [Ty::Vid] may still bind to it), which is what makes `fn f<T>(x: T) -> int
+    /// { x }` an error. At every *use* of the generic item the checker substitutes each param
+    /// with a fresh vid, so two call sites can instantiate it differently. Each `ParamId` is
+    /// globally unique to one declared parameter, so `T` in `map` can never collide with `T`
+    /// somewhere else.
+    Param(ParamId),
     /// An ordered, growable sequence of values that all share one type, like a `Vec` in Rust.
     /// Written `[T]`.
     ///
@@ -113,10 +121,12 @@ pub enum Ty {
     /// See more in the [book](https://mim.as/reference/functions.html).
     Fn(FnHeader),
     /// A user-defined type: a `struct` (a product type) or an `enum` (a sum type). Modules are
-    /// adts internally too, flagged `IS_MODULE`.
+    /// adts internally too, flagged `IS_MODULE`. The `Vec<Ty>` is the adt's type arguments --
+    /// empty for non-generic types, or the instantiation of a generic one (`List<int>`). A
+    /// generic adt *definition* is stored with its own [Ty::Param]s as the args.
     ///
     /// See more in the [book](https://mim.as/reference/types.html).
-    Adt(AdtId),
+    Adt(AdtId, Vec<Ty>),
     /// A value that is either `T` or `null`, written `T?`. There's no option of an option: a `T??`
     /// flattens to `T?`.
     ///
@@ -129,10 +139,11 @@ pub enum Ty {
     Result(Box<Ty>),
     /// `Self` inside an `impl` block: the adt being implemented. References to an adt within its
     /// own impl items are rewritten to this by `filter_adt`, and it's otherwise interchangeable
-    /// with a [Ty::Adt] of the same id.
+    /// with a [Ty::Adt] of the same id. Carries type args exactly like `Adt`, so `Self` inside
+    /// `impl List` is `List<T>`.
     ///
     /// See more in the [book](https://mim.as/reference/types/structs.html#methods-and-associated-items).
-    Identity(AdtId),
+    Identity(AdtId, Vec<Ty>),
     /// A pact bound: any value whose type implements every pact listed. Written as a pact's name,
     /// or several joined with `+` (`Named + Aged`). The concrete type isn't known statically, so
     /// method calls through a bound dispatch at runtime.
@@ -158,10 +169,11 @@ impl PartialEq for Ty {
             (Self::Fn(l), Self::Fn(r)) => l == r,
             (Self::Option(l), Self::Option(r)) => l == r,
             (Self::Result(l), Self::Result(r)) => l == r,
-            (Self::Adt(l), Self::Adt(r)) => l == r,
-            (Self::Identity(l), Self::Identity(r)) => l == r,
+            (Self::Adt(l, la), Self::Adt(r, ra)) => l == r && la == ra,
+            (Self::Identity(l, la), Self::Identity(r, ra)) => l == r && la == ra,
             (Self::Pacts(l), Self::Pacts(r)) => l == r,
             (Self::Skolem(l), Self::Skolem(r)) => l == r,
+            (Self::Param(l), Self::Param(r)) => l == r,
             _ => core::mem::discriminant(self) == core::mem::discriminant(other),
         }
     }
@@ -198,15 +210,51 @@ impl Ty {
         }
     }
 
+    /// A non-generic adt reference: `Ty::adt(id)` is `Ty::Adt(id, vec![])`.
+    pub fn adt(id: AdtId) -> Ty {
+        Ty::Adt(id, vec![])
+    }
+
+    /// A generic adt applied to `args`: `Ty::Adt(id, args)`.
+    pub fn app(id: AdtId, args: Vec<Ty>) -> Ty {
+        Ty::Adt(id, args)
+    }
+
     pub fn as_adt(&self) -> Option<&AdtId> {
         match self {
-            Ty::Identity(adt) | Ty::Adt(adt) => Some(adt),
+            Ty::Identity(adt, _) | Ty::Adt(adt, _) => Some(adt),
+            _ => None,
+        }
+    }
+
+    /// The adt and its type arguments, for sites that substitute them into field/variant types.
+    pub fn applied(&self) -> Option<(AdtId, &[Ty])> {
+        match self {
+            Ty::Identity(adt, args) | Ty::Adt(adt, args) => Some((*adt, args)),
             _ => None,
         }
     }
 
     pub fn is_numeric(&self) -> bool {
         matches!(self, Ty::Float | Ty::Int)
+    }
+
+    /// Whether `self` mentions a declared type parameter (`Ty::Param`) anywhere. Used to skip
+    /// the instantiation pass on non-generic types -- most types short-circuit immediately.
+    pub fn contains_params(&self) -> bool {
+        match self {
+            Ty::Param(_) => true,
+            Ty::Array(inner) | Ty::Dict(inner) | Ty::Option(inner) | Ty::Result(inner) => {
+                inner.contains_params()
+            }
+            Ty::Tuple(members) => members.iter().any(Ty::contains_params),
+            Ty::Fn(h) => {
+                h.parameters.iter().any(|p| p.ty.contains_params())
+                    || h.return_ty.contains_params()
+            }
+            Ty::Adt(_, args) | Ty::Identity(_, args) => args.iter().any(Ty::contains_params),
+            _ => false,
+        }
     }
 
     /// Whether a pact's `Self` appears anywhere in this type, however deeply nested.
@@ -220,6 +268,7 @@ impl Ty {
             Ty::Fn(h) => {
                 h.parameters.iter().any(|p| p.ty.contains_skolem()) || h.return_ty.contains_skolem()
             }
+            Ty::Adt(_, args) | Ty::Identity(_, args) => args.iter().any(Ty::contains_skolem),
             Ty::Unit
             | Ty::Never
             | Ty::Null
@@ -229,8 +278,7 @@ impl Ty {
             | Ty::Str
             | Ty::Vid(_)
             | Ty::Anon(_)
-            | Ty::Adt(_)
-            | Ty::Identity(_)
+            | Ty::Param(_)
             | Ty::Pacts(_) => false,
         }
     }
@@ -332,11 +380,12 @@ impl std::fmt::Display for FnHeader {
     }
 }
 
-/// Where adt and pact names come from when a type is printed. The solver's tables implement
-/// this, as do the names it registered on the current thread (what `Display` uses).
+/// Where adt, pact and type-param names come from when a type is printed. The solver's tables
+/// implement this, as do the names it registered on the current thread (what `Display` uses).
 pub trait TyNames {
     fn adt(&self, id: AdtId) -> Option<String>;
     fn pact(&self, id: PactId) -> Option<String>;
+    fn param(&self, id: ParamId) -> Option<String>;
 }
 
 /// The names the solver registered on this thread.
@@ -344,24 +393,30 @@ pub struct ThreadNames;
 
 impl TyNames for ThreadNames {
     fn adt(&self, id: AdtId) -> Option<String> {
-        TY_NAMES.with_borrow(|(adts, _)| adts.get(id.index()).filter(|n| !n.is_empty()).cloned())
+        TY_NAMES.with_borrow(|(adts, _, _)| adts.get(id.index()).filter(|n| !n.is_empty()).cloned())
     }
 
     fn pact(&self, id: PactId) -> Option<String> {
-        TY_NAMES.with_borrow(|(_, pacts)| pacts.get(id.index()).filter(|n| !n.is_empty()).cloned())
+        TY_NAMES
+            .with_borrow(|(_, pacts, _)| pacts.get(id.index()).filter(|n| !n.is_empty()).cloned())
+    }
+
+    fn param(&self, id: ParamId) -> Option<String> {
+        TY_NAMES
+            .with_borrow(|(_, _, params)| params.get(id.index()).filter(|n| !n.is_empty()).cloned())
     }
 }
 
-// `Display` has no way to reach the solver's tables, so the solver mirrors adt/pact names
+// `Display` has no way to reach the solver's tables, so the solver mirrors adt/pact/param names
 // into this thread-local as it allocates them -- the alternative is `<adt>` placeholders in
 // every type error
 thread_local! {
-    static TY_NAMES: std::cell::RefCell<(Vec<String>, Vec<String>)> =
-        const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
+    static TY_NAMES: std::cell::RefCell<(Vec<String>, Vec<String>, Vec<String>)> =
+        const { std::cell::RefCell::new((Vec::new(), Vec::new(), Vec::new())) };
 }
 
 pub fn name_adt(index: usize, name: &str) {
-    TY_NAMES.with_borrow_mut(|(adts, _)| {
+    TY_NAMES.with_borrow_mut(|(adts, _, _)| {
         if adts.len() <= index {
             adts.resize(index + 1, String::new());
         }
@@ -370,11 +425,20 @@ pub fn name_adt(index: usize, name: &str) {
 }
 
 pub fn name_pact(index: usize, name: &str) {
-    TY_NAMES.with_borrow_mut(|(_, pacts)| {
+    TY_NAMES.with_borrow_mut(|(_, pacts, _)| {
         if pacts.len() <= index {
             pacts.resize(index + 1, String::new());
         }
         pacts[index] = name.to_string();
+    });
+}
+
+pub fn name_param(index: usize, name: &str) {
+    TY_NAMES.with_borrow_mut(|(_, _, params)| {
+        if params.len() <= index {
+            params.resize(index + 1, String::new());
+        }
+        params[index] = name.to_string();
     });
 }
 
@@ -400,15 +464,19 @@ impl Ty {
             // diag emitter recognize either as a leak and attach an explanatory note.
             Ty::Vid(vid) => format!("{INTERNAL_TY_MARKER}T{}>", vid.index()),
             Ty::Anon(n) => format!("{INTERNAL_TY_MARKER}A{n}>"),
-            Ty::Identity(_) | Ty::Skolem(_) => "Self".into(),
-            Ty::Adt(id) => match names.adt(*id) {
+            Ty::Param(id) => names
+                .param(*id)
+                .unwrap_or_else(|| format!("T{}", id.index())),
+            Ty::Identity(_, _) | Ty::Skolem(_) => "Self".into(),
+            Ty::Adt(id, args) => match names.adt(*id) {
                 // module adts are spelled `<module:foo>` internally
                 Some(name) => match name
                     .strip_prefix("<module:")
                     .and_then(|r| r.strip_suffix('>'))
                 {
                     Some(module) => format!("module `{module}`"),
-                    None => name,
+                    None if args.is_empty() => name,
+                    None => format!("{name}<{}>", args.iter().map(|a| a.display(names)).join(", ")),
                 },
                 None => "<adt>".into(),
             },

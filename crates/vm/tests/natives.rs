@@ -419,7 +419,7 @@ fn runtime_described_types_and_natives() {
                     }],
                 }
             });
-            let point = Ty::Adt(binding.adt_id);
+            let point = Ty::adt(binding.adt_id);
             api.add_assoc_described(point, "double", vec![Ty::Int], Ty::Int, |_, args| {
                 Ok(vm::Val::Int(args[0].as_int().unwrap_or_default() * 2))
             });

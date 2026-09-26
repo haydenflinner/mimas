@@ -81,10 +81,15 @@ impl LooseEq for Ty {
             (Ty::Array(ty), Ty::Array(o_ty)) | (Ty::Dict(ty), Ty::Dict(o_ty)) => {
                 ty.loose_eq(o_ty, solver)
             }
-            (Ty::Adt(adt), Ty::Adt(o_adt))
-            | (Ty::Identity(adt), Ty::Adt(o_adt))
-            | (Ty::Adt(adt), Ty::Identity(o_adt)) => {
-                adt == o_adt || (solver.adts[adt].loose_eq(&solver.adts[o_adt], solver))
+            // vids and declared params are both "a type variable we can't name from the test
+            // side" -- loose equality accepts either for the other
+            (Ty::Vid(_), Ty::Param(_)) | (Ty::Param(_), Ty::Vid(_)) => true,
+            (Ty::Adt(adt, args), Ty::Adt(o_adt, o_args))
+            | (Ty::Identity(adt, args), Ty::Adt(o_adt, o_args))
+            | (Ty::Adt(adt, args), Ty::Identity(o_adt, o_args)) => {
+                args.len() == o_args.len()
+                    && args.iter().zip(o_args.iter()).all(|(a, b)| a.loose_eq(b, solver))
+                    && (adt == o_adt || (solver.adts[adt].loose_eq(&solver.adts[o_adt], solver)))
             }
 
             (Ty::Tuple(l), Ty::Tuple(r)) => {
@@ -189,7 +194,7 @@ macro_rules! adt {
         let adt = $crate::components::Adt::new_struct("TEST_STRUCT".into());
         let id = super::solve_test_utils::TEST_SESSION
             .with(|s| s.borrow_mut().0.adts.push(adt));
-        $crate::components::Ty::Adt(id)
+        $crate::components::Ty::adt(id)
     }};
 
     ({ $($field: ident: $ty: expr),* }) => {{
@@ -219,7 +224,7 @@ macro_rules! adt {
         )*
         let id = super::solve_test_utils::TEST_SESSION
             .with(|s| s.borrow_mut().0.adts.push(adt));
-        $crate::components::Ty::Adt(id)
+        $crate::components::Ty::adt(id)
     }};
 }
 
@@ -228,7 +233,7 @@ macro_rules! enu {
         let adt = $crate::components::Adt::new_enum("TEST_ENUM".into(), Default::default());
         let id = super::solve_test_utils::TEST_SESSION
             .with(|s| s.borrow_mut().0.adts.push(adt));
-        $crate::components::Ty::Adt(id)
+        $crate::components::Ty::adt(id)
     }};
     ({ $($variant:expr),*$(,)? }) => {{
         let variants = vec![
@@ -237,7 +242,7 @@ macro_rules! enu {
         let adt = $crate::components::Adt::new_enum("TEST_ENUM".into(), variants);
         let id = super::solve_test_utils::TEST_SESSION
             .with(|s| s.borrow_mut().0.adts.push(adt));
-        $crate::components::Ty::Adt(id)
+        $crate::components::Ty::adt(id)
     }};
 }
 

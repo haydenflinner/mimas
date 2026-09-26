@@ -34,10 +34,13 @@ mod register;
 pub fn native(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut input = parse_macro_input!(item as syn::ItemFn);
     let submission = doc_submission(&input.sig.ident, &collect_doc(&input.attrs));
-    if let Err(e) = convert::expand_conversion(&mut input) {
-        return e.to_compile_error().into();
+    match convert::expand_conversion(&mut input) {
+        Ok((_, mutating)) => {
+            let mutates = mutates_submissions(&input.sig.ident, &mutating);
+            TokenStream::from(quote!(#input #submission #mutates))
+        }
+        Err(e) => e.to_compile_error().into(),
     }
-    TokenStream::from(quote!(#input #submission))
 }
 
 /// Conversion **and** automatic registration -- no manual `api.add*` call.
@@ -100,9 +103,10 @@ fn expand_mimas(attr: TokenStream, item: TokenStream) -> Result<TokenStream2, sy
     match syn::parse::<syn::Item>(item)? {
         syn::Item::Fn(mut function) => {
             let submission = doc_submission(&function.sig.ident, &collect_doc(&function.attrs));
-            convert::expand_conversion(&mut function)?;
+            let (_, mutating) = convert::expand_conversion(&mut function)?;
+            let mutates = mutates_submissions(&function.sig.ident, &mutating);
             let registration = register::fn_registration(&function.sig.ident, module.as_deref());
-            Ok(quote!(#function #registration #submission))
+            Ok(quote!(#function #registration #submission #mutates))
         }
         // struct / enum: emit the same impls the derives would (so don't *also* `#[derive]`
         // them) plus the `add_adt` submission
@@ -205,4 +209,22 @@ fn doc_submission(fn_ident: &Ident, doc: &str) -> TokenStream2 {
             }
         }
     }
+}
+
+/// Ships the indices of `&mut` params to install time keyed by the item's full Rust path, for
+/// `vm::api::mutates_recv` to join onto the registered `ApiMethod` (see `vm::api::NativeMutates`).
+pub(crate) fn mutates_submissions(fn_ident: &Ident, indices: &[usize]) -> TokenStream2 {
+    let vm = vm_path();
+    let name = fn_ident.to_string();
+    let submissions = indices.iter().map(|index| {
+        quote! {
+            #vm::inventory::submit! {
+                #vm::api::NativeMutates {
+                    path: ::std::concat!(::std::module_path!(), "::", #name),
+                    index: #index,
+                }
+            }
+        }
+    });
+    quote!(#(#submissions)*)
 }

@@ -3,8 +3,9 @@ use crate::{
     components::*,
     errors::{
         AssignToConst, AssignToLoopVar, AssignToStringIndex, BareNullBinding, ExtraTupleMembers,
-        FieldNotFound, InvalidAssignTarget, InvalidPattern, InvalidUseTarget, MissingTupleMembers,
-        MultipleConstDeclarations, NonConstantValue, NotFound, SelfOutOfContext,
+        FieldNotFound, InvalidAssignTarget, InvalidPattern, InvalidUseTarget, IteratingHere,
+        MissingTupleMembers, MultipleConstDeclarations, MutateWhileIterating, NonConstantValue,
+        NotFound, SelfOutOfContext,
     },
     traits::*,
 };
@@ -16,9 +17,10 @@ use parse::{
     components::{Binding, Pat, PatKind},
     *,
 };
-use shared::{FileId, IdVec, Literal as RawLiteral, Located, Location, PactId};
+use shared::{FileId, IdVec, Literal as RawLiteral, Located, Location, PactId, ParamId};
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
+    rc::Rc,
     sync::Arc,
 };
 
@@ -43,11 +45,29 @@ pub struct Solver {
 
     pub(crate) dec_to_native: HashMap<DecId, NativeBinding>,
 
+    // dataframe schemas (see frames.rs): a frame's Ty stays the nominal `DataFrame` while
+    // these carry its column map -- keyed by producing expr and by `let` binding.
+    pub(crate) frame_schemas: HashMap<NodeId, Rc<crate::frames::FrameSchema>>,
+    pub(crate) frame_decs: HashMap<DecId, Rc<crate::frames::FrameSchema>>,
+    /// `__q_group`/`group_by` results: `(input schema, key columns)` by expr/binding.
+    pub(crate) group_schemas: HashMap<NodeId, Rc<(Rc<crate::frames::FrameSchema>, Vec<String>)>>,
+    pub(crate) group_decs: HashMap<DecId, Rc<(Rc<crate::frames::FrameSchema>, Vec<String>)>>,
+    /// Unit dims of `25kW`-style literals, merged from every solved ast (`NodeId`s are
+    /// globally unique, so one map is collision-free).
+    pub(crate) ast_quantities: HashMap<NodeId, shared::units::Dim>,
+
     pub(crate) control_flow: ControlFlow,
     pub(crate) ribs: Ribs,
     pub(crate) loop_stack: Vec<LoopRun>,
     pub(crate) fn_stack: Vec<FnRun>,
     pub(crate) non_value: Option<NodeId>,
+    /// Collections a `for` loop is iterating, pushed for the duration of each body's solve.
+    pub(crate) iter_guards: Vec<IterGuard>,
+
+    /// In-scope declared type params (`fn map<T, U>`, `impl Pair` re-entering `Pair<A, B>`),
+    /// innermost last. `Ty::from_annotation` resolves a bare `T` through these before ribs,
+    /// units, or builtins. Entries persist only for the duration of one item's solve.
+    pub(crate) type_params: Vec<HashMap<String, ParamId>>,
 }
 
 // Public impls
@@ -76,7 +96,14 @@ impl Solver {
             module_items: IndexMap::new(),
             sources: HashMap::new(),
             dec_to_native: HashMap::new(),
+            frame_schemas: HashMap::new(),
+            frame_decs: HashMap::new(),
+            group_schemas: HashMap::new(),
+            group_decs: HashMap::new(),
+            ast_quantities: HashMap::new(),
             non_value: None,
+            iter_guards: vec![],
+            type_params: vec![],
         };
         solver.ribs.push_import();
         solver.ribs.push_block();
@@ -129,6 +156,35 @@ impl Solver {
         Ok(())
     }
 
+    /// Errors if `path` off `dec` names a place a `for` loop is iterating -- the write or
+    /// mutating call at `at` would change the collection mid-loop. Guards compare on the
+    /// *resolved* root dec plus the access path, so shadowed names and sibling fields don't
+    /// false-positive. Deliberately not an alias analysis (see `IterGuard`).
+    pub(crate) fn check_iter_guard(
+        &self,
+        dec: DecId,
+        path: &[GuardSeg],
+        at: Location,
+    ) -> Result<()> {
+        if let Some(guard) = self
+            .iter_guards
+            .iter()
+            .find(|g| g.dec == dec && g.path == *path)
+        {
+            Err(MutateWhileIterating {
+                src: self.src(at),
+                at: at.into(),
+                name: guard.name.clone(),
+                iterating: vec![IteratingHere {
+                    src: self.src(guard.iterated_at),
+                    at: guard.iterated_at.into(),
+                    name: guard.name.clone(),
+                }],
+            })?
+        }
+        Ok(())
+    }
+
     pub(crate) fn builtin_adt(&self, ty: &Ty) -> Option<AdtId> {
         let name = match ty {
             Ty::Int => "int",
@@ -148,6 +204,9 @@ impl Solver {
 
     pub fn solve_all<'a>(&mut self, asts: impl IntoIterator<Item = &'a Ast>) -> Result<()> {
         let asts: Vec<_> = asts.into_iter().collect();
+        for ast in &asts {
+            self.ast_quantities.extend(ast.quantities());
+        }
         let module_names: Vec<Option<String>> = asts
             .iter()
             .map(|ast| ast.module_name())
@@ -465,7 +524,7 @@ impl Solver {
                 .library
                 .get(&first.lexeme)
                 .cloned()
-                .map(Ty::Adt)
+                .map(Ty::adt)
                 .ok_or_else(|| NotFound {
                     src: self.src(first.location),
                     at: first.location.into(),
@@ -680,6 +739,7 @@ impl Solver {
                 id: native_id,
                 sig,
                 takes_self: false,
+                mutates_recv: false,
             },
         );
         dec_id
@@ -752,6 +812,18 @@ impl Solver {
                     .map(|t| self.fresh_vids(t, self_ty, memo))
                     .collect(),
             ),
+            Ty::Adt(aid, args) => Ty::Adt(
+                aid,
+                args.iter()
+                    .map(|a| self.fresh_vids(a, self_ty, memo))
+                    .collect(),
+            ),
+            Ty::Identity(aid, args) => Ty::Identity(
+                aid,
+                args.iter()
+                    .map(|a| self.fresh_vids(a, self_ty, memo))
+                    .collect(),
+            ),
             Ty::Fn(h) => {
                 let parameters = h
                     .parameters
@@ -797,6 +869,18 @@ impl Solver {
                 self.substitute_anons(&h.return_ty, memo),
                 h.is_method,
             )),
+            Ty::Adt(aid, args) => Ty::Adt(
+                *aid,
+                args.iter()
+                    .map(|a| self.substitute_anons(a, memo))
+                    .collect(),
+            ),
+            Ty::Identity(aid, args) => Ty::Identity(
+                *aid,
+                args.iter()
+                    .map(|a| self.substitute_anons(a, memo))
+                    .collect(),
+            ),
             Ty::Unit
             | Ty::Never
             | Ty::Null
@@ -805,10 +889,9 @@ impl Solver {
             | Ty::Float
             | Ty::Str
             | Ty::Vid(_)
-            | Ty::Adt(_)
+            | Ty::Param(_)
             | Ty::Pacts(_)
-            | Ty::Skolem(_)
-            | Ty::Identity(_) => t.clone(),
+            | Ty::Skolem(_) => t.clone(),
         }
     }
 
@@ -835,11 +918,11 @@ impl Solver {
                 let id = self.push_adt(adt);
                 if let Some(parent_adt) = &parent {
                     let seg_ident = Ident::synthetic(segment.clone());
-                    let dec = self.dec_id(&seg_ident, Ty::Adt(id), DecKind::Adt(id), Vis::Public);
+                    let dec = self.dec_id(&seg_ident, Ty::adt(id), DecKind::Adt(id), Vis::Public);
                     self.adts[parent_adt].as_struct_mut().insert(
                         segment.clone(),
                         Field {
-                            ty: Ty::Adt(id),
+                            ty: Ty::adt(id),
                             constant: true,
                             declaration_location: location,
                             dec,
@@ -873,6 +956,9 @@ impl Solver {
         }
         let umbrella = Adt {
             name: api_adt.name.clone(),
+            // host/native adts never declare type params; generic signatures live on the
+            // host side as `Ty::Anon` slots instead
+            type_params: vec![],
             variants,
             impls: HashMap::new(),
             native_overloads: HashMap::new(),
@@ -901,7 +987,7 @@ impl Solver {
                 let variant_ident = Ident::synthetic(qualified);
                 let dec = self.dec_id(
                     &variant_ident,
-                    Ty::Adt(api_adt.adt_id),
+                    Ty::adt(api_adt.adt_id),
                     DecKind::Variant {
                         parent: api_adt.adt_id,
                         layout: v.layout_id,
@@ -916,7 +1002,7 @@ impl Solver {
 
         if api_adt.module.is_empty() {
             let ident = Ident::synthetic(api_adt.name.clone());
-            let ty = Ty::Adt(api_adt.adt_id);
+            let ty = Ty::adt(api_adt.adt_id);
             let dec_id = self.dec_id(&ident, ty, DecKind::Adt(api_adt.adt_id), Vis::Public);
             self.ribs.module_mut().insert(ident, dec_id);
             self.library.insert(api_adt.name.clone(), api_adt.adt_id);
@@ -963,14 +1049,14 @@ impl Solver {
             let ident = Ident::synthetic(adt.name.clone());
             let dec = self.dec_id(
                 &ident,
-                Ty::Adt(adt.adt_id),
+                Ty::adt(adt.adt_id),
                 DecKind::Adt(adt.adt_id),
                 Vis::Public,
             );
             self.adts[leaf].as_struct_mut().insert(
                 adt.name.clone(),
                 Field {
-                    ty: Ty::Adt(adt.adt_id),
+                    ty: Ty::adt(adt.adt_id),
                     constant: true,
                     declaration_location: Default::default(),
                     dec,
@@ -1010,6 +1096,7 @@ impl Solver {
                             id,
                             sig,
                             takes_self: false,
+                            mutates_recv: false,
                         },
                     );
                     self.adts[leaf].as_struct_mut().insert(
@@ -1025,7 +1112,7 @@ impl Solver {
                 // native method or associated fn on a built-in
                 ApiEntry::Method(m) => {
                     let adt = match &m.recv_ty {
-                        Ty::Adt(id) => *id,
+                        Ty::Adt(id, _) => *id,
                         other => self.builtin_adt(other).unwrap_or_else(|| {
                             panic!("native method receiver must be a builtin Ty or registered adt; got {other:?}")
                         }),
@@ -1052,6 +1139,7 @@ impl Solver {
                             id,
                             sig,
                             takes_self: m.takes_self,
+                            mutates_recv: m.mutates_recv,
                         },
                     );
                     let field = Field {
@@ -1093,7 +1181,7 @@ impl Solver {
                     // same slot a lang `impl` const hoists into
                     if let Some(recv) = &c.recv_ty {
                         let adt = match recv {
-                            Ty::Adt(id) => *id,
+                            Ty::Adt(id, _) => *id,
                             other => self.builtin_adt(other).unwrap_or_else(|| {
                                 panic!("assoc constant receiver must be a builtin Ty or registered adt; got {other:?}")
                             }),
@@ -1256,6 +1344,154 @@ impl Solver {
     }
 }
 
+// generic type params
+impl Solver {
+    /// The `ParamId` for one declared param ident (`T` in `fn map<T>`). Derived from the
+    /// ident's `NodeId` so hoisting and body-solving the same decl always agree on it; also
+    /// registers the display name so `Ty::Param` renders as `T`, not `<param>`.
+    pub(crate) fn param_id_of(ident: &Ident) -> ParamId {
+        let pid = ParamId::from(ident.id.index() as u32);
+        shared::name_param(pid.index(), &ident.lexeme);
+        pid
+    }
+
+    /// Push a type-parameter scope parsed off a generic item (`fn map<T, U>`). Each `ParamId`
+    /// is derived from the param ident's `NodeId`, so hoisting and body-solving the same
+    /// decl resolve `T` to the *same* id -- that's what lets a signature written once carry
+    /// rigid params through both phases.
+    pub(crate) fn push_type_params(&mut self, params: &[Ident]) {
+        let scope: HashMap<String, ParamId> = params
+            .iter()
+            .map(|i| (i.lexeme.clone(), Self::param_id_of(i)))
+            .collect();
+        self.type_params.push(scope);
+    }
+
+    /// Re-enter the parameter scope of an already-declared adt -- `impl List` sees `List<T>`'s
+    /// `T` with the same `ParamId` the enum's stored member types use.
+    pub(crate) fn push_adt_params(&mut self, adt: AdtId) {
+        let scope: HashMap<String, ParamId> = self.adts[adt].type_params.iter().cloned().collect();
+        self.type_params.push(scope);
+    }
+
+    pub(crate) fn pop_type_params(&mut self) {
+        self.type_params.pop();
+    }
+
+    /// Is `ident` one of the in-scope declared type params (`T` in `fn map<T>`)? Innermost
+    /// scope wins, so a fn param shadows an impl's adt param of the same name.
+    pub(crate) fn type_param(&self, ident: &Ident) -> Option<ParamId> {
+        self.type_params
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(&ident.lexeme))
+            .copied()
+    }
+
+    /// `Ty::Adt(aid, args)` with a fresh vid for every declared param -- what a ctor use
+    /// (`L::C`, `Pair { .. }`) starts from before unification pins the args down.
+    pub(crate) fn instantiated_adt(&mut self, aid: AdtId) -> Ty {
+        let arity = self.adts[aid].type_params.len();
+        let args = (0..arity).map(|_| Ty::Vid(self.vid())).collect();
+        Ty::Adt(aid, args)
+    }
+
+    /// A type stored inside a generic definition, read back at a use site: every `Ty::Param`
+    /// swapped for a fresh vid (consistent within this one call -- `T` in two places still maps
+    /// to the same var). This is the HM instantiation step: `map<T, U>` used once gives
+    /// `fn([?t], (?t) -> ?u) -> [?u]` which call-site unification specializes freely.
+    pub(crate) fn instantiate_params(&mut self, t: &Ty) -> Ty {
+        if !t.contains_params() {
+            return t.clone();
+        }
+        let mut map = HashMap::new();
+        self.substitute_params(t, &mut map)
+    }
+
+    /// `stored` is a member/variant/impl signature declared inside (possibly generic) adt
+    /// `aid`, being read through a `Ty::Adt(aid, args)`/`Identity(aid, args)`. Rebinds each
+    /// declared param to the corresponding arg; params with no matching arg get fresh vids,
+    /// so `specialize` on a non-generic adt is a no-op.
+    pub(crate) fn specialize(&mut self, stored: &Ty, aid: AdtId, args: &[Ty]) -> Ty {
+        if !stored.contains_params() {
+            return stored.clone();
+        }
+        let mut map: HashMap<ParamId, Ty> = self.adts[aid]
+            .type_params
+            .iter()
+            .map(|(_, pid)| *pid)
+            .zip(args.iter().cloned())
+            .collect();
+        self.substitute_params(stored, &mut map)
+    }
+
+    /// Walk `t` swapping each `Ty::Param` for `map[pid]`; missing entries mint a fresh vid
+    /// lazily (and memoize, so one param always gets one var per call). Recurses through every
+    /// composite, including adt/identity type args.
+    pub(crate) fn substitute_params(&mut self, t: &Ty, map: &mut HashMap<ParamId, Ty>) -> Ty {
+        match t {
+            Ty::Param(pid) => match map.get(pid) {
+                Some(ty) => ty.clone(),
+                None => {
+                    let ty = Ty::Vid(self.vid());
+                    map.insert(*pid, ty.clone());
+                    ty
+                }
+            },
+            Ty::Array(v) => Ty::Array(Box::new(self.substitute_params(v, map))),
+            Ty::Dict(v) => Ty::Dict(Box::new(self.substitute_params(v, map))),
+            Ty::Tuple(ts) => Ty::Tuple(
+                ts.iter()
+                    .map(|t| self.substitute_params(t, map))
+                    .collect(),
+            ),
+            Ty::Option(inner) => Ty::Option(Box::new(self.substitute_params(inner, map))),
+            Ty::Result(inner) => Ty::Result(Box::new(self.substitute_params(inner, map))),
+            Ty::Adt(aid, args) => Ty::Adt(
+                *aid,
+                args.iter()
+                    .map(|a| self.substitute_params(a, map))
+                    .collect(),
+            ),
+            Ty::Identity(aid, args) => Ty::Identity(
+                *aid,
+                args.iter()
+                    .map(|a| self.substitute_params(a, map))
+                    .collect(),
+            ),
+            Ty::Fn(h) => {
+                let mut header = FnHeader::new(
+                    h.parameters
+                        .iter()
+                        .map(|p| {
+                            FnParam::new(
+                                p.name.clone(),
+                                self.substitute_params(&p.ty, map),
+                                p.has_default,
+                            )
+                        })
+                        .collect(),
+                    self.substitute_params(&h.return_ty, map),
+                    h.is_method,
+                );
+                header.is_ctor = h.is_ctor;
+                Ty::Fn(header)
+            }
+            Ty::Unit
+            | Ty::Never
+            | Ty::Null
+            | Ty::Bool
+            | Ty::Int
+            | Ty::Float
+            | Ty::Str
+            | Ty::Vid(_)
+            | Ty::Anon(_)
+            | Ty::Pacts(_)
+            | Ty::Skolem(_) => t.clone(),
+        }
+    }
+}
+
 impl Solver {
     pub(crate) fn solve_pat(&mut self, pat: &Pat, ty: Ty) -> Result<()> {
         // normalize so an unresolved Vid reveals its concrete shape (e.g. tuple destruction where
@@ -1413,12 +1649,14 @@ impl Solver {
                 let (adt, variant_name) = match path.kind() {
                     ExprKind::Ident(ident) => {
                         let ty = self.resolve_name(ident, ident.location())?;
-                        let Ty::Adt(adt) = ty else { Err(bad(&ty))? };
+                        let Some(adt) = ty.as_adt().copied() else {
+                            Err(bad(&ty))?
+                        };
                         (adt, None)
                     }
                     ExprKind::Access(Access::DoubleColon { left, right }) => {
                         let adt = match self.resolve_path_head(left)? {
-                            Ty::Adt(adt) | Ty::Identity(adt) => adt,
+                            Ty::Adt(adt, _) | Ty::Identity(adt, _) => adt,
                             lty => Err(bad(&lty))?,
                         };
                         // module::struct -- treat as the inner struct adt
@@ -1433,7 +1671,7 @@ impl Solver {
                                     at: right.location.into(),
                                     field_name: right.lexeme.clone(),
                                 })?;
-                            let Ty::Adt(inner) = field.ty else {
+                            let Some(inner) = field.ty.as_adt().copied() else {
                                 Err(bad(&field.ty))?
                             };
                             (inner, None)
@@ -1447,7 +1685,7 @@ impl Solver {
                                 })?
                             }
                             let dec = self.adts[adt].variants[&right.lexeme].dec();
-                            self.note(right, Ty::Adt(adt), dec);
+                            self.note(right, Ty::adt(adt), dec);
                             (adt, Some(right.lexeme.clone()))
                         }
                     }
@@ -1459,25 +1697,35 @@ impl Solver {
                     })?,
                 };
 
-                unify(self, ty, Ty::Adt(adt), pat.location())?;
+                // the pattern's own instantiation of the adt: unifying it against the scrutinee
+                // binds these fresh arg vids to the scrutinee's actual args (e.g. `int`), and
+                // `specialize` then plugs them into the variant's declared member types
+                let ctor_ty = self.instantiated_adt(adt);
+                unify(self, ty, ctor_ty.clone(), pat.location())?;
+                let ctor_args: Vec<Ty> = match &ctor_ty {
+                    Ty::Adt(_, args) => args.clone(),
+                    _ => vec![],
+                };
+                let ctor_ty = ctor_ty.normalized(self);
                 let variant_key = variant_name
                     .unwrap_or_else(|| self.adts[adt].variants.keys().next().unwrap().clone());
                 let variant = self.adts[adt]
                     .variants
                     .get(&variant_key)
-                    .ok_or_else(|| bad(&Ty::Adt(adt)))?
+                    .ok_or_else(|| bad(&ctor_ty))?
                     .clone();
                 // shadow the path with the layout adt id (per-variant for enums, the parent for
                 // non-enum structs) so IR can read it to emit IsInstance / GetField.
                 let layout = variant.layout().unwrap_or(adt);
-                self.shadow_expr_ty(path.id(), Ty::Adt(layout), path.location())?;
+                self.shadow_expr_ty(path.id(), Ty::adt(layout), path.location())?;
                 match (pat.kind(), variant) {
                     (PatKind::Variant(_), _) => Ok(()),
                     (PatKind::TupleVariant(_, sub_pats), Variant::Tuple(tv)) => {
                         if tv.members.len() != sub_pats.len() {
-                            Err(bad(&Ty::Adt(adt)))?
+                            Err(bad(&ctor_ty))?
                         }
                         for (sp, mty) in sub_pats.iter().zip(tv.members) {
+                            let mty = self.specialize(&mty, adt, &ctor_args);
                             self.solve_match_pat(sp, mty, reuse)?;
                         }
                         Ok(())
@@ -1492,11 +1740,12 @@ impl Solver {
                                         field_name: name.clone(),
                                     }
                                 })?;
+                            let fty = self.specialize(&fty, adt, &ctor_args);
                             self.solve_match_pat(sub, fty, reuse)?;
                         }
                         Ok(())
                     }
-                    _ => Err(bad(&Ty::Adt(adt)))?,
+                    _ => Err(bad(&ctor_ty))?,
                 }
             }
         }
@@ -1545,6 +1794,15 @@ impl Solver {
                         })?
                     }
                     _ => {}
+                }
+
+                // `xs[i] = v` writes through the collection itself; if a `for` loop is
+                // iterating that exact place the write can skip/double-visit elements or
+                // never terminate.
+                if let ExprKind::Access(Access::Square { left: receiver, .. }) = left.kind()
+                    && let Some(path) = access_path(receiver)
+                {
+                    self.check_iter_guard(dec_id, &path, left.location())?;
                 }
 
                 if let ExprKind::Access(Access::Square { left: receiver, .. }) = left.kind() {
@@ -1630,6 +1888,10 @@ impl Solver {
                         self.solve_match_pat(left, ty, false)?;
                     }
                 }
+
+                // a `table {}`/`query {}`/`.schema(…)`-typed RHS carries its column schema
+                // onto the binding, so `df.pull("x")` resolves through the name
+                self.propagate_frame_schemas(left, right);
             }
             StmtKind::Expr(expr) => expr.query(self).map(|_| ())?,
             StmtKind::Module(_) => {
@@ -1760,7 +2022,7 @@ impl Solver {
             // unknown type, so two `Self`s are known to match (unlike two values of the bound)
             let ty = match self.pact_self {
                 Some(pid) => Ty::Skolem(pid),
-                None => self.impl_target().map(Ty::Adt).ok_or_else(|| {
+                None => self.impl_target_ty().ok_or_else(|| {
                     Error::from(SelfOutOfContext {
                         src: self.src(read_location),
                         at: read_location.into(),
@@ -1782,12 +2044,16 @@ impl Solver {
                         };
                         self.instantiate_native(&sig, None)?
                     } else {
-                        Ty::Vid(self.decs[dec_id].vid).normalized(self)
+                        // a generic decl's stored signature holds `Ty::Param`s -- swap them
+                        // for fresh vars per use (the HM instantiation step), so each call
+                        // site can pick its own concrete types
+                        let stored = Ty::Vid(self.decs[dec_id].vid).normalized(self);
+                        self.instantiate_params(&stored)
                     };
                     (ty, Some(dec_id))
                 }
                 None if self.library.contains_key(&ident.lexeme) => {
-                    (Ty::Adt(self.library[&ident.lexeme]), None)
+                    (Ty::adt(self.library[&ident.lexeme]), None)
                 }
                 None => {
                     let pact = self.pacts.iter().find(|(_, p)| p.name == ident.lexeme);
@@ -1876,6 +2142,19 @@ impl Solver {
         self.ribs.impl_target()
     }
 
+    /// `Self` as a type inside an impl body: `Ty::Adt(target)` for a plain impl, or
+    /// `Adt(target, [Param A, Param B, ...])` for a generic one -- `impl Pair` implements
+    /// `Pair<A, B>` with the adt's own params in scope, not any single instantiation.
+    pub(crate) fn impl_target_ty(&self) -> Option<Ty> {
+        let aid = self.impl_target()?;
+        let args = self.adts[aid]
+            .type_params
+            .iter()
+            .map(|(_, pid)| Ty::Param(*pid))
+            .collect();
+        Some(Ty::Adt(aid, args))
+    }
+
     /// Resolves a function/closure parameter's type into an `FnParam` for the `FnHeader`: takes
     /// annotation if present, unifies with the default value's type if present, fixes `self` to
     /// the current impl target if any. Allocates one `Vid` per param and unifies into it
@@ -1896,9 +2175,8 @@ impl Solver {
         // writing `self: Self` explicitly. outside an impl, the body-pass declare leaves it as a
         // vid and SelfOutOfContext fires at first use.
         if ident.lexeme == "self"
-            && let Some(adt) = self.impl_target()
+            && let Some(mut target) = self.impl_target_ty()
         {
-            let mut target = Ty::Adt(adt);
             ty.fulfill_ty(&mut target, self)
                 .map_err(|e| e.into_type_mismatch(self, ident.location))?;
         }
@@ -2108,6 +2386,70 @@ pub(crate) struct NativeBinding {
     pub id: NativeId,
     pub sig: NativeFnSig,
     pub takes_self: bool,
+    /// From `ApiMethod::mutates_recv` -- lets `check_iter_guard` know a call mutates its
+    /// receiver. Always false for non-method natives.
+    pub mutates_recv: bool,
+}
+
+/// A collection an active `for` loop is iterating, expressed as the binding the iterator's
+/// root name resolved to plus the field/index path from there (`s.arr` guards `s` with path
+/// `[Field("arr")]`). A `Square` hop matches any index -- `xs[i]` vs `xs[j]` is beyond this
+/// check's remit.
+///
+/// This is a lint for the beginner trap of mutating a collection mid-loop, not an alias
+/// analysis: writes reached through a *different* binding (`let ys = xs; ys.push(..)`), a
+/// helper function's parameter, or a pact-bound method call are all knowingly missed.
+pub(crate) struct IterGuard {
+    pub dec: DecId,
+    pub path: Vec<GuardSeg>,
+    /// The `for` iterator expr's location, for the `IteratingHere` sub-diagnostic.
+    pub iterated_at: Location,
+    /// The iterator expr rendered, for messages.
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum GuardSeg {
+    Field(String),
+    Index,
+}
+
+/// Walks `expr`'s access spine to its root ident, returning it plus the field/index hops from
+/// there (`s.arr[i]` -> the `s` ident and `[Field("arr"), Index]`). `None` when `expr` isn't a
+/// place rooted at a name -- calls, literals, operator results all produce fresh values that
+/// can't alias an iterated collection in any way this check needs to know about.
+pub(crate) fn root_and_path(expr: &Expr) -> Option<(&Ident, Vec<GuardSeg>)> {
+    let mut path = Vec::new();
+    let mut cur = expr;
+    loop {
+        match cur.kind() {
+            ExprKind::Ident(ident) => {
+                path.reverse();
+                return Some((ident, path));
+            }
+            ExprKind::Access(Access::Dot { left, right, .. }) => {
+                path.push(GuardSeg::Field(right.as_ident()?.lexeme.clone()));
+                cur = left;
+            }
+            ExprKind::Access(Access::DoubleColon { left, right }) => {
+                path.push(GuardSeg::Field(right.lexeme.clone()));
+                cur = left;
+            }
+            ExprKind::Access(Access::Square { left, .. }) => {
+                path.push(GuardSeg::Index);
+                cur = left;
+            }
+            ExprKind::Grouping(g) => cur = &g.inner,
+            ExprKind::Unwrap(u) => cur = &u.expr,
+            ExprKind::Absolve(a) => cur = &a.left,
+            _ => return None,
+        }
+    }
+}
+
+/// The access path of a place expr, dropping the root (already identified by its resolved dec).
+pub(crate) fn access_path(expr: &Expr) -> Option<Vec<GuardSeg>> {
+    root_and_path(expr).map(|(_, path)| path)
 }
 
 /// One module-nested native function, as handed to [`Solver::register_native_module`].

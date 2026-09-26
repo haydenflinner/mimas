@@ -35,14 +35,15 @@ impl TyExt for Ty {
                     || fn_data.return_ty.occurs(other, solver)
             }
             Ty::Tuple(members) => members.iter().any(|v| v.occurs(other, solver)),
-            // adt bodies are nominal: descending into their field types would loop forever on
-            // recursive adts (e.g. `enum Tree { Branch(Vec<Tree>) }`), and a vid inside a field
-            // type can't form an infinite type just by being bound to a `Ty::Adt(_)` -- the adt
-            // itself doesn't unfold.
-            Ty::Adt(_) => false,
+            // adt bodies are nominal: the type args are part of the *head*, so `X = List<X>`
+            // must fail the occurs check (it would form an infinite type), while a vid inside a
+            // field type can never form one -- the adt itself doesn't unfold.
+            Ty::Adt(_, args) | Ty::Identity(_, args) => {
+                args.iter().any(|a| a.occurs(other, solver))
+            }
             Ty::Option(inner) | Ty::Result(inner) => inner.occurs(other, solver),
-            Ty::Identity(_)
-            | Ty::Anon(_)
+            Ty::Anon(_)
+            | Ty::Param(_)
             | Ty::Pacts(_) // annotations always required, never holds vids
             | Ty::Skolem(_)
             | Ty::Unit
@@ -76,7 +77,7 @@ impl TyExt for Ty {
     fn coerce_pacts(a: Ty, b: Ty, solver: &mut Solver) -> Option<Ty> {
         fn bounds(ty: &Ty, solver: &Solver) -> Option<Vec<PactId>> {
             match ty {
-                Ty::Adt(aid) | Ty::Identity(aid) => Some(
+                Ty::Adt(aid, _) | Ty::Identity(aid, _) => Some(
                     solver
                         .pact_impls
                         .iter()
@@ -120,6 +121,13 @@ impl TyExt for Ty {
                     .map(|v| Ty::from_annotation(v, solver))
                     .collect::<Result<_>>()?,
             )),
+            // a declared type param (`fn map<T>`, `struct Pair<A>`) -- looked up before
+            // anything else so a param named like a unit or a builtin still wins
+            Annotation::Ty(ident) if solver.type_param(&ident).is_some() => {
+                let ty = Ty::Param(solver.type_param(&ident).unwrap());
+                solver.note(&ident, ty.clone(), None);
+                Ok(ty)
+            }
             // a unit written where a type goes (`kW`, `usd`) is a float whose dimension the
             // checker tracks -- unless the program declares a type by that name, which wins
             Annotation::Ty(ident)
@@ -128,8 +136,60 @@ impl TyExt for Ty {
             {
                 Ok(Ty::Float)
             }
-            // `Interval<kW>` is an `Interval` to the type checker; the unit is the dimension pass's
-            Annotation::Of(ty, _) => Ty::from_annotation(Annotation::Ty(ty), solver),
+            // `Pair<int, str>` (or `mod::Pair<int, str>`) applies a generic adt;
+            // `Interval<kW>` is an `Interval` to the type checker -- the unit is the
+            // dimension pass's
+            Annotation::Applied(ty, args) => {
+                let head_ann = if ty.len() == 1 {
+                    Annotation::Ty(ty[0].clone())
+                } else {
+                    Annotation::Path(ty.clone())
+                };
+                let name_ident = ty.last().expect("applied annotation has a head");
+                let head = Ty::from_annotation(head_ann, solver)?.normalized(solver);
+                let Some((aid, head_args)) = head.applied() else {
+                    Err(crate::errors::NotGeneric {
+                        src: solver.src(name_ident.location),
+                        at: name_ident.location.into(),
+                        name: name_ident.lexeme.clone(),
+                    })?
+                };
+                let expected = solver.adts[aid].type_params.len();
+                if expected == 0 {
+                    // a `<...>` on a non-generic type is the old unit-annotation syntax --
+                    // only allowed when every argument is a unit (`Interval<kW>`), not a type
+                    let all_units = args.iter().all(|a| match a {
+                        Annotation::Ty(ident) => {
+                            solver.ribs.resolve(&ident).is_none()
+                                && shared::units::lookup(&ident.lexeme).is_some()
+                        }
+                        Annotation::Quantity(_) => true,
+                        _ => false,
+                    });
+                    if all_units {
+                        return Ok(head);
+                    }
+                    Err(crate::errors::NotGeneric {
+                        src: solver.src(name_ident.location),
+                        at: name_ident.location.into(),
+                        name: name_ident.lexeme.clone(),
+                    })?
+                }
+                if args.len() != expected || !head_args.is_empty() {
+                    Err(crate::errors::GenericArity {
+                        src: solver.src(name_ident.location),
+                        at: name_ident.location.into(),
+                        name: solver.adts[aid].name.clone(),
+                        expected,
+                        found: args.len(),
+                    })?
+                }
+                let arg_tys = args
+                    .into_iter()
+                    .map(|a| Ty::from_annotation(a, solver))
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(Ty::Adt(aid, arg_tys))
+            }
             Annotation::Quantity(parts) => {
                 for (unit, _) in &parts {
                     if shared::units::lookup(&unit.lexeme).is_none() {
@@ -158,7 +218,7 @@ impl TyExt for Ty {
                 solver.note(&head, ty.clone(), dec);
                 for segment in iter {
                     let adt = match ty.clone().normalized(solver) {
-                        Ty::Adt(adt) | Ty::Identity(adt) => adt,
+                        Ty::Adt(adt, _) | Ty::Identity(adt, _) => adt,
                         other => Err(TypeHasNoFields {
                             src: solver.src(segment.location),
                             at: segment.location.into(),
@@ -241,11 +301,18 @@ impl TyExt for Ty {
                 h.is_ctor = was_ctor;
                 Ty::Fn(h)
             }
-            Ty::Adt(adt) => Ty::Adt(adt),
+            Ty::Adt(adt, args) => Ty::Adt(
+                adt,
+                args.into_iter().map(|a| a.normalized(solver)).collect(),
+            ),
             Ty::Pacts(pacts) => Ty::Pacts(pacts),
             Ty::Skolem(pid) => Ty::Skolem(pid),
             Ty::Anon(n) => Ty::Anon(n),
-            Ty::Identity(adt) => Ty::Identity(adt),
+            Ty::Param(pid) => Ty::Param(pid),
+            Ty::Identity(adt, args) => Ty::Identity(
+                adt,
+                args.into_iter().map(|a| a.normalized(solver)).collect(),
+            ),
             Ty::Option(inner) => {
                 if let Ty::Option(nested_inner) = *inner {
                     Ty::Option(Box::new(nested_inner.normalized(solver)))
@@ -262,7 +329,18 @@ impl TyExt for Ty {
             Ty::Array(ty) => Ty::Array(Box::new(ty.filter_adt(adt))),
             Ty::Dict(ty) => Ty::Dict(Box::new(ty.filter_adt(adt))),
             Ty::Tuple(members) => Ty::Tuple(members.iter().map(|m| m.filter_adt(adt)).collect()),
-            Ty::Adt(this_adt) if *this_adt == adt => Ty::Identity(adt),
+            Ty::Adt(this_adt, args) if *this_adt == adt => Ty::Identity(
+                adt,
+                args.iter().map(|a| a.filter_adt(adt)).collect(),
+            ),
+            Ty::Adt(id, args) => Ty::Adt(
+                *id,
+                args.iter().map(|a| a.filter_adt(adt)).collect(),
+            ),
+            Ty::Identity(id, args) => Ty::Identity(
+                *id,
+                args.iter().map(|a| a.filter_adt(adt)).collect(),
+            ),
             Ty::Fn(f) => {
                 let parameters: Vec<FnParam> = f
                     .parameters
@@ -275,11 +353,10 @@ impl TyExt for Ty {
             }
             Ty::Option(inner) => Ty::Option(Box::new(inner.filter_adt(adt))),
             Ty::Result(inner) => Ty::Result(Box::new(inner.filter_adt(adt))),
-            Ty::Adt(_)
-            | Ty::Pacts(_)
+            Ty::Pacts(_)
             | Ty::Skolem(_)
-            | Ty::Identity(_)
             | Ty::Anon(_)
+            | Ty::Param(_)
             | Ty::Vid(_)
             | Ty::Unit
             | Ty::Never

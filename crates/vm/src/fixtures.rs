@@ -70,6 +70,31 @@ pub struct DebugInfo {
     pub stack: RefCell<Vec<(BodyId, u32)>>,
 }
 
+/// Where `print`/`dbg` and friends send their lines. The default sink is
+/// the process's stdout; an embedder (a repl, the wasm eval worker) swaps
+/// in a capture with [`Out::set`] and drains it after the run. Each call
+/// gets one line's text — the trailing newline is the sink's business.
+pub struct Out(pub RefCell<Box<dyn FnMut(&str)>>);
+
+impl Default for Out {
+    fn default() -> Self {
+        Self(RefCell::new(Box::new(|line| println!("{line}"))))
+    }
+}
+
+impl Out {
+    /// Emit one line to the current sink.
+    pub fn write(&self, line: &str) {
+        (self.0.borrow_mut())(line);
+    }
+
+    /// Swap the sink. The old one is dropped — this is a one-way trip per
+    /// Vm, which is all capture-style embedders need (a Vm is one session).
+    pub fn set(&self, sink: impl FnMut(&str) + 'static) {
+        *self.0.borrow_mut() = Box::new(sink);
+    }
+}
+
 /// Per-Vm type-keyed storage for host-shared state. Lazily creates entries on first access via
 /// `T::default()`. Designed to hold things like [FreezeCell](crate::freeze::FreezeCell)s that
 /// host code installs `&mut T` borrows into during mimas execution.

@@ -35,6 +35,7 @@ pub mod utils {
 }
 
 mod exhaustion;
+mod frames;
 mod load;
 mod resolutions;
 mod solver;
@@ -57,6 +58,7 @@ mod tests {
     mod solve_enums;
     mod solve_exprs;
     mod solve_functions;
+    mod solve_generics;
     mod solve_match;
     mod solve_modules;
     mod solve_options;

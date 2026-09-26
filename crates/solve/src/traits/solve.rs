@@ -108,8 +108,11 @@ impl Solve for Access {
                         .dec()
                         .expect("enum variant must have a dec set during hoist");
                     solver.node_decs.insert(id, dec);
-                    solver.note(right, Ty::Adt(aid), Some(dec));
-                    Ok(Ty::Adt(aid))
+                    // `L::E` on a generic enum instantiates its params fresh, the same as a
+                    // ctor call would -- each `E` can land on a different `List<T>`
+                    let ty = solver.instantiated_adt(aid);
+                    solver.note(right, ty.clone(), Some(dec));
+                    Ok(ty)
                 } else {
                     Err(MissingTupleMembers {
                         src: solver.src(right.location()),
@@ -143,7 +146,7 @@ impl Solve for Access {
             if solver.non_value != Some(id)
                 && matches!(
                     field.ty.clone().normalized(solver),
-                    Ty::Adt(inner) if solver.adts[&inner]
+                    Ty::Adt(inner, _) if solver.adts[&inner]
                         .flags
                         .intersects(AdtFlags::IS_MODULE | AdtFlags::IS_BUILTIN)
                 )
@@ -159,6 +162,9 @@ impl Solve for Access {
             solver.check_vis(dec, right.location())?;
             solver.node_decs.insert(id, dec);
             // module-nested natives need fresh type vars per call site, same as free natives.
+            // generic items (fns with `<T>` params, generic adt assoc items) do too. module
+            // fields store a bare `Ty::Vid` (see `sync_module_adt`), so normalize first to
+            // reach any `Ty::Param`s underneath.
             let ty = if let Some(binding) = solver.dec_to_native.get(&dec) {
                 let sig = crate::NativeFnSig {
                     params: binding.sig.params.clone(),
@@ -167,7 +173,8 @@ impl Solve for Access {
                 };
                 solver.instantiate_native(&sig, None)?
             } else {
-                field.ty
+                let stored = field.ty.normalized(solver);
+                solver.instantiate_params(&stored)
             };
             solver.note(right, ty.clone(), Some(dec));
             Ok(ty)
@@ -385,16 +392,22 @@ impl Solve for Access {
                     }
                     other => {
                         // adts/identity resolve directly. primitives and collections route
-                        // through their library adt, which is where their methods live
-                        let aid = match other {
-                            Ty::Adt(aid) | Ty::Identity(aid) => *aid,
-                            l => solver.builtin_adt(l).ok_or_else(|| {
-                                Error::from(TypeHasNoFields {
-                                    src: solver.src(left.location()),
-                                    at: left.location().into(),
-                                    ty: l.to_string(),
-                                })
-                            })?,
+                        // through their library adt, which is where their methods live. `args`
+                        // are the receiver's actual type args -- a generic struct's fields and a
+                        // generic impl's methods are stored in terms of `Ty::Param`s and get
+                        // `specialize`d onto them (`p.first` on `Pair<int, str>` gives `int`).
+                        let (aid, args) = match other {
+                            Ty::Adt(aid, args) | Ty::Identity(aid, args) => (*aid, args.clone()),
+                            l => (
+                                solver.builtin_adt(l).ok_or_else(|| {
+                                    Error::from(TypeHasNoFields {
+                                        src: solver.src(left.location()),
+                                        at: left.location().into(),
+                                        ty: l.to_string(),
+                                    })
+                                })?,
+                                vec![],
+                            ),
                         };
 
                         if let ExprKind::Literal(Literal::Int(i)) = right.kind() {
@@ -409,7 +422,7 @@ impl Solve for Access {
                                 _ => None,
                             };
                             match tup_info {
-                                Some((Some(t), _, _)) => t,
+                                Some((Some(t), _, _)) => solver.specialize(&t, aid, &args),
                                 Some((None, max, name)) => Err(OutOfBoundsTupleRead {
                                     src: solver.src(location),
                                     at: location.into(),
@@ -435,6 +448,7 @@ impl Solve for Access {
                             };
 
                             if let Some((ty, dec)) = field {
+                                let ty = solver.specialize(&ty, aid, &args);
                                 solver.note(right.as_ident().unwrap(), ty.clone(), Some(dec));
                                 ty
                             } else {
@@ -464,7 +478,7 @@ impl Solve for Access {
                                     solver
                                         .instantiate_native(&sig, Some((&lhs, left.location())))?
                                 } else {
-                                    impl_field.ty
+                                    solver.specialize(&impl_field.ty, aid, &args)
                                 };
                                 // an associated const reads fine through a value, but a
                                 // method only exists as a call's callee
@@ -587,7 +601,7 @@ impl Solve for Break {
 }
 
 impl Solve for Call {
-    fn solve(&self, _id: NodeId, location: Location, solver: &mut Solver) -> Result<Ty> {
+    fn solve(&self, id: NodeId, location: Location, solver: &mut Solver) -> Result<Ty> {
         let adt = match self.left.kind() {
             ExprKind::Access(Access::DoubleColon { left, right }) => {
                 let adt = match adt_from_type_path(left, solver) {
@@ -624,13 +638,13 @@ impl Solve for Call {
                 } else {
                     let variant = lock.variants.get(&right.lexeme).cloned();
                     if let Some(variant) = &variant {
-                        solver.note(right, Ty::Adt(adt), variant.dec());
+                        solver.note(right, Ty::adt(adt), variant.dec());
                     }
                     variant.map(|v| (v.layout().unwrap(), v, adt))
                 }
             }
             ExprKind::Ident(ident) => match ident.query(solver)? {
-                Ty::Adt(aid) | Ty::Identity(aid) => {
+                Ty::Adt(aid, _) | Ty::Identity(aid, _) => {
                     let (is_enum, name, singular) = {
                         let adt = &solver.adts[aid];
                         (
@@ -664,8 +678,21 @@ impl Solve for Call {
                             name: name.lexeme.clone(),
                         })?
                     }
+                    // a ctor on a generic adt gets a fresh instantiation of its params --
+                    // `List::C(1, ...)` and `List::C("x", ...)` pick different `T`s, and the
+                    // member types are specialized with the same args the result reports
+                    let adt_ty = solver.instantiated_adt(adt);
+                    let ctor_args: Vec<Ty> = match &adt_ty {
+                        Ty::Adt(_, args) => args.clone(),
+                        _ => vec![],
+                    };
                     let mut args = self.arguments.clone().into_iter().peekable();
-                    let mut params = variant.members.clone().into_iter();
+                    let mut params = variant
+                        .members
+                        .iter()
+                        .map(|m| solver.specialize(m, adt, &ctor_args))
+                        .collect::<Vec<_>>()
+                        .into_iter();
 
                     loop {
                         match (args.next(), params.next()) {
@@ -682,8 +709,8 @@ impl Solve for Call {
                         }
                     }
 
-                    solver.shadow_expr_ty(self.left.id(), Ty::Adt(layout), self.left.location())?;
-                    Ok(Ty::Adt(adt))
+                    solver.shadow_expr_ty(self.left.id(), Ty::adt(layout), self.left.location())?;
+                    Ok(adt_ty.normalized(solver))
                 }
                 v @ Variant::Struct(_) => Err(ExpectedTupleStruct {
                     src: solver.src(location),
@@ -711,10 +738,10 @@ impl Solve for Call {
                     })?,
                     (_, other) => other,
                 };
-                let aid = match &lhs {
-                    Ty::Adt(a) | Ty::Identity(a) => *a,
+                let (aid, recv_args) = match &lhs {
+                    Ty::Adt(a, args) | Ty::Identity(a, args) => (*a, args.clone()),
                     l => match solver.builtin_adt(l) {
-                        Some(a) => a,
+                        Some(a) => (a, vec![]),
                         None => return Ok(None),
                     },
                 };
@@ -726,6 +753,17 @@ impl Solve for Call {
                 let dec = field.dec;
                 solver.check_vis(dec, ident.location)?;
                 solver.node_decs.insert(call.left.id(), dec);
+                // a `&mut`-receiver method on a collection a `for` loop is iterating
+                // (`xs.push(..)` inside `for x in xs`) -- see `check_iter_guard`
+                if solver
+                    .dec_to_native
+                    .get(&dec)
+                    .is_some_and(|b| b.mutates_recv)
+                    && let Some((root, path)) = crate::root_and_path(left)
+                    && let Some(root_dec) = solver.ribs.resolve(root)
+                {
+                    solver.check_iter_guard(root_dec, &path, left.location())?;
+                }
                 let ty = if let Some(binding) = solver.dec_to_native.get(&dec) {
                     let sig = crate::NativeFnSig {
                         params: binding.sig.params.clone(),
@@ -734,7 +772,9 @@ impl Solve for Call {
                     };
                     solver.instantiate_native(&sig, Some((&lhs, left.location())))?
                 } else {
-                    field.ty
+                    // a method stored on a generic adt holds `Ty::Param`s; plug in the
+                    // receiver's own args (`l.push(5)` on `List<int>` sees `x: int`)
+                    solver.specialize(&field.ty, aid, &recv_args)
                 };
                 solver.note(ident, ty.clone(), Some(dec));
                 Ok(Some(ty))
@@ -848,6 +888,10 @@ impl Solve for Call {
             }
 
             let ty = fn_data.return_ty.as_ref().clone().normalized(solver);
+            // dataframe schemas ride beside the type system: `pull` gets the column's
+            // concrete element type here, and `schema`/`table{}`/`__q_*` calls record
+            // column maps for downstream calls (see frames.rs)
+            let ty = solver.frame_call(id, self, ty)?;
             if let ExprKind::Access(Access::Dot {
                 kind: AccessKind::Option,
                 ..
@@ -958,13 +1002,19 @@ impl Solve for Continue {
 
 impl Solve for Enum {
     fn solve(&self, _id: NodeId, _location: Location, solver: &mut Solver) -> Result<Ty> {
-        let Ty::Adt(adt) = self.head.query(solver)? else {
+        let Some(adt) = self.head.query(solver)?.as_adt().copied() else {
             unreachable!()
         };
 
         // self-referential variants (`enum List { Cons(int, List), Nil }`) need filter_adt to
         // break the recursion check on field types -- same pattern as Struct::solve.
         solver.ribs.push_impl(adt);
+        // `enum List<T> { .. }`: member annotations resolve `T` (and `List<T>`) through the
+        // declared params -- stored as `Ty::Param`s for per-use instantiation
+        let generic = solver.adts[adt].is_generic();
+        if generic {
+            solver.push_adt_params(adt);
+        }
 
         let result = self
             .members
@@ -1003,6 +1053,9 @@ impl Solve for Enum {
                 }),
             });
 
+        if generic {
+            solver.pop_type_params();
+        }
         solver.ribs.pop();
         result?;
 
@@ -1024,7 +1077,7 @@ impl Solve for Enum {
             solver.adts[layout] = adt;
         }
 
-        Ok(Ty::Adt(adt))
+        Ok(Ty::adt(adt))
     }
 }
 
@@ -1038,7 +1091,7 @@ impl Solve for Enum {
 /// can't reach for a real vid-level "supports overload" trait bound; native adts are opaque to the
 /// solver, so matching by name against the one adt that opts in is what's available.
 fn plexpr_overload_ty(lhs: &Ty, rhs: &Ty, solver: &Solver) -> Option<Ty> {
-    let is_plexpr = |ty: &Ty| matches!(ty, Ty::Adt(id) if solver.adts[*id].name == "PlExpr");
+    let is_plexpr = |ty: &Ty| matches!(ty, Ty::Adt(id, _) if solver.adts[*id].name == "PlExpr");
     if is_plexpr(lhs) {
         Some(lhs.clone())
     } else if is_plexpr(rhs) {
@@ -1061,7 +1114,7 @@ impl Solve for Equality {
         // dispatch at runtime and answer a bool -- `==`/`!=` stay structural
         if !matches!(self.op, EqualityOp::Equal | EqualityOp::NotEqual) {
             let has_ops = |t: &Ty| {
-                matches!(t, Ty::Adt(id) if solver.adts[*id].flags.contains(AdtFlags::HAS_OPS))
+                matches!(t, Ty::Adt(id, _) if solver.adts[*id].flags.contains(AdtFlags::HAS_OPS))
             };
             if has_ops(&lhs_n) || has_ops(&rhs_n) {
                 return Ok(Ty::Bool);
@@ -1140,10 +1193,10 @@ impl Solve for Evaluation {
                 // adts with registered operator impls (`Api::add_bin_op`) typecheck
                 // here and dispatch at runtime — the result is the flagged operand's
                 // type by convention (LHS wins when both are flagged).
-                (Ty::Adt(l), _) if solver.adts[*l].flags.contains(AdtFlags::HAS_OPS) => {
+                (Ty::Adt(l, _), _) if solver.adts[*l].flags.contains(AdtFlags::HAS_OPS) => {
                     Ok(lhs.clone())
                 }
-                (_, Ty::Adt(r)) if solver.adts[*r].flags.contains(AdtFlags::HAS_OPS) => {
+                (_, Ty::Adt(r, _)) if solver.adts[*r].flags.contains(AdtFlags::HAS_OPS) => {
                     Ok(rhs.clone())
                 }
 
@@ -1175,7 +1228,7 @@ impl Solve for For {
         solver.ribs.push_block();
 
         let iter_ty = self.iterator.query(solver)?.normalized(solver);
-        match iter_ty {
+        match &iter_ty {
             Ty::Str => {
                 solver.solve_pat(&self.binding, Ty::Str)?;
             }
@@ -1186,7 +1239,10 @@ impl Solve for For {
                 solver.solve_pat(&self.binding, value.as_ref().clone())?;
             }
             Ty::Dict(value) => {
-                solver.solve_pat(&self.binding, Ty::Tuple(vec![Ty::Str, *value]))?;
+                solver.solve_pat(
+                    &self.binding,
+                    Ty::Tuple(vec![Ty::Str, value.as_ref().clone()]),
+                )?;
             }
             other => Err(InvalidIterTarget {
                 src: solver.src(self.iterator.location()),
@@ -1200,11 +1256,35 @@ impl Solve for For {
             dec.kind = DecKind::LoopVar;
         }
 
+        // guard the iterated place against in-loop mutation -- `for x in xs { xs.push(0) }`
+        // would grow the bound mid-loop. only arrays/dicts can be mutated at all, and only a
+        // name-rooted iterator (`xs`, `s.arr`, `xs[0]` -- not `f()`) names a place to guard.
+        let guard = match &iter_ty {
+            Ty::Array(_) | Ty::Dict(_) => {
+                crate::root_and_path(&self.iterator).and_then(|(root, path)| {
+                    solver.ribs.resolve(root).map(|dec| crate::IterGuard {
+                        dec,
+                        path,
+                        iterated_at: self.iterator.location(),
+                        name: self.iterator.to_string(),
+                    })
+                })
+            }
+            _ => None,
+        };
+        let guarded = guard.is_some();
+        if let Some(guard) = guard {
+            solver.iter_guards.push(guard);
+        }
+        let run = solver.run_loop_body(&self.body);
+        if guarded {
+            solver.iter_guards.pop();
+        }
         let LoopRun {
             break_ty,
             collect_ty,
             ..
-        } = solver.run_loop_body(&self.body)?;
+        } = run?;
         solver.ribs.pop();
 
         // Validate the types
@@ -1252,6 +1332,10 @@ impl Solve for Function {
             unreachable!("hoist seeded the vid with something other than Ty::Fn")
         };
 
+        // declared type params are rigid names inside the body (`let y: T = x` is legal and
+        // means exactly the caller's `T`). popped after the body's been checked
+        solver.push_type_params(&self.type_params);
+
         // one rib holds the params and doubles as the capture barrier; the body's block pushes its
         // own scope on top.
         solver.ribs.push_function();
@@ -1276,6 +1360,8 @@ impl Solve for Function {
         } else if expected_ty != Ty::Unit
             && solver.control_flow.quantify(&flow) != Quantification::Universal
         {
+            solver.pop_type_params();
+            solver.ribs.pop();
             Err(NotAllPathsReturn {
                 src: solver.src(self.body.location()),
                 at: self.body.location().into(),
@@ -1283,6 +1369,7 @@ impl Solve for Function {
             })?;
         }
 
+        solver.pop_type_params();
         solver.ribs.pop();
 
         Ok(Ty::Fn(fn_data.clone()))
@@ -1315,24 +1402,37 @@ impl Solve for Ident {
             }
         }
 
-        if let Ty::Adt(adt) = &ty {
+        if let Some((adt, _)) = ty.applied() {
             let members = {
-                let lock = &solver.adts[adt];
+                let lock = &solver.adts[&adt];
                 (self.lexeme == lock.name && lock.is_tuple_struct())
                     .then(|| lock.as_tuple().members.clone())
             };
             if let Some(members) = members {
+                // `let make = Point;` on `struct Point<T>(T, T)`: the ctor value instantiates
+                // the adt's params fresh, so each `make(..)` call picks its own `T`
+                let ret = solver.instantiated_adt(adt);
+                let ctor_args: Vec<Ty> = match &ret {
+                    Ty::Adt(_, args) => args.clone(),
+                    _ => vec![],
+                };
                 let params = members
                     .into_iter()
-                    .map(|m| FnParam::new(None, m.normalized(solver), false))
+                    .map(|m| {
+                        FnParam::new(
+                            None,
+                            solver.specialize(&m, adt, &ctor_args).normalized(solver),
+                            false,
+                        )
+                    })
                     .collect();
-                return Ok(Ty::Fn(FnHeader::new(params, ty, false).ctor()));
+                return Ok(Ty::Fn(FnHeader::new(params, ret, false).ctor()));
             }
         }
 
         // modules and builtin namespaces have a type for `::` paths to resolve against (see
         // [Solver::resolve_path_head]), but they aren't values
-        if let Ty::Adt(adt) = &ty {
+        if let Ty::Adt(adt, _) = &ty {
             let flags = solver.adts[adt].flags;
             if !bound || flags.intersects(AdtFlags::IS_MODULE | AdtFlags::IS_BUILTIN) {
                 Err(NotAValue {
@@ -1401,7 +1501,11 @@ impl Solve for If {
 impl Solve for Impl {
     fn solve(&self, _id: NodeId, _location: Location, solver: &mut Solver) -> Result<Ty> {
         // Find our target
-        let Ty::Adt(aid) = solver.resolve_name(&self.target, self.target.location())? else {
+        let Some(aid) = solver
+            .resolve_name(&self.target, self.target.location())?
+            .as_adt()
+            .copied()
+        else {
             Err(InvalidImplTarget {
                 src: solver.src(self.target.location()),
                 at: self.target.location().into(),
@@ -1426,6 +1530,12 @@ impl Solve for Impl {
         };
 
         solver.ribs.push_impl(aid);
+        // member signatures/annotations see the target's own declared params (`impl List` is
+        // `impl List<T>` -- there's no specialization syntax)
+        let generic = solver.adts[aid].is_generic();
+        if generic {
+            solver.push_adt_params(aid);
+        }
 
         // todo, I am not positive that these need to be in separate passes, it may be okay to do
         // them concurrently
@@ -1501,7 +1611,10 @@ impl Solve for Impl {
                 let mut impl_ty = ty;
                 // `Self` is this impl's target: `other: Self` has to be exactly this adt, not
                 // just any implementer
-                let mut pact_ty = solver.instantiate_pact_fn(&pact_header, &Ty::Adt(aid));
+                let mut pact_ty = solver.instantiate_pact_fn(
+                    &pact_header,
+                    &solver.impl_target_ty().unwrap(),
+                );
                 impl_ty
                     .fulfill_ty(&mut pact_ty, solver)
                     .map_err(|e| e.into_type_mismatch(solver, function.name.location))?;
@@ -1511,6 +1624,9 @@ impl Solve for Impl {
         });
 
         result?;
+        if generic {
+            solver.pop_type_params();
+        }
         solver.ribs.pop();
 
         if let Some((pact, _)) = pact {
@@ -1601,7 +1717,7 @@ impl Solve for Literal {
                     ExprKind::Access(Access::DoubleColon { left, right }) => {
                         let lhs = solver.resolve_path_head(left)?;
                         let adt = match lhs {
-                            Ty::Adt(adt) | Ty::Identity(adt) => adt,
+                            Ty::Adt(adt, _) | Ty::Identity(adt, _) => adt,
                             _ => Err(NotAStruct {
                                 src: solver.src(location),
                                 at: location.into(),
@@ -1611,7 +1727,7 @@ impl Solve for Literal {
 
                         if solver.adts[adt].flags.contains(AdtFlags::IS_MODULE) {
                             let lhs = name.query(solver)?;
-                            let Ty::Adt(layout) = lhs else {
+                            let Ty::Adt(layout, _) = lhs else {
                                 Err(NotAStruct {
                                     src: solver.src(location),
                                     at: location.into(),
@@ -1650,7 +1766,7 @@ impl Solve for Literal {
                                 })?;
 
                             let layout = variant.layout().unwrap();
-                            solver.note(right, Ty::Adt(adt), variant.dec());
+                            solver.note(right, Ty::adt(adt), variant.dec());
                             let Variant::Struct(struct_variant) = variant else {
                                 Err(NotAStruct {
                                     src: solver.src(location),
@@ -1698,7 +1814,7 @@ impl Solve for Literal {
                         // `Ty::Identity` shows up when the named struct is the current impl
                         // target -- filter_adt rewrote it. treat it as the same adt.
                         let adt = match lhs {
-                            Ty::Adt(adt) | Ty::Identity(adt) => adt,
+                            Ty::Adt(adt, _) | Ty::Identity(adt, _) => adt,
                             _ => Err(NotAStruct {
                                 src: solver.src(location),
                                 at: location.into(),
@@ -1727,9 +1843,18 @@ impl Solve for Literal {
                     }
                 };
 
+                // like a ctor call, the literal gets a fresh instantiation of the adt's
+                // params; each field's stored `Ty::Param`s are specialized with those args so
+                // what the fields end up as is exactly what the literal's type reports
+                let adt_ty = solver.instantiated_adt(adt);
+                let ctor_args: Vec<Ty> = match &adt_ty {
+                    Ty::Adt(_, args) => args.clone(),
+                    _ => vec![],
+                };
+
                 let mut prototype_fields = variant.fields.clone();
                 for (field_name, value) in fields {
-                    let target = prototype_fields
+                    let mut target = prototype_fields
                         .swap_remove(&field_name.to_string())
                         .ok_or_else(|| {
                             Error::from(FieldNotFound {
@@ -1738,6 +1863,7 @@ impl Solve for Literal {
                                 field_name: field_name.to_string(),
                             })
                         })?;
+                    target.ty = solver.specialize(&target.ty, adt, &ctor_args);
 
                     if let FieldKey::Ident(key) = field_name {
                         solver.note(key, target.ty.clone(), Some(target.dec));
@@ -1759,8 +1885,8 @@ impl Solve for Literal {
                     })?;
                 }
 
-                solver.shadow_expr_ty(name.id(), Ty::Adt(layout), name.location())?;
-                Ty::Adt(adt)
+                solver.shadow_expr_ty(name.id(), Ty::adt(layout), name.location())?;
+                adt_ty.normalized(solver)
             }
             Literal::Tuple(members) => Ty::Tuple(
                 members
@@ -1882,7 +2008,7 @@ impl Solve for Return {
 
 impl Solve for Struct {
     fn solve(&self, _id: NodeId, _location: Location, solver: &mut Solver) -> Result<Ty> {
-        let Ty::Adt(adt) = self.name.query(solver)? else {
+        let Some(adt) = self.name.query(solver)?.as_adt().copied() else {
             unreachable!()
         };
 
@@ -1890,6 +2016,12 @@ impl Solve for Struct {
         // }`) get filter_adt-ed to `Ty::Identity` -- breaks the recursion check that would
         // otherwise refuse the self-referential adt.
         solver.ribs.push_impl(adt);
+        // `struct Pair<A, B>`: field annotations resolve `A`/`B`/`Pair<A, B>` through the
+        // declared params
+        let generic = solver.adts[adt].is_generic();
+        if generic {
+            solver.push_adt_params(adt);
+        }
 
         let is_tuple = solver.adts[adt].is_tuple_struct();
 
@@ -1912,6 +2044,9 @@ impl Solve for Struct {
                 .map_err(|v| v.into_type_mismatch(solver, field.location))
         });
 
+        if generic {
+            solver.pop_type_params();
+        }
         solver.ribs.pop();
         result?;
 
@@ -1919,7 +2054,7 @@ impl Solve for Struct {
         normalized.normalize_members(solver);
         solver.adts[adt] = normalized;
 
-        Ok(Ty::Adt(adt))
+        Ok(Ty::adt(adt))
     }
 }
 
@@ -1938,7 +2073,7 @@ impl Solve for Unary {
                     .map(Ty::Tuple),
                 // adts with registered operator impls (`Api::add_unary_op`)
                 // typecheck here and dispatch at runtime, same as `eval`'s.
-                (_, Ty::Adt(id)) if solver.adts[*id].flags.contains(AdtFlags::HAS_OPS) => {
+                (_, Ty::Adt(id, _)) if solver.adts[*id].flags.contains(AdtFlags::HAS_OPS) => {
                     Ok(ty.clone())
                 }
                 _ => Err(InvalidUnary {
@@ -2082,9 +2217,9 @@ impl Solve for While {
 fn adt_from_type_path(left: &Expr, solver: &mut Solver) -> Result<AdtId> {
     let ty = solver.resolve_path_head(left)?;
     match ty {
-        Ty::Adt(adt) | Ty::Identity(adt) => Ok(adt),
+        Ty::Adt(adt, _) | Ty::Identity(adt, _) => Ok(adt),
         Ty::Fn(ref f) => match f.return_ty.as_ref() {
-            Ty::Adt(adt) | Ty::Identity(adt) => Ok(*adt),
+            Ty::Adt(adt, _) | Ty::Identity(adt, _) => Ok(*adt),
             _ => Err(TypeHasNoFields {
                 src: solver.src(left.location()),
                 at: left.location().into(),

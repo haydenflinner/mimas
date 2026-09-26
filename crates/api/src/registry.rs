@@ -46,7 +46,7 @@ impl Registry {
     }
 
     pub fn ty_of_id(&self, type_id: TypeId) -> Option<Ty> {
-        self.get_id(type_id).map(|binding| Ty::Adt(binding.adt_id))
+        self.get_id(type_id).map(|binding| Ty::adt(binding.adt_id))
     }
 
     pub fn bindings(&self) -> &HashMap<TypeId, AdtBinding> {

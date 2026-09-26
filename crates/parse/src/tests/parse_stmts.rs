@@ -983,6 +983,7 @@ stmt_test!(
     "fn foo(self) {}",
     Function {
         name: ident!("foo"),
+        type_params: vec![],
         parameters: vec![Binding::new(ident!("self"))],
         return_type: None,
         body: block!(),
@@ -1090,6 +1091,109 @@ fn head_struct_literal_gets_a_pointed_error() {
         assert!(text.contains("struct literals need parentheses"), "{src}: {text}");
     }
 }
+
+// -- generics -------------------------------------------------------------------
+
+stmt_test!(
+    function_generic_single_param,
+    "fn id<T>(x: T) -> T {}",
+    Function {
+        name: ident!("id"),
+        type_params: vec![ident!("T")],
+        parameters: vec![
+            Binding::new(ident!("x")).with_annotation(Annotation::Ty(ident!("T")))
+        ],
+        return_type: Some(Annotation::Ty(ident!("T"))),
+        body: block!(),
+    }
+    .into_item()
+);
+
+stmt_test!(
+    function_generic_two_params,
+    "fn map<T, U>(xs: [T]) {}",
+    Function {
+        name: ident!("map"),
+        type_params: vec![ident!("T"), ident!("U")],
+        parameters: vec![
+            Binding::new(ident!("xs"))
+                .with_annotation(Annotation::Array(Box::new(Annotation::Ty(ident!("T")))))
+        ],
+        return_type: None,
+        body: block!(),
+    }
+    .into_item()
+);
+
+stmt_test!(
+    struct_generic,
+    "struct Pair<A, B> { first: A, second: B }",
+    Struct {
+        name: ident!("Pair"),
+        type_params: vec![ident!("A"), ident!("B")],
+        fields: vec![
+            StructField {
+                name: FieldKey::Ident(ident!("first")),
+                annotation: Annotation::Ty(ident!("A")),
+                location: shared::Location::default(),
+                public: false,
+            },
+            StructField {
+                name: FieldKey::Ident(ident!("second")),
+                annotation: Annotation::Ty(ident!("B")),
+                location: shared::Location::default(),
+                public: false,
+            },
+        ],
+    }
+    .into_item()
+);
+
+stmt_test!(
+    enum_generic,
+    "enum List<T> { E, C { first: T, rest: List<T> } }",
+    Enum {
+        head: ident!("List"),
+        type_params: vec![ident!("T")],
+        members: vec![
+            (ident!("E"), Member::Struct(vec![])),
+            (
+                ident!("C"),
+                Member::Struct(vec![
+                    StructField {
+                        name: FieldKey::Ident(ident!("first")),
+                        annotation: Annotation::Ty(ident!("T")),
+                        location: shared::Location::default(),
+                        public: true,
+                    },
+                    StructField {
+                        name: FieldKey::Ident(ident!("rest")),
+                        annotation: Annotation::Applied(
+                            vec![ident!("List")],
+                            vec![Annotation::Ty(ident!("T"))],
+                        ),
+                        location: shared::Location::default(),
+                        public: true,
+                    },
+                ]),
+            ),
+        ],
+    }
+    .into_item()
+);
+
+stmt_test!(
+    applied_annotation,
+    "let p: Pair<int, str> = x;",
+    Let::new(
+        ident!("p").into(),
+        ident_expr!("x"),
+        Some(Annotation::Applied(
+            vec![ident!("Pair")],
+            vec![Annotation::Kw(TyKw::Int), Annotation::Kw(TyKw::Str)],
+        )),
+    )
+);
 
 // ...but an `if`/`while` body may begin with an assignment
 #[test]

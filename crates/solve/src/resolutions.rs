@@ -6,7 +6,7 @@ use api::NativeId;
 use indexmap::IndexMap;
 use miette::NamedSource;
 use parse::{Literal, NodeId};
-use shared::{FileId, IdVec, Location, PactId, TyNames};
+use shared::{FileId, IdVec, Location, PactId, ParamId, TyNames};
 
 use crate::{
     Solver,
@@ -30,7 +30,7 @@ impl Resolutions {
     pub fn adt_path(&self, aid: AdtId) -> String {
         let adt = &self.adts[aid];
         let mut path = self.module_path(adt.module).to_vec();
-        path.push(Ty::Adt(aid).display(self));
+        path.push(Ty::adt(aid).display(self));
         path.join("::")
     }
 
@@ -57,6 +57,10 @@ impl TyNames for Resolutions {
 
     fn pact(&self, id: PactId) -> Option<String> {
         self.pact_names.get(id).cloned()
+    }
+
+    fn param(&self, id: ParamId) -> Option<String> {
+        shared::ThreadNames.param(id)
     }
 }
 

@@ -255,6 +255,66 @@ test_fail!(
     "for c in \"abc\" { c = \"x\"; }",
 );
 
+// Mutating the iterated collection mid-loop
+test_fail!(
+    index_write_to_iterated_array,
+    "let xs = [1, 2];
+     for x in xs { xs[0] = 0; }",
+    "let xs = [1, 2];
+     for x in xs { xs[0] += 1; }",
+    "let xs = [1, 2];
+     for x in xs { let i = 0; xs[i] = 0; }",
+);
+test_fail!(
+    index_write_to_iterated_dict,
+    "let d = ~{};
+     for (k, v) in d { d[\"a\"] = 1; }",
+);
+test_fail!(
+    index_write_through_iterated_field,
+    "struct Wrap { arr: [int] }
+     let w = Wrap { arr = [1] };
+     for x in w.arr { w.arr[0] = 0; }",
+);
+test_fail!(
+    nested_loop_outer_mutation,
+    "let xs = [1];
+     for a in xs {
+         for b in xs { xs[0] = 0; }
+     }",
+);
+test_fail!(
+    closure_mutating_iterated_collection,
+    "let xs = [1];
+     for x in xs { let f = || { xs[0] = 0; }; }",
+);
+// rebinding is not mutation, sibling writes are fine, element writes are fine, and
+// shadowed names resolve to a different binding
+test_ty!(
+    assign_iterated_after_loop,
+    "let xs = [1]; for x in xs {} xs[0] = 0;"
+);
+test_ty!(
+    rebind_iterated_inside_loop,
+    "let xs = [1]; for x in xs { xs = []; }",
+);
+test_ty!(
+    index_write_to_other_collection_in_loop,
+    "let xs = [1]; let ys = [2];
+     for x in xs { ys[0] = 0; }",
+);
+test_ty!(
+    index_write_shadowed_in_loop,
+    "let xs = [1];
+     for x in xs { let xs = [2]; xs[0] = 0; }",
+);
+test_ty!(
+    index_write_to_sibling_field_in_loop,
+    "struct Wrap { arr: [int], n: int }
+     let w = Wrap { arr = [1], n = 0 };
+     for x in w.arr { w.n = 1; }",
+);
+
 // Patterns
 test_fail!(tuple_pattern_on_non_tuple, "let (a, b) = 0;");
 

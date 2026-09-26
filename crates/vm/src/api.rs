@@ -59,6 +59,24 @@ pub struct NativeDoc {
 
 inventory::collect!(NativeDoc);
 
+/// Marks a parameter of a `#[native]` / `#[mimas]` fn as `&mut`, submitted via [`inventory`]
+/// and keyed by the item's full Rust path exactly like [`NativeDoc`]. `index` counts from the
+/// receiver: 0 is `self` (or the first param of a free fn), 1.. are the declared params.
+///
+/// Only `index == 0` is consumed today, joined onto [`ApiMethod::mutates_recv`] at
+/// `install_method` time so the solver can reject mutating a collection mid-`for`. Mutating
+/// *non-receiver* params (a `&mut` collection passed to a free fn) are recorded for the same
+/// check to grow into later.
+///
+/// Subject to the same link-pruning footgun as [`NativeDoc`]: a pruned submission degrades to
+/// `mutates_recv: false` -- it can only ever weaken the lint, never corrupt a signature.
+pub struct NativeMutates {
+    pub path: &'static str,
+    pub index: usize,
+}
+
+inventory::collect!(NativeMutates);
+
 pub type NativeFnReg = for<'a, 'gc> fn(&mut Api<'a, 'gc>);
 
 pub struct Api<'a, 'gc> {
@@ -74,6 +92,13 @@ fn doc_for(path: &str) -> String {
         .find(|d| d.path == path)
         .map(|d| d.doc.to_string())
         .unwrap_or_default()
+}
+
+/// Whether `path` was submitted as mutating its receiver -- see [`NativeMutates`].
+fn mutates_recv(path: &str) -> bool {
+    inventory::iter::<NativeMutates>
+        .into_iter()
+        .any(|m| m.path == path && m.index == 0)
 }
 
 impl<'a, 'gc> Api<'a, 'gc> {
@@ -295,6 +320,7 @@ impl<'a, 'gc> Api<'a, 'gc> {
             parameters: parameters.into_iter().map(Some).collect(),
             return_ty: Some(return_ty),
             takes_self: false,
+            mutates_recv: false,
             doc: String::new(),
             call: (),
         });
@@ -482,6 +508,7 @@ macro_rules! impl_into_fn {
                     parameters,
                     return_ty,
                     takes_self: false,
+                    mutates_recv: false,
                     doc,
                     call: (),
                 });
@@ -537,6 +564,7 @@ macro_rules! impl_into_method {
                     parameters,
                     return_ty,
                     takes_self: true,
+                    mutates_recv: mutates_recv(std::any::type_name_of_val(&self)),
                     doc,
                     call: (),
                 });

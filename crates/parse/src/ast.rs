@@ -46,6 +46,12 @@ impl Ast {
         self.quantities.get(&id).copied()
     }
 
+    /// Every `(node, dim)` pair in `quantities` -- the solver merges these per file so
+    /// `table { kwh\n 5kWh }` columns can carry their unit into the schema.
+    pub fn quantities(&self) -> impl Iterator<Item = (NodeId, Dim)> + '_ {
+        self.quantities.iter().map(|(id, dim)| (*id, *dim))
+    }
+
     /// Consumes the Ast into its inner collection of statements.
     pub fn unpack(self) -> Vec<Stmt> {
         self.stmts
@@ -153,5 +159,11 @@ impl NodeId {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(1);
         Self(COUNTER.fetch_add(1, Ordering::Relaxed))
+    }
+
+    /// The counter value this node was minted with. Stable across solver phases for the same
+    /// ast node, so the checker derives ids from it (e.g. `ParamId` for `<T>` type params).
+    pub fn index(self) -> u64 {
+        self.0
     }
 }

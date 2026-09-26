@@ -12,6 +12,8 @@ use crate::{
 pub struct Function {
     /// The name, if any, of this function. Anonymous functions do not have names.
     pub name: Ident,
+    /// The declared type parameters, `<T, U>` after the name. Empty for non-generic fns.
+    pub type_params: Vec<Ident>,
     /// The parameters of this function.
     pub parameters: Vec<Binding>,
     /// The body of the function declaration.
@@ -31,6 +33,7 @@ impl Function {
     ) -> Self {
         Self {
             name,
+            type_params: vec![],
             parameters,
             body,
             return_type,
@@ -54,14 +57,22 @@ impl IntoItem for Function {}
 #[mutants::skip]
 impl std::fmt::Display for Function {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let generics = if self.type_params.is_empty() {
+            String::new()
+        } else {
+            format!("<{}>", self.type_params.iter().join(", "))
+        };
         let param_str = self.parameters.iter().join(", ");
         if let Some(ret) = &self.return_type {
             f.pad(&format!(
-                "fn {}({param_str}) -> {} {}",
+                "fn {}{generics}({param_str}) -> {} {}",
                 self.name, ret, self.body
             ))
         } else {
-            f.pad(&format!("fn {}({param_str}) {}", self.name, self.body))
+            f.pad(&format!(
+                "fn {}{generics}({param_str}) {}",
+                self.name, self.body
+            ))
         }
     }
 }

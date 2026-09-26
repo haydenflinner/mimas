@@ -90,6 +90,11 @@ struct Pass<'a> {
     methods: HashMap<(String, String), &'a Function>,
     /// A function's declaration site, so a call resolved by the solver finds its signature.
     fns_by_site: HashMap<(usize, usize), &'a Function>,
+    /// Declared enum names -- needed for `unit_of` to tell `enum A` from the ampere.
+    enum_names: std::collections::HashSet<String>,
+    /// Generic type-param names in scope (`fn f<T>`, `struct P<A, B>` fields read at a literal,
+    /// an impl's target params). They name types, not units, so `unit_of` must not see them.
+    ty_params: Vec<Vec<String>>,
     env: HashMap<DecId, D>,
     consts: HashMap<DecId, D>,
     /// The declared return of each function being walked.
@@ -107,6 +112,8 @@ pub(crate) fn check(solver: &Solver, asts: &[&Ast]) -> Result<()> {
             fns: HashMap::new(),
             methods: HashMap::new(),
             fns_by_site: HashMap::new(),
+            enum_names: Default::default(),
+            ty_params: Vec::new(),
             env: HashMap::new(),
             consts: HashMap::new(),
             rets: Vec::new(),
@@ -144,6 +151,9 @@ impl<'a> Pass<'a> {
         match item.kind() {
             ItemKind::Struct(s) => {
                 self.structs.entry(s.name.lexeme.clone()).or_insert(s);
+            }
+            ItemKind::Enum(e) => {
+                self.enum_names.insert(e.head.lexeme.clone());
             }
             ItemKind::Function(f) => {
                 let loc = f.name.location;
@@ -221,10 +231,14 @@ impl<'a> Pass<'a> {
                 }
                 D::Q(dim)
             }
-            Annotation::Of(ty, inner) if ty.lexeme == "Interval" => match self.annotation(inner) {
-                D::Q(d) => D::Iv(d),
-                _ => D::Any,
-            },
+            Annotation::Applied(ty, args)
+                if ty.len() == 1 && ty[0].lexeme == "Interval" && args.len() == 1 =>
+            {
+                match self.annotation(&args[0]) {
+                    D::Q(d) => D::Iv(d),
+                    _ => D::Any,
+                }
+            }
             Annotation::Option(inner) | Annotation::Result(inner) => self.annotation(inner),
             Annotation::Array(inner) => D::Arr(Box::new(self.annotation(inner))),
             _ => D::Any,
@@ -233,10 +247,31 @@ impl<'a> Pass<'a> {
 
     /// A type-position name that is a unit (and not a type the program declares).
     fn unit_of(&self, ident: &Ident) -> Option<Dim> {
-        if self.structs.contains_key(&ident.lexeme) {
+        if self.structs.contains_key(&ident.lexeme)
+            || self.enum_names.contains(&ident.lexeme)
+            || self.ty_params.iter().flatten().any(|p| p == &ident.lexeme)
+        {
             return None;
         }
         units::lookup(&ident.lexeme).map(|(d, _)| d)
+    }
+
+    /// Runs `f` with a generic type-param scope pushed (see `ty_params`).
+    fn with_ty_params<T>(&mut self, params: Vec<String>, f: impl FnOnce(&mut Self) -> T) -> T {
+        self.ty_params.push(params);
+        let out = f(self);
+        self.ty_params.pop();
+        out
+    }
+
+    /// The declared type-param names of the adt named `name` (`List` -> `["T"]`).
+    fn adt_param_names(&self, name: &str) -> Vec<String> {
+        self.solver
+            .adts
+            .iter()
+            .find(|(_, a)| a.name == name)
+            .map(|(_, a)| a.type_params.iter().map(|(n, _)| n.clone()).collect())
+            .unwrap_or_default()
     }
 
     // ---- items and statements
@@ -300,27 +335,34 @@ impl<'a> Pass<'a> {
                 }
             }
             ItemKind::Impl(imp) => {
-                for inner in &imp.items {
-                    self.item(inner);
-                }
+                // `impl List` sees `T` -- the target's declared params -- like the solver does
+                let params = self.adt_param_names(&imp.target.lexeme);
+                self.with_ty_params(params, |s| {
+                    for inner in &imp.items {
+                        s.item(inner);
+                    }
+                });
             }
             _ => {}
         }
     }
 
     fn function(&mut self, f: &'a Function) {
-        for p in &f.parameters {
-            self.param(p);
-        }
-        let ret = f.return_type.as_ref().map_or(D::Any, |a| self.annotation(a));
-        self.rets.push(ret.clone());
-        let body = self.expr(&f.body);
-        self.rets.pop();
-        if f.return_type.is_some() {
-            // a body that ends in `return` never gets here with a value worth checking
-            let at = tail_location(&f.body);
-            self.expect(&ret, &body, at, "returns the wrong dimension");
-        }
+        let params: Vec<String> = f.type_params.iter().map(|i| i.lexeme.clone()).collect();
+        self.with_ty_params(params, |s| {
+            for p in &f.parameters {
+                s.param(p);
+            }
+            let ret = f.return_type.as_ref().map_or(D::Any, |a| s.annotation(a));
+            s.rets.push(ret.clone());
+            let body = s.expr(&f.body);
+            s.rets.pop();
+            if f.return_type.is_some() {
+                // a body that ends in `return` never gets here with a value worth checking
+                let at = tail_location(&f.body);
+                s.expect(&ret, &body, at, "returns the wrong dimension");
+            }
+        });
     }
 
     fn param(&mut self, p: &Binding) {
@@ -599,7 +641,10 @@ impl<'a> Pass<'a> {
                         |f| matches!(&f.name, FieldKey::Ident(i) if i.lexeme == k.lexeme),
                     );
                     if let Some(field) = field {
-                        let want = self.annotation(&field.annotation);
+                        let want = self.with_ty_params(
+                            decl.type_params.iter().map(|i| i.lexeme.clone()).collect(),
+                            |s| s.annotation(&field.annotation),
+                        );
                         self.expect(&want, &got, value.location(), &format!("field `{}`", k.lexeme));
                     }
                 }
@@ -659,7 +704,7 @@ impl<'a> Pass<'a> {
     fn adt_name(&self, e: &Expr) -> Option<String> {
         let vid = self.solver.node_to_vid.get(&e.id())?;
         match Ty::Vid(*vid).normalized(self.solver) {
-            Ty::Adt(aid) | Ty::Identity(aid) => Some(self.solver.adts[aid].name.clone()),
+            Ty::Adt(aid, _) | Ty::Identity(aid, _) => Some(self.solver.adts[aid].name.clone()),
             _ => None,
         }
     }
@@ -680,7 +725,10 @@ impl<'a> Pass<'a> {
                             if let Some(f) = decl.fields.iter().find(
                                 |f| matches!(&f.name, FieldKey::Ident(i) if i.lexeme == field.lexeme),
                             ) {
-                                return self.annotation(&f.annotation);
+                                return self.with_ty_params(
+                                    decl.type_params.iter().map(|i| i.lexeme.clone()).collect(),
+                                    |s| s.annotation(&f.annotation),
+                                );
                             }
                         }
                     }
@@ -706,8 +754,12 @@ impl<'a> Pass<'a> {
                 let recv = self.expr(left);
                 let args: Vec<D> = c.arguments.iter().map(|a| self.expr(&a.value)).collect();
                 if let Some(ty) = self.adt_name(left) {
-                    if let Some(f) = self.methods.get(&(ty, method.lexeme.clone())).copied() {
-                        return self.apply(f, c, &args, true);
+                    if let Some(f) = self
+                        .methods
+                        .get(&(ty.clone(), method.lexeme.clone()))
+                        .copied()
+                    {
+                        return self.apply(f, c, &args, true, Some(&ty));
                     }
                 }
                 return self.builtin(e, &method.lexeme, recv, c, &args);
@@ -718,7 +770,7 @@ impl<'a> Pass<'a> {
             let args: Vec<D> = c.arguments.iter().map(|a| self.expr(&a.value)).collect();
             if let ExprKind::Ident(ty) = left.kind() {
                 if let Some(f) = self.methods.get(&(ty.lexeme.clone(), right.lexeme.clone())).copied() {
-                    return self.apply(f, c, &args, false);
+                    return self.apply(f, c, &args, false, Some(&ty.lexeme));
                 }
                 if ty.lexeme == "Interval" {
                     return self.interval_ctor(&right.lexeme, c, &args);
@@ -733,7 +785,7 @@ impl<'a> Pass<'a> {
                 self.fns_by_site.get(&(loc.file_id, loc.span.start)).copied()
             });
             if let Some(f) = user {
-                return self.apply(f, c, &args, false);
+                return self.apply(f, c, &args, false, None);
             }
         } else {
             self.expr(&c.left);
@@ -742,32 +794,46 @@ impl<'a> Pass<'a> {
     }
 
     /// Check a call to a user function against its declared parameters; its declared return is
-    /// what the call is worth.
-    fn apply(&mut self, f: &'a Function, c: &'a parse::Call, args: &[D], method: bool) -> D {
+    /// what the call is worth. `owner` names the impl target for methods and assoc fns, whose
+    /// declared type params are in scope in the signature too.
+    fn apply(
+        &mut self,
+        f: &'a Function,
+        c: &'a parse::Call,
+        args: &[D],
+        method: bool,
+        owner: Option<&str>,
+    ) -> D {
         let params: Vec<&Binding> = f
             .parameters
             .iter()
             .skip(usize::from(method || f.is_method()))
             .collect();
-        for (i, (arg, got)) in c.arguments.iter().zip(args).enumerate() {
-            let param = match &arg.name {
-                Some(n) => params
-                    .iter()
-                    .find(|p| p.left.as_ident().is_some_and(|id| id.lexeme == n.lexeme)),
-                None => params.get(i),
-            };
-            let Some(p) = param else { continue };
-            let Some(ann) = &p.annotation else { continue };
-            let want = self.annotation(ann);
-            let pname = p.left.as_ident().map_or("argument", |i| i.lexeme.as_str());
-            self.expect(
-                &want,
-                got,
-                arg.value.location(),
-                &format!("argument `{pname}` of `{}`", f.name.lexeme),
-            );
+        let mut scope: Vec<String> = f.type_params.iter().map(|i| i.lexeme.clone()).collect();
+        if let Some(owner) = owner {
+            scope.extend(self.adt_param_names(owner));
         }
-        f.return_type.as_ref().map_or(D::Any, |a| self.annotation(a))
+        self.with_ty_params(scope, |s| {
+            for (i, (arg, got)) in c.arguments.iter().zip(args).enumerate() {
+                let param = match &arg.name {
+                    Some(n) => params
+                        .iter()
+                        .find(|p| p.left.as_ident().is_some_and(|id| id.lexeme == n.lexeme)),
+                    None => params.get(i),
+                };
+                let Some(p) = param else { continue };
+                let Some(ann) = &p.annotation else { continue };
+                let want = s.annotation(ann);
+                let pname = p.left.as_ident().map_or("argument", |i| i.lexeme.as_str());
+                s.expect(
+                    &want,
+                    got,
+                    arg.value.location(),
+                    &format!("argument `{pname}` of `{}`", f.name.lexeme),
+                );
+            }
+            f.return_type.as_ref().map_or(D::Any, |a| s.annotation(a))
+        })
     }
 
     /// `Interval::pm(x, rel)` and friends: an interval in the unit of its number arguments.
@@ -801,6 +867,28 @@ impl<'a> Pass<'a> {
     /// Methods of the built-in float/int/list types.
     fn builtin(&mut self, e: &'a Expr, name: &str, recv: D, c: &'a parse::Call, args: &[D]) -> D {
         match (&recv, name) {
+            // `df.pull("kwh")` on a schema'd frame: a numeric column reads as quantities
+            // of its declared unit (or plain numbers when the column has no unit)
+            (_, "pull") => {
+                let recv_schema = match c.left.kind() {
+                    ExprKind::Access(Access::Dot { left, .. }) => self.solver.frame_schema_of(left),
+                    _ => None,
+                };
+                match (recv_schema, c.arguments.first().map(|a| a.value.kind())) {
+                    (Some(schema), Some(ExprKind::Literal(Literal::String(name)))) => {
+                        match schema.cols.get(name.as_str()) {
+                            Some(col) => match col.ty {
+                                Some(shared::Ty::Int) | Some(shared::Ty::Float) => {
+                                    D::Arr(Box::new(D::Q(col.dim.unwrap_or(Dim::NONE))))
+                                }
+                                _ => D::Arr(Box::new(D::Any)),
+                            },
+                            None => D::Any,
+                        }
+                    }
+                    _ => D::Any,
+                }
+            }
             // `df.pull_as("kwh", "kWh")`: a column of quantities in that unit
             (_, "pull_as") => match c.arguments.get(1).map(|a| a.value.kind()) {
                 Some(ExprKind::Literal(Literal::String(u))) => match units::parse(u) {

@@ -252,7 +252,7 @@ impl crate::adt::MimasAdt for PlExprTy {
 #[cfg(feature = "dataframe")]
 impl<'gc> MimasType<'gc> for crate::val::DataFrame<'gc> {
     fn mimas_ty(reg: &Registry) -> Option<Ty> {
-        Some(Ty::Adt(reg.get::<DataFrameTy>()?.adt_id))
+        Some(Ty::adt(reg.get::<DataFrameTy>()?.adt_id))
     }
     fn from_value(_ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError> {
         v.as_dataframe().ok_or_else(|| ty_error("DataFrame", v))
@@ -265,7 +265,7 @@ impl<'gc> MimasType<'gc> for crate::val::DataFrame<'gc> {
 #[cfg(feature = "dataframe")]
 impl<'gc> MimasType<'gc> for crate::val::PlExpr<'gc> {
     fn mimas_ty(reg: &Registry) -> Option<Ty> {
-        Some(Ty::Adt(reg.get::<PlExprTy>()?.adt_id))
+        Some(Ty::adt(reg.get::<PlExprTy>()?.adt_id))
     }
     fn from_value(_ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError> {
         v.as_plexpr().ok_or_else(|| ty_error("PlExpr", v))
@@ -297,7 +297,7 @@ impl crate::adt::MimasAdt for GroupByTy {
 #[cfg(feature = "dataframe")]
 impl<'gc> MimasType<'gc> for crate::val::GroupBy<'gc> {
     fn mimas_ty(reg: &Registry) -> Option<Ty> {
-        Some(Ty::Adt(reg.get::<GroupByTy>()?.adt_id))
+        Some(Ty::adt(reg.get::<GroupByTy>()?.adt_id))
     }
     fn from_value(_ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError> {
         v.as_group_by().ok_or_else(|| ty_error("GroupBy", v))
@@ -334,7 +334,7 @@ impl crate::adt::MimasAdt for DarklyImageTy {
 #[cfg(feature = "darkly")]
 impl<'gc> MimasType<'gc> for crate::val::DarklyImage<'gc> {
     fn mimas_ty(reg: &Registry) -> Option<Ty> {
-        Some(Ty::Adt(reg.get::<DarklyImageTy>()?.adt_id))
+        Some(Ty::adt(reg.get::<DarklyImageTy>()?.adt_id))
     }
     fn from_value(_ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError> {
         v.as_darkly_image()

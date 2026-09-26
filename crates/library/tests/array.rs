@@ -572,3 +572,35 @@ test_run!(
 );
 
 test_fail!(no_sort_by_method, "let a = [1, 2]; a.sort_by([1]);");
+
+// mutating the collection you're iterating is a compile error
+test_fail!(
+    mutate_iterated_array,
+    "let a = [1, 2]; for x in a { a.push(0); }",
+    "let a = [1, 2]; for x in a { a.pop(); }",
+    "let a = [1, 2]; for x in a { a.extend([3]); }",
+    "let a = [1, 2]; for x in a { a.shuffle(); }",
+    "let a = [1, 2]; for x in a { a.reorder([0]); }",
+    "let a = [1, 2]; for x in a { a[0] = 0; }",
+);
+// reads, element mutation, and aliases through call results are all fine
+test_run!(
+    reads_allowed_while_iterating,
+    "let a = [1, 2];
+     let n = 0;
+     for x in a { n += a.len(); }",
+    "n" => "4",
+);
+test_run!(
+    mutate_element_in_loop_allowed,
+    "let a = [[1], [2]];
+     for inner in a { inner.push(0); }",
+    "a[0].len()" => "2",
+);
+test_run!(
+    push_after_loop_allowed,
+    "let a = [1];
+     for x in a {}
+     a.push(2);",
+    "a.len()" => "2",
+);

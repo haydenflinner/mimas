@@ -15,6 +15,34 @@ pub struct BareNullBinding {
     pub at: SourceSpan,
 }
 
+/// `Foo<int>` where `Foo` was declared without type params (and the args aren't units, as in
+/// `Interval<kW>`).
+#[derive(Error, Debug, Diagnostic)]
+#[error("`{name}` is not generic")]
+#[diagnostic(help(
+    "declare it with parameters, e.g. `struct {name}<T>` -- or drop the `<...>`; only unit names may go there"
+))]
+pub struct NotGeneric {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("no type arguments allowed on `{name}`")]
+    pub at: SourceSpan,
+    pub name: String,
+}
+
+/// `Pair<int>` where `Pair` wants two type arguments.
+#[derive(Error, Debug, Diagnostic)]
+#[error("wrong number of type arguments")]
+pub struct GenericArity {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("`{name}` takes {expected} type argument(s) but {found} were supplied")]
+    pub at: SourceSpan,
+    pub name: String,
+    pub expected: usize,
+    pub found: usize,
+}
+
 #[derive(Error, Debug, Diagnostic)]
 #[error("mismatched types")]
 pub struct TypeMismatch {
@@ -572,6 +600,34 @@ pub struct AssignToLoopVar {
 }
 
 #[derive(Error, Debug, Diagnostic)]
+#[error("cannot mutate `{name}` while iterating over it")]
+#[diagnostic(help(
+    "collect what you need during the loop and apply the changes after it, or loop over a snapshot (`for x in xs collect x`)"
+))]
+pub struct MutateWhileIterating {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label(
+        "this mutates `{name}` mid-loop, so elements can be skipped, visited twice, or looped forever"
+    )]
+    pub at: SourceSpan,
+    pub name: String,
+    #[related]
+    pub iterating: Vec<IteratingHere>,
+}
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("`{name}` is being iterated")]
+#[diagnostic(severity(Advice))]
+pub struct IteratingHere {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("the loop holds `{name}` for the whole body")]
+    pub at: SourceSpan,
+    pub name: String,
+}
+
+#[derive(Error, Debug, Diagnostic)]
 #[error("non-constant value")]
 pub struct NonConstantValue {
     #[source_code]
@@ -863,4 +919,34 @@ pub struct DimensionMismatch {
     pub what: String,
     pub label: String,
     pub help: String,
+}
+
+/// `df.pull("revnue")` on a frame whose columns the checker knows (a `table {}` literal, a
+/// `.schema("…")` declaration, or a `query {}` result) -- a typo'd name is a check-time
+/// error, not a runtime raise.
+#[derive(Error, Debug, Diagnostic)]
+#[error("no column `{name}`")]
+#[diagnostic(help("this dataframe's columns: {columns}"))]
+pub struct NoSuchColumn {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("there's no `{name}` here")]
+    pub at: SourceSpan,
+    pub name: String,
+    pub columns: String,
+}
+
+/// A `.schema("…")` spec that doesn't parse (`fare:floatt`, a missing `:`, an unknown
+/// type or unit).
+#[derive(Error, Debug, Diagnostic)]
+#[error("bad schema spec")]
+#[diagnostic(help(
+    "a spec looks like `zone:int fare:float kwh:kWh` -- `int`, `float`, `str`, `bool`, or a unit"
+))]
+pub struct BadSchemaSpec {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("{msg}")]
+    pub at: SourceSpan,
+    pub msg: String,
 }

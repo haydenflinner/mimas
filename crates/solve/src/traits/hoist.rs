@@ -50,7 +50,7 @@ impl<'a> HoistCtx<'a> {
             matches!(self.target, HoistTarget::Scope),
             "adt decls only hoist at scope level"
         );
-        let ty = Ty::Adt(adt_id);
+        let ty = Ty::adt(adt_id);
         let dec_id = self
             .solver
             .dec_id(ident, ty.clone(), DecKind::Adt(adt_id), self.vis);
@@ -178,7 +178,8 @@ impl Hoist for parse::item::Enum {
             })
             .collect();
 
-        let adt = crate::components::Adt::new_enum(self.head.to_string(), variants);
+        let mut adt = crate::components::Adt::new_enum(self.head.to_string(), variants);
+        adt.type_params = type_params_of(&self.type_params);
         let id = ctx.solver.push_adt(adt);
 
         let variant_names: Vec<_> = ctx.solver.adts[id].variants.keys().cloned().collect();
@@ -203,7 +204,7 @@ impl Hoist for parse::item::Enum {
             };
             let dec = ctx.solver.dec_id(
                 &variant_ident,
-                Ty::Adt(id),
+                Ty::adt(id),
                 DecKind::Variant { parent: id, layout },
                 Vis::Private,
             );
@@ -259,6 +260,7 @@ impl Hoist for Struct {
         };
 
         let id = ctx.solver.push_adt(adt);
+        ctx.solver.adts[id].type_params = type_params_of(&self.type_params);
         ctx.write_adt(&self.name, id)
     }
 }
@@ -266,7 +268,7 @@ impl Hoist for Struct {
 impl Hoist for Impl {
     fn hoist(&self, ctx: HoistCtx) -> Result<()> {
         // Find our target
-        let Ty::Adt(adt) = self.target.query(ctx.solver)? else {
+        let Some(adt) = self.target.query(ctx.solver)?.as_adt().copied() else {
             Err(InvalidImplTarget {
                 src: ctx.solver.src(self.target.location()),
                 at: self.target.location().into(),
@@ -294,70 +296,80 @@ impl Hoist for Impl {
         }
 
         ctx.solver.ribs.push_impl(adt);
+        // the impl target's own params are in scope for member signatures (`impl List` can
+        // write `x: T` / `rest: List<T>` -- `impl List<int>`-style specializations are rejected
+        // by the parser)
+        ctx.solver.push_adt_params(adt);
 
-        for item in self.items.iter() {
-            let vis = if item.public() {
-                Vis::Public
-            } else {
-                Vis::Private
-            };
-            let hoist_ctx = HoistCtx::new(
-                ctx.solver,
-                HoistTarget::Adt(adt),
-                Some(item.id()),
-                ctx.location,
-                vis,
-            );
-            match item.kind() {
-                ItemKind::Const(con) => con.hoist(hoist_ctx)?,
-                ItemKind::Function(function) => function.hoist(hoist_ctx)?,
-                // parser rejects everything else in impl-body position
-                _ => unreachable!("parser only allows fn/const in impl bodies"),
-            };
-        }
-
-        // graft methods the impl omitted but the pact defaults, so they become real callable
-        // methods on the adt (and collide like everything else if another pact already provides
-        // the name). freshen the header so each impl's `self` slot is independent.
-        if let Some(pid) = pid {
-            let provided: HashSet<String> = self
-                .items
-                .iter()
-                .filter_map(|i| match i.kind() {
-                    ItemKind::Function(f) => Some(f.name.lexeme.clone()),
-                    _ => None,
-                })
-                .collect();
-            let omitted: Vec<String> = ctx.solver.pacts[pid]
-                .functions
-                .iter()
-                .filter(|&(name, (_, default))| {
-                    default.is_some() && !provided.contains(name.as_str())
-                })
-                .map(|(name, _)| name.clone())
-                .collect();
-            for name in omitted {
-                if let Some(existing) = ctx.solver.adts[adt].impls.get(&name) {
-                    let original_at = ctx.solver.decs[existing.dec].location.into();
-                    Err(DuplicateImplDeclaration {
-                        src: ctx.solver.src(self.target.location()),
-                        at: self.target.location().into(),
-                        original_at,
-                        name: name.clone(),
-                    })?;
-                }
-                let header = ctx.solver.pacts[pid].functions[&name].0.clone();
-                let ty = ctx.solver.instantiate_pact_fn(&header, &Ty::Adt(adt));
-                let dec = ctx.solver.pact_members[&(pid, name.clone())];
-                ctx.solver.adts[adt]
-                    .impls
-                    .insert(name, Field::new_constant(ty, ctx.location, dec));
+        let hoist_result: Result<()> = (|| {
+            for item in self.items.iter() {
+                let vis = if item.public() {
+                    Vis::Public
+                } else {
+                    Vis::Private
+                };
+                let hoist_ctx = HoistCtx::new(
+                    ctx.solver,
+                    HoistTarget::Adt(adt),
+                    Some(item.id()),
+                    ctx.location,
+                    vis,
+                );
+                match item.kind() {
+                    ItemKind::Const(con) => con.hoist(hoist_ctx)?,
+                    ItemKind::Function(function) => function.hoist(hoist_ctx)?,
+                    // parser rejects everything else in impl-body position
+                    _ => unreachable!("parser only allows fn/const in impl bodies"),
+                };
             }
-        }
 
+            // graft methods the impl omitted but the pact defaults, so they become real callable
+            // methods on the adt (and collide like everything else if another pact already provides
+            // the name). freshen the header so each impl's `self` slot is independent.
+            if let Some(pid) = pid {
+                let provided: HashSet<String> = self
+                    .items
+                    .iter()
+                    .filter_map(|i| match i.kind() {
+                        ItemKind::Function(f) => Some(f.name.lexeme.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                let omitted: Vec<String> = ctx.solver.pacts[pid]
+                    .functions
+                    .iter()
+                    .filter(|&(name, (_, default))| {
+                        default.is_some() && !provided.contains(name.as_str())
+                    })
+                    .map(|(name, _)| name.clone())
+                    .collect();
+                for name in omitted {
+                    if let Some(existing) = ctx.solver.adts[adt].impls.get(&name) {
+                        let original_at = ctx.solver.decs[existing.dec].location.into();
+                        Err(DuplicateImplDeclaration {
+                            src: ctx.solver.src(self.target.location()),
+                            at: self.target.location().into(),
+                            original_at,
+                            name: name.clone(),
+                        })?;
+                    }
+                    let header = ctx.solver.pacts[pid].functions[&name].0.clone();
+                    let ty = ctx
+                        .solver
+                        .instantiate_pact_fn(&header, &ctx.solver.impl_target_ty().unwrap());
+                    let dec = ctx.solver.pact_members[&(pid, name.clone())];
+                    ctx.solver.adts[adt]
+                        .impls
+                        .insert(name, Field::new_constant(ty, ctx.location, dec));
+                }
+            }
+            Ok(())
+        })();
+
+        ctx.solver.pop_type_params();
         ctx.solver.ribs.pop();
 
-        Ok(())
+        hoist_result
     }
 }
 
@@ -443,12 +455,17 @@ impl Hoist for Pact {
 
 impl Hoist for Function {
     fn hoist(&self, mut ctx: HoistCtx) -> Result<()> {
+        // declared type params (`fn map<T, U>`) are in scope while the signature resolves --
+        // they land in the stored `Ty::Fn` as `Ty::Param`s and get re-instantiated per use
+        ctx.solver.push_type_params(&self.type_params);
         let fn_header = hoist_fn_header(
             ctx.solver,
             &self.parameters,
             &self.return_type,
             self.is_method(),
-        )?;
+        );
+        ctx.solver.pop_type_params();
+        let fn_header = fn_header?;
 
         let ty = Ty::Fn(fn_header);
         let node_id = ctx.node_id;
@@ -547,6 +564,15 @@ fn hoist_fn_header(
 
 /// A field's name as an ident. A named field hands back the one the parser made (tooling keys
 /// off its id), while a tuple field has only a number to go on.
+/// `(name, ParamId)` for each entry of a parsed `<T, U>` list -- stored on the adt as
+/// `type_params` so `impl` blocks and `Self` can re-enter the scope with the same ids.
+fn type_params_of(params: &[Ident]) -> Vec<(String, shared::ParamId)> {
+    params
+        .iter()
+        .map(|i| (i.lexeme.clone(), Solver::param_id_of(i)))
+        .collect()
+}
+
 fn field_ident(name: &FieldKey, location: Location) -> Ident {
     match name {
         FieldKey::Ident(ident) => ident.clone(),

@@ -64,7 +64,7 @@ impl Project {
         let text = match dec_id {
             // a type named in a path or literal has no dec of its own, just the adt
             None => match ty {
-                Ty::Adt(aid) => resolutions.adt_path(*aid),
+                Ty::Adt(aid, _) => resolutions.adt_path(*aid),
                 ty => ty.display(resolutions),
             },
             Some(dec_id) => {

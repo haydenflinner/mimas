@@ -32,9 +32,9 @@ pub fn expand_impl(block: ItemImpl) -> Result<TokenStream2, syn::Error> {
     for item in &block.items {
         match item {
             ImplItem::Fn(method) => {
-                let (shim, add) = method_shim(&self_ident, method)?;
+                let (shim, muts, add) = method_shim(&self_ident, method)?;
                 let doc = doc_submission(&shim.sig.ident, &collect_doc(&method.attrs));
-                out.extend(quote!(#shim #doc));
+                out.extend(quote!(#shim #doc #muts));
                 adds.extend(add);
             }
             ImplItem::Const(c) => {
@@ -70,7 +70,7 @@ pub fn expand_impl(block: ItemImpl) -> Result<TokenStream2, syn::Error> {
 fn method_shim(
     self_ident: &Ident,
     method: &ImplItemFn,
-) -> Result<(ItemFn, TokenStream2), syn::Error> {
+) -> Result<(ItemFn, TokenStream2, TokenStream2), syn::Error> {
     let name = &method.sig.ident;
     let name_str = name.to_string();
     if method
@@ -130,7 +130,7 @@ fn method_shim(
     }
     ReplaceSelf(self_ident).visit_signature_mut(&mut shim.sig);
 
-    let ctx = expand_conversion(&mut shim)?;
+    let (ctx, mut mutating) = expand_conversion(&mut shim)?;
     let vm = crate::vm_path();
     let body: Vec<syn::Stmt> = match &receiver {
         None => parse_quote!(return #self_ident::#name( #(#call_args),* );),
@@ -169,13 +169,24 @@ fn method_shim(
     };
     shim.block.stmts.extend(body);
 
+    // NativeMutates indices count from the receiver: `&mut self` is index 0, and `&mut`
+    // params shift one slot when a receiver was stripped off the shim's signature -- so
+    // shift first, *then* mark the receiver, or `&mut self` would land on index 1
     let shim_ident = &shim.sig.ident;
+    if receiver.is_some() {
+        mutating.iter_mut().for_each(|i| *i += 1);
+        if receiver.as_ref().is_some_and(|r| r.mutability.is_some()) {
+            mutating.push(0);
+        }
+    }
+    let mut_submissions = crate::mutates_submissions(shim_ident, &mutating);
+
     let add = if receiver.is_some() {
         quote!(api.add_method_named(#name_str, #shim_ident);)
     } else {
         quote!(api.add_assoc_of::<#self_ident, _, _>(#name_str, #shim_ident);)
     };
-    Ok((shim, add))
+    Ok((shim, mut_submissions, add))
 }
 
 struct ReplaceSelf<'a>(&'a Ident);

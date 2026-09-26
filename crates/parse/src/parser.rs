@@ -816,9 +816,30 @@ impl<'s> Parser<'s> {
             .unwrap_or_else(|| self.poison_expr(start))
     }
 
+    /// An optional `<T, U>` type parameter list after a declaration name. The `<` is
+    /// unambiguous here: nothing else can follow the name in decl position.
+    fn type_params(&mut self) -> Vec<Ident> {
+        if !self.eat(TokKind::Less) {
+            return vec![];
+        }
+        self.list(TokKind::Greater, TokKind::is_ident, |p| p.require_ident())
+    }
+
+    /// The span covering a `<...>` list already parsed, for rejecting it in positions that
+    /// don't take generics.
+    fn reject_type_params(&mut self, params: &[Ident]) {
+        if let (Some(first), Some(last)) = (params.first(), params.last()) {
+            self.error(GenericsNotAllowed {
+                src: self.src(),
+                at: first.location.span.until(last.location.span).into(),
+            });
+        }
+    }
+
     fn struct_decl(&mut self) -> Struct {
         self.bump(TokKind::Struct);
         let name = self.require_ident();
+        let type_params = self.type_params();
         let fields = if self.eat(TokKind::SemiColon) {
             vec![]
         } else if self.eat(TokKind::LeftParenthesis) {
@@ -848,7 +869,11 @@ impl<'s> Parser<'s> {
         } else {
             vec![]
         };
-        Struct { name, fields }
+        Struct {
+            name,
+            type_params,
+            fields,
+        }
     }
 
     /// A `name: Type` field, `pub` or not.
@@ -900,7 +925,8 @@ impl<'s> Parser<'s> {
                     });
                 }
                 TokKind::Fn => {
-                    let (name, parameters, return_type) = self.function_sig(false);
+                    let (name, generics, parameters, return_type) = self.function_sig(false);
+                    self.reject_type_params(&generics);
                     // optional default body -- `{ ... }` after the sig. when present, the trailing
                     // `;` is dropped (block-terminated, like normal fns).
                     let default = self.at(TokKind::LeftBrace).then(|| self.block());
@@ -933,6 +959,7 @@ impl<'s> Parser<'s> {
     fn enum_decl(&mut self) -> Enum {
         self.bump(TokKind::Enum);
         let head = self.require_ident();
+        let type_params = self.type_params();
         let members = if self.expect(TokKind::LeftBrace) {
             self.list(TokKind::RightBrace, TokKind::is_ident, |p| {
                 let name = p.require_ident();
@@ -957,16 +984,26 @@ impl<'s> Parser<'s> {
         } else {
             vec![]
         };
-        Enum { head, members }
+        Enum {
+            head,
+            type_params,
+            members,
+        }
     }
 
     fn impl_decl(&mut self) -> Impl {
         self.bump(TokKind::Impl);
         let first = self.require_ident();
+        // `impl Foo<T>` would mean specializing one instantiation -- not supported. `impl Foo`
+        // on a generic type implements all of them at once, with the adt's params in scope.
+        let generics = self.type_params();
+        self.reject_type_params(&generics);
         // `impl Foo {}` (inherent) vs `impl Pact for Foo {}` (pact impl). After the first ident,
         // a `for` token disambiguates -- first becomes the pact, second becomes the target.
         let (pact, target) = if self.eat(TokKind::For) {
             let target = self.require_ident();
+            let generics = self.type_params();
+            self.reject_type_params(&generics);
             (Some(first), target)
         } else {
             (None, first)
@@ -1000,10 +1037,15 @@ impl<'s> Parser<'s> {
         Impl::new(target, pact, items)
     }
 
-    /// A function up to its body. A pact's signatures don't get `defaults`.
-    fn function_sig(&mut self, defaults: bool) -> (Ident, Vec<Binding>, Option<Annotation>) {
+    /// A function up to its body. A pact's signatures don't get `defaults`. Returns the
+    /// name, any `<T, U>` type parameters, the value parameters, and the return annotation.
+    fn function_sig(
+        &mut self,
+        defaults: bool,
+    ) -> (Ident, Vec<Ident>, Vec<Binding>, Option<Annotation>) {
         self.bump(TokKind::Fn);
         let name = self.require_ident();
+        let type_params = self.type_params();
         let parameters = if self.expect(TokKind::LeftParenthesis) {
             let mut first = true;
             self.list(
@@ -1033,7 +1075,7 @@ impl<'s> Parser<'s> {
         };
         let return_type = self.eat(TokKind::Arrow).then(|| self.annotation());
 
-        (name, parameters, return_type)
+        (name, type_params, parameters, return_type)
     }
 
     /// A parameter's name, and maybe its type.
@@ -1045,7 +1087,7 @@ impl<'s> Parser<'s> {
 
     fn function(&mut self) -> Function {
         let start = self.next_start();
-        let (name, parameters, return_type) = self.function_sig(true);
+        let (name, type_params, parameters, return_type) = self.function_sig(true);
         let body = if self.at(TokKind::LeftBrace) {
             self.block()
         } else {
@@ -1058,6 +1100,7 @@ impl<'s> Parser<'s> {
 
         Function {
             name,
+            type_params,
             parameters,
             return_type,
             body,
@@ -2517,13 +2560,15 @@ impl<'s> Parser<'s> {
                     1 if matches!(self.peek(), TokKind::Slash | TokKind::Star | TokKind::Caret) => {
                         self.quantity_annotation(segments.remove(0))
                     }
-                    // `Interval<kW>`: a type applied to a unit
-                    1 if self.at(TokKind::Less) => {
-                        let ty = segments.remove(0);
+                    // `List<T>`, `mod::Pair<A, B>`, or `Interval<kW>` (a unit arg -- the
+                    // checker knows whether the head is generic or takes a unit)
+                    _ if self.at(TokKind::Less) => {
                         self.bump(TokKind::Less);
-                        let unit = self.annotation();
-                        self.expect(TokKind::Greater);
-                        Annotation::Of(ty, Box::new(unit))
+                        let args =
+                            self.list(TokKind::Greater, TokKind::starts_annotation, |p| {
+                                p.annotation()
+                            });
+                        Annotation::Applied(segments, args)
                     }
                     1 => Annotation::Ty(segments.remove(0)),
                     _ => Annotation::Path(segments),

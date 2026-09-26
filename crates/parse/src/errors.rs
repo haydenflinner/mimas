@@ -251,6 +251,16 @@ pub struct PactSigDefaultParam {
 }
 
 #[derive(Error, Debug, Diagnostic)]
+#[error("type parameters are not allowed here")]
+#[diagnostic(help("only `fn`, `struct`, `enum`, and `impl` items declare type parameters"))]
+pub struct GenericsNotAllowed {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("unexpected `<...>`")]
+    pub at: SourceSpan,
+}
+
+#[derive(Error, Debug, Diagnostic)]
 #[error("unknown attribute")]
 #[diagnostic(help("supported attributes are `#[test]` and `#[tests]`"))]
 pub struct UnknownAttribute {

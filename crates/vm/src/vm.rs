@@ -53,6 +53,61 @@ pub enum SceneResult {
     Fallback(String),
 }
 
+/// A `DataFrame` flattened to display cells — column names plus up to
+/// `cap` rows of `AnyValue` display strings. [`Inspect`] flattens a frame to
+/// `Other`, so a host that typesets `show_*` results as tables reads the
+/// cells out with [`Vm::call_fn_read`] + [`table_data`]. Rows past `cap`
+/// fold into `dropped` rather than being read out.
+#[cfg(feature = "dataframe")]
+#[derive(Debug)]
+pub struct TableData {
+    pub cols: Vec<String>,
+    pub rows: Vec<Vec<String>>,
+    /// Rows the `cap` left unread.
+    pub dropped: usize,
+}
+
+/// [`TableData`] for a returned dataframe: strings come through unquoted,
+/// everything else as `AnyValue`'s own display form (the same text the
+/// frame's `Display` prints per cell).
+#[cfg(feature = "dataframe")]
+pub fn table_data(df: &crate::DataFrame<'_>, cap: usize) -> TableData {
+    use polars::prelude::AnyValue;
+    let borrowed = df.0.borrow();
+    let df = &borrowed.0;
+    let cols: Vec<String> = df
+        .get_column_names()
+        .iter()
+        .map(|n| n.as_str().to_string())
+        .collect();
+    let series: Vec<polars::prelude::Series> = df
+        .get_column_names()
+        .iter()
+        .filter_map(|n| df.column(n.as_str()).ok())
+        .map(|c| c.as_materialized_series().clone())
+        .collect();
+    let shown = df.height().min(cap);
+    let mut rows = Vec::with_capacity(shown);
+    for i in 0..shown {
+        rows.push(
+            series
+                .iter()
+                .map(|s| match s.get(i) {
+                    Ok(AnyValue::String(s)) => s.to_string(),
+                    Ok(AnyValue::StringOwned(s)) => s.as_str().to_string(),
+                    Ok(v) => format!("{v}"),
+                    Err(_) => String::new(),
+                })
+                .collect(),
+        );
+    }
+    TableData {
+        cols,
+        rows,
+        dropped: df.height() - shown,
+    }
+}
+
 /// One call-stack frame's introspectable state -- for debuggers/visualizers built on top of
 /// [`Vm`], not used by the interpreter itself. See [`Vm::frames`].
 #[derive(Debug)]
@@ -1921,47 +1976,70 @@ impl Vm {
     /// (e.g. an `img::Draw` scene) rather than compare it in a test. Like
     /// `call_fn_result`, a runtime fault leaves the thread dirty.
     pub fn call_fn_inspect(&mut self, name: &str) -> Result<Inspect, Error> {
+        Ok(self.call_fn_read(name, |_| ())?.0)
+    }
+
+    /// [`Vm::call_fn_inspect`], plus `read` applied to the raw [`Val`] while
+    /// it's still inside the arena — for value kinds `Inspect` flattens (a
+    /// `DataFrame` reads as `Inspect::Other`; a host typesetting it needs the
+    /// cells, e.g. [`table_data`]). A faulting call rewinds the thread to the
+    /// entry frame first, so the next injected call doesn't read stale
+    /// registers — the same reset `run_tests` performs between cases.
+    pub fn call_fn_read<T>(
+        &mut self,
+        name: &str,
+        read: impl FnOnce(&Val<'_>) -> T,
+    ) -> Result<(Inspect, T), Error> {
         let Some(body_id) = self.items.get(name).copied() else {
             return Err(miette::miette!("no fn {name}"));
         };
 
-        let Vm {
-            code,
-            chunks,
-            c_strs: strs,
-            signatures,
-            arena,
-            sources,
-            field_names,
-            ..
-        } = self;
-        arena.mutate(|mc, state| {
-            let ctx = state.ctx(mc);
-            {
-                let mut thread = state.thread.borrow_mut(mc);
-                let stop_depth = thread.frames.len() + 1;
-                enter_call(&mut thread, code, chunks, body_id, Reg::ZERO, &[], &[]).map_err(Error::msg)?;
-                run_dispatch(
-                    ctx,
-                    code,
-                    chunks,
-                    signatures,
-                    strs,
-                    sources,
-                    &mut thread,
-                    usize::MAX,
-                    stop_depth,
-                )?;
-            }
+        let out = {
+            let Vm {
+                code,
+                chunks,
+                c_strs: strs,
+                signatures,
+                arena,
+                sources,
+                field_names,
+                ..
+            } = self;
+            arena.mutate(|mc, state| {
+                let ctx = state.ctx(mc);
+                {
+                    let mut thread = state.thread.borrow_mut(mc);
+                    let stop_depth = thread.frames.len() + 1;
+                    enter_call(&mut thread, code, chunks, body_id, Reg::ZERO, &[], &[])
+                        .map_err(Error::msg)?;
+                    run_dispatch(
+                        ctx,
+                        code,
+                        chunks,
+                        signatures,
+                        strs,
+                        sources,
+                        &mut thread,
+                        usize::MAX,
+                        stop_depth,
+                    )?;
+                }
 
-            let struct_names = state.struct_names.borrow();
-            let mut seen = std::collections::HashSet::new();
-            let t = state.thread.borrow();
-            Ok(t.regs
-                .first()
-                .unwrap()
-                .inspect(&struct_names, field_names, &mut seen))
-        })
+                let struct_names = state.struct_names.borrow();
+                let mut seen = std::collections::HashSet::new();
+                let t = state.thread.borrow();
+                let val = t.regs.first().unwrap();
+                let extra = read(val);
+                Ok((
+                    val.inspect(&struct_names, field_names, &mut seen),
+                    extra,
+                ))
+            })
+        };
+        if out.is_err() {
+            self.reset_to_entry();
+        }
+        out
     }
 
     /// Runs every `#[test]` function and every `#[tests]` expression to completion (not through
