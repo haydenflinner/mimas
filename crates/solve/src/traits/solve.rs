@@ -2115,6 +2115,19 @@ impl Solve for Unwrap {
     }
 }
 
+impl Solve for parse::Demote {
+    fn solve(&self, _id: NodeId, _location: Location, solver: &mut Solver) -> Result<Ty> {
+        // `expr?` demotes a `T!` to `T?` — a raise reads back as null. On `T?`
+        // it's identity, and on anything else it's a passthrough (trailing `?`
+        // was a legal no-op before it had semantics, so `5?` stays `int`).
+        let ty = self.expr.query(solver)?;
+        Ok(match ty.normalized(solver) {
+            Ty::Result(inner) => Ty::Option(inner),
+            ty => ty,
+        })
+    }
+}
+
 impl Solve for parse::Raise {
     fn solve(&self, _id: NodeId, location: Location, solver: &mut Solver) -> Result<Ty> {
         let expected_ty = solver

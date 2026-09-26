@@ -49,6 +49,7 @@ macro_rules! for_each_op {
             IsRaised     [ (dst, Reg, reg) (src, Reg, reg) ];
             UnwrapRaised [ (dst, Reg, reg) (src, Reg, reg) ];
             Unwrap       [ (dst, Reg, reg) (src, Reg, reg) ];
+            UnwrapUnit   [ (dst, Reg, reg) (src, Reg, reg) ];
 
             // -- Inquires -- //
             GetIndex     [ (dst, Reg, reg) (set, Reg, reg) (index, Reg, reg) (kind, AccessKind, enum8) ];
@@ -489,6 +490,10 @@ impl Op {
                 src: ctx.i2r(value),
             },
             Inst::Unwrap(value) => Op::Unwrap {
+                dst: ctx.reg(),
+                src: ctx.i2r(value),
+            },
+            Inst::UnwrapUnit(value) => Op::UnwrapUnit {
                 dst: ctx.reg(),
                 src: ctx.i2r(value),
             },

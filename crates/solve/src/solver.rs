@@ -2466,6 +2466,7 @@ pub(crate) fn root_and_path(expr: &Expr) -> Option<(&Ident, Vec<GuardSeg>)> {
             }
             ExprKind::Grouping(g) => cur = &g.inner,
             ExprKind::Unwrap(u) => cur = &u.expr,
+            ExprKind::Demote(d) => cur = &d.expr,
             ExprKind::Absolve(a) => cur = &a.left,
             _ => return None,
         }

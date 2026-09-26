@@ -136,6 +136,10 @@ fn decode_op(d: &mut Decoder) -> Op {
             dst: Reg::decode(d),
             src: Reg::decode(d),
         },
+        OpCode::UnwrapUnit => Op::UnwrapUnit {
+            dst: Reg::decode(d),
+            src: Reg::decode(d),
+        },
         OpCode::GetIndex => Op::GetIndex {
             dst: Reg::decode(d),
             set: Reg::decode(d),

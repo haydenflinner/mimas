@@ -469,6 +469,7 @@ impl<'a> Pass<'a> {
                 l
             }
             ExprKind::Unwrap(u) => self.expr(&u.expr),
+            ExprKind::Demote(d) => self.expr(&d.expr),
             ExprKind::Absolve(a) => {
                 let l = self.expr(&a.left);
                 self.expr(&a.handler);

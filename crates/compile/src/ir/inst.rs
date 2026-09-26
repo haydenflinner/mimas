@@ -80,6 +80,9 @@ pub enum Inst {
     ToFloat(InstId),
     Sqrt(InstId),
     Unwrap(InstId),
+    /// `expr!` on a `()!` — `()`'s runtime repr is `Null`, so the Null check
+    /// can't run; Raised still faults, anything else reads back as Null.
+    UnwrapUnit(InstId),
     In(InstId, InstId, bool),
     Format(Vec<FormatPart>),
     RefBody(BodyId),
@@ -175,6 +178,7 @@ impl Inst {
             | Inst::ToFloat(..)
             | Inst::Sqrt(..)
             | Inst::Unwrap(..)
+            | Inst::UnwrapUnit(..)
             | Inst::In(..)
             | Inst::Format(..)
             | Inst::RefBody(..)
@@ -200,6 +204,7 @@ impl Inst {
             | Inst::SetIndex { .. }
             | Inst::GetIndex { .. }
             | Inst::Unwrap(..)
+            | Inst::UnwrapUnit(..)
             | Inst::UnwrapRaised(..)
             | Inst::Call { .. }
             | Inst::CallDirect { .. }
@@ -309,6 +314,7 @@ impl IrDisplay for Inst {
             Inst::ToFloat(inst_id) => format!("to_float {inst_id}"),
             Inst::Sqrt(inst_id) => format!("sqrt {inst_id}"),
             Inst::Unwrap(inst_id) => format!("unwrap {inst_id}"),
+            Inst::UnwrapUnit(inst_id) => format!("unwrap_unit {inst_id}"),
             Inst::Raise(inst_id) => format!("raise {inst_id}"),
             Inst::IsRaised(inst_id) => format!("is_raised {inst_id}"),
             Inst::UnwrapRaised(inst_id) => format!("unwrap_raised {inst_id}"),
@@ -678,6 +684,10 @@ impl BlockWriter<'_> {
 
     pub(crate) fn unwrap(&mut self, value: InstId) -> InstId {
         self.instruct(Inst::Unwrap(value))
+    }
+
+    pub(crate) fn unwrap_unit(&mut self, value: InstId) -> InstId {
+        self.instruct(Inst::UnwrapUnit(value))
     }
 
     pub(crate) fn raise(&mut self, value: InstId) -> InstId {

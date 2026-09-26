@@ -251,6 +251,7 @@ fn operands_of(inst: &Inst) -> Vec<(InstId, Option<&'static str>)> {
         | Inst::ToFloat(v)
         | Inst::Sqrt(v)
         | Inst::Unwrap(v)
+        | Inst::UnwrapUnit(v)
         | Inst::Raise(v)
         | Inst::IsRaised(v)
         | Inst::UnwrapRaised(v) => vec![(*v, None)],
@@ -293,6 +294,7 @@ fn node_label(ir: &Ir, inst: &Inst, body_names: &HashMap<BodyId, &str>) -> Strin
         Inst::ToFloat(_) => "to_float".to_string(),
         Inst::Sqrt(_) => "sqrt".to_string(),
         Inst::Unwrap(_) => "unwrap".to_string(),
+        Inst::UnwrapUnit(_) => "unwrap_unit".to_string(),
         Inst::Raise(_) => "raise".to_string(),
         Inst::IsRaised(_) => "is_raised".to_string(),
         Inst::UnwrapRaised(_) => "unwrap_raised".to_string(),

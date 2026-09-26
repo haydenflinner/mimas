@@ -299,6 +299,7 @@ pub fn walk_expr(expr: &Expr, visitor: &mut impl Visitor) {
         }
         ExprKind::Unary(unary) => walk_expr(&unary.right, visitor),
         ExprKind::Unwrap(unwrap) => walk_expr(&unwrap.expr, visitor),
+        ExprKind::Demote(demote) => walk_expr(&demote.expr, visitor),
         ExprKind::While(whil) => {
             if let Some(binding) = &whil.binding {
                 walk_pat(binding, visitor);

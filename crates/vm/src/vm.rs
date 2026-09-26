@@ -1621,6 +1621,18 @@ fn cold_dispatch<'gc>(
             };
             wr!(regs, dst, Val::Str(err));
         }
+        OpCode::UnwrapUnit => {
+            // `()`'s repr is Null, so no null check; only Raised faults. Any
+            // other value reads back as unit.
+            let dst = Reg::decode(code);
+            let src = Reg::decode(code);
+            match rd!(regs, src) {
+                Val::Raised(err) => {
+                    return Err(RtErr::UnwrappedRaised(err.as_str().to_string()));
+                }
+                _ => wr!(regs, dst, Val::Null),
+            }
+        }
         _ => unreachable!("failed to find cold op"),
     }
 

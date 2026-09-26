@@ -44,6 +44,7 @@ impl Query for Expr {
                 ExprKind::Call(v) => v,
                 ExprKind::Closure(v) => v,
                 ExprKind::Coalescence(v) => v,
+                ExprKind::Demote(v) => v,
                 ExprKind::Collect(v) => v,
                 ExprKind::Continue(v) => v,
                 ExprKind::Equality(v) => v,

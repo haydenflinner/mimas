@@ -5,9 +5,9 @@ use crate::{
 use api::NativeId;
 use parse::{
     Absolve, Access, AccessKind, Block, Break, Call, Closure, Coalescence, Collect, Continue,
-    Equality, Evaluation, Expr, ExprKind, FString, FStringPart, For, Grouping, Ident, If, In,
-    Literal, Logical, Loop, Match, MatchCase, NodeId, Raise, Range, Return, Stmt, StmtKind, Unary,
-    Unwrap, While,
+    Demote, Equality, Evaluation, Expr, ExprKind, FString, FStringPart, For, Grouping, Ident, If,
+    In, Literal, Logical, Loop, Match, MatchCase, NodeId, Raise, Range, Return, Stmt, StmtKind,
+    Unary, Unwrap, While,
     components::{Binding, Pat, PatKind},
 };
 use shared::{Located, PactId};
@@ -832,6 +832,7 @@ impl Lower for Expr {
         ir.with_loc(self.location(), |ir| match self.kind() {
             ExprKind::Poison(poison) => poison.escaped(),
             ExprKind::Absolve(absolve) => absolve.emit(id, ir),
+            ExprKind::Demote(demote) => demote.emit(id, ir),
             ExprKind::Access(access) => access.emit(id, ir),
             ExprKind::Block(block) => block.emit(id, ir),
             ExprKind::Break(b) => b.emit(id, ir),
@@ -1450,6 +1451,14 @@ impl Emit for Unary {
 impl Emit for Unwrap {
     fn emit(&self, _id: NodeId, ir: &mut Ir) -> Option<InstId> {
         let value = self.expr.lower(ir)?;
+        // `()!` unwraps against Null-as-unit: `()`'s repr is Val::Null, so the
+        // ordinary null check would fault on success. Raised still faults.
+        if matches!(
+            ir.resolutions.node_tys.get(&self.expr.id()),
+            Some(Ty::Result(inner)) if matches!(inner.as_ref(), Ty::Unit)
+        ) {
+            return Some(ir.current().unwrap_unit(value));
+        }
         Some(ir.current().unwrap(value))
     }
 }
@@ -1459,6 +1468,45 @@ impl Emit for Raise {
         let value = self.value.lower(ir)?;
         ir.current().raise(value);
         None
+    }
+}
+
+impl Emit for Demote {
+    fn emit(&self, _id: NodeId, ir: &mut Ir) -> Option<InstId> {
+        let value = self.expr.lower(ir)?;
+        // Only `T!` can carry a Raised — `T?` and plain values pass through.
+        if !matches!(
+            ir.resolutions.node_tys.get(&self.expr.id()),
+            Some(Ty::Result(_))
+        ) {
+            return Some(value);
+        }
+
+        let err_block = ir.push_block("demote_err");
+        let ok_block = ir.push_block("demote_ok");
+        let merge = ir.push_block("demote_merge");
+
+        let is_raised = ir.current().is_raised(value);
+        ir.in_current(|b| {
+            b.jump_if_false(is_raised, ok_block);
+            b.jump(err_block);
+        });
+
+        let err_branch = ir.in_block(err_block, |b| {
+            let null = b.constant(Constant::Null);
+            let end = b.id();
+            b.jump(merge);
+            (end, null)
+        });
+
+        let ok_end = ir.in_block(ok_block, |b| {
+            let end = b.id();
+            b.jump(merge);
+            end
+        });
+
+        ir.target(merge);
+        Some(ir.current().phi(vec![err_branch, (ok_end, value)]))
     }
 }
 
@@ -1728,6 +1776,7 @@ fn body_may_mutate_len(expr: &Expr, dict_iter: bool) -> bool {
         ExprKind::Coalescence(c) => see(&c.left) || see(&c.right),
         ExprKind::Unary(u) => see(&u.right),
         ExprKind::Unwrap(u) => see(&u.expr),
+        ExprKind::Demote(d) => see(&d.expr),
         ExprKind::Grouping(g) => see(&g.inner),
         ExprKind::Access(Access::Dot { left, right, .. }) => see(left) || see(right),
         ExprKind::Access(Access::Square { left, key, .. }) => see(left) || see(key),

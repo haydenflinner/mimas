@@ -2022,11 +2022,7 @@ impl<'s> Parser<'s> {
                     self.assert_or_unwrap(expr)
                 }
                 TokKind::Bang => self.unwrap(expr),
-                // bare trailing ?'s do nothing but are permitted. future warning
-                TokKind::Hook => {
-                    self.bump(TokKind::Hook);
-                    expr
-                }
+                TokKind::Hook => self.demote(expr),
                 _ => break expr,
             }
         }
@@ -2050,6 +2046,13 @@ impl<'s> Parser<'s> {
         let start = left.span().start();
         self.bump(TokKind::Bang);
         self.new_expr(Unwrap { expr: left }, start)
+    }
+
+    /// `expr?` demotes a `T!` to `T?` — a raise reads back as null.
+    fn demote(&mut self, left: Expr) -> Expr {
+        let start = left.span().start();
+        self.bump(TokKind::Hook);
+        self.new_expr(Demote { expr: left }, start)
     }
 
     /// `assert!(expr)` rewrites to an `if`/`panic` block. Bare `assert!` (no following `(`) is

@@ -160,6 +160,9 @@ impl std::fmt::Display for Op {
             Op::ToFloat { dst, src: value } => write!(f, "{}{}{}", OpName("to_float"), dst, value),
             Op::Sqrt { dst, src: value } => write!(f, "{}{}{}", OpName("sqrt"), dst, value),
             Op::Unwrap { dst, src: value } => write!(f, "{}{}{}", OpName("unwrap"), dst, value),
+            Op::UnwrapUnit { dst, src: value } => {
+                write!(f, "{}{}{}", OpName("unwrap_unit"), dst, value)
+            }
 
             Op::In {
                 dst,

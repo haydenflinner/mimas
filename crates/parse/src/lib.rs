@@ -42,6 +42,7 @@ pub mod expr {
         mod coalescence;
         mod collect;
         mod r#continue;
+        mod demote;
         mod equality;
         mod evaluation;
         mod r#for;
@@ -69,6 +70,7 @@ pub mod expr {
         pub use coalescence::*;
         pub use collect::*;
         pub use r#continue::*;
+        pub use demote::*;
         pub use equality::*;
         pub use evaluation::*;
         pub use r#for::*;
