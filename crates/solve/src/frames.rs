@@ -22,7 +22,7 @@ use shared::{Located, Ty, units::Dim};
 use crate::{
     Error, Result, Solver,
     components::{AdtId, TyExt},
-    errors::{BadSchemaSpec, DimensionMismatch, NoSuchColumn},
+    errors::{BadLiteralArg, BadSchemaSpec, DimensionMismatch, NoSuchColumn},
     traits::Query,
 };
 
@@ -793,9 +793,69 @@ impl Solver {
     }
 
     /// Post-solve hook for calls (runs at the tail of `Call::solve`, after arguments are
-    /// fulfilled): record propagated schemas and refine `pull`'s generic return into the
-    /// column's known `[T]`.
+    /// fulfilled): record propagated schemas, refine `pull`'s generic return into the
+    /// column's known `[T]`, and run the callee's literal validator if it has one.
     pub(crate) fn frame_call(&mut self, id: NodeId, call: &Call, ty: Ty) -> Result<Ty> {
+        let ty = self.frame_call_shapes(id, call, ty)?;
+        self.narrow_validated(call, ty)
+    }
+
+    /// The literal-validator seam: a native can declare `validate` (see `api::LitValidator`).
+    /// When every argument is a literal, `Ok` proves the raise branch unreachable so `T!`
+    /// narrows to `T`; `Err` is a compile error. Non-literal calls keep the honest `T!` --
+    /// `s.find(re)` on a variable `re` stays `[str]?!`.
+    fn narrow_validated(&mut self, call: &Call, ty: Ty) -> Result<Ty> {
+        let dec = match call.left.kind() {
+            // method calls: `method_intercept` records the *chosen* overload's dec on the
+            // callee expr, so `x.find(..)` on a `str` gets the str::find validator, not a
+            // same-named method's.
+            ExprKind::Access(Access::Dot { .. }) => self.node_decs.get(&call.left.id()),
+            ExprKind::Ident(callee) => self.node_decs.get(&callee.id),
+            _ => None,
+        };
+        let Some(validate) = dec
+            .and_then(|d| self.dec_to_native.get(d))
+            .and_then(|b| b.validate)
+        else {
+            return Ok(ty);
+        };
+        let Some(lits) = call
+            .arguments
+            .iter()
+            .map(|a| Self::lit_arg(&a.value))
+            .collect::<Option<Vec<_>>>()
+        else {
+            return Ok(ty);
+        };
+        match validate(&lits) {
+            Ok(()) => Ok(match ty {
+                Ty::Result(inner) => *inner,
+                ty => ty,
+            }),
+            Err(msg) => Err(BadLiteralArg {
+                src: self.src(call.left.location()),
+                at: call.left.location().into(),
+                msg,
+            })?,
+        }
+    }
+
+    /// A call argument as a `shared::Literal` for a validator -- scalar literals only. Any
+    /// array/tuple/non-literal makes the whole call unvalidated (validators see a flat
+    /// `&[Literal]`, so partial conversion would misalign positions).
+    fn lit_arg(e: &Expr) -> Option<shared::Literal> {
+        match e.kind() {
+            ExprKind::Literal(Literal::Int(i)) => Some(shared::Literal::Int(*i)),
+            ExprKind::Literal(Literal::Float(f)) => Some(shared::Literal::Float(*f)),
+            ExprKind::Literal(Literal::String(s)) => Some(shared::Literal::Str(s.clone())),
+            ExprKind::Literal(Literal::True) => Some(shared::Literal::Bool(true)),
+            ExprKind::Literal(Literal::False) => Some(shared::Literal::Bool(false)),
+            ExprKind::Literal(Literal::Null) => Some(shared::Literal::Null),
+            _ => None,
+        }
+    }
+
+    fn frame_call_shapes(&mut self, id: NodeId, call: &Call, ty: Ty) -> Result<Ty> {
         match call.left.kind() {
             // `df.pull("x")`, `df.schema("…")`, `df.filter(…)`, `gb.agg(…)`
             ExprKind::Access(Access::Dot {
@@ -898,19 +958,6 @@ impl Solver {
                 Some(_) => Ty::Result(Box::new(Ty::Array(Box::new(Ty::Float)))),
                 None => ty,
             }),
-            // `x.to("usd")`: the only runtime failure is an unparseable unit
-            // name, so a literal the units table knows can't raise — keep the
-            // plain inner type. A computed unit string keeps the honest `T!`.
-            "to" => {
-                if let Some(ExprKind::Literal(Literal::String(u))) =
-                    call.arguments.first().map(|a| a.value.kind())
-                    && shared::units::parse(u).is_some()
-                    && let Ty::Result(inner) = &ty
-                {
-                    return Ok(inner.as_ref().clone());
-                }
-                Ok(ty)
-            }
             "schema" => self.apply_schema_spec(id, call, recv, ty),
             "filter" => {
                 let Some(schema) = self.frame_schema_of(recv) else {

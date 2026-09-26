@@ -130,6 +130,25 @@ fn to(n: f64, unit: &str) -> Raisable<f64> {
     }
 }
 
+/// A literal unit string is checked at solve time: a known unit proves `to` can't raise
+/// (`float!` narrows to `float`), an unknown one is a compile error. `int::to` has its own
+/// copy -- the validators are joined by Rust path, so each `to` needs its own submission.
+fn valid_unit(args: &[shared::Literal]) -> Result<(), String> {
+    match args.first() {
+        Some(shared::Literal::Str(u)) if shared::units::parse(u).is_none() => {
+            Err(format!("`{u}` isn't a unit"))
+        }
+        _ => Ok(()),
+    }
+}
+
+vm::inventory::submit! {
+    vm::api::NativeValidator {
+        path: concat!(module_path!(), "::to"),
+        validate: valid_unit,
+    }
+}
+
 #[native]
 fn abs(n: f64) -> f64 {
     n.abs()

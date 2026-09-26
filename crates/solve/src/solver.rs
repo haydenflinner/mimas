@@ -740,6 +740,7 @@ impl Solver {
         params: Vec<Option<Ty>>,
         return_ty: Option<Ty>,
         native_id: NativeId,
+        validate: Option<api::LitValidator>,
     ) -> DecId {
         let sig = NativeFnSig {
             params,
@@ -766,6 +767,7 @@ impl Solver {
                 sig,
                 takes_self: false,
                 mutates_recv: false,
+                validate,
             },
         );
         dec_id
@@ -1098,6 +1100,7 @@ impl Solver {
                         f.parameters.clone(),
                         f.return_ty.clone(),
                         id,
+                        f.validate,
                     );
                 }
                 // module-nested native fn
@@ -1123,6 +1126,7 @@ impl Solver {
                             sig,
                             takes_self: false,
                             mutates_recv: false,
+                            validate: f.validate,
                         },
                     );
                     self.adts[leaf].as_struct_mut().insert(
@@ -1166,6 +1170,7 @@ impl Solver {
                             sig,
                             takes_self: m.takes_self,
                             mutates_recv: m.mutates_recv,
+                            validate: m.validate,
                         },
                     );
                     let field = Field {
@@ -2414,6 +2419,10 @@ pub(crate) struct NativeBinding {
     /// From `ApiMethod::mutates_recv` -- lets `check_iter_guard` know a call mutates its
     /// receiver. Always false for non-method natives.
     pub mutates_recv: bool,
+    /// From `ApiMethod::validate`/`ApiFunction::validate` -- when every call argument is a
+    /// literal this proves the call can't raise (`frame_call` narrows `T!` to `T`) or reports
+    /// it definitely will (a compile error). See `api::LitValidator`.
+    pub validate: Option<api::LitValidator>,
 }
 
 /// A collection an active `for` loop is iterating, expressed as the binding the iterator's

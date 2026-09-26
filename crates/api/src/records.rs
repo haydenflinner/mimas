@@ -1,11 +1,19 @@
 use shared::{AdtId, Literal, Ty};
 
+/// A per-native literal checker, submitted via `vm::api::NativeValidator` and joined by Rust
+/// path (same mechanism as `NativeDoc`). The solver calls it when *every* call argument is a
+/// literal: `Ok(())` proves the call can't raise, so a `T!` return narrows to `T`; `Err(msg)`
+/// becomes a compile error at the call site. Non-literal calls are never validated and keep
+/// the honest `T!`.
+pub type LitValidator = fn(&[Literal]) -> Result<(), String>;
+
 pub struct ApiFunction<C> {
     pub name: String,
     pub module: Vec<String>,
     pub parameters: Vec<Option<Ty>>,
     pub return_ty: Option<Ty>,
     pub doc: String,
+    pub validate: Option<LitValidator>,
     pub call: C,
 }
 
@@ -21,6 +29,7 @@ pub struct ApiMethod<C> {
     /// a `for` loop is iterating it.
     pub mutates_recv: bool,
     pub doc: String,
+    pub validate: Option<LitValidator>,
     pub call: C,
 }
 

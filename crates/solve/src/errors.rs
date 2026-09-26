@@ -936,6 +936,18 @@ pub struct NoSuchColumn {
     pub columns: String,
 }
 
+/// A native's literal validator rejected the call -- e.g. `s.find("(")` where the regex
+/// doesn't compile. The validator supplies the message; see `api::LitValidator`.
+#[derive(Error, Debug, Diagnostic)]
+#[error("invalid literal argument")]
+pub struct BadLiteralArg {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("{msg}")]
+    pub at: SourceSpan,
+    pub msg: String,
+}
+
 /// A `.schema("…")` spec that doesn't parse (`fare:floatt`, a missing `:`, an unknown
 /// type or unit).
 #[derive(Error, Debug, Diagnostic)]

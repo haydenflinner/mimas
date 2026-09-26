@@ -243,21 +243,26 @@ test_run!(
     r#""12-34".find("(\\d+)-(\\d+)")"# => r#"["12-34", "12", "34"]"#,
 );
 
-// invalid regex raises (an expected failure with the error text), not a
-// fault and not a silent null — absolve or `!`/`?` handle it
+// a literal pattern that doesn't compile is rejected at solve time — the
+// validator proves the raise, so it never reaches runtime
 #[test]
-fn find_invalid_regex_raises() {
-    let out = crate::test_runner::render("", r#""abc".find("(")"#);
-    assert!(out.starts_with("raised("), "{out}");
-    assert!(out.contains("unclosed"), "{out}");
+fn find_invalid_literal_regex_is_compile_error() {
+    let err = crate::test_runner::try_execute(r#"let x = "abc".find("(");"#)
+        .expect_err("bad literal regex should fail to compile");
+    let text = format!("{err:?}");
+    assert!(text.contains("unclosed"), "{text}");
 }
 
+// a *computed* pattern can't be checked at solve time — the raise is still
+// the honest `[str]?!` and absolve/`?`/`!` handle it
 test_run!(
-    find_invalid_regex_absolve_falls_back,
-    r#""abc".find("(") absolve |_| null"# => "null",
+    find_computed_regex_raises,
+    r#"let re = "(";"#,
+    r#""abc".find(re) absolve |_| null"# => "null",
+    r#""abc".find(re)?"# => "null",
 );
 
-// find_all: every match; each element is the captures of one match. [[str]]? null on bad regex
+// find_all: every match; each element is the captures of one match
 test_run!(
     find_all_multiple,
     r#""a1b2c3".find_all("[0-9]")"# => r#"[["1"], ["2"], ["3"]]"#,
@@ -273,12 +278,21 @@ test_run!(
     r#""a1 b2".find_all("([a-z])([0-9])")"# => r#"[["a1", "a", "1"], ["b2", "b", "2"]]"#,
 );
 
+// literal patterns are proven at solve time: `find_all` narrows from
+// `[str]?!` to `[str]?`, so `??`/`!` apply directly without `?`/`absolve`
 test_run!(
-    find_all_invalid_regex_raises,
-    r#""abc".find_all("(") absolve |_| []"# => "[]",
-    r#""abc".find_all("(") absolve |e| [[e]]"# =>
-        r#"[["regex parse error:\n    (\n    ^\nerror: unclosed group"]]"#,
+    find_all_literal_regex_is_proven,
+    r#""abc".find_all(".") ?? []"# => r#"[["a"], ["b"], ["c"]]"#,
+    r#""abc".find_all("[0-9]") ?? []"# => "[]",
 );
+
+#[test]
+fn find_all_invalid_literal_regex_is_compile_error() {
+    let err = crate::test_runner::try_execute(r#"let x = "abc".find_all("(");"#)
+        .expect_err("bad literal regex should fail to compile");
+    let text = format!("{err:?}");
+    assert!(text.contains("unclosed"), "{text}");
+}
 
 // lines: split on newlines
 test_run!(

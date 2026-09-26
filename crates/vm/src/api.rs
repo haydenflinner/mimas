@@ -77,6 +77,20 @@ pub struct NativeMutates {
 
 inventory::collect!(NativeMutates);
 
+/// A literal-call validator for a `#[native]` / `#[mimas]` fn, submitted via [`inventory`] and
+/// keyed by the item's full Rust path exactly like [`NativeDoc`]. When every call argument is a
+/// literal the solver runs `validate` on them: `Ok` proves the call can't raise so a `T!`
+/// return narrows to `T`; `Err(msg)` becomes a compile error. See [`api::LitValidator`].
+///
+/// Subject to the same link-pruning footgun as [`NativeDoc`]: a pruned submission degrades to
+/// `validate: None` -- the call just keeps its honest `T!`, never a wrong one.
+pub struct NativeValidator {
+    pub path: &'static str,
+    pub validate: api::LitValidator,
+}
+
+inventory::collect!(NativeValidator);
+
 pub type NativeFnReg = for<'a, 'gc> fn(&mut Api<'a, 'gc>);
 
 pub struct Api<'a, 'gc> {
@@ -99,6 +113,14 @@ fn mutates_recv(path: &str) -> bool {
     inventory::iter::<NativeMutates>
         .into_iter()
         .any(|m| m.path == path && m.index == 0)
+}
+
+/// The literal-call validator for `path` if one was submitted -- see [`NativeValidator`].
+fn validator_for(path: &str) -> Option<api::LitValidator> {
+    inventory::iter::<NativeValidator>
+        .into_iter()
+        .find(|v| v.path == path)
+        .map(|v| v.validate)
 }
 
 impl<'a, 'gc> Api<'a, 'gc> {
@@ -322,6 +344,7 @@ impl<'a, 'gc> Api<'a, 'gc> {
             takes_self: false,
             mutates_recv: false,
             doc: String::new(),
+            validate: None,
             call: (),
         });
         self.store_native(id, native);
@@ -422,6 +445,7 @@ impl<'b, 'a, 'gc> ModuleApi<'b, 'a, 'gc> {
             parameters,
             return_ty: Some(return_ty),
             doc: String::new(),
+            validate: None,
             call: (),
         });
         self.parent.store_native(id, native);
@@ -482,7 +506,13 @@ macro_rules! impl_into_fn {
                     self(ctx $(, $arg)*).into_native_result(ctx)
                 });
                 let id = api.library.function(ApiFunction {
-                    name, module, parameters, return_ty, doc, call: (),
+                    name,
+                    module,
+                    parameters,
+                    return_ty,
+                    doc,
+                    validate: validator_for(std::any::type_name_of_val(&self)),
+                    call: (),
                 });
                 api.store_native(id, native);
                 id
@@ -510,6 +540,7 @@ macro_rules! impl_into_fn {
                     takes_self: false,
                     mutates_recv: false,
                     doc,
+                    validate: validator_for(std::any::type_name_of_val(&self)),
                     call: (),
                 });
                 api.store_native(id, native);
@@ -566,6 +597,7 @@ macro_rules! impl_into_method {
                     takes_self: true,
                     mutates_recv: mutates_recv(std::any::type_name_of_val(&self)),
                     doc,
+                    validate: validator_for(std::any::type_name_of_val(&self)),
                     call: (),
                 });
                 api.store_native(id, native);
