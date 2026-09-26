@@ -34,8 +34,12 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
 }
 
 #[native]
-fn clamp(n: f64, low: f64, high: f64) -> f64 {
-    n.clamp(low, high)
+fn clamp(n: f64, low: f64, high: f64) -> Result<f64, RtErr> {
+    // !(low <= high) also catches a NaN bound — f64::clamp panics on both
+    if !(low <= high) {
+        return Err(RtErr::InvalidArgument("clamp requires lo <= hi".into()));
+    }
+    Ok(n.clamp(low, high))
 }
 
 #[native]
@@ -166,6 +170,10 @@ fn to_str(n: f64) -> String {
 }
 
 #[native]
-fn random(len: f64) -> f64 {
-    rand::rng().random_range(0.0..len)
+fn random(len: f64) -> Result<f64, RtErr> {
+    // random_range panics on an empty/NaN range
+    if !(len > 0.0) {
+        return Err(RtErr::InvalidArgument("random requires len > 0".into()));
+    }
+    Ok(rand::rng().random_range(0.0..len))
 }

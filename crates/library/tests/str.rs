@@ -243,10 +243,18 @@ test_run!(
     r#""12-34".find("(\\d+)-(\\d+)")"# => r#"["12-34", "12", "34"]"#,
 );
 
-// invalid regex returns null (the .ok()? path), not a fault
+// invalid regex raises (an expected failure with the error text), not a
+// fault and not a silent null — absolve or `!`/`?` handle it
+#[test]
+fn find_invalid_regex_raises() {
+    let out = crate::test_runner::render("", r#""abc".find("(")"#);
+    assert!(out.starts_with("raised("), "{out}");
+    assert!(out.contains("unclosed"), "{out}");
+}
+
 test_run!(
-    find_invalid_regex_null,
-    r#""abc".find("(")"# => "null",
+    find_invalid_regex_absolve_falls_back,
+    r#""abc".find("(") absolve |_| null"# => "null",
 );
 
 // find_all: every match; each element is the captures of one match. [[str]]? null on bad regex
@@ -266,8 +274,10 @@ test_run!(
 );
 
 test_run!(
-    find_all_invalid_regex_null,
-    r#""abc".find_all("(")"# => "null",
+    find_all_invalid_regex_raises,
+    r#""abc".find_all("(") absolve |_| []"# => "[]",
+    r#""abc".find_all("(") absolve |e| [[e]]"# =>
+        r#"[["regex parse error:\n    (\n    ^\nerror: unclosed group"]]"#,
 );
 
 // lines: split on newlines

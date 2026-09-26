@@ -45,8 +45,12 @@ fn to_str<'gc>(n: i64) -> String {
 }
 
 #[native]
-fn random<'gc>(len: i64) -> i64 {
-    rand::rng().random_range(0..len)
+fn random<'gc>(len: i64) -> Result<i64, RtErr> {
+    // random_range panics on an empty range
+    if len <= 0 {
+        return Err(RtErr::InvalidArgument("random requires len > 0".into()));
+    }
+    Ok(rand::rng().random_range(0..len))
 }
 
 #[native]

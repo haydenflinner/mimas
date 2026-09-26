@@ -1,6 +1,6 @@
 use heck::ToSnakeCase;
 use macros::native;
-use vm::{RtErr, api::Api};
+use vm::{RtErr, api::Api, conversion::Raisable};
 
 pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     let nid = api.add_method(len);
@@ -75,33 +75,36 @@ fn lines(s: &str) -> Vec<String> {
     s.lines().map(From::from).collect()
 }
 
-// todo, the handling of option vs raisable below is bad
-
+// An invalid pattern is an expected failure (raise with the regex error);
+// no match is an honest absence (null). So `[str]?!`: unwrap to `T?`.
 #[native]
-fn find(s: &str, pattern: &str) -> Option<Vec<String>> {
-    let re = regex::Regex::new(pattern).ok()?;
-    let caps = re.captures(s)?;
-    Some(
-        caps.iter()
-            .flatten()
-            .map(|m| m.as_str().to_string())
-            .collect(),
-    )
+fn find(s: &str, pattern: &str) -> Raisable<Option<Vec<String>>> {
+    match regex::Regex::new(pattern) {
+        Err(e) => Raisable::Raised(e.to_string()),
+        Ok(re) => Raisable::Ok(re.captures(s).map(|caps| {
+            caps.iter()
+                .flatten()
+                .map(|m| m.as_str().to_string())
+                .collect()
+        })),
+    }
 }
 
 #[native]
-fn find_all(s: &str, pattern: &str) -> Option<Vec<Vec<String>>> {
-    let re = regex::Regex::new(pattern).ok()?;
-    Some(
-        re.captures_iter(s)
-            .map(|caps| {
-                caps.iter()
-                    .flatten()
-                    .map(|m| m.as_str().to_string())
-                    .collect::<Vec<String>>()
-            })
-            .collect(),
-    )
+fn find_all(s: &str, pattern: &str) -> Raisable<Option<Vec<Vec<String>>>> {
+    match regex::Regex::new(pattern) {
+        Err(e) => Raisable::Raised(e.to_string()),
+        Ok(re) => Raisable::Ok(Some(
+            re.captures_iter(s)
+                .map(|caps| {
+                    caps.iter()
+                        .flatten()
+                        .map(|m| m.as_str().to_string())
+                        .collect::<Vec<String>>()
+                })
+                .collect(),
+        )),
+    }
 }
 
 #[native]
