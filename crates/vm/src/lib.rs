@@ -19,6 +19,8 @@ mod native;
 pub use native::*;
 pub mod fixtures;
 pub use fixtures::*;
+mod snapshot;
+pub use snapshot::*;
 mod math;
 pub mod units;
 pub use units::{Beats, Bits, Hz, Secs, St, Tempo};

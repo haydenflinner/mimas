@@ -135,8 +135,10 @@ pub struct Prints {
     /// `(call site, kind, rendered line)` in emit order.
     pub lines: RefCell<Vec<(Location, PrintKind, String)>>,
     /// Warn sites already reported — survives `take`, so a warn inside a
-    /// game loop reports once per session, not once per frame.
-    warned: RefCell<std::collections::HashSet<(Location, String)>>,
+    /// game loop reports once per session, not once per frame. `pub(crate)`
+    /// for `snapshot`: the dedupe set rides a checkpoint restore so a warn
+    /// that fired before the snapshot doesn't re-fire after it.
+    pub(crate) warned: RefCell<std::collections::HashSet<(Location, String)>>,
     /// Lines past [`Prints::CAP`] — counted so a host can say "…N more".
     pub dropped: Cell<usize>,
 }

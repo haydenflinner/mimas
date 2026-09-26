@@ -1954,7 +1954,13 @@ impl<'s> Parser<'s> {
                     Some(f @ ("sum" | "mean" | "average" | "median" | "min" | "max" | "count" | "n_unique"
                         | "first" | "last" | "is_null" | "is_not_null" | "to_upper" | "to_lower" | "len"
                         | "contains" | "starts_with" | "ends_with" | "fill_null" | "is_in" | "eq" | "neq"
-                        | "cast_int" | "cast_float" | "cast_str" | "lag" | "lead" | "difference"))
+                        | "cast_int" | "cast_float" | "cast_str" | "lag" | "lead" | "difference"
+                        | "abs" | "floor" | "ceil" | "round"
+                        | "to_datetime" | "epoch_ms" | "strftime" | "truncate"
+                        | "year" | "month" | "day" | "hour" | "minute" | "second"
+                        | "weekday" | "ordinal_day" | "days_in_month" | "date" | "month_start" | "month_end"
+                        | "list_len" | "list_get" | "list_first" | "list_last" | "list_sum" | "list_mean"
+                        | "explode"))
                         if !args.is_empty() =>
                     {
                         let mut it = args.into_iter();

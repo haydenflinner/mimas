@@ -49,6 +49,7 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
         m.add(n);
         m.add(to_dataframe);
         m.add(from_csv);
+        m.add(from_json);
         // the verbs are also free functions so `df |> filter(..)` pipes
         // resolve -- `|>` desugars `x |> f(a)` to `f(x, a)`, and methods alone
         // would leave `f` unbound.
@@ -124,6 +125,35 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add_method(str_len);
     api.add_method(cast);
     api.add_method(is_in);
+    // temporal -- `col("t").to_datetime("ms").dt_year()` reads an epoch column as a date
+    api.add_method(to_datetime);
+    api.add_method(dt_year);
+    api.add_method(dt_month);
+    api.add_method(dt_day);
+    api.add_method(dt_ordinal_day);
+    api.add_method(dt_weekday);
+    api.add_method(dt_days_in_month);
+    api.add_method(dt_hour);
+    api.add_method(dt_minute);
+    api.add_method(dt_second);
+    api.add_method(dt_date);
+    api.add_method(dt_month_start);
+    api.add_method(dt_month_end);
+    api.add_method(dt_epoch_ms);
+    api.add_method(dt_strftime);
+    api.add_method(dt_truncate);
+    api.add_method(dt_round);
+    // list cells (from_json's nested arrays) and a few numeric extras
+    api.add_method(list_len);
+    api.add_method(list_get);
+    api.add_method(list_first);
+    api.add_method(list_last);
+    api.add_method(list_sum);
+    api.add_method(list_mean);
+    api.add_method(explode);
+    api.add_method(abs);
+    api.add_method(floor);
+    api.add_method(ceil);
 }
 
 #[native]
@@ -382,12 +412,37 @@ fn cell_val<'gc>(
         AnyValue::Float64(x) => Val::Float(x),
         AnyValue::String(x) => Val::Str(ctx.intern(x)),
         AnyValue::StringOwned(x) => Val::Str(ctx.intern(x.as_str())),
+        // a datetime is its epoch instant in milliseconds -- mimas has no
+        // temporal Val, and ms int is what `epoch_ms`/`to_datetime(_, "ms")`
+        // round-trip through
+        AnyValue::Datetime(x, tu, _) | AnyValue::DatetimeOwned(x, tu, _) => {
+            Val::Int(epoch_ms(x, tu))
+        }
+        AnyValue::Date(_) | AnyValue::Time(_) => Val::Str(ctx.intern(&v.to_string())),
+        AnyValue::Duration(x, tu) => Val::Float(epoch_ms(x, tu) as f64 / 1000.0),
+        AnyValue::List(s) | AnyValue::Array(s, _) => {
+            let mut vals = Vec::with_capacity(s.len());
+            for cell in s.iter() {
+                vals.push(cell_val(ctx, cell, what, col)?);
+            }
+            Val::Array(ctx.new_array(vals))
+        }
         other => {
             return Err(format!(
                 "{what}: column {col:?} has an unsupported dtype ({other:?})"
             ));
         }
     })
+}
+
+/// an instant/duration stored in `tu` units, as plain milliseconds
+fn epoch_ms(x: i64, tu: polars::prelude::TimeUnit) -> i64 {
+    use polars::prelude::TimeUnit;
+    match tu {
+        TimeUnit::Nanoseconds => x / 1_000_000,
+        TimeUnit::Microseconds => x / 1_000,
+        TimeUnit::Milliseconds => x,
+    }
 }
 
 /// The struct_id whose declared fields are exactly `cols` (order-free), i.e. the
@@ -819,6 +874,343 @@ fn from_csv<'gc>(ctx: Ctx<'gc>, csv: &str) -> Raisable<vm::DataFrame<'gc>> {
         .into()
 }
 
+/// `from_json(text)` / `from_json(text, "games")` -- a JSON document into a `DataFrame`.
+/// The rows are an array of objects: a top-level array, or `key`'s array when the
+/// document is an envelope like `{"total": 43, "games": […]}` (when exactly one field
+/// holds an array it's picked automatically; several arrays need `key`). Each field
+/// becomes a column typed by its values -- ints, floats, bools, strs, `null` cells.
+/// A field whose values are scalar arrays flattens into `field_0`, `field_1`, …
+/// (`"s": [900, 800]` -> `s_0`, `s_1`); deeper arrays become list columns
+/// (`"moves": [[…], …]` -> a list you can `list_len`/`explode`), and mixed or
+/// object values come through as their JSON text.
+#[native]
+fn from_json<'gc>(
+    ctx: Ctx<'gc>,
+    text: &str,
+    key: Option<String>,
+) -> Raisable<vm::DataFrame<'gc>> {
+    (|| {
+        let doc: serde_json::Value = serde_json::from_str(text)
+            .map_err(|e| format!("from_json: {e}"))?;
+        let rows = json_rows(&doc, key.as_deref())?;
+        let df = json_columns(rows)?;
+        Ok::<_, String>(ctx.new_dataframe(df))
+    })()
+    .into()
+}
+
+/// the array-of-objects `from_json` reads rows from
+fn json_rows<'a>(
+    doc: &'a serde_json::Value,
+    key: Option<&str>,
+) -> Result<&'a Vec<serde_json::Value>, String> {
+    use serde_json::Value;
+    let rows = match (doc, key) {
+        (Value::Array(rows), None) => rows,
+        (Value::Object(map), Some(k)) => match map.get(k) {
+            Some(Value::Array(rows)) => rows,
+            Some(_) => return Err(format!("from_json: `{k}` isn't an array")),
+            None => {
+                return Err(format!("from_json: no field `{k}` in the document"));
+            }
+        },
+        (Value::Object(map), None) => {
+            let arrays: Vec<&String> = map
+                .iter()
+                .filter(|(_, v)| matches!(v, Value::Array(_)))
+                .map(|(k, _)| k)
+                .collect();
+            match arrays.as_slice() {
+                [k] => match map.get(k.as_str()) {
+                    Some(Value::Array(rows)) => rows,
+                    _ => unreachable!(),
+                },
+                [] => return Err("from_json: the document has no array of rows".into()),
+                keys => {
+                    return Err(format!(
+                        "from_json: the document has several arrays ({}); pass one by name",
+                        keys.iter().map(|k| format!("`{k}`")).collect::<Vec<_>>().join(", ")
+                    ));
+                }
+            }
+        }
+        (Value::Array(_), Some(_)) => {
+            return Err("from_json: the document is already an array; drop the key".into());
+        }
+        _ => return Err("from_json: expected an array of objects or an object holding one".into()),
+    };
+    if let Some(bad) = rows.iter().position(|r| !r.is_object()) {
+        return Err(format!("from_json: row {bad} isn't an object"));
+    }
+    Ok(rows)
+}
+
+/// field name -> one column, following the rules `from_json`'s doc describes
+fn json_columns(rows: &[serde_json::Value]) -> Result<polars::frame::DataFrame, String> {
+    use polars::prelude::Column;
+    use serde_json::Value;
+    // field names in first-seen order
+    let mut names: Vec<&str> = vec![];
+    for row in rows {
+        for k in row.as_object().expect("checked").keys() {
+            if !names.contains(&k.as_str()) {
+                names.push(k.as_str());
+            }
+        }
+    }
+    let mut cols: Vec<Column> = vec![];
+    for name in names {
+        let cells: Vec<Option<&Value>> = rows
+            .iter()
+            .map(|r| r.as_object().unwrap().get(name))
+            .collect();
+        json_field(&mut cols, name, &cells)?;
+    }
+    polars::frame::DataFrame::new_infer_height(cols).map_err(|e| format!("from_json: {e}"))
+}
+
+/// classify one JSON cell for dtype inference
+#[derive(Clone, Copy, PartialEq)]
+enum JKind {
+    Int,
+    Float,
+    Bool,
+    Str,
+    ArrScalar, // an array whose elements are all scalars
+    ArrDeep,   // an array holding arrays/objects
+    Obj,
+}
+
+fn jkind(v: &serde_json::Value) -> Option<JKind> {
+    use serde_json::Value;
+    Some(match v {
+        Value::Null => return None,
+        Value::Bool(_) => JKind::Bool,
+        Value::Number(n) => {
+            if n.is_i64() || n.is_u64() {
+                JKind::Int
+            } else {
+                JKind::Float
+            }
+        }
+        Value::String(_) => JKind::Str,
+        Value::Array(items) => {
+            if items.iter().all(|i| !matches!(i, Value::Array(_) | Value::Object(_))) {
+                JKind::ArrScalar
+            } else {
+                JKind::ArrDeep
+            }
+        }
+        Value::Object(_) => JKind::Obj,
+    })
+}
+
+/// merge the cell kinds of one field into the dtype decision `from_json` documents:
+/// like kinds stay, int+float widens to float, anything else renders as text.
+fn merge_kinds<'a>(kinds: impl Iterator<Item = JKind>) -> Option<JKind> {
+    kinds.fold(None, |acc, k| match (acc, k) {
+        (None, k) => Some(k),
+        (Some(JKind::Int), JKind::Float) | (Some(JKind::Float), JKind::Int) => Some(JKind::Float),
+        (Some(JKind::ArrScalar), JKind::ArrDeep)
+        | (Some(JKind::ArrDeep), JKind::ArrScalar)
+        | (Some(JKind::ArrDeep), JKind::ArrDeep) => Some(JKind::ArrDeep),
+        (Some(a), b) if a == b => acc.or(Some(a)),
+        (Some(_), _) => Some(JKind::Str), // mixed scalars render as text
+    })
+}
+
+fn json_field<'a>(
+    cols: &mut Vec<polars::prelude::Column>,
+    name: &'a str,
+    cells: &[Option<&'a serde_json::Value>],
+) -> Result<(), String> {
+    use polars::prelude::Column;
+    use serde_json::Value;
+    let merged = merge_kinds(cells.iter().flatten().filter_map(|v| jkind(v)));
+    let name_pl: polars::prelude::PlSmallStr = name.into();
+    let col = match merged {
+        // every cell null (or the field never appears) -- an all-null str column
+        None => Column::new(name_pl, vec![Option::<&str>::None; cells.len()]),
+        Some(JKind::Int) => {
+            let v: Vec<Option<i64>> = cells
+                .iter()
+                .map(|c| c.and_then(|v| v.as_i64()))
+                .collect();
+            Column::new(name_pl, v)
+        }
+        Some(JKind::Float) => {
+            let v: Vec<Option<f64>> = cells
+                .iter()
+                .map(|c| c.and_then(|v| v.as_f64()))
+                .collect();
+            Column::new(name_pl, v)
+        }
+        Some(JKind::Bool) => {
+            let v: Vec<Option<bool>> = cells
+                .iter()
+                .map(|c| c.and_then(|v| v.as_bool()))
+                .collect();
+            Column::new(name_pl, v)
+        }
+        // strings, objects and mixed values all land here -- objects keep
+        // their JSON text so nothing is dropped
+        Some(JKind::Str) | Some(JKind::Obj) => {
+            let v: Vec<Option<String>> = cells
+                .iter()
+                .map(|c| {
+                    c.map(|v| match v {
+                        Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    })
+                })
+                .collect();
+            Column::new(name_pl, v)
+        }
+        Some(JKind::ArrScalar) => {
+            // `[blue, red]` -> `p_0`, `p_1`; a short array leaves nulls
+            let width = cells
+                .iter()
+                .flatten()
+                .filter_map(|v| v.as_array())
+                .map(|a| a.len())
+                .max()
+                .unwrap_or(0);
+            if width == 0 {
+                cols.push(Column::new(name_pl.clone(), vec![Option::<&str>::None; cells.len()]));
+                return Ok(());
+            }
+            for i in 0..width {
+                let inner: Vec<Option<&Value>> = cells
+                    .iter()
+                    .map(|c| {
+                        c.and_then(|v| v.as_array())
+                            .and_then(|a| a.get(i))
+                            .filter(|v| !v.is_null())
+                    })
+                    .collect();
+                json_field(cols, &format!("{name}_{i}"), &inner)?;
+            }
+            return Ok(());
+        }
+        Some(JKind::ArrDeep) => {
+            // `[[seat, fx, fy, tx, ty, ms], …]` -> a nested list column; each
+            // row's array becomes the element series of a `List(…)` cell. The
+            // builder asserts one element dtype: empty arrays come back
+            // Null-dtype and get retyped to the column's, and a genuinely
+            // heterogeneous run stringifies every cell to its JSON text.
+            use polars::prelude::{DataType, NamedFrom, Series};
+            let mut items: Vec<Option<Series>> = cells
+                .iter()
+                .map(|c| {
+                    c.and_then(|v| v.as_array())
+                        .map(|inner| json_elem_series(inner))
+                })
+                .collect();
+            if let Some(dt) = items
+                .iter()
+                .flatten()
+                .map(|s| s.dtype().clone())
+                .find(|d| *d != DataType::Null)
+            {
+                let mut uniform = true;
+                for e in items.iter_mut().flatten() {
+                    if *e.dtype() == DataType::Null {
+                        *e = Series::new_empty("".into(), &dt);
+                    } else if *e.dtype() != dt {
+                        uniform = false;
+                    }
+                }
+                if !uniform {
+                    items = cells
+                        .iter()
+                        .map(|c| {
+                            c.and_then(|v| v.as_array()).map(|inner| {
+                                Series::new(
+                                    "".into(),
+                                    vec![Value::Array(inner.clone()).to_string()],
+                                )
+                            })
+                        })
+                        .collect();
+                }
+            }
+            Column::new(name_pl, items)
+        }
+    };
+    cols.push(col);
+    Ok(())
+}
+
+/// one row's nested array -> the `Series` its `List` cell is made of. All-array
+/// elements recurse one level deeper (the element series of the inner `List`);
+/// scalar elements collect typed; anything else renders JSON text. A mixed run
+/// of element dtypes is stringified element-wise so the `List` builder always
+/// sees one dtype.
+fn json_elem_series(items: &[serde_json::Value]) -> polars::prelude::Series {
+    use polars::prelude::{NamedFrom, Series};
+    use serde_json::Value;
+    let name: polars::prelude::PlSmallStr = "".into();
+    if items.iter().any(|v| matches!(v, Value::Array(_)))
+        && items.iter().all(|v| matches!(v, Value::Array(_) | Value::Null))
+    {
+        let elems: Vec<Option<Series>> = items
+            .iter()
+            .map(|v| v.as_array().map(|a| json_scalar_series(a.as_slice())))
+            .collect();
+        // polars' list builder asserts one element dtype -- a mixed run
+        // (say one float element in an int run) stringifies everything
+        let dt = elems.iter().flatten().next().map(|s| s.dtype().clone());
+        if let Some(dt) = dt {
+            let uniform = elems.iter().flatten().all(|s| *s.dtype() == dt);
+            if uniform {
+                return Series::new(name, elems);
+            }
+            return Series::new(
+                name,
+                elems
+                    .into_iter()
+                    .map(|e| {
+                        e.and_then(|s| s.cast(&polars::prelude::DataType::String).ok())
+                    })
+                    .collect::<Vec<_>>(),
+            );
+        }
+        return Series::new_empty(name, &polars::prelude::DataType::Null);
+    }
+    json_scalar_series(items)
+}
+
+/// a flat run of JSON values (one nested array's elements) as a typed `Series`:
+/// ints/floats/bools/strs keep their kind, mixed kinds and objects render text.
+fn json_scalar_series(items: &[serde_json::Value]) -> polars::prelude::Series {
+    use polars::prelude::{NamedFrom, Series};
+    use serde_json::Value;
+    let name: polars::prelude::PlSmallStr = "".into();
+    let merged = merge_kinds(items.iter().filter_map(jkind));
+    match merged {
+        Some(JKind::Int) => {
+            Series::new(name, items.iter().map(|v| v.as_i64()).collect::<Vec<_>>())
+        }
+        Some(JKind::Float) => {
+            Series::new(name, items.iter().map(|v| v.as_f64()).collect::<Vec<_>>())
+        }
+        Some(JKind::Bool) => {
+            Series::new(name, items.iter().map(|v| v.as_bool()).collect::<Vec<_>>())
+        }
+        _ => Series::new(
+            name,
+            items
+                .iter()
+                .map(|v| match v {
+                    Value::Null => None,
+                    Value::String(s) => Some(s.clone()),
+                    other => Some(other.to_string()),
+                })
+                .collect::<Vec<Option<String>>>(),
+        ),
+    }
+}
+
 fn column_from_vals(name: &str, vals: &[Val<'_>]) -> Result<polars::prelude::Column, String> {
     use polars::prelude::Column;
     let name: polars::prelude::PlSmallStr = name.into();
@@ -1004,6 +1396,144 @@ fn is_in<'gc>(
     Ok(ctx.new_plexpr(out))
 }
 
+// ---- temporal & nested expressions -----------------------------------------------
+// `to_datetime` + the `dt_*` methods are the fluent mirror of the `query { }` column
+// functions of the same name (`__q_apply` below); `list_*`/`explode` unpack the list
+// columns `from_json` builds out of nested JSON arrays.
+
+/// a `to_datetime`/unit argument -> the `TimeUnit` polars stores ("s" scales to ms)
+fn parse_time_unit(u: &str) -> Result<(polars::prelude::TimeUnit, i64), vm::RtErr> {
+    use polars::prelude::TimeUnit;
+    Ok(match u {
+        "s" | "sec" | "secs" | "seconds" => (TimeUnit::Milliseconds, 1000),
+        "ms" | "millis" | "milliseconds" => (TimeUnit::Milliseconds, 1),
+        "us" | "micros" | "microseconds" => (TimeUnit::Microseconds, 1),
+        "ns" | "nanos" | "nanoseconds" => (TimeUnit::Nanoseconds, 1),
+        other => {
+            return Err(vm::RtErr::Custom(format!(
+                "unknown time unit {other:?} (expected \"s\", \"ms\", \"us\" or \"ns\")"
+            )));
+        }
+    })
+}
+
+/// `col("endedAt").to_datetime("ms")` -- epoch counts become a real datetime column;
+/// `unit` says what the ints count ("s", "ms", "us" or "ns"). Take it apart with
+/// `dt_year`/`dt_month`/…, render it with `dt_strftime`, or go back to ints with
+/// `dt_epoch_ms`.
+#[native]
+fn to_datetime<'gc>(
+    ctx: Ctx<'gc>,
+    e: vm::PlExpr<'gc>,
+    unit: &str,
+) -> Result<vm::PlExpr<'gc>, vm::RtErr> {
+    use polars::prelude::{DataType, lit};
+    let (tu, scale) = parse_time_unit(unit)?;
+    let e = e.0.0.clone();
+    let e = if scale == 1 { e } else { e * lit(scale) };
+    Ok(ctx.new_plexpr(e.cast(DataType::Datetime(tu, None))))
+}
+
+macro_rules! pl_expr_dt_accessor {
+    ($($name:ident => $method:ident),+ $(,)?) => {$(
+        #[native]
+        fn $name<'gc>(ctx: Ctx<'gc>, e: vm::PlExpr<'gc>) -> vm::PlExpr<'gc> {
+            ctx.new_plexpr(e.0.0.clone().dt().$method())
+        }
+    )+};
+}
+pl_expr_dt_accessor! {
+    dt_year => year,
+    dt_month => month,
+    dt_day => day,
+    dt_ordinal_day => ordinal_day,
+    dt_weekday => weekday,
+    dt_days_in_month => days_in_month,
+    dt_hour => hour,
+    dt_minute => minute,
+    dt_second => second,
+    dt_date => date,
+    dt_month_start => month_start,
+    dt_month_end => month_end,
+}
+
+/// `col("t").dt_epoch_ms()` -- a datetime column back to plain milliseconds.
+#[native]
+fn dt_epoch_ms<'gc>(ctx: Ctx<'gc>, e: vm::PlExpr<'gc>) -> vm::PlExpr<'gc> {
+    ctx.new_plexpr(e.0.0.clone().dt().timestamp(polars::prelude::TimeUnit::Milliseconds))
+}
+
+/// `col("t").dt_strftime("%Y-%m-%d")` -- render each cell with a strftime format.
+#[native]
+fn dt_strftime<'gc>(ctx: Ctx<'gc>, e: vm::PlExpr<'gc>, fmt: &str) -> vm::PlExpr<'gc> {
+    ctx.new_plexpr(e.0.0.clone().dt().strftime(fmt))
+}
+
+/// `col("t").dt_truncate("1d")` -- snap each cell down to a boundary
+/// ("1h", "1d", "1w", "1mo", …) -- the bucketing step of a time-series group-by.
+#[native]
+fn dt_truncate<'gc>(ctx: Ctx<'gc>, e: vm::PlExpr<'gc>, every: &str) -> vm::PlExpr<'gc> {
+    ctx.new_plexpr(e.0.0.clone().dt().truncate(polars::prelude::lit(every)))
+}
+
+/// `col("t").dt_round("1h")` -- round each cell to the nearest boundary.
+#[native]
+fn dt_round<'gc>(ctx: Ctx<'gc>, e: vm::PlExpr<'gc>, every: &str) -> vm::PlExpr<'gc> {
+    ctx.new_plexpr(e.0.0.clone().dt().round(polars::prelude::lit(every)))
+}
+
+// list cells (the ones `from_json` builds out of nested arrays) as expressions
+#[native]
+fn list_len<'gc>(ctx: Ctx<'gc>, e: vm::PlExpr<'gc>) -> vm::PlExpr<'gc> {
+    ctx.new_plexpr(e.0.0.clone().list().len())
+}
+
+/// `col("moves").list_get(0)` -- the `i`th element of each list cell
+/// (null when the list is shorter).
+#[native]
+fn list_get<'gc>(ctx: Ctx<'gc>, e: vm::PlExpr<'gc>, i: i64) -> vm::PlExpr<'gc> {
+    ctx.new_plexpr(e.0.0.clone().list().get(polars::prelude::lit(i), true))
+}
+
+macro_rules! pl_expr_list {
+    ($($name:ident => $method:ident),+ $(,)?) => {$(
+        #[native]
+        fn $name<'gc>(ctx: Ctx<'gc>, e: vm::PlExpr<'gc>) -> vm::PlExpr<'gc> {
+            ctx.new_plexpr(e.0.0.clone().list().$method())
+        }
+    )+};
+}
+pl_expr_list! {
+    list_first => first,
+    list_last => last,
+    list_sum => sum,
+    list_mean => mean,
+}
+
+/// `col("moves").explode()` -- one row per list element (`select` it to see
+/// the exploded rows; keep the other columns to have them repeated).
+#[native]
+fn explode<'gc>(ctx: Ctx<'gc>, e: vm::PlExpr<'gc>) -> vm::PlExpr<'gc> {
+    ctx.new_plexpr(
+        e.0.0.clone().explode(polars::prelude::ExplodeOptions {
+            empty_as_null: true,
+            keep_nulls: true,
+        }),
+    )
+}
+
+macro_rules! pl_expr_numeric {
+    ($($name:ident),+ $(,)?) => {$(
+        #[native]
+        fn $name<'gc>(ctx: Ctx<'gc>, e: vm::PlExpr<'gc>) -> vm::PlExpr<'gc> {
+            ctx.new_plexpr(e.0.0.clone().$name())
+        }
+    )+};
+}
+pl_expr_numeric!(abs, floor, ceil);
+
+
+
 /// `table { … }`'s starting point: a table with no columns.
 #[native]
 fn __table_new<'gc>(ctx: Ctx<'gc>) -> vm::DataFrame<'gc> {
@@ -1149,6 +1679,50 @@ fn __q_apply<'gc>(
         // value write `a == $who` (the `$` splice) or `eq(a, $who)`
         "eq" => e.eq(q_expr(arg)?),
         "neq" => e.neq(q_expr(arg)?),
+        "abs" => e.abs(),
+        "floor" => e.floor(),
+        "ceil" => e.ceil(),
+        // `round(t, "1d")` rounds a datetime to a boundary ("1h", "1d", …)
+        "round" => e.dt().round(polars::prelude::lit(text(arg)?)),
+        // temporal -- `to_datetime(ms_col, "ms")` makes a real datetime; the rest
+        // read or reshape it. (`epoch_ms` is the way back to ints.)
+        "to_datetime" => {
+            let (tu, scale) = parse_time_unit(&text(arg)?)?;
+            let e = if scale == 1 { e } else { e * polars::prelude::lit(scale) };
+            e.cast(polars::prelude::DataType::Datetime(tu, None))
+        }
+        "epoch_ms" => e.dt().timestamp(polars::prelude::TimeUnit::Milliseconds),
+        "year" => e.dt().year(),
+        "month" => e.dt().month(),
+        "day" => e.dt().day(),
+        "hour" => e.dt().hour(),
+        "minute" => e.dt().minute(),
+        "second" => e.dt().second(),
+        "weekday" => e.dt().weekday(),
+        "ordinal_day" => e.dt().ordinal_day(),
+        "days_in_month" => e.dt().days_in_month(),
+        "date" => e.dt().date(),
+        "month_start" => e.dt().month_start(),
+        "month_end" => e.dt().month_end(),
+        "strftime" => e.dt().strftime(&text(arg)?),
+        "truncate" => e.dt().truncate(polars::prelude::lit(text(arg)?)),
+        // list cells (`from_json` builds them out of nested arrays)
+        "list_len" => e.list().len(),
+        "list_get" => {
+            let i = match arg {
+                Val::Int(i) => i,
+                _ => return Err(q_err("list_get takes an int index")),
+            };
+            e.list().get(polars::prelude::lit(i), true)
+        }
+        "list_first" => e.list().first(),
+        "list_last" => e.list().last(),
+        "list_sum" => e.list().sum(),
+        "list_mean" => e.list().mean(),
+        "explode" => e.explode(polars::prelude::ExplodeOptions {
+            empty_as_null: true,
+            keep_nulls: true,
+        }),
         other => return Err(q_err(format!("unknown column function `{other}`"))),
     };
     Ok(ctx.new_plexpr(out))

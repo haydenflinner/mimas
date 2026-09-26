@@ -38,6 +38,12 @@ polars = { path = "../../../polars/crates/polars", optional = true, default-feat
     "regex",
     # `Expr::diff`/`NullBehavior` for `col(..).diff(n)` and `query`'s `difference(..)`
     "diff",
+    # `col("t").dt_month_start()`/`dt_month_end()` and `query`'s `month_start`/`month_end`
+    "month_start",
+    "month_end",
+    # `col("x").floor()`/`.ceil()`/`.abs()` and the same-named `query` functions
+    "round_series",
+    "abs",
 ] }
 # depended on directly (not via `polars`'s own `csv` feature) for `CsvReadOptions`/`CsvReader`,
 # used by `std_lib::dataframe::from_csv` to read an in-memory CSV string into a `DataFrame`.

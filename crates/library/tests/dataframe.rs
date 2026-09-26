@@ -1057,3 +1057,119 @@ test_fail!(
        };
        let _ = df.row(5)!;"#,
 );
+
+// ---- `from_json` + datetimes ---------------------------------------------------
+// A JSON document loads straight into a DataFrame: the rows are an array of
+// objects (a bare array, or the envelope's single array field -- `key` picks
+// one when there are several). Scalar fields become typed columns, a scalar
+// array flattens to `f_0`/`f_1`, deeper arrays become list columns, and mixed
+// values render their JSON text. `to_datetime` then turns an epoch column into
+// a real datetime the rest of the verbs can take apart.
+
+const LOBBY: &str = r#"use std::polars::*;
+    let games = from_json("{\"total\":2,\"games\":[{\"p\":[\"ann\",\"bo\"],\"s\":[3,1],\"w\":0,\"kind\":\"tour\",\"endedAt\":1704103200000,\"actions\":5,\"moves\":[[0,1,2,100],[1,3,4,200]]},{\"p\":[\"cy\",\"di\"],\"s\":[2,2],\"w\":\"tie\",\"kind\":\"practice\",\"endedAt\":1704153600000,\"actions\":8,\"moves\":null}]}")!;"#;
+
+test_run!(
+    from_json_reads_an_envelopes_array_and_flattens_scalar_arrays,
+    LOBBY,
+    // `p: [blue, red]` flattens to p_0/p_1; `s` likewise
+    r#"games.pull("p_0")!.join(",")"# => r#""ann,cy""#,
+    r#"games.pull("s_1")"# => "[1, 2]",
+    // `w` mixes an int seat and a "tie" string -- the whole column is text
+    r#"games.pull("w")!.join(",")"# => r#""0,tie""#,
+    r#"games.pull("endedAt")!.len()"# => "2",
+);
+
+test_run!(
+    from_json_nested_arrays_become_list_columns,
+    LOBBY,
+    // `moves` is an array of arrays -> a list column you can measure and unpack
+    r#"games.mutate([col("moves").list_len().alias("nm")])!.pull("nm")!"# => "[2, null]",
+    r#"games.pull("moves")![0][0]"# => "[0, 1, 2, 100]",
+    // explode opens the lists into one row per move (rows only grow via select)
+    r#"games.select([col("moves").explode().alias("m")])!.pull("m")"# => "[[0, 1, 2, 100], [1, 3, 4, 200], null]",
+    r#"games.select([col("moves").explode().alias("m")])!.filter(col("m").is_not_null())!.pull("m")![1]"# => "[1, 3, 4, 200]",
+);
+
+test_run!(
+    from_json_query_space_flattens_too,
+    LOBBY,
+    // inside query { } the flattened names are ordinary columns
+    r#"query {
+        games
+        derive winner = if w == "0" { p_0 } else { if w == "1" { p_1 } else { "tie" } }
+        sort -s_0
+    }.pull("winner")!.join(",")"# => r#""ann,tie""#,
+);
+
+// epoch ms -> datetime -> parts. 1704103200000 is 2024-01-01T10:00:00Z.
+test_run!(
+    datetime_parts_off_an_epoch_column,
+    LOBBY,
+    r#"query {
+        games
+        derive ended = to_datetime(endedAt, "ms")
+        sort ended
+    }.pull("ended")![0]"# => "1704103200000",
+    r#"query {
+        games
+        derive ended = to_datetime(endedAt, "ms")
+        sort -ended
+        derive hr = hour(ended), yr = year(ended), dow = strftime(ended, "%a")
+    }.pull("hr")![0]"# => "0",
+    r#"query {
+        games
+        derive ended = to_datetime(endedAt, "ms")
+        sort ended
+        derive hr = hour(ended), yr = year(ended), dow = strftime(ended, "%a")
+    }.pull("dow")!.join(",")"# => r#""Mon,Tue""#,
+    r#"query {
+        games
+        derive ended = to_datetime(endedAt, "ms")
+        sort ended
+        derive yr = year(ended)
+    }.pull("yr")"# => "[2024, 2024]",
+    // date() gives a real date dtype; pull renders it as ISO text
+    r#"query {
+        games
+        derive d = date(to_datetime(endedAt, "ms"))
+        sort -d
+    }.pull("d")![0]"# => r#""2024-01-02""#,
+    // truncate buckets a timestamp -- the 10:00 game snaps to midnight
+    r#"query {
+        games
+        derive day_ms = epoch_ms(truncate(to_datetime(endedAt, "ms"), "1d"))
+        sort day_ms
+    }.pull("day_ms")![0]"# => "1704067200000",
+);
+
+test_run!(
+    datetime_fluent_api_mirrors_the_query_functions,
+    LOBBY,
+    r#"games.mutate([col("endedAt").to_datetime("ms").dt_strftime("%Y-%m-%d").alias("d")])!.pull("d")!.join(",")"# => r#""2024-01-01,2024-01-02""#,
+    r#"games.mutate([col("endedAt").to_datetime("ms").dt_epoch_ms().alias("ms")])!.pull("ms")![0]"# => "1704103200000",
+    // "s" rescales the ints into milliseconds before the cast
+    r#"table { t
+        1704103200
+    }.mutate([col("t").to_datetime("s").dt_year().alias("y")])!.pull("y")![0]"# => "2024",
+);
+
+// a bare top-level array needs no key; several arrays do
+test_run!(
+    from_json_array_and_key_forms,
+    "use std::polars::*;",
+    r#"from_json("[{\"a\":1},{\"a\":2}]")!.pull("a")"# => "[1, 2]",
+    r#"from_json("{\"x\":[{\"a\":1}],\"y\":[{\"b\":2}]}", "y")!.pull("b")"# => "[2]",
+);
+
+test_fail!(
+    from_json_rejects_a_multi_array_document_without_a_key,
+    r#"use std::polars::*;
+       let _ = from_json("{\"x\":[{}],\"y\":[{}]}")!;"#,
+);
+
+test_fail!(
+    from_json_rejects_non_object_rows,
+    r#"use std::polars::*;
+       let _ = from_json("[1,2,3]")!;"#,
+);

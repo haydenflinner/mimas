@@ -4,6 +4,7 @@
   - [Why mimas?](./introduction/why-mimas.md)
   - [Tour](./introduction/tour.md)
   - [Benchmarks](./introduction/benchmarks.md)
+  - [Compiling to Rust](./introduction/compiling-to-rust.md)
   - [Getting Started](./introduction/getting-started.md)
   - [Language Server](./introduction/lsp.md)
 - [Language Reference](./reference.md)
