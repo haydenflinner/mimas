@@ -39,7 +39,7 @@
 
 use std::{
     any::{Any, TypeId},
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::HashMap,
     sync::Arc,
 };
@@ -70,6 +70,24 @@ pub struct DebugInfo {
     pub stack: RefCell<Vec<(BodyId, u32)>>,
 }
 
+impl DebugInfo {
+    /// The innermost frame's source location. Inside a native that's the
+    /// call site — the stack mirror's top ip sits just *past* the call
+    /// op, so step back one byte to land inside the call op's own span
+    /// (otherwise a statement whose trailing op carries the next
+    /// statement's loc attributes one call site late).
+    pub fn top_loc(&self) -> Option<Location> {
+        let stack = self.stack.borrow();
+        let &(body, ip) = stack.last()?;
+        let locs = self.locs.borrow();
+        let offsets = self.offsets.borrow();
+        let rel = ip.checked_sub(*offsets.get(body)?)?.saturating_sub(1);
+        let entries = locs.get(body)?;
+        let i = entries.partition_point(|(off, _)| *off <= rel);
+        (i > 0).then(|| entries[i - 1].1)
+    }
+}
+
 /// Where `print`/`dbg` and friends send their lines. The default sink is
 /// the process's stdout; an embedder (a repl, the wasm eval worker) swaps
 /// in a capture with [`Out::set`] and drains it after the run. Each call
@@ -92,6 +110,37 @@ impl Out {
     /// Vm, which is all capture-style embedders need (a Vm is one session).
     pub fn set(&self, sink: impl FnMut(&str) + 'static) {
         *self.0.borrow_mut() = Box::new(sink);
+    }
+}
+
+/// Every `print`/`dbg` line, keyed by call site — a rich host (the lit
+/// page) hovers a `print(x)` and shows what it printed; outside a host
+/// nothing reads this and `Out` is all a print is. Capped so a print in
+/// a per-frame game loop can't grow without bound — overflow lands in
+/// `dropped` (and still reaches `Out`).
+#[derive(Default)]
+pub struct Prints {
+    /// `(call site, rendered line)` in emit order.
+    pub lines: RefCell<Vec<(Location, String)>>,
+    /// Lines past [`Prints::CAP`] — counted so a host can say "…N more".
+    pub dropped: Cell<usize>,
+}
+
+impl Prints {
+    pub const CAP: usize = 256;
+
+    pub fn push(&self, loc: Location, text: String) {
+        let mut lines = self.lines.borrow_mut();
+        if lines.len() < Self::CAP {
+            lines.push((loc, text));
+        } else {
+            self.dropped.set(self.dropped.get() + 1);
+        }
+    }
+
+    /// Drain the recorded lines (leaves `dropped` — it's per-Vm history).
+    pub fn take(&self) -> Vec<(Location, String)> {
+        std::mem::take(&mut *self.lines.borrow_mut())
     }
 }
 

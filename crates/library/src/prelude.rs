@@ -4,7 +4,7 @@ use vm::{
     anon::{self},
     api::Api,
     conversion::NeverReturn,
-    fixtures::Out,
+    fixtures::{DebugInfo, Out, Prints},
 };
 
 pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
@@ -16,7 +16,15 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
 
 #[native]
 fn print<'gc>(ctx: Ctx<'gc>, msg: Val<'gc>) -> Result<(), RtErr> {
-    ctx.fixture::<Out>().write(&ctx.to_string(msg)?);
+    let line = ctx.to_string(msg)?;
+    ctx.fixture::<Out>().write(&line);
+    // `display` (quoted strings, structured values) is the richer read
+    // a host tooltip wants; the plain line above is all `print` is
+    // without one.
+    if let Some(loc) = ctx.fixture::<DebugInfo>().top_loc() {
+        let text = ctx.display(msg).unwrap_or(line);
+        ctx.fixture::<Prints>().push(loc, text);
+    }
     Ok(())
 }
 
@@ -39,6 +47,10 @@ fn todo<'gc>(ctx: Ctx<'gc>, msg: Option<anon::T<'gc>>) -> Result<NeverReturn, Rt
 
 #[native]
 fn dbg<'gc>(ctx: Ctx<'gc>, val: anon::T<'gc>) -> Result<anon::T<'gc>, RtErr> {
-    ctx.fixture::<Out>().write(&format!("dbg value: {}", ctx.display(val.0)?));
+    let text = format!("dbg value: {}", ctx.display(val.0)?);
+    ctx.fixture::<Out>().write(&text);
+    if let Some(loc) = ctx.fixture::<DebugInfo>().top_loc() {
+        ctx.fixture::<Prints>().push(loc, text);
+    }
     Ok(val)
 }
