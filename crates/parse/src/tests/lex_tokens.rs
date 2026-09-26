@@ -4,6 +4,26 @@ tok_test!(whitepsace: " \n\t" =>);
 tok_test!(int: "1" => Int(1));
 tok_test!(int_with_underscores: "1_000_000" => Int(1_000_000));
 tok_test!(int_with_irregular_underscores: "1_0_00___000" => Int(1_000_000));
+// `_` is a separator anywhere inside a digit run, not only between two digits as in Rust:
+// doubled (`1__2`), trailing (`1_`), and wrapped around the `.` (`1_.5`) all lex, the `_`s
+// simply stripped -- `int_with_irregular_underscores` above already settled on the lax rule.
+tok_test!(float_with_underscores: "1_0.5" => Float(10.5));
+tok_test!(float_underscore_around_dot: "1_.5 1._5" => Float(1.5), Float(1.5));
+tok_test!(int_trailing_underscore: "1_" => Int(1));
+tok_test!(int_doubled_underscore: "1__2" => Int(12));
+// a `_` where a number can't start is an identifier, same as Rust
+tok_test!(leading_underscore_is_ident: "_1" => Ident("_1"));
+// hex literals take no separators: the digits stop at `_`, which then leads an identifier
+tok_test!(hex_underscore_tail: "0xFF_FF" => Hex("FF"), Ident("_FF"));
+// float exponents: signed or not, separators allowed, and the number ends where the
+// exponent does -- `1.5e2+1` is three tokens, not one (chompy's own exponent scan used
+// to drop a char per digit and eat the tail)
+tok_test!(float_exponent: "1.5e3" => Float(1500.0));
+tok_test!(float_exponent_signed: "1.5e+3 1.5e-3" => Float(1500.0), Float(0.0015));
+tok_test!(float_exponent_with_underscores: "1.5e1_0" => Float(15000000000.0));
+tok_test!(float_exponent_then_code: "1.5e2+1" => Float(150.0), Plus, Int(1));
+tok_test!(float_e_without_digits: "1.5else" => Float(1.5), Else);
+tok_test!(quantity_with_underscores: "1_0kW" => Quantity(10.0, "kW"));
 tok_test!(float: "0.2" => Float(0.2));
 tok_test!(float_zero: "0.0" => Float(0.0));
 tok_test!(range: "0..1" => Int(0), DoubleDot, Int(1));

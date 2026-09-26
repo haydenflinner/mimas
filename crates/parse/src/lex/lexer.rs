@@ -62,6 +62,33 @@ impl<'s> Lexer<'s> {
         TokKind::Quantity(value, unit)
     }
 
+    /// An `e[+-]?digits` exponent riding on a float's mantissa, chomped only when it's really
+    /// there. chompy's own scan advances twice per exponent digit, which drops a char each
+    /// time and can swallow what follows the number (`1.5e2+1` came out as `1.5`), so the
+    /// exponent is done here instead. `_` separates exponent digits like anywhere else, and
+    /// an `e` that isn't followed by `digits` (or `sign + digits`) is simply left alone --
+    /// `1.5else` is `1.5` then the identifier `else`.
+    fn with_exponent(&mut self, mantissa: f64) -> f64 {
+        let stream = &mut self.char_stream;
+        if !stream.match_peek('e') {
+            return mantissa;
+        }
+        stream.match_peek_with(|c: char| c == '+' || c == '-');
+        while stream.match_peek_with(|c: char| c.is_ascii_digit() || c == '_') {}
+        // `e`, an optional sign, then the digits -- `i32` takes the sign itself
+        let exp = stream.inspect_peeks()[1..].replace('_', "").parse::<i32>();
+        match exp {
+            Ok(exp) => {
+                stream.chomp_peeks();
+                mantissa * 10f64.powi(exp)
+            }
+            Err(_) => {
+                stream.reset_peeks();
+                mantissa
+            }
+        }
+    }
+
     /// Creates a new Lexer, taking a string of mimas source.
     pub fn new(source: &'s str, file_id: FileId, file_name: String) -> Self {
         Self {
@@ -243,7 +270,8 @@ impl<'s> Lex<'s, Tok<TokKind<'s>>, TokKind<'s>> for Lexer<'s> {
                     TokKind::Hex("")
                 }
             }
-        } else if let Some(float) = self.construct_float(true, true) {
+        } else if let Some(mantissa) = self.construct_float(true, false) {
+            let float = self.with_exponent(mantissa);
             self.with_unit(TokKind::Float(float), float)
         } else if rest.starts_with(|c: char| c.is_ascii_digit()) {
             match self.construct_integer(true) {
