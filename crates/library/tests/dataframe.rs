@@ -731,6 +731,95 @@ test_run_display!(
     r#"df.pull("dist")![0] + 100m"# => "5100",
 );
 
+// ---- unit columns inside query/mutate expressions -------------------------------------
+// A schema'd column keeps its unit inside `query { … }` verbs and the `col(…)` method
+// api: comparisons and `+`/`-` demand the same dimension, `*`/`/` compose it onto the
+// derived column in the propagated schema, and a `$` splice or opaque call stays
+// permissive -- the checker enforces dims; the polars columns underneath stay raw
+// numbers.
+
+const MASSES: &str = "use std::polars::*;
+     let df = from_csv(\"item,mass\\na,1.5\\nb,3.0\\nc,0.5\\n\")!.schema(\"item:str mass:kg\")!;";
+
+test_run!(
+    query_verbs_apply_unit_dims,
+    MASSES,
+    r#"query {
+        df
+        filter mass > 2kg
+    }.pull("item")!.join(",")"# => r#""b""#,
+    // literal 0 is allowed on either side of a comparison, like the scalar dims pass
+    r#"query {
+        df
+        filter mass > 0
+    }.pull("item")!.join(",")"# => r#""a,b,c""#,
+    r#"query {
+        df
+        filter mass + 1kg > 2kg
+    }.pull("item")!.join(",")"# => r#""a,b""#,
+);
+
+// `price * n` gives `cost` the composed dimension -- `.to("usd")` on the sum only
+// compiles because `pull("cost")` hands back usd-quantity elements
+test_run!(
+    query_derive_lands_the_composed_dim_in_the_schema,
+    "use std::polars::*;
+     let df = table {
+         item  price  n
+         \"a\"   2usd   3
+         \"b\"   5usd   2
+     };
+     let out = query {
+         df
+         derive cost = price * n
+     };",
+    r#"out.pull("cost")!.sum().to("usd")"# => "16",
+);
+
+// the method api runs the same checks on its explicit column expressions
+test_run!(
+    method_api_units_filter_and_is_in,
+    MASSES,
+    r#"df.filter(col("mass") > 2kg)!.pull("item")!.join(",")"# => r#""b""#,
+    r#"df.filter(col("mass").is_in([0.5kg, 3kg]))!.pull("item")!.join(",")"# => r#""b,c""#,
+    r#"df.mutate([(col("mass") / col("mass")).alias("one")])!.pull("one")![0] + 1.0"# => "2",
+);
+
+// mismatched dims inside a column expr are check-time errors in the query verbs…
+test_fail!(
+    query_verbs_reject_mismatched_dims,
+    r#"use std::polars::*;
+       let df = from_csv("item,mass\na,1.5\n")!.schema("item:str mass:kg")!;
+       query { df
+           filter mass > 2s
+       };"#,
+    r#"use std::polars::*;
+       let df = from_csv("item,mass\na,1.5\n")!.schema("item:str mass:kg")!;
+       query { df
+           derive bad = mass + 2s
+       };"#,
+    // a bare number isn't interchangeable with a quantity column either
+    r#"use std::polars::*;
+       let df = from_csv("item,mass\na,1.5\n")!.schema("item:str mass:kg")!;
+       query { df
+           derive bad = mass + 3
+       };"#,
+);
+
+// …and in the method api
+test_fail!(
+    method_api_rejects_mismatched_dims,
+    r#"use std::polars::*;
+       let df = from_csv("item,mass\na,1.5\n")!.schema("item:str mass:kg")!;
+       df.filter(col("mass") > 2s)!;"#,
+    r#"use std::polars::*;
+       let df = from_csv("item,mass\na,1.5\n")!.schema("item:str mass:kg")!;
+       df.mutate([(col("mass") + 2s).alias("x")])!;"#,
+    r#"use std::polars::*;
+       let df = from_csv("item,mass\na,1.5\n")!.schema("item:str mass:kg")!;
+       df.filter(col("mass").is_in([2kg, 3s]))!;"#,
+);
+
 // an opaque frame stays permissive -- pull keeps its old generic array type and a
 // bad name still only fails at runtime, not at check time
 test_fail!(

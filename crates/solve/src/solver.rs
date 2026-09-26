@@ -14,7 +14,7 @@ use indexmap::{IndexMap, IndexSet};
 use miette::NamedSource;
 use parse::{
     ExprKind,
-    components::{Binding, Pat, PatKind},
+    components::{Annotation, Binding, Pat, PatKind},
     *,
 };
 use shared::{FileId, IdVec, Literal as RawLiteral, Located, Location, PactId, ParamId};
@@ -459,6 +459,33 @@ impl Solver {
             .count()
     }
 
+    /// `let`/`const` annotation enforcement: unify the binding's ty with the annotation's.
+    /// A unit annotation (`kg`, `usd/kWh`) is different from every other: it declares "a
+    /// quantity in this dimension" -- a check the dims pass owns -- while its number may
+    /// be an `int` (`5.5kg.to_int()` keeps the unit and is an `int`) as well as a `float`.
+    /// So for unit annotations the rhs solves first and any numeric result stands;
+    /// anything else gets the usual annotation mismatch.
+    fn fulfill_annotation(
+        &mut self,
+        ty: &mut Ty,
+        annotation: &Annotation,
+        right: &Expr,
+        at: Location,
+    ) -> Result<()> {
+        if Ty::is_unit_annotation(annotation, self) {
+            right.fulfill_ty(ty.clone(), self)?;
+            return match ty.clone().normalized(self) {
+                // a numeric rhs stands (an int quantity is an `int` here); the dims
+                // pass owns the dimension check itself
+                Ty::Int | Ty::Float => Ok(()),
+                // anything else fails the annotation the ordinary way, at the rhs
+                _ => right.fulfill_ty(Ty::Float, self),
+            };
+        }
+        ty.fulfill_ty(&mut Ty::from_annotation(annotation.clone(), self)?, self)
+            .map_err(|e| e.into_type_mismatch(self, at))
+    }
+
     /// Solve a single `const` item's rhs and, if reducible, populate `DeclKind::Constant`'s
     /// payload with the literal. No-op for non-const items. Shared by the top-level fixpoint,
     /// impl associated consts, and block-scoped consts during body visits.
@@ -473,8 +500,7 @@ impl Solver {
         let mut ty = Ty::Vid(vid);
 
         if let Some(annotation) = &annotation {
-            ty.fulfill_ty(&mut Ty::from_annotation(annotation.clone(), self)?, self)
-                .map_err(|e| e.into_type_mismatch(self, left.location()))?;
+            self.fulfill_annotation(&mut ty, annotation, right, left.location())?;
         };
 
         // solve rhs first so inner idents land in `node_decs` before reduce_const_expr uses them
@@ -1843,8 +1869,7 @@ impl Solver {
                 let mut ty = Ty::Vid(vid);
 
                 if let Some(annotation) = &annotation {
-                    ty.fulfill_ty(&mut Ty::from_annotation(annotation.clone(), self)?, self)
-                        .map_err(|e| e.into_type_mismatch(self, left.location()))?;
+                    self.fulfill_annotation(&mut ty, annotation, right, left.location())?;
                 };
 
                 right.fulfill_ty(ty.clone(), self)?;

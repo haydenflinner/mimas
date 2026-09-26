@@ -15,14 +15,14 @@ use indexmap::IndexMap;
 use parse::{
     Access, Call, Expr, ExprKind, Literal, NodeId,
     components::{Pat, PatKind},
-    expr::{EvaluationOp, UnaryOp},
+    expr::{EqualityOp, EvaluationOp, UnaryOp},
 };
 use shared::{Located, Ty, units::Dim};
 
 use crate::{
     Error, Result, Solver,
     components::TyExt,
-    errors::{BadSchemaSpec, NoSuchColumn},
+    errors::{BadSchemaSpec, DimensionMismatch, NoSuchColumn},
     traits::Query,
 };
 
@@ -119,33 +119,106 @@ fn numeric_join(op: EvaluationOp, a: &Option<Ty>, b: &Option<Ty>) -> Option<Ty> 
     }
 }
 
-/// Column dims combine like the dims pass treats scalars: `*`/`/` compose, `+`/`-`/`%`
-/// keep whichever side carries a dim (a true mismatch is permissive, like dims itself).
-fn dim_join(op: EvaluationOp, a: Option<Dim>, b: Option<Dim>) -> Option<Dim> {
+/// How certainly a column expression's dimension is known. `Q` is a unit-carrying column
+/// or literal, `Plain` is definitely a plain number (a bare literal, a `float`/`int`
+/// column, `count()`), and `Any` can't be told (a `$` splice, an opaque call) -- `Any`
+/// never causes an error, same as the dims pass.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum CDim {
+    Any,
+    Plain,
+    Q(Dim),
+}
+
+impl CDim {
+    /// The unit a column carries, for the schema it ends up in (`Any`/`Plain` carry none).
+    fn dim(self) -> Option<Dim> {
+        match self {
+            CDim::Q(d) => Some(d),
+            _ => None,
+        }
+    }
+}
+
+/// A column's dimension status: a declared unit is `Q`, a numeric column with no unit is
+/// `Plain`, and anything else is out of the checker's reach.
+fn cdim(col: &FrameCol) -> CDim {
+    match (&col.ty, col.dim) {
+        (_, Some(d)) => CDim::Q(d),
+        (Some(Ty::Int) | Some(Ty::Float), _) => CDim::Plain,
+        _ => CDim::Any,
+    }
+}
+
+/// `a` and `b` side by side where the dims pass demands the same dimension (`+ - %`,
+/// comparisons, `??`, `if` arms): two *known* sides that disagree. `Plain` counts as
+/// `Dim::NONE`, so `kg_col + 3` is caught while `kg_col + $x` stays permissive.
+fn dim_clash(a: CDim, b: CDim) -> Option<(Dim, Dim)> {
+    match (a, b) {
+        (CDim::Q(x), CDim::Q(y)) if x != y => Some((x, y)),
+        (CDim::Q(x), CDim::Plain) if !x.is_none() => Some((x, Dim::NONE)),
+        (CDim::Plain, CDim::Q(y)) if !y.is_none() => Some((Dim::NONE, y)),
+        _ => None,
+    }
+}
+
+/// The [`CDim`] `a <op> b` computes, after `dim_clash` has had its say on `+ - %`.
+/// `*`/`/` compose dims like the dims pass (`kg * usd/kg` is `usd`), a `Plain` operand
+/// scales without changing the dimension, and `Any` defers to the known side.
+fn cdim_join(op: EvaluationOp, a: CDim, b: CDim) -> CDim {
     match op {
         EvaluationOp::Multiply => match (a, b) {
-            (Some(x), Some(y)) => Some(x.mul(y)),
-            (some, None) | (None, some) => some,
+            (CDim::Q(x), CDim::Q(y)) => CDim::Q(x.mul(y)),
+            (CDim::Q(x), _) | (_, CDim::Q(x)) => CDim::Q(x),
+            (CDim::Plain, CDim::Plain) => CDim::Plain,
+            _ => CDim::Any,
         },
         EvaluationOp::Divide | EvaluationOp::Div => match (a, b) {
-            (x, Some(y)) => Some(x.unwrap_or(Dim::NONE).div(y)),
-            (x, None) => x,
+            (CDim::Q(x), CDim::Q(y)) => CDim::Q(x.div(y)),
+            (CDim::Q(x), _) => CDim::Q(x),
+            (CDim::Plain, CDim::Q(y)) => CDim::Q(Dim::NONE.div(y)),
+            (CDim::Plain, CDim::Plain) => CDim::Plain,
+            _ => CDim::Any,
         },
-        EvaluationOp::Plus | EvaluationOp::Minus | EvaluationOp::Modulo => a.or(b),
-        _ => None,
+        // `+ - %` only reach here without a clash: an agreed dimension, a plain pair, or
+        // something unknown -- the known side wins where there is one
+        EvaluationOp::Plus | EvaluationOp::Minus | EvaluationOp::Modulo => match (a, b) {
+            (CDim::Q(x), CDim::Q(_)) | (CDim::Q(x), CDim::Any) | (CDim::Any, CDim::Q(x)) => {
+                CDim::Q(x)
+            }
+            (CDim::Plain, CDim::Plain) => CDim::Plain,
+            _ => CDim::Any,
+        },
+        _ => CDim::Any,
+    }
+}
+
+/// A literal `0`, which dims allows on either side of a comparison (`mass > 0`).
+fn is_zero(e: &Expr) -> bool {
+    match e.kind() {
+        ExprKind::Literal(Literal::Int(0)) => true,
+        ExprKind::Literal(Literal::Float(f)) => *f == 0.0,
+        ExprKind::Grouping(g) => is_zero(&g.inner),
+        _ => false,
     }
 }
 
 /// The column an aggregation/`PlExpr` method produces from `base`.
 fn apply_result_col(f: &str, base: FrameCol) -> FrameCol {
     match f {
-        "count" | "n" | "n_unique" | "len" | "arg_min" | "arg_max" | "rank" | "cast_int" => {
+        "count" | "n" | "n_unique" | "len" | "arg_min" | "arg_max" | "rank" => {
             FrameCol::known(Ty::Int)
         }
+        // a cast changes the storage, not what the numbers measure: `cast_int` is an
+        // int quantity (like `.to_int()`), `cast_float` keeps whatever unit it had
+        "cast_int" => FrameCol {
+            ty: Some(Ty::Int),
+            dim: base.dim,
+        },
         "mean" | "average" | "median" | "quantile" | "std" | "var" | "cast_float" => FrameCol {
             ty: Some(Ty::Float),
             dim: match f {
-                "mean" | "average" | "median" | "quantile" | "std" => base.dim,
+                "mean" | "average" | "median" | "quantile" | "std" | "cast_float" => base.dim,
                 "var" => base.dim.map(|d| d.mul(d)),
                 _ => None,
             },
@@ -284,71 +357,201 @@ impl Solver {
         Ok(FrameSchema { cols, closed: true })
     }
 
+    /// A `cannot <verb> X and Y`-style dimension error inside a column expression -- the
+    /// same `DimensionMismatch` the dims pass gives scalars.
+    fn dim_err(&self, at: &Expr, what: String, label: String, help: &str) -> Error {
+        DimensionMismatch {
+            src: self.src(at.location()),
+            at: at.location().into(),
+            what,
+            label,
+            help: help.to_string(),
+        }
+        .into()
+    }
+
     /// The column a query/derive/agg column-expression computes, given the input schema.
     /// Handles the `__q_*`/`col()`/`lit()`/`n()` forms, `| alias` / `.alias()`, method
     /// chains on `col(…)`, and arithmetic between them. A bare `Ident` here is a `$expr`
     /// splice (or a plain value in the method api) -- an outer-scope value, so its solved
     /// type broadcasts to the column.
     fn col_expr_col(&mut self, e: &Expr, input: &FrameSchema) -> Result<FrameCol> {
+        self.col_expr(e, input).map(|(col, _)| col)
+    }
+
+    /// `col_expr_col` plus the expression's [`CDim`], so compound column expressions can
+    /// enforce the dims pass's same-dimension rules inside `filter`/`derive`/friends:
+    /// `mass > 2kg` is a fine predicate on a `kg` column, `mass > 2s` is a check-time
+    /// error, and `derive cost = price * n` gives `cost` the composed dimension.
+    fn col_expr(&mut self, e: &Expr, input: &FrameSchema) -> Result<(FrameCol, CDim)> {
+        let opaque = |this: &mut Self, e: &Expr| -> Result<(FrameCol, CDim)> {
+            // a splice escape or a plain call -- an ordinary value in scope whose solved
+            // ty broadcasts to every row of the column, with a dim we can't see
+            Ok((
+                FrameCol {
+                    ty: Some(e.query(this)?.normalized(this)),
+                    dim: None,
+                },
+                CDim::Any,
+            ))
+        };
         match e.kind() {
-            ExprKind::Grouping(g) => self.col_expr_col(&g.inner, input),
-            ExprKind::Unwrap(u) => self.col_expr_col(&u.expr, input),
-            ExprKind::Absolve(a) => self.col_expr_col(&a.left, input),
-            ExprKind::Literal(Literal::Int(_)) => Ok(FrameCol::known(Ty::Int)),
-            ExprKind::Literal(Literal::Float(_)) => Ok(FrameCol {
-                ty: Some(Ty::Float),
-                dim: self.ast_quantities.get(&e.id()).copied(),
-            }),
-            ExprKind::Literal(Literal::String(_)) => Ok(FrameCol::known(Ty::Str)),
+            ExprKind::Grouping(g) => self.col_expr(&g.inner, input),
+            ExprKind::Unwrap(u) => self.col_expr(&u.expr, input),
+            ExprKind::Absolve(a) => self.col_expr(&a.left, input),
+            ExprKind::Literal(Literal::Int(_)) => Ok((FrameCol::known(Ty::Int), CDim::Plain)),
+            ExprKind::Literal(Literal::Float(_)) => {
+                let d = self
+                    .ast_quantities
+                    .get(&e.id())
+                    .map_or(CDim::Plain, |d| CDim::Q(*d));
+                Ok((
+                    FrameCol {
+                        ty: Some(Ty::Float),
+                        dim: d.dim(),
+                    },
+                    d,
+                ))
+            }
+            ExprKind::Literal(Literal::String(_)) => Ok((FrameCol::known(Ty::Str), CDim::Any)),
             ExprKind::Literal(Literal::True) | ExprKind::Literal(Literal::False) => {
-                Ok(FrameCol::known(Ty::Bool))
+                Ok((FrameCol::known(Ty::Bool), CDim::Any))
             }
             ExprKind::Call(c) => {
                 if let Some(ident) = c.left.as_ident() {
                     return match ident.lexeme.as_str() {
                         "__q_col" | "col" => match Self::str_arg(c, 0) {
-                            Some(col) => input.col(self, e, col),
-                            None => Ok(FrameCol::unknown()),
+                            Some(col) => {
+                                let col = input.col(self, e, col)?;
+                                let d = cdim(&col);
+                                Ok((col, d))
+                            }
+                            None => Ok((FrameCol::unknown(), CDim::Any)),
                         },
-                        "__q_n" | "n" => Ok(FrameCol::known(Ty::Int)),
+                        "__q_n" | "n" => Ok((FrameCol::known(Ty::Int), CDim::Plain)),
+                        // `lit(2kg)` keeps the literal's own type and unit
+                        "lit" => match c.arguments.first() {
+                            Some(a) => self.col_expr(&a.value, input),
+                            None => Ok((FrameCol::unknown(), CDim::Any)),
+                        },
                         "__q_when" => {
                             if let Some(cond) = c.arguments.first() {
-                                self.col_expr_col(&cond.value, input)?;
+                                self.col_expr(&cond.value, input)?;
                             }
-                            let t = match c.arguments.get(1) {
-                                Some(a) => self.col_expr_col(&a.value, input)?,
-                                None => FrameCol::unknown(),
+                            let (t, t_d) = match c.arguments.get(1) {
+                                Some(a) => self.col_expr(&a.value, input)?,
+                                None => (FrameCol::unknown(), CDim::Any),
                             };
-                            let f = match c.arguments.get(2) {
-                                Some(a) => self.col_expr_col(&a.value, input)?,
-                                None => FrameCol::unknown(),
+                            let (f, f_d) = match c.arguments.get(2) {
+                                Some(a) => self.col_expr(&a.value, input)?,
+                                None => (FrameCol::unknown(), CDim::Any),
                             };
-                            Ok(FrameCol {
-                                ty: t.ty.or(f.ty),
-                                dim: if t.dim == f.dim { t.dim } else { None },
-                            })
+                            // `if c { mass } else { 3s }` -- the arms are a column each,
+                            // so they share the dims pass's branches-agree rule
+                            if let Some((x, y)) = dim_clash(t_d, f_d) {
+                                return Err(self.dim_err(
+                                    e,
+                                    format!(
+                                        "branches disagree: {} and {}",
+                                        x.describe(),
+                                        y.describe()
+                                    ),
+                                    format!("this branch is {}", y.describe()),
+                                    "both arms of an `if` column have to give the same dimension",
+                                ));
+                            }
+                            let d = match (t_d, f_d) {
+                                (CDim::Q(x), CDim::Q(y)) if x == y => CDim::Q(x),
+                                (CDim::Plain, CDim::Plain) => CDim::Plain,
+                                _ => CDim::Any,
+                            };
+                            Ok((
+                                FrameCol {
+                                    ty: t.ty.or(f.ty),
+                                    dim: d.dim(),
+                                },
+                                d,
+                            ))
                         }
                         "__q_apply" => {
-                            let base = match c.arguments.first() {
-                                Some(a) => self.col_expr_col(&a.value, input)?,
-                                None => FrameCol::unknown(),
+                            let (base, base_d) = match c.arguments.first() {
+                                Some(a) => self.col_expr(&a.value, input)?,
+                                None => (FrameCol::unknown(), CDim::Any),
                             };
-                            // `is_in(discount, $codes)`-style extras can hold outer values
+                            let func = Self::str_arg(c, 1).unwrap_or("");
                             if let Some(extra) = c.arguments.get(2) {
-                                self.col_expr_col(&extra.value, input)?;
+                                match func {
+                                    // `eq(mass, 2s)` is a comparison against the column
+                                    "eq" | "neq" => {
+                                        let (_, arg_d) =
+                                            self.col_expr(&extra.value, input)?;
+                                        if !is_zero(&extra.value)
+                                            && let Some((x, y)) = dim_clash(base_d, arg_d)
+                                        {
+                                            return Err(self.dim_err(
+                                                &extra.value,
+                                                format!(
+                                                    "cannot compare {} and {}",
+                                                    x.describe(),
+                                                    y.describe()
+                                                ),
+                                                format!(
+                                                    "{} against {}",
+                                                    x.describe(),
+                                                    y.describe()
+                                                ),
+                                                "quantities are only comparable in the same dimension; convert one side with `.to(unit)`",
+                                            ));
+                                        }
+                                    }
+                                    // `is_in(mass, [2kg, 5kg])` compares each listed
+                                    // cell against the column
+                                    "is_in" => {
+                                        if let ExprKind::Literal(Literal::Array(items)) =
+                                            extra.value.kind()
+                                        {
+                                            for item in items {
+                                                let (_, item_d) =
+                                                    self.col_expr(item, input)?;
+                                                if let Some((x, y)) =
+                                                    dim_clash(base_d, item_d)
+                                                {
+                                                    return Err(self.dim_err(
+                                                        item,
+                                                        format!(
+                                                            "cannot compare {} and {}",
+                                                            x.describe(),
+                                                            y.describe()
+                                                        ),
+                                                        format!(
+                                                            "{} against {}",
+                                                            x.describe(),
+                                                            y.describe()
+                                                        ),
+                                                        "`is_in` cells are compared to the column, so they share its dimension",
+                                                    ));
+                                                }
+                                            }
+                                        } else {
+                                            self.col_expr(&extra.value, input)?;
+                                        }
+                                    }
+                                    // `is_in(discount, $codes)`-style extras can hold
+                                    // outer values
+                                    _ => {
+                                        self.col_expr(&extra.value, input)?;
+                                    }
+                                }
                             }
-                            Ok(apply_result_col(Self::str_arg(c, 1).unwrap_or(""), base))
+                            let col = apply_result_col(func, base);
+                            let d = cdim(&col);
+                            Ok((col, d))
                         }
                         "__q_named" => match c.arguments.first() {
-                            Some(a) => self.col_expr_col(&a.value, input),
-                            None => Ok(FrameCol::unknown()),
+                            Some(a) => self.col_expr(&a.value, input),
+                            None => Ok((FrameCol::unknown(), CDim::Any)),
                         },
-                        // a splice escape or a plain call -- an ordinary value in scope
-                        // whose solved ty broadcasts to every row of the column
-                        _ => Ok(FrameCol {
-                            ty: Some(e.query(self)?.normalized(self)),
-                            dim: None,
-                        }),
+                        _ => opaque(self, e),
                     };
                 }
                 if let ExprKind::Access(Access::Dot {
@@ -357,52 +560,141 @@ impl Solver {
                     && let Some(m) = right.as_ident().map(|i| i.lexeme.as_str())
                 {
                     if m == "alias" {
-                        return self.col_expr_col(recv, input);
+                        return self.col_expr(recv, input);
                     }
-                    let base = self.col_expr_col(recv, input)?;
-                    return Ok(apply_result_col(m, base));
+                    let (base, base_d) = self.col_expr(recv, input)?;
+                    // `mass.is_in([2kg, 3s])` -- the listed cells compare against the column
+                    if m == "is_in"
+                        && let Some(arg) = c.arguments.first()
+                        && let ExprKind::Literal(Literal::Array(items)) = arg.value.kind()
+                    {
+                        for item in items {
+                            let (_, item_d) = self.col_expr(item, input)?;
+                            if let Some((x, y)) = dim_clash(base_d, item_d) {
+                                return Err(self.dim_err(
+                                    item,
+                                    format!(
+                                        "cannot compare {} and {}",
+                                        x.describe(),
+                                        y.describe()
+                                    ),
+                                    format!("{} against {}", x.describe(), y.describe()),
+                                    "`is_in` cells are compared to the column, so they share its dimension",
+                                ));
+                            }
+                        }
+                    }
+                    // `col("kwh").cast("int")` is an int quantity column; other casts
+                    // that rename the storage keep whatever it measured
+                    if m == "cast" {
+                        let col = match Self::str_arg(c, 0) {
+                            Some("int") => FrameCol {
+                                ty: Some(Ty::Int),
+                                dim: base_d.dim(),
+                            },
+                            Some("float") => FrameCol {
+                                ty: Some(Ty::Float),
+                                dim: base_d.dim(),
+                            },
+                            _ => base,
+                        };
+                        let d = cdim(&col);
+                        return Ok((col, d));
+                    }
+                    let col = apply_result_col(m, base);
+                    let d = cdim(&col);
+                    return Ok((col, d));
                 }
-                Ok(FrameCol::unknown())
+                Ok((FrameCol::unknown(), CDim::Any))
             }
             ExprKind::Evaluation(ev) => {
-                let a = self.col_expr_col(&ev.left, input)?;
-                let b = self.col_expr_col(&ev.right, input)?;
-                Ok(FrameCol {
-                    ty: numeric_join(ev.op, &a.ty, &b.ty),
-                    dim: dim_join(ev.op, a.dim, b.dim),
-                })
+                let (a, a_d) = self.col_expr(&ev.left, input)?;
+                let (b, b_d) = self.col_expr(&ev.right, input)?;
+                if matches!(
+                    ev.op,
+                    EvaluationOp::Plus | EvaluationOp::Minus | EvaluationOp::Modulo
+                ) && let Some((x, y)) = dim_clash(a_d, b_d)
+                {
+                    let verb = match ev.op {
+                        EvaluationOp::Plus => "add",
+                        EvaluationOp::Minus => "subtract",
+                        _ => "combine",
+                    };
+                    return Err(self.dim_err(
+                        e,
+                        format!("cannot {verb} {} and {}", x.describe(), y.describe()),
+                        format!("{} with {}", x.describe(), y.describe()),
+                        "quantities only add and subtract in the same dimension -- convert one with `.to(unit)`, or multiply/divide to make a new quantity",
+                    ));
+                }
+                let d = cdim_join(ev.op, a_d, b_d);
+                Ok((
+                    FrameCol {
+                        ty: numeric_join(ev.op, &a.ty, &b.ty),
+                        dim: d.dim(),
+                    },
+                    d,
+                ))
             }
             // `a > 10`, `x & y`: the result is bool, but the operands' column refs still
-            // need checking -- descend for errors, return Bool
+            // need checking -- descend for errors, apply the same-dimension rule
             ExprKind::Equality(eq) => {
-                self.col_expr_col(&eq.left, input)?;
-                self.col_expr_col(&eq.right, input)?;
-                Ok(FrameCol::known(Ty::Bool))
+                let (_, a_d) = self.col_expr(&eq.left, input)?;
+                let (_, b_d) = self.col_expr(&eq.right, input)?;
+                if !is_zero(&eq.left)
+                    && !is_zero(&eq.right)
+                    && let Some((x, y)) = dim_clash(a_d, b_d)
+                {
+                    let verb = match eq.op {
+                        EqualityOp::Equal | EqualityOp::NotEqual => "compare",
+                        _ => "order",
+                    };
+                    return Err(self.dim_err(
+                        e,
+                        format!("cannot {verb} {} and {}", x.describe(), y.describe()),
+                        format!("{} against {}", x.describe(), y.describe()),
+                        "quantities are only comparable in the same dimension; convert one side with `.to(unit)`",
+                    ));
+                }
+                Ok((FrameCol::known(Ty::Bool), CDim::Any))
             }
             ExprKind::Logical(l) => {
-                self.col_expr_col(&l.left, input)?;
-                self.col_expr_col(&l.right, input)?;
-                Ok(FrameCol::known(Ty::Bool))
+                self.col_expr(&l.left, input)?;
+                self.col_expr(&l.right, input)?;
+                Ok((FrameCol::known(Ty::Bool), CDim::Any))
             }
-            ExprKind::Coalescence(co) => self.col_expr_col(&co.left, input),
+            ExprKind::Coalescence(co) => {
+                let (l, l_d) = self.col_expr(&co.left, input)?;
+                let (_, r_d) = self.col_expr(&co.right, input)?;
+                if let Some((x, y)) = dim_clash(l_d, r_d) {
+                    return Err(self.dim_err(
+                        &co.right,
+                        format!(
+                            "`??` fallback has a different dimension: {} vs {}",
+                            x.describe(),
+                            y.describe()
+                        ),
+                        format!("this is {}", y.describe()),
+                        "the fallback of `??` has to measure the same thing as the value it's replacing",
+                    ));
+                }
+                Ok((l, l_d))
+            }
             ExprKind::Unary(u) => match u.op {
-                UnaryOp::Negative | UnaryOp::Positive => self.col_expr_col(&u.right, input),
+                UnaryOp::Negative | UnaryOp::Positive => self.col_expr(&u.right, input),
                 UnaryOp::Not => {
-                    self.col_expr_col(&u.right, input)?;
-                    Ok(FrameCol::known(Ty::Bool))
+                    self.col_expr(&u.right, input)?;
+                    Ok((FrameCol::known(Ty::Bool), CDim::Any))
                 }
                 UnaryOp::BitwiseNot => {
-                    self.col_expr_col(&u.right, input)?;
-                    Ok(FrameCol::known(Ty::Int))
+                    self.col_expr(&u.right, input)?;
+                    Ok((FrameCol::known(Ty::Int), CDim::Plain))
                 }
             },
             // a bare ident in a column expr is an outer-scope value (all column-name reads
             // were already rewritten to `__q_col`), so its own type broadcasts
-            ExprKind::Ident(_) => Ok(FrameCol {
-                ty: Some(e.query(self)?.normalized(self)),
-                dim: None,
-            }),
-            _ => Ok(FrameCol::unknown()),
+            ExprKind::Ident(_) => opaque(self, e),
+            _ => Ok((FrameCol::unknown(), CDim::Any)),
         }
     }
 

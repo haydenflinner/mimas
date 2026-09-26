@@ -10,6 +10,7 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add_method(max);
     api.add_method(clamp);
     api.add_method(to_str);
+    api.add_method(to);
     let id = api.add_method(to_float);
     api.mark_intrinsic(id, Intrinsic::ToFloat);
     api.add_assoc(Ty::Int, random);
@@ -51,4 +52,14 @@ fn random<'gc>(len: i64) -> i64 {
 #[native]
 fn to_float<'gc>(v: i64) -> f64 {
     v as f64
+}
+
+/// `q.to("g")` on an int -- an int-valued quantity (`5.5kg.to_int()`) reads back in any
+/// unit of the same kind, exactly like float's `to`: the compiler checks the unit
+/// measures the same thing; at runtime only the name has to be a unit.
+#[native]
+fn to(n: i64, unit: &str) -> Result<f64, RtErr> {
+    let (_, scale) = shared::units::parse(unit)
+        .ok_or_else(|| RtErr::InvalidArgument(format!("`{unit}` isn't a unit")))?;
+    Ok(n as f64 / scale)
 }

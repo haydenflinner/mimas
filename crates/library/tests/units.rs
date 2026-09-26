@@ -157,3 +157,30 @@ fn pulled_columns_are_dimension_checked() {
     rejected(&format!("{head}let t = df.pull_as(\"a\", \"bogus\")!;"), "isn't a unit");
     rejected(&format!("{head}let t: [s] = df.pull_as(\"a\", \"kW\")!;"), "declared type doesn't match");
 }
+
+// ---- `.to_int()` keeps the unit ------------------------------------------------------
+// `5.5kg.to_int()` is an `int` that still measures mass: a unit annotation accepts it
+// (a quantity's number may be an `int` as well as a `float`), int's own `.to(unit)`
+// reads it back in any unit of the same kind, and the dims pass still checks it.
+
+test_run!(
+    to_int_keeps_the_unit,
+    "let q = 5.5kg.to_int();
+     let x: kg = q;",
+    "q" => "5",
+    "x.to(\"g\")" => "5000",
+    "q.to(\"kg\")" => "5",
+    // a plain float's to_int is untouched -- still a dimensionless int
+    "3.7.to_int() + 1" => "4",
+);
+
+#[test]
+fn to_int_quantities_are_still_dimension_checked() {
+    rejected("let a: s = 5.5kg.to_int();", "declared type doesn't match");
+    rejected("let a = 5.5kg.to_int().to(\"s\");", "cannot express");
+    rejected("let a = 5.5kg.to_int() + 3s;", "cannot add");
+    // an int quantity can't smuggle into a plain `int` slot either
+    rejected("fn f(x: int) -> int { x }\nlet a = f(5.5kg.to_int());", "argument `x` of `f`");
+    // and a unit annotation still refuses a non-numeric rhs the ordinary way
+    rejected("let a: kg = \"nope\";", "expected float but found str");
+}
