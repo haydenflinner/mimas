@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use api::Registry;
-use shared::Ty;
+use shared::{FnHeader, FnParam, Ty};
 
 use crate::{Array, Ctx, Dict, DictMap, Instance, RtErr, RtResult, Str, Val};
 
@@ -489,6 +489,43 @@ impl<'gc, const N: u32> MimasType<'gc> for crate::anon::DictOf<'gc, N> {
     }
     fn into_value(self, _ctx: Ctx<'gc>) -> Val<'gc> {
         Val::Dict(self.0)
+    }
+}
+
+impl<'gc, const A: u32, R: MimasType<'gc>> MimasType<'gc> for crate::anon::Fn1<'gc, A, R> {
+    fn mimas_ty(reg: &Registry) -> Option<Ty> {
+        Some(Ty::Fn(FnHeader::new(
+            vec![FnParam::new(None, Ty::Anon(A), false)],
+            R::mimas_ty(reg)?,
+            false,
+        )))
+    }
+    fn from_value(_ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError> {
+        Ok(crate::anon::Fn1(v, std::marker::PhantomData))
+    }
+    fn into_value(self, _ctx: Ctx<'gc>) -> Val<'gc> {
+        self.0
+    }
+}
+
+impl<'gc, const A: u32, const B: u32, R: MimasType<'gc>> MimasType<'gc>
+    for crate::anon::Fn2<'gc, A, B, R>
+{
+    fn mimas_ty(reg: &Registry) -> Option<Ty> {
+        Some(Ty::Fn(FnHeader::new(
+            vec![
+                FnParam::new(None, Ty::Anon(A), false),
+                FnParam::new(None, Ty::Anon(B), false),
+            ],
+            R::mimas_ty(reg)?,
+            false,
+        )))
+    }
+    fn from_value(_ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError> {
+        Ok(crate::anon::Fn2(v, std::marker::PhantomData))
+    }
+    fn into_value(self, _ctx: Ctx<'gc>) -> Val<'gc> {
+        self.0
     }
 }
 

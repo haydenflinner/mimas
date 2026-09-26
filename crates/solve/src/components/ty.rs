@@ -10,6 +10,8 @@ pub use shared::{AdtId, FnHeader, FnParam, PactId, Ty, Vid};
 pub trait TyExt: Sized {
     fn occurs(&self, other: Vid, solver: &Solver) -> bool;
     fn from_annotation(annotation: Annotation, solver: &mut Solver) -> Result<Ty>;
+    /// Does `annotation` name a quantity (`kW`, `usd/kWh`) rather than an ordinary type?
+    fn is_unit_annotation(annotation: &Annotation, solver: &Solver) -> bool;
     fn coerce_option(a: Ty, b: Ty, solver: &mut Solver) -> Option<Ty>;
     fn coerce_pacts(a: Ty, b: Ty, solver: &mut Solver) -> Option<Ty>;
     fn fulfill_ty(
@@ -96,6 +98,21 @@ impl TyExt for Ty {
         // `Ty::pacts` sorts and dedups -- `Ty::Pacts` compares as a plain Vec, so that
         // normalization is what lets two independently derived bounds come out equal
         (!shared.is_empty()).then(|| Ty::pacts(shared))
+    }
+
+    /// A quantity annotation means "a number in this dimension" -- the dims pass owns
+    /// that check -- so its number type isn't pinned to `float`: `5.5kg.to_int()` is an
+    /// `int` in kg. Mirrors the unit-vs-type resolution inside `from_annotation`.
+    fn is_unit_annotation(annotation: &Annotation, solver: &Solver) -> bool {
+        match annotation {
+            Annotation::Ty(ident) => {
+                solver.type_param(ident).is_none()
+                    && solver.ribs.resolve(ident).is_none()
+                    && shared::units::lookup(&ident.lexeme).is_some()
+            }
+            Annotation::Quantity(_) => true,
+            _ => false,
+        }
     }
 
     fn from_annotation(annotation: Annotation, solver: &mut Solver) -> Result<Ty> {

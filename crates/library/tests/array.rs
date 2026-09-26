@@ -573,6 +573,200 @@ test_run!(
 
 test_fail!(no_sort_by_method, "let a = [1, 2]; a.sort_by([1]);");
 
+// -- higher-order methods ------------------------------------------------------
+// intrinsics lowered to a generated loop that `Call`s the closure per element;
+// signatures ride the anon-slot machinery: map is `[T] -> ((T) -> U) -> [U]`.
+
+test_run!(
+    map_ints,
+    "[1, 2, 3].map(|x| x * 2)" => "[2, 4, 6]",
+    "[10, -5].map(|x| x + 1)" => "[11, -4]",
+);
+
+test_run!(
+    map_changes_element_type,
+    "[1, 2, 3].map(|x| x > 1)" => "[false, true, true]",
+    r#"[1, 2].map(|x| "n")"# => r#"["n", "n"]"#,
+);
+
+test_run!(
+    map_floats_strs,
+    "[1.5, 2.5].map(|x| x + 1.0)" => "[2.5, 3.5]",
+    r#"["a", "b"].map(|s| s + "!")"# => r#"["a!", "b!"]"#,
+);
+
+test_run!(
+    map_empty,
+    "let e: [int] = [];",
+    "e.map(|x| x * 2)" => "[]",
+);
+
+test_run!(
+    map_does_not_mutate,
+    "let a = [1, 2];
+     let b = a.map(|x| x * 10);",
+    "a" => "[1, 2]",
+    "b" => "[10, 20]",
+);
+
+// fn items unify against the `(T) -> U` slot, not just closures
+test_run!(
+    map_named_fn,
+    "fn double(x: int) -> int { x * 2 }",
+    "[1, 2].map(double)" => "[2, 4]",
+);
+
+// captures ride through the closure value the generated loop calls each
+// iteration (the same `Val::Closure` a plain `f(x)` would dispatch)
+test_run!(
+    map_closure_captures_env,
+    "let base = 100;",
+    "[1, 2].map(|x| x + base)" => "[101, 102]",
+    "[1, 2].fold(base, |acc, x| acc + x)" => "103",
+);
+
+test_run!(
+    map_filter_chain,
+    "[1, 2, 3, 4].map(|x| x * 2).filter(|x| x > 4)" => "[6, 8]",
+);
+
+// the intrinsic lowers inside whatever body the call sits in -- a nested map
+// emits its loop into the *closure's* body, not the caller's
+test_run!(
+    map_nested,
+    "[[1, 2], [3]].map(|inner| inner.map(|x| x + 1))" => "[[2, 3], [4]]",
+    "[[1], [2, 3]].map(|inner| inner.sum())" => "[1, 5]",
+);
+
+// each call instantiates the anon slots fresh -- one `map` can chain into another
+// with a different element type and the checker tracks both
+test_run!(
+    map_inside_generic_fn,
+    "fn run<T, U>(xs: [T], f: (T) -> U, g: (U) -> int) -> int {
+        xs.map(|x| g(f(x))).sum()
+    }",
+    "run([1, 2], |x| x * 3, |y| y + 1)" => "11",
+);
+
+test_run!(
+    map_on_option_receiver,
+    "let a: [int]? = [1, 2];
+     let n: [int]? = null;",
+    "a?.map(|x| x * 2)" => "[2, 4]",
+    "n?.map(|x| x * 2)" => "null",
+);
+
+test_run!(
+    filter_basic,
+    "[1, 2, 3, 4].filter(|x| x % 2 == 0)" => "[2, 4]",
+    r#"["", "a", ""].filter(|s| s != "")"# => r#"["a"]"#,
+);
+
+test_run!(
+    filter_nothing_matches,
+    "let e: [int] = [];
+     let none = [1, 3, 5].filter(|x| x % 2 == 0);",
+    "none" => "[]",
+    "e.filter(|x| true)" => "[]",
+);
+
+test_run!(
+    fold_sum_and_type_change,
+    "[1, 2, 3, 4].fold(0, |acc, x| acc + x)" => "10",
+    "[[1], [2, 3]].fold(0, |acc, xs| acc + xs.len())" => "3",
+    r#"[1, 2].fold("r", |acc, x| acc + "!")"# => r#""r!!""#,
+);
+
+test_run!(
+    fold_empty_returns_init,
+    "let e: [int] = [];",
+    "e.fold(42, |acc, x| acc + x)" => "42",
+);
+
+test_run!(
+    find_hit_and_miss,
+    "[1, 2, 3].find(|x| x > 1)" => "2",
+    "[1, 2, 3].find(|x| x > 9)" => "null",
+    r#"["a", "b"].find(|s| s == "b")"# => r#""b""#,
+);
+
+test_run!(
+    find_first_match_wins,
+    "[5, 6, 7].find(|x| x > 5)" => "6",
+    "[1].find(|x| x > 9) ?? -1" => "-1",
+);
+
+test_run!(
+    any_basic,
+    "[1, 2, 3].any(|x| x > 2)" => "true",
+    "[1, 2, 3].any(|x| x > 9)" => "false",
+);
+
+test_run!(
+    any_empty_is_false,
+    "let e: [int] = [];",
+    "e.any(|x| true)" => "false",
+);
+
+test_run!(
+    all_basic,
+    "[1, 2, 3].all(|x| x > 0)" => "true",
+    "[1, 2, 3].all(|x| x > 1)" => "false",
+);
+
+test_run!(
+    all_empty_is_true,
+    "let e: [int] = [];",
+    "e.all(|x| false)" => "true",
+);
+
+// the walk's bound is frozen at call time: a callback that grows the receiver
+// can't extend the iteration (snapshot semantics, no runaway loop)...
+test_run!(
+    map_callback_push_does_not_extend,
+    "let a = [1, 2];
+     let m = a.map(|x| { a.push(0); x });",
+    "m" => "[1, 2]",
+    "a" => "[1, 2, 0, 0]",
+);
+
+// ...and one that shrinks it faults on the stale index instead of silently
+// skipping elements
+test_fail!(
+    map_callback_pop_faults_oob,
+    "let a = [1, 2, 3]; let _ = a.map(|x| { a.pop(); x });"
+);
+
+// a runtime fault inside the callback propagates out of the intrinsic -- mod by
+// zero is a checked arithmetic error, it must not be swallowed
+test_fail!(
+    map_callback_fault_propagates,
+    "let _ = [1, 2].map(|x| x % 0);"
+);
+test_fail!(
+    fold_callback_fault_propagates,
+    "let _ = [1].fold(0, |acc, x| x % 0);"
+);
+
+// solve-time rejections: wrong arity / non-fn arg / non-bool predicate all fail
+// as ordinary type errors, never reach codegen
+test_fail!(map_rejects_wrong_arity, "let _ = [1, 2].map(|a, b| a);");
+test_fail!(map_rejects_non_fn_arg, "let _ = [1, 2].map(5);");
+test_fail!(map_rejects_missing_arg, "let _ = [1, 2].map();");
+test_fail!(
+    map_rejects_mismatched_elem,
+    r#"let _ = [1, 2].map(|s| s + "!");"#
+);
+test_fail!(filter_rejects_non_bool, "let _ = [1, 2].filter(|x| x + 1);");
+test_fail!(fold_rejects_wrong_arity, "let _ = [1, 2].fold(0, |a| a);");
+test_fail!(
+    fold_rejects_mismatched_acc,
+    r#"let _ = [1, 2].fold(0, |acc, x| acc + "!");"#
+);
+test_fail!(find_rejects_non_bool, "let _ = [1, 2].find(|x| x);");
+test_fail!(any_rejects_non_bool, "let _ = [1, 2].any(|x| 1);");
+test_fail!(all_rejects_non_bool, "let _ = [1, 2].all(|x| 1);");
+
 // mutating the collection you're iterating is a compile error
 test_fail!(
     mutate_iterated_array,

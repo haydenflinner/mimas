@@ -32,6 +32,20 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add_method_named("argsort", argsort_int);
     api.add_method_named("argsort", argsort_float);
     api.add_method(reorder);
+    // higher-order: signatures only -- each lowers to a generated loop that calls the
+    // closure itself (a `#[native]` can't call back into the VM). see emit_intrinsic.
+    let id = api.add_method(map);
+    api.mark_intrinsic(id, Intrinsic::Map);
+    let id = api.add_method(filter);
+    api.mark_intrinsic(id, Intrinsic::Filter);
+    let id = api.add_method(fold);
+    api.mark_intrinsic(id, Intrinsic::Fold);
+    let id = api.add_method(find);
+    api.mark_intrinsic(id, Intrinsic::Find);
+    let id = api.add_method(any);
+    api.mark_intrinsic(id, Intrinsic::Any);
+    let id = api.add_method(all);
+    api.mark_intrinsic(id, Intrinsic::All);
 }
 
 #[native]
@@ -172,6 +186,46 @@ fn argsort_float(keys: &[f64]) -> Vec<i64> {
     let mut idx: Vec<i64> = (0..keys.len() as i64).collect();
     idx.sort_by(|&a, &b| keys[a as usize].total_cmp(&keys[b as usize]));
     idx
+}
+
+/// `xs.map(f)` -> `[U]` -- `f: (T) -> U` applied element-wise.
+#[native]
+fn map<'gc>(_arr: &[anon::T<'gc>], _f: anon::Fn1<'gc, 0, anon::U<'gc>>) -> Vec<anon::U<'gc>> {
+    unreachable!("intrinsics cannot be reached")
+}
+
+/// `xs.filter(f)` -> `[T]` -- keeps the elements `f` returns `true` for.
+#[native]
+fn filter<'gc>(_arr: &[anon::T<'gc>], _f: anon::Fn1<'gc, 0, bool>) -> Vec<anon::T<'gc>> {
+    unreachable!("intrinsics cannot be reached")
+}
+
+/// `xs.fold(init, f)` -> `U` -- `f: (U, T) -> U` threads an accumulator left to right.
+#[native]
+fn fold<'gc>(
+    _arr: &[anon::T<'gc>],
+    _init: anon::U<'gc>,
+    _f: anon::Fn2<'gc, 1, 0, anon::U<'gc>>,
+) -> anon::U<'gc> {
+    unreachable!("intrinsics cannot be reached")
+}
+
+/// `xs.find(f)` -> `T?` -- the first element `f` returns `true` for, else `null`.
+#[native]
+fn find<'gc>(_arr: &[anon::T<'gc>], _f: anon::Fn1<'gc, 0, bool>) -> Option<anon::T<'gc>> {
+    unreachable!("intrinsics cannot be reached")
+}
+
+/// `xs.any(f)` -> `bool` -- whether `f` returns `true` for any element.
+#[native]
+fn any<'gc>(_arr: &[anon::T<'gc>], _f: anon::Fn1<'gc, 0, bool>) -> bool {
+    unreachable!("intrinsics cannot be reached")
+}
+
+/// `xs.all(f)` -> `bool` -- whether `f` returns `true` for every element.
+#[native]
+fn all<'gc>(_arr: &[anon::T<'gc>], _f: anon::Fn1<'gc, 0, bool>) -> bool {
+    unreachable!("intrinsics cannot be reached")
 }
 
 #[native]

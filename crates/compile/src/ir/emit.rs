@@ -1,6 +1,6 @@
 use crate::{
     OperandKind,
-    ir::{BinOp, BlockId, BodyId, Constant, FormatPart, InstId, Ir, LoopCtx, Place},
+    ir::{BinOp, BlockId, BodyId, Constant, FormatPart, Inst, InstId, Ir, LoopCtx, Place},
 };
 use api::NativeId;
 use parse::{
@@ -401,6 +401,99 @@ impl Emit for Call {
                         .map_or(name, |path| path.to_string_lossy().into_owned());
                     let path = ir.intern_str(&path);
                     ir.current().constant(Constant::Str(path))
+                }
+                // the higher-order array methods can't be `#[native]` bodies (a native runs
+                // synchronously and can't call back into the VM), so the intrinsic lowers the
+                // call to a generated loop that `Call`s the closure per element. args is
+                // [receiver, ..declared params]: map/filter/find/any/all take `f` at [1],
+                // fold takes `init, f` at [1], [2].
+                api::Intrinsic::Map => {
+                    let out = ir.current().new_array();
+                    let exit = emit_array_walk(ir, args[0], |ir, elem, _| {
+                        let mapped = ir.current().call(args[1], vec![elem]);
+                        ir.current().push(out, mapped);
+                    });
+                    ir.target(exit);
+                    out
+                }
+                api::Intrinsic::Filter => {
+                    let out = ir.current().new_array();
+                    let exit = emit_array_walk(ir, args[0], |ir, elem, latch| {
+                        let keep = ir.current().call(args[1], vec![elem]);
+                        ir.current().jump_if_false(keep, latch);
+                        ir.current().push(out, elem);
+                    });
+                    ir.target(exit);
+                    out
+                }
+                api::Intrinsic::Fold => {
+                    let acc = ir.synthetic_local("$fold_acc");
+                    ir.current().set_local(acc, args[1]);
+                    let exit = emit_array_walk(ir, args[0], |ir, elem, _| {
+                        let cur = ir.current().get_local(acc);
+                        let next = ir.current().call(args[2], vec![cur, elem]);
+                        ir.current().set_local(acc, next);
+                    });
+                    ir.target(exit);
+                    ir.current().get_local(acc)
+                }
+                api::Intrinsic::Find => {
+                    let merge = ir.push_block("find_merge");
+                    let mut branches = Vec::new();
+                    let exit = emit_array_walk(ir, args[0], |ir, elem, latch| {
+                        let hit = ir.current().call(args[1], vec![elem]);
+                        ir.current().jump_if_false(hit, latch);
+                        let end = ir.current_block_id();
+                        ir.current().jump(merge);
+                        branches.push((end, elem));
+                    });
+                    ir.target(exit);
+                    let null = ir.current().constant(Constant::Null);
+                    let end = ir.current_block_id();
+                    ir.current().jump(merge);
+                    branches.push((end, null));
+                    merge_branches(ir, merge, branches)
+                        .expect("find always emits hit and exhausted edges")
+                }
+                api::Intrinsic::Any => {
+                    let merge = ir.push_block("any_merge");
+                    let mut branches = Vec::new();
+                    let exit = emit_array_walk(ir, args[0], |ir, elem, latch| {
+                        let hit = ir.current().call(args[1], vec![elem]);
+                        ir.current().jump_if_false(hit, latch);
+                        let yes = ir.current().constant(true);
+                        let end = ir.current_block_id();
+                        ir.current().jump(merge);
+                        branches.push((end, yes));
+                    });
+                    ir.target(exit);
+                    let no = ir.current().constant(false);
+                    let end = ir.current_block_id();
+                    ir.current().jump(merge);
+                    branches.push((end, no));
+                    merge_branches(ir, merge, branches)
+                        .expect("any always emits hit and exhausted edges")
+                }
+                api::Intrinsic::All => {
+                    let miss = ir.push_block("all_miss");
+                    let merge = ir.push_block("all_merge");
+                    let mut branches = Vec::new();
+                    let exit = emit_array_walk(ir, args[0], |ir, elem, _| {
+                        let ok = ir.current().call(args[1], vec![elem]);
+                        ir.current().jump_if_false(ok, miss);
+                    });
+                    ir.target(miss);
+                    let no = ir.current().constant(false);
+                    let end = ir.current_block_id();
+                    ir.current().jump(merge);
+                    branches.push((end, no));
+                    ir.target(exit);
+                    let yes = ir.current().constant(true);
+                    let end = ir.current_block_id();
+                    ir.current().jump(merge);
+                    branches.push((end, yes));
+                    merge_branches(ir, merge, branches)
+                        .expect("all always emits miss and exhausted edges")
                 }
             }
         }
@@ -1518,6 +1611,67 @@ fn merge_branches(
     }
     ir.target(merge_block);
     Some(ir.current().phi(branches))
+}
+
+/// The generated-loop skeleton behind the higher-order array intrinsics (`map`, `filter`,
+/// `fold`, `find`, `any`, `all`). Mirrors `For::emit`: an index local, a header that loads
+/// `arr[i]` into `per_elem`, a latch that increments and compares against `len arr`, and an
+/// `empty` shortcut so a zero-length receiver skips the header entirely.
+///
+/// The bound is *frozen* up front, like `for`'s `frozen_bound` path: a callback that grows
+/// the receiver mid-walk can't extend the iteration (that would loop forever on a `push`
+/// per element), and one that shrinks it faults cleanly -- `get_index` on a stale index is
+/// an ordinary out-of-bounds `RtErr`, not a silent skip.
+///
+/// `per_elem` emits the per-element logic into the header block, given the loaded element and
+/// the latch's `BlockId` for "skip to next iteration" edges. If it leaves the current block
+/// without a terminating `Jump` the helper wires the fall-through into the latch -- a body
+/// that exits early (find/any/all) caps its own edge with `Jump` to its merge block instead.
+/// Returns the exit block, left untargeted for the caller to fill (e.g. an exhausted edge).
+fn emit_array_walk(
+    ir: &mut Ir,
+    arr: InstId,
+    per_elem: impl FnOnce(&mut Ir, InstId, BlockId),
+) -> BlockId {
+    let header = ir.push_block("hof_header");
+    let latch = ir.push_block("hof_latch");
+    let empty = ir.push_block("hof_empty");
+    let exit = ir.push_block("hof_exit");
+
+    let idx = ir.synthetic_local("$hof_idx");
+    let zero = ir.current().constant(0);
+    ir.current().set_local(idx, zero);
+    let bound = ir.current().len(arr);
+    let entered = ir
+        .current()
+        .bin(BinOp::LessThan, zero, bound, OperandKind::Int);
+    ir.current().jump_if_false(entered, empty);
+    ir.current().jump(header);
+
+    ir.target(empty);
+    ir.current().jump(exit);
+
+    ir.target(header);
+    let i = ir.current().get_local(idx);
+    let elem = ir.current().get_index(arr, i, AccessKind::Direct);
+    per_elem(ir, elem, latch);
+    let capped = matches!(
+        ir.current_body()
+            .current_stream()
+            .last()
+            .map(|iid| &ir.current_body().instructions[*iid]),
+        Some(Inst::Jump { .. })
+    );
+    if !capped {
+        ir.current().jump(latch);
+    }
+
+    ir.target(latch);
+    let i = ir.current().get_local(idx);
+    ir.current().for_next(i, bound, header);
+    ir.current().jump(exit);
+
+    exit
 }
 
 fn loop_result(ir: &mut Ir, exit: BlockId, branches: Vec<(BlockId, InstId)>) -> Option<InstId> {
