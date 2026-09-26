@@ -28,6 +28,8 @@ mod std_lib {
     pub(crate) mod parse;
     pub(crate) mod process;
     pub(crate) mod sys;
+    #[cfg(feature = "xlsx")]
+    pub(crate) mod xlsx;
 }
 
 mod prelude;
@@ -48,6 +50,8 @@ pub fn std<'gc>(api: &mut Api<'_, 'gc>) {
     methods::bool::install(api);
     #[cfg(feature = "dataframe")]
     std_lib::dataframe::install(api);
+    #[cfg(feature = "xlsx")]
+    std_lib::xlsx::install(api);
     #[cfg(feature = "darkly")]
     std_lib::darkly::install(api);
     std_lib::debug::install(api);

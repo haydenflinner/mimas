@@ -27,7 +27,7 @@ vm = { package = "mimas-vm", path = "../vm", version = "0.2.0", default-features
 mimas-bevy = { path = "../bevy", version = "0.2.0", optional = true }
 
 [features]
-default = ["dataframe", "darkly"]
+default = ["dataframe", "darkly", "xlsx"]
 # DataFrame/PlExpr querying via std::polars, backed by a real polars dependency -- see the
 # `dataframe` feature notes on the `vm`/`library` crates. On by default; `default-features =
 # false` (or `features = []`) opts out for an embedder who doesn't want polars pulled in at all.
@@ -35,6 +35,10 @@ dataframe = ["vm/dataframe", "library/dataframe"]
 # std::darkly (.darkly layer-tree reading) -- see the `darkly` feature notes on the `vm`/
 # `library` crates. On by default, same opt-out story as `dataframe`.
 darkly = ["vm/darkly", "library/darkly"]
+# std::polars's xlsx file I/O (`from_xlsx`/`to_xlsx`, via `calamine` + `rust_xlsxwriter`) -- see
+# the `xlsx` feature notes on the `library` crate. On by default, same opt-out story; implies
+# `dataframe` (it only adds natives over the existing `DataFrame` type, so there's no `vm` side).
+xlsx = ["library/xlsx"]
 op-count = ["vm/op-count"]
 bevy = ["dep:mimas-bevy"]
 

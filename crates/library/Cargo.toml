@@ -53,11 +53,20 @@ polars-io = { path = "/Users/wow/code/dsa/polars/crates/polars-io", optional = t
 # `polars` dep for why this isn't just an unconditional dependency.
 zip = { version = "2", optional = true, default-features = false, features = ["deflate"] }
 serde = { version = "1", optional = true, features = ["derive"] }
+# `std::polars`'s file-backed half: `from_xlsx` reads a worksheet into a `DataFrame` via
+# `calamine` (pure-Rust xlsx/xls/ods reader -- the same engine behind Python polars' `fastexcel`),
+# `df.to_xlsx(path)` exports one via `rust_xlsxwriter` (port of the author's own Python
+# `XlsxWriter`). `rust_xlsxwriter`'s `polars` feature stays off: it would resolve a *second*,
+# crates.io `polars` whose `DataFrame` type wouldn't unify with this workspace's path-dep clone,
+# so `to_xlsx` iterates `AnyValue`s itself. Both optional, gated behind the `xlsx` feature below.
+calamine = { version = "0.36.1", optional = true, features = ["chrono"] }
+rust_xlsxwriter = { version = "0.99.1", optional = true }
 
 [features]
-default = ["dataframe", "darkly"]
+default = ["dataframe", "darkly", "xlsx"]
 dataframe = ["dep:polars", "dep:polars-io", "vm/dataframe"]
 darkly = ["dep:zip", "dep:serde", "vm/darkly"]
+xlsx = ["dataframe", "dep:calamine", "dep:rust_xlsxwriter"]
 
 [dev-dependencies]
 parse = { package = "mimas-parse", path = "../parse", version = "0.2.0" }
