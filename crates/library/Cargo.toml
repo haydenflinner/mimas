@@ -36,6 +36,8 @@ polars = { path = "/Users/wow/code/dsa/polars/crates/polars", optional = true, d
     "pivot",
     "strings",
     "regex",
+    # `Expr::diff`/`NullBehavior` for `col(..).diff(n)` and `query`'s `difference(..)`
+    "diff",
 ] }
 # depended on directly (not via `polars`'s own `csv` feature) for `CsvReadOptions`/`CsvReader`,
 # used by `std_lib::dataframe::from_csv` to read an in-memory CSV string into a `DataFrame`.

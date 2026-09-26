@@ -21,7 +21,7 @@ use shared::{Located, Ty, units::Dim};
 
 use crate::{
     Error, Result, Solver,
-    components::TyExt,
+    components::{AdtId, TyExt},
     errors::{BadSchemaSpec, DimensionMismatch, NoSuchColumn},
     traits::Query,
 };
@@ -335,6 +335,35 @@ impl Solver {
             columns: Self::schema_columns(schema),
         }
         .into()
+    }
+
+    /// The adt whose declared fields are exactly `schema`'s columns, when the schema
+    /// is closed and exactly one non-generic record shape matches. Generic and
+    /// enum-parent adts can't be instantiated by name alone, so they don't qualify;
+    /// enum-variant *layouts* are their own adt entries and match like any struct.
+    /// `None` on ambiguity too -- the runtime raises the same condition.
+    fn record_adt_for(&self, schema: &FrameSchema) -> Option<AdtId> {
+        if !schema.closed {
+            return None;
+        }
+        let mut found = None;
+        for (id, adt) in self.adts.iter() {
+            if adt.is_generic() {
+                continue;
+            }
+            let Some(variant) = adt.try_as_struct() else {
+                continue;
+            };
+            if variant.fields.len() == schema.cols.len()
+                && variant.fields.keys().all(|f| schema.cols.contains_key(f))
+            {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some(id);
+            }
+        }
+        found
     }
 
     /// `df.schema("fare:float kwh:kWh")` -- parse the spec into a schema; the runtime
@@ -845,6 +874,24 @@ impl Solver {
                     }
                     _ => Ok(ty),
                 }
+            }
+            // `df.row(i)`/`df.rows()`: a closed schema names the record type outright --
+            // the check-time twin of `row`'s runtime field-name match. No schema or no
+            // unique match keeps the native's anonymous return, which still resolves at
+            // runtime.
+            "row" | "rows" => {
+                let Some(schema) = self.frame_schema_of(recv) else {
+                    return Ok(ty);
+                };
+                let Some(adt) = self.record_adt_for(&schema) else {
+                    return Ok(ty);
+                };
+                let record = Ty::adt(adt);
+                Ok(Ty::Result(Box::new(if method == "row" {
+                    record
+                } else {
+                    Ty::Array(Box::new(record))
+                })))
             }
             // a unit column pulled as a unit is still `[float]` at the Ty layer
             "pull_as" => Ok(match self.frame_schema_of(recv) {

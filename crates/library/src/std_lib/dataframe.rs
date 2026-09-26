@@ -67,6 +67,8 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
         m.add(col_names);
         m.add(pull);
         m.add(pull_as);
+        m.add(row);
+        m.add(rows);
         m.add(schema);
         m.add(group_by);
         m.add(agg);
@@ -89,6 +91,8 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add_method(col_names);
     api.add_method(pull);
     api.add_method(pull_as);
+    api.add_method(row);
+    api.add_method(rows);
     api.add_method(schema);
     api.add_method(group_by);
     api.add_method(agg);
@@ -106,6 +110,8 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add_method(first);
     api.add_method(last);
     api.add_method(alias);
+    api.add_method(shift);
+    api.add_method(diff);
     api.add_method(is_null);
     api.add_method(is_not_null);
     api.add_method(fill_null);
@@ -331,7 +337,6 @@ fn pull<'gc>(
     df: vm::DataFrame<'gc>,
     name: &str,
 ) -> Raisable<vm::Array<'gc>> {
-    use polars::prelude::AnyValue;
     let col = {
         let d = df.0.borrow();
         match d.0.column(name) {
@@ -342,33 +347,166 @@ fn pull<'gc>(
     let s = col.as_materialized_series();
     let mut out = Vec::with_capacity(s.len());
     for v in s.iter() {
-        let v = match v {
-            AnyValue::Null => Val::Null,
-            AnyValue::Boolean(b) => Val::Bool(b),
-            AnyValue::Int8(x) => Val::Int(x as i64),
-            AnyValue::Int16(x) => Val::Int(x as i64),
-            AnyValue::Int32(x) => Val::Int(x as i64),
-            AnyValue::Int64(x) => Val::Int(x),
-            AnyValue::UInt8(x) => Val::Int(x as i64),
-            AnyValue::UInt16(x) => Val::Int(x as i64),
-            AnyValue::UInt32(x) => Val::Int(x as i64),
-            AnyValue::UInt64(x) => match i64::try_from(x) {
-                Ok(x) => Val::Int(x),
-                Err(_) => return Raisable::Raised(format!("pull: {x} overflows int")),
-            },
-            AnyValue::Float32(x) => Val::Float(x as f64),
-            AnyValue::Float64(x) => Val::Float(x),
-            AnyValue::String(x) => Val::Str(ctx.intern(x)),
-            AnyValue::StringOwned(x) => Val::Str(ctx.intern(x.as_str())),
-            other => {
-                return Raisable::Raised(format!(
-                    "pull: column {name:?} has an unsupported dtype ({other:?})"
-                ));
-            }
-        };
-        out.push(v);
+        match cell_val(ctx, v, "pull", name) {
+            Ok(v) => out.push(v),
+            Err(e) => return Raisable::Raised(e),
+        }
     }
     Raisable::Ok(ctx.new_array(out))
+}
+
+/// AnyValue -> Val, the cell conversion `pull`/`row`/`rows` share. `what` names the
+/// verb the user typed so error text points at the right call.
+fn cell_val<'gc>(
+    ctx: Ctx<'gc>,
+    v: polars::prelude::AnyValue,
+    what: &str,
+    col: &str,
+) -> Result<Val<'gc>, String> {
+    use polars::prelude::AnyValue;
+    Ok(match v {
+        AnyValue::Null => Val::Null,
+        AnyValue::Boolean(b) => Val::Bool(b),
+        AnyValue::Int8(x) => Val::Int(x as i64),
+        AnyValue::Int16(x) => Val::Int(x as i64),
+        AnyValue::Int32(x) => Val::Int(x as i64),
+        AnyValue::Int64(x) => Val::Int(x),
+        AnyValue::UInt8(x) => Val::Int(x as i64),
+        AnyValue::UInt16(x) => Val::Int(x as i64),
+        AnyValue::UInt32(x) => Val::Int(x as i64),
+        AnyValue::UInt64(x) => match i64::try_from(x) {
+            Ok(x) => Val::Int(x),
+            Err(_) => return Err(format!("{what}: {x} overflows int")),
+        },
+        AnyValue::Float32(x) => Val::Float(x as f64),
+        AnyValue::Float64(x) => Val::Float(x),
+        AnyValue::String(x) => Val::Str(ctx.intern(x)),
+        AnyValue::StringOwned(x) => Val::Str(ctx.intern(x.as_str())),
+        other => {
+            return Err(format!(
+                "{what}: column {col:?} has an unsupported dtype ({other:?})"
+            ));
+        }
+    })
+}
+
+/// The struct_id whose declared fields are exactly `cols` (order-free), i.e. the
+/// record shape a row of this frame becomes. `field_names`/`struct_names` are
+/// indexed by `struct_id` and filled at `load_program` from every adt the program
+/// compiled -- including enum-variant layouts, whose fields match too.
+fn record_struct(ctx: Ctx, cols: &[String], what: &str) -> Result<u32, String> {
+    let field_names = ctx.state().field_names.borrow();
+    let mut want: Vec<&str> = cols.iter().map(String::as_str).collect();
+    want.sort_unstable();
+    let mut found = vec![];
+    for (id, fields) in field_names.iter().enumerate() {
+        let mut have: Vec<&str> = fields.iter().map(String::as_str).collect();
+        have.sort_unstable();
+        if have == want {
+            found.push(id as u32);
+        }
+    }
+    match found.as_slice() {
+        [id] => Ok(*id),
+        [] => Err(format!(
+            "{what}: no declared struct has fields [{}] -- declare one for the row shape first",
+            cols.join(", ")
+        )),
+        ids => {
+            let names = ctx.state().struct_names.borrow();
+            let list: Vec<String> = ids
+                .iter()
+                .map(|&i| {
+                    names
+                        .get(i as usize)
+                        .cloned()
+                        .unwrap_or_else(|| format!("#{i}"))
+                })
+                .collect();
+            Err(format!(
+                "{what}: columns [{}] match more than one declared struct ({})",
+                cols.join(", "),
+                list.join(", ")
+            ))
+        }
+    }
+}
+
+/// The struct a frame's rows record into, plus one materialized column per field in
+/// the struct's declared order, so a row fills its fields by name.
+fn record_cols(
+    ctx: Ctx,
+    df: &polars::frame::DataFrame,
+    what: &str,
+) -> Result<(u32, Vec<(String, polars::prelude::Series)>), String> {
+    let cols: Vec<String> = df
+        .get_column_names()
+        .iter()
+        .map(|n| n.as_str().to_string())
+        .collect();
+    let sid = record_struct(ctx, &cols, what)?;
+    let fields = ctx.state().field_names.borrow()[sid as usize].clone();
+    let mut out = Vec::with_capacity(fields.len());
+    for name in fields {
+        let series = df
+            .column(&name)
+            .map_err(|e| format!("{what}: {e}"))?
+            .as_materialized_series()
+            .clone();
+        out.push((name, series));
+    }
+    Ok((sid, out))
+}
+
+/// Row `i` of a frame as an instance of `struct_id`, fields filled from `cols`.
+fn record_at<'gc>(
+    ctx: Ctx<'gc>,
+    struct_id: u32,
+    cols: &[(String, polars::prelude::Series)],
+    i: usize,
+    what: &str,
+) -> Result<Val<'gc>, String> {
+    let mut vals = Vec::with_capacity(cols.len());
+    for (name, col) in cols {
+        let v = col.get(i).map_err(|e| format!("{what}: {e}"))?;
+        vals.push(cell_val(ctx, v, what, name)?);
+    }
+    Ok(Val::Instance(ctx.new_instance(struct_id, vm::Fields::new(vals))))
+}
+
+/// `df.row(2)` -- row `i` as a record: an instance of the declared struct whose
+/// fields are exactly this frame's columns, filled by name. Missing cells come
+/// through as `null`. Raises when no declared struct matches the columns (or when
+/// several do), and on an out-of-bounds index.
+#[native]
+fn row<'gc>(ctx: Ctx<'gc>, df: vm::DataFrame<'gc>, i: i64) -> Raisable<vm::anon::Anon<'gc, 0>> {
+    let d = df.0.borrow();
+    (|| {
+        let (sid, cols) = record_cols(ctx, &d.0, "row")?;
+        let n = d.0.height();
+        if i < 0 || i as usize >= n {
+            return Err(format!("row: index {i} out of bounds ({n} rows)"));
+        }
+        record_at(ctx, sid, &cols, i as usize, "row")
+    })()
+    .map(vm::anon::Anon)
+    .into()
+}
+
+/// `df.rows()` -- every row as a record, resolved the same way as [`row`].
+#[native]
+fn rows<'gc>(ctx: Ctx<'gc>, df: vm::DataFrame<'gc>) -> Raisable<vm::anon::ArrayOf<'gc, 0>> {
+    let d = df.0.borrow();
+    (|| {
+        let (sid, cols) = record_cols(ctx, &d.0, "rows")?;
+        let mut out = Vec::with_capacity(d.0.height());
+        for i in 0..d.0.height() {
+            out.push(record_at(ctx, sid, &cols, i, "rows")?);
+        }
+        Ok::<_, String>(ctx.new_array(out))
+    })()
+    .map(vm::anon::ArrayOf)
+    .into()
 }
 
 /// `df.pull_as("kwh", "kWh")` -- a numeric column read as quantities in `unit`. The table holds
@@ -598,6 +736,23 @@ pl_expr_reducer!(sum, mean, median, min, max, count, n_unique, first, last);
 #[native]
 fn alias<'gc>(ctx: Ctx<'gc>, e: vm::PlExpr<'gc>, name: &str) -> vm::PlExpr<'gc> {
     ctx.new_plexpr(e.0.0.clone().alias(name))
+}
+
+/// `col("t").shift(1)` — the value `n` rows above (a lag); negative `n`
+/// reaches the rows below (a lead). The shifted-in cells are null.
+/// Sort first: "the row above" is only meaningful in row order.
+#[native]
+fn shift<'gc>(ctx: Ctx<'gc>, e: vm::PlExpr<'gc>, n: i64) -> vm::PlExpr<'gc> {
+    ctx.new_plexpr(e.0.0.clone().shift(polars::prelude::lit(n)))
+}
+
+/// `col("t").diff(1)` — each cell minus the cell `n` rows above; the
+/// first `n` cells are null (polars' `NullBehavior::Ignore`).
+#[native]
+fn diff<'gc>(ctx: Ctx<'gc>, e: vm::PlExpr<'gc>, n: i64) -> vm::PlExpr<'gc> {
+    ctx.new_plexpr(
+        e.0.0.clone().diff(polars::prelude::lit(n), polars::series::ops::NullBehavior::Ignore),
+    )
 }
 
 /// An array of same-shaped struct instances -> a `DataFrame` whose columns are named after the
@@ -973,6 +1128,23 @@ fn __q_apply<'gc>(
         "cast_int" => e.cast(polars::prelude::DataType::Int64),
         "cast_float" => e.cast(polars::prelude::DataType::Float64),
         "cast_str" => e.cast(polars::prelude::DataType::String),
+        // `lag(x)`, `lead(x)`, `difference(x)` — the row `n` above/below
+        // or the gap to it (`n` defaults to 1); first/last cells come
+        // back null. Order-sensitive: `sort` first.
+        "lag" | "lead" | "difference" => {
+            let n = match arg {
+                Val::Null => 1,
+                Val::Int(i) => i,
+                _ => return Err(q_err(format!("{func} takes an optional int step"))),
+            };
+            if func == "lag" {
+                e.shift(polars::prelude::lit(n))
+            } else if func == "lead" {
+                e.shift(polars::prelude::lit(-n))
+            } else {
+                e.diff(polars::prelude::lit(n), polars::series::ops::NullBehavior::Ignore)
+            }
+        }
         // `eq(a, b)` compares two columns; for a column against an outside
         // value write `a == $who` (the `$` splice) or `eq(a, $who)`
         "eq" => e.eq(q_expr(arg)?),

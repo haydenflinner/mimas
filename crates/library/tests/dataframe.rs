@@ -385,6 +385,77 @@ test_run!(
     r#"df.mutate([when(col("age") > 30, lit("senior"), lit("junior")).alias("level")])!.pull("level")!.join(",")"# => r#""senior,junior,senior,junior""#,
 );
 
+// `shift`/`diff` read neighbouring rows — the window the tidy-tables
+// deck derives lap times through (sorted rider clocks, guard on the
+// rider boundary, first lap counts from the gun).
+test_run_display!(
+    shift_and_diff_read_neighbouring_rows,
+    EMPLOYEES,
+    r#"df.mutate([col("age").shift(1).alias("prev")])!.select_names(["name", "prev"])"# => r#"shape: (4, 2)
+┌───────┬──────┐
+│ name  ┆ prev │
+│ ---   ┆ ---  │
+│ str   ┆ i64  │
+╞═══════╪══════╡
+│ Alice ┆ null │
+│ Bob   ┆ 34   │
+│ Carol ┆ 29   │
+│ Dave  ┆ 41   │
+└───────┴──────┘"#,
+    r#"df.mutate([col("age").diff(1).alias("gap")])!.select_names(["name", "gap"])"# => r#"shape: (4, 2)
+┌───────┬──────┐
+│ name  ┆ gap  │
+│ ---   ┆ ---  │
+│ str   ┆ i64  │
+╞═══════╪══════╡
+│ Alice ┆ null │
+│ Bob   ┆ -5   │
+│ Carol ┆ 12   │
+│ Dave  ┆ -16  │
+└───────┴──────┘"#,
+    // a negative shift is a lead
+    r#"df.mutate([col("age").shift(-1).alias("next")])!.select_names(["name", "next"])"# => r#"shape: (4, 2)
+┌───────┬──────┐
+│ name  ┆ next │
+│ ---   ┆ ---  │
+│ str   ┆ i64  │
+╞═══════╪══════╡
+│ Alice ┆ 29   │
+│ Bob   ┆ 41   │
+│ Carol ┆ 25   │
+│ Dave  ┆ null │
+└───────┴──────┘"#,
+);
+
+test_run_display!(
+    laptime_per_rider_via_shift_diff_and_when,
+    r#"use std::polars::*;
+       const START = 36000;
+       let samples = table {
+           rider    clock
+           "bo"     36061
+           "ada"    36060
+           "ada"    36122
+           "bo"     36124
+       };"#,
+    r#"samples
+       |> arrange(["rider", "clock"], [false, false])!
+       |> mutate([when(col("rider") == col("rider").shift(1),
+                      col("clock").diff(1),
+                      col("clock") - lit(START)).alias("laptime")])!
+       |> select_names(["rider", "laptime"])!"# => r#"shape: (4, 2)
+┌───────┬─────────┐
+│ rider ┆ laptime │
+│ ---   ┆ ---     │
+│ str   ┆ i64     │
+╞═══════╪═════════╡
+│ ada   ┆ 60      │
+│ ada   ┆ 62      │
+│ bo    ┆ 61      │
+│ bo    ┆ 63      │
+└───────┴─────────┘"#,
+);
+
 test_run!(
     string_expressions,
     EMPLOYEES,
@@ -498,6 +569,67 @@ test_run_display!(
 │ email    ┆ 5       ┆ 3      │
 │ pickup   ┆ 16      ┆ 3      │
 └──────────┴─────────┴────────┘"#,
+);
+
+test_run_display!(
+    query_lag_lead_and_difference,
+    QEVENTS,
+    // difference(numtix) is numtix minus the row above — sort first!
+    r#"query {
+        events
+        sort name
+        derive gap = difference(numtix)
+        select name gap
+    }"# => r#"shape: (6, 2)
+┌────────┬──────┐
+│ name   ┆ gap  │
+│ ---    ┆ ---  │
+│ str    ┆ i64  │
+╞════════╪══════╡
+│ Ana    ┆ null │
+│ Bonnie ┆ -2   │
+│ Ellie  ┆ 1    │
+│ Parrot ┆ 8    │
+│ Sam    ┆ -5   │
+│ Zach   ┆ -5   │
+└────────┴──────┘"#,
+    // lag reads the row above, lead the row below
+    r#"query {
+        events
+        sort name
+        derive prev = lag(delivery)
+        select name prev
+    }"# => r#"shape: (6, 2)
+┌────────┬────────┐
+│ name   ┆ prev   │
+│ ---    ┆ ---    │
+│ str    ┆ str    │
+╞════════╪════════╡
+│ Ana    ┆ null   │
+│ Bonnie ┆ email  │
+│ Ellie  ┆ pickup │
+│ Parrot ┆ email  │
+│ Sam    ┆ pickup │
+│ Zach   ┆ pickup │
+└────────┴────────┘"#,
+    r#"query {
+        events
+        sort name
+        derive nxt = lead(numtix)
+        select name nxt
+    }"# => r#"shape: (6, 2)
+┌────────┬──────┐
+│ name   ┆ nxt  │
+│ ---    ┆ ---  │
+│ str    ┆ i64  │
+╞════════╪══════╡
+│ Ana    ┆ 1    │
+│ Bonnie ┆ 2    │
+│ Ellie  ┆ 10   │
+│ Parrot ┆ 5    │
+│ Sam    ┆ 0    │
+│ Zach   ┆ null │
+└────────┴──────┘"#,
 );
 
 test_run!(
@@ -827,4 +959,101 @@ test_fail!(
     r#"use std::polars::*;
        let df = from_csv("a,b\n1,2")!;
        df.pull("nope")!;"#,
+);
+
+// ---- rows as records ---------------------------------------------------------------
+// `df.row(i)`/`df.rows()` hand a row back as an instance of the declared struct whose
+// fields are exactly the frame's columns, filled by name. On a `table {}` literal the
+// closed schema resolves the record type at check time (so `row.field` type-checks);
+// on an opaque frame the return stays anonymous and unifies where it's used -- the
+// runtime matches the struct by field names either way.
+
+const SHUTTLE: &str = "use std::polars::*;
+     struct Shuttle { month: str, riders: int }
+     let df = table {
+         month    riders
+         \"Jan\"    1123
+         \"Feb\"    1045
+         \"Mar\"    1087
+         \"Apr\"    999
+     };";
+
+test_run!(
+    row_reads_a_row_back_as_the_matching_record,
+    SHUTTLE,
+    r#"df.row(0)!"# => r#"{ "Jan", 1123 }"#,
+    r#"df.row(3)!.riders"# => "999",
+);
+
+// the struct's field order doesn't have to match the column order -- fields fill by name
+test_run!(
+    row_fills_fields_by_name_not_position,
+    r#"use std::polars::*;
+       struct Swap { riders: int, month: str }
+       let df = table { month  riders
+           "Jan"  1123
+       };
+       let r = df.row(0)!;"#,
+    "r" => r#"{ 1123, "Jan" }"#,
+);
+
+test_run!(
+    rows_reads_every_row_in_order,
+    SHUTTLE,
+    r#"df.rows()!.len()"# => "4",
+    r#"df.rows()![2].month"# => r#""Mar""#,
+);
+
+// the point of the api: a row goes straight into a fn typed on the record. This frame
+// is opaque (from_csv, no schema) so the record type comes from unifying the anonymous
+// return with `s: Shuttle`, not the schema fast path; the free-fn form does the same.
+test_run!(
+    row_passes_into_a_function_typed_on_the_record,
+    r#"use std::polars::*;
+       struct Shuttle { month: str, riders: int }
+       fn cleared_1k(s: Shuttle) -> bool { s.riders < 1000 }
+       let df = from_csv("month,riders\nJan,1123\nApr,999\n")!;"#,
+    "cleared_1k(df.row(0)!)" => "false",
+    "cleared_1k(df.row(1)!)" => "true",
+    "cleared_1k(row(df, 0)!)" => "false",
+);
+
+// a missing cell materializes as `null` in the field's slot
+test_run!(
+    row_materializes_a_missing_cell_as_null,
+    r#"use std::polars::*;
+       struct CsvRow { a: str, b: str }
+       let df = from_csv("a,b\nx,\ny,z\n")!.schema("a:str b:str")!;"#,
+    r#"df.row(0)!"# => r#"{ "x", null }"#,
+);
+
+// no declared struct has the frame's column set -> raise, not a guess. (`int` forces
+// the anonymous return to resolve so the failure is the runtime match, not inference.)
+test_fail!(
+    row_rejects_a_frame_with_no_matching_record_shape,
+    r#"use std::polars::*;
+       let df = table { a b
+           1 2
+       };
+       let _: int = df.row(0)!;"#,
+);
+
+// two structs with the same fields -> the match is ambiguous and raises
+test_fail!(
+    row_rejects_an_ambiguous_record_shape,
+    r#"use std::polars::*;
+       struct A { x: int, y: int }
+       struct B { x: int, y: int }
+       let df = to_dataframe([A { x = 1, y = 2 }])!;
+       let _: int = df.row(0)!;"#,
+);
+
+test_fail!(
+    row_out_of_bounds_raises,
+    r#"use std::polars::*;
+       struct Shuttle { month: str, riders: int }
+       let df = table { month riders
+           "Jan" 1123
+       };
+       let _ = df.row(5)!;"#,
 );
