@@ -35,6 +35,7 @@ pub mod utils {
 }
 
 mod exhaustion;
+mod frames;
 mod load;
 mod resolutions;
 mod solver;

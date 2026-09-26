@@ -801,6 +801,28 @@ impl<'a> Pass<'a> {
     /// Methods of the built-in float/int/list types.
     fn builtin(&mut self, e: &'a Expr, name: &str, recv: D, c: &'a parse::Call, args: &[D]) -> D {
         match (&recv, name) {
+            // `df.pull("kwh")` on a schema'd frame: a numeric column reads as quantities
+            // of its declared unit (or plain numbers when the column has no unit)
+            (_, "pull") => {
+                let recv_schema = match c.left.kind() {
+                    ExprKind::Access(Access::Dot { left, .. }) => self.solver.frame_schema_of(left),
+                    _ => None,
+                };
+                match (recv_schema, c.arguments.first().map(|a| a.value.kind())) {
+                    (Some(schema), Some(ExprKind::Literal(Literal::String(name)))) => {
+                        match schema.cols.get(name.as_str()) {
+                            Some(col) => match col.ty {
+                                Some(shared::Ty::Int) | Some(shared::Ty::Float) => {
+                                    D::Arr(Box::new(D::Q(col.dim.unwrap_or(Dim::NONE))))
+                                }
+                                _ => D::Arr(Box::new(D::Any)),
+                            },
+                            None => D::Any,
+                        }
+                    }
+                    _ => D::Any,
+                }
+            }
             // `df.pull_as("kwh", "kWh")`: a column of quantities in that unit
             (_, "pull_as") => match c.arguments.get(1).map(|a| a.value.kind()) {
                 Some(ExprKind::Literal(Literal::String(u))) => match units::parse(u) {

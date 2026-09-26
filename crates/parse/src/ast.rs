@@ -46,6 +46,12 @@ impl Ast {
         self.quantities.get(&id).copied()
     }
 
+    /// Every `(node, dim)` pair in `quantities` -- the solver merges these per file so
+    /// `table { kwh\n 5kWh }` columns can carry their unit into the schema.
+    pub fn quantities(&self) -> impl Iterator<Item = (NodeId, Dim)> + '_ {
+        self.quantities.iter().map(|(id, dim)| (*id, *dim))
+    }
+
     /// Consumes the Ast into its inner collection of statements.
     pub fn unpack(self) -> Vec<Stmt> {
         self.stmts

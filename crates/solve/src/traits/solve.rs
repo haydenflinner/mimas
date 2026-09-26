@@ -587,7 +587,7 @@ impl Solve for Break {
 }
 
 impl Solve for Call {
-    fn solve(&self, _id: NodeId, location: Location, solver: &mut Solver) -> Result<Ty> {
+    fn solve(&self, id: NodeId, location: Location, solver: &mut Solver) -> Result<Ty> {
         let adt = match self.left.kind() {
             ExprKind::Access(Access::DoubleColon { left, right }) => {
                 let adt = match adt_from_type_path(left, solver) {
@@ -848,6 +848,10 @@ impl Solve for Call {
             }
 
             let ty = fn_data.return_ty.as_ref().clone().normalized(solver);
+            // dataframe schemas ride beside the type system: `pull` gets the column's
+            // concrete element type here, and `schema`/`table{}`/`__q_*` calls record
+            // column maps for downstream calls (see frames.rs)
+            let ty = solver.frame_call(id, self, ty)?;
             if let ExprKind::Access(Access::Dot {
                 kind: AccessKind::Option,
                 ..

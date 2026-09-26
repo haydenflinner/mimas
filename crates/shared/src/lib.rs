@@ -2,6 +2,7 @@ mod id;
 mod interner;
 mod literal;
 mod location;
+pub mod schema;
 mod ty;
 pub mod units;
 

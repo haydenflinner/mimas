@@ -19,6 +19,7 @@ use parse::{
 use shared::{FileId, IdVec, Literal as RawLiteral, Located, Location, PactId};
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
+    rc::Rc,
     sync::Arc,
 };
 
@@ -42,6 +43,17 @@ pub struct Solver {
     pub(crate) sources: HashMap<FileId, NamedSource<Arc<str>>>,
 
     pub(crate) dec_to_native: HashMap<DecId, NativeBinding>,
+
+    // dataframe schemas (see frames.rs): a frame's Ty stays the nominal `DataFrame` while
+    // these carry its column map -- keyed by producing expr and by `let` binding.
+    pub(crate) frame_schemas: HashMap<NodeId, Rc<crate::frames::FrameSchema>>,
+    pub(crate) frame_decs: HashMap<DecId, Rc<crate::frames::FrameSchema>>,
+    /// `__q_group`/`group_by` results: `(input schema, key columns)` by expr/binding.
+    pub(crate) group_schemas: HashMap<NodeId, Rc<(Rc<crate::frames::FrameSchema>, Vec<String>)>>,
+    pub(crate) group_decs: HashMap<DecId, Rc<(Rc<crate::frames::FrameSchema>, Vec<String>)>>,
+    /// Unit dims of `25kW`-style literals, merged from every solved ast (`NodeId`s are
+    /// globally unique, so one map is collision-free).
+    pub(crate) ast_quantities: HashMap<NodeId, shared::units::Dim>,
 
     pub(crate) control_flow: ControlFlow,
     pub(crate) ribs: Ribs,
@@ -76,6 +88,11 @@ impl Solver {
             module_items: IndexMap::new(),
             sources: HashMap::new(),
             dec_to_native: HashMap::new(),
+            frame_schemas: HashMap::new(),
+            frame_decs: HashMap::new(),
+            group_schemas: HashMap::new(),
+            group_decs: HashMap::new(),
+            ast_quantities: HashMap::new(),
             non_value: None,
         };
         solver.ribs.push_import();
@@ -148,6 +165,9 @@ impl Solver {
 
     pub fn solve_all<'a>(&mut self, asts: impl IntoIterator<Item = &'a Ast>) -> Result<()> {
         let asts: Vec<_> = asts.into_iter().collect();
+        for ast in &asts {
+            self.ast_quantities.extend(ast.quantities());
+        }
         let module_names: Vec<Option<String>> = asts
             .iter()
             .map(|ast| ast.module_name())
@@ -1630,6 +1650,10 @@ impl Solver {
                         self.solve_match_pat(left, ty, false)?;
                     }
                 }
+
+                // a `table {}`/`query {}`/`.schema(…)`-typed RHS carries its column schema
+                // onto the binding, so `df.pull("x")` resolves through the name
+                self.propagate_frame_schemas(left, right);
             }
             StmtKind::Expr(expr) => expr.query(self).map(|_| ())?,
             StmtKind::Module(_) => {

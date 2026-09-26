@@ -864,3 +864,33 @@ pub struct DimensionMismatch {
     pub label: String,
     pub help: String,
 }
+
+/// `df.pull("revnue")` on a frame whose columns the checker knows (a `table {}` literal, a
+/// `.schema("…")` declaration, or a `query {}` result) -- a typo'd name is a check-time
+/// error, not a runtime raise.
+#[derive(Error, Debug, Diagnostic)]
+#[error("no column `{name}`")]
+#[diagnostic(help("this dataframe's columns: {columns}"))]
+pub struct NoSuchColumn {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("there's no `{name}` here")]
+    pub at: SourceSpan,
+    pub name: String,
+    pub columns: String,
+}
+
+/// A `.schema("…")` spec that doesn't parse (`fare:floatt`, a missing `:`, an unknown
+/// type or unit).
+#[derive(Error, Debug, Diagnostic)]
+#[error("bad schema spec")]
+#[diagnostic(help(
+    "a spec looks like `zone:int fare:float kwh:kWh` -- `int`, `float`, `str`, `bool`, or a unit"
+))]
+pub struct BadSchemaSpec {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("{msg}")]
+    pub at: SourceSpan,
+    pub msg: String,
+}

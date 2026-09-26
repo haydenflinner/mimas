@@ -604,3 +604,138 @@ test_fail!(
         frobnicate a
     };"#,
 );
+
+// ---- schemas ---------------------------------------------------------------
+// `table {}` and `.schema("…")` give the checker a column map, so `pull` returns a
+// concrete `[T]` (no annotation, no `?mimas<T>`) and a typo'd name is a check-time
+// error. Opaque frames (`from_csv` with no schema) keep the old generic pull.
+
+const TRIPS: &str = "use std::polars::*;
+     let trips = table {
+         zone  fare  tip
+         1     12.5  2.0
+         2     8.0   1.0
+         1     20.0  5.0
+     };";
+
+// `.format(2)` on a pulled element only compiles because `pull` knows `fare: float`
+test_run!(
+    table_literal_schema_types_pull,
+    TRIPS,
+    r#"trips.pull("fare")![0].format(2)"# => r#""12.50""#,
+    r#"trips.pull("zone")![0] + 1"# => "2",
+);
+
+// `.schema(…)` declares types on an opaque frame; the same string drives the runtime
+// check/cast and the solver's column types
+test_run!(
+    schema_declares_types_on_an_opaque_frame,
+    "use std::polars::*;",
+    r#"from_csv("zone,fare\n1,10.5\n2,9.0")!.schema("zone:int fare:float")!.pull("zone")![0] + 1"# => "2",
+);
+
+// schemas propagate through the query verbs
+test_run!(
+    query_verbs_propagate_the_schema,
+    TRIPS,
+    r#"query {
+        trips
+        filter fare > 5
+        derive gross = fare + tip
+        group zone {
+            aggregate {
+                n = count(),
+                revenue = sum(gross),
+            }
+        }
+        sort -revenue
+    }.pull("revenue")![0].format(1)"# => r#""39.5""#,
+);
+
+// and through the method api
+test_run!(
+    method_calls_propagate_the_schema,
+    TRIPS,
+    r#"trips.filter(col("fare") > 5)!.mutate([col("fare").sum().alias("rev")])!.pull("rev")![0]"# => "40.5",
+);
+
+// a `schema()`-declared unit makes pulled elements quantities the dims checker tracks
+test_run_display!(
+    schema_units_track_through_pull,
+    "use std::polars::*;
+     let df = from_csv(\"kwh\\n3.5\\n4.0\")!.schema(\"kwh:kWh\")!;
+     let kwh = df.pull(\"kwh\")!;",
+    "kwh[0] + kwh[1]" => "7.5",
+);
+
+test_fail!(
+    pull_of_a_typo_column_is_a_check_error,
+    r#"use std::polars::*;
+       let trips = table {
+           zone  fare
+           1     12.5
+       };
+       trips.pull("zome")!;"#,
+);
+
+test_fail!(
+    query_verb_rejects_a_typo_column_at_check_time,
+    r#"use std::polars::*;
+       let trips = table {
+           zone  fare
+           1     12.5
+       };
+       query {
+           trips
+           filter frae > 5
+       };"#,
+);
+
+test_fail!(
+    schema_spec_rejects_an_unknown_type,
+    r#"use std::polars::*;
+       let trips = table {
+           zone
+           1
+       };
+       trips.schema("zone:integer")!;"#,
+);
+
+test_fail!(
+    schema_spec_rejects_an_unknown_column,
+    r#"use std::polars::*;
+       let trips = table {
+           zone
+           1
+       };
+       trips.schema("zome:int")!;"#,
+);
+
+// unit dims on a pulled column still check -- kwh + seconds is a dims error
+test_fail!(
+    schema_units_reject_mismatched_dims,
+    r#"use std::polars::*;
+       let df = from_csv("kwh\n3.5")!.schema("kwh:kWh")!;
+       df.pull("kwh")![0] + 2s;"#,
+);
+
+// unit literals in `table {}` cells carry their dims into the schema too
+test_run_display!(
+    table_literal_unit_columns,
+    "use std::polars::*;
+     let df = table {
+         dist
+         5km
+         3km
+     };",
+    r#"df.pull("dist")![0] + 100m"# => "5100",
+);
+
+// an opaque frame stays permissive -- pull keeps its old generic array type and a
+// bad name still only fails at runtime, not at check time
+test_fail!(
+    unschematized_pull_of_a_bad_column_fails_at_runtime,
+    r#"use std::polars::*;
+       let df = from_csv("a,b\n1,2")!;
+       df.pull("nope")!;"#,
+);

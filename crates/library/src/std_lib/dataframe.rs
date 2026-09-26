@@ -67,6 +67,7 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
         m.add(col_names);
         m.add(pull);
         m.add(pull_as);
+        m.add(schema);
         m.add(group_by);
         m.add(agg);
         m.add(join);
@@ -88,6 +89,7 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add_method(col_names);
     api.add_method(pull);
     api.add_method(pull_as);
+    api.add_method(schema);
     api.add_method(group_by);
     api.add_method(agg);
     api.add_method(join);
@@ -414,6 +416,54 @@ fn pull_as<'gc>(
         out.push(x * scale);
     }
     Raisable::Ok(out)
+}
+
+/// `df.schema("zone:int pay:int fare:float kwh:kWh")` -- declare the column types you
+/// expect. Unknown columns and cells that can't convert raise; entries that already match
+/// are free. A unit (`kwh:kWh`) means "floats in that dimension" -- the runtime checks
+/// numeric, and the checker tracks the unit for you from then on. More than validation:
+/// the solver reads the same spec, so `df.pull("fare")` after this is a plain `[float]`
+/// with no annotation.
+#[native]
+fn schema<'gc>(ctx: Ctx<'gc>, df: vm::DataFrame<'gc>, spec: &str) -> Raisable<vm::DataFrame<'gc>> {
+    use polars::prelude::{DataType, IntoLazy, col};
+    let entries = match shared::schema::parse_schema(spec) {
+        Ok(entries) => entries,
+        Err(e) => return Raisable::Raised(format!("schema: {e}")),
+    };
+    let frame = df.0.borrow().0.clone();
+    let mut casts = vec![];
+    for (name, ty) in &entries {
+        let want = match ty {
+            shared::schema::SchemaTy::Int => DataType::Int64,
+            shared::schema::SchemaTy::Float | shared::schema::SchemaTy::Unit(_) => {
+                DataType::Float64
+            }
+            shared::schema::SchemaTy::Str => DataType::String,
+            shared::schema::SchemaTy::Bool => DataType::Boolean,
+        };
+        match frame.column(name) {
+            Ok(existing) if existing.dtype() == &want => {}
+            Ok(_) => casts.push(col(name).cast(want)),
+            Err(_) => {
+                let have = frame
+                    .get_column_names()
+                    .iter()
+                    .map(|n| n.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Raisable::Raised(format!(
+                    "schema: no column {name:?} (this dataframe's columns: {have})"
+                ));
+            }
+        }
+    }
+    if casts.is_empty() {
+        return Raisable::Ok(df);
+    }
+    collect_in_memory(frame.lazy().with_columns(casts))
+        .map(|d| ctx.new_dataframe(d))
+        .into()
 }
 
 /// `df.group_by(["dept"]).agg([col("age").mean().alias("avg_age")])`. `group_by` alone can't
