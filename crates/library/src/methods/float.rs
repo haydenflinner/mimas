@@ -2,7 +2,7 @@ use api::Intrinsic;
 use macros::native;
 use rand::RngExt;
 use shared::Ty;
-use vm::{RtErr, api::Api};
+use vm::{RtErr, api::Api, conversion::Raisable};
 
 pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add_method(floor);
@@ -119,12 +119,15 @@ fn to_int(n: f64) -> i64 {
 
 /// `q.to("kWh")` -- a quantity as a plain number in `unit`. A quantity is stored in base units
 /// (`25kW` is `25000.0`), so this divides by the unit's scale. The compiler checks that `q` and
-/// `unit` measure the same thing; at runtime only the name has to be a unit.
+/// `unit` measure the same thing; at runtime only the name has to be a unit. A computed unit
+/// string can fail, so the sig is honest `float!`; literal units are proven at solve time and
+/// keep a plain `float` return (see `frame_method_call`).
 #[native]
-fn to(n: f64, unit: &str) -> Result<f64, RtErr> {
-    let (_, scale) = shared::units::parse(unit)
-        .ok_or_else(|| RtErr::InvalidArgument(format!("`{unit}` isn't a unit")))?;
-    Ok(n / scale)
+fn to(n: f64, unit: &str) -> Raisable<f64> {
+    match shared::units::parse(unit) {
+        Some((_, scale)) => Raisable::Ok(n / scale),
+        None => Raisable::Raised(format!("`{unit}` isn't a unit")),
+    }
 }
 
 #[native]

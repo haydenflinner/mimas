@@ -851,6 +851,19 @@ impl Solver {
                 Some(_) => Ty::Result(Box::new(Ty::Array(Box::new(Ty::Float)))),
                 None => ty,
             }),
+            // `x.to("usd")`: the only runtime failure is an unparseable unit
+            // name, so a literal the units table knows can't raise — keep the
+            // plain inner type. A computed unit string keeps the honest `T!`.
+            "to" => {
+                if let Some(ExprKind::Literal(Literal::String(u))) =
+                    call.arguments.first().map(|a| a.value.kind())
+                    && shared::units::parse(u).is_some()
+                    && let Ty::Result(inner) = &ty
+                {
+                    return Ok(inner.as_ref().clone());
+                }
+                Ok(ty)
+            }
             "schema" => self.apply_schema_spec(id, call, recv, ty),
             "filter" => {
                 let Some(schema) = self.frame_schema_of(recv) else {

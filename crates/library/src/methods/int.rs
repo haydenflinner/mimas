@@ -2,7 +2,7 @@ use api::Intrinsic;
 use macros::native;
 use rand::RngExt;
 use shared::Ty;
-use vm::{RtErr, api::Api};
+use vm::{RtErr, api::Api, conversion::Raisable};
 
 pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add_method(abs);
@@ -60,10 +60,13 @@ fn to_float<'gc>(v: i64) -> f64 {
 
 /// `q.to("g")` on an int -- an int-valued quantity (`5.5kg.to_int()`) reads back in any
 /// unit of the same kind, exactly like float's `to`: the compiler checks the unit
-/// measures the same thing; at runtime only the name has to be a unit.
+/// measures the same thing; at runtime only the name has to be a unit. A computed unit
+/// string can fail, so the sig is honest `float!`; literal units are proven at solve
+/// time and keep a plain `float` return (see `frame_method_call`).
 #[native]
-fn to(n: i64, unit: &str) -> Result<f64, RtErr> {
-    let (_, scale) = shared::units::parse(unit)
-        .ok_or_else(|| RtErr::InvalidArgument(format!("`{unit}` isn't a unit")))?;
-    Ok(n as f64 / scale)
+fn to(n: i64, unit: &str) -> Raisable<f64> {
+    match shared::units::parse(unit) {
+        Some((_, scale)) => Raisable::Ok(n as f64 / scale),
+        None => Raisable::Raised(format!("`{unit}` isn't a unit")),
+    }
 }

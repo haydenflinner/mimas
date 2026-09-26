@@ -27,6 +27,18 @@ test_run!(
     "(plan.load * 2.0).to(\"kW\")" => "50",
 );
 
+// `x.to(unit)`: a literal unit the checker knows can't raise — plain `float`.
+// A computed unit string keeps the honest `float!` — `?`/`absolve`/`!` apply.
+test_run!(
+    to_returns_plain_float_for_literal_units,
+    "let u = \"W\";
+     let bad = \"watt?\";",
+    "25kW.to(\"W\")" => "25000",
+    "25kW.to(u)?" => "25000",
+    "5.0.to(bad)?" => "null",
+    "25kW.to(bad) absolve |_| -1.0" => "-1",
+);
+
 fn rejected(src: &str, needle: &str) {
     let err = test_runner::try_execute(src).expect_err(&format!("`{src}` should be rejected"));
     let text = format!("{err:?}");
