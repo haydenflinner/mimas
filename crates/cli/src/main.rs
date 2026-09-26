@@ -30,6 +30,7 @@ fn main() {
             input.dump_ir,
             input.time,
         ),
+        Some(Commands::Hash { path }) => hash(path),
         Some(Commands::Run { path, script_args }) => build(
             path,
             script_args,
@@ -84,6 +85,60 @@ fn check(path: Option<PathBuf>, color: bool) -> i32 {
     println!("{seperator}");
 
     i32::from(summary.had_errors())
+}
+
+/// `mimas hash`: content-hash the top-level fns of a `.mim` file (or every
+/// `.mim` under a directory) and print `fn <name>  L<line>  <blake3>` per item.
+fn hash(path: Option<PathBuf>) -> i32 {
+    let path = resolve_path(path);
+    let (paths, io_errors) = if path.is_file() {
+        (vec![path], vec![])
+    } else {
+        solve::mim_files(&path)
+    };
+    let mut io_errors = io_errors;
+    let mut n_items = 0usize;
+    for file_path in &paths {
+        let source = match std::fs::read_to_string(file_path) {
+            Ok(s) => s,
+            Err(e) => {
+                io_errors.push(std::io::Error::new(
+                    e.kind(),
+                    format!("{}: {e}", file_path.display()),
+                ));
+                continue;
+            }
+        };
+        let items = hash::extract(&source);
+        let prefix = if paths.len() > 1 {
+            format!("{}: ", file_path.display())
+        } else {
+            String::new()
+        };
+        for item in &items {
+            println!(
+                "{prefix}fn {}  L{}  {}",
+                item.name,
+                item.line(&source),
+                item.hash()
+            );
+            n_items += 1;
+        }
+    }
+    if !io_errors.is_empty() {
+        println!(
+            "\n{}: The following errors occurred while trying to read files...",
+            "error".bright_red().bold()
+        );
+        io_errors.iter().for_each(|error| {
+            println!("{error}");
+        });
+        return 1;
+    }
+    if n_items == 0 {
+        println!("no fn items");
+    }
+    0
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -195,7 +250,7 @@ fn build(
 // bare `mimas foo.mim` means `mimas run foo.mim`; inject `run` when the first
 // positional isn't already a subcommand. `mimas` alone still falls through to help.
 fn massage_args(mut args: Vec<String>) -> Vec<String> {
-    const SUBCOMMANDS: [&str; 4] = ["check", "build", "run", "help"];
+    const SUBCOMMANDS: [&str; 5] = ["check", "build", "hash", "run", "help"];
     if let Some(idx) = args.iter().skip(1).position(|a| !a.starts_with('-')) {
         let idx = idx + 1;
         if !SUBCOMMANDS.contains(&args[idx].as_str()) {

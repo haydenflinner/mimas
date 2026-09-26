@@ -276,6 +276,7 @@ impl Session {
 
     /// Recompiles `new_source` and fast-forwards a fresh session back to where this one was, by
     /// replaying `step` `steps` times -- the same trick `rewind_one_line` uses `step_line` for.
+    /// Level 1 (replay) on the content-addressing roadmap: edits recompile, not hot-swap.
     /// Raw op-steps, not `step_line`/`line_steps`: the "Step" button only advances `steps` (one
     /// op), so anyone stepping op-by-op rather than by line would have `line_steps` stuck at
     /// whatever it last was (often 0) -- replaying that many *lines* landed back near the very

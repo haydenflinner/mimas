@@ -47,6 +47,13 @@ pub enum Commands {
         #[clap(last = true)]
         script_args: Vec<String>,
     },
+    /// Prints the content hash of every top-level fn in a mimas file.
+    Hash {
+        /// The .mim file to hash. Hashes every `.mim` under a directory if one
+        /// is provided; uses the current directory if not provided.
+        #[clap(parse(from_os_str))]
+        path: Option<PathBuf>,
+    },
     /// Builds but does not run
     Build {
         /// The path to the project directory to run on. Uses the current directory if not

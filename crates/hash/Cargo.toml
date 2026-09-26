@@ -1,0 +1,18 @@
+[package]
+name = "mimas-hash"
+version = "0.2.0"
+edition = "2024"
+description = "Content addressing for mimas items: extraction, canonical form, blake3 hashing. Internal to mimas; not intended for direct use."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "hash"
+path = "src/lib.rs"
+
+[dependencies]
+parse = { package = "mimas-parse", path = "../parse", version = "0.2.0" }
+shared = { package = "mimas-shared", path = "../shared", version = "0.2.0" }
+blake3 = "1"

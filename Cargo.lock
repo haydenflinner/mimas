@@ -3218,6 +3218,7 @@ dependencies = [
  "miette",
  "mimas-api",
  "mimas-compile",
+ "mimas-hash",
  "mimas-library",
  "mimas-parse",
  "mimas-shared",
@@ -3242,6 +3243,15 @@ dependencies = [
  "mimas-solve",
  "mutants",
  "pretty_assertions",
+]
+
+[[package]]
+name = "mimas-hash"
+version = "0.2.0"
+dependencies = [
+ "blake3",
+ "mimas-parse",
+ "mimas-shared",
 ]
 
 [[package]]

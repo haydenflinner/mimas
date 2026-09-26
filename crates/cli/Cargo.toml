@@ -18,6 +18,7 @@ path = "src/main.rs"
 
 [dependencies]
 parse = { package = "mimas-parse", path = "../parse", version = "0.2.0" }
+hash = { package = "mimas-hash", path = "../hash", version = "0.2.0" }
 solve = { package = "mimas-solve", path = "../solve", version = "0.2.0" }
 compile = { package = "mimas-compile", path = "../compile", version = "0.2.0" }
 vm = { package = "mimas-vm", path = "../vm", version = "0.2.0" }
