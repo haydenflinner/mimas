@@ -7,7 +7,17 @@
 //! by interval arithmetic and the best guess by the plain operation, so a
 //! whole model written over `Interval`s comes out with honest error bars
 //! and no extra code. `.sample(u)` draws from the triangular distribution
-//! the three numbers describe — the Monte Carlo hook.
+//! the three numbers describe — the Monte Carlo hook. `x.exp()`,
+//! `x.ln()`, `x.sqrt()`, `x.min(y)` and `x.max(y)` push the same idea
+//! through the elementary functions: increasing functions map the ends
+//! straight through, `sqrt`/`ln` see only the part of the range inside
+//! their domain (clamped like `pow`), and `min`/`max` take the pointwise
+//! envelopes of two ranges. Rust's float math has no directed rounding,
+//! so `exp`/`ln` nudge the computed ends one ulp outward — correctly-
+//! rounded-then-widened rather than exactly outward-rounded (`sqrt` is
+//! correctly rounded by IEEE 754 and needs no nudge). The `+ - * /`
+//! bounds and `pow` predate that convention: they use plain f64
+//! arithmetic on the ends, so each end can be off by ~1 ulp inward.
 //!
 //! Ordering (`<` `<=` `>` `>=`) against another interval or a plain number is
 //! *certain*: `x < y` is true only when it holds for every value in both
@@ -77,6 +87,46 @@ impl Interval {
     pub fn pow(self, n: f64) -> Self {
         let (a, b) = (self.lo.max(0.0).powf(n), self.hi.max(0.0).powf(n));
         Interval { lo: a.min(b), mid: self.mid.max(0.0).powf(n), hi: a.max(b) }
+    }
+    /// The image of a strictly increasing `f` computed in plain f64:
+    /// `[f(lo), f(hi)]` with each end nudged one ulp outward, so the
+    /// result contains the true image even though `exp`/`ln` aren't
+    /// guaranteed correctly rounded.
+    fn image(lo: f64, mid: f64, hi: f64) -> Self {
+        Interval { lo: lo.next_down(), mid, hi: hi.next_up() }
+    }
+    /// `e^x` — strictly increasing, so the ends map straight through.
+    pub fn exp(self) -> Self {
+        Self::image(self.lo.exp(), self.mid.exp(), self.hi.exp())
+    }
+    /// `ln x` — defined for `x > 0`. Clamped like `pow`: the part of the
+    /// range at or below zero contributes nothing, and a range reaching
+    /// zero is unbounded below (`ln` dives to `-inf` there).
+    pub fn ln(self) -> Self {
+        Self::image(
+            self.lo.max(0.0).ln(),
+            self.mid.max(0.0).ln(),
+            self.hi.max(0.0).ln(),
+        )
+    }
+    /// `√x` — clamped like `pow`: the part of the range below zero is cut
+    /// (`sqrt` isn't defined there). `f64::sqrt` is correctly rounded by
+    /// IEEE 754, so no ulp nudge is needed.
+    pub fn sqrt(self) -> Self {
+        Interval {
+            lo: self.lo.max(0.0).sqrt(),
+            mid: self.mid.max(0.0).sqrt(),
+            hi: self.hi.max(0.0).sqrt(),
+        }
+    }
+    /// `min(self, o)` — `min` is increasing in each argument, so the
+    /// pointwise envelopes are the exact image.
+    pub fn min(self, o: Self) -> Self {
+        Interval { lo: self.lo.min(o.lo), mid: self.mid.min(o.mid), hi: self.hi.min(o.hi) }
+    }
+    /// `max(self, o)` — see [`Interval::min`].
+    pub fn max(self, o: Self) -> Self {
+        Interval { lo: self.lo.max(o.lo), mid: self.mid.max(o.mid), hi: self.hi.max(o.hi) }
     }
     /// The triangular distribution over `[lo, hi]` with mode `mid`, at
     /// quantile `u` in 0..1.
@@ -156,6 +206,48 @@ mod iv {
         x.pow(n)
     }
 
+    /// `x.exp()` — `e^x` over the range.
+    #[native]
+    pub fn exp<'gc>(_ctx: Ctx<'gc>, x: Interval) -> Interval {
+        x.exp()
+    }
+
+    /// `x.ln()` — the natural log over the positive part of the range.
+    #[native]
+    pub fn ln<'gc>(_ctx: Ctx<'gc>, x: Interval) -> Interval {
+        x.ln()
+    }
+
+    /// `x.sqrt()` — over the non-negative part of the range.
+    #[native]
+    pub fn sqrt<'gc>(_ctx: Ctx<'gc>, x: Interval) -> Interval {
+        x.sqrt()
+    }
+
+    /// `x.min(y)` — the lower envelope of two ranges; `y` may be an
+    /// interval or a plain number.
+    #[native]
+    pub fn min<'gc>(ctx: Ctx<'gc>, x: Interval, y: Val<'gc>) -> Result<Interval, RtErr> {
+        match operand(ctx, y) {
+            Some(y) => Ok(x.min(y)),
+            None => Err(RtErr::InvalidArgument(
+                "`min` takes an Interval or a number".into(),
+            )),
+        }
+    }
+
+    /// `x.max(y)` — the upper envelope of two ranges; `y` may be an
+    /// interval or a plain number.
+    #[native]
+    pub fn max<'gc>(ctx: Ctx<'gc>, x: Interval, y: Val<'gc>) -> Result<Interval, RtErr> {
+        match operand(ctx, y) {
+            Some(y) => Ok(x.max(y)),
+            None => Err(RtErr::InvalidArgument(
+                "`max` takes an Interval or a number".into(),
+            )),
+        }
+    }
+
     /// `x.overlaps(y)` — could the two ranges share a value? (the "possibly"
     /// that `<`/`>` don't say)
     #[native]
@@ -221,6 +313,11 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add_method(iv::contains);
     api.add_method(iv::sample);
     api.add_method(iv::pow);
+    api.add_method(iv::exp);
+    api.add_method(iv::ln);
+    api.add_method(iv::sqrt);
+    api.add_method(iv::min);
+    api.add_method(iv::max);
     api.add_method(iv::overlaps);
     api.add_bin_op::<Interval, _>(iv::bin);
     api.add_unary_op::<Interval, _>(iv::un);
@@ -253,6 +350,51 @@ mod tests {
         let z = Interval { lo: -1.0, mid: 1.0, hi: 1.0 };
         let q = Interval::point(1.0).div(z);
         assert_eq!((q.lo, q.hi), (f64::NEG_INFINITY, f64::INFINITY));
+    }
+
+    #[test]
+    fn increasing_functions_map_the_ends() {
+        let a = Interval { lo: 0.0, mid: 0.5, hi: 1.0 };
+        let e = a.exp();
+        // the ends are computed then nudged one ulp outward: the true
+        // image [1, e] sits strictly inside
+        assert!(e.lo < 1.0 && 1.0 - e.lo < 1e-15);
+        assert!(e.hi > std::f64::consts::E && e.hi - std::f64::consts::E < 1e-15);
+        assert_eq!(e.mid, 0.5f64.exp());
+        let l = Interval { lo: 1.0, mid: 2.0, hi: std::f64::consts::E }.ln();
+        assert!(l.lo < 0.0 && l.lo > -1e-15); // ln(1) = 0, widened a hair
+        assert!(l.hi > 1.0 && l.hi - 1.0 < 1e-15);
+        assert_eq!(l.mid, 2.0f64.ln());
+    }
+
+    #[test]
+    fn sqrt_and_ln_clamp_to_their_domains() {
+        // like `pow`: the part of the range below zero is cut
+        let s = Interval { lo: -4.0, mid: 4.0, hi: 9.0 }.sqrt();
+        assert_eq!((s.lo, s.mid, s.hi), (0.0, 2.0, 3.0));
+        let whole = Interval { lo: -4.0, mid: -2.0, hi: -1.0 }.sqrt();
+        assert_eq!((whole.lo, whole.hi), (0.0, 0.0));
+        // a range reaching zero is unbounded below under ln
+        let l = Interval { lo: -1.0, mid: 1.0, hi: std::f64::consts::E }.ln();
+        assert_eq!(l.lo, f64::NEG_INFINITY);
+        assert!(l.hi > 1.0 && l.hi - 1.0 < 1e-15);
+        // nothing of the range is in ln's domain: the lower end stays
+        // unbounded, the upper widens one ulp up from `-inf` (`f64::MIN`)
+        let flat = Interval { lo: -2.0, mid: -1.5, hi: -1.0 }.ln();
+        assert_eq!((flat.lo, flat.hi), (f64::NEG_INFINITY, f64::MIN));
+    }
+
+    #[test]
+    fn min_max_take_the_pointwise_envelopes() {
+        let a = Interval { lo: 0.0, mid: 1.0, hi: 5.0 };
+        let b = Interval { lo: 3.0, mid: 4.0, hi: 8.0 };
+        assert_eq!((a.min(b).lo, a.min(b).mid, a.min(b).hi), (0.0, 1.0, 5.0));
+        assert_eq!((a.max(b).lo, a.max(b).mid, a.max(b).hi), (3.0, 4.0, 8.0));
+        // overlapping ranges: the envelopes still map end to end
+        let c = Interval { lo: 2.0, mid: 3.0, hi: 4.0 };
+        assert_eq!((a.min(c).lo, a.min(c).hi), (0.0, 4.0));
+        assert_eq!((a.max(c).lo, a.max(c).hi), (2.0, 5.0));
+        assert_eq!((a.min(Interval::point(4.5)).hi), 4.5);
     }
 
     #[test]

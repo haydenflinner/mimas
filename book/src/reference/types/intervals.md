@@ -26,6 +26,8 @@ print(net.hi);                              // 33000
 
 `+ - * /` work between two intervals or an interval and a plain number, in either order. The bounds propagate by interval arithmetic and the best guess by the plain operation, so a whole model written over intervals comes out with error bars and no extra code. Unary `-` works too, and `x.pow(n)` raises a non-negative interval to a power.
 
+`x.exp()`, `x.ln()` and `x.sqrt()` push the range through the elementary functions — they are increasing, so the ends map straight through (`x.ln()` and `x.sqrt()` only see the part of the range inside their domain, clamped like `pow`; a `ln` range reaching zero is unbounded below). `x.min(y)` and `x.max(y)` take the pointwise envelopes of two ranges, where `y` may be an interval or a plain number. Bounds are computed in plain `f64`: `exp`/`ln` nudge the ends one ulp outward to stay honest where the function isn't guaranteed correctly rounded, while the basic `+ - * /` and `pow` ends can be off by ~1 ulp inward.
+
 ```admonish warning title="Interval arithmetic is conservative"
 Every input is assumed to sit at its worst *independently*, and the same estimate used twice doesn't cancel (`x - x` is not zero). Dividing by a range that includes zero gives an unbounded result. For a tighter picture, sample: `x.sample(u)` draws from the triangular distribution the three numbers describe (`u` in 0..1), which is the hook for a Monte Carlo run.
 ```

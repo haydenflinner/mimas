@@ -28,6 +28,54 @@ test_run!(
     "g.contains(40.0)" => "false",
 );
 
+// increasing functions map the ends straight through; `exp`/`ln` nudge
+// the computed ends one ulp outward (no directed rounding in f64), so
+// the true image sits strictly inside
+test_run!(
+    interval_functions_map_the_bounds,
+    "let e = Interval::span(0.0, 1.0).exp();",
+    "e.lo < 1.0" => "true",
+    "e.lo > 0.99" => "true",
+    "e.hi >= 2.718281828459045" => "true",
+    "(e.hi - 2.718281828459045).abs() < 0.0000000000001" => "true",
+    "(Interval::span(0.0, 1.0).exp().mid - 1.6487212707001282).abs() < 0.0000000000001" => "true",
+    "Interval::span(1.0, 10.0).ln().lo <= 0.0" => "true",
+    "Interval::span(1.0, 10.0).ln().lo > -0.0000001" => "true",
+    "(Interval::span(1.0, 10.0).ln().hi - 2.302585092994046).abs() < 0.0000000000001" => "true",
+    "Interval::of(0.0, 1.0, 9.0).sqrt().hi" => "3",
+);
+
+// `sqrt`/`ln` clamp to their domain, like `pow`: the part below zero
+// is cut, and `ln` of a range reaching zero is unbounded below
+test_run!(
+    interval_functions_clamp_their_domains,
+    "",
+    "Interval::of(-4.0, 4.0, 9.0).sqrt().lo" => "0",
+    "Interval::of(-4.0, 4.0, 9.0).sqrt().hi" => "3",
+    "Interval::of(-4.0, 4.0, 9.0).sqrt().mid" => "2",
+    "Interval::span(-2.0, -1.0).sqrt().hi" => "0",
+    "Interval::span(-1.0, 4.0).ln().hi > 1.38" => "true",
+    "Interval::span(-1.0, 4.0).ln().hi < 1.39" => "true",
+    "Interval::span(-1.0, 4.0).ln().lo < -1000000.0" => "true",
+);
+
+// `min`/`max` take the pointwise envelopes — exact, even overlapping;
+// the other side may be a plain number
+test_run!(
+    interval_min_max_take_the_envelopes,
+    "let a = Interval::of(0.0, 1.0, 5.0); let b = Interval::of(3.0, 4.0, 8.0);",
+    "a.min(b).lo" => "0",
+    "a.min(b).hi" => "5",
+    "a.max(b).lo" => "3",
+    "a.max(b).hi" => "8",
+    "a.min(b).mid" => "1",
+    "a.min(Interval::of(2.0, 3.0, 4.0)).hi" => "4",
+    "a.max(Interval::of(2.0, 3.0, 4.0)).lo" => "2",
+    "a.min(4.5).hi" => "4.5",
+    "a.max(7).lo" => "7",
+    "a.max(7).mid" => "7",
+);
+
 // ordering is *certain*: true only if it holds for every value in both ranges
 test_run!(
     interval_comparisons_are_certain,
