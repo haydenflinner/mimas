@@ -166,11 +166,7 @@ impl Solve for Access {
             // fields store a bare `Ty::Vid` (see `sync_module_adt`), so normalize first to
             // reach any `Ty::Param`s underneath.
             let ty = if let Some(binding) = solver.dec_to_native.get(&dec) {
-                let sig = crate::NativeFnSig {
-                    params: binding.sig.params.clone(),
-                    return_ty: binding.sig.return_ty.clone(),
-                    recv: binding.sig.recv.clone(),
-                };
+                let sig = binding.sig.clone();
                 solver.instantiate_native(&sig, None)?
             } else {
                 let stored = field.ty.normalized(solver);
@@ -470,11 +466,7 @@ impl Solve for Access {
                                 solver.check_vis(dec, right.location())?;
                                 solver.node_decs.insert(id, dec);
                                 let member = if let Some(binding) = solver.dec_to_native.get(&dec) {
-                                    let sig = crate::NativeFnSig {
-                                        params: binding.sig.params.clone(),
-                                        return_ty: binding.sig.return_ty.clone(),
-                                        recv: binding.sig.recv.clone(),
-                                    };
+                                    let sig = binding.sig.clone();
                                     solver
                                         .instantiate_native(&sig, Some((&lhs, left.location())))?
                                 } else {
@@ -765,11 +757,7 @@ impl Solve for Call {
                     solver.check_iter_guard(root_dec, &path, left.location())?;
                 }
                 let ty = if let Some(binding) = solver.dec_to_native.get(&dec) {
-                    let sig = crate::NativeFnSig {
-                        params: binding.sig.params.clone(),
-                        return_ty: binding.sig.return_ty.clone(),
-                        recv: binding.sig.recv.clone(),
-                    };
+                    let sig = binding.sig.clone();
                     solver.instantiate_native(&sig, Some((&lhs, left.location())))?
                 } else {
                     // a method stored on a generic adt holds `Ty::Param`s; plug in the

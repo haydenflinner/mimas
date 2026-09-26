@@ -20,6 +20,8 @@ pub use native::*;
 pub mod fixtures;
 pub use fixtures::*;
 mod math;
+pub mod units;
+pub use units::{Beats, Bits, Hz, Secs, St, Tempo};
 pub use ::glam;
 
 // re-exports the MimasEnum / MimasStruct derives resolve against -- saves user crates from

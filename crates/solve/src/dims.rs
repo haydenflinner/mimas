@@ -763,10 +763,13 @@ impl<'a> Pass<'a> {
                         return self.apply(f, c, &args, true, Some(&ty));
                     }
                 }
+                if let Some(d) = self.native_apply(c, &args) {
+                    return d;
+                }
                 return self.builtin(e, &method.lexeme, recv, c, &args);
             }
         }
-        // `Type::assoc(...)`
+        // `Type::assoc(...)` or a module fn like `music::play_for(...)`
         if let ExprKind::Access(Access::DoubleColon { left, right }) = c.left.kind() {
             let args: Vec<D> = c.arguments.iter().map(|a| self.expr(&a.value)).collect();
             if let ExprKind::Ident(ty) = left.kind() {
@@ -777,7 +780,7 @@ impl<'a> Pass<'a> {
                     return self.interval_ctor(&right.lexeme, c, &args);
                 }
             }
-            return D::Any;
+            return self.native_apply(c, &args).unwrap_or(D::Any);
         }
         let args: Vec<D> = c.arguments.iter().map(|a| self.expr(&a.value)).collect();
         if let ExprKind::Ident(callee) = c.left.kind() {
@@ -791,7 +794,46 @@ impl<'a> Pass<'a> {
         } else {
             self.expr(&c.left);
         }
-        D::Any
+        self.native_apply(c, &args).unwrap_or(D::Any)
+    }
+
+    /// A call the solver resolved to a native: check each argument against the slot's declared
+    /// dimension (from unit-carrying `MimasType`s like `Secs`), and the call is worth the
+    /// declared return dimension. `None` when the callee isn't native *or* declares no dims at
+    /// all -- a fully dimension-agnostic native falls through so `builtin`'s special cases
+    /// (`pull`, `to`, `pow`, ...) still see it.
+    fn native_apply(&mut self, c: &'a parse::Call, args: &[D]) -> Option<D> {
+        let dec = match c.left.kind() {
+            ExprKind::Ident(i) => self.solver.node_decs.get(&i.id).copied(),
+            ExprKind::Access(Access::Dot { .. } | Access::DoubleColon { .. }) => {
+                self.solver.node_decs.get(&c.left.id()).copied()
+            }
+            _ => None,
+        }?;
+        let binding = self.solver.dec_to_native.get(&dec)?;
+        if binding.sig.return_dim.is_none()
+            && binding.sig.param_dims.iter().all(Option::is_none)
+        {
+            return None;
+        }
+        let name = match c.left.kind() {
+            ExprKind::Ident(i) => i.lexeme.as_str(),
+            ExprKind::Access(Access::Dot { right, .. }) => {
+                right.as_ident().map_or("?", |i| i.lexeme.as_str())
+            }
+            ExprKind::Access(Access::DoubleColon { right, .. }) => right.lexeme.as_str(),
+            _ => "?",
+        };
+        for (i, (arg, got)) in c.arguments.iter().zip(args).enumerate() {
+            let Some(Some(want)) = binding.sig.param_dims.get(i) else { continue };
+            self.expect(
+                &D::Q(*want),
+                got,
+                arg.value.location(),
+                &format!("argument {} of `{name}`", i + 1),
+            );
+        }
+        Some(binding.sig.return_dim.map(D::Q).unwrap_or(D::Any))
     }
 
     /// Check a call to a user function against its declared parameters; its declared return is

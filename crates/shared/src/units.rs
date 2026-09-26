@@ -5,16 +5,20 @@
 //! each quantity's [`Dim`] -- an exponent for every base dimension -- and refuses arithmetic that
 //! doesn't add up (`5kW + 3s`), while letting dimensionless numbers scale anything.
 //!
-//! Base dimensions are the seven SI ones plus a currency (`usd`) and two for graphics (`px`,
-//! `frame`), so `px/frame` (a speed in pixels per frame) is its own thing rather than a length
-//! over a time. Every unit name in [`lookup`] carries a dimension and a scale to the base
-//! unit, which is how `25kW`, `25000W` and `25000` all mean the same watts.
+//! Base dimensions are the seven SI ones plus a currency (`usd`), two for graphics (`px`,
+//! `frame`), and three for the studio: `beat` (musical time, convertible to `s` only via a
+//! tempo), `st` (semitones — pitch), and `b` (bits — data). `px/frame` (a speed in pixels per
+//! frame) is its own thing rather than a length over a time. Every unit name in [`lookup`]
+//! carries a dimension and a scale to the base unit, which is how `25kW`, `25000W` and `25000`
+//! all mean the same watts.
 
 /// Number of base dimensions.
-pub const N: usize = 10;
+pub const N: usize = 13;
 
 /// The base dimensions, in [`Dim`] exponent order.
-pub const BASES: [&str; N] = ["m", "kg", "s", "A", "K", "mol", "cd", "usd", "px", "frame"];
+pub const BASES: [&str; N] = [
+    "m", "kg", "s", "A", "K", "mol", "cd", "usd", "px", "frame", "beat", "st", "b",
+];
 
 /// An exponent per base dimension. All zeros is dimensionless.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -27,33 +31,49 @@ impl Dim {
         *self == Self::NONE
     }
 
-    pub fn mul(self, other: Dim) -> Dim {
+    pub const fn mul(self, other: Dim) -> Dim {
         let mut out = self.0;
-        for (o, b) in out.iter_mut().zip(other.0) {
-            *o += b;
+        let mut i = 0;
+        while i < N {
+            out[i] += other.0[i];
+            i += 1;
         }
         Dim(out)
     }
 
-    pub fn div(self, other: Dim) -> Dim {
+    pub const fn div(self, other: Dim) -> Dim {
         let mut out = self.0;
-        for (o, b) in out.iter_mut().zip(other.0) {
-            *o -= b;
+        let mut i = 0;
+        while i < N {
+            out[i] -= other.0[i];
+            i += 1;
         }
         Dim(out)
     }
 
     /// `self ^ n`.
-    pub fn powi(self, n: i8) -> Dim {
-        Dim(self.0.map(|e| e * n))
+    pub const fn powi(self, n: i8) -> Dim {
+        let mut out = self.0;
+        let mut i = 0;
+        while i < N {
+            out[i] *= n;
+            i += 1;
+        }
+        Dim(out)
     }
 
     /// The square root, when every exponent is even.
-    pub fn sqrt(self) -> Option<Dim> {
-        self.0
-            .iter()
-            .all(|e| e % 2 == 0)
-            .then(|| Dim(self.0.map(|e| e / 2)))
+    pub const fn sqrt(self) -> Option<Dim> {
+        let mut out = self.0;
+        let mut i = 0;
+        while i < N {
+            if self.0[i] % 2 != 0 {
+                return None;
+            }
+            out[i] = self.0[i] / 2;
+            i += 1;
+        }
+        Some(Dim(out))
     }
 
     /// A reader-friendly name: a familiar unit when one fits (`kW`-ish things say `power (W)`),
@@ -117,27 +137,30 @@ const fn d(e: [i8; N]) -> Dim {
     Dim(e)
 }
 
-// exponents:        m  kg  s  A  K mol cd usd px frame
-const LENGTH: Dim = d([1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-const MASS: Dim = d([0, 1, 0, 0, 0, 0, 0, 0, 0, 0]);
-const TIME: Dim = d([0, 0, 1, 0, 0, 0, 0, 0, 0, 0]);
-const CURRENT: Dim = d([0, 0, 0, 1, 0, 0, 0, 0, 0, 0]);
-const TEMP: Dim = d([0, 0, 0, 0, 1, 0, 0, 0, 0, 0]);
-const AMOUNT: Dim = d([0, 0, 0, 0, 0, 1, 0, 0, 0, 0]);
-const LUMINOUS: Dim = d([0, 0, 0, 0, 0, 0, 1, 0, 0, 0]);
-const MONEY: Dim = d([0, 0, 0, 0, 0, 0, 0, 1, 0, 0]);
-const PIXELS: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 1, 0]);
-const FRAMES: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
-const FREQ: Dim = d([0, 0, -1, 0, 0, 0, 0, 0, 0, 0]);
-const FORCE: Dim = d([1, 1, -2, 0, 0, 0, 0, 0, 0, 0]);
-const PRESSURE: Dim = d([-1, 1, -2, 0, 0, 0, 0, 0, 0, 0]);
-const ENERGY: Dim = d([2, 1, -2, 0, 0, 0, 0, 0, 0, 0]);
-const POWER: Dim = d([2, 1, -3, 0, 0, 0, 0, 0, 0, 0]);
-const CHARGE: Dim = d([0, 0, 1, 1, 0, 0, 0, 0, 0, 0]);
-const VOLTAGE: Dim = d([2, 1, -3, -1, 0, 0, 0, 0, 0, 0]);
+// exponents:        m  kg  s  A  K mol cd usd px frame beat st bit
+pub const LENGTH: Dim = d([1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const MASS: Dim = d([0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const TIME: Dim = d([0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const CURRENT: Dim = d([0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const TEMP: Dim = d([0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const AMOUNT: Dim = d([0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]);
+pub const LUMINOUS: Dim = d([0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0]);
+pub const MONEY: Dim = d([0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0]);
+pub const PIXELS: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0]);
+pub const FRAMES: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0]);
+pub const BEAT: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0]);
+pub const PITCH: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0]);
+pub const DATA: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+pub const FREQ: Dim = d([0, 0, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const FORCE: Dim = d([1, 1, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const PRESSURE: Dim = d([-1, 1, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const ENERGY: Dim = d([2, 1, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const POWER: Dim = d([2, 1, -3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const CHARGE: Dim = d([0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const VOLTAGE: Dim = d([2, 1, -3, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
 
 /// Dimension families, for error messages.
-const SI: [(&str, Dim); 17] = [
+const SI: [(&str, Dim); 20] = [
     ("length", LENGTH),
     ("mass", MASS),
     ("time", TIME),
@@ -148,6 +171,9 @@ const SI: [(&str, Dim); 17] = [
     ("money", MONEY),
     ("pixels", PIXELS),
     ("frames", FRAMES),
+    ("beats", BEAT),
+    ("pitch", PITCH),
+    ("data", DATA),
     ("frequency", FREQ),
     ("force", FORCE),
     ("pressure", PRESSURE),
@@ -158,7 +184,7 @@ const SI: [(&str, Dim); 17] = [
 ];
 
 /// The coherent unit each family is kept in.
-const NAMED: [(&str, Dim, f64); 17] = [
+const NAMED: [(&str, Dim, f64); 20] = [
     ("m", LENGTH, 1.0),
     ("kg", MASS, 1.0),
     ("s", TIME, 1.0),
@@ -169,6 +195,9 @@ const NAMED: [(&str, Dim, f64); 17] = [
     ("usd", MONEY, 1.0),
     ("px", PIXELS, 1.0),
     ("frame", FRAMES, 1.0),
+    ("b", DATA, 1.0),
+    ("beat", BEAT, 1.0),
+    ("st", PITCH, 1.0),
     ("Hz", FREQ, 1.0),
     ("N", FORCE, 1.0),
     ("Pa", PRESSURE, 1.0),
@@ -235,6 +264,32 @@ pub fn lookup(name: &str) -> Option<(Dim, f64)> {
         "usd" => (MONEY, 1.0),
         "px" => (PIXELS, 1.0),
         "frame" => (FRAMES, 1.0),
+        // data: `b` is the bit — the base unit. Byte spellings follow IEC
+        // (`B`=8b, `kB`=10³B, `KiB`=2¹⁰B). The music stdlib also abuses
+        // `b` for beats in its mini-notation — although it is notation
+        // abuse, it is believed to reduce the abuse liability, in the
+        // "FDA"'s words.
+        "b" => (DATA, 1.0),
+        "bit" => (DATA, 1.0),
+        "B" => (DATA, 8.0),
+        "kB" => (DATA, 8e3),
+        "KiB" => (DATA, 8.0 * 1024.0),
+        "MB" => (DATA, 8e6),
+        "MiB" => (DATA, 8.0 * 1024.0 * 1024.0),
+        "GB" => (DATA, 8e9),
+        "GiB" => (DATA, 8.0 * 1024.0 * 1024.0 * 1024.0),
+        "TB" => (DATA, 8e12),
+        // music: `beat` is musical time, its own dimension — a tempo
+        // (`bpm`, or `cpm` counting measures) is beats per second.
+        // `meas` is a 4/4 measure, `phrase` four measures; `st`/`oct`
+        // measure pitch.
+        "beat" => (BEAT, 1.0),
+        "meas" => (BEAT, 4.0),
+        "phrase" => (BEAT, 16.0),
+        "bpm" => (BEAT.div(TIME), 1.0 / 60.0),
+        "cpm" => (BEAT.div(TIME), 4.0 / 60.0),
+        "st" => (PITCH, 1.0),
+        "oct" => (PITCH, 12.0),
         // dimensionless scales: `90deg`, `6pct` are plain floats
         "rad" => (NONE, 1.0),
         "deg" => (NONE, std::f64::consts::PI / 180.0),

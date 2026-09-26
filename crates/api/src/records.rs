@@ -1,4 +1,4 @@
-use shared::{AdtId, Literal, Ty};
+use shared::{AdtId, Literal, Ty, units::Dim};
 
 /// A per-native literal checker, submitted via `vm::api::NativeValidator` and joined by Rust
 /// path (same mechanism as `NativeDoc`). The solver calls it when *every* call argument is a
@@ -11,7 +11,12 @@ pub struct ApiFunction<C> {
     pub name: String,
     pub module: Vec<String>,
     pub parameters: Vec<Option<Ty>>,
+    /// Per-slot dimension the checker enforces at call sites, parallel to `parameters`
+    /// (`None` = unchecked). Populated from unit-carrying `MimasType`s like `Secs`/`Hz`.
+    pub param_dims: Vec<Option<Dim>>,
     pub return_ty: Option<Ty>,
+    /// Dimension of the return value, when it measures something.
+    pub return_dim: Option<Dim>,
     pub doc: String,
     pub validate: Option<LitValidator>,
     pub call: C,
@@ -21,7 +26,11 @@ pub struct ApiMethod<C> {
     pub recv_ty: Ty,
     pub name: String,
     pub parameters: Vec<Option<Ty>>,
+    /// Per-slot dimension the checker enforces at call sites, parallel to `parameters`.
+    pub param_dims: Vec<Option<Dim>>,
     pub return_ty: Option<Ty>,
+    /// Dimension of the return value, when it measures something.
+    pub return_dim: Option<Dim>,
     pub takes_self: bool,
     /// The receiver is mutated by the call -- a `&mut` first param on the Rust side. Set by
     /// matching the registered fn's path against `vm::api::NativeMutates` submissions, the

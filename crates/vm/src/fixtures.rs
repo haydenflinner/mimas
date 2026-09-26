@@ -113,15 +113,30 @@ impl Out {
     }
 }
 
-/// Every `print`/`dbg` line, keyed by call site — a rich host (the lit
-/// page) hovers a `print(x)` and shows what it printed; outside a host
-/// nothing reads this and `Out` is all a print is. Capped so a print in
-/// a per-frame game loop can't grow without bound — overflow lands in
-/// `dropped` (and still reaches `Out`).
+/// What a line recorded at a call site is: `Print` is program output
+/// (`print`/`dbg`); `Warn` is a non-fatal diagnostic — something was
+/// skipped or defaulted, the run kept going, and the host gets a span to
+/// point at. A warning also reaches `Out`; a print never does the reverse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrintKind {
+    Print,
+    Warn,
+}
+
+/// Every `print`/`dbg`/`warn` line, keyed by call site — a rich host (the lit
+/// page) hovers a `print(x)` and shows what it printed, or underlines a call
+/// that warned; outside a host nothing reads this and `Out` is all a print is.
+/// Capped so a print in a per-frame game loop can't grow without bound —
+/// overflow lands in `dropped` (and still reaches `Out`). Warns are also
+/// deduped per `(site, text)`: the same problem reported every frame is one
+/// warning, not sixty.
 #[derive(Default)]
 pub struct Prints {
-    /// `(call site, rendered line)` in emit order.
-    pub lines: RefCell<Vec<(Location, String)>>,
+    /// `(call site, kind, rendered line)` in emit order.
+    pub lines: RefCell<Vec<(Location, PrintKind, String)>>,
+    /// Warn sites already reported — survives `take`, so a warn inside a
+    /// game loop reports once per session, not once per frame.
+    warned: RefCell<std::collections::HashSet<(Location, String)>>,
     /// Lines past [`Prints::CAP`] — counted so a host can say "…N more".
     pub dropped: Cell<usize>,
 }
@@ -132,14 +147,32 @@ impl Prints {
     pub fn push(&self, loc: Location, text: String) {
         let mut lines = self.lines.borrow_mut();
         if lines.len() < Self::CAP {
-            lines.push((loc, text));
+            lines.push((loc, PrintKind::Print, text));
         } else {
             self.dropped.set(self.dropped.get() + 1);
         }
     }
 
-    /// Drain the recorded lines (leaves `dropped` — it's per-Vm history).
-    pub fn take(&self) -> Vec<(Location, String)> {
+    /// Record a non-fatal diagnostic at `loc`. Repeats of the same
+    /// `(site, text)` are suppressed — the host still holds the first.
+    /// Returns whether the warning was new (the caller may still want to
+    /// echo it to `Out` only then).
+    pub fn push_warn(&self, loc: Location, text: String) -> bool {
+        if !self.warned.borrow_mut().insert((loc, text.clone())) {
+            return false;
+        }
+        let mut lines = self.lines.borrow_mut();
+        if lines.len() < Self::CAP {
+            lines.push((loc, PrintKind::Warn, text));
+        } else {
+            self.dropped.set(self.dropped.get() + 1);
+        }
+        true
+    }
+
+    /// Drain the recorded lines (leaves `dropped` and the warn dedup —
+    /// they're per-Vm history).
+    pub fn take(&self) -> Vec<(Location, PrintKind, String)> {
         std::mem::take(&mut *self.lines.borrow_mut())
     }
 }

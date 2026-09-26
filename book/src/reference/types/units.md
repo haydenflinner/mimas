@@ -42,9 +42,12 @@ If your program declares a type with the same name as a unit (a `struct W`, say)
 | other SI | `K` `mol` `cd` |
 | money | `usd` |
 | graphics | `px` `frame` (so `px/frame` is a speed in pixels per frame) |
+| music | `beat` `meas` `phrase` `bpm` `cpm` (`1meas` is 4 beats, `132bpm` is 2.2 beats per second) |
+| pitch | `st` `oct` (semitones; `1oct` is `12st`) |
+| data | `b` `bit` `B` `kB` `KiB` `MB` `MiB` `GB` `GiB` `TB` (`b` is **bit**, not beat; `B` is a byte) |
 | plain numbers | `rad` `deg` `pct` (`90deg` is `1.5708`, `6pct` is `0.06`) |
 
-Money and the graphics units are dimensions of their own: `usd` can't be added to `s`, and `px` isn't a length.
+Money, music, pitch, data and the graphics units are dimensions of their own: `usd` can't be added to `s`, `px` isn't a length, and `beat` converts to `s` only through a tempo (`4meas / 132bpm` is a time). The `music` stdlib's mini-notation abuses `b` for *beat* inside pattern strings (`"C2 1b"`) — the checker never sees those, and in real code `b` stays a bit.
 
 ## What the checker enforces
 
@@ -54,7 +57,7 @@ Money and the graphics units are dimensions of their own: `usd` can't be added t
 * `.abs()`, `.round()`, `.min(q)`, `.max(q)` and `.clamp(a, b)` keep the dimension; `.sqrt()` halves it (all exponents must be even); `.pow(n)` scales it; `.sin()`, `.exp()` and friends need a plain number.
 * Struct fields, function parameters, return types and list elements (`[kW]`) take unit annotations, and the dimension follows values through them.
 
-Anything the checker can't follow -- what a native function returns, an unannotated closure -- is simply *unknown*, and unknown never causes an error. So code without units is unaffected, and you can adopt them one function at a time.
+Native functions can declare their units too: a Rust parameter wrapped in a unit type (`Secs`, `Hz`, `Beats`, `St`, `Tempo`, `Bits` — thin `f64` wrappers in `mimas::vm`) lands in the API record as the slot's dimension, so `music::play_for(tab, n, amp, 0.5s, 1200Hz)` in the wrong order is a compile error, not a silent honk. Natives that declare nothing, unannotated closures, and anything else the checker can't follow are simply *unknown*, and unknown never causes an error. So code without units is unaffected, and you can adopt them one function at a time.
 
 ## Intervals and columns keep their units
 

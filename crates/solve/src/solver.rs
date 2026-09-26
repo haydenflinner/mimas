@@ -738,13 +738,17 @@ impl Solver {
         &mut self,
         name: String,
         params: Vec<Option<Ty>>,
+        param_dims: Vec<Option<shared::units::Dim>>,
         return_ty: Option<Ty>,
+        return_dim: Option<shared::units::Dim>,
         native_id: NativeId,
         validate: Option<api::LitValidator>,
     ) -> DecId {
         let sig = NativeFnSig {
             params,
+            param_dims,
             return_ty,
+            return_dim,
             recv: None,
         };
         // first instantiation fills the dec's vid, later ident resolutions detect that this is
@@ -1098,7 +1102,9 @@ impl Solver {
                     self.declare_native_fn(
                         f.name.clone(),
                         f.parameters.clone(),
+                        f.param_dims.clone(),
                         f.return_ty.clone(),
+                        f.return_dim,
                         id,
                         f.validate,
                     );
@@ -1108,7 +1114,9 @@ impl Solver {
                     let leaf = self.ensure_module_path(&f.module);
                     let sig = NativeFnSig {
                         params: f.parameters.clone(),
+                        param_dims: f.param_dims.clone(),
                         return_ty: f.return_ty.clone(),
+                        return_dim: f.return_dim,
                         recv: None,
                     };
                     let ident = Ident::synthetic(f.name.clone());
@@ -1152,7 +1160,9 @@ impl Solver {
                     // primitives like `Ty::Int` have nothing to unify, but it's harmless to pass.
                     let sig = NativeFnSig {
                         params: m.parameters.clone(),
+                        param_dims: m.param_dims.clone(),
                         return_ty: m.return_ty.clone(),
+                        return_dim: m.return_dim,
                         recv: Some(m.recv_ty.clone()),
                     };
                     let ident = Ident::synthetic(m.name.clone());
@@ -2067,11 +2077,7 @@ impl Solver {
                     // natives carry a fresh `Ty::Fn` per use so each call gets its own type vars;
                     // without this, two calls with different types unify and the second fails.
                     let ty = if let Some(binding) = self.dec_to_native.get(&dec_id) {
-                        let sig = NativeFnSig {
-                            params: binding.sig.params.clone(),
-                            return_ty: binding.sig.return_ty.clone(),
-                            recv: binding.sig.recv.clone(),
-                        };
+                        let sig = binding.sig.clone();
                         self.instantiate_native(&sig, None)?
                     } else {
                         // a generic decl's stored signature holds `Ty::Param`s -- swap them
@@ -2406,9 +2412,15 @@ pub(crate) struct FnRun {
 // fresh vids per call site instead of sharing one set of inference variables. `recv` carries the
 // pattern type for the receiver (e.g. `[Anon(0)]` for `Vec<T>`) -- methods use it at dispatch to
 // reject receivers whose element type doesn't fit.
+#[derive(Clone)]
 pub(crate) struct NativeFnSig {
     pub params: Vec<Option<Ty>>,
+    /// Per-slot dimension from unit-carrying `MimasType`s, parallel to `params`. The dims
+    /// pass checks call args against it; `None` leaves the slot unchecked.
+    pub param_dims: Vec<Option<shared::units::Dim>>,
     pub return_ty: Option<Ty>,
+    /// Dimension of the return value, when it measures something.
+    pub return_dim: Option<shared::units::Dim>,
     pub recv: Option<Ty>,
 }
 

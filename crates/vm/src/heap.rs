@@ -165,6 +165,24 @@ impl<'gc> Ctx<'gc> {
         self.state.fixtures.get::<T>()
     }
 
+    /// Emit a non-fatal diagnostic at the current call site: the host gets a
+    /// `(call site, text)` pair through [`Prints`](crate::fixtures::Prints)
+    /// (same pipeline as `print` popovers, tagged `Warn`), and `warning: …`
+    /// reaches the `Out` sink too. Repeated reports of the same message from
+    /// the same site are suppressed, so a warn inside a per-frame loop is safe.
+    pub fn warn(self, msg: &str) {
+        use crate::fixtures::{DebugInfo, Out, Prints};
+        let fresh = match self.fixture::<DebugInfo>().top_loc() {
+            Some(loc) => self.fixture::<Prints>().push_warn(loc, msg.to_string()),
+            // no call-site loc (native driven from outside a run) — can't
+            // dedupe, so let it through
+            None => true,
+        };
+        if fresh {
+            self.fixture::<Out>().write(&format!("warning: {msg}"));
+        }
+    }
+
     pub fn thread(self) -> Thread<'gc> {
         self.state.thread
     }

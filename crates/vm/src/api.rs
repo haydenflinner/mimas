@@ -339,8 +339,10 @@ impl<'a, 'gc> Api<'a, 'gc> {
         let id = self.library.method(ApiMethod {
             recv_ty,
             name: name.into(),
+            param_dims: vec![None; parameters.len()],
             parameters: parameters.into_iter().map(Some).collect(),
             return_ty: Some(return_ty),
+            return_dim: None,
             takes_self: false,
             mutates_recv: false,
             doc: String::new(),
@@ -442,8 +444,10 @@ impl<'b, 'a, 'gc> ModuleApi<'b, 'a, 'gc> {
         let id = self.parent.library.function(ApiFunction {
             name: name.into(),
             module: self.path.clone(),
+            param_dims: vec![None; parameters.len()],
             parameters,
             return_ty: Some(return_ty),
+            return_dim: None,
             doc: String::new(),
             validate: None,
             call: (),
@@ -495,7 +499,9 @@ macro_rules! impl_into_fn {
             fn install(self, api: &mut Api<'_, 'gc>, name: String, module: Vec<String>) -> NativeId {
                 let reg = api.library.registry();
                 let parameters = vec![$(<$arg as MimasType<'gc>>::mimas_ty(reg),)*];
+                let param_dims = vec![$(<$arg as MimasType<'gc>>::mimas_dim(reg),)*];
                 let return_ty = <R as IntoNativeResult<'gc>>::return_ty(reg);
+                let return_dim = <R as IntoNativeResult<'gc>>::return_dim(reg);
                 let doc = doc_for(std::any::type_name_of_val(&self));
                 let native = make_native(&api.ctx, move |ctx, args| {
                     let mut it = args.iter().copied();
@@ -509,7 +515,9 @@ macro_rules! impl_into_fn {
                     name,
                     module,
                     parameters,
+                    param_dims,
                     return_ty,
+                    return_dim,
                     doc,
                     validate: validator_for(std::any::type_name_of_val(&self)),
                     call: (),
@@ -522,7 +530,9 @@ macro_rules! impl_into_fn {
             fn install_assoc(self, api: &mut Api<'_, 'gc>, recv_ty: Ty, name: String) {
                 let reg = api.library.registry();
                 let parameters = vec![$(<$arg as MimasType<'gc>>::mimas_ty(reg),)*];
+                let param_dims = vec![$(<$arg as MimasType<'gc>>::mimas_dim(reg),)*];
                 let return_ty = <R as IntoNativeResult<'gc>>::return_ty(reg);
+                let return_dim = <R as IntoNativeResult<'gc>>::return_dim(reg);
                 let doc = doc_for(std::any::type_name_of_val(&self));
                 let native = make_native(&api.ctx, move |ctx, args| {
                     let mut it = args.iter().copied();
@@ -536,7 +546,9 @@ macro_rules! impl_into_fn {
                     recv_ty,
                     name,
                     parameters,
+                    param_dims,
                     return_ty,
+                    return_dim,
                     takes_self: false,
                     mutates_recv: false,
                     doc,
@@ -575,7 +587,9 @@ macro_rules! impl_into_method {
                 let recv_ty = <Recv as MimasType<'gc>>::mimas_ty(reg)
                     .expect("native method receiver must have a concrete Ty");
                 let parameters = vec![$(<$arg as MimasType<'gc>>::mimas_ty(reg),)*];
+                let param_dims = vec![$(<$arg as MimasType<'gc>>::mimas_dim(reg),)*];
                 let return_ty = <R as IntoNativeResult<'gc>>::return_ty(reg);
+                let return_dim = <R as IntoNativeResult<'gc>>::return_dim(reg);
                 let doc = doc_for(std::any::type_name_of_val(&self));
                 let native = make_native(&api.ctx, move |ctx, args| {
                     let mut it = args.iter().copied();
@@ -593,7 +607,9 @@ macro_rules! impl_into_method {
                     recv_ty,
                     name,
                     parameters,
+                    param_dims,
                     return_ty,
+                    return_dim,
                     takes_self: true,
                     mutates_recv: mutates_recv(std::any::type_name_of_val(&self)),
                     doc,

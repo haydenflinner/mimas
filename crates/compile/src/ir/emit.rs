@@ -527,6 +527,17 @@ impl Emit for Call {
                     ir.target(exit);
                     ir.current().get_local(acc)
                 }
+                // `recv.m(a.., f)` → `merge(recv, f(recv), a..)` — the closure
+                // runs in generated code (a native can't re-enter the VM),
+                // and the merge native gets [recv, transformed, ..middle args].
+                api::Intrinsic::ApplyMerge(merge) => {
+                    let f = *args.last().unwrap();
+                    let mut m_args = Vec::with_capacity(args.len());
+                    m_args.push(args[0]);
+                    m_args.push(ir.current().call(f, vec![args[0]]));
+                    m_args.extend_from_slice(&args[1..args.len() - 1]);
+                    ir.current().call_native(merge, m_args)
+                }
             }
         }
 

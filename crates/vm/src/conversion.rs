@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use api::Registry;
-use shared::{FnHeader, FnParam, Ty};
+use shared::{FnHeader, FnParam, Ty, units::Dim};
 
 use crate::{Array, Ctx, Dict, DictMap, Instance, RtErr, RtResult, Str, Val};
 
@@ -19,6 +19,11 @@ impl From<TypeError> for RtErr {
 
 pub trait MimasType<'gc>: Sized {
     fn mimas_ty(reg: &Registry) -> Option<Ty>;
+    /// The dimension the checker should track for this slot, when the type stands for a
+    /// measured quantity (`Secs` -> `s`). `None` means unchecked, the same as before.
+    fn mimas_dim(_: &Registry) -> Option<Dim> {
+        None
+    }
     fn from_value(ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError>;
     fn into_value(self, ctx: Ctx<'gc>) -> Val<'gc>;
 }
@@ -28,6 +33,11 @@ pub trait MimasType<'gc>: Sized {
 /// this trait so users don't need to pick a different registration path just to be able to fail.
 pub trait IntoNativeResult<'gc> {
     fn return_ty(reg: &Registry) -> Option<Ty>;
+    /// The dimension the return value carries, when it stands for a measured quantity.
+    fn return_dim(reg: &Registry) -> Option<Dim> {
+        let _ = reg;
+        None
+    }
     fn into_native_result(self, ctx: Ctx<'gc>) -> RtResult<Val<'gc>>;
 }
 
@@ -37,6 +47,9 @@ where
 {
     fn return_ty(reg: &Registry) -> Option<Ty> {
         <T as MimasType<'gc>>::mimas_ty(reg)
+    }
+    fn return_dim(reg: &Registry) -> Option<Dim> {
+        <T as MimasType<'gc>>::mimas_dim(reg)
     }
     fn into_native_result(self, ctx: Ctx<'gc>) -> RtResult<Val<'gc>> {
         Ok(self.into_value(ctx))
@@ -50,6 +63,9 @@ where
 {
     fn return_ty(reg: &Registry) -> Option<Ty> {
         <T as MimasType<'gc>>::mimas_ty(reg)
+    }
+    fn return_dim(reg: &Registry) -> Option<Dim> {
+        <T as MimasType<'gc>>::mimas_dim(reg)
     }
     fn into_native_result(self, ctx: Ctx<'gc>) -> RtResult<Val<'gc>> {
         self.map(|v| v.into_value(ctx)).map_err(Into::into)
@@ -361,6 +377,9 @@ impl<'gc, T: MimasType<'gc>> MimasType<'gc> for Option<T> {
     fn mimas_ty(reg: &Registry) -> Option<Ty> {
         T::mimas_ty(reg).map(|i| Ty::Option(Box::new(i)))
     }
+    fn mimas_dim(reg: &Registry) -> Option<Dim> {
+        T::mimas_dim(reg)
+    }
     fn from_value(ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError> {
         if v == Val::Null {
             Ok(None)
@@ -393,6 +412,9 @@ impl<T, E: std::fmt::Display> From<std::result::Result<T, E>> for Raisable<T> {
 impl<'gc, T: MimasType<'gc>> MimasType<'gc> for Raisable<T> {
     fn mimas_ty(reg: &Registry) -> Option<Ty> {
         T::mimas_ty(reg).map(|i| Ty::Result(Box::new(i)))
+    }
+    fn mimas_dim(reg: &Registry) -> Option<Dim> {
+        T::mimas_dim(reg)
     }
     fn from_value(ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError> {
         match v {

@@ -9,6 +9,7 @@ use vm::{
 
 pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add(print);
+    api.add(warn);
     api.add(panic);
     api.add(todo);
     api.add(dbg);
@@ -26,6 +27,15 @@ fn print<'gc>(ctx: Ctx<'gc>, msg: Val<'gc>) -> Result<(), RtErr> {
         ctx.fixture::<Prints>().push(loc, text);
     }
     Ok(())
+}
+
+/// A non-fatal diagnostic: the host marks this call site with the message,
+/// `warning: …` reaches the out sink, and the run continues — the reporting
+/// side of "skip the bit that's in err". Repeats from the same site are
+/// suppressed, so `warn` inside a loop doesn't flood.
+#[native]
+fn warn<'gc>(ctx: Ctx<'gc>, msg: &str) {
+    ctx.warn(msg);
 }
 
 #[native]

@@ -196,3 +196,32 @@ fn to_int_quantities_are_still_dimension_checked() {
     // and a unit annotation still refuses a non-numeric rhs the ordinary way
     rejected("let a: kg = \"nope\";", "expected float but found str");
 }
+
+// ---- studio units: beats, measures, pitch, data --------------------------------------
+// `beat` is musical time, a dimension apart from `s` until a tempo converts it; `meas`/
+// `phrase`/`bpm`/`cpm` are the band-facing spellings and `st`/`oct` measure pitch. `b` is
+// the bit — it never moonlights as a beat in real code, whatever the music strings say.
+
+test_run!(
+    studio_units,
+    "",
+    "4b.to(\"bit\")" => "4",
+    "2meas.to(\"beat\")" => "8",
+    "(1phrase).to(\"beat\")" => "16",
+    "(120bpm * 30s).to(\"beat\")" => "60",
+    "(30cpm * 1min).to(\"meas\")" => "30",
+    "132bpm.to(\"beat/s\")" => "2.2",
+    "(1oct).to(\"st\")" => "12",
+    "(1KiB).to(\"bit\")" => "8192",
+    "(1B).to(\"bit\")" => "8",
+);
+
+#[test]
+fn studio_units_are_dimension_checked() {
+    rejected("let a = 4beat + 2s;", "cannot add");
+    rejected("let a = 120bpm + 2Hz;", "cannot add");
+    rejected("let a = 4b + 2beat;", "cannot add");
+    rejected("let a = 2meas + 3st;", "cannot add");
+    rejected("let a: beat = 3s;", "declared type doesn't match");
+    rejected("let a: Hz = 4b;", "declared type doesn't match");
+}
