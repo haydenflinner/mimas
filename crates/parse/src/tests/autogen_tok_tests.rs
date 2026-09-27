@@ -48,6 +48,7 @@ tok_test!(lex_true: "true" => True);
 tok_test!(lex_false: "false" => False);
 tok_test!(lex_plus: "+" => Plus);
 tok_test!(lex_minus: "-" => Minus);
+tok_test!(lex_plus_minus: "±" => PlusMinus);
 tok_test!(lex_bang: "!" => Bang);
 tok_test!(lex_hook: "?" => Hook);
 tok_test!(lex_double_hook: "??" => DoubleHook);

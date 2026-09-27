@@ -1346,20 +1346,85 @@ impl<'s> Parser<'s> {
             && self.infix_binds()
         {
             self.advance();
-            let right = self.binary(power + 1);
-            let chains = !matches!(op, BinaryOp::In(_));
-            left = match op {
-                BinaryOp::Logical(op) => self.new_expr(Logical::new(left, op, right), start),
-                BinaryOp::Equality(op) => self.new_expr(Equality::new(left, op, right), start),
-                BinaryOp::In(condition) => self.new_expr(In::new(left, right, condition), start),
-                BinaryOp::Eval(op) => self.new_expr(Evaluation::new(left, op, right), start),
-                BinaryOp::Pipe => self.pipe(left, right, start),
+            let right = if matches!(op, BinaryOp::PlusMinus) {
+                // `±`'s tolerance parses like a normal right side except a `%`
+                // there is the literal's percent marker, not `mod` -- `x ± 10%`
+                // is "give or take 10%", and `x ± (a % b)` keeps infix `mod`.
+                self.plus_minus_rhs()
+            } else {
+                self.binary(power + 1)
             };
+            let chains = !matches!(op, BinaryOp::In(_));
+            left = self.op_expr(op, left, right, start);
             if !chains {
                 break;
             }
         }
         left
+    }
+
+    /// Builds the expr `left op right`, `op` as [`BinaryOp::of`] classified it.
+    fn op_expr(&mut self, op: BinaryOp, left: Expr, right: Expr, start: usize) -> Expr {
+        match op {
+            BinaryOp::Logical(op) => self.new_expr(Logical::new(left, op, right), start),
+            BinaryOp::Equality(op) => self.new_expr(Equality::new(left, op, right), start),
+            BinaryOp::In(condition) => self.new_expr(In::new(left, right, condition), start),
+            BinaryOp::Eval(op) => self.new_expr(Evaluation::new(left, op, right), start),
+            BinaryOp::Pipe => self.pipe(left, right, start),
+            BinaryOp::PlusMinus => self.plus_minus(left, right, start),
+        }
+    }
+
+    /// The `d` in `x ± d` binds at the multiplicative level, with one exception: a `%` at its
+    /// top level is the literal's percent marker (`x ± 10%`), not `mod` -- write `x ± (a % b)`
+    /// for a `mod` inside the tolerance.
+    fn plus_minus_rhs(&mut self) -> Expr {
+        let start = self.next_start();
+        let mut left = self.unary();
+        while let Some((op, power)) = BinaryOp::of(self.peek())
+            && power >= 7
+            && !matches!(op, BinaryOp::Eval(EvaluationOp::Modulo))
+            && self.infix_binds()
+        {
+            self.advance();
+            let right = self.binary(power + 1);
+            left = self.op_expr(op, left, right, start);
+        }
+        left
+    }
+
+    /// `x ± d` is `Interval::within(x * 1.0, d * 1.0)` — "give or take `d`" in `x`'s unit.
+    /// `x ± d%` is relative: `Interval::pm(x * 1.0, d * 0.01)`, the `%` marking percent-of-x.
+    /// The `* 1.0` widens an int operand to the float `Interval` works in; floats and
+    /// quantities pass through unchanged.
+    fn plus_minus(&mut self, left: Expr, right: Expr, start: usize) -> Expr {
+        let times = |e: Expr, f: f64, p: &mut Self| {
+            p.new_expr(
+                Evaluation::new(e, EvaluationOp::Multiply, p.new_expr(Literal::Float(f), start)),
+                start,
+            )
+        };
+        let (ctor, tolerance) = if self.eat(TokKind::Percent) {
+            ("pm", times(right, 0.01, self))
+        } else {
+            ("within", times(right, 1.0, self))
+        };
+        let mid = times(left, 1.0, self);
+        let interval = self.new_expr(Ident::synthetic("Interval"), start);
+        let path = self.new_expr(
+            Access::DoubleColon { left: interval, right: Ident::synthetic(ctor) },
+            start,
+        );
+        self.new_expr(
+            Call::new(
+                path,
+                vec![
+                    Argument { name: None, value: mid },
+                    Argument { name: None, value: tolerance },
+                ],
+            ),
+            start,
+        )
     }
 
     /// `x |> f(a, b)` is `f(x, a, b)` — the piped value leads the argument
@@ -3103,6 +3168,8 @@ enum BinaryOp {
     /// `in` when true, `!in` when false.
     In(bool),
     Eval(EvaluationOp),
+    /// `±` — binds like `+`/`-`; desugars to an `Interval::` constructor call.
+    PlusMinus,
 }
 
 impl BinaryOp {
@@ -3110,6 +3177,9 @@ impl BinaryOp {
     fn of(kind: TokKind) -> Option<(Self, u8)> {
         if kind == TokKind::PipeGreater {
             return Some((Self::Pipe, 0));
+        }
+        if kind == TokKind::PlusMinus {
+            return Some((Self::PlusMinus, 6));
         }
         if let Ok(op) = LogicalOp::try_from(kind) {
             return Some((Self::Logical(op), 1));

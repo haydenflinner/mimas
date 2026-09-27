@@ -102,3 +102,26 @@ test_run!(
     "x.sample(1.0)" => "10",
     "x.sample(0.2)" => "2",
 );
+
+// `±` — the interval literal: `x ± d` is `Interval::within(x, d)` (an absolute
+// tolerance), `x ± d%` is `Interval::pm(x, d / 100)` (percent-of-x). Int
+// operands widen to floats; quantities keep their unit.
+test_run!(
+    plus_minus_literal,
+    "let pct = 25.0;",
+    "(30000 ± 10%).lo" => "27000",
+    "(30000 ± 10%).mid" => "30000",
+    "(30000 ± 10%).hi" => "33000",
+    "(100.0 ± 0.5).lo" => "99.5",
+    "(100.0 ± 0.5).hi" => "100.5",
+    "(1000.0 ± pct%).lo" => "750",
+    // a negative tolerance is the same width — `within`/`pm` take it absolute
+    "(100.0 ± -3.0).lo" => "97",
+    "(30kW ± 10%).lo" => "27000",
+    "(30s ± 0.5s).mid" => "30",
+);
+test_fail!(
+    plus_minus_rejects_mismatched_dims,
+    "let a = 30s ± 0.5;",
+    "let b = 30s ± 5kg;",
+);

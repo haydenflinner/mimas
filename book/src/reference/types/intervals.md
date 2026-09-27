@@ -22,6 +22,15 @@ print(net.hi);                              // 33000
 | `Interval::of(lo, mid, hi)` | an asymmetric estimate |
 | `Interval::exact(x)` | no uncertainty — what a plain number becomes next to an interval |
 
+Or write the two `±` forms directly — the plus-minus interval literal:
+
+```mimas
+let grant = 30000 ± 10%;   // 27000 … 33000 — `d%` is percent-of-x, like `pm`
+let depth = 100.0 ± 0.5;   // 99.5 … 100.5 — a bare `d` is absolute, like `within`
+```
+
+`±` binds with `+` and `-`: `a + b ± c` is `(a + b) ± c`. A `%` right after the tolerance is the literal's percent marker, not `mod` — for `mod` inside a tolerance, use `x ± (a % b)`.
+
 ## Arithmetic
 
 `+ - * /` work between two intervals or an interval and a plain number, in either order. The bounds propagate by interval arithmetic and the best guess by the plain operation, so a whole model written over intervals comes out with error bars and no extra code. Unary `-` works too, and `x.pow(n)` raises a non-negative interval to a power.

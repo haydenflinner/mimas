@@ -449,6 +449,7 @@ impl<'s> Lex<'s, Tok<TokKind<'s>>, TokKind<'s>> for Lexer<'s> {
                         TokKind::Percent
                     }
                 }
+                '±' => TokKind::PlusMinus,
                 '?' => {
                     if self.match_chomp('?') {
                         if self.match_chomp('=') {

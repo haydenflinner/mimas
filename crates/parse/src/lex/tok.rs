@@ -52,6 +52,8 @@ pub enum TokKind<'s> {
     False,
     Plus,
     Minus,
+    /// `±` — the plus-minus interval literal, `x ± d` / `x ± d%`.
+    PlusMinus,
     Bang,
     Hook,
     DoubleHook,
@@ -156,6 +158,7 @@ impl Display for TokKind<'_> {
             TokKind::False => "false",
             TokKind::Plus => "+",
             TokKind::Minus => "-",
+            TokKind::PlusMinus => "±",
             TokKind::Bang => "!",
             TokKind::Hook => "?",
             TokKind::DoubleHook => "??",

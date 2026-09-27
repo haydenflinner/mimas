@@ -1856,3 +1856,43 @@ expr_test!(
         ]
     )
 );
+
+// `x ± d` desugars to `Interval::within(x * 1.0, d * 1.0)`; `x ± d%` to
+// `Interval::pm(x * 1.0, d * 0.01)`.
+#[test]
+fn plus_minus_absolute() {
+    assert_eq!(parse_expr("x ± 0.5"), "Interval::within(x * 1, 0.5 * 1)");
+}
+
+#[test]
+fn plus_minus_relative() {
+    assert_eq!(parse_expr("30000 ± 10%"), "Interval::pm(30000 * 1, 10 * 0.01)");
+    assert_eq!(parse_expr("a ± b %"), "Interval::pm(a * 1, b * 0.01)");
+}
+
+#[test]
+fn plus_minus_binds_like_additive() {
+    // `±` sits with `+`/`-`: its left side takes the whole sum to the left,
+    // its right side takes one multiplicative run.
+    assert_eq!(
+        parse_expr("a + b ± c * 2"),
+        "Interval::within(a + b * 1, c * 2 * 1)"
+    );
+    assert_eq!(parse_expr("x ± d + e"), "Interval::within(x * 1, d * 1) + e");
+    assert_eq!(parse_expr("x ± d * e"), "Interval::within(x * 1, d * e * 1)");
+}
+
+#[test]
+fn plus_minus_tolerance_may_be_complex() {
+    assert_eq!(parse_expr("x ± f(1)"), "Interval::within(x * 1, f(1) * 1)");
+    assert_eq!(parse_expr("x ± -d"), "Interval::within(x * 1, -d * 1)");
+    // a `%` in the tolerance is the literal's percent marker, so `mod` needs parens
+    assert_eq!(
+        parse_expr("x ± (a % b)"),
+        "Interval::within(x * 1, (a % b) * 1)"
+    );
+    assert_eq!(
+        parse_expr("x ± (a % b)%"),
+        "Interval::pm(x * 1, (a % b) * 0.01)"
+    );
+}
