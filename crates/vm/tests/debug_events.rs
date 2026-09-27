@@ -115,3 +115,36 @@ fn contains_cycle(v: &Captured) -> bool {
         _ => false,
     }
 }
+
+// `debug_step` used to never collect: `run` pays the arena's allocation debt between FUEL
+// batches, but a stepped session (a `use game` loop stepping frames at 60Hz, a debugger
+// stepping ops) never crosses that boundary, so every value the program dropped stayed in the
+// arena for the session's whole life — the leak that OOM'd the wasm game instance on the tour.
+#[test]
+fn debug_step_collects_garbage() {
+    let mut vm = Vm::compile(
+        "let i = 0;
+         let junk = [];
+         while i < 100_000 { junk = [i, i, i]; i += 1; }",
+        |_| {},
+    )
+    .expect("source should compile");
+
+    // Sample the live-object count at two points far apart in allocation terms: thousands of
+    // list literals die between them, so only collection keeps the readings comparable.
+    let mut mid = 0usize;
+    for step in 0..60_000 {
+        if vm.debug_step().expect("step should not fault") {
+            break;
+        }
+        if step == 30_000 {
+            mid = vm.gc_count();
+        }
+    }
+    let end = vm.gc_count();
+    assert!(mid > 0, "loop should be live mid-run, saw {mid} objects");
+    assert!(
+        end <= mid + 1000,
+        "arena kept growing while stepping: {mid} -> {end} live GC objects"
+    );
+}

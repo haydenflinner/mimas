@@ -2311,7 +2311,7 @@ impl Vm {
             sources,
             ..
         } = self;
-        arena.mutate(|mc, state| {
+        let done = arena.mutate(|mc, state| {
             let ctx = state.ctx(mc);
             let mut thread = state.thread.borrow_mut(mc);
             let done = run_dispatch(ctx, code, chunks, signatures, strs, sources, &mut thread, 1, 1)?;
@@ -2323,7 +2323,13 @@ impl Vm {
                 top.ip = code.ip;
             }
             Ok(done)
-        })
+        });
+        // `run` pays the arena's allocation debt between FUEL batches; a stepped session (a game
+        // stepping frames, a debugger stepping ops) never crosses that boundary, so without a
+        // collection here its heap only ever grows. Cheap when nothing is owed: `collect_debt`
+        // returns after a metrics check while the allocation debt is still unpaid.
+        arena.collect_debt();
+        done
     }
 
     /// [`Vm::debug_step`], plus the source-level diff of what that one op did. Diffs two
@@ -2352,6 +2358,12 @@ impl Vm {
             let rel = u32::try_from(f.ip.saturating_sub(chunk.offset)).unwrap_or(0);
             Some((f.chunk, f.ip, chunk.loc_at(rel)))
         })
+    }
+
+    /// Live GC objects in the arena — the leak gauge for stepped sessions, whose heap must stay
+    /// bounded across a run, and for hosts charting allocation over time.
+    pub fn gc_count(&self) -> usize {
+        self.arena.metrics().total_gc_count()
     }
 
     /// Snapshots every live call frame (oldest/entry frame first, matching `ThreadState.frames`)
