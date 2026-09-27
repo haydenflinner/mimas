@@ -110,6 +110,51 @@ test_vm!(
 );
 
 test_vm!(
+    const_tuple_destructure,
+    "const (A, B) = (1, 2);",
+    "A" => Int(1),
+    "B" => Int(2),
+);
+
+test_vm!(
+    const_tuple_destructure_mixed_types,
+    r#"const (S, N) = ("hi", 42);"#,
+    "S" => str!("hi"),
+    "N" => Int(42),
+);
+
+test_vm!(
+    const_tuple_destructure_nested,
+    "const ((A, B), C) = ((1, 2), 3);",
+    "A" => Int(1),
+    "B" => Int(2),
+    "C" => Int(3),
+);
+
+test_vm!(
+    const_destructure_of_const,
+    "const T = (1, 2); const (A, B) = T;",
+    "A" => Int(1),
+    "B" => Int(2),
+);
+
+test_vm!(
+    const_prefix_destructure,
+    "const FIELD_(X, Y, W, H) = (1.5, 2.5, 3.5, 4.5);",
+    "FIELD_X" => Float(1.5),
+    "FIELD_Y" => Float(2.5),
+    "FIELD_W" => Float(3.5),
+    "FIELD_H" => Float(4.5),
+);
+
+test_vm!(
+    const_prefix_destructure_nested,
+    "const A_(X, B_(Y)) = (1, (2,));",
+    "A_X" => Int(1),
+    "A_B_Y" => Int(2),
+);
+
+test_vm!(
     for_tuple_destructure,
     "let pairs = [(1, 2), (3, 4), (5, 6)];",
     "for (a, b) in pairs collect a + b" => array!(Int(3), Int(7), Int(11)),

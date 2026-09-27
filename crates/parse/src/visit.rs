@@ -98,7 +98,7 @@ pub fn walk_item(item: &Item, visitor: &mut impl Visitor) {
             }
         }
         ItemKind::Const(con) => {
-            visitor.ident(&con.left);
+            walk_pat(&con.left, visitor);
             if let Some(annotation) = &con.annotation {
                 walk_annotation(annotation, visitor);
             }

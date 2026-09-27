@@ -413,7 +413,7 @@ impl<'s> Scoped<'s> {
                     self.annotation(annotation);
                 }
                 self.expr(&con.right);
-                self.bind(&con.left);
+                self.pat_bind(&con.left);
             }
             ItemKind::Use(us) => {
                 let imported: Vec<String> = match us {

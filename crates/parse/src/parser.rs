@@ -774,7 +774,7 @@ impl<'s> Parser<'s> {
 
     fn const_decl(&mut self) -> Const {
         self.bump(TokKind::Const);
-        let left = self.pattern();
+        let left = desugar_prefix_pat(&self.pattern(), "");
         let annotation = self.eat(TokKind::Colon).then(|| self.annotation());
         self.expect(TokKind::Equal);
         let right = self.expr();
@@ -3258,4 +3258,44 @@ fn unique_test_name(seen: &mut std::collections::HashSet<String>, name: String) 
         }
         n += 1;
     }
+}
+
+/// `const FIELD_(X, Y, W, H) = t` desugars to `const (FIELD_X, FIELD_Y, FIELD_W, FIELD_H) = t`:
+/// a `name(..)` pattern in const position binds `name`-prefixed leaves, and nested `name(..)`
+/// nodes compose (`A_(X, B_(Y))` binds `A_X` and `A_B_Y`). The same shape in `let`/`match`
+/// stays a tuple-variant pattern -- the sugar is `const`-only.
+fn desugar_prefix_pat(pat: &Pat, prefix: &str) -> Pat {
+    let kind = match pat.kind() {
+        PatKind::Ident(id) if !prefix.is_empty() && id.lexeme != "_" => {
+            let mut id = id.clone();
+            id.lexeme = format!("{prefix}{id}");
+            PatKind::Ident(id)
+        }
+        PatKind::Tuple(pats) => PatKind::Tuple(
+            pats.iter().map(|p| desugar_prefix_pat(p, prefix)).collect(),
+        ),
+        PatKind::TupleVariant(head, pats) => {
+            // a real path head (`A::B(..)`) isn't a prefix -- leave it for the solver to reject
+            let ExprKind::Ident(head) = head.kind() else {
+                return pat.clone();
+            };
+            let prefix = format!("{prefix}{head}");
+            PatKind::Tuple(pats.iter().map(|p| desugar_prefix_pat(p, &prefix)).collect())
+        }
+        PatKind::NullBind(inner) => {
+            PatKind::NullBind(Box::new(desugar_prefix_pat(inner, prefix)))
+        }
+        PatKind::Or(pats) => {
+            PatKind::Or(pats.iter().map(|p| desugar_prefix_pat(p, prefix)).collect())
+        }
+        PatKind::Struct(head, fields) => PatKind::Struct(
+            head.clone(),
+            fields
+                .iter()
+                .map(|(k, v)| (k.clone(), desugar_prefix_pat(v, prefix)))
+                .collect(),
+        ),
+        _ => return pat.clone(),
+    };
+    Pat::new(kind, pat.location())
 }

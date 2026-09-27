@@ -85,6 +85,25 @@ const GREETING = "hello";      // valid -- a literal
 const NOPE = some_call();      // compile error: constants must be known at compile time
 ```
 
+The left side takes the same irrefutable patterns `let` does -- idents and tuples of them, nested as deep as you like -- so one `const` can declare a whole group:
+
+```mimas
+const (WIDTH, HEIGHT) = (960.0, 720.0);
+const ((MIN, MAX), STEP) = ((0.0, 1.0), 0.01);
+// WIDTH, HEIGHT, MIN, MAX, STEP are each their own constant
+```
+
+Each bound name is a real constant with the matching element of the value, so the count and shape of the pattern must match the right side exactly.
+
+When the names share a prefix, `name(..)` spells the same destructure once -- `FIELD_(X, Y)` is sugar for `(FIELD_X, FIELD_Y)`, and nested prefixes compose (`A_(X, B_(Y))` binds `A_X` and `A_B_Y`):
+
+```mimas
+const FIELD_(X, Y, W, H) = (40.0, 40.0, 960.0, 720.0);
+// FIELD_X = 40.0, FIELD_Y = 40.0, FIELD_W = 960.0, FIELD_H = 720.0
+```
+
+This sugar is `const`-only -- in `let`/`match`, `name(..)` stays a tuple-variant pattern.
+
 ```admonish todo
 Our constant folding could likely handle evaluating whether a function is fully knowable at compile time, but that will come after `0.1.0`.
 ```

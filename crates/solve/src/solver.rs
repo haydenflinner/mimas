@@ -521,15 +521,92 @@ impl Solver {
             })?;
         }
 
-        if let (Some(lit), Some(dec)) = (
-            self.reduce_const_expr(right)?,
-            self.node_decs.get(&id).copied(),
-        ) && let DecKind::Constant(slot) = &mut self.decs[dec].kind
-        {
-            *slot = Some(lit);
+        // a destructuring const's leaf vids unify with the rhs tuple's element types
+        if left.as_ident().is_none() {
+            let rhs_ty = ty.clone().normalized(self);
+            self.bind_const_pat(left, rhs_ty)?;
+        }
+
+        if let Some(lit) = self.reduce_const_expr(right)? {
+            if left.as_ident().is_some() {
+                if let Some(dec) = self.node_decs.get(&id).copied()
+                    && let DecKind::Constant(slot) = &mut self.decs[dec].kind
+                {
+                    *slot = Some(lit);
+                }
+            } else {
+                self.fill_const_pat(left, &lit)?;
+            }
         }
 
         Ok(ty)
+    }
+
+    /// The type half of a destructuring `const`: each leaf's vid unifies with the matching
+    /// element of the rhs's tuple type. Only idents and tuples of them are irrefutable, same
+    /// as `let` without an `else` -- anything else is an `InvalidPattern`.
+    fn bind_const_pat(&mut self, pat: &Pat, ty: Ty) -> Result<()> {
+        let ty = ty.normalized(self);
+        match (pat.kind(), &ty) {
+            (PatKind::Ident(_), _) => {
+                let Some(&dec) = self.node_decs.get(&pat.id()) else {
+                    return Ok(());
+                };
+                let mut leaf = Ty::Vid(self.decs[dec].vid);
+                leaf.fulfill_ty(&mut ty.clone(), self)
+                    .map_err(|e| e.into_type_mismatch(self, pat.location()))
+            }
+            (PatKind::Tuple(pats), Ty::Tuple(tys)) => match pats.len().cmp(&tys.len()) {
+                std::cmp::Ordering::Less => Err(MissingTupleMembers {
+                    src: self.src(pat.location()),
+                    at: pat.location().into(),
+                })?,
+                std::cmp::Ordering::Greater => Err(ExtraTupleMembers {
+                    src: self.src(pat.location()),
+                    at: pat.location().into(),
+                })?,
+                std::cmp::Ordering::Equal => pats
+                    .iter()
+                    .zip(tys.iter())
+                    .try_for_each(|(p, t)| self.bind_const_pat(p, t.clone())),
+            },
+            (PatKind::Poison(poison), _) => poison.escaped(),
+            _ => Err(InvalidPattern {
+                src: self.src(pat.location()),
+                at: pat.location().into(),
+                pattern: pat.to_string(),
+                ty: ty.to_string(),
+            })?,
+        }
+    }
+
+    /// The value half of a destructuring `const`: distributes a reduced rhs literal into the
+    /// leaf decs' `Constant` slots. Shape mismatches can't reach here -- `bind_const_pat`
+    /// rejects them first.
+    fn fill_const_pat(&mut self, pat: &Pat, lit: &Literal) -> Result<()> {
+        match (pat.kind(), lit) {
+            (PatKind::Ident(_), _) => {
+                if let Some(&dec) = self.node_decs.get(&pat.id())
+                    && let DecKind::Constant(slot) = &mut self.decs[dec].kind
+                {
+                    *slot = Some(lit.clone());
+                }
+                Ok(())
+            }
+            (
+                PatKind::Tuple(pats),
+                Literal::Tuple(exprs) | Literal::Array(exprs),
+            ) => {
+                for (pat, expr) in pats.iter().zip(exprs) {
+                    let Some(sub) = self.reduce_const_expr(expr)? else {
+                        continue;
+                    };
+                    self.fill_const_pat(pat, &sub)?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
     }
 
     fn process_use(&mut self, us: &Use, location: Location) -> Result<()> {
@@ -648,9 +725,20 @@ impl Solver {
             } else {
                 Vis::Private
             };
-            let dec = self.dec_id(left, Ty::Vid(vid), DecKind::Constant(None), vis);
-            self.node_decs.insert(item.id(), dec);
-            self.ribs.current_mut().insert(left.clone(), dec);
+            if let Some(ident) = left.as_ident() {
+                let dec = self.dec_id(ident, Ty::Vid(vid), DecKind::Constant(None), vis);
+                self.node_decs.insert(item.id(), dec);
+                self.ribs.current_mut().insert(ident.clone(), dec);
+                continue;
+            }
+            // destructuring const -- one Constant dec per bound name, keyed on the leaf pat
+            for leaf in left.bound_leaves() {
+                let ident = leaf.as_ident().expect("bound_leaves only yields idents");
+                let leaf_ty = Ty::Vid(self.vid());
+                let dec = self.dec_id(ident, leaf_ty, DecKind::Constant(None), vis);
+                self.node_decs.insert(leaf.id(), dec);
+                self.ribs.current_mut().insert(ident.clone(), dec);
+            }
         }
     }
 

@@ -296,6 +296,35 @@ test_fail!(
 );
 test_fail!(const_destructure_literal_pat, "const 1 = 1;");
 test_fail!(const_destructure_redundant_name, "const (A, A) = (1, 2);");
+test_ty!(
+    const_prefix_destructure,
+    "const FIELD_(X, Y, W, H) = (40.0, 40.0, 960.0, 720.0);",
+    "FIELD_X" => Float,
+    "FIELD_Y" => Float,
+    "FIELD_W" => Float,
+    "FIELD_H" => Float,
+);
+test_ty!(
+    const_prefix_destructure_nested,
+    "const A_(X, B_(Y, Z)) = (1, (2, 3));",
+    "A_X" => Int,
+    "A_B_Y" => Int,
+    "A_B_Z" => Int,
+);
+test_ty!(
+    const_prefix_destructure_mixed,
+    r#"const C_(S, N) = ("hi", 42);"#,
+    "C_S" => Str,
+    "C_N" => Int,
+);
+test_fail!(
+    const_prefix_destructure_wrong_arity,
+    "const A_(X, Y, Z) = (1, 2);"
+);
+test_fail!(
+    let_name_parens_is_not_prefix,
+    "let A_(X) = (1,);"
+);
 test_fail!(
     const_cycle,
     "const A: int = B; const B: int = A;",

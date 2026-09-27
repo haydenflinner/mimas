@@ -202,6 +202,40 @@ stmt_test!(
 );
 
 stmt_test!(
+    const_destructure_tuple,
+    "const (A, B) = c;",
+    Const::new(
+        Pat::new(
+            PatKind::Tuple(vec![
+                Pat::new(ident!("A").into(), shared::Location::default()),
+                Pat::new(ident!("B").into(), shared::Location::default()),
+            ]),
+            shared::Location::default()
+        ),
+        ident!("c").into_expr(),
+        None,
+    )
+    .into_item()
+);
+
+stmt_test!(
+    const_destructure_prefix,
+    "const FIELD_(X, Y) = c;",
+    Const::new(
+        Pat::new(
+            PatKind::Tuple(vec![
+                Pat::new(ident!("FIELD_X").into(), shared::Location::default()),
+                Pat::new(ident!("FIELD_Y").into(), shared::Location::default()),
+            ]),
+            shared::Location::default()
+        ),
+        ident!("c").into_expr(),
+        None,
+    )
+    .into_item()
+);
+
+stmt_test!(
     assign_block,
     "let i = { 0 };",
     Let::new(

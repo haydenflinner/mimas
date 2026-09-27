@@ -36,6 +36,25 @@ impl Pat {
         Some(ident)
     }
 
+    /// The ident leaves this pattern binds, in traversal order: `(a, (b, c))` yields `a`, `b`,
+    /// `c`. `_` counts as bound.
+    pub fn bound_leaves(&self) -> Vec<&Pat> {
+        let mut out = Vec::new();
+        let mut stack = vec![self];
+        while let Some(pat) = stack.pop() {
+            match pat.kind() {
+                PatKind::Ident(_) => out.push(pat),
+                PatKind::Tuple(pats) | PatKind::TupleVariant(_, pats) | PatKind::Or(pats) => {
+                    stack.extend(pats.iter().rev());
+                }
+                PatKind::Struct(_, fields) => stack.extend(fields.values()),
+                PatKind::NullBind(inner) => stack.push(inner),
+                PatKind::Variant(_) | PatKind::Literal(_) | PatKind::Poison(_) => {}
+            }
+        }
+        out
+    }
+
     pub fn id(&self) -> NodeId {
         self.id
     }

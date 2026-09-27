@@ -105,7 +105,8 @@ scores.insert("cy", 3);
 // Tuple -- fixed-length, heterogeneous, indexed by position
 let pair: (int, str) = (1, "one");
 let one = pair.1;    // -> "one"
-let (x, y) = (3, 4); // destructuring let
+let (x, y) = (3, 4);   // destructuring let
+const (W, H) = (3, 4); // const takes the same patterns
 
 // `in` tests membership
 0 in xs;            // array: contains the element

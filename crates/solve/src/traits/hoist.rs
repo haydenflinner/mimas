@@ -522,7 +522,33 @@ impl Hoist for Tests {
 impl Hoist for Const {
     fn hoist(&self, mut ctx: HoistCtx) -> Result<()> {
         let vid = ctx.solver.node_vid(self.right.id());
-        ctx.write(&self.left, Ty::Vid(vid), true)
+        if let Some(ident) = self.left.as_ident() {
+            return ctx.write(ident, Ty::Vid(vid), true);
+        }
+
+        // destructuring const -- one Constant dec per bound name; the leaf types are fresh
+        // vids that `solve_const`'s `bind_const_pat` pins to the rhs's element types.
+        for leaf in self.left.bound_leaves() {
+            let ident = leaf.as_ident().expect("bound_leaves only yields idents");
+            let mut leaf_ctx = HoistCtx::new(
+                ctx.solver,
+                ctx.target.clone(),
+                Some(leaf.id()),
+                ctx.location,
+                ctx.vis,
+            );
+            let leaf_vid = leaf_ctx.solver.vid();
+            leaf_ctx.write(ident, Ty::Vid(leaf_vid), true)?;
+        }
+        // the item node itself still types as the whole tuple
+        if let Some(node_id) = ctx.node_id {
+            let item_vid = ctx.solver.node_vid(node_id);
+            let location = ctx.location;
+            ctx.solver
+                .register_sub(item_vid, Ty::Vid(vid))
+                .map_err(|e| e.into_type_mismatch(ctx.solver, location))?;
+        }
+        Ok(())
     }
 }
 

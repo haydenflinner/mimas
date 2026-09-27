@@ -2,7 +2,7 @@ use line_index::{LineCol, LineIndex, TextSize, WideEncoding, WideLineCol};
 use lsp_types::{Diagnostic, DiagnosticSeverity, DocumentSymbol, Position, Range, SymbolKind};
 use parse::{
     Ast, FieldKey, Ident, Item, ItemKind, Member, NodeId, PactItem, Stmt, StmtKind, StructField,
-    Visitor, walk_stmts,
+    Visitor, item::Const, walk_stmts,
 };
 use shared::{Located, Span};
 
@@ -63,12 +63,42 @@ impl SourceFile {
             })
         }
 
+        /// A destructuring const has no single name -- the pattern text is the symbol's name
+        /// and each bound leaf becomes a child.
+        #[allow(deprecated)]
+        fn destructuring_symbol(
+            file: &SourceFile,
+            item: &Item,
+            con: &Const,
+        ) -> Option<DocumentSymbol> {
+            let children: Vec<DocumentSymbol> = con
+                .left
+                .bound_leaves()
+                .iter()
+                .filter_map(|p| p.as_ident())
+                .filter_map(|n| symbol(file, n, SymbolKind::Constant, n.location.span))
+                .collect();
+            Some(DocumentSymbol {
+                name: con.left.to_string(),
+                detail: None,
+                kind: SymbolKind::Constant,
+                tags: None,
+                deprecated: None,
+                range: file.range(item.span())?,
+                selection_range: file.range(con.left.location().span)?,
+                children: (!children.is_empty()).then_some(children),
+            })
+        }
+
         fn item_symbol(file: &SourceFile, item: &Item) -> Option<DocumentSymbol> {
             let (name, kind, detail, children) = match item.kind() {
                 ItemKind::Function(function) => {
                     (&function.name, SymbolKind::Function, None, vec![])
                 }
-                ItemKind::Const(con) => (&con.left, SymbolKind::Constant, None, vec![]),
+                ItemKind::Const(con) => match con.left.as_ident() {
+                    Some(name) => (name, SymbolKind::Constant, None, vec![]),
+                    None => return destructuring_symbol(file, item, con),
+                },
                 ItemKind::Struct(struc) => {
                     let fields = struc
                         .fields
@@ -183,7 +213,13 @@ impl SourceFile {
                 let start = item.span().start;
                 match item.kind() {
                     ItemKind::Function(function) => self.check(&function.name, start),
-                    ItemKind::Const(con) => self.check(&con.left, start),
+                    ItemKind::Const(con) => {
+                        for leaf in con.left.bound_leaves() {
+                            if let Some(name) = leaf.as_ident() {
+                                self.check(name, start);
+                            }
+                        }
+                    }
                     ItemKind::Struct(struc) => {
                         self.check(&struc.name, start);
                         self.fields(&struc.fields);

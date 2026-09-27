@@ -330,9 +330,7 @@ impl<'a> Pass<'a> {
                     }
                     None => got,
                 };
-                if let Some(dec) = self.dec_of(&c.left) {
-                    self.consts.insert(dec, d);
-                }
+                self.bind_const(&c.left, d);
             }
             ItemKind::Impl(imp) => {
                 // `impl List` sees `T` -- the target's declared params -- like the solver does
@@ -392,6 +390,30 @@ impl<'a> Pass<'a> {
                 }
             }
             PatKind::NullBind(p) => self.bind(p, d),
+            _ => {}
+        }
+    }
+
+    /// `bind` for a `const`: same shape walk, but the names land in `consts`. Destructured
+    /// leaves degrade to `Any`, same as a `let` tuple destructure.
+    fn bind_const(&mut self, pat: &Pat, d: D) {
+        match pat.kind() {
+            PatKind::Ident(ident) => {
+                if let Some(dec) = self.dec_of(ident) {
+                    self.consts.insert(dec, d);
+                }
+            }
+            PatKind::Tuple(pats) | PatKind::TupleVariant(_, pats) | PatKind::Or(pats) => {
+                for p in pats {
+                    self.bind_const(p, D::Any);
+                }
+            }
+            PatKind::Struct(_, fields) => {
+                for p in fields.values() {
+                    self.bind_const(p, D::Any);
+                }
+            }
+            PatKind::NullBind(p) => self.bind_const(p, d),
             _ => {}
         }
     }

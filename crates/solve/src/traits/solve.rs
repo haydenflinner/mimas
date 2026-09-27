@@ -1539,20 +1539,26 @@ impl Solve for Impl {
             let mut ty = solver.solve_const(con, id)?;
 
             if let Some((pact, _)) = &mut pact {
+                // a destructuring const can never satisfy a pact's `const NAME` requirement
+                let name = con
+                    .left
+                    .as_ident()
+                    .map(|i| i.lexeme.clone())
+                    .unwrap_or_else(|| con.left.to_string());
                 let mut pact_ty =
                     pact.constants
-                        .swap_remove(&con.left.lexeme)
+                        .swap_remove(&name)
                         .ok_or_else(|| {
                             miette::Error::from(PactConstNotFound {
-                                src: solver.src(con.left.location),
-                                at: con.left.location.into(),
-                                name: con.left.lexeme.clone(),
+                                src: solver.src(con.left.location()),
+                                at: con.left.location().into(),
+                                name,
                                 pact: pact.name.clone(),
                             })
                         })?;
 
                 ty.fulfill_ty(&mut pact_ty, solver)
-                    .map_err(|e| e.into_type_mismatch(solver, con.left.location))?;
+                    .map_err(|e| e.into_type_mismatch(solver, con.left.location()))?;
             }
         }
 
