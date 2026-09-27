@@ -290,10 +290,20 @@ pub fn lookup(name: &str) -> Option<(Dim, f64)> {
         "cpm" => (BEAT.div(TIME), 4.0 / 60.0),
         "st" => (PITCH, 1.0),
         "oct" => (PITCH, 12.0),
-        // dimensionless scales: `90deg`, `6pct` are plain floats
+        // dimensionless scales: `90deg`, `6pct` are plain floats. `prob`/
+        // `logit` scale 1 — they're intent annotations like `rad` ("this
+        // number is a probability"), not new dimensions: probability
+        // doesn't compose under the dim algebra (`p * p` stays a
+        // probability, so a `prob` base dim would wrongly read `prob^2`,
+        // and `p / p` is odds, not dimensionless). `bp` is basis points —
+        // `25bp` is `0.0025`; spelled `bp`, not `bps`, so `b/s` keeps
+        // meaning bits per second.
         "rad" => (NONE, 1.0),
         "deg" => (NONE, std::f64::consts::PI / 180.0),
         "pct" => (NONE, 0.01),
+        "bp" => (NONE, 1e-4),
+        "prob" => (NONE, 1.0),
+        "logit" => (NONE, 1.0),
         _ => return None,
     })
 }
@@ -384,6 +394,10 @@ mod tests {
         assert_eq!(d, POWER);
         assert_eq!(s, 1e3);
         assert_eq!(lookup("kWh").unwrap().0, POWER.mul(TIME));
+        // `pct`/`bp`/`prob`/`logit` are dimensionless — intent + scale only
+        assert_eq!(lookup("prob"), Some((Dim::NONE, 1.0)));
+        assert_eq!(lookup("logit"), Some((Dim::NONE, 1.0)));
+        assert_eq!(lookup("bp"), Some((Dim::NONE, 1e-4)));
         assert!(lookup("bogus").is_none());
     }
 
