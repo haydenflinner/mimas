@@ -53,6 +53,11 @@ pub enum Commands {
         /// is provided; uses the current directory if not provided.
         #[clap(parse(from_os_str))]
         path: Option<PathBuf>,
+
+        /// Print the scoped hash instead: locals alpha-renamed, same-source
+        /// callee references replaced by the callee's content hash.
+        #[clap(long)]
+        scoped: bool,
     },
     /// Builds but does not run
     Build {

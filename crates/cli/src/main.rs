@@ -30,7 +30,7 @@ fn main() {
             input.dump_ir,
             input.time,
         ),
-        Some(Commands::Hash { path }) => hash(path),
+        Some(Commands::Hash { path, scoped }) => hash(path, scoped),
         Some(Commands::Run { path, script_args }) => build(
             path,
             script_args,
@@ -89,7 +89,9 @@ fn check(path: Option<PathBuf>, color: bool) -> i32 {
 
 /// `mimas hash`: content-hash the top-level fns of a `.mim` file (or every
 /// `.mim` under a directory) and print `fn <name>  L<line>  <blake3>` per item.
-fn hash(path: Option<PathBuf>) -> i32 {
+/// `--scoped` prints the scoped hash instead — alpha-renamed locals, dep-hash
+/// callee references — a different hash namespace than the token-level one.
+fn hash(path: Option<PathBuf>, scoped: bool) -> i32 {
     let path = resolve_path(path);
     let (paths, io_errors) = if path.is_file() {
         (vec![path], vec![])
@@ -110,17 +112,22 @@ fn hash(path: Option<PathBuf>) -> i32 {
             }
         };
         let items = hash::extract(&source);
+        let globals = scoped.then(|| hash::Globals::for_source(&source));
         let prefix = if paths.len() > 1 {
             format!("{}: ", file_path.display())
         } else {
             String::new()
         };
         for item in &items {
+            let digest = match &globals {
+                Some(globals) => item.scoped_hash(globals),
+                None => item.hash(),
+            };
             println!(
                 "{prefix}fn {}  L{}  {}",
                 item.name,
                 item.line(&source),
-                item.hash()
+                digest
             );
             n_items += 1;
         }

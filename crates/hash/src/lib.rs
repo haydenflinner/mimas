@@ -9,6 +9,17 @@
 //! This crate is the shared home of the hashing machinery: `mimas hash` on
 //! the CLI and the literate host's blob store both build on it. It must never
 //! depend on Automerge — namespace/blob persistence stays in the host.
+//!
+//! Two hash namespaces live here. The token-level [`hash_item`]/[`canonical`]
+//! is the v1 stored form — seed manifests and blob stores already depend on
+//! its bytes. [`hash_scoped`]/[`canonical_scoped`] (roadmap 2b/3) is the
+//! post-solve form: locals alpha-rename positionally, same-source callee
+//! references substitute the callee's content hash, recursion marks `@self`.
+//! Neither substitutes for the other — pick per call site.
+
+mod scoped;
+
+pub use scoped::{Globals, canonical_scoped, dep_table, hash_scoped, scoped_hashes};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Item {
@@ -62,6 +73,20 @@ impl Item {
     /// lexes, else the raw source. The hash covers these bytes.
     pub fn canonical_source(&self) -> String {
         canonical(&self.source).unwrap_or_else(|| self.source.clone())
+    }
+
+    /// The scoped canonical form (roadmap 2b/3): locals alpha-renamed to
+    /// `@v{n}`, same-source fn refs to `@dep:<hash>`, self-refs to `@self`.
+    /// `None` when the source doesn't parse — callers then use
+    /// [`Self::canonical_source`].
+    pub fn scoped_canonical(&self, globals: &Globals) -> Option<String> {
+        canonical_scoped(&self.source, globals)
+    }
+
+    /// The scoped content hash: blake3 of [`Self::scoped_canonical`],
+    /// falling back to [`Item::hash`] when the source doesn't parse.
+    pub fn scoped_hash(&self, globals: &Globals) -> String {
+        hash_scoped(&self.source, globals)
     }
 
     /// Inclusive-exclusive char offsets of this item in `source`.
@@ -796,18 +821,7 @@ pub fn canonical(source: &str) -> Option<String> {
         // `Float(1.0)` Displays as `1`, colliding with `Int(1)` — keep the
         // point so an int and a float never share a canonical token.
         match tok.kind {
-            parse::lex::TokKind::Float(v) => {
-                let s = v.to_string();
-                if s.bytes().any(|b| matches!(b, b'.' | b'e' | b'E'))
-                    || s.contains("inf")
-                    || s.contains("NaN")
-                {
-                    out.push_str(&s);
-                } else {
-                    out.push_str(&s);
-                    out.push_str(".0");
-                }
-            }
+            parse::lex::TokKind::Float(v) => out.push_str(&float_text(v)),
             // The first ident after the first `fn` is the item's own name.
             kind if !name_erased && after_fn && matches!(kind, parse::lex::TokKind::Ident(_)) => {
                 out.push('_');
@@ -822,6 +836,21 @@ pub fn canonical(source: &str) -> Option<String> {
         return None;
     }
     Some(out)
+}
+
+/// Canonical text of a float token: `Float(1.0)` Displays as `1`, colliding
+/// with `Int(1)` — keep the point so an int and a float never share a
+/// canonical token. Shared by the token-level and scoped passes.
+pub(crate) fn float_text(v: f64) -> String {
+    let s = v.to_string();
+    if s.bytes().any(|b| matches!(b, b'.' | b'e' | b'E'))
+        || s.contains("inf")
+        || s.contains("NaN")
+    {
+        s
+    } else {
+        format!("{s}.0")
+    }
 }
 
 /// Content hash of an item: blake3 of the canonical token stream, falling
