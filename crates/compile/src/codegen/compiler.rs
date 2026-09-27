@@ -191,6 +191,10 @@ impl Compiler {
         let root = std::mem::take(&mut ir.resolutions.root);
         let root = export(&mut ir, &signatures, root);
 
+        // the entry body's local->reg map, captured when body 0 compiles -- non-entry bodies
+        // need it to turn a global's `Local` into its absolute (base-0) entry-frame register.
+        let mut entry_to_reg: IdVec<Local, Reg> = IdVec::new();
+
         for (body_id, mut body) in ir.bodies {
             clean::clean(&mut body);
 
@@ -206,6 +210,9 @@ impl Compiler {
             body.locals.iter().for_each(|_| {
                 local_to_reg.push(regs.push(()));
             });
+            if body_id == BodyId::ZERO {
+                entry_to_reg = local_to_reg.clone();
+            }
 
             let mut inst_to_reg: IdVec<InstId, Option<Reg>> =
                 vec![None; body.instructions.len()].into();
@@ -472,6 +479,7 @@ impl Compiler {
                             let mut ctx = Ctx {
                                 inst_to_reg: &inst_to_reg,
                                 local_to_reg: &local_to_reg,
+                                entry_to_reg: &entry_to_reg,
                                 regs: &mut regs,
                                 free: &mut free,
                             };
@@ -518,6 +526,7 @@ impl Compiler {
                         let ctx = Ctx {
                             inst_to_reg: &inst_to_reg,
                             local_to_reg: &local_to_reg,
+                            entry_to_reg: &entry_to_reg,
                             regs: &mut regs,
                             free: &mut free,
                         };
@@ -714,6 +723,9 @@ impl Default for Compiler {
 pub(crate) struct Ctx<'a> {
     pub inst_to_reg: &'a IdVec<InstId, Option<Reg>>,
     pub local_to_reg: &'a IdVec<Local, Reg>,
+    /// The entry body's local->reg map. Its registers are the global slots (`t.regs[0..]`,
+    /// base 0) that `GetEntry`/`SetEntry` insts address.
+    pub entry_to_reg: &'a IdVec<Local, Reg>,
     pub regs: &'a mut IdVec<Reg, ()>,
     pub free: &'a mut Vec<Reg>,
 }

@@ -33,6 +33,13 @@ macro_rules! for_each_op {
             LoadBody     [ (dst, Reg, reg) (body, BodyId, u32) ];
             LoadConst    [ (dst, Reg, reg) (constant, Constant, konst) ];
 
+            // -- Entry Frame -- //
+            // `slot` is an absolute register of the entry frame (base 0), not window-relative --
+            // that's what lets a nested body reach a top-level `let`. `StoreEntry` deliberately
+            // has no `dst`-named field so `Op::reg`/`set_reg` fusion never retargets it.
+            LoadEntry    [ (dst, Reg, reg) (slot, Reg, reg) ];
+            StoreEntry   [ (slot, Reg, reg) (src, Reg, reg) ];
+
             // -- Control Flow -- //
             Jump         [ (target, BlockTarget, jump) ];
             JumpIf       [ (cond, Reg, reg) (target, BlockTarget, jump) (is_true, bool, bool) ];
@@ -406,6 +413,16 @@ impl Op {
                 src: ctx.i2r(value),
             },
             Inst::GetLocal(_) => unreachable!("GetLocal is aliased at codegen, never emitted"),
+            // entry-frame slots address absolute registers (base 0) via the entry body's map,
+            // not this body's locals
+            Inst::GetEntry(local) => Op::LoadEntry {
+                dst: ctx.reg(),
+                slot: ctx.entry_to_reg[*local],
+            },
+            Inst::SetEntry(local, value) => Op::StoreEntry {
+                slot: ctx.entry_to_reg[*local],
+                src: ctx.i2r(value),
+            },
             Inst::Phi(_) => unreachable!("phis should be handled before Op::from_inst"),
             Inst::BinOp {
                 left,

@@ -782,6 +782,27 @@ fn step_one<'gc>(
             let src = Reg::decode(code);
             wr!(regs, dst, rd!(regs, src));
         }
+        OpCode::LoadEntry => {
+            let dst = Reg::decode(code);
+            let slot = Reg::decode(code);
+            // `slot` is an absolute index into `thread.regs` -- the entry frame always sits
+            // at base 0. These ops are only emitted outside the entry body, so the window
+            // lies strictly above the slots they touch: `regs.as_ptr() - base` is
+            // `thread.regs[0]`, disjoint from the live `&mut [Val]` window.
+            let base = frames.last().map(|f| f.base).unwrap_or(0);
+            debug_assert!(base > 0, "entry-frame op ran in the entry frame");
+            let v = unsafe { *regs.as_ptr().sub(base).add(slot.index()) };
+            wr!(regs, dst, v);
+        }
+        OpCode::StoreEntry => {
+            let slot = Reg::decode(code);
+            let src = Reg::decode(code);
+            let base = frames.last().map(|f| f.base).unwrap_or(0);
+            debug_assert!(base > 0, "entry-frame op ran in the entry frame");
+            let v = rd!(regs, src);
+            // SAFETY: same disjointness argument as LoadEntry -- the slot is below the window.
+            unsafe { *regs.as_mut_ptr().sub(base).add(slot.index()) = v };
+        }
         OpCode::Jump => {
             code.ip = code.u32() as usize;
         }
@@ -2343,6 +2364,24 @@ impl Vm {
         self.arena.mutate(|_mc, state| {
             let struct_names = state.struct_names.borrow();
             let t = state.thread.borrow();
+
+            // the entry frame's named locals = the program's globals (top-level `let`s) --
+            // visible from every body, so deeper frames surface them too, sourced from
+            // `t.regs[0..]` rather than the frame's own window.
+            let (entry_base, entry_locals): (usize, Vec<(String, Reg)>) = t
+                .frames
+                .first()
+                .map(|f| {
+                    let mut locals: Vec<_> = chunks[f.chunk]
+                        .locals
+                        .iter()
+                        .map(|(name, &reg)| (name.clone(), reg))
+                        .collect();
+                    locals.sort_by_key(|(_, reg)| reg.index());
+                    (f.base, locals)
+                })
+                .unwrap_or_default();
+
             t.frames
                 .iter()
                 .map(|f| {
@@ -2366,7 +2405,7 @@ impl Vm {
                     // list's `a`/`b`/`c`, say) only get it expanded once between them, not once
                     // per alias. See `Inspect::Cycle`.
                     let mut seen = std::collections::HashSet::new();
-                    let locals_inspect = locals
+                    let mut locals_inspect: Vec<(String, Inspect)> = locals
                         .iter()
                         .map(|&(name, reg)| {
                             (
@@ -2375,10 +2414,26 @@ impl Vm {
                             )
                         })
                         .collect();
-                    let locals = locals
+                    let mut locals: Vec<(String, Captured)> = locals
                         .into_iter()
                         .map(|(name, reg)| (name.clone(), registers[reg.index()].clone()))
                         .collect();
+
+                    // a deeper frame's globals: entry-frame locals it doesn't shadow itself,
+                    // read out of `t.regs[0..]` where the entry frame lives.
+                    if f.base != 0 {
+                        for (name, reg) in &entry_locals {
+                            if locals.iter().any(|(n, _)| n == name) {
+                                continue;
+                            }
+                            let val = t.regs[entry_base + reg.index()];
+                            locals.push((name.clone(), val.capture()));
+                            locals_inspect.push((
+                                name.clone(),
+                                val.inspect(&struct_names, field_names, &mut seen),
+                            ));
+                        }
+                    }
 
                     FrameView {
                         base: f.base,

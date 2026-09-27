@@ -33,6 +33,14 @@ fn decode_op(d: &mut Decoder) -> Op {
             dst: Reg::decode(d),
             src: Reg::decode(d),
         },
+        OpCode::LoadEntry => Op::LoadEntry {
+            dst: Reg::decode(d),
+            slot: Reg::decode(d),
+        },
+        OpCode::StoreEntry => Op::StoreEntry {
+            slot: Reg::decode(d),
+            src: Reg::decode(d),
+        },
         OpCode::NewArray => Op::NewArray {
             dst: Reg::decode(d),
         },

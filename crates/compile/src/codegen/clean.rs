@@ -105,7 +105,7 @@ fn dve(body: &mut Body) -> bool {
 /// Yields the InstIds that an Inst relies upon.
 pub(crate) fn uses(inst: &Inst) -> Vec<InstId> {
     let mut out = match inst {
-        Inst::SetLocal(_, v) => vec![*v],
+        Inst::SetLocal(_, v) | Inst::SetEntry(_, v) => vec![*v],
         Inst::BinOp { left, right, .. } => vec![*left, *right],
         Inst::UnaryOp { right, .. } => vec![*right],
         Inst::JumpIfFalse { condition, .. } => vec![*condition],

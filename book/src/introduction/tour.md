@@ -254,6 +254,13 @@ fn square_of_zero() {                // inspector runs these on load
 
 `fn`s live only at the file's top level and capture nothing -- they're *second-class* (passable as arguments, but not bindable). Closures are *first-class* (bindable, storable) and capture their surrounding scope. Mark a function `#[test]` and the inspector will run it when the file loads.
 
+Top-level `let`s are the exception to "capture nothing": they live in the script's global scope, so a `fn` sees every `let` declared *above* it and shares the same storage -- assigning to one inside a `fn` writes the shared slot, not a copy. `let`s nested inside blocks and `for` bindings stay local, and a `let` placed below the `fn` isn't visible inside it (scope follows source order).
+
+```mimas
+let score = 0;
+fn bump() { score = score + 1; }   // reads and writes the shared `score`
+```
+
 ```mimas
 let g = add;       // ok -- closures are values
 // let h = square; // error -- a fn isn't a value you can bind

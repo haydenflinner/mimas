@@ -243,7 +243,9 @@ impl Emit for Access {
                     ResolvedDeclKind::Adt(_) => unreachable!(
                         "`::` resolved to an adt-dec directly -- should only be possible for variants"
                     ),
-                    ResolvedDeclKind::Local => unreachable!("`::` never resolves to a local"),
+                    ResolvedDeclKind::Local | ResolvedDeclKind::Global => {
+                        unreachable!("`::` never resolves to a local")
+                    }
                     ResolvedDeclKind::Pact(_) => todo!(),
                 }
             }
@@ -1063,10 +1065,7 @@ impl Emit for Ident {
     fn emit(&self, id: NodeId, ir: &mut Ir) -> Option<InstId> {
         let dec = ir.node_dec(id);
         match &ir.resolutions.decs[dec].kind {
-            ResolvedDeclKind::Local => {
-                let local = ir.local_for(dec);
-                Some(ir.current().get_local(local))
-            }
+            ResolvedDeclKind::Local | ResolvedDeclKind::Global => Some(ir.read_binding(dec)),
             ResolvedDeclKind::Item { .. } => {
                 let body = ir.item_body_for(dec);
                 Some(ir.current().ref_body(body))

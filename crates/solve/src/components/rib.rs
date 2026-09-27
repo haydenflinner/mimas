@@ -50,6 +50,13 @@ impl Ribs {
         self.inner.push(Rib::new(RibKind::Block));
     }
 
+    /// The file's top-level statement scope: where `let` bindings declared at module level
+    /// live. Unlike an ordinary block it stays visible across function boundaries -- a fn
+    /// body reads the shared entry-frame slot rather than a dead local.
+    pub(crate) fn push_script(&mut self) {
+        self.inner.push(Rib::new(RibKind::Script));
+    }
+
     pub(crate) fn push_function(&mut self) {
         self.inner.push(Rib::new(RibKind::Function));
     }
@@ -165,6 +172,17 @@ impl Ribs {
         assert_eq!(block.kind, RibKind::Block);
         block
     }
+
+    pub(crate) fn pop_script(&mut self) -> Rib {
+        let script = self.pop();
+        assert_eq!(script.kind, RibKind::Script);
+        script
+    }
+
+    /// The rib declarations land in right now.
+    pub(crate) fn current_kind(&self) -> RibKind {
+        self.inner.last().map(|rib| rib.kind).unwrap_or(RibKind::Block)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -235,6 +253,10 @@ pub(crate) enum RibKind {
     Import,
     /// An ordinary lexical scope: a block, loop, match arm, or closure body.
     Block,
+    /// A file's top-level statement scope -- holds its `let` bindings. Visible across
+    /// function boundaries (the bindings are backed by the entry frame's registers, so a fn
+    /// reads/writes the same storage). Nested blocks inside it stay ordinary `Block`s.
+    Script,
     /// A function body. Names bound outside it cannot be captured from within.
     Function,
     /// A closure body. Same visibility as a block, but identified so resolutions that cross it
@@ -246,7 +268,7 @@ pub(crate) enum RibKind {
 
 impl RibKind {
     fn visible_across_functions(self) -> bool {
-        matches!(self, Self::Module(_) | Self::Import)
+        matches!(self, Self::Module(_) | Self::Import | Self::Script)
     }
 }
 
@@ -265,6 +287,10 @@ pub struct Dec {
 #[derive(Debug, Clone, PartialEq)]
 pub enum DecKind {
     Local,
+    /// A `let` bound in the file's top-level statement scope. Runtime-mutable like a local,
+    /// but stored in the entry frame so function bodies can reach it. Never captured by
+    /// closures -- they address it directly, the same way fns do.
+    Global,
     Item {
         defaults: Vec<Option<parse::Literal>>,
     },

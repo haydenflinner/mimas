@@ -63,6 +63,18 @@ impl std::fmt::Display for Op {
             ),
             Op::Move { dst, src } => write!(f, "{}{}{}", OpName("move"), dst, src),
 
+            // `slot` is an absolute entry-frame register, so prefix it like `Body`/`Adt`
+            // rather than rendering it as a window register.
+            Op::LoadEntry { dst, slot } => {
+                write!(f, "{}{}", OpName("load_entry"), dst)?;
+                dotted(f, "^", slot.index())
+            }
+            Op::StoreEntry { slot, src } => {
+                write!(f, "{}", OpName("store_entry"))?;
+                dotted(f, "^", slot.index())?;
+                write!(f, "{src}")
+            }
+
             Op::Bin {
                 dst,
                 left,

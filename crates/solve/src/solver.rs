@@ -106,7 +106,7 @@ impl Solver {
             type_params: vec![],
         };
         solver.ribs.push_import();
-        solver.ribs.push_block();
+        solver.ribs.push_script();
 
         // todo, this is a bit brittle
         for name in ["int", "float", "str", "bool", "array", "dict"] {
@@ -238,11 +238,11 @@ impl Solver {
                         .unwrap_or_else(|| Rib::new(RibKind::Module(module_adts[name])));
                     solver.ribs.push_rib(rib);
                     solver.ribs.push_import();
-                    solver.ribs.push_block();
+                    solver.ribs.push_script();
                 }
                 phase(solver, ast)?;
                 if let Some(name) = module {
-                    solver.ribs.pop_block();
+                    solver.ribs.pop_script();
                     solver.ribs.pop_import();
                     let rib = solver.ribs.pop_module();
                     solver.sync_module_adt(module_adts[name], &rib);
@@ -2286,7 +2286,14 @@ impl Solver {
         #[cfg(feature = "logging")]
         println!("{}", crate::utils::Printer::declare(ident, &ty));
 
-        let dec_id = self.dec_id(ident, ty.clone(), DecKind::Local, Vis::Public);
+        // a `let` declared in the file's top-level statement scope is a global: it stays
+        // visible across function boundaries and its storage lives in the entry frame. every
+        // other declaration context is an ordinary local.
+        let kind = match self.ribs.current_kind() {
+            RibKind::Script => DecKind::Global,
+            _ => DecKind::Local,
+        };
+        let dec_id = self.dec_id(ident, ty.clone(), kind, Vis::Public);
         if let Some(node_id) = node_id {
             self.node_decs.insert(node_id, dec_id);
         }

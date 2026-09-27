@@ -122,6 +122,8 @@ pub struct ResolvedDecl {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ResolvedDeclKind {
     Local,
+    /// A top-level `let`: mutable storage living in the entry frame, visible to fns.
+    Global,
     Item {
         defaults: Vec<Option<Literal>>,
         native: Option<NativeId>,
@@ -268,6 +270,7 @@ impl From<Solver> for Resolutions {
             let vis = dec.vis;
             let kind = match dec.kind {
                 DecKind::Local | DecKind::LoopVar => ResolvedDeclKind::Local,
+                DecKind::Global => ResolvedDeclKind::Global,
                 DecKind::Item { defaults } => ResolvedDeclKind::Item {
                     defaults,
                     native: solver.dec_to_native.get(&id).map(|b| b.id),

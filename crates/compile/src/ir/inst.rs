@@ -16,6 +16,11 @@ pub enum Inst {
     Constant(Constant),
     SetLocal(Local, InstId),
     GetLocal(Local),
+    /// Like `GetLocal`/`SetLocal`, but the local belongs to the *entry* body -- the storage
+    /// of a top-level `let`. Emitted by non-entry bodies only: inside the entry body itself
+    /// the same slot is reached with plain Get/SetLocal.
+    SetEntry(Local, InstId),
+    GetEntry(Local),
     BinOp {
         left: InstId,
         op: BinOp,
@@ -150,6 +155,7 @@ impl Inst {
         match self {
             // mutations, calls, and control flow: must run regardless of whether a result is used.
             Inst::SetLocal(..)
+            | Inst::SetEntry(..)
             | Inst::SetIndex { .. }
             | Inst::SetField { .. }
             | Inst::Push { .. }
@@ -167,6 +173,7 @@ impl Inst {
             // pure value producers: droppable when their result is unused.
             Inst::Constant(..)
             | Inst::GetLocal(..)
+            | Inst::GetEntry(..)
             | Inst::BinOp { .. }
             | Inst::UnaryOp { .. }
             | Inst::Phi(..)
@@ -215,6 +222,8 @@ impl Inst {
             Inst::Constant(..)
             | Inst::SetLocal(..)
             | Inst::GetLocal(..)
+            | Inst::SetEntry(..)
+            | Inst::GetEntry(..)
             | Inst::Phi(..)
             | Inst::NewArray
             | Inst::NewDict
@@ -257,6 +266,8 @@ impl IrDisplay for Inst {
                 format!("set {variable}: {inst}")
             }
             Inst::GetLocal(variable) => format!("get {variable}"),
+            Inst::SetEntry(variable, inst) => format!("set! {variable}: {inst}"),
+            Inst::GetEntry(variable) => format!("get! {variable}"),
             Inst::BinOp {
                 left,
                 op,
@@ -571,6 +582,16 @@ impl BlockWriter<'_> {
 
     pub(crate) fn get_local(&mut self, variable: Local) -> InstId {
         self.instruct(Inst::GetLocal(variable))
+    }
+
+    /// `set_local`/`get_local` for an entry-body local -- a top-level `let`. Only valid from
+    /// non-entry bodies; `Ir::read_binding`/`write_binding` pick the right pair for a dec.
+    pub(crate) fn set_entry(&mut self, variable: Local, inst: InstId) -> InstId {
+        self.instruct(Inst::SetEntry(variable, inst))
+    }
+
+    pub(crate) fn get_entry(&mut self, variable: Local) -> InstId {
+        self.instruct(Inst::GetEntry(variable))
     }
 
     pub(crate) fn bin(

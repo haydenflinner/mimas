@@ -196,17 +196,41 @@ impl Ir {
             .unwrap_or_else(|| panic!("no field `{field}` on adt"))
     }
 
-    // allocate-or-fetch this binding's slot within the current body
+    // allocate-or-fetch this binding's slot within its home body: the entry body for
+    // globals (a top-level `let` stores there no matter which body asks), the current body
+    // for everything else.
     pub(crate) fn local_for(&mut self, dec: DecId) -> Local {
-        if let Some(&local) = self.bodies[self.current_body].dec_to_local.get(&dec) {
+        self.local_in(dec, self.body_for_dec(dec))
+    }
+
+    /// The body that owns a dec's storage: globals live in the entry frame.
+    pub(crate) fn body_for_dec(&self, dec: DecId) -> BodyId {
+        match self.resolutions.decs[dec].kind {
+            solve::ResolvedDeclKind::Global => BodyId::ZERO,
+            _ => self.current_body,
+        }
+    }
+
+    fn local_in(&mut self, dec: DecId, body_id: BodyId) -> Local {
+        if let Some(&local) = self.bodies[body_id].dec_to_local.get(&dec) {
             return local;
         }
         let name = self.resolutions.decs[dec].name.to_string();
-        let body = &mut self.bodies[self.current_body];
+        let body = &mut self.bodies[body_id];
         let local = body.locals.push(dec);
         body.dec_to_local.insert(dec, local);
         body.artifacts.insert(local, name);
         local
+    }
+
+    /// Emits a read of `dec` in the current body. Globals reached from a non-entry body go
+    /// through the entry frame's registers; everything else is an ordinary local read.
+    pub(crate) fn read_binding(&mut self, dec: DecId) -> InstId {
+        let local = self.local_for(dec);
+        if self.body_for_dec(dec) != self.current_body {
+            return self.current().get_entry(local);
+        }
+        self.current().get_local(local)
     }
 
     pub(crate) fn synthetic_local(&mut self, name: &str) -> Local {

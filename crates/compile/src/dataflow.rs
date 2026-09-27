@@ -107,6 +107,9 @@ pub fn function_dataflow(ir: &Ir, function_name: &str) -> Result<DataflowGraph, 
     // is a plain last-write-wins map, valid precisely because there's no control-flow merge to
     // reconcile (that's exactly what `blocks.len() != 1` above rules out).
     let mut local_source: HashMap<Local, usize> = HashMap::new();
+    // same idea, but for top-level `let` slots: `Local` here indexes the *entry* body, so it
+    // can't share `local_source`'s namespace.
+    let mut entry_source: HashMap<Local, usize> = HashMap::new();
 
     for &param in &body.params {
         let name = local_name(ir, body_id, param);
@@ -154,6 +157,25 @@ pub fn function_dataflow(ir: &Ir, function_name: &str) -> Result<DataflowGraph, 
                 Inst::SetLocal(local, value) => {
                     if let Some(&src) = inst_node.get(value) {
                         local_source.insert(*local, src);
+                    }
+                }
+                // a top-level `let` read -- state from outside the body. Render it like a
+                // param: one `In` node per global, shared by every read.
+                Inst::GetEntry(local) => {
+                    let idx = *entry_source.entry(*local).or_insert_with(|| {
+                        let dec = ir.bodies[BodyId::ZERO].locals[*local];
+                        let idx = nodes.len();
+                        nodes.push(DataflowNode {
+                            label: ir.resolutions.decs[dec].name.clone(),
+                            kind: NodeKind::In,
+                        });
+                        idx
+                    });
+                    inst_node.insert(inst_id, idx);
+                }
+                Inst::SetEntry(local, value) => {
+                    if let Some(&src) = inst_node.get(value) {
+                        entry_source.insert(*local, src);
                     }
                 }
                 // the function's single exit -- becomes the one `Out` node instead of a regular
@@ -224,6 +246,8 @@ fn operands_of(inst: &Inst) -> Vec<(InstId, Option<&'static str>)> {
         | Inst::GetLocal(_)
         | Inst::SetLocal(..)
         | Inst::Return(_)
+        | Inst::GetEntry(_)
+        | Inst::SetEntry(..)
         | Inst::Jump { .. }
         | Inst::JumpIfFalse { .. }
         | Inst::Switch { .. }
@@ -315,6 +339,8 @@ fn node_label(ir: &Ir, inst: &Inst, body_names: &HashMap<BodyId, &str>) -> Strin
         // handled by the caller before this is ever reached.
         Inst::GetLocal(_)
         | Inst::SetLocal(..)
+        | Inst::GetEntry(_)
+        | Inst::SetEntry(..)
         | Inst::Return(_)
         | Inst::Jump { .. }
         | Inst::JumpIfFalse { .. }

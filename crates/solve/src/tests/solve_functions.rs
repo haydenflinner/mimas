@@ -271,7 +271,12 @@ test_fail!(
     foo(0, b=3);"
 );
 
-test_fail!(fn_does_not_hoist_local, "let a = 0; fn c() -> int { a }");
+// top-level `let`s are globals: fns see them, sharing the entry-frame slot
+test_ty!(fn_reads_global_let, "let a = 0; fn c() -> int { a }", "c" => func!(() -> Int));
+// ...but only at top level: a `let` in a nested block stays block-scoped
+test_fail!(fn_does_not_hoist_block_local, "{ let a = 0; } fn c() -> int { a }");
+// and scoping stays sequential -- a `let` below the fn isn't visible inside it
+test_fail!(fn_cant_see_later_global, "fn c() -> int { a } let a = 0;");
 test_ty!(closure_captures_local, "let a = 0; let b = || a;", "b" => func!(() -> Int));
 test_ty!(
     fn_sees_const_and_items,

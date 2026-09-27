@@ -8,6 +8,8 @@ pub(crate) trait Place {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PlaceTarget {
     Variable(Local),
+    /// A top-level `let` slot: an entry-body local, reachable from any body.
+    Entry(Local),
     Index { array: InstId, index: InstId },
     Field { receiver: InstId, slot: u32 },
 }
@@ -16,6 +18,7 @@ impl PlaceTarget {
     pub(crate) fn load(self, ir: &mut Ir) -> InstId {
         match self {
             PlaceTarget::Variable(variable) => ir.current().get_local(variable),
+            PlaceTarget::Entry(variable) => ir.current().get_entry(variable),
             PlaceTarget::Index { array, index } => {
                 ir.current().get_index(array, index, AccessKind::Direct)
             }
@@ -28,6 +31,7 @@ impl PlaceTarget {
     pub(crate) fn store(self, ir: &mut Ir, value: InstId) -> InstId {
         match self {
             PlaceTarget::Variable(variable) => ir.current().set_local(variable, value),
+            PlaceTarget::Entry(variable) => ir.current().set_entry(variable, value),
             PlaceTarget::Index { array, index } => ir.current().set_index(array, index, value),
             PlaceTarget::Field { receiver, slot } => ir.current().set_field(receiver, slot, value),
         }
@@ -71,7 +75,11 @@ impl Place for Expr {
         // idents resolve off the enclosing Expr's NodeId -- Ident itself has no id
         if let ExprKind::Ident(_) = self.kind() {
             let dec = ir.node_dec(self.id());
-            return Some(PlaceTarget::Variable(ir.local_for(dec)));
+            let local = ir.local_for(dec);
+            if ir.body_for_dec(dec) != ir.current_body {
+                return Some(PlaceTarget::Entry(local));
+            }
+            return Some(PlaceTarget::Variable(local));
         }
         self.kind().place(ir)
     }
