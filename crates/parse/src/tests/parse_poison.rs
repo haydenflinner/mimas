@@ -811,7 +811,7 @@ test_recover!(
     stmts: ["_", "let z = 3;"],
 );
 
-// `NAME_(…)` is prefix sugar in pattern position -- but in expression
+// `name_(…)` is prefix sugar in pattern position -- in expression
 // position `f_(x)` is a call on a `_`-tailed name, which is a mistake.
 test_recover!(
     underscore_call,

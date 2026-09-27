@@ -2405,7 +2405,7 @@ impl<'s> Parser<'s> {
 
     fn call(&mut self, left: Expr) -> Expr {
         let start = left.span().start();
-        // `f_(x)` isn't a call anyone means to write -- `NAME_(…)` only
+        // `f_(x)` isn't a call anyone means to write -- `name_(…)` only
         // exists as destructure sugar in patterns, so treat it as a mistake.
         let tail = match left.kind() {
             ExprKind::Ident(id) => Some(id),
