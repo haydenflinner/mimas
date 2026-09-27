@@ -163,7 +163,7 @@ test_reduction!(
     bitwise,
     "0xff & 0x0f" => Int(0x0f),
     "0x0f | 0xf0" => Int(0xff),
-    "0xff ^ 0xff" => Int(0),
+    "0xff ⊕ 0xff" => Int(0),
     "1 << 3" => Int(8),
     "8 >> 3" => Int(1),
 );

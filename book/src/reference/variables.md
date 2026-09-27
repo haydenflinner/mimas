@@ -95,14 +95,14 @@ const ((MIN, MAX), STEP) = ((0.0, 1.0), 0.01);
 
 Each bound name is a real constant with the matching element of the value, so the count and shape of the pattern must match the right side exactly.
 
-When the names share a prefix, `name(..)` spells the same destructure once -- `FIELD_(X, Y)` is sugar for `(FIELD_X, FIELD_Y)`, and nested prefixes compose (`A_(X, B_(Y))` binds `A_X` and `A_B_Y`):
+When the names share a prefix, `name_(..)` spells the same destructure once -- `FIELD_(X, Y)` is sugar for `(FIELD_X, FIELD_Y)`, and nested prefixes compose (`A_(X, B_(Y))` binds `A_X` and `A_B_Y`):
 
 ```mimas
 const FIELD_(X, Y, W, H) = (40.0, 40.0, 960.0, 720.0);
 // FIELD_X = 40.0, FIELD_Y = 40.0, FIELD_W = 960.0, FIELD_H = 720.0
 ```
 
-This sugar is `const`-only -- in `let`/`match`, `name(..)` stays a tuple-variant pattern.
+The sugar works in every pattern position -- `let FIELD_(X, Y) = t`, `for P_(a, b) in pairs`, `match` arms, and `if let`/`while let` conditions. The trailing `_` is what marks it: a plain `Name(..)` still reads as a tuple-variant pattern. In expression position it's a parse error -- `f_(x)` is a call on a `_`-tailed name, which is never what you meant.
 
 ```admonish todo
 Our constant folding could likely handle evaluating whether a function is fully knowable at compile time, but that will come after `0.1.0`.

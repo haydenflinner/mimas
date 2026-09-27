@@ -293,9 +293,24 @@ impl<'s> Parser<'s> {
             _ => {
                 let expr = self.expr();
 
+                // `^=` went the way of `^` — retired spelling, teach `⊕=`
+                // and recover as if it were written.
+                if self.at(TokKind::CaretEqual) {
+                    self.error_here(Misdirection {
+                        src: self.src(),
+                        at: self.next_location().into(),
+                        msg: "xor-assign is `x ⊕= y` — `^` superscripts a name now, as in `x^2`".into(),
+                        label: "write `⊕=` here".into(),
+                    });
+                }
                 // TODO: assignment does not belong here... I think
-                let Ok(operator) = self.peek().try_into() else {
-                    return BlockElement::MaybeYield(expr);
+                let operator: AssignmentOp = if self.at(TokKind::CaretEqual) {
+                    AssignmentOp::XorEqual
+                } else {
+                    let Ok(operator) = self.peek().try_into() else {
+                        return BlockElement::MaybeYield(expr);
+                    };
+                    operator
                 };
                 // `c\n= a` is not an assignment: a newline after the target ends the
                 // expression, so the `=` belongs to whatever statement starts there.
@@ -774,7 +789,7 @@ impl<'s> Parser<'s> {
 
     fn const_decl(&mut self) -> Const {
         self.bump(TokKind::Const);
-        let left = desugar_prefix_pat(&self.pattern(), "");
+        let left = self.pattern();
         let annotation = self.eat(TokKind::Colon).then(|| self.annotation());
         self.expect(TokKind::Equal);
         let right = self.expr();
@@ -1363,6 +1378,34 @@ impl<'s> Parser<'s> {
                 self.advance();
                 let right = self.binary(8);
                 left = self.op_expr(BinaryOp::Eval(EvaluationOp::Modulo), left, right, start);
+                continue;
+            }
+            // A `^` reaching here is the retired xor — contiguous `x^2`
+            // already folded into the name at lex time, so this is always
+            // spaced (or after a number, where the intent was `pow`). Teach
+            // `⊕`/`xor`/`.pow` and keep parsing as if xor were written.
+            if self.at(TokKind::Caret) && self.infix_binds() {
+                let pow = matches!(
+                    left.kind(),
+                    ExprKind::Literal(Literal::Int(_) | Literal::Float(_))
+                );
+                self.error_here(Misdirection {
+                    src: self.src(),
+                    at: self.next_location().into(),
+                    msg: if pow {
+                        "`^` isn't an operator — exponents are `x.pow(n)` and xor is `a ⊕ b`; `x^2` superscripts a name".into()
+                    } else {
+                        "xor is `a ⊕ b` (or `a xor b`) — `^` superscripts a name, as in `x^2`".into()
+                    },
+                    label: if pow {
+                        "write `.pow(…)`".into()
+                    } else {
+                        "write `⊕` here".into()
+                    },
+                });
+                self.advance();
+                let right = self.binary(5);
+                left = self.op_expr(BinaryOp::Eval(EvaluationOp::Xor), left, right, start);
                 continue;
             }
             let Some((op, power)) = BinaryOp::of(self.peek()) else {
@@ -2362,6 +2405,33 @@ impl<'s> Parser<'s> {
 
     fn call(&mut self, left: Expr) -> Expr {
         let start = left.span().start();
+        // `f_(x)` isn't a call anyone means to write -- `NAME_(…)` only
+        // exists as destructure sugar in patterns, so treat it as a mistake.
+        let tail = match left.kind() {
+            ExprKind::Ident(id) => Some(id),
+            ExprKind::Access(Access::DoubleColon { right, .. }) => Some(right),
+            ExprKind::Access(Access::Dot { right, .. }) => match right.kind() {
+                ExprKind::Ident(id) => Some(id),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(id) = tail {
+            if id.lexeme.len() > 1 && id.lexeme.ends_with('_') {
+                self.error(Misdirection {
+                    src: self.src(),
+                    at: left.location().into(),
+                    msg: format!(
+                        "`{}(…)` reads as prefix destructuring, which only exists in pattern position",
+                        id.lexeme
+                    ),
+                    label: format!(
+                        "calling a `{}` name isn't valid -- rename it to drop the trailing `_`",
+                        id.lexeme
+                    ),
+                });
+            }
+        }
         self.bump(TokKind::LeftParenthesis);
         let mut named = false;
         let arguments = self.in_group(|p| p.list(TokKind::RightParenthesis, TokKind::starts_expr, |p| {
@@ -2670,7 +2740,14 @@ impl<'s> Parser<'s> {
                     segments.push(self.require_ident());
                 }
                 match segments.len() {
-                    1 if matches!(self.peek(), TokKind::Slash | TokKind::Star | TokKind::Caret) => {
+                    // `m^2` arrives inside the ident's lexeme now, so a
+                    // `^n` tail on a lone segment means quantity too.
+                    1 if matches!(self.peek(), TokKind::Slash | TokKind::Star | TokKind::Caret)
+                        || segments[0]
+                            .lexeme
+                            .rsplit_once('^')
+                            .is_some_and(|(_, t)| !t.is_empty() && t.chars().all(|c| c.is_ascii_digit())) =>
+                    {
                         self.quantity_annotation(segments.remove(0))
                     }
                     // `List<T>`, `mod::Pair<A, B>`, or `Interval<kW>` (a unit arg -- the
@@ -2714,7 +2791,7 @@ impl<'s> Parser<'s> {
     /// The rest of a compound unit type (`usd/kWh`, `m/s^2`, `W*h`) after its first name: signed
     /// exponents, `/` flipping the next term.
     fn quantity_annotation(&mut self, first: Ident) -> Annotation {
-        let mut parts = vec![(first, self.unit_exponent())];
+        let mut parts = vec![self.unit_name_exp(first)];
         loop {
             let sign = match self.peek() {
                 TokKind::Star => 1,
@@ -2723,9 +2800,32 @@ impl<'s> Parser<'s> {
             };
             self.advance();
             let unit = self.require_ident();
-            parts.push((unit, sign * self.unit_exponent()));
+            let (unit, exp) = self.unit_name_exp(unit);
+            parts.push((unit, sign * exp));
         }
         Annotation::Quantity(parts)
+    }
+
+    /// A unit name and its exponent. `s^2` lexes as one ident now (`^`
+    /// joins a name like `_` does), so a `^n` tail splits off the lexeme;
+    /// `s^-2` or spaced `s ^ 2` still come through as a Caret token.
+    fn unit_name_exp(&mut self, unit: Ident) -> (Ident, i8) {
+        let Some(caret) = unit.lexeme.rfind('^') else {
+            let exp = self.unit_exponent();
+            return (unit, exp);
+        };
+        let tail = &unit.lexeme[caret + 1..];
+        // `x^foo` stays one name — only a digits tail is an exponent.
+        match tail.parse::<i8>() {
+            Ok(n) if !tail.is_empty() => (
+                Ident::new(&unit.lexeme[..caret], unit.location),
+                n,
+            ),
+            _ => {
+                let exp = self.unit_exponent();
+                (unit, exp)
+            }
+        }
     }
 
     /// An optional `^n` (or `^-n`) after a unit name.
@@ -2946,6 +3046,7 @@ impl<'s> Parser<'s> {
             return self.new_pat(PatKind::Poison(Poison), start);
         }
         self.nested(inner)
+            .map(|pat| desugar_prefix_pat(&pat, ""))
             .unwrap_or_else(|| self.new_pat(PatKind::Poison(Poison), start))
     }
 
@@ -2997,7 +3098,8 @@ impl<'s> Parser<'s> {
                 }
 
                 match self.peek() {
-                    // `Foo(...)` tuple-variant
+                    // `Foo(...)` tuple-variant (`Name_(…)` becomes prefix
+                    // sugar in `pattern()`'s desugar pass)
                     TokKind::LeftParenthesis => {
                         self.bump(TokKind::LeftParenthesis);
                         let pats = self.list(
@@ -3230,6 +3332,11 @@ impl BinaryOp {
         if matches!(kind, TokKind::In | TokKind::NotIn) {
             return Some((Self::In(kind == TokKind::In), 3));
         }
+        // `a xor b` — the word spelling of `⊕`, contextual like `mod`:
+        // an ordinary name everywhere else.
+        if matches!(kind, TokKind::Ident("xor")) {
+            return Some((Self::Eval(EvaluationOp::Xor), 4));
+        }
         let op = EvaluationOp::try_from(kind).ok()?;
         let power = if op.is_binary() {
             4
@@ -3260,10 +3367,12 @@ fn unique_test_name(seen: &mut std::collections::HashSet<String>, name: String) 
     }
 }
 
-/// `const FIELD_(X, Y, W, H) = t` desugars to `const (FIELD_X, FIELD_Y, FIELD_W, FIELD_H) = t`:
-/// a `name(..)` pattern in const position binds `name`-prefixed leaves, and nested `name(..)`
-/// nodes compose (`A_(X, B_(Y))` binds `A_X` and `A_B_Y`). The same shape in `let`/`match`
-/// stays a tuple-variant pattern -- the sugar is `const`-only.
+/// `FIELD_(X, Y, W, H)` desugars to `(FIELD_X, FIELD_Y, FIELD_W, FIELD_H)`: a
+/// `_`-tailed `name(..)` pattern binds `name`-prefixed leaves, and nested
+/// `name_(..)` nodes compose (`A_(X, B_(Y))` binds `A_X` and `A_B_Y`). Applied
+/// at `pattern()`'s exit, so every pattern position gets it -- `const`,
+/// `let`, `match`, `for`, `if let`/`while let`. (In expression position `f_(x)`
+/// is a call on a `_`-tailed name, which `call()` rejects as a mistake.)
 fn desugar_prefix_pat(pat: &Pat, prefix: &str) -> Pat {
     let kind = match pat.kind() {
         PatKind::Ident(id) if !prefix.is_empty() && id.lexeme != "_" => {
@@ -3275,10 +3384,14 @@ fn desugar_prefix_pat(pat: &Pat, prefix: &str) -> Pat {
             pats.iter().map(|p| desugar_prefix_pat(p, prefix)).collect(),
         ),
         PatKind::TupleVariant(head, pats) => {
-            // a real path head (`A::B(..)`) isn't a prefix -- leave it for the solver to reject
+            // only `Name_(…)` is sugar -- a real path head (`A::B(..)`) or a
+            // plain `Name(..)` variant pattern is left for the solver to reject
             let ExprKind::Ident(head) = head.kind() else {
                 return pat.clone();
             };
+            if head.lexeme.len() <= 1 || !head.lexeme.ends_with('_') {
+                return pat.clone();
+            }
             let prefix = format!("{prefix}{head}");
             PatKind::Tuple(pats.iter().map(|p| desugar_prefix_pat(p, &prefix)).collect())
         }

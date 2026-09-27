@@ -63,7 +63,7 @@ let good: int = null ?? 0;
 // bit operators
 let and = a & b;
 let or = a | b;
-let xor = a ^ b;
+let xor = a ⊕ b; // `a xor b` spells it too
 let shift_right = 1 >> 1;
 let shift_left = 1 << 1;
 

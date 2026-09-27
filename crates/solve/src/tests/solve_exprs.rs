@@ -231,7 +231,7 @@ test_ty!(
     "1 ~/ 1" => Int,
     "1 & 1" => Int,
     "1 | 1" => Int,
-    "1 ^ 1" => Int,
+    "1 ⊕ 1" => Int,
     "1 << 1" => Int,
     "1 >> 1" => Int,
 );
@@ -254,7 +254,7 @@ test_ty!(
     "(0, 0) * (0, 0)" => tuple!(Int, Int),
     "(0, 0) ~/ (0, 0)" => tuple!(Int, Int),
     "(0, 0) mod (0, 0)" => tuple!(Int, Int),
-    "(0, 0) ^ (0, 0)" => tuple!(Int, Int),
+    "(0, 0) ⊕ (0, 0)" => tuple!(Int, Int),
     "(0, 0) << (0, 0)" => tuple!(Int, Int),
     "(0, 0) >> (0, 0)" => tuple!(Int, Int),
     "(0, 0.0) + (0.0, 0)" => tuple!(Float, Float),

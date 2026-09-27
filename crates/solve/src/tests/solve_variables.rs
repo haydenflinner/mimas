@@ -321,9 +321,18 @@ test_fail!(
     const_prefix_destructure_wrong_arity,
     "const A_(X, Y, Z) = (1, 2);"
 );
+// `Foo(X)` without the `_` stays a real variant pattern -- only `Foo_(X)`
+// is prefix sugar -- so const still rejects it as unbindable.
 test_fail!(
-    let_name_parens_is_not_prefix,
-    "let A_(X) = (1,);"
+    const_variant_pat_is_not_prefix,
+    "const Foo(X) = (1,);"
+);
+// the same sugar works in `let`, `match`, `for` -- every pattern position
+test_ty!(
+    let_prefix_destructure,
+    "let P_(X, B_(Y)) = (1.0, (2.0,));",
+    "P_X" => Float,
+    "P_B_Y" => Float,
 );
 test_fail!(
     const_cycle,

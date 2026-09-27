@@ -219,7 +219,7 @@ test_vm!(
 test_vm!(
     bit_ops_combined,
     "(0xff & 0xf0) | 0x0f" => Int(0xff),
-    "0xff ^ 0xff" => Int(0),
+    "0xff ⊕ 0xff" => Int(0),
 );
 
 test_vm!(

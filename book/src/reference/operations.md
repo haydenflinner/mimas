@@ -63,14 +63,14 @@ Bitwise operators work on `int`.
 | :--- | :---: | :--- |
 | And | `&` | Set each bit where both bits are set. |
 | Or | `\|` | Set each bit where either bit is set. |
-| Xor | `^` | Set each bit where the bits differ. |
+| Xor | `⊕` (or `xor`) | Set each bit where the bits differ. |
 | Shift left | `<<` | Shift bits left. |
 | Shift right | `>>` | Shift bits right. |
 
 ```mimas
 print(6 & 3);  // 2
 print(6 | 1);  // 7
-print(6 ^ 3);  // 5
+print(6 ⊕ 3);  // 5
 print(1 << 4); // 16
 ```
 
@@ -96,7 +96,7 @@ a %= 3;
 a ~/= 2;
 a &= 1;
 a |= 1;
-a ^= 1;
+a ⊕= 1;
 a ??= fallback; // assign only if `a` is currently null
 ```
 ## Pipe

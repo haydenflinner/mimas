@@ -229,11 +229,14 @@ impl<'s> Lex<'s, Tok<TokKind<'s>>, TokKind<'s>> for Lexer<'s> {
     /// before -- which is what actually disambiguates `foo-bar` (one identifier) from `foo - bar`
     /// (subtraction): write the operator with spaces, or it reads as part of the name.
     ///
-    /// A leading `-` (nothing consumed yet) is never treated as a continuation, whatever follows
-    /// it -- `can_extend` guards that, so a bare `-foo` still lexes as `Minus` then `Ident(foo)`,
-    /// same as before. A `-` not immediately followed by an identifier char (`foo-)`, `foo- `,
-    /// `foo--bar`) rolls back to just after the last committed segment via `reset_peeks`, leaving
-    /// the `-` itself untouched for the next `lex()` call.
+    /// A leading `-`/`^` (nothing consumed yet) is never treated as a continuation, whatever
+    /// follows it -- `can_extend` guards that, so a bare `-foo` still lexes as `Minus` then
+    /// `Ident(foo)`, same as before. A `-`/`^` not immediately followed by an identifier char
+    /// (`foo-)`, `foo- `, `x^ 2`, `foo--bar`) rolls back to just after the last committed
+    /// segment via `reset_peeks`, leaving the operator itself untouched for the next `lex()`
+    /// call. `^` joins a name the same way `foo-bar`'s `-` does: `x^2` is one ident, which the
+    /// editor typesets raised; `x ^ 2` spaced still lexes `Caret` (the parser's misdirection
+    /// points at `⊕`/`xor`/`.pow`).
     fn construct_ident(&mut self) -> Option<&'s str> {
         let is_continue = |c: char| c.is_alphanumeric() || c == '_';
         let stream = self.char_stream();
@@ -243,7 +246,7 @@ impl<'s> Lex<'s, Tok<TokKind<'s>>, TokKind<'s>> for Lexer<'s> {
             stream.chomp_peeks();
             let can_extend = stream.position() > start;
             if can_extend
-                && stream.match_peek_with(|c: char| c == '-')
+                && stream.match_peek_with(|c: char| c == '-' || c == '^')
                 && stream.match_peek_with(is_continue)
             {
                 continue;
@@ -470,6 +473,15 @@ impl<'s> Lex<'s, Tok<TokKind<'s>>, TokKind<'s>> for Lexer<'s> {
                         TokKind::CaretEqual
                     } else {
                         TokKind::Caret
+                    }
+                }
+                // `⊕`/`⊻` both spell xor; `⊕=`/`⊻=` its assignment. They share
+                // the one token each so the AST always prints `⊕`/`⊕=`.
+                '⊕' | '⊻' => {
+                    if self.match_chomp('=') {
+                        TokKind::CircledPlusEqual
+                    } else {
+                        TokKind::CircledPlus
                     }
                 }
                 '!' => {

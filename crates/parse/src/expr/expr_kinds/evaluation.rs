@@ -34,7 +34,7 @@ op!(
         Ident("mod") => Modulo,
         Ampersand => And,
         Pipe => Or,
-        Caret => Xor,
+        CircledPlus => Xor,
         DoubleLeftCaret => BitShiftLeft,
         DoubleRightCaret => BitShiftRight,
     }

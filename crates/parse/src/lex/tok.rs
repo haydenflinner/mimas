@@ -82,6 +82,11 @@ pub enum TokKind<'s> {
     PipeEqual,
     AmpersandEqual,
     CaretEqual,
+    /// `⊕` (also `⊻`) — xor. `^` left the operator table for identifier
+    /// continuation (`x^2` is a name); the parser's misdirection teaches it.
+    CircledPlus,
+    /// `⊕=` (also `⊻=`).
+    CircledPlusEqual,
     Tilde,
     Dollar,
     DoubleLeftCaret,
@@ -187,6 +192,8 @@ impl Display for TokKind<'_> {
             TokKind::PipeEqual => "|=",
             TokKind::AmpersandEqual => "&=",
             TokKind::CaretEqual => "^=",
+            TokKind::CircledPlus => "⊕",
+            TokKind::CircledPlusEqual => "⊕=",
             TokKind::Tilde => "~",
             TokKind::Dollar => "$",
             TokKind::DoubleLeftCaret => "<<",

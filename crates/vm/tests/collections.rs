@@ -155,6 +155,25 @@ test_vm!(
 );
 
 test_vm!(
+    let_prefix_destructure,
+    "let P_(X, Y) = (10, 20);",
+    "P_X" => Int(10),
+    "P_Y" => Int(20),
+);
+
+test_vm!(
+    for_prefix_destructure,
+    "let pairs = [(1, 2), (3, 4)];",
+    "for P_(a, b) in pairs collect P_a + P_b" => array!(Int(3), Int(7)),
+);
+
+test_vm!(
+    match_prefix_destructure,
+    "let t = (3, 4);",
+    "match t { M_(a, b) => M_a + M_b, _ => 0 }" => Int(7),
+);
+
+test_vm!(
     for_tuple_destructure,
     "let pairs = [(1, 2), (3, 4), (5, 6)];",
     "for (a, b) in pairs collect a + b" => array!(Int(3), Int(7), Int(11)),

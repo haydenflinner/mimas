@@ -677,9 +677,58 @@ expr_test!(
 
 expr_test!(
     bitwise_xor,
-    "1 ^ 1",
+    "1 ⊕ 1",
     Evaluation::new(int!(1), EvaluationOp::Xor, int!(1))
 );
+
+// `⊻` is the same operator — lexed to the same token.
+expr_test!(
+    bitwise_xor_alt_glyph,
+    "1 ⊻ 1",
+    Evaluation::new(int!(1), EvaluationOp::Xor, int!(1))
+);
+
+// `xor` is the word spelling — contextual like `mod`, so `let xor = …`
+// still binds an ordinary name.
+expr_test!(
+    xor_word,
+    "a xor b",
+    Evaluation::new(ident_expr!("a"), EvaluationOp::Xor, ident_expr!("b"))
+);
+
+// `^` joined identifier continuation: `x^2` is one name (the editor
+// typesets it raised), not `x` xor `2`.
+expr_test!(
+    caret_joins_ident,
+    "x^2 + 1",
+    Evaluation::new(
+        ident_expr!("x^2"),
+        EvaluationOp::Plus,
+        int!(1),
+    )
+);
+
+// The retired spellings report a misdirection and parse on as xor.
+#[test]
+fn spaced_caret_is_old_xor() {
+    let lexer = crate::lex::Lexer::new("a ^ b", 0, "test".into());
+    let mut parser = crate::Parser::new(lexer);
+    let expr = parser.expr();
+    assert_eq!(expr.to_string(), "a ⊕ b");
+    assert_eq!(parser.errors().len(), 1);
+}
+
+// `2^10` was almost surely meant as a power — the diagnostic points at
+// `.pow`, and recovery still parses the `^` as xor.
+#[test]
+fn caret_after_number_suggests_pow() {
+    let lexer = crate::lex::Lexer::new("2^10", 0, "test".into());
+    let mut parser = crate::Parser::new(lexer);
+    let expr = parser.expr();
+    assert_eq!(expr.to_string(), "2 ⊕ 10");
+    assert_eq!(parser.errors().len(), 1);
+    assert!(parser.errors()[0].to_string().contains("pow"));
+}
 
 expr_test!(
     dot_access_bitwise,

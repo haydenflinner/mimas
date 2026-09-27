@@ -811,6 +811,20 @@ test_recover!(
     stmts: ["_", "let z = 3;"],
 );
 
+// `NAME_(…)` is prefix sugar in pattern position -- but in expression
+// position `f_(x)` is a call on a `_`-tailed name, which is a mistake.
+test_recover!(
+    underscore_call,
+    "f_(1);
+     w.g_(2);
+     let b = 2;",
+    errors: [
+        "`f_(…)` reads as prefix destructuring, which only exists in pattern position",
+        "`g_(…)` reads as prefix destructuring, which only exists in pattern position",
+    ],
+    stmts: ["f_(1)", "w.g_(2)", "let b = 2;"],
+);
+
 test_recover!(
     match_bad_struct_pattern,
     "match x {

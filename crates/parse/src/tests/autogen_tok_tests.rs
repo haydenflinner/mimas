@@ -75,6 +75,8 @@ tok_test!(lex_slash_equal: "/=" => SlashEqual);
 tok_test!(lex_pipe_equal: "|=" => PipeEqual);
 tok_test!(lex_ampersand_equal: "&=" => AmpersandEqual);
 tok_test!(lex_caret_equal: "^=" => CaretEqual);
+tok_test!(lex_circled_plus: "⊕" => CircledPlus);
+tok_test!(lex_circled_plus_equal: "⊕=" => CircledPlusEqual);
 tok_test!(lex_tilde: "~" => Tilde);
 tok_test!(lex_double_left_caret: "<<" => DoubleLeftCaret);
 tok_test!(lex_double_right_caret: ">>" => DoubleRightCaret);

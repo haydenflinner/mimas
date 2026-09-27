@@ -236,6 +236,22 @@ stmt_test!(
 );
 
 stmt_test!(
+    let_destructure_prefix,
+    "let FIELD_(X, Y) = c;",
+    Let::new(
+        Pat::new(
+            PatKind::Tuple(vec![
+                Pat::new(ident!("FIELD_X").into(), shared::Location::default()),
+                Pat::new(ident!("FIELD_Y").into(), shared::Location::default()),
+            ]),
+            shared::Location::default()
+        ),
+        ident!("c").into_expr(),
+        None,
+    )
+);
+
+stmt_test!(
     assign_block,
     "let i = { 0 };",
     Let::new(
@@ -572,9 +588,19 @@ stmt_test!(
 
 stmt_test!(
     xor_equal,
-    "foo ^= 1;",
+    "foo ⊕= 1;",
     Assignment::new(ident_expr!("foo"), AssignmentOp::XorEqual, int!(1),)
 );
+
+// `^=` retired with `^` — report and parse on as `⊕=`.
+#[test]
+fn caret_equal_is_old_xor_assign() {
+    let lexer = crate::lex::Lexer::new("foo ^= 1;", 0, "test".into());
+    let mut parser = crate::Parser::new(lexer);
+    let stmt = parser.stmt();
+    assert_eq!(stmt.to_string(), "foo ⊕= 1");
+    assert_eq!(parser.errors().len(), 1);
+}
 
 stmt_test!(
     mod_equal,
