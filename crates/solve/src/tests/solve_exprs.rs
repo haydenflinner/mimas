@@ -227,7 +227,7 @@ test_ty!(
     "1 + 1" => Int,
     "1.0 * 1.0" => Float,
     "1.0 / 1.0" => Float,
-    "1 % 1" => Int,
+    "1 mod 1" => Int,
     "1 ~/ 1" => Int,
     "1 & 1" => Int,
     "1 | 1" => Int,
@@ -253,7 +253,7 @@ test_ty!(
     "(0, 0) / (0, 0)" => tuple!(Float, Float),
     "(0, 0) * (0, 0)" => tuple!(Int, Int),
     "(0, 0) ~/ (0, 0)" => tuple!(Int, Int),
-    "(0, 0) % (0, 0)" => tuple!(Int, Int),
+    "(0, 0) mod (0, 0)" => tuple!(Int, Int),
     "(0, 0) ^ (0, 0)" => tuple!(Int, Int),
     "(0, 0) << (0, 0)" => tuple!(Int, Int),
     "(0, 0) >> (0, 0)" => tuple!(Int, Int),
@@ -444,7 +444,7 @@ test_fail!(
 
 // ice prevention
 test_fail!(div_by_zero, "const DIV_ZERO: int = 1 ~/ 0;");
-test_fail!(mod_by_zero, "const MOD_ZERO: int = 1 % 0;");
+test_fail!(mod_by_zero, "const MOD_ZERO: int = 1 mod 0;");
 test_fail!(negative_shift, "const SHIFT_NEG: int = 1 << -1;");
 test_fail!(
     giant_hex_const,

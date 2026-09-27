@@ -38,6 +38,10 @@ pub struct Parser<'s> {
     /// Inside a `(...)` group (call args, tuples, `#[tests]` lists), where an infix operator
     /// may bind across a newline.
     group_depth: usize,
+    /// On while `±`'s tolerance parses, so a trailing `%` stays the percent marker
+    /// (`x ± 10%`) instead of folding as postfix percent. Groups reset it -- inside
+    /// `x ± (50%)` the `%` is postfix again.
+    pct_marker: bool,
     /// Monotonic counter for `__assert_left_N` / `__assert_right_N` names minted by `assert!`
     /// rewriting, so nested asserts don't collide.
     assert_id: u32,
@@ -99,6 +103,7 @@ impl<'s> Parser<'s> {
             src,
             struct_literals: true,
             group_depth: 0,
+            pct_marker: false,
             assert_id: 0,
             depth: 0,
             quantities: HashMap::new(),
@@ -191,9 +196,13 @@ impl<'s> Parser<'s> {
     /// the block sits in -- `({ c = a\n-b })` would otherwise still parse as `c = a - b`.
     fn with_group_depth<T>(&mut self, depth: usize, body: impl FnOnce(&mut Self) -> T) -> T {
         let saved = self.group_depth;
+        let saved_pct = self.pct_marker;
         self.group_depth = depth;
+        // `(50%)` inside a `±` tolerance is postfix percent, not the marker.
+        self.pct_marker = false;
         let parsed = body(self);
         self.group_depth = saved;
+        self.pct_marker = saved_pct;
         parsed
     }
 
@@ -765,7 +774,7 @@ impl<'s> Parser<'s> {
 
     fn const_decl(&mut self) -> Const {
         self.bump(TokKind::Const);
-        let left = self.require_ident();
+        let left = self.pattern();
         let annotation = self.eat(TokKind::Colon).then(|| self.annotation());
         self.expect(TokKind::Equal);
         let right = self.expr();
@@ -1340,15 +1349,33 @@ impl<'s> Parser<'s> {
     fn binary(&mut self, min_power: u8) -> Expr {
         let start = self.next_start();
         let mut left = self.unary();
-        while let Some((op, power)) = BinaryOp::of(self.peek())
-            && power >= min_power
-            && self.infix_binds()
-        {
+        loop {
+            // A spaced `%` reaching here can only be old-style modulo — postfix `x%` hugs
+            // its operand and already folded in `chain_accesses`, and a `±` tolerance's
+            // `%` is claimed by `plus_minus`. Teach `mod` and keep parsing as if written.
+            if self.at(TokKind::Percent) && !self.pct_marker && self.infix_binds() {
+                self.error_here(Misdirection {
+                    src: self.src(),
+                    at: self.next_location().into(),
+                    msg: "modulo is `a mod b` now — `%` spells percent, as in `50%`".into(),
+                    label: "write `mod` here".into(),
+                });
+                self.advance();
+                let right = self.binary(8);
+                left = self.op_expr(BinaryOp::Eval(EvaluationOp::Modulo), left, right, start);
+                continue;
+            }
+            let Some((op, power)) = BinaryOp::of(self.peek()) else {
+                break;
+            };
+            if power < min_power || !self.infix_binds() {
+                break;
+            }
             self.advance();
             let right = if matches!(op, BinaryOp::PlusMinus) {
                 // `±`'s tolerance parses like a normal right side except a `%`
                 // there is the literal's percent marker, not `mod` -- `x ± 10%`
-                // is "give or take 10%", and `x ± (a % b)` keeps infix `mod`.
+                // is "give or take 10%", and `x ± (a mod b)` keeps infix `mod`.
                 self.plus_minus_rhs()
             } else {
                 self.binary(power + 1)
@@ -1375,10 +1402,11 @@ impl<'s> Parser<'s> {
     }
 
     /// The `d` in `x ± d` binds at the multiplicative level, with one exception: a `%` at its
-    /// top level is the literal's percent marker (`x ± 10%`), not `mod` -- write `x ± (a % b)`
-    /// for a `mod` inside the tolerance.
+    /// top level is the literal's percent marker (`x ± 10%`), not `mod` -- write
+    /// `x ± (a mod b)` for a `mod` inside the tolerance.
     fn plus_minus_rhs(&mut self) -> Expr {
         let start = self.next_start();
+        let saved_pct = std::mem::replace(&mut self.pct_marker, true);
         let mut left = self.unary();
         while let Some((op, power)) = BinaryOp::of(self.peek())
             && power >= 7
@@ -1389,6 +1417,7 @@ impl<'s> Parser<'s> {
             let right = self.binary(power + 1);
             left = self.op_expr(op, left, right, start);
         }
+        self.pct_marker = saved_pct;
         left
     }
 
@@ -2092,6 +2121,18 @@ impl<'s> Parser<'s> {
                 }
                 TokKind::Bang => self.unwrap(expr),
                 TokKind::Hook => self.demote(expr),
+                // `x%` hugs its operand and spells percent -- `50%` is `50 * 0.01`, the
+                // `pct` unit by another name. A spaced `%` is neither postfix nor modulo
+                // (`a mod b`); `binary` reports it. While a `±` tolerance parses the
+                // marker claim takes precedence (`x ± 10%`).
+                TokKind::Percent
+                    if !self.pct_marker && self.cursor() == self.next_start() =>
+                {
+                    let at = expr.span().start();
+                    self.advance();
+                    let scale = self.new_expr(Literal::Float(0.01), at);
+                    self.new_expr(Evaluation::new(expr, EvaluationOp::Multiply, scale), at)
+                }
                 _ => break expr,
             }
         }

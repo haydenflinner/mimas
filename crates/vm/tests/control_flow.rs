@@ -309,7 +309,7 @@ test_vm!(
     continue_in_for,
     "let count = 0;
      for x in [1, 2, 3, 4, 5] {
-        if x % 2 == 0 { continue; }
+        if x mod 2 == 0 { continue; }
         count += 1;
      }",
     "count" => Int(3),

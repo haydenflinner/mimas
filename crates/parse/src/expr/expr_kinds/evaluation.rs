@@ -31,7 +31,7 @@ op!(
         Slash => Divide,
         Star => Multiply,
         TildeSlash => Div,
-        Percent => Modulo,
+        Ident("mod") => Modulo,
         Ampersand => And,
         Pipe => Or,
         Caret => Xor,

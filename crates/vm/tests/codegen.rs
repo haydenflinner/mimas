@@ -72,12 +72,12 @@ test_vm!(
 
         let junk = 0;
         for i in 1000 {
-            if i % 2 == 0 {
+            if i mod 2 == 0 {
                 junk += i;
-            } else if i % 3 == 0 {
+            } else if i mod 3 == 0 {
                 junk -= i;
             } else {
-                junk = match i % 5 {
+                junk = match i mod 5 {
                     0 => junk + 1,
                     1 => junk - 1,
                     _ => junk,
@@ -104,7 +104,7 @@ test_vm!(
 
         let junk = 0;
         for i in 50 {
-            if i % 2 == 0 { junk += i; } else { junk -= i; }
+            if i mod 2 == 0 { junk += i; } else { junk -= i; }
         }
         while junk > 0 { junk -= 1; }
         junk + 7777

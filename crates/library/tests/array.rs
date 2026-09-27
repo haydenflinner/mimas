@@ -668,14 +668,14 @@ test_run!(
 
 test_run!(
     filter_basic,
-    "[1, 2, 3, 4].filter(|x| x % 2 == 0)" => "[2, 4]",
+    "[1, 2, 3, 4].filter(|x| x mod 2 == 0)" => "[2, 4]",
     r#"["", "a", ""].filter(|s| s != "")"# => r#"["a"]"#,
 );
 
 test_run!(
     filter_nothing_matches,
     "let e: [int] = [];
-     let none = [1, 3, 5].filter(|x| x % 2 == 0);",
+     let none = [1, 3, 5].filter(|x| x mod 2 == 0);",
     "none" => "[]",
     "e.filter(|x| true)" => "[]",
 );
@@ -751,11 +751,11 @@ test_fail!(
 // zero is a checked arithmetic error, it must not be swallowed
 test_fail!(
     map_callback_fault_propagates,
-    "let _ = [1, 2].map(|x| x % 0);"
+    "let _ = [1, 2].map(|x| x mod 0);"
 );
 test_fail!(
     fold_callback_fault_propagates,
-    "let _ = [1].fold(0, |acc, x| x % 0);"
+    "let _ = [1].fold(0, |acc, x| x mod 0);"
 );
 
 // solve-time rejections: wrong arity / non-fn arg / non-bool predicate all fail
@@ -822,7 +822,7 @@ test_run!(
 
 test_run!(
     flat_map_shrinks_and_grows,
-    "[1, 2, 3].flat_map(|x| if x % 2 == 0 { [x] } else { [] })" => "[2]",
+    "[1, 2, 3].flat_map(|x| if x mod 2 == 0 { [x] } else { [] })" => "[2]",
     r#"[1, 2].flat_map(|x| ["a", "b"])"# => r#"["a", "b", "a", "b"]"#,
 );
 

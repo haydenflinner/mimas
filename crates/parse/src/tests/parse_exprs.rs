@@ -643,7 +643,7 @@ expr_test!(
 
 expr_test!(
     modulo,
-    "1 % 1",
+    "1 mod 1",
     Evaluation::new(int!(1), EvaluationOp::Modulo, int!(1))
 );
 
@@ -1888,11 +1888,35 @@ fn plus_minus_tolerance_may_be_complex() {
     assert_eq!(parse_expr("x ± -d"), "Interval::within(x * 1, -d * 1)");
     // a `%` in the tolerance is the literal's percent marker, so `mod` needs parens
     assert_eq!(
-        parse_expr("x ± (a % b)"),
-        "Interval::within(x * 1, (a % b) * 1)"
+        parse_expr("x ± (a mod b)"),
+        "Interval::within(x * 1, (a mod b) * 1)"
     );
     assert_eq!(
-        parse_expr("x ± (a % b)%"),
-        "Interval::pm(x * 1, (a % b) * 0.01)"
+        parse_expr("x ± (a mod b)%"),
+        "Interval::pm(x * 1, (a mod b) * 0.01)"
     );
+}
+
+// `x%` hugs its operand and spells percent — `50%` is `50 * 0.01`. A spaced `%`
+// isn't postfix or modulo — `binary` reports it and parses on as `mod`.
+#[test]
+fn percent_postfix() {
+    assert_eq!(parse_expr("50%"), "50 * 0.01");
+    assert_eq!(parse_expr("rate%"), "rate * 0.01");
+    assert_eq!(parse_expr("f(50%)"), "f(50 * 0.01)");
+    assert_eq!(parse_expr("10%.abs()"), "10 * 0.01.abs()");
+    // inside a `±` tolerance's parens, `%` is postfix again
+    assert_eq!(
+        parse_expr("x ± (50%)"),
+        "Interval::within(x * 1, (50 * 0.01) * 1)"
+    );
+}
+
+#[test]
+fn spaced_percent_is_old_modulo() {
+    let lexer = crate::lex::Lexer::new("a % b", 0, "test".into());
+    let mut parser = crate::Parser::new(lexer);
+    let expr = parser.expr();
+    assert_eq!(expr.to_string(), "a mod b");
+    assert_eq!(parser.errors().len(), 1);
 }

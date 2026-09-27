@@ -24,8 +24,8 @@ test_fail!(
     div_mod_by_zero_faults,
     "print(5 ~/ 0);",
     "let d = 0; print(5 ~/ d);",
-    "print(5 % 0);",
-    "let d = 0; print(7 % d);"
+    "print(5 mod 0);",
+    "let d = 0; print(7 mod d);"
 );
 
 // array index out of bounds

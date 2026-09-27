@@ -242,6 +242,60 @@ test_fail!(
 );
 test_fail!(const_redeclared, "const A = 0; const A = 1;");
 test_fail!(const_references_local, "let a = 0; const B = a;");
+test_ty!(
+    const_tuple_destructure,
+    "const (A, B) = (1, 2);",
+    "A" => Int,
+    "B" => Int,
+);
+test_ty!(
+    const_tuple_destructure_mixed,
+    r#"const (S, N, F) = ("hi", 42, 1.5);"#,
+    "S" => Str,
+    "N" => Int,
+    "F" => Float,
+);
+test_ty!(
+    const_tuple_destructure_nested,
+    "const ((A, B), C) = ((1, 2), 3);",
+    "A" => Int,
+    "B" => Int,
+    "C" => Int,
+);
+test_ty!(
+    const_destructure_of_const,
+    "const T = (1, 2);
+     const (A, B) = T;",
+    "A" => Int,
+    "B" => Int,
+);
+test_ty!(
+    const_destructure_composed,
+    "const X = 1;
+     const (A, B) = (X + 1, X + 2);",
+    "A" => Int,
+    "B" => Int,
+);
+test_ty!(
+    const_destructure_visible_in_fn,
+    "const (A, B) = (1, 2);
+     fn sum() -> int { A + B }",
+    "sum()" => Int,
+);
+test_ty!(
+    const_destructure_block_scoped,
+    "fn f() -> int { const (A, B) = (3, 4); A * B }",
+    "f()" => Int,
+);
+test_fail!(const_destructure_missing_member, "const (A, B, C) = (1, 2);");
+test_fail!(const_destructure_extra_member, "const (A) = (1, 2);");
+test_fail!(const_destructure_non_tuple, "const (A, B) = 5;");
+test_fail!(
+    const_destructure_non_const_rhs,
+    "fn f() -> int { 1 } const (A, B) = (f(), 2);"
+);
+test_fail!(const_destructure_literal_pat, "const 1 = 1;");
+test_fail!(const_destructure_redundant_name, "const (A, A) = (1, 2);");
 test_fail!(
     const_cycle,
     "const A: int = B; const B: int = A;",
@@ -419,7 +473,7 @@ test_fail!(
 
 test_fail!(
     const_min_div_rem_overflow_ices,
-    "const A: int = (-9223372036854775807 - 1) % -1;",
+    "const A: int = (-9223372036854775807 - 1) mod -1;",
     "const B: int = (-9223372036854775807 - 1) ~/ -1;"
 );
 

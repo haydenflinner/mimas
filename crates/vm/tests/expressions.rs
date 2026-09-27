@@ -116,7 +116,7 @@ test_vm!(
     "0 - 1" => Int(-1),
     "0 * 2" => Int(0),
     "5 ~/ 2" => Int(2),
-    "5 % 2" => Int(1),
+    "5 mod 2" => Int(1),
     "-5 + 3" => Int(-2),
     "5 + -3" => Int(2),
     "-1.0 + 2.0" => Float(1.0),
@@ -169,15 +169,15 @@ test_vm!(
     "r > 1.0e9 || r == r" => Bool(true),
 );
 
-// `%` sign follows the lhs
+// `mod` sign follows the lhs
 test_vm!(
     mod_sign_follows_lhs,
-    "5 % 2" => Int(1),
-    "-5 % 3" => Int(-2),
-    "5 % -3" => Int(2),
-    "-5 % -3" => Int(-2),
-    "-5.0 % 3.0" => Float(-2.0),
-    "5.0 % -3.0" => Float(2.0),
+    "5 mod 2" => Int(1),
+    "-5 mod 3" => Int(-2),
+    "5 mod -3" => Int(2),
+    "-5 mod -3" => Int(-2),
+    "-5.0 mod 3.0" => Float(-2.0),
+    "5.0 mod -3.0" => Float(2.0),
 );
 
 test_vm!(
@@ -188,13 +188,13 @@ test_vm!(
     "(0.5, 5.0) * (2.0, 4.0)" => array!(Float(1.0), Float(20.0)),
     "(2.0, 3.0) / (2.0, 0.5)" => array!(Float(1.0), Float(6.0)),
     "(5.0, 5.0) ~/ (2.0, 3.0)" => array!(Float(2.0), Float(1.0)),
-    "(5, 5) % (2, 3)" => array!(Int(1), Int(2)),
+    "(5, 5) mod (2, 3)" => array!(Int(1), Int(2)),
     "(0, 0) + (1, 2)" => array!(Int(1), Int(2)),
     "(5, 4) - (1, 2)" => array!(Int(4), Int(2)),
     "(0, 1) * (2, 5)" => array!(Int(0), Int(5)),
     "(2, 4) / (2, 1)" => array!(Float(1.0), Float(4.0)),
     "(5, 10) ~/ (2, 2)" => array!(Int(2), Int(5)),
-    "(5, 10) % (2, 1)" => array!(Int(1), Int(0)),
+    "(5, 10) mod (2, 1)" => array!(Int(1), Int(0)),
     "(10, 10) * 2" => array!(Int(20), Int(20)),
     "(10, 10) / 2" => array!(Float(5.0), Float(5.0)),
 );
