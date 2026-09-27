@@ -86,14 +86,17 @@ whole rule suite runs natively under `cargo test` — all 15 pass.
   corners may not emit yet.
 - `game::*` calls compile to headless stubs, so native output can't host
   the interactive canvas — it exists for servers, tests, and search.
-- Regeneration is currently manual (`cargo run -p literate-eval --example
-  rustgen -- in.mim out.rs`); `build.rs` integration is on the TODO list.
+- meridian regenerates at build time — `host/meridian-gen/build.rs` reruns
+  the transpile whenever `meridian.mimas` changes, so the engine can never
+  go stale. Ad-hoc regen for other sources: `cargo run -p rustgen
+  --example rustgen -- in.mim out.rs`.
 
 ## Reproduce
 
 ```bash
 cd host
 cargo run -p literate-eval --features gen --release --example bench   # timings
-cargo run -p literate-eval --features gen --release --example fuzz -- 128 120
-cargo test -p literate-eval --features gen                            # where checks
+cargo run -p meridian-gen --release --example fuzz -- 128 120         # VM-vs-native diff
+cargo test -p meridian-gen                                            # where checks
+cargo run -p meridian-gen --release --bin theory                      # native /suggest (:8737)
 ```
