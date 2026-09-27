@@ -334,6 +334,20 @@ test_run_display!(
 );
 
 test_run_display!(
+    take_is_head_under_the_domain_name,
+    EMPLOYEES,
+    r#"df.take(2)"# => r#"shape: (2, 3)
+┌───────┬─────┬───────┐
+│ name  ┆ age ┆ dept  │
+│ ---   ┆ --- ┆ ---   │
+│ str   ┆ i64 ┆ str   │
+╞═══════╪═════╪═══════╡
+│ Alice ┆ 34  ┆ eng   │
+│ Bob   ┆ 29  ┆ sales │
+└───────┴─────┴───────┘"#,
+);
+
+test_run_display!(
     rename_relabels_a_column,
     EMPLOYEES,
     r#"df.rename("dept", "team")!.head(1)"# => r#"shape: (1, 3)

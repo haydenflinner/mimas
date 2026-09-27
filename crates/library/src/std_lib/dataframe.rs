@@ -63,6 +63,7 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
         m.add(drop_nulls);
         m.add(head);
         m.add(tail);
+        m.add(take);
         m.add(slice);
         m.add(rename);
         m.add(col_names);
@@ -87,6 +88,7 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add_method(drop_nulls);
     api.add_method(head);
     api.add_method(tail);
+    api.add_method(take);
     api.add_method(slice);
     api.add_method(rename);
     api.add_method(col_names);
@@ -319,6 +321,13 @@ fn head<'gc>(ctx: Ctx<'gc>, df: vm::DataFrame<'gc>, n: i64) -> vm::DataFrame<'gc
 #[native]
 fn tail<'gc>(ctx: Ctx<'gc>, df: vm::DataFrame<'gc>, n: i64) -> vm::DataFrame<'gc> {
     ctx.new_dataframe(df.0.borrow().0.tail(Some(n.max(0) as usize)))
+}
+
+/// `df.take(n)` — the first n rows, same as `head` under the name the
+/// domain uses ("take the podium" reads better than "head the podium").
+#[native]
+fn take<'gc>(ctx: Ctx<'gc>, df: vm::DataFrame<'gc>, n: i64) -> vm::DataFrame<'gc> {
+    ctx.new_dataframe(df.0.borrow().0.head(Some(n.max(0) as usize)))
 }
 
 #[native]
