@@ -33,13 +33,15 @@ for i in 3 {
 ```
 
 ````admonish tip title="Need the index?"
-Call `.enumerate()` on an array to pair each element with its position:
+Call `.enumerate()` on an array to pair each element with its position. The binding is a pattern, so a tuple binding pulls the pair apart in place:
 
 ```mimas
-for pair in ["a", "b"].enumerate() {
-    print(pair); // [0, a], then [1, b]
+for (i, v) in ["a", "b"].enumerate() {
+    print(f"{i}: {v}"); // 0: a, then 1: b
 }
 ```
+
+The same works on anything iterating pairs, like a dict's `(key, value)` items: `for (k, v) in dict`.
 ````
 
 Tuples are intentionally *not* iterable: each position can hold a different type, so a single loop binding would have no consistent type. Reach into a tuple by index instead (`t.0`, `t.1`). See [Tuples](../collections/tuples.md).

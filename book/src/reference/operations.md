@@ -99,3 +99,14 @@ a |= 1;
 a ^= 1;
 a ??= fallback; // assign only if `a` is currently null
 ```
+## Pipe
+
+`x |> f(a, b)` is `f(x, a, b)` — the piped value becomes the call's first argument. It's the loosest operator of all (`a + b |> f` is `f(a + b)`), and it's the one infix that may lead a line, so pipelines can sit one step per line:
+
+```mimas
+let result = samples
+    |> arrange(["rider", "clock"], [false, false])!
+    |> select_names(["rider", "laptime"])!;
+```
+
+The callee is a *call*, not a method lookup on the piped value: `x |> f(a)` resolves `f` as a free function, and `x |> obj.f(a)` is `obj.f(x, a)`. Method-only names (`xs.push(0)` mutates through `&mut self`) can't be reached this way — that's what `.` is for. The `std::polars` verbs are registered as both methods and module functions so `df |> filter(..)!` and `df.filter(..)!` both work.

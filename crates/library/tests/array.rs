@@ -195,6 +195,16 @@ test_run!(
     "e[1].1" => r#""b""#,
 );
 
+// `for` takes a pattern, so `(i, v)` destructures each pair in place
+test_run!(
+    enumerate_destructures_in_for,
+    "let seen = [];
+     for (i, v) in [10, 20, 30].enumerate() {
+         seen.push(i * 100 + v);
+     }",
+    "seen" => "[10, 120, 230]",
+);
+
 test_run!(
     flatten_nested_ints,
     "let a = [[1, 2], [3], [4, 5]];

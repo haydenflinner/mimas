@@ -2,6 +2,67 @@
 
 Memorable additions to mimas beyond what the changelog tracks — newest first.
 
+## `|>` — why the pipe operator is worth keeping
+
+The TODO asked the honest question: nobody who doesn't write pipelines uses it, so what
+does `|>` offer over `.`? Here is what it actually does, where it earns its keep, and
+where `.` is the right tool instead.
+
+**What it lowers to.** `|>` is pure sugar at parse time — there is no `ExprKind` for it.
+`x |> f(a, b)` becomes the plain call `f(x, a, b)`; `x |> f` becomes `f(x)`. The piped
+value is inserted as the *first argument of a free call*, which is the entire semantics.
+It is also the loosest operator in the grammar (`a + b |> f` is `f(a + b)`), and it is
+the one infix exempt from the newline cutoff, because a line can't start with `|>` —
+that is what makes the vertical, one-verb-per-line style parse:
+
+```mimas
+samples
+|> arrange(["rider", "clock"], [false, false])!
+|> mutate([when(col("rider") == col("rider").shift(1),
+               col("clock").diff(1),
+               col("clock") - lit(START)).alias("laptime")])!
+|> select_names(["rider", "laptime"])!
+```
+
+Two subtleties worth knowing: `x |> f(1)!.g(2)` puts `x` into the *first* call of the
+postfix chain (`f(x, 1)!.g(2)`, not `(f(1)!.g)(x, 2)`), so `!` unwraps per-step inside a
+pipeline. And `x |> n.f(1)` pipes into `n.f(x, 1)` — the callee can be any expression
+that calls, not just a bare ident.
+
+**What it buys over `.`.** `.` is member access: `x.f(a)` only resolves when `f` is a
+method on `x`'s type (or a field). `|>` doesn't dispatch at all — `x |> f(a)` calls the
+*free function* `f(x, a)`. So `|>` is the only way to put a value through functions that
+aren't, and can't be, methods:
+
+- functions on types you don't own — you can't `impl` methods onto builtin `[T]`, `str`,
+  or a `DataFrame` type declared by a library;
+- ordinary `fn`s written without thinking about receivers — `x |> clean(2)` for any
+  `fn clean(x, k)`;
+- the `std::polars` verbs, which are deliberately registered *both* as methods and as
+  module functions (see `dataframe.rs::install`) precisely so `df |> filter(..)!` and
+  `df.filter(..)!` both resolve — the pipeline style for data transforms was the original
+  motivation (tidy/PRQL, commit `8767a67`).
+
+The secondary benefit is visual: a pipeline lines its steps up vertically and reads as a
+recipe, and `|>` being loosest means `expr |> f` grabs the whole expression to its left —
+usually what you want.
+
+**When `.` is better.** Almost everywhere else. `.` is how you read fields, index, and
+call *methods* — including the mutating ones: `xs.push(0)` takes `&mut self`, and
+`xs |> push(0)` desugars to a *call* `push(xs, 0)`, which doesn't resolve because `push`
+isn't a free function. `|>` passes the value by first-argument position; it cannot reach
+`&mut self` receivers. If a name is only a method, it won't resolve under `|>` — that is
+the main footgun, and the reason polars verbs are dual-registered.
+
+**Verdict: keep.** The `.` operator covers methods; `|>` covers the one thing `.` can't —
+threading a value through free functions in reading order — and it costs almost nothing:
+a desugar in `Parser::binary`/`pipe` (~50 lines), no new AST, no runtime, no type-system
+surface. Nothing about it is mandatory; code that never pipelines never sees it. The cost
+it does impose is a second spelling for call chains (`x.f()` vs `x |> f()` when `f` is
+dual-registered), and the resolution surprise when a method-only name doesn't exist as a
+free function. Both are documented above; the upside is that the tidy surface reads like
+tidy, which was the point.
+
 ## Units across the native boundary — `param_dims` / `return_dim` on native signatures
 
 Natives used to be `Any` at the boundary: `music::play_for(t, n, amp, 0.5s, 1200Hz)`
