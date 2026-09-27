@@ -1,10 +1,9 @@
 # TODO
 
-- **rustgen: real `game::*`/`host::*` bindings for generated code** — today the
-  emitted Rust links `game::*` calls to headless stubs (`mrt`), so native
-  output can't host the interactive canvas. If the eval host can ship
-  generated Rust to the browser (wasm target calling the same drawing
-  primitives `literate-eval::game` registers for the VM), pages could run at
-  transpiled speed (~17× on meridian-class code) with no VM in the loop.
-  Scope `host/web/src/evalworker.ts` first — the win is real but the plumbing
-  is unknown.
+- **rustgen: widen the native-wasm engine beyond meridian** — `host/meridian-wasm`
+  + `host/web/src/nativehost.ts` now run meridian on transpiled wasm answering
+  the same `gameFrameAt` contract (docs/features.md). Remaining: register more
+  pages (tictactoe/brickbreaker are differential-green already; the NATIVE map
+  is one line each once each has a `-gen` crate), `use "img"`-style seeded-page
+  splicing for pong/asteroids, `host::*` natives, and heap snapshots for
+  replay seeks (native sessions refeed instead).
