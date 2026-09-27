@@ -58,6 +58,12 @@ pub enum Commands {
         /// callee references replaced by the callee's content hash.
         #[clap(long)]
         scoped: bool,
+
+        /// Print each fn's dependency edges beneath it — the `@dep:` reloc
+        /// sites (written name → callee content hash) and `@self` recursion
+        /// points, in canonical order. Implies scoped hashes.
+        #[clap(long)]
+        deps: bool,
     },
     /// Builds but does not run
     Build {

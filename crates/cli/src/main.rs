@@ -30,7 +30,7 @@ fn main() {
             input.dump_ir,
             input.time,
         ),
-        Some(Commands::Hash { path, scoped }) => hash(path, scoped),
+        Some(Commands::Hash { path, scoped, deps }) => hash(path, scoped || deps, deps),
         Some(Commands::Run { path, script_args }) => build(
             path,
             script_args,
@@ -91,7 +91,9 @@ fn check(path: Option<PathBuf>, color: bool) -> i32 {
 /// `.mim` under a directory) and print `fn <name>  L<line>  <blake3>` per item.
 /// `--scoped` prints the scoped hash instead — alpha-renamed locals, dep-hash
 /// callee references — a different hash namespace than the token-level one.
-fn hash(path: Option<PathBuf>, scoped: bool) -> i32 {
+/// `--deps` additionally indents each item's relocation sites beneath it:
+/// `-> <name>  <dep hash>` per `@dep:` edge, `-> @self` for recursion.
+fn hash(path: Option<PathBuf>, scoped: bool, deps: bool) -> i32 {
     let path = resolve_path(path);
     let (paths, io_errors) = if path.is_file() {
         (vec![path], vec![])
@@ -129,6 +131,18 @@ fn hash(path: Option<PathBuf>, scoped: bool) -> i32 {
                 item.line(&source),
                 digest
             );
+            if deps && let Some(globals) = &globals {
+                for reloc in item.relocs(globals).unwrap_or_default() {
+                    match reloc {
+                        hash::Reloc::Dep { name, hash, .. } => {
+                            println!("{prefix}  -> {name}  {hash}");
+                        }
+                        hash::Reloc::SelfRef { .. } => {
+                            println!("{prefix}  -> @self");
+                        }
+                    }
+                }
+            }
             n_items += 1;
         }
     }

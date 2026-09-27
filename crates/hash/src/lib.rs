@@ -16,10 +16,18 @@
 //! post-solve form: locals alpha-rename positionally, same-source callee
 //! references substitute the callee's content hash, recursion marks `@self`.
 //! Neither substitutes for the other — pick per call site.
+//!
+//! Link-by-hash (roadmap 4) starts from [`deps`] — an item's ordered
+//! `@dep:`/`@self` relocation sites — and [`manifest`], the per-page
+//! `{ name → (hash, token_hash, [deps]) }` table a hash-addressed loader
+//! consumes.
 
 mod scoped;
 
-pub use scoped::{Globals, canonical_scoped, dep_table, hash_scoped, scoped_hashes};
+pub use scoped::{
+    Globals, Manifest, Reloc, canonical_scoped, dep_table, deps, hash_scoped, manifest,
+    scoped_hashes,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Item {
@@ -87,6 +95,13 @@ impl Item {
     /// falling back to [`Item::hash`] when the source doesn't parse.
     pub fn scoped_hash(&self, globals: &Globals) -> String {
         hash_scoped(&self.source, globals)
+    }
+
+    /// The item's relocation sites — every `@dep:`/`@self` marker its
+    /// scoped canonical form carries, in order. `None` under the same gate
+    /// as [`Self::scoped_canonical`].
+    pub fn relocs(&self, globals: &Globals) -> Option<Vec<Reloc>> {
+        deps(&self.source, globals)
     }
 
     /// Inclusive-exclusive char offsets of this item in `source`.

@@ -128,6 +128,80 @@ pub fn dep_table(items: &[Item]) -> HashMap<String, String> {
         .collect()
 }
 
+/// A relocation site in the scoped canonical form — one `@dep:` or `@self`
+/// marker a link-by-hash loader must patch. Sites collect in traversal
+/// order, which is source order: the same order the markers appear in the
+/// canonical text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reloc {
+    /// A `@dep:<hash>` site — the identifier `name` (byte span `start..end`
+    /// in the item source) was substituted by the callee's pass-1 content
+    /// hash.
+    Dep {
+        name: String,
+        hash: String,
+        start: usize,
+        end: usize,
+    },
+    /// A `@self` site — a recursive reference to the item being hashed.
+    /// Links to the item's own address once it stores by hash.
+    SelfRef { name: String, start: usize, end: usize },
+}
+
+impl Reloc {
+    /// The dep-edge target hash — `Some` at `@dep:` sites, `None` at
+    /// `@self`.
+    pub fn hash(&self) -> Option<&str> {
+        match self {
+            Reloc::Dep { hash, .. } => Some(hash),
+            Reloc::SelfRef { .. } => None,
+        }
+    }
+
+    /// The name the programmer wrote at this site.
+    pub fn name(&self) -> &str {
+        match self {
+            Reloc::Dep { name, .. } | Reloc::SelfRef { name, .. } => name,
+        }
+    }
+
+    /// The byte span of the substituted identifier in the item source.
+    pub fn span(&self) -> (usize, usize) {
+        match self {
+            Reloc::Dep { start, end, .. } | Reloc::SelfRef { start, end, .. } => (*start, *end),
+        }
+    }
+}
+
+/// One entry of a page's link-by-hash manifest: an item's address plus the
+/// ordered reloc sites a loader patches when it instantiates the blob.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Manifest {
+    /// The item's written name (a label, not an address — renames don't
+    /// move `hash`).
+    pub name: String,
+    /// The item's scoped content hash — the address it stores under.
+    pub hash: String,
+    /// The item's pass-1 (token-level) hash. Dep edges target *this*, not
+    /// `hash` — `@dep:` markers substitute pass-1 hashes so cycles need no
+    /// fixed point — so a loader resolves an edge by finding the entry
+    /// whose `token_hash` matches, then loads `hash`.
+    pub token_hash: String,
+    /// Every `@dep:`/`@self` site, in canonical order. Empty when the
+    /// item's source can't be scope-parsed (`hash` then carries the
+    /// token-level fallback, same as [`hash_scoped`]).
+    pub relocs: Vec<Reloc>,
+}
+
+impl Manifest {
+    /// The dep-edge target hashes (`@dep:` sites only), in order,
+    /// duplicates kept per site. Each target equals the *`token_hash`* of
+    /// the entry it links to — see [`Manifest::token_hash`].
+    pub fn dep_hashes(&self) -> impl Iterator<Item = &str> {
+        self.relocs.iter().filter_map(Reloc::hash)
+    }
+}
+
 /// Substitution map + scope stack for one item's AST walk.
 struct Scoped<'s> {
     source: &'s str,
@@ -136,6 +210,8 @@ struct Scoped<'s> {
     /// `(start, end)` byte span → replacement token text. Keyed on Location:
     /// NodeIds are a process-global counter and can't key anything stable.
     subs: HashMap<(usize, usize), String>,
+    /// The `@dep:`/`@self` sites, in the order the walk records them.
+    relocs: Vec<Reloc>,
     /// Inside member names, `::` paths, struct-literal/pattern paths: every
     /// ident stays literal.
     keep_names: bool,
@@ -148,6 +224,7 @@ impl<'s> Scoped<'s> {
             scopes: vec![],
             next: 0,
             subs: HashMap::new(),
+            relocs: Vec::new(),
             keep_names: false,
         }
     }
@@ -160,15 +237,18 @@ impl<'s> Scoped<'s> {
     /// source there actually reads this name. The parser synthesizes idents
     /// at borrowed spans (`__q_*` calls, `±` lowering); trusting a span
     /// without checking its text would corrupt whatever token sits there.
-    fn record(&mut self, ident: &Ident, text: String) {
+    /// Returns whether a substitution was recorded — reloc sites list only
+    /// spans that truly carry a marker in the canonical form.
+    fn record(&mut self, ident: &Ident, text: String) -> bool {
         let span = ident.location.span;
         if span.is_synthetic() {
-            return;
+            return false;
         }
         if self.source.get(span.start..span.end) != Some(ident.lexeme.as_str()) {
-            return;
+            return false;
         }
         self.subs.insert((span.start, span.end), text);
+        true
     }
 
     /// A binding site: assign the next alpha position, record `@v{n}` at the
@@ -205,10 +285,28 @@ impl<'s> Scoped<'s> {
                 self.record(ident, text);
             }
             Some(Slot::Dep(hash)) => {
+                let hash = hash.clone();
                 let text = format!("@dep:{hash}");
-                self.record(ident, text);
+                if self.record(ident, text) {
+                    let span = ident.location.span;
+                    self.relocs.push(Reloc::Dep {
+                        name: ident.lexeme.clone(),
+                        hash,
+                        start: span.start,
+                        end: span.end,
+                    });
+                }
             }
-            Some(Slot::OwnItem) => self.record(ident, "@self".to_string()),
+            Some(Slot::OwnItem) => {
+                if self.record(ident, "@self".to_string()) {
+                    let span = ident.location.span;
+                    self.relocs.push(Reloc::SelfRef {
+                        name: ident.lexeme.clone(),
+                        start: span.start,
+                        end: span.end,
+                    });
+                }
+            }
             // Type params aren't values; Keep/imports and unbound names stay.
             Some(Slot::Type(_)) | Some(Slot::Keep) | None => {}
         }
@@ -575,15 +673,11 @@ impl<'s> Scoped<'s> {
     }
 }
 
-/// The scoped canonical form of one fn item's source: same layout as
-/// [`crate::canonical`] (trivia dropped, tokens space-joined, own name
-/// erased) plus `@v{n}` locals, `@dep:<hash>` same-source fn refs and
-/// `@self` recursion. `None` when the source doesn't parse or holds no fn.
-///
-/// `globals` names what the body's free identifiers resolve to — see
-/// [`Globals::for_source`]. Callers hashing a whole page want
-/// [`scoped_hashes`] instead.
-pub fn canonical_scoped(item_source: &str, globals: &Globals) -> Option<String> {
+/// The scope walk over one fn item's source: push the globals frame (with
+/// the item's own name bound to `OwnItem`) and walk the fn body, recording
+/// substitutions and reloc sites. `None` when the source doesn't parse or
+/// holds no fn — the same gate [`canonical_scoped`] applies.
+fn scoped_pass<'s>(item_source: &'s str, globals: &Globals) -> Option<Scoped<'s>> {
     let ast = Parser::new(Lexer::new(item_source, 0, "scoped".into()))
         .try_into_ast()
         .ok()?;
@@ -603,8 +697,13 @@ pub fn canonical_scoped(item_source: &str, globals: &Globals) -> Option<String> 
     frame.insert(function.name.lexeme.clone(), Slot::OwnItem);
     st.scopes.push(frame);
     st.function(function);
+    Some(st)
+}
 
-    // Re-lex and swap every recorded ident for its canonical token.
+/// Re-lex the item and swap every recorded ident for its canonical token —
+/// the emitting half of [`canonical_scoped`]. `None` on any invalid token
+/// or lexer error.
+fn render_scoped(item_source: &str, st: &Scoped) -> Option<String> {
     let mut out = String::new();
     let mut lexer = Lexer::new(item_source, 0, "scoped".into());
     let mut name_erased = false;
@@ -643,6 +742,67 @@ pub fn canonical_scoped(item_source: &str, globals: &Globals) -> Option<String> 
         return None;
     }
     Some(out)
+}
+
+/// The scoped canonical form of one fn item's source: same layout as
+/// [`crate::canonical`] (trivia dropped, tokens space-joined, own name
+/// erased) plus `@v{n}` locals, `@dep:<hash>` same-source fn refs and
+/// `@self` recursion. `None` when the source doesn't parse or holds no fn.
+///
+/// `globals` names what the body's free identifiers resolve to — see
+/// [`Globals::for_source`]. Callers hashing a whole page want
+/// [`scoped_hashes`] instead.
+pub fn canonical_scoped(item_source: &str, globals: &Globals) -> Option<String> {
+    let st = scoped_pass(item_source, globals)?;
+    render_scoped(item_source, &st)
+}
+
+/// The relocation sites of one fn item's source — every `@dep:`/`@self`
+/// marker the scoped canonical form carries, in the order they appear in
+/// it. This *is* the linking table: a link-by-hash loader reads this list
+/// to patch callee references, and [`Manifest::dep_hashes`] derives the
+/// edge set from it. `None` under the same gate as [`canonical_scoped`]
+/// (source doesn't parse or holds no fn).
+pub fn deps(item_source: &str, globals: &Globals) -> Option<Vec<Reloc>> {
+    scoped_pass(item_source, globals).map(|st| st.relocs)
+}
+
+/// The link-by-hash manifest of a whole page: for every extracted fn, in
+/// extraction order, its scoped content hash, its token hash and its
+/// ordered reloc sites — `{ name → (hash, [deps]) }` plus the edge-target
+/// key. One [`Globals`] build covers all items, so inter-fn edges resolve
+/// regardless of declaration order. Items whose source can't be
+/// scope-parsed keep their token-level fallback hash (the same one
+/// [`hash_scoped`] reports) and an empty reloc list.
+pub fn manifest(source: &str) -> Vec<Manifest> {
+    let items = extract(source);
+    let globals = Globals::for_source(source);
+    items
+        .iter()
+        .map(|item| {
+            let token_hash = item.hash();
+            let (hash, relocs) = match scoped_pass(&item.source, &globals) {
+                Some(st) => {
+                    // Same hash `hash_scoped` would report: blake3 of the
+                    // rendered canonical form, token-hash fallback otherwise.
+                    let hash = match render_scoped(&item.source, &st) {
+                        Some(canonical) => {
+                            blake3::hash(canonical.as_bytes()).to_hex().to_string()
+                        }
+                        None => token_hash.clone(),
+                    };
+                    (hash, st.relocs)
+                }
+                None => (token_hash.clone(), Vec::new()),
+            };
+            Manifest {
+                name: item.name.clone(),
+                hash,
+                token_hash,
+                relocs,
+            }
+        })
+        .collect()
 }
 
 /// blake3 of the scoped canonical form. Falls back to [`hash_item`] when
@@ -959,5 +1119,164 @@ mod tests {
             seen.insert(scoped_hashes(src));
         }
         assert_eq!(seen.len(), 1);
+    }
+
+    /// `deps` is the linking table: every `@dep:` site in canonical (source)
+    /// order, carrying the written name and the callee's pass-1 hash.
+    #[test]
+    fn deps_lists_sites_in_order() {
+        let src = "fn a() -> int { 1 }\nfn b() -> int { 2 }\nfn f() -> int { a() + b() + a() }\n";
+        let items = extract(src);
+        let globals = Globals::for_source(src);
+        let f = items.iter().find(|i| i.name == "f").unwrap();
+        let relocs = f.relocs(&globals).unwrap();
+        let want_a = items[0].hash();
+        let want_b = items[1].hash();
+        assert_eq!(
+            relocs
+                .iter()
+                .map(|r| (r.name(), r.hash()))
+                .collect::<Vec<_>>(),
+            vec![("a", Some(want_a.as_str())), ("b", Some(want_b.as_str())), ("a", Some(want_a.as_str()))]
+        );
+        // The site's span is the substituted ident's span in the item source.
+        for reloc in &relocs {
+            let (lo, hi) = reloc.span();
+            assert_eq!(&f.source[lo..hi], reloc.name());
+        }
+        // The same sites, as markers, appear in the canonical form.
+        let canon = f.scoped_canonical(&globals).unwrap();
+        assert_eq!(canon.matches("@dep:").count(), 3, "{canon}");
+        // `deps()` on the item slice agrees with the free function.
+        assert_eq!(deps(&f.source, &globals), Some(relocs));
+    }
+
+    /// Recursion records `@self` sites — a reloc with no dep hash.
+    #[test]
+    fn deps_marks_self_recursion() {
+        let src = "fn f(n: int) -> int { if n <= 0 { 0 } else { f(n - 1) } }\n";
+        let items = extract(src);
+        let globals = Globals::for_source(src);
+        let relocs = items[0].relocs(&globals).unwrap();
+        assert_eq!(relocs.len(), 1);
+        assert!(matches!(&relocs[0], Reloc::SelfRef { name, .. } if name == "f"));
+        assert_eq!(relocs[0].hash(), None);
+        let (lo, hi) = relocs[0].span();
+        assert_eq!(&items[0].source[lo..hi], "f");
+        // Mutual recursion records one dep edge per cross reference.
+        let cyc = "fn a(n: int) -> int { b(n) }\nfn b(n: int) -> int { a(n) }\n";
+        let items = extract(cyc);
+        let globals = Globals::for_source(cyc);
+        let a = items.iter().find(|i| i.name == "a").unwrap();
+        let b = items.iter().find(|i| i.name == "b").unwrap();
+        assert_eq!(
+            a.relocs(&globals).unwrap(),
+            vec![Reloc::Dep {
+                name: "b".into(),
+                hash: b.hash(),
+                start: a.source.find("b(n)").unwrap(),
+                end: a.source.find("b(n)").unwrap() + 1,
+            }]
+        );
+        assert_eq!(b.relocs(&globals).unwrap()[0].hash(), Some(a.hash().as_str()));
+    }
+
+    /// Calls that resolve to locals or `use`d names are not reloc sites —
+    /// only same-source fn references and self-references are.
+    #[test]
+    fn deps_skips_shadowed_and_foreign_names() {
+        let src = "fn f() -> int { 1 }\nfn g() -> int { let f = 0; f() }\n";
+        let items = extract(src);
+        let globals = Globals::for_source(src);
+        let g = items.iter().find(|i| i.name == "g").unwrap();
+        assert_eq!(g.relocs(&globals).unwrap(), vec![]);
+        // `let f = f` binds the dep on the right, then shadows the name:
+        // exactly one site — the RHS.
+        let rhs = "fn f() -> int { 1 }\nfn g() -> int { let f = f; f() }\n";
+        let items = extract(rhs);
+        let globals = Globals::for_source(rhs);
+        let g = items.iter().find(|i| i.name == "g").unwrap();
+        let relocs = g.relocs(&globals).unwrap();
+        assert_eq!(relocs.len(), 1, "{relocs:?}");
+        let (lo, hi) = relocs[0].span();
+        assert_eq!(&g.source[lo..hi], "f");
+        assert!(lo < g.source.find("; f()").unwrap());
+        // Unparseable source: `None`, same gate as `canonical_scoped`.
+        assert!(deps("fn f( { let", &globals).is_none());
+        assert!(deps("let x = 1;", &Globals::empty()).is_none());
+    }
+
+    /// `manifest` is the page-level form: names and hashes match
+    /// `scoped_hashes`, and each entry's reloc sites come from `deps`.
+    #[test]
+    fn manifest_pairs_hashes_with_dep_edges() {
+        let src = "fn square(n: int) -> int { n * n }\nfn twice(n: int) -> int { square(n) + square(n) }\nfn leaf() -> int { 0 }\n";
+        let manifest = manifest(src);
+        let hashes = scoped_hashes(src);
+        assert_eq!(manifest.len(), 3);
+        for (entry, (name, hash)) in manifest.iter().zip(&hashes) {
+            assert_eq!(&entry.name, name);
+            assert_eq!(&entry.hash, hash);
+        }
+        let twice = &manifest[1];
+        // Dep edges carry the callee's pass-1 (token-level) hash — the same
+        // value `dep_table` reports — not its scoped hash. Each entry also
+        // publishes that token hash, so an edge target resolves to the
+        // entry whose `token_hash` matches: the manifest is self-contained.
+        let callee_token_hash = extract(src)[0].hash();
+        assert_eq!(manifest[0].token_hash, callee_token_hash);
+        assert_eq!(
+            twice.dep_hashes().collect::<Vec<_>>(),
+            vec![callee_token_hash.as_str(), callee_token_hash.as_str()]
+        );
+        for target in twice.dep_hashes() {
+            let entry = manifest.iter().find(|m| m.token_hash == target);
+            assert_eq!(entry.map(|m| m.name.as_str()), Some("square"));
+        }
+        assert!(manifest[0].relocs.is_empty());
+        assert!(manifest[2].relocs.is_empty());
+        // Extraction order is preserved — the manifest is positional.
+        assert_eq!(
+            manifest.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
+            vec!["square", "twice", "leaf"]
+        );
+    }
+
+    /// The manifest is rename-stable: renaming a callee (and its call
+    /// sites) leaves every entry's hash and every dep edge untouched —
+    /// the property link-by-hash exists for.
+    #[test]
+    fn manifest_is_rename_stable() {
+        let a = "fn square(n: int) -> int { n * n }\nfn twice(n: int) -> int { square(n) }\n";
+        let b = "fn sq(n: int) -> int { n * n }\nfn twice(n: int) -> int { sq(n) }\n";
+        let ma = manifest(a);
+        let mb = manifest(b);
+        assert_eq!(ma[0].hash, mb[0].hash);
+        assert_eq!(ma[1].hash, mb[1].hash);
+        assert_eq!(
+            ma[1].dep_hashes().collect::<Vec<_>>(),
+            mb[1].dep_hashes().collect::<Vec<_>>()
+        );
+        // … while editing the callee's body moves the edge target.
+        let c = "fn square(n: int) -> int { n * n + 1 }\nfn twice(n: int) -> int { square(n) }\n";
+        let mc = manifest(c);
+        assert_ne!(ma[1].dep_hashes().collect::<Vec<_>>(), mc[1].dep_hashes().collect::<Vec<_>>());
+        assert_ne!(ma[1].hash, mc[1].hash);
+    }
+
+    /// Dep edges can point at idents inside f-string interpolation — the
+    /// site records the inner ident's span even though the outer token is
+    /// one lexer unit.
+    #[test]
+    fn deps_inside_fstrings() {
+        let src = "fn who() -> str { \"world\" }\nfn greet() -> str { f\"hi {who()}\" }\n";
+        let items = extract(src);
+        let globals = Globals::for_source(src);
+        let greet = items.iter().find(|i| i.name == "greet").unwrap();
+        let relocs = greet.relocs(&globals).unwrap();
+        assert_eq!(relocs.len(), 1);
+        let (lo, hi) = relocs[0].span();
+        assert_eq!(&greet.source[lo..hi], "who");
+        assert!(greet.scoped_canonical(&globals).unwrap().contains("@dep:"));
     }
 }
