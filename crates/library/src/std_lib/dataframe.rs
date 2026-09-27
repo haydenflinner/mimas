@@ -1007,7 +1007,7 @@ fn jkind(v: &serde_json::Value) -> Option<JKind> {
 
 /// merge the cell kinds of one field into the dtype decision `from_json` documents:
 /// like kinds stay, int+float widens to float, anything else renders as text.
-fn merge_kinds<'a>(kinds: impl Iterator<Item = JKind>) -> Option<JKind> {
+fn merge_kinds(kinds: impl Iterator<Item = JKind>) -> Option<JKind> {
     kinds.fold(None, |acc, k| match (acc, k) {
         (None, k) => Some(k),
         (Some(JKind::Int), JKind::Float) | (Some(JKind::Float), JKind::Int) => Some(JKind::Float),

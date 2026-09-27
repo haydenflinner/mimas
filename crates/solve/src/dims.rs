@@ -441,19 +441,20 @@ impl<'a> Pass<'a> {
             ExprKind::Equality(eq) => {
                 let l = self.expr(&eq.left);
                 let r = self.expr(&eq.right);
-                if !Self::is_zero(&eq.left) && !Self::is_zero(&eq.right) {
-                    if let Some((a, b)) = clash(&l, &r) {
-                        let verb = match eq.op {
-                            EqualityOp::Equal | EqualityOp::NotEqual => "compare",
-                            _ => "order",
-                        };
-                        self.fail(
-                            e.location(),
-                            format!("cannot {verb} {} and {}", Self::describe(&a), Self::describe(&b)),
-                            format!("{} against {}", Self::describe(&a), Self::describe(&b)),
-                            "quantities are only comparable in the same dimension; convert one side with `.to(unit)`",
-                        );
-                    }
+                if !Self::is_zero(&eq.left)
+                    && !Self::is_zero(&eq.right)
+                    && let Some((a, b)) = clash(&l, &r)
+                {
+                    let verb = match eq.op {
+                        EqualityOp::Equal | EqualityOp::NotEqual => "compare",
+                        _ => "order",
+                    };
+                    self.fail(
+                        e.location(),
+                        format!("cannot {verb} {} and {}", Self::describe(&a), Self::describe(&b)),
+                        format!("{} against {}", Self::describe(&a), Self::describe(&b)),
+                        "quantities are only comparable in the same dimension; convert one side with `.to(unit)`",
+                    );
                 }
                 D::Any
             }
@@ -716,22 +717,21 @@ impl<'a> Pass<'a> {
                 let recv = self.expr(left);
                 // a field: look its declaration up by the receiver's struct
                 if let ExprKind::Ident(field) = right.kind() {
-                    if let D::Iv(d) = recv {
-                        if matches!(field.lexeme.as_str(), "lo" | "mid" | "hi") {
-                            return D::Q(d);
-                        }
+                    if let D::Iv(d) = recv
+                        && matches!(field.lexeme.as_str(), "lo" | "mid" | "hi")
+                    {
+                        return D::Q(d);
                     }
-                    if let Some(ty) = self.adt_name(left) {
-                        if let Some(decl) = self.structs.get(&ty).copied() {
-                            if let Some(f) = decl.fields.iter().find(
-                                |f| matches!(&f.name, FieldKey::Ident(i) if i.lexeme == field.lexeme),
-                            ) {
-                                return self.with_ty_params(
-                                    decl.type_params.iter().map(|i| i.lexeme.clone()).collect(),
-                                    |s| s.annotation(&f.annotation),
-                                );
-                            }
-                        }
+                    if let Some(ty) = self.adt_name(left)
+                        && let Some(decl) = self.structs.get(&ty).copied()
+                        && let Some(f) = decl.fields.iter().find(
+                            |f| matches!(&f.name, FieldKey::Ident(i) if i.lexeme == field.lexeme),
+                        )
+                    {
+                        return self.with_ty_params(
+                            decl.type_params.iter().map(|i| i.lexeme.clone()).collect(),
+                            |s| s.annotation(&f.annotation),
+                        );
                     }
                 }
                 D::Any
@@ -750,24 +750,23 @@ impl<'a> Pass<'a> {
 
     fn call(&mut self, e: &'a Expr, c: &'a parse::Call) -> D {
         // methods on a value: `x.abs()`, `list.push(v)`, or a user `impl` method
-        if let ExprKind::Access(Access::Dot { left, right, .. }) = c.left.kind() {
-            if let ExprKind::Ident(method) = right.kind() {
-                let recv = self.expr(left);
-                let args: Vec<D> = c.arguments.iter().map(|a| self.expr(&a.value)).collect();
-                if let Some(ty) = self.adt_name(left) {
-                    if let Some(f) = self
-                        .methods
-                        .get(&(ty.clone(), method.lexeme.clone()))
-                        .copied()
-                    {
-                        return self.apply(f, c, &args, true, Some(&ty));
-                    }
-                }
-                if let Some(d) = self.native_apply(c, &args) {
-                    return d;
-                }
-                return self.builtin(e, &method.lexeme, recv, c, &args);
+        if let ExprKind::Access(Access::Dot { left, right, .. }) = c.left.kind()
+            && let ExprKind::Ident(method) = right.kind()
+        {
+            let recv = self.expr(left);
+            let args: Vec<D> = c.arguments.iter().map(|a| self.expr(&a.value)).collect();
+            if let Some(ty) = self.adt_name(left)
+                && let Some(f) = self
+                    .methods
+                    .get(&(ty.clone(), method.lexeme.clone()))
+                    .copied()
+            {
+                return self.apply(f, c, &args, true, Some(&ty));
             }
+            if let Some(d) = self.native_apply(c, &args) {
+                return d;
+            }
+            return self.builtin(e, &method.lexeme, recv, c, &args);
         }
         // `Type::assoc(...)` or a module fn like `music::play_for(...)`
         if let ExprKind::Access(Access::DoubleColon { left, right }) = c.left.kind() {
@@ -833,7 +832,7 @@ impl<'a> Pass<'a> {
                 &format!("argument {} of `{name}`", i + 1),
             );
         }
-        Some(binding.sig.return_dim.map(D::Q).unwrap_or(D::Any))
+        Some(binding.sig.return_dim.map_or(D::Any, D::Q))
     }
 
     /// Check a call to a user function against its declared parameters; its declared return is
@@ -893,13 +892,23 @@ impl<'a> Pass<'a> {
         };
         for &i in &measured[1..] {
             if let Some(a) = args.get(i) {
-                self.expect(first, a, c.arguments[i].value.location(), &format!("`Interval::{name}` bounds need the same dimension"));
+                self.expect(
+                    first,
+                    a,
+                    c.arguments[i].value.location(),
+                    &format!("`Interval::{name}` bounds need the same dimension"),
+                );
             }
         }
-        if name == "pm" {
-            if let Some(rel) = args.get(1) {
-                self.expect(&PLAIN, rel, c.arguments[1].value.location(), "`Interval::pm` takes a plain fraction");
-            }
+        if name == "pm"
+            && let Some(rel) = args.get(1)
+        {
+            self.expect(
+                &PLAIN,
+                rel,
+                c.arguments[1].value.location(),
+                "`Interval::pm` takes a plain fraction",
+            );
         }
         match first {
             D::Q(d) => D::Iv(*d),
@@ -1059,10 +1068,10 @@ impl<'a> Pass<'a> {
 
 /// Where a function body's value comes from: its final expression, for pointing an error at it.
 fn tail_location(body: &Expr) -> Location {
-    if let ExprKind::Block(b) = body.kind() {
-        if let Some(y) = &b.yielded_expr {
-            return tail_location(y);
-        }
+    if let ExprKind::Block(b) = body.kind()
+        && let Some(y) = &b.yielded_expr
+    {
+        return tail_location(y);
     }
     body.location()
 }

@@ -50,8 +50,8 @@ pub struct Solver {
     pub(crate) frame_schemas: HashMap<NodeId, Rc<crate::frames::FrameSchema>>,
     pub(crate) frame_decs: HashMap<DecId, Rc<crate::frames::FrameSchema>>,
     /// `__q_group`/`group_by` results: `(input schema, key columns)` by expr/binding.
-    pub(crate) group_schemas: HashMap<NodeId, Rc<(Rc<crate::frames::FrameSchema>, Vec<String>)>>,
-    pub(crate) group_decs: HashMap<DecId, Rc<(Rc<crate::frames::FrameSchema>, Vec<String>)>>,
+    pub(crate) group_schemas: HashMap<NodeId, crate::frames::GroupInfo>,
+    pub(crate) group_decs: HashMap<DecId, crate::frames::GroupInfo>,
     /// Unit dims of `25kW`-style literals, merged from every solved ast (`NodeId`s are
     /// globally unique, so one map is collision-free).
     pub(crate) ast_quantities: HashMap<NodeId, shared::units::Dim>,
@@ -734,6 +734,7 @@ impl Solver {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn declare_native_fn(
         &mut self,
         name: String,

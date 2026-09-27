@@ -63,6 +63,9 @@ pub(crate) struct FrameSchema {
     pub closed: bool,
 }
 
+/// A `group_by` result's provenance: the input schema plus its key columns.
+pub(crate) type GroupInfo = Rc<(Rc<FrameSchema>, Vec<String>)>;
+
 impl FrameSchema {
     fn empty() -> Self {
         Self {
@@ -302,7 +305,7 @@ impl Solver {
     }
 
     /// A `"lit"` string argument at `call.arguments[n]`.
-    fn str_arg<'c>(call: &'c Call, n: usize) -> Option<&'c str> {
+    fn str_arg(call: &Call, n: usize) -> Option<&str> {
         match call.arguments.get(n).map(|a| a.value.kind()) {
             Some(ExprKind::Literal(Literal::String(s))) => Some(s.as_str()),
             _ => None,
@@ -310,7 +313,7 @@ impl Solver {
     }
 
     /// A `["a","b"]` string-array argument (the `q_str_list` the parser emits for verb keys).
-    fn str_list_arg<'c>(call: &'c Call, n: usize) -> Option<Vec<&'c str>> {
+    fn str_list_arg(call: &Call, n: usize) -> Option<Vec<&str>> {
         match call.arguments.get(n).map(|a| a.value.kind()) {
             Some(ExprKind::Literal(Literal::Array(items))) => items
                 .iter()
@@ -1359,7 +1362,7 @@ impl Solver {
         }
         let mut cols = a.cols.clone();
         for (name, col) in &b.cols {
-            if keys.iter().any(|k| *k == name.as_str()) {
+            if keys.contains(&name.as_str()) {
                 continue;
             }
             // polars suffixes a duplicated non-key column with `_right`

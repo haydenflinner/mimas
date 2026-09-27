@@ -666,8 +666,7 @@ impl<'s> Parser<'s> {
             .get(span.start()..span.end())
             .map(str::trim)
             .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| expr.to_string())
+            .map_or_else(|| expr.to_string(), str::to_string)
     }
 
     fn use_decl(&mut self) -> Option<Use> {
@@ -2010,8 +2009,7 @@ impl<'s> Parser<'s> {
                     return c
                         .arguments
                         .first()
-                        .map(|a| a.value.clone())
-                        .unwrap_or_else(|| e.clone());
+                        .map_or_else(|| e.clone(), |a| a.value.clone());
                 }
                 let args: Vec<Expr> = c.arguments.iter().map(|a| self.q_lower(&a.value)).collect();
                 match c.left.as_ident().map(|i| i.lexeme.as_str()) {

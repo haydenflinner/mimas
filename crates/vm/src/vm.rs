@@ -699,7 +699,7 @@ fn run_dispatch<'gc>(
                     }
                 };
                 if let Err(kind) = enter_call(thread, code, chunks, body, dst, &args, captures) {
-                    return Err(locate(kind, op_ip, thread, chunks, sources)).map_err(Error::msg)?;
+                    Err(Error::msg(locate(kind, op_ip, thread, chunks, sources)))?;
                 }
                 (regs_ptr, regs_len) = window(thread, chunks);
             }
@@ -857,9 +857,9 @@ fn step_one<'gc>(
             let v = match receiver {
                 Val::Instance(i) => i.0.borrow().fields[slot],
                 Val::Array(a) => a.0.borrow()[slot],
-                Val::Null => return Err(RtErr::UnwrappedNull.into()),
+                Val::Null => return Err(RtErr::UnwrappedNull),
                 other => {
-                    return Err(RtErr::Custom(format!("no fields on {:?}", other.capture())).into());
+                    return Err(RtErr::Custom(format!("no fields on {:?}", other.capture())));
                 }
             };
             wr!(regs, dst, v);
@@ -873,9 +873,9 @@ fn step_one<'gc>(
             match receiver {
                 Val::Instance(i) => i.0.borrow_mut(&ctx).fields[slot] = value,
                 Val::Array(a) => a.0.borrow_mut(&ctx)[slot] = value,
-                Val::Null => return Err(RtErr::UnwrappedNull.into()),
+                Val::Null => return Err(RtErr::UnwrappedNull),
                 other => {
-                    return Err(RtErr::Custom(format!("no fields on {:?}", other.capture())).into());
+                    return Err(RtErr::Custom(format!("no fields on {:?}", other.capture())));
                 }
             }
         }
@@ -897,7 +897,10 @@ fn step_one<'gc>(
                 // `null.len()` (a missing cell read as a string, say) is a runtime error, not a
                 // VM abort
                 other => {
-                    return Err(RtErr::Custom(format!("len: {:?} has no length", other.capture())).into());
+                    return Err(RtErr::Custom(format!(
+                        "len: {:?} has no length",
+                        other.capture()
+                    )));
                 }
             };
             wr!(regs, dst, Val::Int(len as i64));

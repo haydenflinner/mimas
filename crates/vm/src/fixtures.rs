@@ -88,11 +88,13 @@ impl DebugInfo {
     }
 }
 
+pub type OutSink = Box<dyn FnMut(&str)>;
+
 /// Where `print`/`dbg` and friends send their lines. The default sink is
 /// the process's stdout; an embedder (a repl, the wasm eval worker) swaps
 /// in a capture with [`Out::set`] and drains it after the run. Each call
 /// gets one line's text — the trailing newline is the sink's business.
-pub struct Out(pub RefCell<Box<dyn FnMut(&str)>>);
+pub struct Out(pub RefCell<OutSink>);
 
 impl Default for Out {
     fn default() -> Self {

@@ -35,17 +35,17 @@ fn write_mixed_fixture(path: &std::path::Path) {
     }
     ws.write_string(1, 0, "a").unwrap();
     ws.write_boolean(1, 1, true).unwrap();
-    ws.write_datetime_with_format(1, 2, &ExcelDateTime::from_ymd(2024, 3, 15).unwrap(), &date)
+    ws.write_datetime_with_format(1, 2, ExcelDateTime::from_ymd(2024, 3, 15).unwrap(), &date)
         .unwrap();
     ws.write_string(1, 3, "x").unwrap();
     ws.write_string(2, 0, "b").unwrap();
     ws.write_boolean(2, 1, false).unwrap();
-    ws.write_datetime_with_format(2, 2, &ExcelDateTime::from_ymd(2024, 3, 16).unwrap(), &date)
+    ws.write_datetime_with_format(2, 2, ExcelDateTime::from_ymd(2024, 3, 16).unwrap(), &date)
         .unwrap();
     ws.write_number(2, 3, 7.0).unwrap();
     ws.write_string(3, 0, "c").unwrap();
     ws.write_boolean(3, 1, true).unwrap();
-    ws.write_datetime_with_format(3, 2, &ExcelDateTime::from_ymd(2024, 3, 17).unwrap(), &date)
+    ws.write_datetime_with_format(3, 2, ExcelDateTime::from_ymd(2024, 3, 17).unwrap(), &date)
         .unwrap();
     // note[3] deliberately unwritten -- an Empty cell
     workbook.save(path).unwrap();

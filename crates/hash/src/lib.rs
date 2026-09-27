@@ -280,12 +280,13 @@ fn extract_braces(source: &str) -> Vec<Item> {
         if depth == 0 && skip_where_block(source, &mut i) {
             continue;
         }
-        if depth == 0 && is_fn_start(source, i) {
-            if let Some(item) = parse_fn(source, i) {
-                i = item.end;
-                items.push(item);
-                continue;
-            }
+        if depth == 0
+            && is_fn_start(source, i)
+            && let Some(item) = parse_fn(source, i)
+        {
+            i = item.end;
+            items.push(item);
+            continue;
         }
         i += 1;
     }
@@ -339,7 +340,7 @@ fn is_fn_start(source: &str, i: usize) -> bool {
         || source[..i]
             .chars()
             .next_back()
-            .map_or(true, |c| c.is_whitespace());
+            .is_none_or(|c| c.is_whitespace());
     let after = rest.get(2..).and_then(|s| s.chars().next());
     before_ok && after.is_some_and(|c| c.is_whitespace() || c == '_')
 }
@@ -430,8 +431,8 @@ fn skip_comment(source: &str, i: &mut usize) -> bool {
         }
         return true;
     }
-    if rest.starts_with("/*") {
-        if let Some(end) = rest[2..].find("*/") {
+    if let Some(block) = rest.strip_prefix("/*") {
+        if let Some(end) = block.find("*/") {
             *i += 2 + end + 2;
         } else {
             *i = source.len();

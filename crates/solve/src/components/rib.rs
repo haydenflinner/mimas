@@ -181,7 +181,7 @@ impl Ribs {
 
     /// The rib declarations land in right now.
     pub(crate) fn current_kind(&self) -> RibKind {
-        self.inner.last().map(|rib| rib.kind).unwrap_or(RibKind::Block)
+        self.inner.last().map_or(RibKind::Block, |rib| rib.kind)
     }
 }
 

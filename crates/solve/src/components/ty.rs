@@ -177,7 +177,7 @@ impl TyExt for Ty {
                     // only allowed when every argument is a unit (`Interval<kW>`), not a type
                     let all_units = args.iter().all(|a| match a {
                         Annotation::Ty(ident) => {
-                            solver.ribs.resolve(&ident).is_none()
+                            solver.ribs.resolve(ident).is_none()
                                 && shared::units::lookup(&ident.lexeme).is_some()
                         }
                         Annotation::Quantity(_) => true,

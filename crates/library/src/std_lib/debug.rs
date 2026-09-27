@@ -31,7 +31,7 @@ fn caller_loc(ctx: Ctx<'_>, skip: i64) -> Option<(FileId, usize)> {
         return None;
     }
     let loc = locs[i - 1].1;
-    Some((loc.file_id, loc.span.start as usize))
+    Some((loc.file_id, loc.span.start))
 }
 
 /// The 1-based source line of the call site `skip` frames up: `dbg::caller_line(0)` inside a
