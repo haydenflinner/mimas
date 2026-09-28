@@ -718,14 +718,42 @@ fn spaced_caret_is_old_xor() {
     assert_eq!(parser.errors().len(), 1);
 }
 
-// `2^10` was almost surely meant as a power — the diagnostic points at
-// `.pow`, and recovery still parses the `^` as xor.
+// `lit ^ lit` reads as a power — both sides are const, so the fold
+// happens at desugar and no error fires.
+expr_test!(
+    caret_folds_lit_pow,
+    "2^10",
+    Literal::Int(1024)
+);
+expr_test!(
+    caret_folds_float_pow,
+    "2.0 ^ 0.5",
+    Literal::Float(std::f64::consts::SQRT_2)
+);
+expr_test!(
+    caret_folds_neg_exp,
+    "2^-1",
+    Literal::Float(0.5)
+);
+expr_test!(
+    caret_folds_overflow_to_float,
+    "2^63",
+    Literal::Float(9.223372036854776e18)
+);
+// `-2^2` reads as `-(2^2)` per math convention; the parenthesized
+// `(-2)^2` squares the negative.
+expr_test!(caret_neg_base_hoists, "-2^2", Literal::Int(-4));
+expr_test!(caret_paren_neg_base, "(-2)^2", Literal::Int(4));
+expr_test!(caret_paren_neg_cube, "(-2)^3", Literal::Int(-8));
+
+// With a non-literal side the `^` still reads as the retired xor — the
+// diagnostic points at `.pow`, and recovery parses on as xor.
 #[test]
 fn caret_after_number_suggests_pow() {
-    let lexer = crate::lex::Lexer::new("2^10", 0, "test".into());
+    let lexer = crate::lex::Lexer::new("2 ^ x", 0, "test".into());
     let mut parser = crate::Parser::new(lexer);
     let expr = parser.expr();
-    assert_eq!(expr.to_string(), "2 ⊕ 10");
+    assert_eq!(expr.to_string(), "2 ⊕ x");
     assert_eq!(parser.errors().len(), 1);
     assert!(parser.errors()[0].to_string().contains("pow"));
 }

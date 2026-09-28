@@ -148,7 +148,7 @@ impl TyExt for Ty {
             // a unit written where a type goes (`kW`, `usd`) is a float whose dimension the
             // checker tracks -- unless the program declares a type by that name, which wins
             Annotation::Ty(ident)
-                if solver.ribs.resolve(&ident).is_none()
+                if !names_a_type(solver, &ident)
                     && shared::units::lookup(&ident.lexeme).is_some() =>
             {
                 Ok(Ty::Float)
@@ -177,7 +177,7 @@ impl TyExt for Ty {
                     // only allowed when every argument is a unit (`Interval<kW>`), not a type
                     let all_units = args.iter().all(|a| match a {
                         Annotation::Ty(ident) => {
-                            solver.ribs.resolve(ident).is_none()
+                            !names_a_type(solver, ident)
                                 && shared::units::lookup(&ident.lexeme).is_some()
                         }
                         Annotation::Quantity(_) => true,
@@ -393,4 +393,18 @@ pub(crate) fn ty_from_kw(kw: TyKw) -> Ty {
         TyKw::Str => Ty::Str,
         TyKw::Bool => Ty::Bool,
     }
+}
+
+/// Does `ident` name a *type* in scope -- a struct/enum/pact (imported or declared), so
+/// `x: S` means that type -- rather than a value binding like a `fn` or `let`? Units and
+/// type params are checked separately; this is what decides whether `-> inch` reads as
+/// the unit or `fn inch` leaks its `Ty::Fn` into annotation position.
+fn names_a_type(solver: &Solver, ident: &parse::Ident) -> bool {
+    let Some(dec) = solver.ribs.resolve(ident) else {
+        return false;
+    };
+    matches!(
+        Ty::Vid(solver.decs[dec].vid).normalized(solver),
+        Ty::Adt(..) | Ty::Identity(..) | Ty::Pacts(_)
+    )
 }

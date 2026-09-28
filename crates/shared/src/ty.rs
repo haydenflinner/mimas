@@ -75,8 +75,8 @@ pub enum Ty {
     /// successful compilation.
     Vid(Vid),
     /// A slot in a native signature that stands for one type, whichever it turns out to be at each
-    /// call. mimas has no generics, but native signatures still need to express things like "the
-    /// value pushed must match the array's element type." Scripts can't write these; the host
+    /// call. Native signatures can't declare [Ty::Param]s, but still need to express things like
+    /// "the value pushed must match the array's element type." Scripts can't write these; the host
     /// does, through `vm::anon`, whose `T`, `U`, `V`, and `W` are slots 0 through 3.
     ///
     /// ```rust,ignore

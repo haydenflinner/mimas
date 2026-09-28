@@ -24,7 +24,10 @@ mod std_lib {
     pub(crate) mod debug;
     pub(crate) mod fs;
     pub(crate) mod interval;
+    pub(crate) mod iso;
     pub(crate) mod math;
+    #[cfg(feature = "parquet")]
+    pub(crate) mod parquet;
     pub(crate) mod parse;
     pub(crate) mod process;
     pub(crate) mod sys;
@@ -52,11 +55,14 @@ pub fn std<'gc>(api: &mut Api<'_, 'gc>) {
     std_lib::dataframe::install(api);
     #[cfg(feature = "xlsx")]
     std_lib::xlsx::install(api);
+    #[cfg(feature = "parquet")]
+    std_lib::parquet::install(api);
     #[cfg(feature = "darkly")]
     std_lib::darkly::install(api);
     std_lib::debug::install(api);
     std_lib::fs::install(api);
     std_lib::interval::install(api);
+    std_lib::iso::install(api);
     std_lib::math::install(api);
     std_lib::parse::install(api);
     std_lib::process::install(api);

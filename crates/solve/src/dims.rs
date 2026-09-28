@@ -19,6 +19,7 @@
 
 use std::collections::HashMap;
 
+use itertools::Itertools;
 use miette::NamedSource;
 use parse::{
     Access, Ast, Expr, ExprKind, FStringPart, FieldKey, Function, Ident, Item, ItemKind, Literal,
@@ -33,6 +34,8 @@ use shared::{
     units::Dim,
 };
 use crate::components::TyExt;
+use indexmap::IndexMap;
+use parse::NodeId;
 
 use crate::{Result, Solver, components::DecId, errors::DimensionMismatch};
 
@@ -99,14 +102,22 @@ struct Pass<'a> {
     consts: HashMap<DecId, D>,
     /// The declared return of each function being walked.
     rets: Vec<D>,
+    /// Every expr's computed dimension — surfaces to `Resolutions::node_dims`
+    /// so tools can name a node's unit (`b.x + BALL` is `px`).
+    dims: IndexMap<NodeId, Dim>,
+    /// The dimension the surrounding context demanded of an expr (a call-arg
+    /// slot's declared param dim) — surfaces to `Resolutions::want_dims`. An
+    /// expr whose own dim is `Any` (`b.x` on a dimless `Vec2` field) can still
+    /// carry the unit its slot required.
+    want_dims: IndexMap<NodeId, Dim>,
     report: bool,
-    error: Option<miette::Report>,
+    errors: Vec<miette::Report>,
 }
 
-pub(crate) fn check(solver: &Solver, asts: &[&Ast]) -> Result<()> {
+pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> Result<()> {
     for ast in asts {
         let mut pass = Pass {
-            solver,
+            solver: &*solver,
             ast,
             structs: HashMap::new(),
             fns: HashMap::new(),
@@ -117,8 +128,10 @@ pub(crate) fn check(solver: &Solver, asts: &[&Ast]) -> Result<()> {
             env: HashMap::new(),
             consts: HashMap::new(),
             rets: Vec::new(),
+            dims: IndexMap::new(),
+            want_dims: IndexMap::new(),
             report: false,
-            error: None,
+            errors: Vec::new(),
         };
         pass.index(ast.stmts());
         // two quiet rounds settle constants that build on each other in any order, then the
@@ -129,9 +142,25 @@ pub(crate) fn check(solver: &Solver, asts: &[&Ast]) -> Result<()> {
         pass.report = true;
         pass.env.clear();
         pass.run(ast.stmts());
-        if let Some(e) = pass.error {
-            return Err(e);
+        match pass.errors.len() {
+            0 => {}
+            1 => return Err(pass.errors.pop().unwrap()),
+            // one report per problem is the useful thing; miette's `{:?}` keeps each
+            // diagnostic's snippet rendering intact inside the joined message
+            _ => {
+                let joined = pass
+                    .errors
+                    .iter()
+                    .map(|e| format!("{e:?}"))
+                    .join("\n\n");
+                return Err(miette::Report::msg(joined));
+            }
         }
+        let dims = std::mem::take(&mut pass.dims);
+        let want_dims = std::mem::take(&mut pass.want_dims);
+        drop(pass); // ends the `&*solver` borrow
+        solver.node_dims.extend(dims);
+        solver.want_dims.extend(want_dims);
     }
     Ok(())
 }
@@ -181,10 +210,10 @@ impl<'a> Pass<'a> {
     // ---- reporting
 
     fn fail(&mut self, at: Location, what: String, label: String, help: &str) {
-        if !self.report || self.error.is_some() {
+        if !self.report {
             return;
         }
-        self.error = Some(
+        self.errors.push(
             DimensionMismatch {
                 src: self.solver.src(at),
                 at: at.into(),
@@ -436,6 +465,17 @@ impl<'a> Pass<'a> {
     }
 
     fn expr(&mut self, e: &'a Expr) -> D {
+        let d = self.expr_dim(e);
+        // record dimensionless results too: a lookup miss means "dim unknown"
+        // (`b.x + BALL` joining an `Any` field), which is a different answer
+        // than "provably plain" for tools naming a node's unit
+        if let D::Q(dim) = d {
+            self.dims.insert(e.id(), dim);
+        }
+        d
+    }
+
+    fn expr_dim(&mut self, e: &'a Expr) -> D {
         match e.kind() {
             ExprKind::Literal(l) => self.literal(e, l),
             ExprKind::Ident(ident) => match self.dec_of(ident) {
@@ -744,16 +784,25 @@ impl<'a> Pass<'a> {
                     {
                         return D::Q(d);
                     }
-                    if let Some(ty) = self.adt_name(left)
-                        && let Some(decl) = self.structs.get(&ty).copied()
-                        && let Some(f) = decl.fields.iter().find(
-                            |f| matches!(&f.name, FieldKey::Ident(i) if i.lexeme == field.lexeme),
-                        )
-                    {
-                        return self.with_ty_params(
-                            decl.type_params.iter().map(|i| i.lexeme.clone()).collect(),
-                            |s| s.annotation(&f.annotation),
-                        );
+                    if let Some(ty) = self.adt_name(left) {
+                        if let Some(decl) = self.structs.get(&ty).copied()
+                            && let Some(f) = decl.fields.iter().find(
+                                |f| matches!(&f.name, FieldKey::Ident(i) if i.lexeme == field.lexeme),
+                            )
+                        {
+                            return self.with_ty_params(
+                                decl.type_params.iter().map(|i| i.lexeme.clone()).collect(),
+                                |s| s.annotation(&f.annotation),
+                            );
+                        }
+                        // host adts carry field dims on their api descriptor (`Input.dt` is `s`)
+                        if let Some(d) = self
+                            .solver
+                            .field_dims
+                            .get(&(ty, field.lexeme.clone()))
+                        {
+                            return D::Q(*d);
+                        }
                     }
                 }
                 D::Any
@@ -847,6 +896,9 @@ impl<'a> Pass<'a> {
         };
         for (i, (arg, got)) in c.arguments.iter().zip(args).enumerate() {
             let Some(Some(want)) = binding.sig.param_dims.get(i) else { continue };
+            if !want.is_none() {
+                self.want_dims.insert(arg.value.id(), *want);
+            }
             self.expect(
                 &D::Q(*want),
                 got,
@@ -888,6 +940,11 @@ impl<'a> Pass<'a> {
                 let Some(p) = param else { continue };
                 let Some(ann) = &p.annotation else { continue };
                 let want = s.annotation(ann);
+                if let Some(d) = want.dim()
+                    && !d.is_none()
+                {
+                    s.want_dims.insert(arg.value.id(), d);
+                }
                 let pname = p.left.as_ident().map_or("argument", |i| i.lexeme.as_str());
                 s.expect(
                     &want,

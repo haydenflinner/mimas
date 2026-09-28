@@ -21,7 +21,7 @@ macro_rules! glam_struct {
                         name: "@".to_string(),
                         doc: "",
                         fields: ApiVariantFields::Named(vec![
-                            $((stringify!($field).to_string(), Ty::Float)),+
+                            $((stringify!($field).to_string(), Ty::Float, None)),+
                         ]),
                     }],
                 }

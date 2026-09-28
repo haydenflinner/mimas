@@ -17,6 +17,15 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
 }
 
 #[native]
+/// Parses `text` as JSON and returns it as a `Value`. Raises if `text` isn't valid JSON, with a
+/// message giving the line and column of the problem.
+///
+/// ```mimas
+/// use std::parse;
+///
+/// let data = parse::from_json("{\"name\": \"ada\", \"hp\": 30}")!;
+/// let name = data.as_dict()!["name"]!.as_str()!; // "ada"
+/// ```
 fn from_json(v: &str) -> Raisable<Value> {
     serde_json::from_str::<serde_json::Value>(v)
         .map(Into::into)
@@ -24,6 +33,20 @@ fn from_json(v: &str) -> Raisable<Value> {
 }
 
 #[native]
+/// Returns `value` written as compact JSON, with no spaces or line breaks. Object keys are written
+/// in alphabetical order, and a whole number has no decimal point (`3.0` is written as `3`). A
+/// `NaN` or infinite number, which JSON can't represent, is written as `null`.
+///
+/// ```mimas
+/// use std::parse;
+/// use std::parse::Value;
+///
+/// let player = Value::Object(~{
+///     name = Value::String("ada"),
+///     level = Value::Number(3.0),
+/// });
+/// let text = parse::to_json(player)!; // "{\"level\":3,\"name\":\"ada\"}"
+/// ```
 fn to_json(v: Value) -> Raisable<String> {
     serde_json::to_string(&serde_json::Value::from(v)).into()
 }
@@ -40,6 +63,15 @@ enum Value {
 
 impl Value {
     #[native]
+    /// Returns the entries of an `Object`, or `null` for any other kind of value. The keys are in no
+    /// particular order.
+    ///
+    /// ```mimas
+    /// use std::parse;
+    ///
+    /// let data = parse::from_json("{\"hp\": 30}")!;
+    /// let hp = data.as_dict()!["hp"]!.as_float()!; // 30.0
+    /// ```
     fn as_dict(value: Value) -> Option<HashMap<String, Value>> {
         let Self::Object(dict) = value else {
             return None;
@@ -48,18 +80,43 @@ impl Value {
     }
 
     #[native]
+    /// Returns the elements of an `Array`, or `null` for any other kind of value.
+    ///
+    /// ```mimas
+    /// use std::parse;
+    ///
+    /// let list = parse::from_json("[1, 2, 3]")!;
+    /// let n = list.as_array()!.len(); // 3
+    /// ```
     fn as_array(value: Value) -> Option<Vec<Value>> {
         let Self::Array(arr) = value else { return None };
         Some(arr)
     }
 
     #[native]
+    /// Returns the text of a `String`, or `null` for any other kind of value.
+    ///
+    /// ```mimas
+    /// use std::parse;
+    ///
+    /// let a = parse::from_json("\"hi\"")!.as_str(); // "hi"
+    /// let b = parse::from_json("12")!.as_str();     // null
+    /// ```
     fn as_str(value: Value) -> Option<String> {
         let Self::String(s) = value else { return None };
         Some(s)
     }
 
     #[native]
+    /// Returns the number in a `Number`, or `null` for any other kind of value. Every JSON number
+    /// comes back as a `float`. Call `to_int` on the result when you need an `int`.
+    ///
+    /// ```mimas
+    /// use std::parse;
+    ///
+    /// let a = parse::from_json("12")!.as_float();           // 12.0
+    /// let b = parse::from_json("12")!.as_float()!.to_int(); // 12
+    /// ```
     fn as_float(value: Value) -> Option<f64> {
         let Self::Number(f) = value else { return None };
         Some(f)

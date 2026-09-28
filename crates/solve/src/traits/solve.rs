@@ -824,6 +824,12 @@ impl Solve for Call {
                 cursor = 1;
             }
 
+            // slot resolution + duplicate checks run in arg order first; the
+            // fulfill_ty pass below is reordered so closures check last -- their
+            // expected param types may hold still-unbound vids that a later
+            // positional arg pins down (`under(at(2), |x| x * 10, xs)` -- `xs`
+            // binds the lens's element vid before `|x|`'s body is checked).
+            let mut args_by_slot: Vec<(usize, &parse::Argument)> = Vec::new();
             for arg in &self.arguments {
                 let slot = match &arg.name {
                     None => {
@@ -854,7 +860,14 @@ impl Solve for Call {
                         name: name.lexeme.clone(),
                     })?
                 }
-                if let ExprKind::Closure(_) = arg.value.kind()
+                filled[slot] = true;
+                args_by_slot.push((slot, arg));
+            }
+            let (closures, rest): (Vec<_>, Vec<_>) = args_by_slot
+                .iter()
+                .partition(|(_, arg)| matches!(arg.value.kind(), ExprKind::Closure(_)));
+            for &(slot, arg) in rest.iter().chain(&closures) {
+                if matches!(arg.value.kind(), ExprKind::Closure(_))
                     && let Ty::Fn(header) = params[slot].ty.clone().normalized(solver)
                 {
                     solver
@@ -862,7 +875,6 @@ impl Solve for Call {
                         .insert(arg.value.id(), header.parameters);
                 }
                 arg.value.fulfill_ty(params[slot].ty.clone(), solver)?;
-                filled[slot] = true;
             }
             if params
                 .iter()
@@ -1107,6 +1119,39 @@ impl Solve for Equality {
             if has_ops(&lhs_n) || has_ops(&rhs_n) {
                 return Ok(Ty::Bool);
             }
+            // unresolved operands on a relational op (`r.x <= r.w` inside `Rect<T>`):
+            // anywhere the comparison could run both sides already agree, so a shared
+            // var settles to `bool` and a lone vid pins to the concrete operand's type
+            let mut lhs_n = lhs_n.clone();
+            let mut rhs_n = rhs_n.clone();
+            loop {
+                match (&lhs_n, &rhs_n) {
+                    (Ty::Vid(a), Ty::Vid(b)) if a == b => return Ok(Ty::Bool),
+                    (Ty::Param(a), Ty::Param(b)) if a == b => return Ok(Ty::Bool),
+                    (Ty::Vid(_), _) | (_, Ty::Vid(_)) => {
+                        let mut l = lhs_n.clone();
+                        let mut r = rhs_n.clone();
+                        if l.fulfill_ty(&mut r, solver).is_err() {
+                            break;
+                        }
+                        lhs_n = l.normalized(solver);
+                        rhs_n = r.normalized(solver);
+                    }
+                    _ => {
+                        return if (lhs_n.is_numeric() && rhs_n.is_numeric())
+                            || (lhs_n == Ty::Str && rhs_n == Ty::Str)
+                        {
+                            Ok(Ty::Bool)
+                        } else {
+                            Err(InvalidComparison {
+                                src: solver.src(location),
+                                at: location.into(),
+                            }
+                            .into())
+                        };
+                    }
+                }
+            }
         }
         match (&lhs, &rhs) {
             (Ty::Null, Ty::Option(_)) | (Ty::Option(_), Ty::Null) => Ok(()),
@@ -1201,12 +1246,63 @@ impl Solve for Evaluation {
 
         let lhs = self.left.query(solver)?;
         let rhs = self.right.query(solver)?;
-        let lhs_n = lhs.clone().normalized(solver);
-        let rhs_n = rhs.clone().normalized(solver);
+        let mut lhs_n = lhs.clone().normalized(solver);
+        let mut rhs_n = rhs.clone().normalized(solver);
         if let Some(ty) = plexpr_overload_ty(&lhs_n, &rhs_n, solver) {
             return Ok(ty);
         }
-        eval(self.op, &lhs, &rhs, location, solver)
+        // unresolved operands -- `r.x + r.w` on a `Rect<T>` receiver, or two params of an
+        // unannotated `fn` -- share one type wherever `op` could run, so unify them (or pin
+        // a lone vid to the concrete side) and answer that type. `/` never rides the
+        // operand var: `int / int` already widens to `float`. settling a vid can reveal a
+        // `Param` pair, so loop until no vid remains.
+        loop {
+            match (&lhs_n, &rhs_n) {
+                (Ty::Vid(a), Ty::Vid(b)) if a == b => {
+                    return Ok(match self.op {
+                        EvaluationOp::Divide => Ty::Float,
+                        _ => lhs_n,
+                    });
+                }
+                (Ty::Param(a), Ty::Param(b)) if a == b => {
+                    return Ok(match self.op {
+                        EvaluationOp::Divide => Ty::Float,
+                        _ => lhs_n,
+                    });
+                }
+                // `a.w * 0.5`-style scalar math: `int` keeps the param's slot (an `int`
+                // instantiation stays `int`, `float` stays `float`), while a `float`
+                // operand widens the answer the same way it widens `int`s
+                (Ty::Param(_), t) | (t, Ty::Param(_)) if t.is_numeric() => {
+                    return Ok(if self.op == EvaluationOp::Divide || *t == Ty::Float {
+                        Ty::Float
+                    } else if matches!(lhs_n, Ty::Param(_)) {
+                        lhs_n.clone()
+                    } else {
+                        rhs_n.clone()
+                    });
+                }
+                (Ty::Vid(_), Ty::Vid(_)) => {
+                    let mut l = lhs_n.clone();
+                    let mut r = rhs_n.clone();
+                    l.fulfill_ty(&mut r, solver)
+                        .map_err(|e| e.into_type_mismatch(solver, location))?;
+                    lhs_n = l.normalized(solver);
+                    rhs_n = r.normalized(solver);
+                }
+                (Ty::Vid(_), _) | (_, Ty::Vid(_)) => {
+                    let mut l = lhs_n.clone();
+                    let mut r = rhs_n.clone();
+                    if l.fulfill_ty(&mut r, solver).is_err() {
+                        break;
+                    }
+                    lhs_n = l.normalized(solver);
+                    rhs_n = r.normalized(solver);
+                }
+                _ => break,
+            }
+        }
+        eval(self.op, &lhs_n, &rhs_n, location, solver)
     }
 }
 

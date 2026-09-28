@@ -110,3 +110,63 @@ fn method_with_ctx_and_autoborrow() {
 fn assoc_const() {
     assert_eq!(run(r#"let TEST_VALUE = Player::MAX_HEALTH;"#), "100");
 }
+
+// `#[mimas]` items submit their declared parameter names through the `NativeMeta` inventory,
+// which install joins onto the record -- `param_names` is parallel to `parameters`, with the
+// receiver dropped for methods and the `Ctx` arg dropped for both shapes.
+#[test]
+fn param_names_come_from_the_signatures() {
+    use api::ApiEntry;
+    let library = vm::Vm::new().install_library(library::std);
+    // the test's `#[mimas] struct Player` registers methods/assoc fns on an adt whose id we
+    // read back off a known method rather than name-matching `adts()` (test modules in the
+    // same binary may register their own)
+    let damage = library
+        .natives()
+        .find_map(|(_, e)| match e {
+            ApiEntry::Method(m) if m.name == "damage" => Some(m.recv_ty.clone()),
+            _ => None,
+        })
+        .expect("damage registered");
+    let names_of = |pred: &dyn Fn(&ApiEntry<()>) -> Option<&Vec<String>>| -> Vec<String> {
+        library
+            .natives()
+            .find_map(|(_, e)| pred(e))
+            .cloned()
+            .expect("native was registered")
+    };
+    assert_eq!(
+        names_of(&|e| match e {
+            ApiEntry::Method(m) if m.name == "damage" && m.recv_ty == damage =>
+                Some(&m.param_names),
+            _ => None,
+        }),
+        ["amount"]
+    );
+    assert_eq!(
+        names_of(&|e| match e {
+            ApiEntry::Method(m) if m.name == "drain_into" && m.recv_ty == damage =>
+                Some(&m.param_names),
+            _ => None,
+        }),
+        ["sink"]
+    );
+    // assoc fns (`Player::new`) register as methods on the adt too, `takes_self: false`
+    assert_eq!(
+        names_of(&|e| match e {
+            ApiEntry::Method(m) if m.name == "new" && m.recv_ty == damage =>
+                Some(&m.param_names),
+            _ => None,
+        }),
+        ["name"]
+    );
+    // a `#[native]` std fn's names ride the same path
+    assert_eq!(
+        names_of(&|e| match e {
+            ApiEntry::Function(f) if f.name == "write" && f.module == ["std", "fs"] =>
+                Some(&f.param_names),
+            _ => None,
+        }),
+        ["path", "output"]
+    );
+}

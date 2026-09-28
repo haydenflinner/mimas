@@ -1,4 +1,4 @@
-use crate::{collect_doc, convert::expand_conversion, doc_submission, register::submission};
+use crate::{collect_doc, convert::expand_conversion, meta_submission, param_names, register::submission};
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::{
@@ -32,9 +32,20 @@ pub fn expand_impl(block: ItemImpl) -> Result<TokenStream2, syn::Error> {
     for item in &block.items {
         match item {
             ImplItem::Fn(method) => {
-                let (shim, muts, add) = method_shim(&self_ident, method)?;
-                let doc = doc_submission(&shim.sig.ident, &collect_doc(&method.attrs));
-                out.extend(quote!(#shim #doc #muts));
+                let (mut shim, muts, add) = method_shim(&self_ident, method)?;
+                // the shim is the registered fn, so it submits the method's meta -- inside its
+                // body, since `submit!` expands to an unnamed const (see `meta_submission`)
+                let meta = meta_submission(
+                    &shim.sig.ident,
+                    &param_names(&shim.sig),
+                    &collect_doc(&method.attrs),
+                );
+                if let Some(meta) = meta {
+                    shim.block.stmts.insert(0, meta);
+                }
+                let src =
+                    crate::src_submission(&shim.sig.ident, method.sig.ident.span());
+                out.extend(quote!(#shim #src #muts));
                 adds.extend(add);
             }
             ImplItem::Const(c) => {

@@ -15,6 +15,12 @@ use crate::{
 
 pub struct Resolutions {
     pub node_tys: IndexMap<NodeId, Ty>,
+    /// The unit dimension the dims pass computed for each expr —
+    /// `b.x + 2.0px` is `Float` in `node_tys` but `px` here.
+    pub node_dims: IndexMap<NodeId, shared::units::Dim>,
+    /// The unit dimension the expr's context demanded — `b.x + BALL` passed to a
+    /// `px` param is `Any` in `node_dims` but `px` here.
+    pub want_dims: IndexMap<NodeId, shared::units::Dim>,
     pub node_decs: IndexMap<NodeId, DecId>,
     pub decs: IdVec<DecId, ResolvedDecl>,
     pub adts: IdVec<AdtId, ResolvedAdt>,
@@ -128,6 +134,8 @@ pub enum ResolvedDeclKind {
         defaults: Vec<Option<Literal>>,
         native: Option<NativeId>,
         takes_self: bool,
+        /// Def site of the registered Rust fn for natives (`None` for user-defined items).
+        src: Option<api::NativeSrc>,
     },
     Constant(Literal),
     Variant {
@@ -278,6 +286,7 @@ impl From<Solver> for Resolutions {
                         Some(binding) => binding.takes_self,
                         None => matches!(&ty, Ty::Fn(header) if header.is_method),
                     },
+                    src: solver.dec_to_native.get(&id).and_then(|b| b.src),
                 },
                 DecKind::Constant(Some(lit)) => ResolvedDeclKind::Constant(lit),
                 DecKind::Constant(None) => panic!(
@@ -313,6 +322,8 @@ impl From<Solver> for Resolutions {
 
         Self {
             node_tys,
+            node_dims: solver.node_dims,
+            want_dims: solver.want_dims,
             node_decs: solver.node_decs,
             decs: resolved_decs,
             adts: resolved_adts,

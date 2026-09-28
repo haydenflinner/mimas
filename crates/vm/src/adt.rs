@@ -50,6 +50,12 @@ impl<'gc, T: MimasType<'gc>> MimasType<'gc> for InstanceOf<'gc, T> {
 }
 
 impl<'gc, T: MimasType<'gc>> InstanceOf<'gc, T> {
+    /// Wrap an already-built instance handle -- for natives that construct the
+    /// `Instance` themselves (e.g. `iso`'s opaque callable-pair layout).
+    pub fn new(inst: Instance<'gc>) -> Self {
+        Self(inst, PhantomData)
+    }
+
     pub fn load(&self, ctx: Ctx<'gc>) -> T {
         T::from_value(ctx, Val::Instance(self.0)).expect("instance fields matched T's layout")
     }

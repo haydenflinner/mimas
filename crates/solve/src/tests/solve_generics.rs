@@ -188,3 +188,64 @@ test_fail!(
     generic_param_shadows_unit_mismatch,
     "fn tick<A>(x: A) -> A { x } let y: str = tick(3);",
 );
+
+
+// -- generic field arithmetic ---------------------------------------------------
+// a field read through a generic receiver keeps the receiver's param, so `r.x + r.w`
+// is `T + T` -- unifiable, and the result rides the same param.
+
+test_ty!(
+    generic_struct_field_arithmetic,
+    "struct Rect<T> { x: T, y: T, w: T, h: T }
+    fn right<T>(r: Rect<T>) -> T { r.x + r.w }",
+    "right(Rect { x = 1.0, y = 2.0, w = 3.0, h = 4.0 })" => Float,
+    "right(Rect { x = 1, y = 2, w = 3, h = 4 })" => Int,
+);
+
+test_ty!(
+    generic_struct_field_relational,
+    "struct Rect<T> { x: T, y: T, w: T, h: T }
+    fn fits<T>(r: Rect<T>) -> bool { r.w <= r.x }",
+    "fits(Rect { x = 1, y = 2, w = 3, h = 4 })" => Bool,
+);
+
+// `impl Rect` sees the adt's own params, so `self` methods need no `<T>` of their own
+test_ty!(
+    generic_struct_impl_method_arithmetic,
+    "struct Rect<T> { x: T, y: T, w: T, h: T }
+    impl Rect {
+        fn right(self) -> T { self.x + self.w }
+        fn contains(self, x: T, y: T) -> bool {
+            x >= self.x && x <= self.x + self.w && y >= self.y && y <= self.y + self.h
+        }
+    }
+    let r = Rect { x = 1.0, y = 2.0, w = 3.0, h = 4.0 };",
+    "r.right()" => Float,
+    "r.contains(2.0, 3.0)" => Bool,
+);
+
+// distinct params still can't mix (`a + b` where `a: T`, `b: U` is a type error)
+test_ty!(
+    generic_fn_no_annotate_body_int,
+    "fn f(a, b) -> int { a + b }",
+    "f(1, 2)" => Int,
+);
+
+// an unannotated param pins to whatever its arithmetic demands
+test_ty!(
+    bare_param_arithmetic_infers,
+    "fn f(x) -> int { x + 1 }",
+    "f(3)" => Int,
+);
+
+// pinning sticks: `x + 1` settled `x` to int, so `f(3.5)` is an error
+test_fail!(
+    bare_param_pinning_sticks,
+    "fn f(x) -> int { x + 1 } let r = f(3.5);",
+);
+
+test_ty!(
+    bare_param_list_body,
+    "fn f(x) -> [int] { [x + 1, x] }",
+    "f(3)" => array!(Int),
+);

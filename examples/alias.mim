@@ -1,0 +1,27 @@
+// Alias semantics — `let y = x` binds the *same* cell in the VM, so a
+// write through `x` reads through `y`. rustgen lowers such classes to
+// `mrt::Shared<T>`; `alias_probe()` returns 9 iff generated code matches.
+
+struct Bag {
+    items: [int],
+}
+
+fn bump(a) {
+    a[0] = a[0] + 1;
+}
+
+fn keep(a) -> [int] { a }
+
+fn alias_probe() -> int {
+    let xs = [1, 2, 3];
+    let ys = xs;
+    xs[0] = 42;
+    bump(xs);
+    let b = Bag { items = xs };
+    b.items[1] = 7;
+    let zs = keep(xs);
+    let d = ~{k = xs};
+    let row = d["k"]!;
+    row[0] = 9;
+    zs[0] + ys[1]
+}

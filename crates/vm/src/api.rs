@@ -42,25 +42,30 @@ impl MimasReg {
 
 inventory::collect!(MimasReg);
 
-/// A doc-comment harvested from a `#[native]` / `#[mimas]` item, submitted via [`inventory`] and
-/// keyed by the item's full Rust path (`concat!(module_path!(), "::", <ident>)`). The install path
-/// joins these onto the [`ApiFunction`]/[`ApiMethod`] it builds by matching the path against
+/// Metadata harvested from a `#[native]` / `#[mimas]` item -- its doc comment and the identifiers
+/// of its declared parameters -- submitted via [`inventory`] and keyed by the item's full Rust
+/// path (`concat!(module_path!(), "::", <ident>)`). The install path joins these onto the
+/// [`ApiFunction`]/[`ApiMethod`] it builds by matching the path against
 /// [`std::any::type_name_of_val`] of the registered fn, so the receiver/module -- known only at the
 /// `api.add_*` call site, not the macro -- never has to travel with the doc.
 ///
+/// `parameters` holds every declared parameter after `ctx`, including a method's receiver --
+/// consumers skip the leading slots their `parameters`/`param_dims` vecs don't cover.
+///
 /// Like every inventory registry this is subject to the link-pruning footgun (a submission in an
 /// unreferenced object file can be dropped under `codegen-units > 1`). That only affects the
-/// doc-generation build, which we own and can pin to `codegen-units = 1`; missing a doc degrades to
-/// an empty string, never a wrong signature.
-pub struct NativeDoc {
+/// doc-generation build, which we own and can pin to `codegen-units = 1`; missing metadata
+/// degrades to `arg{i}` names and an empty doc, never a wrong signature.
+pub struct NativeMeta {
     pub path: &'static str,
+    pub parameters: &'static [&'static str],
     pub doc: &'static str,
 }
 
-inventory::collect!(NativeDoc);
+inventory::collect!(NativeMeta);
 
 /// Marks a parameter of a `#[native]` / `#[mimas]` fn as `&mut`, submitted via [`inventory`]
-/// and keyed by the item's full Rust path exactly like [`NativeDoc`]. `index` counts from the
+/// and keyed by the item's full Rust path exactly like [`NativeMeta`]. `index` counts from the
 /// receiver: 0 is `self` (or the first param of a free fn), 1.. are the declared params.
 ///
 /// Only `index == 0` is consumed today, joined onto [`ApiMethod::mutates_recv`] at
@@ -68,7 +73,7 @@ inventory::collect!(NativeDoc);
 /// *non-receiver* params (a `&mut` collection passed to a free fn) are recorded for the same
 /// check to grow into later.
 ///
-/// Subject to the same link-pruning footgun as [`NativeDoc`]: a pruned submission degrades to
+/// Subject to the same link-pruning footgun as [`NativeMeta`]: a pruned submission degrades to
 /// `mutates_recv: false` -- it can only ever weaken the lint, never corrupt a signature.
 pub struct NativeMutates {
     pub path: &'static str,
@@ -78,11 +83,11 @@ pub struct NativeMutates {
 inventory::collect!(NativeMutates);
 
 /// A literal-call validator for a `#[native]` / `#[mimas]` fn, submitted via [`inventory`] and
-/// keyed by the item's full Rust path exactly like [`NativeDoc`]. When every call argument is a
+/// keyed by the item's full Rust path exactly like [`NativeMeta`]. When every call argument is a
 /// literal the solver runs `validate` on them: `Ok` proves the call can't raise so a `T!`
 /// return narrows to `T`; `Err(msg)` becomes a compile error. See [`api::LitValidator`].
 ///
-/// Subject to the same link-pruning footgun as [`NativeDoc`]: a pruned submission degrades to
+/// Subject to the same link-pruning footgun as [`NativeMeta`]: a pruned submission degrades to
 /// `validate: None` -- the call just keeps its honest `T!`, never a wrong one.
 pub struct NativeValidator {
     pub path: &'static str,
@@ -91,6 +96,25 @@ pub struct NativeValidator {
 
 inventory::collect!(NativeValidator);
 
+/// A native's definition site (`file!()`/`line!()` at the item), submitted via [`inventory`]
+/// and keyed by the item's full Rust path exactly like [`NativeMeta`]. The install path joins
+/// it onto [`ApiFunction::src`]/[`ApiMethod::src`] so a host can link a built-in's symbol menu
+/// straight to its source.
+///
+/// Subject to the same link-pruning footgun as [`NativeMeta`]: a pruned submission degrades to
+/// `src: None` -- the menu just keeps its old "no source here" line.
+pub struct NativeSrc {
+    pub path: &'static str,
+    /// `file!()` at the def site -- relative to the workspace root the crate compiled under.
+    pub file: &'static str,
+    /// `env!("CARGO_MANIFEST_DIR")` of the defining crate -- locates which workspace `file` is
+    /// relative to.
+    pub manifest: &'static str,
+    pub line: u32,
+}
+
+inventory::collect!(NativeSrc);
+
 pub type NativeFnReg = for<'a, 'gc> fn(&mut Api<'a, 'gc>);
 
 pub struct Api<'a, 'gc> {
@@ -98,14 +122,30 @@ pub struct Api<'a, 'gc> {
     pub library: &'a mut Library<()>,
 }
 
-/// Look up the doc-comment for a native by its full Rust path (`type_name_of_val(&f)`). Empty when
-/// the item carried no `///` -- or when the submission was pruned (see [`NativeDoc`]).
-fn doc_for(path: &str) -> String {
-    inventory::iter::<NativeDoc>
+/// Look up what `#[native]`/`#[mimas]` submitted for the fn at `path` (`type_name_of_val(&f)`)
+/// and pair `arity` slots with their declared names, dropping the `skip` leading ones the arity
+/// doesn't cover (a method's receiver). Missing or mismatched submissions degrade to `arg{i}`
+/// names and an empty doc (see [`NativeMeta`]).
+fn meta_for(path: &str, skip: usize, arity: usize) -> (String, Vec<String>) {
+    let meta = inventory::iter::<NativeMeta>
         .into_iter()
-        .find(|d| d.path == path)
-        .map(|d| d.doc.to_string())
-        .unwrap_or_default()
+        .find(|m| m.path == path);
+    let names = meta
+        .and_then(|m| m.parameters.get(skip..))
+        .filter(|names| names.len() == arity);
+    let param_names = (0..arity)
+        .map(|i| names.map_or_else(|| format!("arg{i}"), |names| names[i].to_string()))
+        .collect();
+    let doc = meta.map(|m| m.doc.to_string()).unwrap_or_default();
+    (doc, param_names)
+}
+
+/// The def-site `(file, manifest, line)` submitted for `path` -- see [`NativeSrc`].
+fn src_for(path: &str) -> Option<api::NativeSrc> {
+    inventory::iter::<NativeSrc>
+        .into_iter()
+        .find(|s| s.path == path)
+        .map(|s| (s.file, s.manifest, s.line))
 }
 
 /// Whether `path` was submitted as mutating its receiver -- see [`NativeMutates`].
@@ -340,6 +380,7 @@ impl<'a, 'gc> Api<'a, 'gc> {
             recv_ty,
             name: name.into(),
             param_dims: vec![None; parameters.len()],
+            param_names: (0..parameters.len()).map(|i| format!("arg{i}")).collect(),
             parameters: parameters.into_iter().map(Some).collect(),
             return_ty: Some(return_ty),
             return_dim: None,
@@ -347,6 +388,7 @@ impl<'a, 'gc> Api<'a, 'gc> {
             mutates_recv: false,
             doc: String::new(),
             validate: None,
+            src: None,
             call: (),
         });
         self.store_native(id, native);
@@ -445,11 +487,13 @@ impl<'b, 'a, 'gc> ModuleApi<'b, 'a, 'gc> {
             name: name.into(),
             module: self.path.clone(),
             param_dims: vec![None; parameters.len()],
+            param_names: (0..parameters.len()).map(|i| format!("arg{i}")).collect(),
             parameters,
             return_ty: Some(return_ty),
             return_dim: None,
             doc: String::new(),
             validate: None,
+            src: None,
             call: (),
         });
         self.parent.store_native(id, native);
@@ -502,7 +546,12 @@ macro_rules! impl_into_fn {
                 let param_dims = vec![$(<$arg as MimasType<'gc>>::mimas_dim(reg),)*];
                 let return_ty = <R as IntoNativeResult<'gc>>::return_ty(reg);
                 let return_dim = <R as IntoNativeResult<'gc>>::return_dim(reg);
-                let doc = doc_for(std::any::type_name_of_val(&self));
+                let (doc, param_names) = meta_for(
+                    std::any::type_name_of_val(&self),
+                    0,
+                    parameters.len(),
+                );
+                let src = src_for(std::any::type_name_of_val(&self));
                 let native = make_native(&api.ctx, move |ctx, args| {
                     let mut it = args.iter().copied();
                     $(let $arg = <$arg as MimasType<'gc>>::from_value(
@@ -516,10 +565,12 @@ macro_rules! impl_into_fn {
                     module,
                     parameters,
                     param_dims,
+                    param_names,
                     return_ty,
                     return_dim,
                     doc,
                     validate: validator_for(std::any::type_name_of_val(&self)),
+                    src,
                     call: (),
                 });
                 api.store_native(id, native);
@@ -533,7 +584,12 @@ macro_rules! impl_into_fn {
                 let param_dims = vec![$(<$arg as MimasType<'gc>>::mimas_dim(reg),)*];
                 let return_ty = <R as IntoNativeResult<'gc>>::return_ty(reg);
                 let return_dim = <R as IntoNativeResult<'gc>>::return_dim(reg);
-                let doc = doc_for(std::any::type_name_of_val(&self));
+                let (doc, param_names) = meta_for(
+                    std::any::type_name_of_val(&self),
+                    0,
+                    parameters.len(),
+                );
+                let src = src_for(std::any::type_name_of_val(&self));
                 let native = make_native(&api.ctx, move |ctx, args| {
                     let mut it = args.iter().copied();
                     $(let $arg = <$arg as MimasType<'gc>>::from_value(
@@ -547,12 +603,14 @@ macro_rules! impl_into_fn {
                     name,
                     parameters,
                     param_dims,
+                    param_names,
                     return_ty,
                     return_dim,
                     takes_self: false,
                     mutates_recv: false,
                     doc,
                     validate: validator_for(std::any::type_name_of_val(&self)),
+                    src,
                     call: (),
                 });
                 api.store_native(id, native);
@@ -590,7 +648,11 @@ macro_rules! impl_into_method {
                 let param_dims = vec![$(<$arg as MimasType<'gc>>::mimas_dim(reg),)*];
                 let return_ty = <R as IntoNativeResult<'gc>>::return_ty(reg);
                 let return_dim = <R as IntoNativeResult<'gc>>::return_dim(reg);
-                let doc = doc_for(std::any::type_name_of_val(&self));
+                let (doc, param_names) = meta_for(
+                    std::any::type_name_of_val(&self),
+                    1,
+                    parameters.len(),
+                );
                 let native = make_native(&api.ctx, move |ctx, args| {
                     let mut it = args.iter().copied();
                     let recv = <Recv as MimasType<'gc>>::from_value(
@@ -608,12 +670,14 @@ macro_rules! impl_into_method {
                     name,
                     parameters,
                     param_dims,
+                    param_names,
                     return_ty,
                     return_dim,
                     takes_self: true,
                     mutates_recv: mutates_recv(std::any::type_name_of_val(&self)),
                     doc,
                     validate: validator_for(std::any::type_name_of_val(&self)),
+                    src: src_for(std::any::type_name_of_val(&self)),
                     call: (),
                 });
                 api.store_native(id, native);

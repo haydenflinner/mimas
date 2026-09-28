@@ -16,6 +16,14 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
 }
 
 #[native]
+/// Writes `value` to standard output, followed by a newline. A string prints as its plain text,
+/// and any other value prints the same way it would inside an f-string.
+///
+/// ```mimas
+/// print("hello");           // hello
+/// print([1, 2, 3]);         // [1, 2, 3]
+/// print(f"{1 + 2} apples"); // 3 apples
+/// ```
 fn print<'gc>(ctx: Ctx<'gc>, msg: Val<'gc>) -> Result<(), RtErr> {
     let line = ctx.to_string(msg)?;
     ctx.fixture::<Out>().write(&line);
@@ -39,6 +47,19 @@ fn warn<'gc>(ctx: Ctx<'gc>, msg: &str) {
 }
 
 #[native]
+/// Stops the script with a runtime error. The error reads `panic: ` followed by `msg`, or
+/// `explicit panic` when there's no message.
+///
+/// `panic` never returns, and its [never type](../reference/special-types.md) lets it stand in for
+/// a value of any type:
+///
+/// ```mimas
+/// let config = ~{ port = 8080 };
+/// let port = config["port"] ?? panic("no port configured");
+/// ```
+///
+/// For a failure the caller should be able to recover from, return a
+/// [result](../reference/error-handling.md#results) and `raise` instead.
 fn panic<'gc>(ctx: Ctx<'gc>, msg: Option<anon::T<'gc>>) -> Result<NeverReturn, RtErr> {
     let text = match msg {
         Some(msg) => format!("panic: {}", ctx.to_string(msg.0)?),
@@ -48,6 +69,17 @@ fn panic<'gc>(ctx: Ctx<'gc>, msg: Option<anon::T<'gc>>) -> Result<NeverReturn, R
 }
 
 #[native]
+/// Stops the script with a runtime error that marks unfinished code. The error reads `todo: `
+/// followed by `msg`, or just `todo` when there's no message.
+///
+/// Like [`panic`](#panic), it never returns, and it can stand in for a body you haven't written
+/// yet:
+///
+/// ```mimas
+/// fn load_save(path: str) -> ~{int} {
+///     todo("read the save format")
+/// }
+/// ```
 fn todo<'gc>(ctx: Ctx<'gc>, msg: Option<anon::T<'gc>>) -> Result<NeverReturn, RtErr> {
     Err(match msg {
         Some(m) => RtErr::Custom(format!("todo: {}", ctx.to_string(m.0)?)),
@@ -56,6 +88,15 @@ fn todo<'gc>(ctx: Ctx<'gc>, msg: Option<anon::T<'gc>>) -> Result<NeverReturn, Rt
 }
 
 #[native]
+/// Prints `value` to standard output in its debug form, then returns it. The line starts with
+/// `dbg value:`, and strings keep their quotes.
+///
+/// Since it returns its argument, `dbg` can wrap any expression without changing the result:
+///
+/// ```mimas
+/// let total = dbg(2 + 3) * 10; // prints `dbg value: 5`, and total is 50
+/// let name = dbg("ada");       // prints `dbg value: "ada"`
+/// ```
 fn dbg<'gc>(ctx: Ctx<'gc>, val: anon::T<'gc>) -> Result<anon::T<'gc>, RtErr> {
     let text = format!("dbg value: {}", ctx.display(val.0)?);
     ctx.fixture::<Out>().write(&text);

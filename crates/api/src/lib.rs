@@ -51,4 +51,15 @@ pub enum Intrinsic {
     /// combining rule (merge over windows, stack, mask-gated pick, ...).
     /// Convention: `f` is the last declared param.
     ApplyMerge(NativeId),
+    /// `under(iso, f, x)` / `under(iso, f)` — apply `iso`'s forward transform to `x`,
+    /// run `f` on the result, then map back through `iso`'s inverse/update (Uiua's
+    /// `⍜`). The `#[native]` body is unreachable; the lowering emits the field loads
+    /// and closure calls itself (a native can't re-enter the VM), and synthesizes a
+    /// closure for the curried two-arg form.
+    Under,
+    /// `at(i)` — the index lens: an `Iso` whose `do` splits out `src[i]` (with `src`
+    /// as context) and whose `undo` returns a copy of the source with `i` replaced.
+    /// Lowers to synthesized closures wrapped in an `Iso` instance; the `#[native]`
+    /// body is unreachable.
+    At,
 }

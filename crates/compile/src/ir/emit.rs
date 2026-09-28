@@ -315,7 +315,7 @@ impl Emit for Break {
 }
 
 impl Emit for Call {
-    fn emit(&self, _id: NodeId, ir: &mut Ir) -> Option<InstId> {
+    fn emit(&self, id: NodeId, ir: &mut Ir) -> Option<InstId> {
         fn fill_call_args(
             ir: &mut Ir,
             fn_ty: &FnHeader,
@@ -381,6 +381,7 @@ impl Emit for Call {
             intrinsic: api::Intrinsic,
             args: &[InstId],
             call: &Call,
+            call_id: NodeId,
         ) -> InstId {
             match intrinsic {
                 api::Intrinsic::Len => ir.current().len(args[0]),
@@ -529,6 +530,87 @@ impl Emit for Call {
                     ir.target(exit);
                     ir.current().get_local(acc)
                 }
+                // `under(t, f, x)` — transform `x` forward through `t`, apply `f`,
+                // then map back through `t`'s inverse/update. `t`'s slot 0 tag picks
+                // the convention: iso (`from(f(to(x)))`) or lens
+                // (`undo(ctx, f(focus))` where `do(x)` returned `(focus, ctx)`).
+                // The curried `under(t, f)` synthesizes `|x| under(t, f, x)`.
+                api::Intrinsic::Under => {
+                    let t = args[0];
+                    let f = args[1];
+                    if call.arguments.len() == 3 {
+                        emit_under_apply(ir, t, f, args[2])
+                    } else {
+                        let bid = ir.bodies.push(crate::ir::Body::new());
+                        ir.in_body(bid, |ir| {
+                            let x = ir.synthetic_local("$under_x");
+                            let t_cap = ir.synthetic_local("$under_t");
+                            let f_cap = ir.synthetic_local("$under_f");
+                            ir.current_body_mut().params = vec![x];
+                            ir.current_body_mut().captures = vec![t_cap, f_cap];
+                            let x = ir.current().get_local(x);
+                            let t = ir.current().get_local(t_cap);
+                            let f = ir.current().get_local(f_cap);
+                            let r = emit_under_apply(ir, t, f, x);
+                            ir.current().ret(r);
+                        });
+                        ir.current().make_closure(bid, vec![t, f])
+                    }
+                }
+                // `at(i)` — the index lens: synthesize `do: |src| (src[i], src)` and
+                // `undo: |ctx, focus| shallow_copy(ctx) with [i] = focus`, then build
+                // the `Iso` instance directly. Fields are [kind=1, do, undo] — see
+                // `std_lib::iso`'s layout doc.
+                api::Intrinsic::At => {
+                    let iso_adt = match ir.resolutions.node_tys.get(&call_id) {
+                        Some(Ty::Adt(id, _)) => *id,
+                        other => panic!("`at`'s return type isn't an `Iso`: {other:?}"),
+                    };
+                    let idx = args[0];
+
+                    let do_bid = ir.bodies.push(crate::ir::Body::new());
+                    ir.in_body(do_bid, |ir| {
+                        let src = ir.synthetic_local("$at_src");
+                        let i = ir.synthetic_local("$at_i");
+                        ir.current_body_mut().params = vec![src];
+                        ir.current_body_mut().captures = vec![i];
+                        let src = ir.current().get_local(src);
+                        let i = ir.current().get_local(i);
+                        let focus = ir.current().get_index(src, i, AccessKind::Direct);
+                        let pair = ir.current().new_array();
+                        ir.current().push(pair, focus);
+                        ir.current().push(pair, src);
+                        ir.current().ret(pair);
+                    });
+                    let do_clo = ir.current().make_closure(do_bid, vec![idx]);
+
+                    // undo: |ctx, focus| -- copy ctx element-wise (shallow: a lens
+                    // rebuilds the container, it doesn't deep-copy the world), then
+                    // `out[i] = focus`.
+                    let undo_bid = ir.bodies.push(crate::ir::Body::new());
+                    ir.in_body(undo_bid, |ir| {
+                        let ctx = ir.synthetic_local("$at_ctx");
+                        let focus = ir.synthetic_local("$at_focus");
+                        let i = ir.synthetic_local("$at_i");
+                        ir.current_body_mut().params = vec![ctx, focus];
+                        ir.current_body_mut().captures = vec![i];
+                        let ctx = ir.current().get_local(ctx);
+                        let focus = ir.current().get_local(focus);
+                        let i = ir.current().get_local(i);
+                        let out = ir.current().new_array();
+                        let exit = emit_array_walk(ir, ctx, |ir, elem, _i, _latch| {
+                            ir.current().push(out, elem);
+                        });
+                        ir.target(exit);
+                        ir.current().set_index(out, i, focus);
+                        ir.current().ret(out);
+                    });
+                    let undo_clo = ir.current().make_closure(undo_bid, vec![idx]);
+
+                    let kind = ir.current().constant(1);
+                    ir.current()
+                        .new_instance(iso_adt, vec![kind, do_clo, undo_clo])
+                }
                 // `recv.m(a.., f)` → `merge(recv, f(recv), a..)` — the closure
                 // runs in generated code (a native can't re-enter the VM),
                 // and the merge native gets [recv, transformed, ..middle args].
@@ -671,9 +753,9 @@ impl Emit for Call {
                     let receiver = takes_self.then_some(receiver);
                     let args = fill_call_args(ir, &fn_ty, &defaults, &self.arguments, receiver)?;
                     Some(match (native_id, body) {
-                        (Some(id), _) => match ir.intrinsics.get(&id) {
-                            Some(&i) => emit_intrinsic(ir, i, &args, self),
-                            None => ir.current().call_native(id, args),
+                        (Some(nid), _) => match ir.intrinsics.get(&nid) {
+                            Some(&i) => emit_intrinsic(ir, i, &args, self, id),
+                            None => ir.current().call_native(nid, args),
                         },
                         (None, Some(body)) => ir.current().call_direct(body, args),
                         _ => unreachable!(),
@@ -744,9 +826,9 @@ impl Emit for Call {
 
         Some(match static_callee {
             Some(StaticCallee::Body(body)) => ir.current().call_direct(body, args),
-            Some(StaticCallee::Native(id)) => match ir.intrinsics.get(&id) {
-                Some(&i) => emit_intrinsic(ir, i, &args, self),
-                None => ir.current().call_native(id, args),
+            Some(StaticCallee::Native(nid)) => match ir.intrinsics.get(&nid) {
+                Some(&i) => emit_intrinsic(ir, i, &args, self, id),
+                None => ir.current().call_native(nid, args),
             },
             None => {
                 let callee = self.left.lower(ir)?;
@@ -1767,6 +1849,50 @@ fn emit_array_walk(
 fn loop_result(ir: &mut Ir, exit: BlockId, branches: Vec<(BlockId, InstId)>) -> Option<InstId> {
     ir.target(exit);
     Some(ir.current().phi(branches))
+}
+
+/// The applied half of `Intrinsic::Under`: `under(t, f, x)`. Slot 0 of `t` tags the
+/// convention -- iso (0) stores `to`/`from` and computes `from(f(to(x)))`; lens (1)
+/// stores `do`/`undo` and computes `undo(ctx, f(focus))` from `do(x)`'s
+/// `(focus, ctx)` pair. `t`'s declared `Iso` param type means the solver has already
+/// rejected non-`Iso` callers, so the fields are trusted.
+fn emit_under_apply(ir: &mut Ir, t: InstId, f: InstId, x: InstId) -> InstId {
+    let kind = ir.current().get_field(t, 0, AccessKind::Direct);
+    let a = ir.current().get_field(t, 1, AccessKind::Direct);
+    let b = ir.current().get_field(t, 2, AccessKind::Direct);
+    let zero = ir.current().constant(0);
+    let is_iso = ir
+        .current()
+        .bin(BinOp::Identity, kind, zero, OperandKind::Int);
+
+    let iso_blk = ir.push_block("under_iso");
+    let lens_blk = ir.push_block("under_lens");
+    let merge = ir.push_block("under_merge");
+    ir.in_current(|block| {
+        block.jump_if_false(is_iso, lens_blk);
+        block.jump(iso_blk);
+    });
+
+    ir.target(iso_blk);
+    let to_x = ir.current().call(a, vec![x]);
+    let edited = ir.current().call(f, vec![to_x]);
+    let r_iso = ir.current().call(b, vec![edited]);
+    let iso_end = ir.current_block_id();
+    ir.current().jump(merge);
+
+    ir.target(lens_blk);
+    let pair = ir.current().call(a, vec![x]);
+    let zero = ir.current().constant(0);
+    let one = ir.current().constant(1);
+    let focus = ir.current().get_index(pair, zero, AccessKind::Direct);
+    let ctx = ir.current().get_index(pair, one, AccessKind::Direct);
+    let edited = ir.current().call(f, vec![focus]);
+    let r_lens = ir.current().call(b, vec![ctx, edited]);
+    let lens_end = ir.current_block_id();
+    ir.current().jump(merge);
+
+    merge_branches(ir, merge, vec![(iso_end, r_iso), (lens_end, r_lens)])
+        .expect("under always emits iso and lens edges")
 }
 
 /// whether an `if let` / `while let` binding needs the implicit null short-circuit: true when the

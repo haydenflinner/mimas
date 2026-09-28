@@ -415,7 +415,7 @@ fn runtime_described_types_and_natives() {
                     variants: vec![vm::adt::ApiVariantShape {
                         name: "@".into(),
                         doc: "",
-                        fields: vm::ApiVariantFields::Named(vec![("x".into(), Ty::Int)]),
+                        fields: vm::ApiVariantFields::Named(vec![("x".into(), Ty::Int, None)]),
                     }],
                 }
             });

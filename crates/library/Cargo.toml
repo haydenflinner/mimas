@@ -61,6 +61,9 @@ polars-io = { path = "../../../polars/crates/polars-io", optional = true, defaul
 # `polars` dep for why this isn't just an unconditional dependency.
 zip = { version = "2", optional = true, default-features = false, features = ["deflate"] }
 serde = { version = "1", optional = true, features = ["derive"] }
+# `std::polars`'s parquet file I/O (`from_parquet`/`to_parquet`) rides the same `polars-io`
+# dep as `csv` -- `parquet` pulls `polars-parquet` and nothing else (no `streaming`, no cloud
+# module), so it's safe to enable directly here.
 # `std::polars`'s file-backed half: `from_xlsx` reads a worksheet into a `DataFrame` via
 # `calamine` (pure-Rust xlsx/xls/ods reader -- the same engine behind Python polars' `fastexcel`),
 # `df.to_xlsx(path)` exports one via `rust_xlsxwriter` (port of the author's own Python
@@ -71,13 +74,15 @@ calamine = { version = "0.36.1", optional = true, features = ["chrono"] }
 rust_xlsxwriter = { version = "0.99.1", optional = true }
 
 [features]
-default = ["dataframe", "darkly", "xlsx"]
+default = ["dataframe", "darkly", "xlsx", "parquet"]
 dataframe = ["dep:polars", "dep:polars-io", "vm/dataframe"]
 darkly = ["dep:zip", "dep:serde", "vm/darkly"]
 xlsx = ["dataframe", "dep:calamine", "dep:rust_xlsxwriter"]
+parquet = ["dataframe", "polars-io/parquet"]
 
 [dev-dependencies]
 parse = { package = "mimas-parse", path = "../parse", version = "0.2.0" }
 solve = { package = "mimas-solve", path = "../solve", version = "0.2.0" }
 compile = { package = "mimas-compile", path = "../compile", version = "0.2.0" }
+inventory = "0.3"
 pretty_assertions.workspace = true

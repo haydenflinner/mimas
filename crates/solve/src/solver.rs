@@ -55,6 +55,18 @@ pub struct Solver {
     /// Unit dims of `25kW`-style literals, merged from every solved ast (`NodeId`s are
     /// globally unique, so one map is collision-free).
     pub(crate) ast_quantities: HashMap<NodeId, shared::units::Dim>,
+    /// Every expression's computed dimension, recorded by the dims pass —
+    /// `b.x + 2.0px` is `px` here while its `node_tys` stays `Float`.
+    /// Surfaces on [`Resolutions::node_dims`](crate::Resolutions).
+    pub(crate) node_dims: IndexMap<NodeId, shared::units::Dim>,
+    /// The dimension each expr's context demanded (a call arg's declared param
+    /// dim) — an expr whose own dim is `Any` still knows the unit its slot wanted.
+    /// Surfaces on [`Resolutions::want_dims`](crate::Resolutions).
+    pub(crate) want_dims: IndexMap<NodeId, shared::units::Dim>,
+    /// Dimensions of api-adt fields (`Input.dt` is `s`): `(adt name, field name)`.
+    /// Populated by `install_user_adt` from `ApiVariantFields::Named` dims; the dims pass
+    /// consults it when a `.field` read isn't on a source-declared struct.
+    pub(crate) field_dims: HashMap<(String, String), shared::units::Dim>,
 
     pub(crate) control_flow: ControlFlow,
     pub(crate) ribs: Ribs,
@@ -101,6 +113,9 @@ impl Solver {
             group_schemas: HashMap::new(),
             group_decs: HashMap::new(),
             ast_quantities: HashMap::new(),
+            node_dims: IndexMap::new(),
+            want_dims: IndexMap::new(),
+            field_dims: HashMap::new(),
             non_value: None,
             iter_guards: vec![],
             type_params: vec![],
@@ -832,6 +847,7 @@ impl Solver {
         return_dim: Option<shared::units::Dim>,
         native_id: NativeId,
         validate: Option<api::LitValidator>,
+        src: Option<api::NativeSrc>,
     ) -> DecId {
         let sig = NativeFnSig {
             params,
@@ -861,6 +877,7 @@ impl Solver {
                 takes_self: false,
                 mutates_recv: false,
                 validate,
+                src,
             },
         );
         dec_id
@@ -1069,6 +1086,14 @@ impl Solver {
         let mut variants = IndexMap::new();
         for v in &api_adt.variants {
             let variant = self.build_variant(&v.fields);
+            if let ApiVariantFields::Named(named) = &v.fields {
+                for (name, _ty, dim) in named {
+                    if let Some(dim) = dim {
+                        self.field_dims
+                            .insert((api_adt.name.clone(), name.clone()), *dim);
+                    }
+                }
+            }
             let key = match api_adt.kind {
                 ApiAdtKind::Enum => v.name.clone(),
                 ApiAdtKind::Struct => Adt::STRUCT_VARIANT_NAME.to_string(),
@@ -1142,7 +1167,7 @@ impl Solver {
             }),
             ApiVariantFields::Named(named) => {
                 let mut fields_map = IndexMap::new();
-                for (name, ty) in named {
+                for (name, ty, _dim) in named {
                     let ident = Ident::synthetic(name.clone());
                     let dec = self.dec_id(&ident, ty.clone(), DecKind::Local, Vis::Public);
                     fields_map.insert(
@@ -1196,6 +1221,7 @@ impl Solver {
                         f.return_dim,
                         id,
                         f.validate,
+                        f.src,
                     );
                 }
                 // module-nested native fn
@@ -1224,6 +1250,7 @@ impl Solver {
                             takes_self: false,
                             mutates_recv: false,
                             validate: f.validate,
+                            src: f.src,
                         },
                     );
                     self.adts[leaf].as_struct_mut().insert(
@@ -1270,6 +1297,7 @@ impl Solver {
                             takes_self: m.takes_self,
                             mutates_recv: m.mutates_recv,
                             validate: m.validate,
+                            src: m.src,
                         },
                     );
                     let field = Field {
@@ -2171,9 +2199,15 @@ impl Solver {
                     } else {
                         // a generic decl's stored signature holds `Ty::Param`s -- swap them
                         // for fresh vars per use (the HM instantiation step), so each call
-                        // site can pick its own concrete types
+                        // site can pick its own concrete types. value bindings are exempt:
+                        // a `fn` parameter or `let` is monomorphic, so `r: Rect<T>` must
+                        // read the *same* `T` every occurrence -- freshening per read would
+                        // mint unrelated vars and `r.x + r.w` would no longer see one type.
                         let stored = Ty::Vid(self.decs[dec_id].vid).normalized(self);
-                        self.instantiate_params(&stored)
+                        match self.decs[dec_id].kind {
+                            DecKind::Local | DecKind::Global | DecKind::LoopVar => stored,
+                            _ => self.instantiate_params(&stored),
+                        }
                     };
                     (ty, Some(dec_id))
                 }
@@ -2531,6 +2565,10 @@ pub(crate) struct NativeBinding {
     /// literal this proves the call can't raise (`frame_call` narrows `T!` to `T`) or reports
     /// it definitely will (a compile error). See `api::LitValidator`.
     pub validate: Option<api::LitValidator>,
+    /// Def site of the registered Rust fn (`file!()`/`line!()`), joined at install from
+    /// `vm::api::NativeSrc` submissions. Hosts use it to link a built-in's symbol menu to
+    /// its source.
+    pub src: Option<api::NativeSrc>,
 }
 
 /// A collection an active `for` loop is iterating, expressed as the binding the iterator's

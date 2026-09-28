@@ -76,6 +76,38 @@ impl Dim {
         Some(Dim(out))
     }
 
+    /// The unit name for a type annotation — `px`, `px/s`, `kg*m^2/s^3` —
+    /// unlike `describe`, which answers in prose (`pixels (px)`).
+    pub fn name(&self) -> String {
+        if self.is_none() {
+            return "float".into();
+        }
+        for (name, dim, scale) in NAMED {
+            if dim == *self && scale == 1.0 {
+                return name.to_string();
+            }
+        }
+        let part = |pos: bool| {
+            let mut s = Vec::new();
+            for (i, e) in self.0.iter().enumerate() {
+                let e = if pos { *e } else { -*e };
+                if e > 0 {
+                    s.push(if e == 1 {
+                        BASES[i].to_string()
+                    } else {
+                        format!("{}^{e}", BASES[i])
+                    });
+                }
+            }
+            s.join("*")
+        };
+        match (part(true), part(false)) {
+            (n, d) if d.is_empty() => n,
+            (n, d) if n.is_empty() => format!("1/{d}"),
+            (n, d) => format!("{n}/{d}"),
+        }
+    }
+
     /// A reader-friendly name: a familiar unit when one fits (`kW`-ish things say `power (W)`),
     /// else the base composition (`kg*m^2/s^3`).
     pub fn describe(&self) -> String {

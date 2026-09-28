@@ -1385,13 +1385,25 @@ impl<'s> Parser<'s> {
             // spaced (or after a number, where the intent was `pow`). Teach
             // `⊕`/`xor`/`.pow` and keep parsing as if xor were written.
             if self.at(TokKind::Caret) && self.infix_binds() {
+                let caret = self.next_location();
                 let pow = matches!(
                     left.kind(),
                     ExprKind::Literal(Literal::Int(_) | Literal::Float(_))
                 );
-                self.error_here(Misdirection {
+                self.advance();
+                let right = self.binary(5);
+                // `2^10` is spelled like math, not xor — both sides are
+                // const, so the value's known at desugar: fold it. `x ^ 2`
+                // with a name stays the misdirection (`x^2` superscripts).
+                if let Some(folded) = caret_pow(&left, &right) {
+                    left = self.new_expr(folded, start);
+                    continue;
+                }
+                // `error`, not `error_here`: the right side already parsed,
+                // so at EOF the Misdirection itself would never emit.
+                self.error(Misdirection {
                     src: self.src(),
-                    at: self.next_location().into(),
+                    at: caret.into(),
                     msg: if pow {
                         "`^` isn't an operator — exponents are `x.pow(n)` and xor is `a ⊕ b`; `x^2` superscripts a name".into()
                     } else {
@@ -1403,8 +1415,6 @@ impl<'s> Parser<'s> {
                         "write `⊕` here".into()
                     },
                 });
-                self.advance();
-                let right = self.binary(5);
                 left = self.op_expr(BinaryOp::Eval(EvaluationOp::Xor), left, right, start);
                 continue;
             }
@@ -3365,6 +3375,61 @@ fn unique_test_name(seen: &mut std::collections::HashSet<String>, name: String) 
         }
         n += 1;
     }
+}
+
+/// A signed number literal — `2`, `0.5`, `-3` — as `caret_pow`'s operand.
+#[derive(Clone, Copy)]
+enum SignedLit {
+    Int(i64),
+    Float(f64),
+}
+impl SignedLit {
+    fn as_f64(&self) -> f64 {
+        match self {
+            SignedLit::Int(n) => *n as f64,
+            SignedLit::Float(n) => *n,
+        }
+    }
+}
+
+/// Reads `2`, `0.5`, `-3` (and `+3`, parenthesized forms) as a number;
+/// anything else is `None`.
+fn num_lit(e: &Expr) -> Option<SignedLit> {
+    match e.kind() {
+        ExprKind::Literal(Literal::Int(n)) => Some(SignedLit::Int(*n)),
+        ExprKind::Literal(Literal::Float(n)) => Some(SignedLit::Float(*n)),
+        ExprKind::Unary(Unary { op: UnaryOp::Negative, right }) => match num_lit(right)? {
+            SignedLit::Int(n) => n.checked_neg().map(SignedLit::Int),
+            SignedLit::Float(n) => Some(SignedLit::Float(-n)),
+        },
+        ExprKind::Unary(Unary { op: UnaryOp::Positive, right }) => num_lit(right),
+        ExprKind::Grouping(g) => num_lit(&g.inner),
+        _ => None,
+    }
+}
+
+/// `lit ^ lit` folds to the literal's power at desugar — `2^10` is `1024`.
+/// A bare signed base keeps the math reading — `-2^2` is `-(2^2)`, while
+/// `(-2)^2` squares the negative. Ints stay ints when the exponent is
+/// non-negative and the value fits; a float side, negative exponent, or
+/// overflow falls back to float.
+fn caret_pow(left: &Expr, right: &Expr) -> Option<Literal> {
+    let (negated, base) = match left.kind() {
+        ExprKind::Unary(Unary { op: UnaryOp::Negative, right }) => (true, num_lit(right)?),
+        ExprKind::Unary(Unary { op: UnaryOp::Positive, right }) => (false, num_lit(right)?),
+        _ => (false, num_lit(left)?),
+    };
+    let exp = num_lit(right)?;
+    let sign = if negated { -1.0 } else { 1.0 };
+    Some(if let (SignedLit::Int(b), SignedLit::Int(e)) = (base, exp) {
+        match u32::try_from(e).ok().and_then(|e| b.checked_pow(e)) {
+            // a `checked_pow` result can't be `i64::MIN`, so `-n` can't overflow
+            Some(n) => Literal::Int(if negated { -n } else { n }),
+            None => Literal::Float((b as f64).powf(e as f64) * sign),
+        }
+    } else {
+        Literal::Float(base.as_f64().powf(exp.as_f64()) * sign)
+    })
 }
 
 /// `FIELD_(X, Y, W, H)` desugars to `(FIELD_X, FIELD_Y, FIELD_W, FIELD_H)`: a

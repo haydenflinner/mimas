@@ -20,7 +20,7 @@ use proc_macro::TokenStream;
 use proc_macro_crate::{FoundCrate, crate_name};
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::{DeriveInput, Ident, parse_macro_input};
+use syn::{DeriveInput, FnArg, Ident, Pat, parse_macro_input, parse_quote};
 
 mod convert;
 mod derive;
@@ -33,11 +33,21 @@ mod register;
 #[proc_macro_attribute]
 pub fn native(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut input = parse_macro_input!(item as syn::ItemFn);
-    let submission = doc_submission(&input.sig.ident, &collect_doc(&input.attrs));
+    let src = src_submission(&input.sig.ident, input.sig.ident.span());
     match convert::expand_conversion(&mut input) {
         Ok((_, mutating)) => {
+            // `submit!` expands to an unnamed const, which an `impl` block rejects -- the meta
+            // submission goes inside the fn body instead, so `#[native]` works on impl methods.
+            let meta = meta_submission(
+                &input.sig.ident,
+                &param_names(&input.sig),
+                &collect_doc(&input.attrs),
+            );
+            if let Some(meta) = meta {
+                input.block.stmts.insert(0, meta);
+            }
             let mutates = mutates_submissions(&input.sig.ident, &mutating);
-            TokenStream::from(quote!(#input #submission #mutates))
+            TokenStream::from(quote!(#input #src #mutates))
         }
         Err(e) => e.to_compile_error().into(),
     }
@@ -67,7 +77,7 @@ pub fn mimas(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
-#[proc_macro_derive(MimasEnum)]
+#[proc_macro_derive(MimasEnum, attributes(mimas_dim))]
 pub fn derive_mimas_enum(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     match derive::expand_derive(&input, true) {
@@ -76,7 +86,7 @@ pub fn derive_mimas_enum(input: TokenStream) -> TokenStream {
     }
 }
 
-#[proc_macro_derive(MimasStruct)]
+#[proc_macro_derive(MimasStruct, attributes(mimas_dim))]
 pub fn derive_mimas_struct(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     match derive::expand_derive(&input, false) {
@@ -102,11 +112,19 @@ fn expand_mimas(attr: TokenStream, item: TokenStream) -> Result<TokenStream2, sy
 
     match syn::parse::<syn::Item>(item)? {
         syn::Item::Fn(mut function) => {
-            let submission = doc_submission(&function.sig.ident, &collect_doc(&function.attrs));
+            let src = src_submission(&function.sig.ident, function.sig.ident.span());
             let (_, mutating) = convert::expand_conversion(&mut function)?;
+            let meta = meta_submission(
+                &function.sig.ident,
+                &param_names(&function.sig),
+                &collect_doc(&function.attrs),
+            );
+            if let Some(meta) = meta {
+                function.block.stmts.insert(0, meta);
+            }
             let mutates = mutates_submissions(&function.sig.ident, &mutating);
             let registration = register::fn_registration(&function.sig.ident, module.as_deref());
-            Ok(quote!(#function #registration #submission #mutates))
+            Ok(quote!(#function #registration #src #mutates))
         }
         // struct / enum: emit the same impls the derives would (so don't *also* `#[derive]`
         // them) plus the `add_adt` submission
@@ -192,22 +210,67 @@ fn collect_doc(attrs: &[syn::Attribute]) -> String {
     lines.join("\n")
 }
 
-/// Ships a doc-comment to install time keyed by the item's full Rust path, so `vm::api::doc_for`
-/// can join it onto the registered `ApiFunction`/`ApiMethod` (whose receiver/module are known
-/// only at the `api.add_*` call site, not here).
-fn doc_submission(fn_ident: &Ident, doc: &str) -> TokenStream2 {
-    if doc.is_empty() {
-        return TokenStream2::new();
+/// Ships a fn's parameter names and doc-comment to install time keyed by the item's full Rust
+/// path, so `vm::api::meta_for` can join them onto the registered `ApiFunction`/`ApiMethod`
+/// (whose receiver/module are known only at the `api.add_*` call site, not here). Callers
+/// insert the returned statement into the fn's body: `inventory::submit!` expands to an
+/// unnamed `const`, which an `impl` block rejects but a fn body accepts.
+fn meta_submission(fn_ident: &Ident, params: &[String], doc: &str) -> Option<syn::Stmt> {
+    if doc.is_empty() && params.is_empty() {
+        return None;
     }
     let vm = vm_path();
     let name = fn_ident.to_string();
-    quote! {
+    Some(parse_quote! {
         #vm::inventory::submit! {
-            #vm::api::NativeDoc {
+            #vm::api::NativeMeta {
                 path: ::std::concat!(::std::module_path!(), "::", #name),
+                parameters: &[#(#params),*],
                 doc: #doc,
             }
         }
+    })
+}
+
+/// Collects the identifiers used in a function signature's parameters, skipping `ctx`.
+fn param_names(sig: &syn::Signature) -> Vec<String> {
+    sig.inputs
+        .iter()
+        .skip(1)
+        .map(|arg| match arg {
+            FnArg::Typed(t) => match &*t.pat {
+                Pat::Ident(i) => i.ident.to_string(),
+                _ => "_".to_string(),
+            },
+            FnArg::Receiver(_) => "self".to_string(),
+        })
+        .collect()
+}
+
+/// Ships the definition site's `file!()`/`line!()` to install time, keyed by `key_ident`'s full
+/// Rust path exactly like [`doc_submission`]. `span` locates the recorded line -- a method
+/// passes its own ident's span so the link lands on the method, not the generated shim (which
+/// `key_ident` names, since install-time lookup happens by `type_name_of_val(&shim)`).
+pub(crate) fn src_submission(key_ident: &Ident, span: proc_macro2::Span) -> TokenStream2 {
+    let vm = vm_path();
+    let name = key_ident.to_string();
+    // `submit!` expands to an anonymous `const _` which impl bodies reject -- a named const
+    // wrapper keeps it legal there (in-impl `#[native]` methods) without changing behavior.
+    let holder = quote::format_ident!("__mimas_src_{name}");
+    let file = quote::quote_spanned!(span => ::std::file!());
+    let line = quote::quote_spanned!(span => ::std::line!());
+    quote! {
+        #[allow(non_upper_case_globals)]
+        const #holder: () = {
+            #vm::inventory::submit! {
+                #vm::api::NativeSrc {
+                    path: ::std::concat!(::std::module_path!(), "::", #name),
+                    file: #file,
+                    manifest: ::std::env!("CARGO_MANIFEST_DIR"),
+                    line: #line,
+                }
+            }
+        };
     }
 }
 

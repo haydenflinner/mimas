@@ -240,13 +240,38 @@ impl Ir {
         local
     }
 
-    // allocate-or-fetch the body associated with this dec
+    // allocate-or-fetch the body associated with this dec. A native has no lowered
+    // body, but `ref_body` still needs one when the native is used as a value
+    // (`let f = from_json`) -- synthesize a trampoline that forwards its params to
+    // CallNative. Call sites don't go through this (they emit CallNative directly).
     pub(crate) fn item_body_for(&mut self, dec: DecId) -> BodyId {
         if let Some(&bid) = self.item_bodies.get(&dec) {
             return bid;
         }
         let bid = self.bodies.push(Body::new());
         self.item_bodies.insert(dec, bid);
+        if let solve::ResolvedDeclKind::Item {
+            native: Some(native), ..
+        } = &self.resolutions.decs[dec].kind
+        {
+            let native = *native;
+            let Ty::Fn(header) = &self.resolutions.decs[dec].ty else {
+                panic!("a native dec's ty is always a Ty::Fn")
+            };
+            let arity = header.parameters.len();
+            self.in_body(bid, |ir| {
+                let params: Vec<Local> = (0..arity)
+                    .map(|i| ir.synthetic_local(&format!("$trampoline_arg{i}")))
+                    .collect();
+                ir.current_body_mut().params = params.clone();
+                let args: Vec<InstId> = params
+                    .iter()
+                    .map(|&p| ir.current().get_local(p))
+                    .collect();
+                let ret = ir.current().call_native(native, args);
+                ir.current().ret(ret);
+            });
+        }
         bid
     }
 

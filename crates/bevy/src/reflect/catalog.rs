@@ -89,7 +89,11 @@ impl Catalog {
                             members
                                 .reflected()
                                 .map(|(name, member)| {
-                                    (name.unwrap_or_default().to_string(), ty(registry, member))
+                                    (
+                                        name.unwrap_or_default().to_string(),
+                                        ty(registry, member),
+                                        None,
+                                    )
                                 })
                                 .collect(),
                         ),

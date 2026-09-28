@@ -14,6 +14,12 @@ use crate::{
     conversion::{MimasType, TypeError, ty_error},
 };
 
+/// Resolve a unit name to its dimension — backs `#[mimas_dim("s")]` on `MimasStruct`/
+/// `MimasEnum` fields, so a plain `f64` field can declare its unit for the checker.
+pub fn dim_of(name: &str) -> Option<Dim> {
+    units::lookup(name).map(|(d, _)| d)
+}
+
 macro_rules! unit_ty {
     ($(#[$m:meta])* $name:ident, $unit:literal, $dim:expr) => {
         $(#[$m])*
@@ -77,4 +83,16 @@ unit_ty!(
 unit_ty!(
     /// Bits of data.
     Bits, "b", units::DATA
+);
+unit_ty!(
+    /// Pixels -- screen-space positions and extents.
+    Px, "px", units::PIXELS
+);
+unit_ty!(
+    /// Pixels per second -- screen-space velocities.
+    PxS, "px/s", units::PIXELS.div(units::TIME)
+);
+unit_ty!(
+    /// Pixels per second squared -- screen-space accelerations.
+    PxS2, "px/s^2", units::PIXELS.div(units::TIME.powi(2))
 );
