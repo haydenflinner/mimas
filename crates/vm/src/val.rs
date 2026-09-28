@@ -535,6 +535,65 @@ pub enum Captured {
     Cycle,
 }
 
+/// How many rows [`Inspect::Table`] carries — mirrors the `show_*`
+/// `TableView` cap in spirit: enough to typeset a real table, bounded so
+/// a million-row frame can't flood a snapshot (the rest report through
+/// `dropped`).
+pub const INSPECT_TABLE_ROWS: usize = 40;
+
+/// [`Inspect::Table`] for one frame: scalars keep their kind, everything
+/// else (dates, nested lists, …) falls back to `AnyValue`'s display
+/// text — the same fallback [`crate::table_data`] uses.
+#[cfg(feature = "dataframe")]
+fn inspect_frame(df: &polars::frame::DataFrame) -> Inspect {
+    use polars::prelude::AnyValue;
+    let cols: Vec<String> = df
+        .get_column_names()
+        .iter()
+        .map(|n| n.as_str().to_string())
+        .collect();
+    let series: Vec<polars::prelude::Series> = df
+        .get_column_names()
+        .iter()
+        .filter_map(|n| df.column(n.as_str()).ok())
+        .map(|c| c.as_materialized_series().clone())
+        .collect();
+    let shown = df.height().min(INSPECT_TABLE_ROWS);
+    let mut rows = Vec::with_capacity(shown);
+    for i in 0..shown {
+        rows.push(
+            series
+                .iter()
+                .map(|s| match s.get(i) {
+                    Ok(AnyValue::Null) => Inspect::Null,
+                    Ok(AnyValue::Boolean(b)) => Inspect::Bool(b),
+                    Ok(AnyValue::Int8(v)) => Inspect::Int(v as i64),
+                    Ok(AnyValue::Int16(v)) => Inspect::Int(v as i64),
+                    Ok(AnyValue::Int32(v)) => Inspect::Int(v as i64),
+                    Ok(AnyValue::Int64(v)) => Inspect::Int(v),
+                    Ok(AnyValue::UInt8(v)) => Inspect::Int(v as i64),
+                    Ok(AnyValue::UInt16(v)) => Inspect::Int(v as i64),
+                    Ok(AnyValue::UInt32(v)) => Inspect::Int(v as i64),
+                    Ok(AnyValue::UInt64(v)) => {
+                        i64::try_from(v).map(Inspect::Int).unwrap_or(Inspect::Float(v as f64))
+                    }
+                    Ok(AnyValue::Float32(v)) => Inspect::Float(v as f64),
+                    Ok(AnyValue::Float64(v)) => Inspect::Float(v),
+                    Ok(AnyValue::String(s)) => Inspect::Str(s.to_string()),
+                    Ok(AnyValue::StringOwned(s)) => Inspect::Str(s.as_str().to_string()),
+                    Ok(v) => Inspect::Str(format!("{v}")),
+                    Err(_) => Inspect::Null,
+                })
+                .collect(),
+        );
+    }
+    Inspect::Table {
+        cols,
+        rows,
+        dropped: df.height() - shown,
+    }
+}
+
 impl std::fmt::Display for Captured {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -671,6 +730,16 @@ pub enum Inspect {
     },
     Fn(BodyId),
     Raised(String),
+    /// A `DataFrame` flattened for display — column names plus up to
+    /// [`INSPECT_TABLE_ROWS`] rows of typed cells. A host gets no raw
+    /// frame handle, so a table it can typeset (or graph — cells keep
+    /// their scalar `Inspect` kind) is the honest shape. `dropped`
+    /// counts rows the cap left unread.
+    Table {
+        cols: Vec<String>,
+        rows: Vec<Vec<Inspect>>,
+        dropped: usize,
+    },
     Other,
     /// A true cycle back to an ancestor on the current path (see [`Captured::Cycle`]) -- *or*,
     /// since `seen` in [`Val::inspect`] is shared across everything the caller inspects with it,
@@ -764,7 +833,11 @@ impl<'gc> Val<'gc> {
             Val::Raised(s) => Inspect::Raised(s.as_str().to_string()),
             Val::Closure(_) => Inspect::Other,
             #[cfg(feature = "dataframe")]
-            Val::DataFrame(_) | Val::PlExpr(_) | Val::GroupBy(_) => Inspect::Other,
+            Val::DataFrame(d) => guarded(Gc::as_ptr(d.0) as *const (), seen, |_| {
+                inspect_frame(&d.0.borrow().0)
+            }),
+            #[cfg(feature = "dataframe")]
+            Val::PlExpr(_) | Val::GroupBy(_) => Inspect::Other,
             #[cfg(feature = "darkly")]
             Val::DarklyImage(_) => Inspect::Other,
         }
