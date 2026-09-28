@@ -1549,6 +1549,11 @@ impl Solve for If {
         // Ensure the branches match, or coercse an option.
         let (ty, negative) = if let Some(else_expr) = self.else_expr.as_ref() {
             solver.control_flow.enter();
+            // an error *inside* the else arm is real -- only a failure to unify the
+            // arm's type with the main body's may fall back to option coercion
+            // (otherwise the retry below re-reads a half-solved cache and swallows
+            // the error, leaving unresolved nodes for the emitter to panic on)
+            else_expr.query(solver)?;
             let ty = if let Err(e) = else_expr.fulfill_ty(positive_ty.clone(), solver) {
                 if let Some(ty) = Ty::coerce_option(else_expr.query(solver)?, positive_ty, solver) {
                     ty
@@ -1774,6 +1779,11 @@ impl Solve for Literal {
             let ty = if let Some(expr) = exprs.first() {
                 let mut first_ty = expr.query(solver)?;
                 for expr in exprs.iter().skip(1) {
+                    // an error *inside* the element is real -- only a failure to unify the
+                    // element's type with the accumulated one may fall back to coercion
+                    // (otherwise the retry below re-reads a half-solved cache and swallows
+                    // the error, leaving unresolved nodes for the emitter to panic on)
+                    expr.query(solver)?;
                     first_ty = if let Err(e) = expr.fulfill_ty(first_ty.clone(), solver) {
                         let found = expr.query(solver)?;
                         if let Some(ty) = Ty::coerce_option(found.clone(), first_ty.clone(), solver)
