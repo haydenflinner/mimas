@@ -32,4 +32,6 @@ bevy = { version = "0.19.0", default-features = false, features = [
   "default_font",
   "png",
 ] }
-bevy_immediate = { path = "/Users/wow/code/dsa/bevy_immediate" }
+# Pinned upstream — the checkout is at `main` tip `1ba98ca` (v0.8.0,
+# unreleased; crates.io tops out at 0.5.x).
+bevy_immediate = { git = "https://github.com/PPakalns/bevy_immediate.git", rev = "1ba98ca3" }

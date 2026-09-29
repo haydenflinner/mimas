@@ -29,7 +29,10 @@ walkdir.workspace = true
 # for why `lazy`/`fmt`/`dtype-full` and not `streaming`. `pivot` (unlike `csv`) doesn't bundle
 # `streaming` at the umbrella-crate level, so it's safe to enable directly here -- needed for
 # `std_lib::dataframe::pivot`.
-polars = { path = "../../../polars/crates/polars", optional = true, default-features = false, features = [
+# The `literate` fork carries wasm32 shims (inline block_on, byte_source
+# fallbacks) upstream lacks — required by hosts that compile `dataframe`
+# to wasm. Pinned to the rev the shim commits sit on.
+polars = { git = "https://github.com/haydenflinner/polars.git", rev = "c90a33e76c", optional = true, default-features = false, features = [
     "lazy",
     "fmt_no_tty",
     "dtype-full",
@@ -47,12 +50,12 @@ polars = { path = "../../../polars/crates/polars", optional = true, default-feat
 ] }
 # depended on directly (not via `polars`'s own `csv` feature) for `CsvReadOptions`/`CsvReader`,
 # used by `std_lib::dataframe::from_csv` to read an in-memory CSV string into a `DataFrame`.
-# `polars`'s own `csv` feature unconditionally bundles in `streaming`, which this local clone's
+# `polars`'s own `csv` feature unconditionally bundles in `streaming`, which this clone's
 # `polars-io` cloud module doesn't build against (an unrelated `object_store` version mismatch --
-# see the note on the `polars` dep above); `polars-io/csv` on its own pulls in neither. Same repo
-# path as the `polars` dep above, so Cargo resolves this to the identical `DataFrame`/`Column`
+# see the note on the `polars` dep above); `polars-io/csv` on its own pulls in neither. Same git
+# source as the `polars` dep above, so Cargo resolves this to the identical `DataFrame`/`Column`
 # types `polars::frame`/`polars::prelude` re-export, not a second copy.
-polars-io = { path = "../../../polars/crates/polars-io", optional = true, default-features = false, features = [
+polars-io = { git = "https://github.com/haydenflinner/polars.git", rev = "c90a33e76c", optional = true, default-features = false, features = [
     "csv",
 ] }
 # `std_lib::darkly` (a `.darkly` file's own layer/manifest format, not a game-engine dependency):

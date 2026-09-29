@@ -110,6 +110,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "alloc-no-stdlib"
+version = "2.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cc7bb162ec39d46ab1ca8c77bf72e890535becd1751bb45f64c597edb4c8c6b3"
+
+[[package]]
+name = "alloc-stdlib"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e76a019e91224d279006ff972f1e984179a6e9feb050adba6ce8274aef23195"
+dependencies = [
+ "alloc-no-stdlib",
+]
+
+[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -847,6 +862,7 @@ dependencies = [
 [[package]]
 name = "bevy_immediate"
 version = "0.8.0"
+source = "git+https://github.com/PPakalns/bevy_immediate.git?rev=1ba98ca3#1ba98ca3ea2d3410ee0cd19f4fa55972d0f51e16"
 dependencies = [
  "bevy_immediate_attach",
  "bevy_immediate_core",
@@ -856,6 +872,7 @@ dependencies = [
 [[package]]
 name = "bevy_immediate_attach"
 version = "0.8.0"
+source = "git+https://github.com/PPakalns/bevy_immediate.git?rev=1ba98ca3#1ba98ca3ea2d3410ee0cd19f4fa55972d0f51e16"
 dependencies = [
  "bevy_app",
  "bevy_ecs",
@@ -866,6 +883,7 @@ dependencies = [
 [[package]]
 name = "bevy_immediate_core"
 version = "0.8.0"
+source = "git+https://github.com/PPakalns/bevy_immediate.git?rev=1ba98ca3#1ba98ca3ea2d3410ee0cd19f4fa55972d0f51e16"
 dependencies = [
  "ahash",
  "bevy_app",
@@ -882,6 +900,7 @@ dependencies = [
 [[package]]
 name = "bevy_immediate_floating_ui"
 version = "0.8.0"
+source = "git+https://github.com/PPakalns/bevy_immediate.git?rev=1ba98ca3#1ba98ca3ea2d3410ee0cd19f4fa55972d0f51e16"
 dependencies = [
  "bevy_app",
  "bevy_ecs",
@@ -900,6 +919,7 @@ dependencies = [
 [[package]]
 name = "bevy_immediate_ui"
 version = "0.8.0"
+source = "git+https://github.com/PPakalns/bevy_immediate.git?rev=1ba98ca3#1ba98ca3ea2d3410ee0cd19f4fa55972d0f51e16"
 dependencies = [
  "bevy_app",
  "bevy_color",
@@ -1742,6 +1762,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "36f64beae40a84da1b4b26ff2761a5b895c12adc41dc25aaee1c4f2bbfe97a6e"
 
 [[package]]
+name = "brotli"
+version = "8.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5cc91aac060a7a1e25823bdccbfb6af1875b88f17c6daac97894eed8207166b3"
+dependencies = [
+ "alloc-no-stdlib",
+ "alloc-stdlib",
+ "brotli-decompressor",
+]
+
+[[package]]
+name = "brotli-decompressor"
+version = "5.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3a32acac15fe1967bc3986b2a6347dffc965602354ea6f450ad07e8bfd253583"
+dependencies = [
+ "alloc-no-stdlib",
+ "alloc-stdlib",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1786,6 +1827,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "calamine"
+version = "0.36.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5fa68281b1a76b54a62156474adb06bb380a67e07dd60656e3217152b42183f3"
+dependencies = [
+ "atoi_simd",
+ "byteorder",
+ "chrono",
+ "codepage",
+ "encoding_rs",
+ "fast-float2",
+ "log",
+ "quick-xml",
+ "serde",
+ "zip 8.6.0",
 ]
 
 [[package]]
@@ -1896,6 +1955,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "codepage"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bdff162541cd8b79de82e2edcc7eff3a8c2a6dc3d75152636028f96d93de3b26"
+dependencies = [
+ "encoding_rs",
+]
+
+[[package]]
 name = "codespan-reporting"
 version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1943,7 +2011,6 @@ version = "7.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "958c5d6ecf1f214b4c2bbbbf6ab9523a864bd136dcf71a7e8904799acfe1ad47"
 dependencies = [
- "crossterm",
  "unicode-segmentation",
  "unicode-width 0.2.2",
 ]
@@ -2085,6 +2152,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "core_detect"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f8f80099a98041a3d1622845c271458a2d73e688351bf3cb999266764b81d48"
+
+[[package]]
 name = "core_maths"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2159,29 +2232,6 @@ name = "crossbeam-utils"
 version = "0.8.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a31eee39dddec8330830986fcd7625edb5a24ec90ea038215273bbc3adb08ac6"
-
-[[package]]
-name = "crossterm"
-version = "0.29.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d8b9f2e4c67f833b660cdb0a3523065869fb35570177239812ed4c905aeff87b"
-dependencies = [
- "bitflags 2.13.2",
- "crossterm_winapi",
- "document-features",
- "parking_lot",
- "rustix 1.1.4",
- "winapi",
-]
-
-[[package]]
-name = "crossterm_winapi"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "acdd7c62a3665c7f6830a51635d9ac9b23ed385797f70a83bb8bafe9c572ab2b"
-dependencies = [
- "winapi",
-]
 
 [[package]]
 name = "crunchy"
@@ -2399,6 +2449,20 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "encoding_rs"
+version = "0.8.42"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e985e0451871ad22fb8d2b6b076e2028a502a0d3950998c2c5c0a4f9b5d9679"
+dependencies = [
+ "cfg-if",
+ "core_detect",
+ "multiversion_no_op",
+ "rustversion",
+ "scopeguard",
+ "simdutf8",
 ]
 
 [[package]]
@@ -3639,7 +3703,7 @@ dependencies = [
 
 [[package]]
 name = "mimas"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "mimas-api",
  "mimas-compile",
@@ -3653,17 +3717,18 @@ dependencies = [
 
 [[package]]
 name = "mimas-api"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "mimas-shared",
 ]
 
 [[package]]
 name = "mimas-compile"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chompy",
  "colored",
+ "indexmap",
  "itertools 0.10.5",
  "mimas-api",
  "mimas-parse",
@@ -3679,13 +3744,14 @@ dependencies = [
  "bevy",
  "bevy_immediate",
  "mimas",
- "zip",
+ "zip 2.4.2",
 ]
 
 [[package]]
 name = "mimas-library"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
+ "calamine",
  "camino",
  "chompy",
  "heck",
@@ -3698,15 +3764,16 @@ dependencies = [
  "polars-io",
  "rand",
  "regex",
+ "rust_xlsxwriter",
  "serde",
  "serde_json",
  "walkdir",
- "zip",
+ "zip 2.4.2",
 ]
 
 [[package]]
 name = "mimas-macros"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -3716,9 +3783,8 @@ dependencies = [
 
 [[package]]
 name = "mimas-parse"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
- "bitflags 1.3.2",
  "chompy",
  "hashbrown 0.13.2",
  "itertools 0.10.5",
@@ -3731,7 +3797,7 @@ dependencies = [
 
 [[package]]
 name = "mimas-shared"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chompy",
  "indexmap",
@@ -3742,7 +3808,7 @@ dependencies = [
 
 [[package]]
 name = "mimas-solve"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bitflags 1.3.2",
  "chompy",
@@ -3757,13 +3823,15 @@ dependencies = [
  "mutants",
  "pretty_assertions",
  "thiserror 1.0.69",
+ "walkdir",
 ]
 
 [[package]]
 name = "mimas-vm"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "gc-arena",
+ "glam",
  "indexmap",
  "inventory",
  "itertools 0.10.5",
@@ -3822,6 +3890,12 @@ dependencies = [
  "num-traits",
  "pxfm",
 ]
+
+[[package]]
+name = "multiversion_no_op"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
 
 [[package]]
 name = "murmur3"
@@ -4544,6 +4618,7 @@ dependencies = [
 [[package]]
 name = "polars"
 version = "0.55.1"
+source = "git+https://github.com/haydenflinner/polars.git?rev=c90a33e76c#c90a33e76c8a00d88928773f885a6ea1ffedfb27"
 dependencies = [
  "getrandom 0.2.17",
  "getrandom 0.4.3",
@@ -4566,6 +4641,7 @@ dependencies = [
 [[package]]
 name = "polars-arrow"
 version = "0.55.1"
+source = "git+https://github.com/haydenflinner/polars.git?rev=c90a33e76c#c90a33e76c8a00d88928773f885a6ea1ffedfb27"
 dependencies = [
  "atoi_simd",
  "bitflags 2.13.2",
@@ -4609,6 +4685,7 @@ dependencies = [
 [[package]]
 name = "polars-async"
 version = "0.55.1"
+source = "git+https://github.com/haydenflinner/polars.git?rev=c90a33e76c#c90a33e76c8a00d88928773f885a6ea1ffedfb27"
 dependencies = [
  "atomic-waker",
  "crossbeam-channel",
@@ -4627,6 +4704,7 @@ dependencies = [
 [[package]]
 name = "polars-buffer"
 version = "0.55.1"
+source = "git+https://github.com/haydenflinner/polars.git?rev=c90a33e76c#c90a33e76c8a00d88928773f885a6ea1ffedfb27"
 dependencies = [
  "bytemuck",
  "either",
@@ -4638,6 +4716,7 @@ dependencies = [
 [[package]]
 name = "polars-compute"
 version = "0.55.1"
+source = "git+https://github.com/haydenflinner/polars.git?rev=c90a33e76c#c90a33e76c8a00d88928773f885a6ea1ffedfb27"
 dependencies = [
  "atoi_simd",
  "bytemuck",
@@ -4663,6 +4742,7 @@ dependencies = [
 [[package]]
 name = "polars-config"
 version = "0.55.1"
+source = "git+https://github.com/haydenflinner/polars.git?rev=c90a33e76c#c90a33e76c8a00d88928773f885a6ea1ffedfb27"
 dependencies = [
  "polars-error",
  "serde",
@@ -4671,6 +4751,7 @@ dependencies = [
 [[package]]
 name = "polars-core"
 version = "0.55.1"
+source = "git+https://github.com/haydenflinner/polars.git?rev=c90a33e76c#c90a33e76c8a00d88928773f885a6ea1ffedfb27"
 dependencies = [
  "bitflags 2.13.2",
  "boxcar",
@@ -4710,6 +4791,7 @@ dependencies = [
 [[package]]
 name = "polars-descriptions"
 version = "0.55.1"
+source = "git+https://github.com/haydenflinner/polars.git?rev=c90a33e76c#c90a33e76c8a00d88928773f885a6ea1ffedfb27"
 dependencies = [
  "serde",
  "strum_macros",
@@ -4718,6 +4800,7 @@ dependencies = [
 [[package]]
 name = "polars-dtype"
 version = "0.55.1"
+source = "git+https://github.com/haydenflinner/polars.git?rev=c90a33e76c#c90a33e76c8a00d88928773f885a6ea1ffedfb27"
 dependencies = [
  "boxcar",
  "hashbrown 0.17.1",
@@ -4731,6 +4814,7 @@ dependencies = [
 [[package]]
 name = "polars-error"
 version = "0.55.1"
+source = "git+https://github.com/haydenflinner/polars.git?rev=c90a33e76c#c90a33e76c8a00d88928773f885a6ea1ffedfb27"
 dependencies = [
  "object_store",
  "parking_lot",
@@ -4743,6 +4827,7 @@ dependencies = [
 [[package]]
 name = "polars-expr"
 version = "0.55.1"
+source = "git+https://github.com/haydenflinner/polars.git?rev=c90a33e76c#c90a33e76c8a00d88928773f885a6ea1ffedfb27"
 dependencies = [
  "bitflags 2.13.2",
  "hashbrown 0.17.1",
@@ -4767,6 +4852,7 @@ dependencies = [
 [[package]]
 name = "polars-io"
 version = "0.55.1"
+source = "git+https://github.com/haydenflinner/polars.git?rev=c90a33e76c#c90a33e76c8a00d88928773f885a6ea1ffedfb27"
 dependencies = [
  "async-trait",
  "atoi_simd",
@@ -4818,6 +4904,7 @@ dependencies = [
 [[package]]
 name = "polars-json"
 version = "0.55.1"
+source = "git+https://github.com/haydenflinner/polars.git?rev=c90a33e76c#c90a33e76c8a00d88928773f885a6ea1ffedfb27"
 dependencies = [
  "chrono",
  "fallible-streaming-iterator",
@@ -4837,6 +4924,7 @@ dependencies = [
 [[package]]
 name = "polars-lazy"
 version = "0.55.1"
+source = "git+https://github.com/haydenflinner/polars.git?rev=c90a33e76c#c90a33e76c8a00d88928773f885a6ea1ffedfb27"
 dependencies = [
  "bitflags 2.13.2",
  "chrono",
@@ -4863,6 +4951,7 @@ dependencies = [
 [[package]]
 name = "polars-mem-engine"
 version = "0.55.1"
+source = "git+https://github.com/haydenflinner/polars.git?rev=c90a33e76c#c90a33e76c8a00d88928773f885a6ea1ffedfb27"
 dependencies = [
  "memmap2",
  "polars-arrow",
@@ -4881,6 +4970,7 @@ dependencies = [
 [[package]]
 name = "polars-observer"
 version = "0.55.1"
+source = "git+https://github.com/haydenflinner/polars.git?rev=c90a33e76c#c90a33e76c8a00d88928773f885a6ea1ffedfb27"
 dependencies = [
  "parking_lot",
  "polars-descriptions",
@@ -4890,6 +4980,7 @@ dependencies = [
 [[package]]
 name = "polars-ooc"
 version = "0.55.1"
+source = "git+https://github.com/haydenflinner/polars.git?rev=c90a33e76c#c90a33e76c8a00d88928773f885a6ea1ffedfb27"
 dependencies = [
  "async-trait",
  "boxcar",
@@ -4910,6 +5001,7 @@ dependencies = [
 [[package]]
 name = "polars-ops"
 version = "0.55.1"
+source = "git+https://github.com/haydenflinner/polars.git?rev=c90a33e76c#c90a33e76c8a00d88928773f885a6ea1ffedfb27"
 dependencies = [
  "argminmax",
  "base64 0.22.1",
@@ -4942,13 +5034,17 @@ dependencies = [
 [[package]]
 name = "polars-parquet"
 version = "0.55.1"
+source = "git+https://github.com/haydenflinner/polars.git?rev=c90a33e76c#c90a33e76c8a00d88928773f885a6ea1ffedfb27"
 dependencies = [
  "async-stream",
  "base64 0.22.1",
+ "brotli",
  "bytemuck",
  "ethnum",
+ "flate2",
  "futures",
  "hashbrown 0.17.1",
+ "lz4",
  "num-traits",
  "polars-arrow",
  "polars-buffer",
@@ -4960,7 +5056,9 @@ dependencies = [
  "regex",
  "serde",
  "simdutf8",
+ "snap",
  "streaming-decompression",
+ "zstd",
 ]
 
 [[package]]
@@ -4976,6 +5074,7 @@ dependencies = [
 [[package]]
 name = "polars-plan"
 version = "0.55.1"
+source = "git+https://github.com/haydenflinner/polars.git?rev=c90a33e76c#c90a33e76c8a00d88928773f885a6ea1ffedfb27"
 dependencies = [
  "bitflags 2.13.2",
  "blake3",
@@ -5017,6 +5116,7 @@ dependencies = [
 [[package]]
 name = "polars-row"
 version = "0.55.1"
+source = "git+https://github.com/haydenflinner/polars.git?rev=c90a33e76c#c90a33e76c8a00d88928773f885a6ea1ffedfb27"
 dependencies = [
  "bitflags 2.13.2",
  "bytemuck",
@@ -5031,6 +5131,7 @@ dependencies = [
 [[package]]
 name = "polars-schema"
 version = "0.55.1"
+source = "git+https://github.com/haydenflinner/polars.git?rev=c90a33e76c#c90a33e76c8a00d88928773f885a6ea1ffedfb27"
 dependencies = [
  "indexmap",
  "polars-error",
@@ -5042,6 +5143,7 @@ dependencies = [
 [[package]]
 name = "polars-sql"
 version = "0.55.1"
+source = "git+https://github.com/haydenflinner/polars.git?rev=c90a33e76c#c90a33e76c8a00d88928773f885a6ea1ffedfb27"
 dependencies = [
  "bitflags 2.13.2",
  "hex",
@@ -5062,6 +5164,7 @@ dependencies = [
 [[package]]
 name = "polars-stream"
 version = "0.55.1"
+source = "git+https://github.com/haydenflinner/polars.git?rev=c90a33e76c#c90a33e76c8a00d88928773f885a6ea1ffedfb27"
 dependencies = [
  "async-channel",
  "async-trait",
@@ -5106,6 +5209,7 @@ dependencies = [
 [[package]]
 name = "polars-testing"
 version = "0.55.1"
+source = "git+https://github.com/haydenflinner/polars.git?rev=c90a33e76c#c90a33e76c8a00d88928773f885a6ea1ffedfb27"
 dependencies = [
  "polars-core",
  "polars-ops",
@@ -5114,6 +5218,7 @@ dependencies = [
 [[package]]
 name = "polars-time"
 version = "0.55.1"
+source = "git+https://github.com/haydenflinner/polars.git?rev=c90a33e76c#c90a33e76c8a00d88928773f885a6ea1ffedfb27"
 dependencies = [
  "atoi_simd",
  "bytemuck",
@@ -5135,6 +5240,7 @@ dependencies = [
 [[package]]
 name = "polars-utils"
 version = "0.55.1"
+source = "git+https://github.com/haydenflinner/polars.git?rev=c90a33e76c#c90a33e76c8a00d88928773f885a6ea1ffedfb27"
 dependencies = [
  "argminmax",
  "bincode",
@@ -5281,6 +5387,7 @@ version = "0.41.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e660451e55124f798a69a5af3f49ccfbefbd41910eefd25caf2393e1f3473ec1"
 dependencies = [
+ "encoding_rs",
  "memchr",
  "serde",
 ]
@@ -5674,6 +5781,15 @@ dependencies = [
  "serde_derive",
  "typeid",
  "unicode-ident",
+]
+
+[[package]]
+name = "rust_xlsxwriter"
+version = "0.99.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "34f2d2cda7223168a14fb86bc7411dbc3379bd7d49749ecc53b91ed98585b6b0"
+dependencies = [
+ "zip 8.6.0",
 ]
 
 [[package]]
@@ -6079,6 +6195,12 @@ checksum = "dd538fb6910ac1099850255cf94a94df6551fbdd602454387d0adb2d1ca6dead"
 dependencies = [
  "serde",
 ]
+
+[[package]]
+name = "snap"
+version = "1.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "199905e6153d6405f9728fe44daace35f8f837bbf830bb6e85fbd5828709a886"
 
 [[package]]
 name = "socket2"
@@ -6681,6 +6803,12 @@ checksum = "cb30dbbd9036155e74adad6812e9898d03ec374946234fbcebd5dfc7b9187b90"
 dependencies = [
  "rustc-hash 2.1.3",
 ]
+
+[[package]]
+name = "typed-path"
+version = "0.12.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e28f89b80c87b8fb0cf04ab448d5dd0dd0ade2f8891bae878de66a75a28600e"
 
 [[package]]
 name = "typeid"
@@ -7591,6 +7719,20 @@ dependencies = [
  "indexmap",
  "memchr",
  "thiserror 2.0.20",
+ "zopfli",
+]
+
+[[package]]
+name = "zip"
+version = "8.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d04a6b5381502aa6087c94c669499eb1602eb9c5e8198e534de571f7154809b"
+dependencies = [
+ "crc32fast",
+ "flate2",
+ "indexmap",
+ "memchr",
+ "typed-path",
  "zopfli",
 ]
 
