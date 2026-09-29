@@ -1,6 +1,6 @@
 use std::fmt::Display;
 
-use hashbrown::HashMap;
+use indexmap::IndexMap;
 use itertools::Itertools;
 use shared::{Located, Location};
 
@@ -77,7 +77,7 @@ impl Display for Pat {
 pub enum PatKind {
     Ident(Ident),
     Tuple(Vec<Pat>),
-    Struct(Box<Expr>, HashMap<String, Pat>),
+    Struct(Box<Expr>, IndexMap<String, Pat>),
     TupleVariant(Box<Expr>, Vec<Pat>),
     Variant(Box<Expr>),
     Or(Vec<Pat>),

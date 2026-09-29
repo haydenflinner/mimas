@@ -3354,6 +3354,7 @@ version = "0.2.0"
 dependencies = [
  "chompy",
  "hashbrown 0.13.2",
+ "indexmap 2.14.0",
  "itertools 0.10.5",
  "miette",
  "mimas-shared",
