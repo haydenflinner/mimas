@@ -400,3 +400,182 @@ fn marker(
     // Not a marker — copy the `@` through.
     Ok(("@".to_string(), 1))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Globals, extract};
+
+    /// blob key → blob text for every decl in `src` — the map a
+    /// `blobs-scoped/` dir would hold after publishing the page.
+    fn blobs_of(src: &str) -> (Globals, HashMap<String, String>) {
+        let globals = Globals::for_source(src);
+        let mut blobs = HashMap::new();
+        for i in 0..globals.items().len() {
+            blobs.insert(
+                Globals::blob_key(globals.address(i)).to_string(),
+                globals.blob_text(i),
+            );
+        }
+        (globals, blobs)
+    }
+
+    fn addr_of(globals: &Globals, name: &str) -> String {
+        let i = globals.items().iter().position(|i| i.name == name).unwrap();
+        globals.address(i).to_string()
+    }
+
+    fn name_of<'a>(linked: &'a Linked, addr: &str) -> &'a str {
+        linked
+            .items
+            .iter()
+            .find(|i| i.hash == addr)
+            .map(|i| i.name.as_str())
+            .unwrap()
+    }
+
+    /// One fn, no deps: the blob round-trips to a renamed decl.
+    #[test]
+    fn a_leaf_links_to_itself() {
+        let src = "fn leaf() -> int { 42 }\n";
+        let (globals, blobs) = blobs_of(src);
+        let addr = addr_of(&globals, "leaf");
+        let linked = link(&addr, |k| blobs.get(k).cloned()).unwrap();
+        assert_eq!(linked.items.len(), 1);
+        let name = &linked.items[0].name;
+        assert!(name.starts_with('x'), "{name}");
+        assert_eq!(linked.source, format!("fn {name} ( ) -> int {{ 42 }}"));
+        assert_eq!(extract(&linked.source).len(), 1);
+    }
+
+    /// `twice` → `square` → leaf: deps land before dependents, call
+    /// sites point at generated names, markers are gone.
+    #[test]
+    fn transitive_deps_link_post_order() {
+        let src = "fn twice(n: int) -> int { square(n) + square(n) }\nfn square(n: int) -> int { n * n }\nfn main() -> int { twice(2) }\n";
+        let (globals, blobs) = blobs_of(src);
+        let root = addr_of(&globals, "main");
+        let linked = link(&root, |k| blobs.get(k).cloned()).unwrap();
+        assert_eq!(linked.items.len(), 3);
+        // Post-order: deps precede their dependents, root last.
+        let order: Vec<&str> = linked.items.iter().map(|i| i.hash.as_str()).collect();
+        let pos = |n: &str| order.iter().position(|a| *a == addr_of(&globals, n)).unwrap();
+        assert!(pos("square") < pos("twice"));
+        assert!(pos("twice") < pos("main"));
+        // No markers survive; every dep site names its target.
+        assert!(!linked.source.contains('@'), "{}", linked.source);
+        let twice_name = name_of(&linked, &addr_of(&globals, "twice"));
+        let square_name = name_of(&linked, &addr_of(&globals, "square"));
+        let twice_decl = linked
+            .source
+            .lines()
+            .find(|l| l.contains(&format!("fn {twice_name}")))
+            .unwrap();
+        assert!(twice_decl.contains(&format!("{square_name} (")), "{twice_decl}");
+        // The linked module still parses to the same fn count.
+        assert_eq!(extract(&linked.source).len(), 3);
+    }
+
+    /// `f` → `f`: the lone blob links without looping, and the self
+    /// call names the generated fn.
+    #[test]
+    fn self_recursion_terminates() {
+        let src = "fn f(n: int) -> int { if n <= 0 { 0 } else { f(n - 1) } }\n";
+        let (globals, blobs) = blobs_of(src);
+        let addr = addr_of(&globals, "f");
+        assert!(!addr.contains(':'), "self-recursion is no group: {addr}");
+        let linked = link(&addr, |k| blobs.get(k).cloned()).unwrap();
+        assert_eq!(linked.items.len(), 1);
+        let name = &linked.items[0].name;
+        assert!(linked.source.contains(&format!("{name} (")), "{}", linked.source);
+        assert!(!linked.source.contains('@'));
+    }
+
+    /// `a` ⇄ `b` is one group blob: linking `G:0` lands both members,
+    /// `@scc:` sites resolve to sibling names, and the group hash is
+    /// the fetch key.
+    #[test]
+    fn a_cycle_links_as_one_blob() {
+        let src = "fn a(n: int) -> int { b(n) }\nfn b(n: int) -> int { a(n) }\n";
+        let (globals, blobs) = blobs_of(src);
+        assert_eq!(blobs.len(), 1, "one group blob, {blobs:?}");
+        let root = addr_of(&globals, "a");
+        assert!(root.ends_with(":0"), "{root}");
+        let linked = link(&root, |k| blobs.get(k).cloned()).unwrap();
+        assert_eq!(linked.items.len(), 2);
+        let a = name_of(&linked, &addr_of(&globals, "a"));
+        let b = name_of(&linked, &addr_of(&globals, "b"));
+        assert!(linked.source.contains(&format!("fn {a}")), "{}", linked.source);
+        assert!(linked.source.contains(&format!("fn {b}")), "{}", linked.source);
+        assert!(!linked.source.contains('@'), "{}", linked.source);
+        assert_eq!(extract(&linked.source).len(), 2);
+    }
+
+    /// A cycle's edges *out* of the group resolve too: `m` inside the
+    /// cycle calls the plain `help` dep, which links alongside.
+    #[test]
+    fn a_cycles_external_deps_link() {
+        let src = "fn help() -> int { 7 }\nfn a(n: int) -> int { b(n) + help() }\nfn b(n: int) -> int { a(n) }\n";
+        let (globals, blobs) = blobs_of(src);
+        let root = addr_of(&globals, "a");
+        let linked = link(&root, |k| blobs.get(k).cloned()).unwrap();
+        assert_eq!(linked.items.len(), 3);
+        let help = name_of(&linked, &addr_of(&globals, "help"));
+        assert!(linked.source.contains(&format!("{help} (")), "{}", linked.source);
+        assert!(!linked.source.contains('@'));
+    }
+
+    /// A fetch that comes back `None` names the missing key.
+    #[test]
+    fn a_missing_blob_is_an_error() {
+        let src = "fn go() -> int { leaf() }\nfn leaf() -> int { 1 }\n";
+        let (globals, blobs) = blobs_of(src);
+        let mut blobs = blobs;
+        let leaf = addr_of(&globals, "leaf");
+        blobs.remove(&leaf);
+        let root = addr_of(&globals, "go");
+        match link(&root, |k| blobs.get(k).cloned()) {
+            Err(LinkError::MissingBlob(key)) => assert_eq!(key, leaf),
+            other => panic!("expected MissingBlob, got {other:?}"),
+        }
+    }
+
+    /// `G:9` on a two-member group is an error, not a panic.
+    #[test]
+    fn a_member_past_the_end_is_an_error() {
+        let src = "fn a(n: int) -> int { b(n) }\nfn b(n: int) -> int { a(n) }\n";
+        let (globals, blobs) = blobs_of(src);
+        let group = Globals::blob_key(&addr_of(&globals, "a")).to_string();
+        match link(&format!("{group}:9"), |k| blobs.get(k).cloned()) {
+            Err(LinkError::MissingMember(addr)) => assert_eq!(addr, format!("{group}:9")),
+            other => panic!("expected MissingMember, got {other:?}"),
+        }
+    }
+
+    /// Renaming the program's fns changes nothing about the linked
+    /// shape — same addresses, same generated names, same source.
+    #[test]
+    fn a_rename_links_identically() {
+        let (ga, ba) = blobs_of("fn go(x: int) -> int { leaf(x) }\nfn leaf(y: int) -> int { y + 1 }\n");
+        let (gb, bb) = blobs_of("fn run(x: int) -> int { base(x) }\nfn base(y: int) -> int { y + 1 }\n");
+        let a = link(&addr_of(&ga, "go"), |k| ba.get(k).cloned()).unwrap();
+        let b = link(&addr_of(&gb, "run"), |k| bb.get(k).cloned()).unwrap();
+        assert_eq!(a, b);
+    }
+
+    /// `@v` locals and f-string interpolation survive the rewrite —
+    /// markers inside `f"…{…}…"` resolve, the literal bytes outside
+    /// interpolation copy through.
+    #[test]
+    fn locals_and_interpolations_rewrite() {
+        let src = "fn greet(name: str) -> str { f\"hi {name}!\" }\n";
+        let (globals, blobs) = blobs_of(src);
+        let addr = addr_of(&globals, "greet");
+        let linked = link(&addr, |k| blobs.get(k).cloned()).unwrap();
+        let name = &linked.items[0].name;
+        assert_eq!(
+            linked.source,
+            format!("fn {name} ( v0 : str ) -> str {{ f\"hi {{v0}}!\" }}")
+        );
+    }
+}
