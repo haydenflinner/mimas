@@ -1364,6 +1364,8 @@ impl<'s> Parser<'s> {
     fn binary(&mut self, min_power: u8) -> Expr {
         let start = self.next_start();
         let mut left = self.unary();
+        // only looser operators can follow an `in`, which doesn't chain
+        let mut max_power = u8::MAX;
         loop {
             // A spaced `%` reaching here can only be old-style modulo — postfix `x%` hugs
             // its operand and already folded in `chain_accesses`, and a `±` tolerance's
@@ -1421,7 +1423,7 @@ impl<'s> Parser<'s> {
             let Some((op, power)) = BinaryOp::of(self.peek()) else {
                 break;
             };
-            if power < min_power || !self.infix_binds() {
+            if !(min_power..max_power).contains(&power) || !self.infix_binds() {
                 break;
             }
             self.advance();
@@ -1433,11 +1435,10 @@ impl<'s> Parser<'s> {
             } else {
                 self.binary(power + 1)
             };
-            let chains = !matches!(op, BinaryOp::In(_));
-            left = self.op_expr(op, left, right, start);
-            if !chains {
-                break;
+            if matches!(op, BinaryOp::In(_)) {
+                max_power = power;
             }
+            left = self.op_expr(op, left, right, start);
         }
         left
     }
@@ -3338,7 +3339,7 @@ impl BinaryOp {
         if let Ok(op) = EqualityOp::try_from(kind) {
             return Some((Self::Equality(op), 2));
         }
-        // `in` doesn't chain, so `binary` stops after taking one
+        // `in` doesn't chain — `binary` caps `max_power` after taking one
         if matches!(kind, TokKind::In | TokKind::NotIn) {
             return Some((Self::In(kind == TokKind::In), 3));
         }
