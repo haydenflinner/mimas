@@ -35,14 +35,27 @@
 //! `use "page";` (roadmap 4) crosses the page boundary: [`Globals::for_page`]
 //! pulls each include's fns into the dep table the way the host splices
 //! them — breadth-first, appended after the own source — so a `use`d name
-//! emits the same `@dep:<hash>` a same-source callee does. Resolution is
+//! emits the same `@dep:` edge a same-source callee does. Resolution is
 //! positional, matching the interpreter's module rib: the latest decl at or
 //! before the use site wins; when none precedes it, the last decl does —
 //! an include's `row` shadows the page's own `fn row` only for calls
 //! written *above* the own decl. Module-path `use`s (`use a::b::c`) stay
 //! `Keep` slots: they shadow without a body we can hash.
+//!
+//! Dep edges carry the callee's *final address* — its scoped hash, or
+//! `G:i` (group hash + member index) when the callee belongs to a
+//! dependency cycle. Cycles are hashed Unison-style: the decls of each
+//! strongly-connected component are canonicalized with intra-SCC refs as
+//! positional `@scc:<i>` markers (i = member order by source position, so
+//! a rename can't shift it), joined into one group blob under `G =
+//! blake3(joined)`. Rename-stable *inside* cycles and self-contained
+//! outside them: every `@dep:`/`@self`/`@scc` marker in a stored blob
+//! names fetchable content, so the link-by-hash loader needs no manifest
+//! — fetch the blob, rename the markers, concat.
 
+use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::rc::Rc;
 
 use parse::components::{Annotation, Binding, Pat, PatKind};
 use parse::lex::{Lexer, TokKind};
@@ -63,22 +76,20 @@ enum Slot {
     Local(usize),
     /// A `<T>` type parameter — resolves only in annotation position.
     Type(usize),
-    /// A top-level `fn` — same-source or `use`d in — emits `@dep:<hash>`.
-    Dep(String),
     /// A name that shadows globals without being one (a module-path `use`d
     /// import): resolves so that it *blocks* dep substitution but emits
     /// literally.
     Keep,
 }
 
-/// A top-level `fn` declaration the assembled program provides: its pass-1
-/// content hash and byte position. Own items carry their real spans; each
-/// `use "…"` page's items follow breadth-first, offset past the own source
-/// the way the host splices them.
+/// A top-level `fn` declaration the assembled program provides: its byte
+/// position and index into [`Globals::items`]. Own items carry their real
+/// spans; each `use "…"` page's items follow breadth-first, offset past
+/// the own source the way the host splices them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Decl {
-    hash: String,
     pos: usize,
+    index: usize,
 }
 
 /// The non-local names a fn's bare identifiers can resolve to: top-level
@@ -92,6 +103,15 @@ pub struct Globals {
     keeps: HashSet<String>,
     /// `use "…"` names that resolved, in breadth-first (assembled) order.
     includes: Vec<String>,
+    /// Every top-level `fn` of the assembled program, own first then
+    /// includes in `includes()` order, `start` rebased to assembled byte
+    /// offsets. `items()[..own]` is the page's own source.
+    items: Vec<Item>,
+    /// How many of `items` came from the page's own source.
+    own: usize,
+    /// Whole-page scoped analysis (dep graph → SCCs → final addresses),
+    /// computed once on demand.
+    analysis: OnceCell<Rc<Analysis>>,
 }
 
 impl Globals {
@@ -109,8 +129,9 @@ impl Globals {
     pub fn for_page(source: &str, mut resolve: impl FnMut(&str) -> Option<String>) -> Self {
         let mut globals = Self::default();
         for item in extract(source) {
-            globals.decl(&item.name, item.hash(), item.start);
+            globals.item(item);
         }
+        globals.own = globals.items.len();
         let mut queue = VecDeque::new();
         let mut seen = HashSet::new();
         globals.use_items(source, &mut queue, &mut seen);
@@ -119,8 +140,10 @@ impl Globals {
             let Some(inc) = resolve(&name) else {
                 continue;
             };
-            for item in extract(&inc) {
-                globals.decl(&item.name, item.hash(), base + item.start);
+            for mut item in extract(&inc) {
+                item.start += base;
+                item.end += base;
+                globals.item(item);
             }
             globals.use_items(&inc, &mut queue, &mut seen);
             globals.includes.push(name);
@@ -141,26 +164,103 @@ impl Globals {
         &self.includes
     }
 
-    /// The slot `name` resolves to for a use site at assembled-source byte
-    /// `pos` — the interpreter's module-rib rule: the latest declaration
-    /// at or before the use wins; when none precedes it, the last
-    /// declaration does (a name only includes provide is still visible to
-    /// the whole page, and a `use`d decl shadows an own `fn` written below
-    /// the call). Module-path `use`d names block dep substitution.
-    fn slot_at(&self, name: &str, pos: usize) -> Option<Slot> {
+    /// Every top-level `fn` of the assembled program — own source first,
+    /// then each `use "…"` include breadth-first — with `start`/`end`
+    /// rebased to assembled byte offsets so `scoped_canonical` and
+    /// `relocs` resolve dep edges the way the interpreter's module rib
+    /// does.
+    pub fn items(&self) -> &[Item] {
+        &self.items
+    }
+
+    /// `items()` entries that came from the page's own source — the ones
+    /// a publish writes namespace bindings for.
+    pub fn own_items(&self) -> &[Item] {
+        &self.items[..self.own]
+    }
+
+    /// The declaration a bare `name` written at assembled-source byte
+    /// `pos` resolves to — an index into [`Globals::items`]. The
+    /// interpreter's module-rib rule: the latest declaration at or before
+    /// the use wins; when none precedes it, the last declaration does (a
+    /// name only includes provide is still visible to the whole page, and
+    /// a `use`d decl shadows an own `fn` written below the call).
+    /// Module-path `use`d names shadow without a decl: they return `None`
+    /// the way an unbound name does.
+    pub fn decl_at(&self, name: &str, pos: usize) -> Option<usize> {
         if self.keeps.contains(name) {
-            return Some(Slot::Keep);
+            return None;
         }
         let decls = self.decls.get(name)?;
         let decl = decls.iter().rfind(|d| d.pos <= pos).or_else(|| decls.last())?;
-        Some(Slot::Dep(decl.hash.clone()))
+        Some(decl.index)
     }
 
-    fn decl(&mut self, name: &str, hash: String, pos: usize) {
+    /// The decl `source` at assembled byte `start` stands for, if it is
+    /// one — lets item-shaped queries share the analyzed decl's canonical
+    /// form and address instead of re-rendering a lone copy.
+    fn decl_of(&self, source: &str, start: usize) -> Option<usize> {
+        self.items
+            .iter()
+            .position(|i| i.start == start && i.source == source)
+    }
+
+    /// The whole-page scoped analysis — dep graph, SCCs and final
+    /// addresses for every assembled decl. Built once, on first use.
+    fn analysis(&self) -> &Analysis {
+        self.analysis
+            .get_or_init(|| Rc::new(analyze(self)))
+            .as_ref()
+    }
+
+    /// The decl's final address: its scoped hash `S`, or `G:i` for the
+    /// `i`-th member (assembled-source order) of a dependency cycle.
+    /// Index into [`Globals::items`].
+    pub fn address(&self, index: usize) -> &str {
+        &self.analysis().addrs[index]
+    }
+
+    /// The decl's reloc sites with final addresses — see [`deps`].
+    pub fn relocs_at(&self, index: usize) -> &[Reloc] {
+        &self.analysis().relocs[index]
+    }
+
+    /// The decl's own canonical line — `@scc:` markers for in-cycle refs.
+    /// `None` when the decl can't scope-parse (token-level fallback).
+    fn canonical_at(&self, index: usize) -> Option<String> {
+        self.analysis().canonicals[index].clone()
+    }
+
+    /// The text the decl's address stores in a scoped blob dir: the
+    /// joined group blob for cycle members, the decl's own canonical
+    /// otherwise (token-level canonical when it can't scope-parse).
+    pub fn blob_text(&self, index: usize) -> String {
+        let addr = self.address(index);
+        if let Some((group, _)) = addr.split_once(':') {
+            if let Some(text) = self.analysis().groups.get(group) {
+                return text.clone();
+            }
+        }
+        self.canonical_at(index)
+            .unwrap_or_else(|| self.items[index].canonical_source())
+    }
+
+    /// The blob-dir key an address names — the part before `:` (`G:i`
+    /// fetches the whole group's blob).
+    pub fn blob_key(addr: &str) -> &str {
+        addr.split(':').next().unwrap_or(addr)
+    }
+
+    fn item(&mut self, item: Item) {
+        let index = self.items.len();
         self.decls
-            .entry(name.to_string())
+            .entry(item.name.clone())
             .or_default()
-            .push(Decl { hash, pos });
+            .push(Decl {
+                pos: item.start,
+                index,
+            });
+        self.items.push(item);
     }
 
     /// `use` items in `source`: `use a::b::c`/`use a::{…}` names keep
@@ -222,9 +322,10 @@ pub fn dep_table(items: &[Item]) -> HashMap<String, String> {
 /// canonical text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reloc {
-    /// A `@dep:<hash>` site — the identifier `name` (byte span `start..end`
-    /// in the item source) was substituted by the callee's pass-1 content
-    /// hash.
+    /// A `@dep:` site — the identifier `name` (byte span `start..end`
+    /// in the item source) was substituted by the callee's *address*:
+    /// its scoped hash, or `G:i` when the callee sits inside a
+    /// dependency cycle.
     Dep {
         name: String,
         hash: String,
@@ -268,12 +369,12 @@ pub struct Manifest {
     /// The item's written name (a label, not an address — renames don't
     /// move `hash`).
     pub name: String,
-    /// The item's scoped content hash — the address it stores under.
+    /// The item's scoped address — `S` ordinarily, `G:i` inside a
+    /// dependency cycle. Fetch [`Globals::blob_key`] of it from a scoped
+    /// blob dir.
     pub hash: String,
-    /// The item's pass-1 (token-level) hash. Dep edges target *this*, not
-    /// `hash` — `@dep:` markers substitute pass-1 hashes so cycles need no
-    /// fixed point — so a loader resolves an edge by finding the entry
-    /// whose `token_hash` matches, then loads `hash`.
+    /// The item's pass-1 (token-level) hash — the `blobs/` address,
+    /// complementary to `hash`'s `blobs-scoped/` one.
     pub token_hash: String,
     /// Every `@dep:`/`@self` site, in canonical order. Empty when the
     /// item's source can't be scope-parsed (`hash` then carries the
@@ -282,9 +383,8 @@ pub struct Manifest {
 }
 
 impl Manifest {
-    /// The dep-edge target hashes (`@dep:` sites only), in order,
-    /// duplicates kept per site. Each target equals the *`token_hash`* of
-    /// the entry it links to — see [`Manifest::token_hash`].
+    /// The dep-edge target addresses (`@dep:` sites only), in order,
+    /// duplicates kept per site.
     pub fn dep_hashes(&self) -> impl Iterator<Item = &str> {
         self.relocs.iter().filter_map(Reloc::hash)
     }
@@ -308,6 +408,10 @@ struct Scoped<'s> {
     subs: HashMap<(usize, usize), String>,
     /// The `@dep:`/`@self` sites, in the order the walk records them.
     relocs: Vec<Reloc>,
+    /// The decl each `Reloc::Dep` site resolved to — an index into
+    /// `globals.items`, parallel to the `Dep` entries of `relocs`. The
+    /// final address goes in at patch time, after SCCs are known.
+    targets: Vec<usize>,
     /// Inside member names, `::` paths, struct-literal/pattern paths: every
     /// ident stays literal.
     keep_names: bool,
@@ -324,6 +428,7 @@ impl<'s> Scoped<'s> {
             next: 0,
             subs: HashMap::new(),
             relocs: Vec::new(),
+            targets: Vec::new(),
             keep_names: false,
         }
     }
@@ -400,10 +505,15 @@ impl<'s> Scoped<'s> {
             }
             return;
         }
-        let Some(Slot::Dep(hash)) = self.globals.slot_at(&ident.lexeme, self.base + span.start)
+        let Some(target) = self
+            .globals
+            .decl_at(&ident.lexeme, self.base + span.start)
         else {
             return;
         };
+        // The marker is a placeholder until patch time: the dep table
+        // writes the target's final address once SCCs are known.
+        let hash = self.globals.items[target].hash();
         if self.record(ident, format!("@dep:{hash}")) {
             self.relocs.push(Reloc::Dep {
                 name: ident.lexeme.clone(),
@@ -411,6 +521,7 @@ impl<'s> Scoped<'s> {
                 start: span.start,
                 end: span.end,
             });
+            self.targets.push(target);
         }
     }
 
@@ -850,43 +961,71 @@ fn render_scoped(item_source: &str, st: &Scoped) -> Option<String> {
 /// as opening the assembled source (base 0); callers hashing one item of
 /// a page want [`Item::scoped_canonical`], which positions it correctly.
 pub fn canonical_scoped(item_source: &str, globals: &Globals) -> Option<String> {
-    let st = scoped_pass(item_source, globals, 0)?;
-    render_scoped(item_source, &st)
+    canonical_scoped_at(item_source, globals, 0)
 }
 
 /// [`canonical_scoped`] with the item's real byte offset in the assembled
 /// source — [`Item`] methods route through this so `use`d-name resolution
-/// sees the true use-site position.
+/// sees the true use-site position. When `item_source` is one of the
+/// assembled decls sitting at `base`, the analysis's stored canonical
+/// comes back (`@scc:` markers for in-cycle refs); standalone text gets
+/// plain `@dep:` edges to the decls it references.
 pub(crate) fn canonical_scoped_at(
     item_source: &str,
     globals: &Globals,
     base: usize,
 ) -> Option<String> {
-    let st = scoped_pass(item_source, globals, base)?;
+    if let Some(index) = globals.decl_of(item_source, base) {
+        return globals.canonical_at(index);
+    }
+    let mut st = scoped_pass(item_source, globals, base)?;
+    patch_standalone(&mut st, globals);
     render_scoped(item_source, &st)
 }
 
 /// [`deps`] with the item's real byte offset — see [`canonical_scoped_at`].
 pub(crate) fn deps_at(item_source: &str, globals: &Globals, base: usize) -> Option<Vec<Reloc>> {
-    scoped_pass(item_source, globals, base).map(|st| st.relocs)
+    if let Some(index) = globals.decl_of(item_source, base) {
+        return Some(globals.relocs_at(index).to_vec());
+    }
+    let mut st = scoped_pass(item_source, globals, base)?;
+    patch_standalone(&mut st, globals);
+    Some(st.relocs)
 }
 
 /// The relocation sites of one fn item's source — every `@dep:`/`@self`
 /// marker the scoped canonical form carries, in the order they appear in
-/// it. This *is* the linking table: a link-by-hash loader reads this list
-/// to patch callee references, and [`Manifest::dep_hashes`] derives the
-/// edge set from it. `None` under the same gate as [`canonical_scoped`]
-/// (source doesn't parse or holds no fn). Same base-0 caveat — page
-/// callers want [`Item::relocs`].
+/// it. Dep hashes are the targets' final addresses: a bare scoped hash,
+/// or `G:i` when the target sits in a dependency cycle. `None` under the
+/// same gate as [`canonical_scoped`] (source doesn't parse or holds no
+/// fn). Same base-0 caveat — page callers want [`Item::relocs`].
 pub fn deps(item_source: &str, globals: &Globals) -> Option<Vec<Reloc>> {
-    scoped_pass(item_source, globals, 0).map(|st| st.relocs)
+    deps_at(item_source, globals, 0)
+}
+
+/// Patch a standalone walk's `@dep:` placeholders with final addresses —
+/// for item text that is *not* one of the assembled decls (decl text goes
+/// through the analysis and may get `@scc:` markers instead).
+fn patch_standalone(st: &mut Scoped, globals: &Globals) {
+    let analysis = globals.analysis();
+    let mut dep = 0;
+    for reloc in &mut st.relocs {
+        let Reloc::Dep { hash, start, end, .. } = reloc else {
+            continue;
+        };
+        let target = st.targets[dep];
+        dep += 1;
+        let addr = analysis.addrs[target].clone();
+        st.subs.insert((*start, *end), format!("@dep:{addr}"));
+        *hash = addr;
+    }
 }
 
 /// The link-by-hash manifest of a whole page against `globals`: for every
-/// extracted fn, in extraction order, its scoped content hash, its token
-/// hash and its ordered reloc sites — `{ name → (hash, [deps]) }` plus
-/// the edge-target key. One [`Globals`] build covers all items, so
-/// inter-fn and `use`-include edges resolve regardless of declaration
+/// extracted fn, in extraction order, its scoped address (`S`, or `G:i`
+/// inside a cycle), its token hash and its ordered reloc sites —
+/// `{ name → (hash, [deps]) }`. One [`Globals`] build covers all items,
+/// so inter-fn and `use`-include edges resolve regardless of declaration
 /// order. Items whose source can't be scope-parsed keep their token-level
 /// fallback hash (the same one [`hash_scoped`] reports) and an empty
 /// reloc list.
@@ -895,25 +1034,11 @@ pub fn manifest_with(source: &str, globals: &Globals) -> Vec<Manifest> {
         .iter()
         .map(|item| {
             let token_hash = item.hash();
-            let (hash, relocs) = match scoped_pass(&item.source, globals, item.start) {
-                Some(st) => {
-                    // Same hash `hash_scoped` would report: blake3 of the
-                    // rendered canonical form, token-hash fallback otherwise.
-                    let hash = match render_scoped(&item.source, &st) {
-                        Some(canonical) => {
-                            blake3::hash(canonical.as_bytes()).to_hex().to_string()
-                        }
-                        None => token_hash.clone(),
-                    };
-                    (hash, st.relocs)
-                }
-                None => (token_hash.clone(), Vec::new()),
-            };
             Manifest {
                 name: item.name.clone(),
-                hash,
+                hash: item.scoped_hash(globals),
                 token_hash,
-                relocs,
+                relocs: item.relocs(globals).unwrap_or_default(),
             }
         })
         .collect()
@@ -929,9 +1054,19 @@ pub fn manifest(source: &str) -> Vec<Manifest> {
 /// blake3 of the scoped canonical form. Falls back to [`hash_item`] when
 /// the source doesn't parse — the token-level form is still deterministic.
 /// Same base-0 caveat as [`canonical_scoped`]; page callers want
-/// [`Item::scoped_hash`].
+/// [`Item::scoped_hash`], which also reports `G:i` addresses for decls
+/// inside a dependency cycle.
 pub fn hash_scoped(item_source: &str, globals: &Globals) -> String {
-    match canonical_scoped(item_source, globals) {
+    scoped_hash_at(item_source, globals, 0)
+}
+
+/// [`hash_scoped`] positioned in the assembled source — shares the
+/// analyzed decl's address when `item_source` *is* the decl at `base`.
+pub(crate) fn scoped_hash_at(item_source: &str, globals: &Globals, base: usize) -> String {
+    if let Some(index) = globals.decl_of(item_source, base) {
+        return globals.address(index).to_string();
+    }
+    match canonical_scoped_at(item_source, globals, base) {
         Some(canonical) => blake3::hash(canonical.as_bytes()).to_hex().to_string(),
         None => hash_item(item_source),
     }
@@ -988,6 +1123,266 @@ fn fstring_text(
     }
     rewritten.push_str(&source[cursor..close]);
     format!("f\"{rewritten}\"")
+}
+
+/// Whole-page scoped analysis: every assembled decl's final address,
+/// canonical line and reloc table, plus the joined group blob per
+/// dependency cycle.
+#[derive(Debug)]
+struct Analysis {
+    /// decl index → final address: `S`, or `G:i` for the `i`-th member
+    /// (assembled-source order) of a multi-decl cycle.
+    addrs: Vec<String>,
+    /// decl index → its canonical line (`@scc:` markers for in-cycle
+    /// refs); `None` → token-level fallback (unparseable source).
+    canonicals: Vec<Option<String>>,
+    /// decl index → its reloc sites, dep hashes carrying final addresses.
+    relocs: Vec<Vec<Reloc>>,
+    /// group hash → the joined member canonicals — the cycle's blob text.
+    groups: HashMap<String, String>,
+}
+
+/// `analyze`'s working state: the scoped passes, the SCC split, and the
+/// memoized address assignment over the condensation DAG.
+struct Analyze<'a> {
+    globals: &'a Globals,
+    passes: Vec<Option<Scoped<'a>>>,
+    /// Multi-decl SCCs — each member list sorted by assembled position.
+    sccs: Vec<Vec<usize>>,
+    /// decl → its SCC's index into `sccs` (only cycles get an entry).
+    scc_of: Vec<Option<usize>>,
+    /// decl → its position inside its SCC (the `i` in `G:i` / `@scc:i`).
+    member_pos: Vec<Option<usize>>,
+    done: Vec<bool>,
+    done_scc: Vec<bool>,
+    out: Analysis,
+}
+
+fn analyze(globals: &Globals) -> Analysis {
+    let n = globals.items.len();
+    let mut work = Analyze {
+        globals,
+        passes: globals
+            .items
+            .iter()
+            .map(|item| scoped_pass(&item.source, globals, item.start))
+            .collect(),
+        sccs: Vec::new(),
+        scc_of: vec![None; n],
+        member_pos: vec![None; n],
+        done: vec![false; n],
+        done_scc: Vec::new(),
+        out: Analysis {
+            addrs: vec![String::new(); n],
+            canonicals: vec![None; n],
+            relocs: vec![Vec::new(); n],
+            groups: HashMap::new(),
+        },
+    };
+    let edges: Vec<Vec<usize>> = work
+        .passes
+        .iter()
+        .map(|pass| pass.as_ref().map(|s| s.targets.clone()).unwrap_or_default())
+        .collect();
+    // Only cycles need group handling — self-recursion never reaches the
+    // graph (own-name refs mark `@self`), so `len > 1` is the whole test.
+    for (sid, members) in tarjan(&edges)
+        .into_iter()
+        .filter(|s| s.len() > 1)
+        .enumerate()
+    {
+        let mut sorted = members;
+        sorted.sort_by_key(|&m| globals.items[m].start);
+        for (pos, &m) in sorted.iter().enumerate() {
+            work.scc_of[m] = Some(sid);
+            work.member_pos[m] = Some(pos);
+        }
+        work.sccs.push(sorted);
+        work.done_scc.push(false);
+    }
+    for i in 0..n {
+        work.compute(i);
+    }
+    work.out
+}
+
+impl<'a> Analyze<'a> {
+    fn compute(&mut self, i: usize) {
+        if self.done[i] {
+            return;
+        }
+        if self.passes[i].is_none() {
+            self.out.addrs[i] = self.globals.items[i].hash();
+            self.done[i] = true;
+            return;
+        }
+        if let Some(sid) = self.scc_of[i] {
+            self.compute_group(sid);
+            return;
+        }
+        self.patch(i);
+        self.done[i] = true;
+    }
+
+    /// A lone decl: every dep site gets the target's final address —
+    /// computing targets first is what orders the condensation DAG.
+    fn patch(&mut self, i: usize) {
+        let mut st = self.passes[i].take().expect("scoped pass ran");
+        let mut dep = 0;
+        for reloc in &mut st.relocs {
+            let Reloc::Dep { hash, start, end, .. } = reloc else {
+                continue;
+            };
+            let target = st.targets[dep];
+            dep += 1;
+            self.compute(target);
+            let addr = self.out.addrs[target].clone();
+            st.subs.insert((*start, *end), format!("@dep:{addr}"));
+            *hash = addr;
+        }
+        self.finish(i, st);
+    }
+
+    /// A multi-decl cycle: intra-SCC refs render as positional `@scc:i`
+    /// markers (i = member order by source position — rename-stable), the
+    /// members' canonicals join into one blob, and each member's address
+    /// is `blake3(joined):i`. External deps resolve as usual — an SCC is
+    /// one node of the condensation DAG.
+    fn compute_group(&mut self, sid: usize) {
+        if self.done_scc[sid] {
+            return;
+        }
+        let members = self.sccs[sid].clone();
+        // Reloc sites whose target lives inside the group: their `hash`
+        // is patched once G is known. (member, reloc index, target decl)
+        let mut pending = Vec::new();
+        for &m in &members {
+            let mut st = self.passes[m].take().expect("scoped pass ran");
+            let mut dep = 0;
+            for (ridx, reloc) in st.relocs.iter_mut().enumerate() {
+                let Reloc::Dep { hash, start, end, .. } = reloc else {
+                    continue;
+                };
+                let target = st.targets[dep];
+                dep += 1;
+                if self.scc_of[target] == Some(sid) {
+                    st.subs.insert(
+                        (*start, *end),
+                        format!("@scc:{}", self.member_pos[target].unwrap()),
+                    );
+                    pending.push((m, ridx, target));
+                } else {
+                    self.compute(target);
+                    let addr = self.out.addrs[target].clone();
+                    st.subs.insert((*start, *end), format!("@dep:{addr}"));
+                    *hash = addr;
+                }
+            }
+            self.passes[m] = Some(st);
+        }
+        let mut lines = Vec::new();
+        for &m in &members {
+            let st = self.passes[m].take().expect("patched above");
+            // Render can only fail on a lexer error — a degraded member
+            // still gets a line so the group's member count lines up.
+            let line = render_scoped(&self.globals.items[m].source, &st)
+                .unwrap_or_else(|| self.globals.items[m].canonical_source());
+            self.out.canonicals[m] = Some(line.clone());
+            self.out.relocs[m] = st.relocs;
+            lines.push(line);
+        }
+        let text = lines.join("\n");
+        let group = blake3::hash(text.as_bytes()).to_hex().to_string();
+        self.out.groups.insert(group.clone(), text);
+        for (pos, &m) in members.iter().enumerate() {
+            self.out.addrs[m] = format!("{group}:{pos}");
+            self.done[m] = true;
+        }
+        for (m, ridx, target) in pending {
+            let pos = self.member_pos[target].unwrap();
+            if let Reloc::Dep { hash, .. } = &mut self.out.relocs[m][ridx] {
+                *hash = format!("{group}:{pos}");
+            }
+        }
+        self.done_scc[sid] = true;
+    }
+
+    /// Render the patched walk and store the decl's line + address.
+    /// A render failure (lexer error) degrades to the token-level
+    /// address, the same fallback `hash_scoped` reports.
+    fn finish(&mut self, i: usize, st: Scoped) {
+        let rendered = render_scoped(&self.globals.items[i].source, &st);
+        self.out.relocs[i] = st.relocs;
+        match rendered {
+            Some(canonical) => {
+                self.out.addrs[i] = blake3::hash(canonical.as_bytes()).to_hex().to_string();
+                self.out.canonicals[i] = Some(canonical);
+            }
+            None => {
+                self.out.addrs[i] = self.globals.items[i].hash();
+            }
+        }
+    }
+}
+
+/// Tarjan's algorithm over the decl dep graph — the SCCs (multi- and
+/// single-member) in no particular order; callers sort members by
+/// assembled position before use.
+fn tarjan(edges: &[Vec<usize>]) -> Vec<Vec<usize>> {
+    struct State<'a> {
+        edges: &'a [Vec<usize>],
+        index: Vec<usize>,
+        low: Vec<usize>,
+        on_stack: Vec<bool>,
+        stack: Vec<usize>,
+        next: usize,
+        out: Vec<Vec<usize>>,
+    }
+    impl State<'_> {
+        fn go(&mut self, v: usize) {
+            self.index[v] = self.next;
+            self.low[v] = self.next;
+            self.next += 1;
+            self.stack.push(v);
+            self.on_stack[v] = true;
+            let targets = self.edges[v].clone();
+            for w in targets {
+                if self.index[w] == usize::MAX {
+                    self.go(w);
+                    self.low[v] = self.low[v].min(self.low[w]);
+                } else if self.on_stack[w] {
+                    self.low[v] = self.low[v].min(self.index[w]);
+                }
+            }
+            if self.low[v] == self.index[v] {
+                let mut scc = Vec::new();
+                while let Some(w) = self.stack.pop() {
+                    self.on_stack[w] = false;
+                    scc.push(w);
+                    if w == v {
+                        break;
+                    }
+                }
+                self.out.push(scc);
+            }
+        }
+    }
+    let n = edges.len();
+    let mut state = State {
+        edges,
+        index: vec![usize::MAX; n],
+        low: vec![0; n],
+        on_stack: vec![false; n],
+        stack: Vec::new(),
+        next: 0,
+        out: Vec::new(),
+    };
+    for v in 0..n {
+        if state.index[v] == usize::MAX {
+            state.go(v);
+        }
+    }
+    state.out
 }
 
 #[cfg(test)]
@@ -1100,13 +1495,20 @@ mod tests {
         assert!(canon_of(f, "f").contains("@self"), "{}", canon_of(f, "f"));
         // 2a couldn't do this: token-level hashing still differs on rename.
         assert_ne!(hash_item(f), hash_item(g));
-        // Mutual recursion — must terminate and stay deterministic.
+        // Mutual recursion — must terminate and stay deterministic. The
+        // pair is one SCC: intra-cycle refs mark `@scc:<member>` instead
+        // of an edge into the cycle.
         let cyc = "fn a(n: int) -> int { b(n) }\nfn b(n: int) -> int { a(n) }\n";
         let first = scoped_hashes(cyc);
         let second = scoped_hashes(cyc);
         assert_eq!(first, second);
-        assert!(canon_of(cyc, "a").contains("@dep:"));
-        assert!(canon_of(cyc, "b").contains("@dep:"));
+        assert!(canon_of(cyc, "a").contains("@scc:"));
+        assert!(canon_of(cyc, "b").contains("@scc:"));
+        // …and the group hash is rename-stable: consistent renames leave
+        // both addresses (same `G`, positional members) untouched.
+        let renamed = "fn x(n: int) -> int { y(n) }\nfn y(n: int) -> int { x(n) }\n";
+        assert_eq!(hash_of(&first, "a"), hash_of(&scoped_hashes(renamed), "x"));
+        assert_eq!(hash_of(&first, "b"), hash_of(&scoped_hashes(renamed), "y"));
     }
 
     /// Stdlib/module/member names are not dep-substituted — only same-source
@@ -1290,7 +1692,8 @@ mod tests {
         assert_eq!(relocs[0].hash(), None);
         let (lo, hi) = relocs[0].span();
         assert_eq!(&items[0].source[lo..hi], "f");
-        // Mutual recursion records one dep edge per cross reference.
+        // Mutual recursion records one dep edge per cross reference —
+        // the edge names the callee's address (`G:i` inside a cycle).
         let cyc = "fn a(n: int) -> int { b(n) }\nfn b(n: int) -> int { a(n) }\n";
         let items = extract(cyc);
         let globals = Globals::for_source(cyc);
@@ -1300,12 +1703,18 @@ mod tests {
             a.relocs(&globals).unwrap(),
             vec![Reloc::Dep {
                 name: "b".into(),
-                hash: b.hash(),
+                hash: b.scoped_hash(&globals),
                 start: a.source.find("b(n)").unwrap(),
                 end: a.source.find("b(n)").unwrap() + 1,
             }]
         );
-        assert_eq!(b.relocs(&globals).unwrap()[0].hash(), Some(a.hash().as_str()));
+        assert_eq!(
+            b.relocs(&globals).unwrap()[0].hash(),
+            Some(a.scoped_hash(&globals).as_str())
+        );
+        // Same cycle ⇒ same group hash, distinct member indices.
+        assert!(a.scoped_hash(&globals).ends_with(":0"));
+        assert!(b.scoped_hash(&globals).ends_with(":1"));
     }
 
     /// Calls that resolve to locals or `use`d names are not reloc sites —
@@ -1346,20 +1755,20 @@ mod tests {
             assert_eq!(&entry.hash, hash);
         }
         let twice = &manifest[1];
-        // Dep edges carry the callee's pass-1 (token-level) hash — the same
-        // value `dep_table` reports — not its scoped hash. Each entry also
-        // publishes that token hash, so an edge target resolves to the
-        // entry whose `token_hash` matches: the manifest is self-contained.
-        let callee_token_hash = extract(src)[0].hash();
-        assert_eq!(manifest[0].token_hash, callee_token_hash);
+        // Dep edges carry the callee's final address — its scoped hash —
+        // so an edge target resolves to the entry whose `hash` matches:
+        // the manifest is self-contained for a hash-addressed loader.
         assert_eq!(
             twice.dep_hashes().collect::<Vec<_>>(),
-            vec![callee_token_hash.as_str(), callee_token_hash.as_str()]
+            vec![manifest[0].hash.as_str(), manifest[0].hash.as_str()]
         );
         for target in twice.dep_hashes() {
-            let entry = manifest.iter().find(|m| m.token_hash == target);
+            let entry = manifest.iter().find(|m| m.hash == target);
             assert_eq!(entry.map(|m| m.name.as_str()), Some("square"));
         }
+        // The token hash still rides along as the `blobs/` address.
+        let callee_token_hash = extract(src)[0].hash();
+        assert_eq!(manifest[0].token_hash, callee_token_hash);
         assert!(manifest[0].relocs.is_empty());
         assert!(manifest[2].relocs.is_empty());
         // Extraction order is preserved — the manifest is positional.

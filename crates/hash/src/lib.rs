@@ -17,14 +17,21 @@
 //! references substitute the callee's content hash, recursion marks `@self`.
 //! Neither substitutes for the other — pick per call site.
 //!
-//! Link-by-hash (roadmap 4) starts from [`deps`] — an item's ordered
-//! `@dep:`/`@self` relocation sites — and [`manifest`], the per-page
-//! `{ name → (hash, token_hash, [deps]) }` table a hash-addressed loader
-//! consumes. [`Globals::for_page`] resolves `use "…"` includes so dep
-//! edges cross the page boundary with the interpreter's own rules.
+//! Link-by-hash (roadmap 4) is [`link`]: scoped blobs are
+//! self-contained — every `@dep:` marker *is* the fetch key — so a
+//! loader fetches a root address, resolves its transitive deps, and
+//! rewrites markers into generated names. Recursion cycles live in
+//! group blobs (`G:i` addresses, `@scc:` markers) so renames inside a
+//! cycle are free. [`manifest`]'s `{ name → (hash, token_hash, [deps]) }`
+//! table still reports what a page exports.
+//!
+//! [`Globals::for_page`] resolves `use "…"` includes so dep edges cross
+//! the page boundary with the interpreter's own rules.
 
+pub mod link;
 mod scoped;
 
+pub use link::{LinkError, Linked, LinkedItem};
 pub use scoped::{
     Globals, Manifest, Reloc, canonical_scoped, dep_table, deps, hash_scoped, manifest,
     manifest_with, scoped_hashes, scoped_hashes_with,
@@ -94,13 +101,11 @@ impl Item {
         scoped::canonical_scoped_at(&self.source, globals, self.start)
     }
 
-    /// The scoped content hash: blake3 of [`Self::scoped_canonical`],
-    /// falling back to [`Item::hash`] when the source doesn't parse.
+    /// The scoped content address: blake3 of [`Self::scoped_canonical`],
+    /// or `G:i` when the decl belongs to a dependency cycle, falling back
+    /// to [`Item::hash`] when the source doesn't parse.
     pub fn scoped_hash(&self, globals: &Globals) -> String {
-        match self.scoped_canonical(globals) {
-            Some(canonical) => blake3::hash(canonical.as_bytes()).to_hex().to_string(),
-            None => self.hash(),
-        }
+        scoped::scoped_hash_at(&self.source, globals, self.start)
     }
 
     /// The item's relocation sites — every `@dep:`/`@self` marker its
