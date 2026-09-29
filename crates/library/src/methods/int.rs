@@ -1,8 +1,7 @@
 use api::Intrinsic;
 use macros::native;
-use rand::RngExt;
 use shared::Ty;
-use vm::{RtErr, api::Api, conversion::Raisable};
+use vm::{Ctx, RtErr, api::Api, conversion::Raisable};
 
 pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add_method(abs);
@@ -84,12 +83,13 @@ fn to_str<'gc>(n: i64) -> String {
 /// ```mimas
 /// let roll = int::random(6) + 1; // 1 to 6
 /// ```
-fn random<'gc>(len: i64) -> Result<i64, RtErr> {
-    // random_range panics on an empty range
+fn random<'gc>(ctx: Ctx<'gc>, len: i64) -> Result<i64, RtErr> {
     if len <= 0 {
         return Err(RtErr::InvalidArgument("random requires len > 0".into()));
     }
-    Ok(rand::rng().random_range(0..len))
+    // one unit draw scaled — the same shape `mrt::random_int` produces,
+    // so seeded interpreter and native streams stay in lockstep
+    Ok(((super::rng::unit(ctx) * len as f64) as i64).clamp(0, len - 1))
 }
 
 #[native]

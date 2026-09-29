@@ -1,6 +1,5 @@
 use api::Intrinsic;
 use macros::native;
-use rand::{prelude::IndexedRandom, seq::SliceRandom};
 use shared::Ty;
 use vm::{Array, Ctx, RtErr, Val, anon, api::Api};
 
@@ -134,8 +133,13 @@ fn pop(arr: &mut Vec<anon::T<'gc>>) -> Option<anon::T<'gc>> {
 /// let deck = [1, 2, 3, 4];
 /// deck.shuffle();
 /// ```
-fn shuffle(arr: &mut Vec<anon::T<'gc>>) {
-    arr.shuffle(&mut rand::rng());
+fn shuffle<'gc>(ctx: Ctx<'gc>, arr: &mut Vec<anon::T<'gc>>) {
+    // Fisher-Yates on the Vm's stream — the same draws `mrt::shuffle`
+    // makes, so a seeded run shuffles identically either way
+    for i in (1..arr.len()).rev() {
+        let j = (super::rng::unit(ctx) * (i as f64 + 1.0)) as usize;
+        arr.swap(i, j.min(i));
+    }
 }
 
 // `other` stays as the gc handle because we already hold a borrow on `arr`. if `other`
@@ -185,8 +189,12 @@ fn flatten(arr: Vec<Vec<anon::T<'gc>>>) -> Vec<anon::T<'gc>> {
 /// let loot = ["sword", "shield", "potion"];
 /// let drop = loot.choose() ?? "nothing";
 /// ```
-fn choose(arr: &[Val<'gc>]) -> Option<anon::T<'gc>> {
-    arr.choose(&mut rand::rng()).copied().map(anon::Anon)
+fn choose<'gc>(ctx: Ctx<'gc>, arr: &[Val<'gc>]) -> Option<anon::T<'gc>> {
+    if arr.is_empty() {
+        return None;
+    }
+    let i = (super::rng::unit(ctx) * arr.len() as f64) as usize;
+    Some(anon::Anon(arr[i.min(arr.len() - 1)]))
 }
 
 #[native]

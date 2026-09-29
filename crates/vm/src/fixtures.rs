@@ -40,7 +40,7 @@
 use std::{
     any::{Any, TypeId},
     cell::{Cell, RefCell},
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     sync::Arc,
 };
 
@@ -178,6 +178,79 @@ impl Prints {
     /// they're per-Vm history).
     pub fn take(&self) -> Vec<(Location, PrintKind, String)> {
         std::mem::take(&mut *self.lines.borrow_mut())
+    }
+}
+
+/// Per-Vm random stream behind `float::random`/`int::random`/`bool::random`/
+/// `arr.shuffle`/`arr.choose` (and anything else that draws): the one place
+/// nondeterminism enters a program, so a host that seeds it gets a replayable
+/// run. `None` (the default) means each draw takes fresh entropy, same as
+/// `rand::rng()` did before; `seed` installs a xorshift64* stream — the same
+/// algorithm the headless `mrt` runtime uses, so an interpreter seeded `s`
+/// and a transpiled run seeded `s` produce identical sequences.
+///
+/// `script` is the other half of the story — the hookable read. A sim
+/// harness queues exact unit values for upcoming draws ("the third
+/// `float::random` returns exactly 0.25"), taking manual control of a
+/// specific nondet point instead of the whole stream. Scripted draws
+/// *replace* the stream value at that position — the stream still
+/// advances — so unscripted draws replay at identical indices either
+/// way and neighbors are untouched.
+#[derive(Default)]
+pub struct Rng {
+    /// `Some` = seeded xorshift64* state; `None` = entropy per draw.
+    state: Cell<Option<u64>>,
+    /// Exact `[0,1)` values queued for the next draws.
+    script: RefCell<VecDeque<f64>>,
+}
+
+impl Rng {
+    /// Install the deterministic stream — a sim harness calls this before
+    /// the program's first random op. `0` is legal but degenerate
+    /// (xorshift64* pins at 0 → every draw 0.0); callers wanting
+    /// "0 means unseeded" semantics guard before calling.
+    pub fn seed(&self, seed: u64) {
+        self.state.set(Some(seed));
+    }
+
+    /// The live stream state — `None` while unseeded. A host snapshots
+    /// this into checkpoints the way `mrt::random_seed` does, so a
+    /// resumed run continues the same sequence rather than restarting.
+    pub fn state(&self) -> Option<u64> {
+        self.state.get()
+    }
+
+    /// Queue exact unit values for the next `values.len()` draws — the
+    /// specific-read hook: override *these* draws, leave the rest of the
+    /// stream untouched. Out-of-`[0,1)` values are clamped into it.
+    pub fn script(&self, values: impl IntoIterator<Item = f64>) {
+        self.script.borrow_mut().extend(values);
+    }
+
+    /// How many scripted draws are left — a test asserts the program
+    /// consumed exactly what was queued.
+    pub fn scripted(&self) -> usize {
+        self.script.borrow().len()
+    }
+
+    /// One `[0, 1)` draw — the xorshift64* step (bit-identical to
+    /// `mrt::random`'s stream), or `None` when unseeded and the caller
+    /// falls back to its entropy source; a queued script value replaces
+    /// whatever the stream produced at this position. Every random op
+    /// draws through here, so `shuffle`, `choose`, and the `random`s
+    /// share one composable stream.
+    pub fn next_unit(&self) -> Option<f64> {
+        let stream = self.state.get().map(|mut x| {
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            self.state.set(Some(x));
+            (x.wrapping_mul(0x2545F4914F6CDD1D) >> 11) as f64 / (1u64 << 53) as f64
+        });
+        if let Some(u) = self.script.borrow_mut().pop_front() {
+            return Some(u.clamp(0.0, 1.0 - f64::EPSILON));
+        }
+        stream
     }
 }
 

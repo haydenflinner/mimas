@@ -13,6 +13,7 @@ mod methods {
     pub(crate) mod dict;
     pub(crate) mod float;
     pub(crate) mod int;
+    pub(crate) mod rng;
     pub(crate) mod str;
 }
 

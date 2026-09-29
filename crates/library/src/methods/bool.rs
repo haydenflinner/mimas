@@ -1,7 +1,6 @@
 use macros::native;
-use rand::RngExt;
 use shared::Ty;
-use vm::api::Api;
+use vm::{Ctx, api::Api};
 
 pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add_assoc(Ty::Bool, random);
@@ -13,6 +12,6 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
 /// let side = if bool::random() "heads" else "tails";
 /// ```
 #[native]
-fn random() -> bool {
-    rand::rng().random()
+fn random<'gc>(ctx: Ctx<'gc>) -> bool {
+    super::rng::unit(ctx) < 0.5
 }

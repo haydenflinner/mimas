@@ -1,8 +1,7 @@
 use api::Intrinsic;
 use macros::native;
-use rand::RngExt;
 use shared::Ty;
-use vm::{RtErr, api::Api, conversion::Raisable};
+use vm::{Ctx, RtErr, api::Api, conversion::Raisable};
 
 pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add_method(floor);
@@ -348,10 +347,9 @@ fn to_str(n: f64) -> String {
 ///     print("a one in four chance");
 /// }
 /// ```
-fn random(len: f64) -> Result<f64, RtErr> {
-    // random_range panics on an empty/NaN range
+fn random<'gc>(ctx: Ctx<'gc>, len: f64) -> Result<f64, RtErr> {
     if len.is_nan() || len <= 0.0 {
         return Err(RtErr::InvalidArgument("random requires len > 0".into()));
     }
-    Ok(rand::rng().random_range(0.0..len))
+    Ok(super::rng::unit(ctx) * len)
 }
