@@ -6,7 +6,7 @@ fn main() {
         "check f(2) == 3\n",
         "let x = 1 |> add3(10, 20, 30);\n",
     ] {
-        let mut p = Parser::new(Lexer::new(src, 0, "t".into()));
+        let p = Parser::new(Lexer::new(src, 0, "t".into()));
         let (ast, diags) = p.into_ast();
         eprintln!(
             "{:?} => stmts={} diags={:?}",
