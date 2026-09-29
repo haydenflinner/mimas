@@ -20,13 +20,14 @@
 //! Link-by-hash (roadmap 4) starts from [`deps`] — an item's ordered
 //! `@dep:`/`@self` relocation sites — and [`manifest`], the per-page
 //! `{ name → (hash, token_hash, [deps]) }` table a hash-addressed loader
-//! consumes.
+//! consumes. [`Globals::for_page`] resolves `use "…"` includes so dep
+//! edges cross the page boundary with the interpreter's own rules.
 
 mod scoped;
 
 pub use scoped::{
     Globals, Manifest, Reloc, canonical_scoped, dep_table, deps, hash_scoped, manifest,
-    scoped_hashes,
+    manifest_with, scoped_hashes, scoped_hashes_with,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,24 +85,29 @@ impl Item {
     }
 
     /// The scoped canonical form (roadmap 2b/3): locals alpha-renamed to
-    /// `@v{n}`, same-source fn refs to `@dep:<hash>`, self-refs to `@self`.
-    /// `None` when the source doesn't parse — callers then use
-    /// [`Self::canonical_source`].
+    /// `@v{n}`, fn refs to `@dep:<hash>` — same-source or `use "…"`d in,
+    /// when `globals` came from [`Globals::for_page`] — self-refs to
+    /// `@self`. The item's real page offset (`self.start`) positions dep
+    /// resolution. `None` when the source doesn't parse — callers then
+    /// use [`Self::canonical_source`].
     pub fn scoped_canonical(&self, globals: &Globals) -> Option<String> {
-        canonical_scoped(&self.source, globals)
+        scoped::canonical_scoped_at(&self.source, globals, self.start)
     }
 
     /// The scoped content hash: blake3 of [`Self::scoped_canonical`],
     /// falling back to [`Item::hash`] when the source doesn't parse.
     pub fn scoped_hash(&self, globals: &Globals) -> String {
-        hash_scoped(&self.source, globals)
+        match self.scoped_canonical(globals) {
+            Some(canonical) => blake3::hash(canonical.as_bytes()).to_hex().to_string(),
+            None => self.hash(),
+        }
     }
 
     /// The item's relocation sites — every `@dep:`/`@self` marker its
     /// scoped canonical form carries, in order. `None` under the same gate
     /// as [`Self::scoped_canonical`].
     pub fn relocs(&self, globals: &Globals) -> Option<Vec<Reloc>> {
-        deps(&self.source, globals)
+        scoped::deps_at(&self.source, globals, self.start)
     }
 
     /// Inclusive-exclusive char offsets of this item in `source`.

@@ -28,12 +28,21 @@
 //!
 //! Namespaces that are not user-fns stay literal (v1): member/method names
 //! after `.`/`?`, `::` paths (`str::len`, `std::polars::x`), named args,
-//! dict/struct-literal field keys, pattern paths, `use` paths and `use`d
-//! names, type names, `self`. Type *parameters* (`fn id<T>`) alpha-rename
-//! like locals, since they're binding sites, and `T` annotations resolve to
-//! them.
+//! dict/struct-literal field keys, pattern paths, `use` paths, type names,
+//! `self`. Type *parameters* (`fn id<T>`) alpha-rename like locals, since
+//! they're binding sites, and `T` annotations resolve to them.
+//!
+//! `use "page";` (roadmap 4) crosses the page boundary: [`Globals::for_page`]
+//! pulls each include's fns into the dep table the way the host splices
+//! them — breadth-first, appended after the own source — so a `use`d name
+//! emits the same `@dep:<hash>` a same-source callee does. Resolution is
+//! positional, matching the interpreter's module rib: the latest decl at or
+//! before the use site wins; when none precedes it, the last decl does —
+//! an include's `row` shadows the page's own `fn row` only for calls
+//! written *above* the own decl. Module-path `use`s (`use a::b::c`) stay
+//! `Keep` slots: they shadow without a body we can hash.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use parse::components::{Annotation, Binding, Pat, PatKind};
 use parse::lex::{Lexer, TokKind};
@@ -54,67 +63,146 @@ enum Slot {
     Local(usize),
     /// A `<T>` type parameter — resolves only in annotation position.
     Type(usize),
-    /// The item being hashed — a recursive self-reference. Emits `@self`.
-    OwnItem,
-    /// Another same-source top-level fn — emits `@dep:<hash>`.
+    /// A top-level `fn` — same-source or `use`d in — emits `@dep:<hash>`.
     Dep(String),
-    /// A name that shadows globals without being one (a `use`d import):
-    /// resolves so that it *blocks* dep substitution but emits literally.
+    /// A name that shadows globals without being one (a module-path `use`d
+    /// import): resolves so that it *blocks* dep substitution but emits
+    /// literally.
     Keep,
 }
 
-/// The non-local names a fn's bare identifiers can resolve to: same-source
-/// top-level fns (by content hash) plus `use`d imports (kept literal — a
-/// `use` shadows a same-name fn, and misjudging that would dep-substitute a
-/// foreign name). Built once per source, shared by every item on it.
+/// A top-level `fn` declaration the assembled program provides: its pass-1
+/// content hash and byte position. Own items carry their real spans; each
+/// `use "…"` page's items follow breadth-first, offset past the own source
+/// the way the host splices them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Decl {
+    hash: String,
+    pos: usize,
+}
+
+/// The non-local names a fn's bare identifiers can resolve to: top-level
+/// fns, own and `use "…"`d (by content hash), plus module-path `use`d
+/// imports (kept literal — they shadow without a resolvable body). Built
+/// once per page, shared by every item on it.
 #[derive(Debug, Clone, Default)]
 pub struct Globals {
-    map: HashMap<String, Slot>,
+    /// name → its declarations, in assembled-source order.
+    decls: HashMap<String, Vec<Decl>>,
+    keeps: HashSet<String>,
+    /// `use "…"` names that resolved, in breadth-first (assembled) order.
+    includes: Vec<String>,
 }
 
 impl Globals {
-    /// Top-level fns of `source` (pass-1 `hash_item` each) plus its `use`
-    /// imports. A `use`d name overrides a same-named fn — the conservative
-    /// read of an ambiguous program.
+    /// Top-level fns of `source` with no includes — a page whose `use "…"`
+    /// names all fail to resolve lands here too.
     pub fn for_source(source: &str) -> Self {
+        Self::for_page(source, |_| None)
+    }
+
+    /// `source` plus its `use "…"` includes: `resolve` maps a used page
+    /// name to that page's source (the host owns name → source). Includes
+    /// splice breadth-first after the own source, each joined by "\n\n" —
+    /// the order the assembler emits and the interpreter's module rib
+    /// resolves against.
+    pub fn for_page(source: &str, mut resolve: impl FnMut(&str) -> Option<String>) -> Self {
         let mut globals = Self::default();
-        for (name, hash) in dep_table(&extract(source)) {
-            globals.map.insert(name, Slot::Dep(hash));
+        for item in extract(source) {
+            globals.decl(&item.name, item.hash(), item.start);
         }
-        if let Ok(ast) = Parser::new(Lexer::new(source, 0, "globals".into())).try_into_ast() {
-            for stmt in ast.stmts() {
-                if let StmtKind::Item(item) = stmt.kind()
-                    && let ItemKind::Use(us) = item.kind()
-                {
-                    globals.use_item(us);
-                }
+        let mut queue = VecDeque::new();
+        let mut seen = HashSet::new();
+        globals.use_items(source, &mut queue, &mut seen);
+        let mut base = source.len();
+        while let Some(name) = queue.pop_front() {
+            let Some(inc) = resolve(&name) else {
+                continue;
+            };
+            for item in extract(&inc) {
+                globals.decl(&item.name, item.hash(), base + item.start);
             }
+            globals.use_items(&inc, &mut queue, &mut seen);
+            globals.includes.push(name);
+            base += inc.len() + 2;
         }
         globals
     }
 
-    /// Only `use`d names, no fn deps — for callers testing a single item in
-    /// isolation.
+    /// Only module-path `use`d names, no fn deps — for callers testing a
+    /// single item in isolation.
     pub fn empty() -> Self {
         Self::default()
     }
 
-    /// `use a::b::c` binds `c`; `use a::{b, c}` binds both; `use a::*` and
-    /// `use "page"` bind unknown names — nothing to shadow with.
-    fn use_item(&mut self, us: &Use) {
-        match us {
-            Use::Singular(_, item) => self.keep(&item.lexeme),
-            Use::Multi(_, items) => {
-                for item in items {
-                    self.keep(&item.lexeme);
+    /// `use "…"` names that resolved, in assembled order — the pages a
+    /// link-by-hash loader fetches alongside this one.
+    pub fn includes(&self) -> &[String] {
+        &self.includes
+    }
+
+    /// The slot `name` resolves to for a use site at assembled-source byte
+    /// `pos` — the interpreter's module-rib rule: the latest declaration
+    /// at or before the use wins; when none precedes it, the last
+    /// declaration does (a name only includes provide is still visible to
+    /// the whole page, and a `use`d decl shadows an own `fn` written below
+    /// the call). Module-path `use`d names block dep substitution.
+    fn slot_at(&self, name: &str, pos: usize) -> Option<Slot> {
+        if self.keeps.contains(name) {
+            return Some(Slot::Keep);
+        }
+        let decls = self.decls.get(name)?;
+        let decl = decls.iter().rfind(|d| d.pos <= pos).or_else(|| decls.last())?;
+        Some(Slot::Dep(decl.hash.clone()))
+    }
+
+    fn decl(&mut self, name: &str, hash: String, pos: usize) {
+        self.decls
+            .entry(name.to_string())
+            .or_default()
+            .push(Decl { hash, pos });
+    }
+
+    /// `use` items in `source`: `use a::b::c`/`use a::{…}` names keep
+    /// (they shadow but have no hashable body); `use a::*` binds unknown
+    /// names — nothing to shadow with; `use "page"` enqueues for the
+    /// `for_page` BFS, deduped case-insensitively like the host's
+    /// includeNames. Unparseable source contributes nothing.
+    fn use_items(
+        &mut self,
+        source: &str,
+        queue: &mut VecDeque<String>,
+        seen: &mut HashSet<String>,
+    ) {
+        let Ok(ast) = Parser::new(Lexer::new(source, 0, "globals".into())).try_into_ast() else {
+            return;
+        };
+        for stmt in ast.stmts() {
+            let StmtKind::Item(item) = stmt.kind() else {
+                continue;
+            };
+            let ItemKind::Use(us) = item.kind() else {
+                continue;
+            };
+            match us {
+                Use::Singular(_, item) => self.keep(&item.lexeme),
+                Use::Multi(_, items) => {
+                    for item in items {
+                        self.keep(&item.lexeme);
+                    }
+                }
+                Use::All(_) => {}
+                Use::Host(name) => {
+                    if seen.insert(name.to_lowercase()) {
+                        queue.push_back(name.clone());
+                    }
                 }
             }
-            Use::All(_) | Use::Host(_) => {}
         }
     }
 
     fn keep(&mut self, name: &str) {
-        self.map.insert(name.to_string(), Slot::Keep);
+        self.keeps.insert(name.to_string());
     }
 }
 
@@ -205,6 +293,14 @@ impl Manifest {
 /// Substitution map + scope stack for one item's AST walk.
 struct Scoped<'s> {
     source: &'s str,
+    /// The page's non-local environment — dep decls and `Keep` names.
+    globals: &'s Globals,
+    /// `source`'s byte offset in the assembled program: `use`d names
+    /// resolve by use-site position, which is `base` + the ident's
+    /// item-relative span.
+    base: usize,
+    /// The item's own name — resolves to `@self`, never a dep edge.
+    own_name: String,
     scopes: Vec<HashMap<String, Slot>>,
     next: usize,
     /// `(start, end)` byte span → replacement token text. Keyed on Location:
@@ -218,9 +314,12 @@ struct Scoped<'s> {
 }
 
 impl<'s> Scoped<'s> {
-    fn new(source: &'s str) -> Self {
+    fn new(source: &'s str, globals: &'s Globals, base: usize) -> Self {
         Self {
             source,
+            globals,
+            base,
+            own_name: String::new(),
             scopes: vec![],
             next: 0,
             subs: HashMap::new(),
@@ -229,7 +328,10 @@ impl<'s> Scoped<'s> {
         }
     }
 
-    fn resolve(&self, name: &str) -> Option<&Slot> {
+    /// Local scopes only — params, `let`/`for`/`match` bindings, nested
+    /// items, block-level `use`s. Globals resolve separately (see
+    /// [`Scoped::reference`]): the item's own name, then [`Globals`] deps.
+    fn local(&self, name: &str) -> Option<&Slot> {
         self.scopes.iter().rev().find_map(|s| s.get(name))
     }
 
@@ -274,41 +376,41 @@ impl<'s> Scoped<'s> {
     }
 
     /// A bare-identifier *reference* in value position. Locals win over
-    /// deps, deps over nothing — `let f = ...; f()` shadows a top-level `f`.
+    /// the item's own name, which wins over globals — `let f = ...; f()`
+    /// shadows both a top-level `f` and a recursive self-call.
     fn reference(&mut self, ident: &Ident) {
         if self.keep_names {
             return;
         }
-        match self.resolve(&ident.lexeme) {
-            Some(Slot::Local(n)) => {
-                let text = format!("@v{n}");
-                self.record(ident, text);
+        if let Some(slot) = self.local(&ident.lexeme).cloned() {
+            // Type params aren't values; Keep names stay literal.
+            if let Slot::Local(n) = slot {
+                self.record(ident, format!("@v{n}"));
             }
-            Some(Slot::Dep(hash)) => {
-                let hash = hash.clone();
-                let text = format!("@dep:{hash}");
-                if self.record(ident, text) {
-                    let span = ident.location.span;
-                    self.relocs.push(Reloc::Dep {
-                        name: ident.lexeme.clone(),
-                        hash,
-                        start: span.start,
-                        end: span.end,
-                    });
-                }
+            return;
+        }
+        let span = ident.location.span;
+        if ident.lexeme == self.own_name {
+            if self.record(ident, "@self".to_string()) {
+                self.relocs.push(Reloc::SelfRef {
+                    name: ident.lexeme.clone(),
+                    start: span.start,
+                    end: span.end,
+                });
             }
-            Some(Slot::OwnItem) => {
-                if self.record(ident, "@self".to_string()) {
-                    let span = ident.location.span;
-                    self.relocs.push(Reloc::SelfRef {
-                        name: ident.lexeme.clone(),
-                        start: span.start,
-                        end: span.end,
-                    });
-                }
-            }
-            // Type params aren't values; Keep/imports and unbound names stay.
-            Some(Slot::Type(_)) | Some(Slot::Keep) | None => {}
+            return;
+        }
+        let Some(Slot::Dep(hash)) = self.globals.slot_at(&ident.lexeme, self.base + span.start)
+        else {
+            return;
+        };
+        if self.record(ident, format!("@dep:{hash}")) {
+            self.relocs.push(Reloc::Dep {
+                name: ident.lexeme.clone(),
+                hash,
+                start: span.start,
+                end: span.end,
+            });
         }
     }
 
@@ -317,14 +419,14 @@ impl<'s> Scoped<'s> {
         if self.keep_names {
             return;
         }
-        if let Some(Slot::Type(n)) = self.resolve(&ident.lexeme) {
+        if let Some(Slot::Type(n)) = self.local(&ident.lexeme) {
             let text = format!("@v{n}");
             self.record(ident, text);
         }
     }
 
     fn scope_mut(&mut self) -> &mut HashMap<String, Slot> {
-        self.scopes.last_mut().expect("globals frame is pushed first")
+        self.scopes.last_mut().expect("the fn's own frame is pushed first")
     }
 
     fn push(&mut self) {
@@ -673,11 +775,13 @@ impl<'s> Scoped<'s> {
     }
 }
 
-/// The scope walk over one fn item's source: push the globals frame (with
-/// the item's own name bound to `OwnItem`) and walk the fn body, recording
-/// substitutions and reloc sites. `None` when the source doesn't parse or
-/// holds no fn — the same gate [`canonical_scoped`] applies.
-fn scoped_pass<'s>(item_source: &'s str, globals: &Globals) -> Option<Scoped<'s>> {
+/// The scope walk over one fn item's source: bind the item's own name to
+/// `@self` and walk the fn body, recording substitutions and reloc sites.
+/// `base` is the item's byte offset in the assembled program — dep
+/// resolution is positional (see [`Globals::slot_at`]). `None` when the
+/// source doesn't parse or holds no fn — the gate [`canonical_scoped`]
+/// applies.
+fn scoped_pass<'s>(item_source: &'s str, globals: &'s Globals, base: usize) -> Option<Scoped<'s>> {
     let ast = Parser::new(Lexer::new(item_source, 0, "scoped".into()))
         .try_into_ast()
         .ok()?;
@@ -686,16 +790,8 @@ fn scoped_pass<'s>(item_source: &'s str, globals: &Globals) -> Option<Scoped<'s>
         _ => None,
     })?;
 
-    let mut st = Scoped::new(item_source);
-    let mut frame: HashMap<String, Slot> = globals
-        .map
-        .iter()
-        .map(|(name, slot)| (name.clone(), slot.clone()))
-        .collect();
-    // The item's own name resolves to a fixed marker — never its hash,
-    // which would be self-referential inside the canonical form.
-    frame.insert(function.name.lexeme.clone(), Slot::OwnItem);
-    st.scopes.push(frame);
+    let mut st = Scoped::new(item_source, globals, base);
+    st.own_name = function.name.lexeme.clone();
     st.function(function);
     Some(st)
 }
@@ -750,11 +846,29 @@ fn render_scoped(item_source: &str, st: &Scoped) -> Option<String> {
 /// `@self` recursion. `None` when the source doesn't parse or holds no fn.
 ///
 /// `globals` names what the body's free identifiers resolve to — see
-/// [`Globals::for_source`]. Callers hashing a whole page want
-/// [`scoped_hashes`] instead.
+/// [`Globals::for_source`] and [`Globals::for_page`]. The item is treated
+/// as opening the assembled source (base 0); callers hashing one item of
+/// a page want [`Item::scoped_canonical`], which positions it correctly.
 pub fn canonical_scoped(item_source: &str, globals: &Globals) -> Option<String> {
-    let st = scoped_pass(item_source, globals)?;
+    let st = scoped_pass(item_source, globals, 0)?;
     render_scoped(item_source, &st)
+}
+
+/// [`canonical_scoped`] with the item's real byte offset in the assembled
+/// source — [`Item`] methods route through this so `use`d-name resolution
+/// sees the true use-site position.
+pub(crate) fn canonical_scoped_at(
+    item_source: &str,
+    globals: &Globals,
+    base: usize,
+) -> Option<String> {
+    let st = scoped_pass(item_source, globals, base)?;
+    render_scoped(item_source, &st)
+}
+
+/// [`deps`] with the item's real byte offset — see [`canonical_scoped_at`].
+pub(crate) fn deps_at(item_source: &str, globals: &Globals, base: usize) -> Option<Vec<Reloc>> {
+    scoped_pass(item_source, globals, base).map(|st| st.relocs)
 }
 
 /// The relocation sites of one fn item's source — every `@dep:`/`@self`
@@ -762,26 +876,26 @@ pub fn canonical_scoped(item_source: &str, globals: &Globals) -> Option<String> 
 /// it. This *is* the linking table: a link-by-hash loader reads this list
 /// to patch callee references, and [`Manifest::dep_hashes`] derives the
 /// edge set from it. `None` under the same gate as [`canonical_scoped`]
-/// (source doesn't parse or holds no fn).
+/// (source doesn't parse or holds no fn). Same base-0 caveat — page
+/// callers want [`Item::relocs`].
 pub fn deps(item_source: &str, globals: &Globals) -> Option<Vec<Reloc>> {
-    scoped_pass(item_source, globals).map(|st| st.relocs)
+    scoped_pass(item_source, globals, 0).map(|st| st.relocs)
 }
 
-/// The link-by-hash manifest of a whole page: for every extracted fn, in
-/// extraction order, its scoped content hash, its token hash and its
-/// ordered reloc sites — `{ name → (hash, [deps]) }` plus the edge-target
-/// key. One [`Globals`] build covers all items, so inter-fn edges resolve
-/// regardless of declaration order. Items whose source can't be
-/// scope-parsed keep their token-level fallback hash (the same one
-/// [`hash_scoped`] reports) and an empty reloc list.
-pub fn manifest(source: &str) -> Vec<Manifest> {
-    let items = extract(source);
-    let globals = Globals::for_source(source);
-    items
+/// The link-by-hash manifest of a whole page against `globals`: for every
+/// extracted fn, in extraction order, its scoped content hash, its token
+/// hash and its ordered reloc sites — `{ name → (hash, [deps]) }` plus
+/// the edge-target key. One [`Globals`] build covers all items, so
+/// inter-fn and `use`-include edges resolve regardless of declaration
+/// order. Items whose source can't be scope-parsed keep their token-level
+/// fallback hash (the same one [`hash_scoped`] reports) and an empty
+/// reloc list.
+pub fn manifest_with(source: &str, globals: &Globals) -> Vec<Manifest> {
+    extract(source)
         .iter()
         .map(|item| {
             let token_hash = item.hash();
-            let (hash, relocs) = match scoped_pass(&item.source, &globals) {
+            let (hash, relocs) = match scoped_pass(&item.source, globals, item.start) {
                 Some(st) => {
                     // Same hash `hash_scoped` would report: blake3 of the
                     // rendered canonical form, token-hash fallback otherwise.
@@ -805,8 +919,17 @@ pub fn manifest(source: &str) -> Vec<Manifest> {
         .collect()
 }
 
+/// [`manifest_with`] over `source`'s own items alone — no `use "…"`
+/// includes. Pages with includes want [`Globals::for_page`] +
+/// `manifest_with`.
+pub fn manifest(source: &str) -> Vec<Manifest> {
+    manifest_with(source, &Globals::for_source(source))
+}
+
 /// blake3 of the scoped canonical form. Falls back to [`hash_item`] when
 /// the source doesn't parse — the token-level form is still deterministic.
+/// Same base-0 caveat as [`canonical_scoped`]; page callers want
+/// [`Item::scoped_hash`].
 pub fn hash_scoped(item_source: &str, globals: &Globals) -> String {
     match canonical_scoped(item_source, globals) {
         Some(canonical) => blake3::hash(canonical.as_bytes()).to_hex().to_string(),
@@ -817,13 +940,17 @@ pub fn hash_scoped(item_source: &str, globals: &Globals) -> String {
 /// `(name, scoped hash)` for every fn in `source`, in extraction order.
 /// One [`Globals`] build covers all items, so inter-fn deps resolve in a
 /// single pass regardless of declaration order.
-pub fn scoped_hashes(source: &str) -> Vec<(String, String)> {
-    let items = extract(source);
-    let globals = Globals::for_source(source);
-    items
+pub fn scoped_hashes_with(source: &str, globals: &Globals) -> Vec<(String, String)> {
+    extract(source)
         .iter()
-        .map(|item| (item.name.clone(), item.scoped_hash(&globals)))
+        .map(|item| (item.name.clone(), item.scoped_hash(globals)))
         .collect()
+}
+
+/// [`scoped_hashes_with`] over `source`'s own items alone — no `use "…"`
+/// includes.
+pub fn scoped_hashes(source: &str) -> Vec<(String, String)> {
+    scoped_hashes_with(source, &Globals::for_source(source))
 }
 
 /// Rewrite the interior of an `f"..."` token when substitutions land inside
@@ -1278,5 +1405,176 @@ mod tests {
         let (lo, hi) = relocs[0].span();
         assert_eq!(&greet.source[lo..hi], "who");
         assert!(greet.scoped_canonical(&globals).unwrap().contains("@dep:"));
+    }
+
+    /// `use "page"` — a call resolving to an included page's fn emits the
+    /// same `@dep:<token-hash>` a same-source callee does: the edge names
+    /// content, not location.
+    #[test]
+    fn used_page_fns_are_dep_edges() {
+        let kit = "fn row() -> int { 42 }\n";
+        let page = "use \"kit\";\nfn go() -> int { row() }\n";
+        let globals = Globals::for_page(page, |n| (n == "kit").then(|| kit.to_string()));
+        assert_eq!(globals.includes(), &["kit".to_string()]);
+        let items = extract(page);
+        let go = items.iter().find(|i| i.name == "go").unwrap();
+        let relocs = go.relocs(&globals).unwrap();
+        assert_eq!(relocs.len(), 1);
+        assert_eq!(relocs[0].name(), "row");
+        assert_eq!(relocs[0].hash(), Some(extract(kit)[0].hash().as_str()));
+        // …and `go` hashes identically to the page where `row` is written
+        // inline — content-addressed, not page-addressed.
+        let inline = "fn go() -> int { row() }\nfn row() -> int { 42 }\n";
+        assert_eq!(
+            go.scoped_hash(&globals),
+            hash_of(&scoped_hashes(inline), "go")
+        );
+    }
+
+    /// Resolution is positional, matching the interpreter's module rib: an
+    /// own `fn` declared *above* the call shadows the `use`d one; declared
+    /// *below* it, the include's decl wins — the page's calls all sit before
+    /// the spliced include, and a use site with no decl before it takes the
+    /// last declaration.
+    #[test]
+    fn shadowing_a_used_fn_is_position_dependent() {
+        let kit = "fn row() -> int { 99 }\n";
+        let resolve = |n: &str| (n == "kit").then(|| kit.to_string());
+        // Own decl above the call → own row wins.
+        let above = "use \"kit\";\nfn row() -> int { 42 }\nfn go() -> int { row() }\n";
+        let globals = Globals::for_page(above, resolve);
+        let items = extract(above);
+        let go = items.iter().find(|i| i.name == "go").unwrap();
+        let own_row = items.iter().find(|i| i.name == "row").unwrap();
+        assert_eq!(
+            go.relocs(&globals).unwrap()[0].hash(),
+            Some(own_row.hash().as_str())
+        );
+        // Own decl below the call → kit's row wins.
+        let below = "use \"kit\";\nfn go() -> int { row() }\nfn row() -> int { 42 }\n";
+        let globals = Globals::for_page(below, resolve);
+        let go = extract(below)
+            .into_iter()
+            .find(|i| i.name == "go")
+            .unwrap();
+        assert_eq!(
+            go.relocs(&globals).unwrap()[0].hash(),
+            Some(extract(kit)[0].hash().as_str())
+        );
+    }
+
+    /// Renaming a `use`d page's fn — and its call sites — leaves the
+    /// caller's scoped hash untouched, same as same-page renames.
+    #[test]
+    fn renaming_a_used_page_fn_is_free() {
+        let a = "use \"kit\";\nfn go() -> int { row() }\n";
+        let b = "use \"kit\";\nfn go() -> int { r() }\n";
+        let ga = Globals::for_page(a, |n| {
+            (n == "kit").then(|| "fn row() -> int { 42 }\n".to_string())
+        });
+        let gb = Globals::for_page(b, |n| {
+            (n == "kit").then(|| "fn r() -> int { 42 }\n".to_string())
+        });
+        let go_a = extract(a).into_iter().find(|i| i.name == "go").unwrap();
+        let go_b = extract(b).into_iter().find(|i| i.name == "go").unwrap();
+        assert_eq!(go_a.scoped_hash(&ga), go_b.scoped_hash(&gb));
+        // … while editing the include's body moves the edge target.
+        let gc = Globals::for_page(a, |n| {
+            (n == "kit").then(|| "fn row() -> int { 43 }\n".to_string())
+        });
+        assert_ne!(go_a.scoped_hash(&ga), go_a.scoped_hash(&gc));
+    }
+
+    /// Two includes providing the same name: the last spliced decl wins —
+    /// the interpreter's `table.get` fallback when no decl precedes the
+    /// use. Same for a transitive include reached through another page.
+    #[test]
+    fn the_last_included_decl_wins() {
+        let pages = [
+            ("a", "fn row() -> int { 1 }\n"),
+            ("b", "fn row() -> int { 2 }\n"),
+        ];
+        let page = "use \"a\";\nuse \"b\";\nfn go() -> int { row() }\n";
+        let globals = Globals::for_page(page, |n| {
+            pages
+                .iter()
+                .find(|(name, _)| *name == n)
+                .map(|(_, s)| s.to_string())
+        });
+        assert_eq!(globals.includes(), &["a".to_string(), "b".to_string()]);
+        let go = extract(page).into_iter().find(|i| i.name == "go").unwrap();
+        assert_eq!(
+            go.relocs(&globals).unwrap()[0].hash(),
+            Some(extract(pages[1].1)[0].hash().as_str()),
+            "b's row shadows a's"
+        );
+        // Transitive: kit uses img; img's decls splice after kit's, so
+        // img's `row` — not kit's — is what the page's calls see.
+        let transitive = [
+            ("kit", "use \"img\";\nfn row() -> int { 1 }\n"),
+            ("img", "fn row() -> int { 2 }\nfn shade() -> int { 7 }\n"),
+        ];
+        let page2 = "use \"kit\";\nfn go() -> int { row() + shade() }\n";
+        let globals2 = Globals::for_page(page2, |n| {
+            transitive
+                .iter()
+                .find(|(name, _)| *name == n)
+                .map(|(_, s)| s.to_string())
+        });
+        assert_eq!(
+            globals2.includes(),
+            &["kit".to_string(), "img".to_string()]
+        );
+        let go2 = extract(page2).into_iter().find(|i| i.name == "go").unwrap();
+        let relocs = go2.relocs(&globals2).unwrap();
+        assert_eq!(relocs.len(), 2);
+        assert_eq!(
+            relocs[0].hash(),
+            Some(extract(transitive[1].1)[0].hash().as_str()),
+            "img's row, reached through kit"
+        );
+        assert_eq!(
+            relocs[1].hash(),
+            Some(extract(transitive[1].1)[1].hash().as_str())
+        );
+    }
+
+    /// An unresolvable `use "…"` contributes nothing: the page's fns hash
+    /// as if it weren't there, and a call to a name nobody declares stays
+    /// literal — matching the assembler's `missing` list.
+    #[test]
+    fn missing_includes_contribute_no_names() {
+        let page = "use \"ghost\";\nfn go() -> int { row() }\n";
+        let globals = Globals::for_page(page, |_| None);
+        assert!(globals.includes().is_empty());
+        let go = extract(page).into_iter().find(|i| i.name == "go").unwrap();
+        assert_eq!(go.relocs(&globals).unwrap(), vec![]);
+        let canon = go.scoped_canonical(&globals).unwrap();
+        assert!(canon.contains("row ( )"), "{canon}");
+        // An include cycle terminates: a page using itself, or a↔b.
+        let pages = [("a", "use \"b\";\nfn f() -> int { 1 }\n"), ("b", "use \"a\";\nfn g() -> int { 2 }\n")];
+        let globals = Globals::for_page("use \"a\";\nfn go() -> int { f() }\n", |n| {
+            pages
+                .iter()
+                .find(|(name, _)| *name == n)
+                .map(|(_, s)| s.to_string())
+        });
+        assert_eq!(globals.includes(), &["a".to_string(), "b".to_string()]);
+    }
+
+    /// `manifest_with` carries the cross-page edges the same way it carries
+    /// same-page ones — dep targets are token hashes either way.
+    #[test]
+    fn manifest_includes_cross_page_edges() {
+        let kit = "fn row() -> int { 42 }\n";
+        let page = "use \"kit\";\nfn go() -> int { row() }\nfn leaf() -> int { 0 }\n";
+        let globals = Globals::for_page(page, |n| (n == "kit").then(|| kit.to_string()));
+        let manifest = manifest_with(page, &globals);
+        let kit_row = extract(kit)[0].hash();
+        let go = &manifest[0];
+        assert_eq!(go.dep_hashes().collect::<Vec<_>>(), vec![kit_row.as_str()]);
+        assert!(manifest[1].relocs.is_empty());
+        // The edge resolves through the *include's* manifest by token_hash,
+        // exactly as same-page edges resolve through this one.
     }
 }

@@ -114,7 +114,20 @@ fn hash(path: Option<PathBuf>, scoped: bool, deps: bool) -> i32 {
             }
         };
         let items = hash::extract(&source);
-        let globals = scoped.then(|| hash::Globals::for_source(&source));
+        // `use "name";` resolves to a sibling `<name>.mim` — the same
+        // page-include BFS the lit host runs.
+        let dir = file_path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_default();
+        let globals = scoped.then(|| {
+            hash::Globals::for_page(&source, |name| {
+                if name.contains('/') || name.contains('\\') {
+                    return None;
+                }
+                std::fs::read_to_string(dir.join(format!("{name}.mim"))).ok()
+            })
+        });
         let prefix = if paths.len() > 1 {
             format!("{}: ", file_path.display())
         } else {
