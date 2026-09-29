@@ -78,6 +78,45 @@ pub fn link(
     })
 }
 
+/// Link several roots into ONE module, keeping real names for the given
+/// entries — a page's `(name, addr)` manifest, in declaration order.
+/// Members bind as `fn name`, so a consumer can `use` the module where
+/// it would splice the live page source: the entry names are the
+/// include's exports. Dep edges between members rewrite to the member
+/// names; deps outside the set (a member's own `use` graph, baked in
+/// at publish time) land as `x{hash}` generated fns — pinned too.
+///
+/// Duplicate entry names emit verbatim: positional shadowing is a page
+/// feature, so two `fn helper` decls keep the same shadowing the live
+/// page had. Generated names skip every entry name.
+///
+/// The module is self-contained — it holds the members' exact pinned
+/// content plus their full transitive dep closure — so storing the
+/// `source` as a blob and fetching it later needs no further linking.
+pub fn link_named(
+    entries: &[(&str, &str)],
+    mut fetch: impl FnMut(&str) -> Option<String>,
+) -> Result<Linked, LinkError> {
+    let mut linker = Linker {
+        fetch: &mut fetch,
+        names: entries
+            .iter()
+            .map(|(name, addr)| (addr.to_string(), name.to_string()))
+            .collect(),
+        used: entries.iter().map(|(name, _)| name.to_string()).collect(),
+        emitted: HashSet::new(),
+        out: Vec::new(),
+        items: Vec::new(),
+    };
+    for (_, addr) in entries {
+        linker.visit(addr)?;
+    }
+    Ok(Linked {
+        source: linker.out.join("\n"),
+        items: linker.items,
+    })
+}
+
 struct Linker<'a> {
     fetch: &'a mut dyn FnMut(&str) -> Option<String>,
     /// addr (`S` or `G:i`) → generated name.
