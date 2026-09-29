@@ -41,7 +41,11 @@ pub struct Interval {
 
 impl Interval {
     fn point(x: f64) -> Self {
-        Interval { lo: x, mid: x, hi: x }
+        Interval {
+            lo: x,
+            mid: x,
+            hi: x,
+        }
     }
 
     fn hull(mid: f64, candidates: [f64; 4]) -> Self {
@@ -55,45 +59,79 @@ impl Interval {
             hi = hi.max(c);
         }
         if lo > hi {
-            return Interval { lo: f64::NEG_INFINITY, mid, hi: f64::INFINITY };
+            return Interval {
+                lo: f64::NEG_INFINITY,
+                mid,
+                hi: f64::INFINITY,
+            };
         }
         Interval { lo, mid, hi }
     }
 
     pub fn add(self, o: Self) -> Self {
-        Interval { lo: self.lo + o.lo, mid: self.mid + o.mid, hi: self.hi + o.hi }
+        Interval {
+            lo: self.lo + o.lo,
+            mid: self.mid + o.mid,
+            hi: self.hi + o.hi,
+        }
     }
     pub fn sub(self, o: Self) -> Self {
-        Interval { lo: self.lo - o.hi, mid: self.mid - o.mid, hi: self.hi - o.lo }
+        Interval {
+            lo: self.lo - o.hi,
+            mid: self.mid - o.mid,
+            hi: self.hi - o.lo,
+        }
     }
     pub fn mul(self, o: Self) -> Self {
         Self::hull(
             self.mid * o.mid,
-            [self.lo * o.lo, self.lo * o.hi, self.hi * o.lo, self.hi * o.hi],
+            [
+                self.lo * o.lo,
+                self.lo * o.hi,
+                self.hi * o.lo,
+                self.hi * o.hi,
+            ],
         )
     }
     pub fn div(self, o: Self) -> Self {
         if o.lo <= 0.0 && o.hi >= 0.0 {
             // the divisor might be zero: nothing can be said about the bounds
-            return Interval { lo: f64::NEG_INFINITY, mid: self.mid / o.mid, hi: f64::INFINITY };
+            return Interval {
+                lo: f64::NEG_INFINITY,
+                mid: self.mid / o.mid,
+                hi: f64::INFINITY,
+            };
         }
         Self::hull(
             self.mid / o.mid,
-            [self.lo / o.lo, self.lo / o.hi, self.hi / o.lo, self.hi / o.hi],
+            [
+                self.lo / o.lo,
+                self.lo / o.hi,
+                self.hi / o.lo,
+                self.hi / o.hi,
+            ],
         )
     }
     /// `self ^ n` for a non-negative base — monotone, so the ends map
     /// straight through (a decreasing power for negative `n` swaps them).
     pub fn pow(self, n: f64) -> Self {
         let (a, b) = (self.lo.max(0.0).powf(n), self.hi.max(0.0).powf(n));
-        Interval { lo: a.min(b), mid: self.mid.max(0.0).powf(n), hi: a.max(b) }
+        Interval {
+            lo: a.min(b),
+            mid: self.mid.max(0.0).powf(n),
+            hi: a.max(b),
+        }
     }
     /// The image of a strictly increasing `f` computed in plain f64:
     /// `[f(lo), f(hi)]` with each end nudged one ulp outward, so the
     /// result contains the true image even though `exp`/`ln` aren't
     /// guaranteed correctly rounded.
     fn image(lo: f64, mid: f64, hi: f64) -> Self {
-        Interval { lo: lo.next_down(), mid, hi: hi.next_up() }
+        Interval {
+            lo: lo.next_down(),
+            mid,
+            hi: hi.next_up(),
+        }
     }
     /// `e^x` — strictly increasing, so the ends map straight through.
     pub fn exp(self) -> Self {
@@ -122,11 +160,19 @@ impl Interval {
     /// `min(self, o)` — `min` is increasing in each argument, so the
     /// pointwise envelopes are the exact image.
     pub fn min(self, o: Self) -> Self {
-        Interval { lo: self.lo.min(o.lo), mid: self.mid.min(o.mid), hi: self.hi.min(o.hi) }
+        Interval {
+            lo: self.lo.min(o.lo),
+            mid: self.mid.min(o.mid),
+            hi: self.hi.min(o.hi),
+        }
     }
     /// `max(self, o)` — see [`Interval::min`].
     pub fn max(self, o: Self) -> Self {
-        Interval { lo: self.lo.max(o.lo), mid: self.mid.max(o.mid), hi: self.hi.max(o.hi) }
+        Interval {
+            lo: self.lo.max(o.lo),
+            mid: self.mid.max(o.mid),
+            hi: self.hi.max(o.hi),
+        }
     }
     /// The triangular distribution over `[lo, hi]` with mode `mid`, at
     /// quantile `u` in 0..1.
@@ -152,27 +198,43 @@ mod iv {
     #[native]
     pub fn pm<'gc>(_ctx: Ctx<'gc>, mid: f64, rel: f64) -> Interval {
         let d = (mid * rel).abs();
-        Interval { lo: mid - d, mid, hi: mid + d }
+        Interval {
+            lo: mid - d,
+            mid,
+            hi: mid + d,
+        }
     }
 
     /// `Interval::within(mid, delta)` — `mid` give or take an absolute amount.
     #[native]
     pub fn within<'gc>(_ctx: Ctx<'gc>, mid: f64, delta: f64) -> Interval {
         let d = delta.abs();
-        Interval { lo: mid - d, mid, hi: mid + d }
+        Interval {
+            lo: mid - d,
+            mid,
+            hi: mid + d,
+        }
     }
 
     /// `Interval::span(lo, hi)` — anywhere between; the best guess is the middle.
     #[native]
     pub fn span<'gc>(_ctx: Ctx<'gc>, lo: f64, hi: f64) -> Interval {
         let (lo, hi) = (lo.min(hi), lo.max(hi));
-        Interval { lo, mid: (lo + hi) / 2.0, hi }
+        Interval {
+            lo,
+            mid: (lo + hi) / 2.0,
+            hi,
+        }
     }
 
     /// `Interval::of(lo, mid, hi)` — an asymmetric estimate.
     #[native]
     pub fn of<'gc>(_ctx: Ctx<'gc>, lo: f64, mid: f64, hi: f64) -> Interval {
-        Interval { lo: lo.min(mid), mid, hi: hi.max(mid) }
+        Interval {
+            lo: lo.min(mid),
+            mid,
+            hi: hi.max(mid),
+        }
     }
 
     /// `Interval::exact(x)` — no uncertainty (what a plain number becomes
@@ -293,7 +355,11 @@ mod iv {
             return Err(RtErr::InvalidUnaryOperand);
         };
         let out = match op {
-            UnaryOp::Negative => Interval { lo: -x.hi, mid: -x.mid, hi: -x.lo },
+            UnaryOp::Negative => Interval {
+                lo: -x.hi,
+                mid: -x.mid,
+                hi: -x.lo,
+            },
             UnaryOp::Positive => x,
             _ => return Err(RtErr::InvalidUnaryOperand),
         };
@@ -329,8 +395,16 @@ mod tests {
 
     #[test]
     fn arithmetic_propagates_bounds() {
-        let a = Interval { lo: 9.0, mid: 10.0, hi: 11.0 };
-        let b = Interval { lo: 1.0, mid: 2.0, hi: 3.0 };
+        let a = Interval {
+            lo: 9.0,
+            mid: 10.0,
+            hi: 11.0,
+        };
+        let b = Interval {
+            lo: 1.0,
+            mid: 2.0,
+            hi: 3.0,
+        };
         let s = a.add(b);
         assert_eq!((s.lo, s.mid, s.hi), (10.0, 12.0, 14.0));
         let d = a.sub(b);
@@ -344,24 +418,41 @@ mod tests {
 
     #[test]
     fn signs_and_zero_divisors() {
-        let a = Interval { lo: -2.0, mid: 1.0, hi: 3.0 };
+        let a = Interval {
+            lo: -2.0,
+            mid: 1.0,
+            hi: 3.0,
+        };
         let p = a.mul(a);
         assert_eq!((p.lo, p.hi), (-6.0, 9.0));
-        let z = Interval { lo: -1.0, mid: 1.0, hi: 1.0 };
+        let z = Interval {
+            lo: -1.0,
+            mid: 1.0,
+            hi: 1.0,
+        };
         let q = Interval::point(1.0).div(z);
         assert_eq!((q.lo, q.hi), (f64::NEG_INFINITY, f64::INFINITY));
     }
 
     #[test]
     fn increasing_functions_map_the_ends() {
-        let a = Interval { lo: 0.0, mid: 0.5, hi: 1.0 };
+        let a = Interval {
+            lo: 0.0,
+            mid: 0.5,
+            hi: 1.0,
+        };
         let e = a.exp();
         // the ends are computed then nudged one ulp outward: the true
         // image [1, e] sits strictly inside
         assert!(e.lo < 1.0 && 1.0 - e.lo < 1e-15);
         assert!(e.hi > std::f64::consts::E && e.hi - std::f64::consts::E < 1e-15);
         assert_eq!(e.mid, 0.5f64.exp());
-        let l = Interval { lo: 1.0, mid: 2.0, hi: std::f64::consts::E }.ln();
+        let l = Interval {
+            lo: 1.0,
+            mid: 2.0,
+            hi: std::f64::consts::E,
+        }
+        .ln();
         assert!(l.lo < 0.0 && l.lo > -1e-15); // ln(1) = 0, widened a hair
         assert!(l.hi > 1.0 && l.hi - 1.0 < 1e-15);
         assert_eq!(l.mid, 2.0f64.ln());
@@ -370,28 +461,60 @@ mod tests {
     #[test]
     fn sqrt_and_ln_clamp_to_their_domains() {
         // like `pow`: the part of the range below zero is cut
-        let s = Interval { lo: -4.0, mid: 4.0, hi: 9.0 }.sqrt();
+        let s = Interval {
+            lo: -4.0,
+            mid: 4.0,
+            hi: 9.0,
+        }
+        .sqrt();
         assert_eq!((s.lo, s.mid, s.hi), (0.0, 2.0, 3.0));
-        let whole = Interval { lo: -4.0, mid: -2.0, hi: -1.0 }.sqrt();
+        let whole = Interval {
+            lo: -4.0,
+            mid: -2.0,
+            hi: -1.0,
+        }
+        .sqrt();
         assert_eq!((whole.lo, whole.hi), (0.0, 0.0));
         // a range reaching zero is unbounded below under ln
-        let l = Interval { lo: -1.0, mid: 1.0, hi: std::f64::consts::E }.ln();
+        let l = Interval {
+            lo: -1.0,
+            mid: 1.0,
+            hi: std::f64::consts::E,
+        }
+        .ln();
         assert_eq!(l.lo, f64::NEG_INFINITY);
         assert!(l.hi > 1.0 && l.hi - 1.0 < 1e-15);
         // nothing of the range is in ln's domain: the lower end stays
         // unbounded, the upper widens one ulp up from `-inf` (`f64::MIN`)
-        let flat = Interval { lo: -2.0, mid: -1.5, hi: -1.0 }.ln();
+        let flat = Interval {
+            lo: -2.0,
+            mid: -1.5,
+            hi: -1.0,
+        }
+        .ln();
         assert_eq!((flat.lo, flat.hi), (f64::NEG_INFINITY, f64::MIN));
     }
 
     #[test]
     fn min_max_take_the_pointwise_envelopes() {
-        let a = Interval { lo: 0.0, mid: 1.0, hi: 5.0 };
-        let b = Interval { lo: 3.0, mid: 4.0, hi: 8.0 };
+        let a = Interval {
+            lo: 0.0,
+            mid: 1.0,
+            hi: 5.0,
+        };
+        let b = Interval {
+            lo: 3.0,
+            mid: 4.0,
+            hi: 8.0,
+        };
         assert_eq!((a.min(b).lo, a.min(b).mid, a.min(b).hi), (0.0, 1.0, 5.0));
         assert_eq!((a.max(b).lo, a.max(b).mid, a.max(b).hi), (3.0, 4.0, 8.0));
         // overlapping ranges: the envelopes still map end to end
-        let c = Interval { lo: 2.0, mid: 3.0, hi: 4.0 };
+        let c = Interval {
+            lo: 2.0,
+            mid: 3.0,
+            hi: 4.0,
+        };
         assert_eq!((a.min(c).lo, a.min(c).hi), (0.0, 4.0));
         assert_eq!((a.max(c).lo, a.max(c).hi), (2.0, 5.0));
         assert_eq!((a.min(Interval::point(4.5)).hi), 4.5);
@@ -399,7 +522,11 @@ mod tests {
 
     #[test]
     fn sampling_stays_in_range_and_centres_on_the_mode() {
-        let a = Interval { lo: 0.0, mid: 2.0, hi: 10.0 };
+        let a = Interval {
+            lo: 0.0,
+            mid: 2.0,
+            hi: 10.0,
+        };
         assert_eq!(a.sample(0.0), 0.0);
         assert_eq!(a.sample(1.0), 10.0);
         assert!((a.sample(0.2) - 2.0).abs() < 1e-9);

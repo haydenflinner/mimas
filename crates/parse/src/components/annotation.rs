@@ -64,13 +64,11 @@ impl std::fmt::Display for Annotation {
                     })
                     .join(""),
             ),
-            Annotation::Applied(ty, args) => {
-                f.pad(&format!(
-                    "{}<{}>",
-                    ty.iter().map(|i| i.to_string()).join("::"),
-                    args.iter().join(", ")
-                ))
-            }
+            Annotation::Applied(ty, args) => f.pad(&format!(
+                "{}<{}>",
+                ty.iter().map(|i| i.to_string()).join("::"),
+                args.iter().join(", ")
+            )),
             Annotation::Poison(_) => f.pad(POISON),
         }
     }

@@ -897,7 +897,9 @@ pub(crate) fn elide(s: String) -> String {
 
 #[derive(Error, Debug, Diagnostic)]
 #[error("unknown unit")]
-#[diagnostic(help("units are things like m, s, kg, W, kWh, usd -- see the Units page of the book"))]
+#[diagnostic(help(
+    "units are things like m, s, kg, W, kWh, usd -- see the Units page of the book"
+))]
 pub struct UnknownUnit {
     #[source_code]
     pub src: NamedSource<Arc<str>>,

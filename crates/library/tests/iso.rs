@@ -57,7 +57,4 @@ test_fail!(
      un(l);",
 );
 
-test_fail!(
-    iso_rejects_non_callable,
-    "iso(1, 2);",
-);
+test_fail!(iso_rejects_non_callable, "iso(1, 2);",);

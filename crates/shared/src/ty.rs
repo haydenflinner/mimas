@@ -249,8 +249,7 @@ impl Ty {
             }
             Ty::Tuple(members) => members.iter().any(Ty::contains_params),
             Ty::Fn(h) => {
-                h.parameters.iter().any(|p| p.ty.contains_params())
-                    || h.return_ty.contains_params()
+                h.parameters.iter().any(|p| p.ty.contains_params()) || h.return_ty.contains_params()
             }
             Ty::Adt(_, args) | Ty::Identity(_, args) => args.iter().any(Ty::contains_params),
             _ => false,
@@ -476,7 +475,10 @@ impl Ty {
                 {
                     Some(module) => format!("module `{module}`"),
                     None if args.is_empty() => name,
-                    None => format!("{name}<{}>", args.iter().map(|a| a.display(names)).join(", ")),
+                    None => format!(
+                        "{name}<{}>",
+                        args.iter().map(|a| a.display(names)).join(", ")
+                    ),
                 },
                 None => "<adt>".into(),
             },

@@ -88,7 +88,10 @@ impl LooseEq for Ty {
             | (Ty::Identity(adt, args), Ty::Adt(o_adt, o_args))
             | (Ty::Adt(adt, args), Ty::Identity(o_adt, o_args)) => {
                 args.len() == o_args.len()
-                    && args.iter().zip(o_args.iter()).all(|(a, b)| a.loose_eq(b, solver))
+                    && args
+                        .iter()
+                        .zip(o_args.iter())
+                        .all(|(a, b)| a.loose_eq(b, solver))
                     && (adt == o_adt || (solver.adts[adt].loose_eq(&solver.adts[o_adt], solver)))
             }
 

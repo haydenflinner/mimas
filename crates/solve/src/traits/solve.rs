@@ -1144,9 +1144,7 @@ impl Solve for Equality {
         // `<` `<=` `>` `>=` on an adt with registered operator impls (`Api::add_bin_op`)
         // dispatch at runtime and answer a bool -- `==`/`!=` stay structural
         if !matches!(self.op, EqualityOp::Equal | EqualityOp::NotEqual) {
-            let has_ops = |t: &Ty| {
-                matches!(t, Ty::Adt(id, _) if solver.adts[*id].flags.contains(AdtFlags::HAS_OPS))
-            };
+            let has_ops = |t: &Ty| matches!(t, Ty::Adt(id, _) if solver.adts[*id].flags.contains(AdtFlags::HAS_OPS));
             if has_ops(&lhs_n) || has_ops(&rhs_n) {
                 return Ok(Ty::Bool);
             }
@@ -1677,17 +1675,14 @@ impl Solve for Impl {
                     .as_ident()
                     .map(|i| i.lexeme.clone())
                     .unwrap_or_else(|| con.left.to_string());
-                let mut pact_ty =
-                    pact.constants
-                        .swap_remove(&name)
-                        .ok_or_else(|| {
-                            miette::Error::from(PactConstNotFound {
-                                src: solver.src(con.left.location()),
-                                at: con.left.location().into(),
-                                name,
-                                pact: pact.name.clone(),
-                            })
-                        })?;
+                let mut pact_ty = pact.constants.swap_remove(&name).ok_or_else(|| {
+                    miette::Error::from(PactConstNotFound {
+                        src: solver.src(con.left.location()),
+                        at: con.left.location().into(),
+                        name,
+                        pact: pact.name.clone(),
+                    })
+                })?;
 
                 ty.fulfill_ty(&mut pact_ty, solver)
                     .map_err(|e| e.into_type_mismatch(solver, con.left.location()))?;
@@ -1737,10 +1732,8 @@ impl Solve for Impl {
                 let mut impl_ty = ty;
                 // `Self` is this impl's target: `other: Self` has to be exactly this adt, not
                 // just any implementer
-                let mut pact_ty = solver.instantiate_pact_fn(
-                    &pact_header,
-                    &solver.impl_target_ty().unwrap(),
-                );
+                let mut pact_ty =
+                    solver.instantiate_pact_fn(&pact_header, &solver.impl_target_ty().unwrap());
                 impl_ty
                     .fulfill_ty(&mut pact_ty, solver)
                     .map_err(|e| e.into_type_mismatch(solver, function.name.location))?;

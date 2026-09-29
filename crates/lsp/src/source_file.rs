@@ -241,7 +241,9 @@ impl SourceFile {
                         }
                     }
                     // the walk visits impl methods as items of their own
-                    ItemKind::Impl(_) | ItemKind::Use(_) | ItemKind::Tests(_)
+                    ItemKind::Impl(_)
+                    | ItemKind::Use(_)
+                    | ItemKind::Tests(_)
                     | ItemKind::Poison(_) => {}
                 }
             }

@@ -45,7 +45,10 @@ test_run!(
 fn rejected(src: &str, needle: &str) {
     let err = test_runner::try_execute(src).expect_err(&format!("`{src}` should be rejected"));
     let text = format!("{err:?}");
-    assert!(text.contains(needle), "`{src}`: expected `{needle}` in:\n{text}");
+    assert!(
+        text.contains(needle),
+        "`{src}`: expected `{needle}` in:\n{text}"
+    );
 }
 
 #[test]
@@ -64,8 +67,14 @@ fn nonsense_arithmetic_is_rejected() {
 fn declared_dimensions_are_enforced() {
     // a plain float is dimensionless: a power isn't one
     rejected("let a: float = 5kW;", "declared type doesn't match");
-    rejected("fn f(x: float) -> float { x }\nlet a = f(5kW);", "argument `x` of `f`");
-    rejected("fn f(p: kW) -> kW { p }\nlet a = f(5s);", "argument `p` of `f`");
+    rejected(
+        "fn f(x: float) -> float { x }\nlet a = f(5kW);",
+        "argument `x` of `f`",
+    );
+    rejected(
+        "fn f(p: kW) -> kW { p }\nlet a = f(5s);",
+        "argument `p` of `f`",
+    );
     rejected("fn f(p: kW) -> s { p }", "returns the wrong dimension");
     rejected("struct S { p: kW }\nlet a = S { p = 5s };", "field `p`");
     rejected("let a: kW = 5.0;", "declared type doesn't match");
@@ -108,8 +117,10 @@ fn plain_numbers_scale_and_units_combine() {
 #[test]
 fn a_declared_type_named_like_a_unit_wins() {
     // programs that already have a `struct W` keep it
-    test_runner::try_execute("struct W { x: int }\nfn f(w: W) -> int { w.x }\nlet a = f(W { x = 1 });")
-        .unwrap();
+    test_runner::try_execute(
+        "struct W { x: int }\nfn f(w: W) -> int { w.x }\nlet a = f(W { x = 1 });",
+    )
+    .unwrap();
 }
 
 // ---- intervals keep their units
@@ -140,14 +151,26 @@ fn intervals_are_dimension_checked() {
     for src in fine {
         test_runner::try_execute(src).unwrap_or_else(|e| panic!("`{src}` should pass: {e:?}"));
     }
-    rejected("let a = Interval::pm(5kW, 0.1) + Interval::pm(3s, 0.1);", "cannot add");
+    rejected(
+        "let a = Interval::pm(5kW, 0.1) + Interval::pm(3s, 0.1);",
+        "cannot add",
+    );
     rejected("let a = Interval::pm(5kW, 0.1) + 3s;", "cannot add");
-    rejected("let a: Interval<s> = Interval::pm(5kW, 0.1);", "declared type doesn't match");
-    rejected("let a: s = Interval::pm(5kW, 0.1).hi;", "declared type doesn't match");
+    rejected(
+        "let a: Interval<s> = Interval::pm(5kW, 0.1);",
+        "declared type doesn't match",
+    );
+    rejected(
+        "let a: s = Interval::pm(5kW, 0.1).hi;",
+        "declared type doesn't match",
+    );
     rejected("let a = Interval::pm(5kW, 0.1) < 3s;", "cannot order");
     rejected("let a = Interval::span(1m, 2s);", "need the same dimension");
     rejected("let a = Interval::pm(5kW, 3s);", "plain fraction");
-    rejected("fn f(x: Interval<kW>) {}\nlet a = f(Interval::pm(5s, 0.1));", "argument `x` of `f`");
+    rejected(
+        "fn f(x: Interval<kW>) {}\nlet a = f(Interval::pm(5s, 0.1));",
+        "argument `x` of `f`",
+    );
 }
 
 // ---- data columns with units
@@ -166,11 +189,22 @@ test_run!(
 #[test]
 fn pulled_columns_are_dimension_checked() {
     let head = "use std::polars::*;\nlet df = from_csv(\"a,b\\n1,2\\n\")!;\n";
-    let ok = format!("{head}let e: kWh = df.pull_as(\"a\", \"kWh\")![0]; let p: [kW] = df.pull_as(\"b\", \"kW\")!;");
+    let ok = format!(
+        "{head}let e: kWh = df.pull_as(\"a\", \"kWh\")![0]; let p: [kW] = df.pull_as(\"b\", \"kW\")!;"
+    );
     test_runner::try_execute(&ok).unwrap_or_else(|e| panic!("should pass: {e:?}"));
-    rejected(&format!("{head}let t = df.pull_as(\"a\", \"kW\")![0] + 3s;"), "cannot add");
-    rejected(&format!("{head}let t = df.pull_as(\"a\", \"bogus\")!;"), "isn't a unit");
-    rejected(&format!("{head}let t: [s] = df.pull_as(\"a\", \"kW\")!;"), "declared type doesn't match");
+    rejected(
+        &format!("{head}let t = df.pull_as(\"a\", \"kW\")![0] + 3s;"),
+        "cannot add",
+    );
+    rejected(
+        &format!("{head}let t = df.pull_as(\"a\", \"bogus\")!;"),
+        "isn't a unit",
+    );
+    rejected(
+        &format!("{head}let t: [s] = df.pull_as(\"a\", \"kW\")!;"),
+        "declared type doesn't match",
+    );
 }
 
 // ---- `.to_int()` keeps the unit ------------------------------------------------------
@@ -195,7 +229,10 @@ fn to_int_quantities_are_still_dimension_checked() {
     rejected("let a = 5.5kg.to_int().to(\"s\");", "cannot express");
     rejected("let a = 5.5kg.to_int() + 3s;", "cannot add");
     // an int quantity can't smuggle into a plain `int` slot either
-    rejected("fn f(x: int) -> int { x }\nlet a = f(5.5kg.to_int());", "argument `x` of `f`");
+    rejected(
+        "fn f(x: int) -> int { x }\nlet a = f(5.5kg.to_int());",
+        "argument `x` of `f`",
+    );
     // and a unit annotation still refuses a non-numeric rhs the ordinary way
     rejected("let a: kg = \"nope\";", "expected float but found str");
 }

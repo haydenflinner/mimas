@@ -23,8 +23,8 @@ mod snapshot;
 pub use snapshot::*;
 mod math;
 pub mod units;
-pub use units::{Beats, Bits, Hz, Px, PxS, PxS2, Secs, St, Tempo};
 pub use ::glam;
+pub use units::{Beats, Bits, Hz, Px, PxS, PxS2, Secs, St, Tempo};
 
 // re-exports the MimasEnum / MimasStruct derives resolve against -- saves user crates from
 // depending on mimas-api / mimas-shared directly.

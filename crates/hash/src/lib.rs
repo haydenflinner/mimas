@@ -8,7 +8,7 @@
 //!
 //! This crate is the shared home of the hashing machinery: `mimas hash` on
 //! the CLI and the literate host's blob store both build on it. It must never
-//! depend on Automerge — namespace/blob persistence stays in the host.
+//! depend on the doc layer — namespace/blob persistence stays in the host.
 //!
 //! Two hash namespaces live here. The token-level [`hash_item`]/[`canonical`]
 //! is the v1 stored form — seed manifests and blob stores already depend on
@@ -273,14 +273,16 @@ pub fn extract(source: &str) -> Vec<Item> {
 }
 
 /// Parser-backed extraction: real item spans (attributes included), no
-/// `where:`/`examples` blocks or `// example:` comments. `None` when the
+/// `check` items. `None` when the
 /// source doesn't parse — callers then fall back to the brace matcher.
 fn extract_parsed(source: &str) -> Option<Vec<Item>> {
     use parse::lex::Lexer;
     use parse::{ItemKind, Parser, StmtKind};
     use shared::Located;
 
-    let ast = Parser::new(Lexer::new(source, 0, "page".into())).try_into_ast().ok()?;
+    let ast = Parser::new(Lexer::new(source, 0, "page".into()))
+        .try_into_ast()
+        .ok()?;
     let mut items = Vec::new();
     for stmt in ast.stmts() {
         let StmtKind::Item(item) = stmt.kind() else {
@@ -328,7 +330,7 @@ fn extract_braces(source: &str) -> Vec<Item> {
             i += 1;
             continue;
         }
-        if depth == 0 && skip_where_block(source, &mut i) {
+        if depth == 0 && skip_check_line(source, &mut i) {
             continue;
         }
         if depth == 0
@@ -344,15 +346,20 @@ fn extract_braces(source: &str) -> Vec<Item> {
     items
 }
 
-fn skip_where_block(source: &str, i: &mut usize) -> bool {
+/// A `check <expr>` line is skipped whole — checks are one line each, so no
+/// block tracking is needed beyond the line boundary.
+fn skip_check_line(source: &str, i: &mut usize) -> bool {
     let rest = &source[*i..];
     let trimmed = rest.trim_start();
-    if !(trimmed.starts_with("where:") || trimmed.starts_with("where {") || trimmed == "where") {
+    let is_check = trimmed.strip_prefix("check").is_some_and(|tail| {
+        tail.is_empty() || tail.starts_with(|c: char| !c.is_alphanumeric() && c != '_')
+    });
+    if !is_check {
         return false;
     }
     let indent_skipped = rest.len() - trimmed.len();
     if indent_skipped > 0 {
-        // `where:` only starts a block at column 0 of a line-ish position
+        // `check` only starts a line at column 0 of a line-ish position
         // (whitespace after newline is fine; mid-identifier is not).
         let before = &source[..*i];
         if !before.ends_with('\n') && !before.is_empty() {
@@ -360,24 +367,9 @@ fn skip_where_block(source: &str, i: &mut usize) -> bool {
         }
     }
     *i += indent_skipped;
-    if let Some(nl) = source[*i..].find('\n') {
-        *i += nl + 1;
-    } else {
-        *i = source.len();
-        return true;
-    }
-    while *i < source.len() {
-        let line = source[*i..].lines().next().unwrap_or("");
-        let trimmed = line.trim();
-        let indented = line.starts_with(' ') || line.starts_with('\t');
-        if trimmed.is_empty() || indented || trimmed == "}" || trimmed.starts_with("//") {
-            *i += line.len();
-            if source.as_bytes().get(*i) == Some(&b'\n') {
-                *i += 1;
-            }
-            continue;
-        }
-        break;
+    match source[*i..].find('\n') {
+        Some(nl) => *i += nl + 1,
+        None => *i = source.len(),
     }
     true
 }
@@ -586,7 +578,9 @@ fn callers_overlay_items(items: &[Item], source: &str, callee: &str) -> String {
 /// `None` when the slice doesn't parse.
 fn references(source: &str) -> Option<std::collections::HashSet<String>> {
     use parse::{Parser, lex::Lexer};
-    let ast = Parser::new(Lexer::new(source, 0, "refs".into())).try_into_ast().ok()?;
+    let ast = Parser::new(Lexer::new(source, 0, "refs".into()))
+        .try_into_ast()
+        .ok()?;
     let mut out = std::collections::HashSet::new();
     for stmt in ast.stmts() {
         stmt_refs(stmt, &mut out);
@@ -869,9 +863,7 @@ pub fn canonical(source: &str) -> Option<String> {
 /// canonical token. Shared by the token-level and scoped passes.
 pub(crate) fn float_text(v: f64) -> String {
     let s = v.to_string();
-    if s.bytes().any(|b| matches!(b, b'.' | b'e' | b'E'))
-        || s.contains("inf")
-        || s.contains("NaN")
+    if s.bytes().any(|b| matches!(b, b'.' | b'e' | b'E')) || s.contains("inf") || s.contains("NaN")
     {
         s
     } else {
@@ -898,7 +890,7 @@ fn twice(n: int) -> int {
     square(n) + square(n)
 }
 
-// example: square(4) is 16
+check square(4) == 16
 "#;
 
     #[test]
@@ -1040,12 +1032,13 @@ fn calls_it() -> int { square(3) }
         assert_eq!(twice.byte_len(), twice.end - twice.start);
         let (lo, hi) = twice.char_span(SRC);
         assert!(hi > lo);
-        assert!(SRC
-            .chars()
-            .skip(lo)
-            .take(hi - lo)
-            .collect::<String>()
-            .contains("fn twice"));
+        assert!(
+            SRC.chars()
+                .skip(lo)
+                .take(hi - lo)
+                .collect::<String>()
+                .contains("fn twice")
+        );
         assert_eq!(
             at_byte(&items, twice.start).map(|i| i.name.as_str()),
             Some("twice")
@@ -1094,8 +1087,8 @@ fn calls_it() -> int { square(3) }
     }
 
     #[test]
-    fn where_block_is_not_extracted_as_code() {
-        let src = "fn square(n: int) -> int { n * n }\nwhere:\n    square(0) is 0\n    square(2) is 4\n\n// fn decoy() { 1 }\n";
+    fn check_lines_are_not_extracted_as_code() {
+        let src = "fn square(n: int) -> int { n * n }\ncheck square(0) == 0\ncheck square(2) == 4\n\n// fn decoy() { 1 }\n";
         let items = extract(src);
         assert_eq!(names(&items), vec!["square"]);
     }
@@ -1107,10 +1100,13 @@ fn calls_it() -> int { square(3) }
         let src = "#[test]\nfn checked() { 1 }\npub fn open() { 2 }\n";
         let items = extract(src);
         assert_eq!(names(&items), vec!["checked", "open"]);
-        assert!(items[0].source.starts_with("#[test]"), "{}", items[0].source);
+        assert!(
+            items[0].source.starts_with("#[test]"),
+            "{}",
+            items[0].source
+        );
         assert!(items[1].source.starts_with("pub fn"), "{}", items[1].source);
     }
-
 
     #[test]
     fn dbg_canon_probe() {
@@ -1140,10 +1136,7 @@ fn calls_it() -> int { square(3) }
         );
         // `1` and `1.0` are different types — the canonical form keeps the
         // float's point so they can't share a hash.
-        assert_ne!(
-            hash_item("fn f() { 1 }\n"),
-            hash_item("fn f() { 1.0 }\n")
-        );
+        assert_ne!(hash_item("fn f() { 1 }\n"), hash_item("fn f() { 1.0 }\n"));
         // … while `1.0` and `1.00` are the same float.
         assert_eq!(
             hash_item("fn f() { 1.0 }\n"),

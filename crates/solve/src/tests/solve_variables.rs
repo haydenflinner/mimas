@@ -287,7 +287,10 @@ test_ty!(
     "fn f() -> int { const (A, B) = (3, 4); A * B }",
     "f()" => Int,
 );
-test_fail!(const_destructure_missing_member, "const (A, B, C) = (1, 2);");
+test_fail!(
+    const_destructure_missing_member,
+    "const (A, B, C) = (1, 2);"
+);
 test_fail!(const_destructure_extra_member, "const (A) = (1, 2);");
 test_fail!(const_destructure_non_tuple, "const (A, B) = 5;");
 test_fail!(
@@ -323,10 +326,7 @@ test_fail!(
 );
 // `Foo(X)` without the `_` stays a real variant pattern -- only `Foo_(X)`
 // is prefix sugar -- so const still rejects it as unbindable.
-test_fail!(
-    const_variant_pat_is_not_prefix,
-    "const Foo(X) = (1,);"
-);
+test_fail!(const_variant_pat_is_not_prefix, "const Foo(X) = (1,);");
 // the same sugar works in `let`, `match`, `for` -- every pattern position
 test_ty!(
     let_prefix_destructure,

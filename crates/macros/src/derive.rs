@@ -163,23 +163,25 @@ fn variant_tokens(
         Fields::Named(f) => f
             .named
             .iter()
-            .map(|f| match f.attrs.iter().find(|a| a.path().is_ident("mimas_dim")) {
-                Some(attr) => match attr.parse_args::<syn::LitStr>() {
-                    Ok(lit) => {
-                        let name = lit.value();
-                        quote!(::std::option::Option::Some(
+            .map(
+                |f| match f.attrs.iter().find(|a| a.path().is_ident("mimas_dim")) {
+                    Some(attr) => match attr.parse_args::<syn::LitStr>() {
+                        Ok(lit) => {
+                            let name = lit.value();
+                            quote!(::std::option::Option::Some(
                             #vm::units::dim_of(#lit)
                                 .expect(concat!("unknown unit in #[mimas_dim]: ", #name))))
-                    }
-                    Err(_) => quote! {
-                        compile_error!("#[mimas_dim(\"unit\")] needs a unit string")
+                        }
+                        Err(_) => quote! {
+                            compile_error!("#[mimas_dim(\"unit\")] needs a unit string")
+                        },
                     },
+                    None => {
+                        let ty = &f.ty;
+                        quote!(<#ty as #vm::conversion::MimasType<'static>>::mimas_dim(reg))
+                    }
                 },
-                None => {
-                    let ty = &f.ty;
-                    quote!(<#ty as #vm::conversion::MimasType<'static>>::mimas_dim(reg))
-                }
-            })
+            )
             .collect(),
         _ => vec![],
     };

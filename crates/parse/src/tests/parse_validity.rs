@@ -175,38 +175,39 @@ fn tests_list_keeps_expressions() {
     assert!(!text.contains("panic"), "{text}");
 }
 
-// `where:` / `examples { }` check lists -- the literate spelling of `#[tests]`
+// `check <expr>` lines -- the literate spelling of a `#[tests]` case
 test_ok!(
-    check_blocks_ok,
-    "where: x is 1",
-    "where: x",
-    "where: x is 1, y is 2",
-    "where { x is 1 }",
-    "where { x is 1, y is 2 }",
-    "where {\n    x is 1\n    y is 2\n}",
-    "where: { x is 1 }",
-    "examples { x }",
-    "examples: x is 1",
-    "example: x is 1",
-    "example { x is 1 }"
+    checks_ok,
+    "check x == 1",
+    "check f(2) == 3",
+    "check x",
+    "check x == 1, y == 2",
+    "check !done"
 );
 test_fail!(
-    check_blocks_rejected,
-    "where:",
-    "where { }",
-    "where { x is }",
-    "where { x is 1 y is 2 }",
+    checks_rejected,
+    // the retired list forms -- `:`/`{` error but still recover
+    "check:",
+    "check: x == 1",
+    "check { }",
+    "check { x == 1 }",
+    "check: { x == 1 }",
+    // `is` is gone -- plain `==` is the check spelling now
+    "check x is 1",
+    // the retired keywords are ordinary identifiers again
+    "where: x == 1",
+    "example { x }",
     // junk after a check used to spin the parser until its fuel guard panicked
-    "where {\n    xs[1..] is [2]\n}",
-    "where { a[1..] is b",
-    "where:\n    xs[1..] is [2]",
-    // an unclosed `where {` followed by an item -- deleting the `}` used to
+    "check {\n    xs[1..] == [2]\n}",
+    "check { a[1..] == b",
+    // an unclosed `check {` followed by an item -- deleting the `}` used to
     // loop forever on `fn` (it can't open a check) until the fuel guard
     // panicked; panic-fuzzing found this as `guide.lit` minus one `}` token
-    "where {\n    1 is 1\n\nfn f() -> int { 1 }",
-    // same hole in the colon form: a non-expr continuation line (`]`) isn't
-    // a check and isn't a statement ender, so `check_continues` spun on it
-    "where:\n    1 is 1\n]"
+    "check {\n    1 == 1\n\nfn f() -> int { 1 }",
+    // a `check` alone on a line is a plain identifier, not a block opener --
+    // the expr statement runs into a missing-semicolon error, never silently
+    // swallowing the next line's expression as a check
+    "check\n    f() == 1"
 );
 
 fn check_item(source: &str) -> crate::Tests {
@@ -224,53 +225,71 @@ fn check_item(source: &str) -> crate::Tests {
 }
 
 #[test]
-fn where_block_lowers_is_to_equality() {
-    let tests = check_item("where:\n    square(0) is 0\n    square(4) is 16\n");
-    assert_eq!(tests.cases.len(), 2);
-    assert_eq!(tests.cases[0].name.lexeme, "square(0) is 0");
-    assert_eq!(tests.cases[1].name.lexeme, "square(4) is 16");
-    for case in &tests.cases {
-        assert!(
-            matches!(case.expr.kind(), crate::ExprKind::Equality(_)),
-            "{:?} should be an equality",
-            case.expr
-        );
+fn check_line_is_ordinary_equality() {
+    // each `check` line is its own `#[tests]` item, named by its expr snippet
+    let lexer = crate::lex::Lexer::new(
+        "check square(0) == 0\ncheck square(4) == 16\n",
+        0,
+        "test".into(),
+    );
+    let ast = crate::Parser::new(lexer).try_into_ast().unwrap();
+    assert_eq!(ast.stmts().len(), 2);
+    for (i, want) in ["square(0) == 0", "square(4) == 16"].iter().enumerate() {
+        let crate::StmtKind::Item(item) = ast.stmts()[i].kind() else {
+            panic!("check line should be an item")
+        };
+        let crate::ItemKind::Tests(tests) = item.kind() else {
+            panic!("check line should be a tests item")
+        };
+        assert_eq!(tests.cases.len(), 1);
+        assert_eq!(&tests.cases[0].name.lexeme, want);
+        assert!(matches!(
+            tests.cases[0].expr.kind(),
+            crate::ExprKind::Equality(_)
+        ));
     }
-    // a bare expr (no `is`) stays a bare check
-    let tests = check_item("examples { alive() }");
+    // a bare expr stays a bare check
+    let tests = check_item("check alive()");
     assert_eq!(tests.cases[0].name.lexeme, "alive()");
     assert!(!matches!(
         tests.cases[0].expr.kind(),
         crate::ExprKind::Equality(_)
     ));
-}
-
-#[test]
-fn where_block_is_a_paragraph() {
-    // consecutive lines belong to the block; a blank line or an item ends it
-    let lexer = crate::lex::Lexer::new(
-        "fn f() -> int { 0 }\nwhere:\n    f() is 0\n    f() is 1\n\nfn g() {}\n",
-        0,
-        "test".into(),
-    );
-    let ast = crate::Parser::new(lexer).try_into_ast().unwrap();
-    assert_eq!(ast.stmts().len(), 3);
-    let crate::StmtKind::Item(item) = ast.stmts()[1].kind() else {
-        panic!("where: should be an item")
-    };
-    let crate::ItemKind::Tests(tests) = item.kind() else {
-        panic!("where: should be a check list")
-    };
+    // `,` chains a second check on the same line
+    let tests = check_item("check f() == 0, g() == 1");
     assert_eq!(tests.cases.len(), 2);
 }
 
 #[test]
-fn check_words_still_lex_as_idents() {
-    // `examples`/`where`/`example` are only special before `:` or `{`
-    let lexer = crate::lex::Lexer::new("examples.push(x);", 0, "test".into());
-    assert!(crate::Parser::new(lexer).try_into_ast().is_ok());
-    let lexer = crate::lex::Lexer::new("let where = 5;", 0, "test".into());
-    assert!(crate::Parser::new(lexer).try_into_ast().is_ok());
+fn check_lines_stand_alone() {
+    // no block, no paragraph -- consecutive `check` lines are independent items
+    let lexer = crate::lex::Lexer::new(
+        "fn f() -> int { 0 }\ncheck f() == 0\ncheck f() == 1\n\nfn g() {}\n",
+        0,
+        "test".into(),
+    );
+    let ast = crate::Parser::new(lexer).try_into_ast().unwrap();
+    assert_eq!(ast.stmts().len(), 4);
+    for i in [1, 2] {
+        let crate::StmtKind::Item(item) = ast.stmts()[i].kind() else {
+            panic!("check line should be an item")
+        };
+        assert!(matches!(item.kind(), crate::ItemKind::Tests(_)));
+    }
+}
+
+#[test]
+fn check_word_still_lexes_as_ident() {
+    // `check` is only special before a same-line `:`/`{`/expr
+    for src in [
+        "check.push(x);",
+        "let check = 5;",
+        "check(x);",
+        "check == 5;",
+    ] {
+        let lexer = crate::lex::Lexer::new(src, 0, "test".into());
+        assert!(crate::Parser::new(lexer).try_into_ast().is_ok(), "{src}");
+    }
 }
 
 // modules

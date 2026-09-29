@@ -251,7 +251,8 @@ impl Ir {
         let bid = self.bodies.push(Body::new());
         self.item_bodies.insert(dec, bid);
         if let solve::ResolvedDeclKind::Item {
-            native: Some(native), ..
+            native: Some(native),
+            ..
         } = &self.resolutions.decs[dec].kind
         {
             let native = *native;
@@ -264,10 +265,7 @@ impl Ir {
                     .map(|i| ir.synthetic_local(&format!("$trampoline_arg{i}")))
                     .collect();
                 ir.current_body_mut().params = params.clone();
-                let args: Vec<InstId> = params
-                    .iter()
-                    .map(|&p| ir.current().get_local(p))
-                    .collect();
+                let args: Vec<InstId> = params.iter().map(|&p| ir.current().get_local(p)).collect();
                 let ret = ir.current().call_native(native, args);
                 ir.current().ret(ret);
             });

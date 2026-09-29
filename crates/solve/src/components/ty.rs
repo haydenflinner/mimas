@@ -346,18 +346,13 @@ impl TyExt for Ty {
             Ty::Array(ty) => Ty::Array(Box::new(ty.filter_adt(adt))),
             Ty::Dict(ty) => Ty::Dict(Box::new(ty.filter_adt(adt))),
             Ty::Tuple(members) => Ty::Tuple(members.iter().map(|m| m.filter_adt(adt)).collect()),
-            Ty::Adt(this_adt, args) if *this_adt == adt => Ty::Identity(
-                adt,
-                args.iter().map(|a| a.filter_adt(adt)).collect(),
-            ),
-            Ty::Adt(id, args) => Ty::Adt(
-                *id,
-                args.iter().map(|a| a.filter_adt(adt)).collect(),
-            ),
-            Ty::Identity(id, args) => Ty::Identity(
-                *id,
-                args.iter().map(|a| a.filter_adt(adt)).collect(),
-            ),
+            Ty::Adt(this_adt, args) if *this_adt == adt => {
+                Ty::Identity(adt, args.iter().map(|a| a.filter_adt(adt)).collect())
+            }
+            Ty::Adt(id, args) => Ty::Adt(*id, args.iter().map(|a| a.filter_adt(adt)).collect()),
+            Ty::Identity(id, args) => {
+                Ty::Identity(*id, args.iter().map(|a| a.filter_adt(adt)).collect())
+            }
             Ty::Fn(f) => {
                 let parameters: Vec<FnParam> = f
                     .parameters

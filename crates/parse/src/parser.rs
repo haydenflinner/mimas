@@ -278,10 +278,10 @@ impl<'s> Parser<'s> {
         match self.peek() {
             TokKind::Let => BlockElement::Stmt(self.let_stmt()),
             TokKind::Module => BlockElement::Stmt(self.module_stmt()),
-            // `where:` / `examples { }` check lists -- the literate spelling of `#[tests]`.
-            // The words stay contextual: they only open a block when `:` or `{` follows, so
-            // `examples.push(x)` or `where = 5` still parse as ordinary expressions.
-            TokKind::Ident("where" | "examples" | "example") if self.check_intro() => {
+            // `check <expr>` -- the literate spelling of a `#[tests]` case. The word stays
+            // contextual: it only opens a check when a same-line expr follows, so `check(x)`
+            // or `check = 5` still parse as ordinary expressions.
+            TokKind::Ident("check") if self.check_intro() => {
                 let item = Item::new(self.check_block().into(), self.location(start), false);
                 BlockElement::Stmt(self.new_stmt(item, start))
             }
@@ -299,7 +299,8 @@ impl<'s> Parser<'s> {
                     self.error_here(Misdirection {
                         src: self.src(),
                         at: self.next_location().into(),
-                        msg: "xor-assign is `x ⊕= y` — `^` superscripts a name now, as in `x^2`".into(),
+                        msg: "xor-assign is `x ⊕= y` — `^` superscripts a name now, as in `x^2`"
+                            .into(),
                         label: "write `⊕=` here".into(),
                     });
                 }
@@ -503,44 +504,71 @@ impl<'s> Parser<'s> {
         })
     }
 
-    /// One-token lookahead for the contextual check keywords: `where`/`examples`/`example`
-    /// open a check block only when `:` or `{` follows.
+    /// One-token lookahead for the contextual `check` keyword. `check` opens a check
+    /// when something follows *on the same line* — tokens that could instead continue
+    /// `check` as an ordinary expression don't qualify: `check(x)` is a call,
+    /// `check - 1` a subtraction, `check == y` an equality. A next-line token is
+    /// never taken — `check` alone on a line is an identifier, so `check\n    f()`
+    /// doesn't steal the following statement. (A same-line `:`/`{` also routes here;
+    /// the retired list forms get a pointed error, not a silent parse.)
     fn check_intro(&self) -> bool {
-        matches!(self.nth(1), TokKind::Colon | TokKind::LeftBrace)
+        let last = self.tokens.len() - 1;
+        let kw_end = self.tokens[self.next.min(last)].span().end();
+        let after = self.tokens[(self.next + 1).min(last)].span().start();
+        if self.src.inner()[kw_end..after].contains('\n') {
+            return false;
+        }
+        match self.nth(1) {
+            TokKind::Colon | TokKind::LeftBrace => true,
+            TokKind::Ident(_) | TokKind::FString(_) | TokKind::Bang => true,
+            kind => Literal::try_from(kind).is_ok(),
+        }
     }
 
-    /// `where:` / `examples { }` check lists. Each check is `expr` or `expr is expr` and
-    /// becomes one [TestCase] in a [Tests] item, so `Vm::run_tests` sees them exactly like a
-    /// `#[tests]` list. Two shapes:
-    ///
-    /// - braced (`where { a is b, c is d }`): checks separated by `,` or newlines.
-    /// - colon (`where:` then check lines): a paragraph -- consecutive non-blank lines each
-    ///   holding a check, ended by a blank line, an item/statement keyword, `}`, or EOF.
-    ///   `,` and `;` also work as separators/terminators.
+    /// A `check` is one line: `check <expr>` — `check f(2) == 3` — becoming one
+    /// [TestCase] in a [Tests] item, so `Vm::run_tests` sees it exactly like a
+    /// `#[tests]` entry. `,`/`;` chain more checks on the same line. The retired
+    /// `check:` / `check { }` list forms still parse — once, under a pointed error —
+    /// so old text degrades to diagnostics instead of junk.
     fn check_block(&mut self) -> Tests {
-        let word = self.advance();
-        let at = Location::from(word.location());
-        self.eat(TokKind::Colon);
-        let braced = self.eat(TokKind::LeftBrace);
+        self.advance();
         let mut names = std::collections::HashSet::new();
         let mut cases = vec![];
-        if braced {
+        if self.at(TokKind::Colon) && !self.at_line_start() {
+            self.error_here(Misdirection {
+                src: self.src(),
+                at: self.next_location().into(),
+                msg: "`check:` lists are retired — put `check` on each line: `check f(2) == 3`"
+                    .into(),
+                label: "the check is just the line's expression".into(),
+            });
+            self.bump(TokKind::Colon);
+            if self.peek().starts_expr() {
+                cases.push(self.check_case(&mut names));
+            }
+        } else if self.at(TokKind::LeftBrace) && !self.at_line_start() {
+            self.error_here(Misdirection {
+                src: self.src(),
+                at: self.next_location().into(),
+                msg: "`check { }` lists are retired — put `check` on each line: `check f(2) == 3`"
+                    .into(),
+                label: "the check is just the line's expression".into(),
+            });
+            self.bump(TokKind::LeftBrace);
             loop {
                 if self.eat(TokKind::RightBrace) {
                     break;
                 }
                 // A token that can't open a check where a check or `}` should be means the
-                // brace never closed (`where { ... \nfn f() ...`). Flag the missing `}` and
-                // leave the token for whatever's further out -- parsing it as a check would
-                // go nowhere, and looping here spins until the fuel guard panics.
+                // brace never closed. Flag the missing `}` and leave the token for
+                // whatever's further out -- parsing it as a check would go nowhere, and
+                // looping here spins until the fuel guard panics.
                 if !self.peek().starts_expr() {
                     self.expect(TokKind::RightBrace);
                     break;
                 }
                 cases.push(self.check_case(&mut names));
-                if self.eat(TokKind::Comma)
-                    || self.at_line_start()
-                    || self.at(TokKind::RightBrace)
+                if self.eat(TokKind::Comma) || self.at_line_start() || self.at(TokKind::RightBrace)
                 {
                     continue;
                 }
@@ -563,55 +591,21 @@ impl<'s> Parser<'s> {
                 }
             }
         } else {
-            loop {
-                cases.push(self.check_case(&mut names));
-                // `,`/`;` chain more checks on the same line.
-                while self.eat(TokKind::Comma) || self.eat(TokKind::SemiColon) {
-                    if !self.check_continues(true) {
-                        break;
-                    }
-                    cases.push(self.check_case(&mut names));
-                }
-                if self.check_continues(false) {
-                    continue;
-                }
-                // same-line junk after a check (`a is b c`) gets a pointed diagnostic.
-                if !self.at_line_start() && !self.at(TokKind::Eof) {
-                    self.error_here(Misdirection {
-                        src: self.src(),
-                        at: self.next_location().into(),
-                        msg: "checks need `,` or a newline between them".into(),
-                        label: "unexpected token here".into(),
-                    });
-                }
+            cases.push(self.check_case(&mut names));
+        }
+        // `,`/`;` chain more checks on the same line.
+        while self.eat(TokKind::Comma) || self.eat(TokKind::SemiColon) {
+            if !self.check_chains() {
                 break;
             }
-        }
-        if cases.is_empty() {
-            self.error(Misdirection {
-                src: self.src(),
-                at: at.into(),
-                msg: format!("`{}` opens a check list but none follow", word.kind()),
-                label: "expected `expr` or `expr is expr` after this".into(),
-            });
+            cases.push(self.check_case(&mut names));
         }
         Tests::new(cases)
     }
 
-    /// One `expr` or `expr is expr` check. `is` lowers to `==` and sits inside the case's
-    /// span, so the test's name -- its source snippet -- reads exactly as written.
+    /// One check: an `expr` — `a == b` is an ordinary equality, no sugar.
     fn check_case(&mut self, names: &mut std::collections::HashSet<String>) -> TestCase {
-        let start = self.next_start();
-        let left = self.expr();
-        let is_next =
-            matches!(self.peek(), TokKind::Ident("is")) && !self.at_line_start();
-        let expr = if is_next {
-            self.advance();
-            let right = self.expr();
-            self.new_expr(Equality::new(left, EqualityOp::Equal, right), start)
-        } else {
-            left
-        };
+        let expr = self.expr();
         let name = unique_test_name(names, self.source_of(&expr));
         let location = expr.location();
         TestCase {
@@ -621,65 +615,18 @@ impl<'s> Parser<'s> {
         }
     }
 
-    /// Whether a `where:` block takes another check. `same_line` answers for a `,`/`;`
-    /// continuation; otherwise the next token must sit on a later line with no blank line in
-    /// between (the paragraph rule) and must not open the next statement instead.
-    fn check_continues(&mut self, same_line: bool) -> bool {
+    /// Whether a `,`/`;` on a `check` line chains another check — the next token
+    /// must sit on the same line and be able to open one.
+    fn check_chains(&mut self) -> bool {
         if self.at(TokKind::Eof) {
             return false;
         }
-        let kind = self.peek();
         let gap = self
             .src
             .inner()
             .get(self.cursor()..self.next_start())
             .unwrap_or_default();
-        if same_line {
-            if gap.contains('\n') {
-                return false;
-            }
-        } else {
-            // split off the check's own line tail and the next token's line head; a wholly
-            // empty middle line is a paragraph break (comment lines are not blank).
-            let mut lines = gap.split('\n');
-            lines.next();
-            lines.next_back();
-            if !gap.contains('\n') || lines.any(|line| line.trim().is_empty()) {
-                return false;
-            }
-        }
-        // a line that opens the next statement -- an item, a control-flow keyword, `}`, or
-        // a fresh check block -- ends this one. So does anything that can't start a check
-        // at all (`]`, a stray operator): a check is an expr, so nothing follows for us here.
-        let ends = !kind.starts_expr()
-            || matches!(
-                kind,
-                TokKind::RightBrace
-                    | TokKind::Fn
-                    | TokKind::Let
-                    | TokKind::Pub
-                    | TokKind::Struct
-                    | TokKind::Enum
-                    | TokKind::Impl
-                    | TokKind::Pact
-                    | TokKind::Use
-                    | TokKind::Const
-                    | TokKind::Module
-                    | TokKind::Hash
-                    | TokKind::If
-                    | TokKind::Match
-                    | TokKind::For
-                    | TokKind::While
-                    | TokKind::Loop
-                    | TokKind::Return
-                    | TokKind::Raise
-                    | TokKind::Break
-                    | TokKind::Continue
-                    | TokKind::Collect
-            )
-            || matches!(kind, TokKind::Ident("where" | "examples" | "example"))
-                && self.check_intro();
-        !ends
+        !gap.contains('\n') && self.peek().starts_expr()
     }
 
     /// The source text an expr was parsed from, for a check's display name.
@@ -1296,7 +1243,9 @@ impl<'s> Parser<'s> {
                 src: self.src(),
                 // from the keyword when we have it, so this reads before the
                 // statement-level errors the stray braces set off
-                at: from.map_or_else(|| self.next_location(), |f| self.location(f)).into(),
+                at: from
+                    .map_or_else(|| self.next_location(), |f| self.location(f))
+                    .into(),
                 msg: "struct literals need parentheses here".into(),
                 label: "wrap the struct literal in `( )`; a `{` here starts the body".into(),
             });
@@ -1482,7 +1431,11 @@ impl<'s> Parser<'s> {
     fn plus_minus(&mut self, left: Expr, right: Expr, start: usize) -> Expr {
         let times = |e: Expr, f: f64, p: &mut Self| {
             p.new_expr(
-                Evaluation::new(e, EvaluationOp::Multiply, p.new_expr(Literal::Float(f), start)),
+                Evaluation::new(
+                    e,
+                    EvaluationOp::Multiply,
+                    p.new_expr(Literal::Float(f), start),
+                ),
                 start,
             )
         };
@@ -1494,15 +1447,24 @@ impl<'s> Parser<'s> {
         let mid = times(left, 1.0, self);
         let interval = self.new_expr(Ident::synthetic("Interval"), start);
         let path = self.new_expr(
-            Access::DoubleColon { left: interval, right: Ident::synthetic(ctor) },
+            Access::DoubleColon {
+                left: interval,
+                right: Ident::synthetic(ctor),
+            },
             start,
         );
         self.new_expr(
             Call::new(
                 path,
                 vec![
-                    Argument { name: None, value: mid },
-                    Argument { name: None, value: tolerance },
+                    Argument {
+                        name: None,
+                        value: mid,
+                    },
+                    Argument {
+                        name: None,
+                        value: tolerance,
+                    },
                 ],
             ),
             start,
@@ -1520,7 +1482,13 @@ impl<'s> Parser<'s> {
                 if callee_holds_call(&call.left) {
                     call.left = self.pipe(left, call.left, start);
                 } else {
-                    call.arguments.insert(0, Argument { name: None, value: left });
+                    call.arguments.insert(
+                        0,
+                        Argument {
+                            name: None,
+                            value: left,
+                        },
+                    );
                 }
                 self.new_expr(call, start)
             }
@@ -1532,22 +1500,46 @@ impl<'s> Parser<'s> {
                 let inner = self.pipe(left, group.inner, start);
                 self.new_expr(Grouping::new(inner), start)
             }
-            ExprKind::Access(Access::Dot { left: obj, right, kind })
-                if callee_holds_call(&obj) =>
-            {
+            ExprKind::Access(Access::Dot {
+                left: obj,
+                right,
+                kind,
+            }) if callee_holds_call(&obj) => {
                 let obj = self.pipe(left, obj, start);
-                self.new_expr(Access::Dot { left: obj, right, kind }, start)
+                self.new_expr(
+                    Access::Dot {
+                        left: obj,
+                        right,
+                        kind,
+                    },
+                    start,
+                )
             }
-            ExprKind::Access(Access::Square { left: obj, key, kind })
-                if callee_holds_call(&obj) =>
-            {
+            ExprKind::Access(Access::Square {
+                left: obj,
+                key,
+                kind,
+            }) if callee_holds_call(&obj) => {
                 let obj = self.pipe(left, obj, start);
-                self.new_expr(Access::Square { left: obj, key, kind }, start)
+                self.new_expr(
+                    Access::Square {
+                        left: obj,
+                        key,
+                        kind,
+                    },
+                    start,
+                )
             }
             kind => {
                 let callee = Expr::new(kind, loc);
                 self.new_expr(
-                    Call::new(callee, vec![Argument { name: None, value: left }]),
+                    Call::new(
+                        callee,
+                        vec![Argument {
+                            name: None,
+                            value: left,
+                        }],
+                    ),
                     start,
                 )
             }
@@ -1693,13 +1685,18 @@ impl<'s> Parser<'s> {
             // reaches the `__q_splice` native, which explains the escape only
             // applies inside a query.
             self.advance();
-            let inner = self.nested(Self::unary).unwrap_or_else(|| self.poison_expr(start));
-            let callee = self.new_expr(
-                Ident::new("__q_splice", self.location(start)),
-                start,
-            );
+            let inner = self
+                .nested(Self::unary)
+                .unwrap_or_else(|| self.poison_expr(start));
+            let callee = self.new_expr(Ident::new("__q_splice", self.location(start)), start);
             self.new_expr(
-                Call::new(callee, vec![Argument { name: None, value: inner }]),
+                Call::new(
+                    callee,
+                    vec![Argument {
+                        name: None,
+                        value: inner,
+                    }],
+                ),
                 start,
             )
         } else {
@@ -1736,7 +1733,10 @@ impl<'s> Parser<'s> {
 
         let mut names: Vec<String> = vec![];
         let mut first = true;
-        while !self.at(TokKind::RightBrace) && !self.at(TokKind::Eof) && (first || !self.at_line_start()) {
+        while !self.at(TokKind::RightBrace)
+            && !self.at(TokKind::Eof)
+            && (first || !self.at_line_start())
+        {
             first = false;
             let cell = self.unary();
             match cell.kind() {
@@ -1756,7 +1756,10 @@ impl<'s> Parser<'s> {
         while !self.at(TokKind::RightBrace) && !self.at(TokKind::Eof) {
             let mut row = vec![];
             let mut first = true;
-            while !self.at(TokKind::RightBrace) && !self.at(TokKind::Eof) && (first || !self.at_line_start()) {
+            while !self.at(TokKind::RightBrace)
+                && !self.at(TokKind::Eof)
+                && (first || !self.at_line_start())
+            {
                 first = false;
                 if !self.peek().starts_expr() {
                     self.expected("a table cell");
@@ -1772,7 +1775,11 @@ impl<'s> Parser<'s> {
                     self.error(Misdirection {
                         src: self.src(),
                         at: at.into(),
-                        msg: format!("this row has {} cells but the table names {} columns", row.len(), names.len()),
+                        msg: format!(
+                            "this row has {} cells but the table names {} columns",
+                            row.len(),
+                            names.len()
+                        ),
                         label: "every row needs one cell per column".into(),
                     });
                 }
@@ -1793,7 +1800,10 @@ impl<'s> Parser<'s> {
             let column = self.new_expr(Literal::Array(cells), start);
             let title = self.new_expr(Literal::String(name.clone()), start);
             let callee = ident(self, "__table_col");
-            table = self.new_expr(Call::new(callee, vec![arg(table), arg(title), arg(column)]), start);
+            table = self.new_expr(
+                Call::new(callee, vec![arg(table), arg(title), arg(column)]),
+                start,
+            );
         }
         table
     }
@@ -1846,16 +1856,21 @@ impl<'s> Parser<'s> {
                 }
                 "select" => {
                     let names = self.q_names(false);
-                    let list = self.q_str_list(names.iter().map(|(n, _)| n.clone()).collect(), verb_start);
+                    let list =
+                        self.q_str_list(names.iter().map(|(n, _)| n.clone()).collect(), verb_start);
                     self.q_call("__q_select", vec![table, list], verb_start)
                 }
                 "sort" => {
                     let names = self.q_names(true);
-                    let cols = self.q_str_list(names.iter().map(|(n, _)| n.clone()).collect(), verb_start);
+                    let cols =
+                        self.q_str_list(names.iter().map(|(n, _)| n.clone()).collect(), verb_start);
                     let dirs = names
                         .iter()
                         .map(|(_, desc)| {
-                            self.new_expr(if *desc { Literal::True } else { Literal::False }, verb_start)
+                            self.new_expr(
+                                if *desc { Literal::True } else { Literal::False },
+                                verb_start,
+                            )
                         })
                         .collect();
                     let dirs = self.new_expr(Literal::Array(dirs), verb_start);
@@ -1867,7 +1882,8 @@ impl<'s> Parser<'s> {
                 }
                 "distinct" => {
                     let names = self.q_names(false);
-                    let list = self.q_str_list(names.into_iter().map(|(n, _)| n).collect(), verb_start);
+                    let list =
+                        self.q_str_list(names.into_iter().map(|(n, _)| n).collect(), verb_start);
                     self.q_call("__q_distinct", vec![table, list], verb_start)
                 }
                 "rename" => {
@@ -1906,7 +1922,10 @@ impl<'s> Parser<'s> {
                     let other = self.unary();
                     let mut keys = vec![];
                     let mut kind = "inner".to_string();
-                    while !self.at_line_start() && !self.at(TokKind::RightBrace) && !self.at(TokKind::Eof) {
+                    while !self.at_line_start()
+                        && !self.at(TokKind::RightBrace)
+                        && !self.at(TokKind::Eof)
+                    {
                         match self.peek() {
                             TokKind::Ident(n) => {
                                 keys.push(n.to_string());
@@ -1934,7 +1953,10 @@ impl<'s> Parser<'s> {
                         label: "try filter, derive, select, sort, take, group, rename, distinct or join".into(),
                     });
                     // skip the rest of this line
-                    while !self.at_line_start() && !self.at(TokKind::RightBrace) && !self.at(TokKind::Eof) {
+                    while !self.at_line_start()
+                        && !self.at(TokKind::RightBrace)
+                        && !self.at(TokKind::Eof)
+                    {
                         self.advance();
                     }
                     table
@@ -1949,12 +1971,18 @@ impl<'s> Parser<'s> {
 
     fn q_call(&self, name: &str, args: Vec<Expr>, start: usize) -> Expr {
         let callee = self.new_expr(Ident::new(name.to_string(), self.location(start)), start);
-        let args = args.into_iter().map(|value| Argument { name: None, value }).collect();
+        let args = args
+            .into_iter()
+            .map(|value| Argument { name: None, value })
+            .collect();
         self.new_expr(Call::new(callee, args), start)
     }
 
     fn q_str_list(&self, names: Vec<String>, start: usize) -> Expr {
-        let items = names.into_iter().map(|n| self.new_expr(Literal::String(n), start)).collect();
+        let items = names
+            .into_iter()
+            .map(|n| self.new_expr(Literal::String(n), start))
+            .collect();
         self.new_expr(Literal::Array(items), start)
     }
 
@@ -2035,7 +2063,9 @@ impl<'s> Parser<'s> {
             let title = self.new_expr(Literal::String(name.to_string()), start);
             out.push(self.q_call("__q_named", vec![value, title], start));
             self.eat(TokKind::Comma);
-            if !braced && (self.at_line_start() || self.at(TokKind::RightBrace) || self.at(TokKind::Eof)) {
+            if !braced
+                && (self.at_line_start() || self.at(TokKind::RightBrace) || self.at(TokKind::Eof))
+            {
                 break;
             }
         }
@@ -2057,18 +2087,23 @@ impl<'s> Parser<'s> {
                 self.q_call("__q_col", vec![name], start)
             }
             ExprKind::Grouping(g) => self.new_expr(Grouping::new(self.q_lower(&g.inner)), start),
-            ExprKind::Evaluation(ev) => {
-                self.new_expr(Evaluation::new(self.q_lower(&ev.left), ev.op, self.q_lower(&ev.right)), start)
-            }
-            ExprKind::Equality(eq) => {
-                self.new_expr(Equality::new(self.q_lower(&eq.left), eq.op, self.q_lower(&eq.right)), start)
-            }
+            ExprKind::Evaluation(ev) => self.new_expr(
+                Evaluation::new(self.q_lower(&ev.left), ev.op, self.q_lower(&ev.right)),
+                start,
+            ),
+            ExprKind::Equality(eq) => self.new_expr(
+                Equality::new(self.q_lower(&eq.left), eq.op, self.q_lower(&eq.right)),
+                start,
+            ),
             ExprKind::Logical(l) => {
                 let op = match l.op {
                     LogicalOp::And => EvaluationOp::And,
                     LogicalOp::Or => EvaluationOp::Or,
                 };
-                self.new_expr(Evaluation::new(self.q_lower(&l.left), op, self.q_lower(&l.right)), start)
+                self.new_expr(
+                    Evaluation::new(self.q_lower(&l.left), op, self.q_lower(&l.right)),
+                    start,
+                )
             }
             ExprKind::Unary(u) => self.new_expr(Unary::new(u.op, self.q_lower(&u.right)), start),
             ExprKind::If(i) => {
@@ -2079,7 +2114,11 @@ impl<'s> Parser<'s> {
                 match (tail(&i.main_body), i.else_expr.as_ref().and_then(tail)) {
                     (Some(a), Some(b)) => self.q_call(
                         "__q_when",
-                        vec![self.q_lower(&i.condition), self.q_lower(&a), self.q_lower(&b)],
+                        vec![
+                            self.q_lower(&i.condition),
+                            self.q_lower(&a),
+                            self.q_lower(&b),
+                        ],
                         start,
                     ),
                     _ => e.clone(),
@@ -2097,18 +2136,18 @@ impl<'s> Parser<'s> {
                 let args: Vec<Expr> = c.arguments.iter().map(|a| self.q_lower(&a.value)).collect();
                 match c.left.as_ident().map(|i| i.lexeme.as_str()) {
                     Some("count") if args.is_empty() => self.q_call("__q_n", vec![], start),
-                    Some(f @ ("sum" | "mean" | "average" | "median" | "min" | "max" | "count" | "n_unique"
-                        | "first" | "last" | "is_null" | "is_not_null" | "to_upper" | "to_lower" | "len"
-                        | "contains" | "starts_with" | "ends_with" | "fill_null" | "is_in" | "eq" | "neq"
-                        | "cast_int" | "cast_float" | "cast_str" | "lag" | "lead" | "difference"
-                        | "abs" | "floor" | "ceil" | "round"
-                        | "to_datetime" | "epoch_ms" | "strftime" | "truncate"
-                        | "year" | "month" | "day" | "hour" | "minute" | "second"
-                        | "weekday" | "ordinal_day" | "days_in_month" | "date" | "month_start" | "month_end"
-                        | "list_len" | "list_get" | "list_first" | "list_last" | "list_sum" | "list_mean"
-                        | "explode"))
-                        if !args.is_empty() =>
-                    {
+                    Some(
+                        f @ ("sum" | "mean" | "average" | "median" | "min" | "max" | "count"
+                        | "n_unique" | "first" | "last" | "is_null" | "is_not_null"
+                        | "to_upper" | "to_lower" | "len" | "contains" | "starts_with"
+                        | "ends_with" | "fill_null" | "is_in" | "eq" | "neq" | "cast_int"
+                        | "cast_float" | "cast_str" | "lag" | "lead" | "difference" | "abs"
+                        | "floor" | "ceil" | "round" | "to_datetime" | "epoch_ms" | "strftime"
+                        | "truncate" | "year" | "month" | "day" | "hour" | "minute" | "second"
+                        | "weekday" | "ordinal_day" | "days_in_month" | "date" | "month_start"
+                        | "month_end" | "list_len" | "list_get" | "list_first" | "list_last"
+                        | "list_sum" | "list_mean" | "explode"),
+                    ) if !args.is_empty() => {
                         let mut it = args.into_iter();
                         let first = it.next().unwrap();
                         let name = self.new_expr(Literal::String(f.to_string()), start);
@@ -2161,16 +2200,14 @@ impl<'s> Parser<'s> {
             // newline doesn't matter.
             let fresh_line = self.group_depth == 0 && self.at_line_start();
             expr = match self.peek() {
-                TokKind::LeftParenthesis | TokKind::LeftSquare | TokKind::Bang if fresh_line => break expr,
+                TokKind::LeftParenthesis | TokKind::LeftSquare | TokKind::Bang if fresh_line => {
+                    break expr;
+                }
                 TokKind::LeftParenthesis => self.call(expr),
                 TokKind::LeftSquare | TokKind::HookLeftSquare => self.square_access(expr),
                 TokKind::DoubleColon => self.colon_access(expr),
                 TokKind::Dot | TokKind::HookDot => self.dot_access(expr),
-                TokKind::Bang
-                    if expr
-                        .as_ident()
-                        .is_some_and(|i| i.lexeme == "assert") =>
-                {
+                TokKind::Bang if expr.as_ident().is_some_and(|i| i.lexeme == "assert") => {
                     self.assert_or_unwrap(expr)
                 }
                 TokKind::Bang => self.unwrap(expr),
@@ -2179,9 +2216,7 @@ impl<'s> Parser<'s> {
                 // `pct` unit by another name. A spaced `%` is neither postfix nor modulo
                 // (`a mod b`); `binary` reports it. While a `±` tolerance parses the
                 // marker claim takes precedence (`x ± 10%`).
-                TokKind::Percent
-                    if !self.pct_marker && self.cursor() == self.next_start() =>
-                {
+                TokKind::Percent if !self.pct_marker && self.cursor() == self.next_start() => {
                     let at = expr.span().start();
                     self.advance();
                     let scale = self.new_expr(Literal::Float(0.01), at);
@@ -2445,29 +2480,31 @@ impl<'s> Parser<'s> {
         }
         self.bump(TokKind::LeftParenthesis);
         let mut named = false;
-        let arguments = self.in_group(|p| p.list(TokKind::RightParenthesis, TokKind::starts_expr, |p| {
-            let value = p.struct_literals(true, Self::expr);
-            if !p.at(TokKind::Equal) {
-                if named {
-                    p.error(NamedBeforePositional {
-                        src: p.src(),
-                        at: value.location().into(),
-                    });
+        let arguments = self.in_group(|p| {
+            p.list(TokKind::RightParenthesis, TokKind::starts_expr, |p| {
+                let value = p.struct_literals(true, Self::expr);
+                if !p.at(TokKind::Equal) {
+                    if named {
+                        p.error(NamedBeforePositional {
+                            src: p.src(),
+                            at: value.location().into(),
+                        });
+                    }
+                    return Argument { name: None, value };
                 }
-                return Argument { name: None, value };
-            }
-            named = true;
-            let name = match value.kind() {
-                ExprKind::Ident(ident) => Some(ident.clone()),
-                _ => {
-                    p.error(p.unexpected_token());
-                    None
-                }
-            };
-            p.bump(TokKind::Equal);
-            let value = p.expr();
-            Argument { name, value }
-        }));
+                named = true;
+                let name = match value.kind() {
+                    ExprKind::Ident(ident) => Some(ident.clone()),
+                    _ => {
+                        p.error(p.unexpected_token());
+                        None
+                    }
+                };
+                p.bump(TokKind::Equal);
+                let value = p.expr();
+                Argument { name, value }
+            })
+        });
         self.new_expr(Call::new(left, arguments), start)
     }
 
@@ -2754,10 +2791,9 @@ impl<'s> Parser<'s> {
                     // `m^2` arrives inside the ident's lexeme now, so a
                     // `^n` tail on a lone segment means quantity too.
                     1 if matches!(self.peek(), TokKind::Slash | TokKind::Star | TokKind::Caret)
-                        || segments[0]
-                            .lexeme
-                            .rsplit_once('^')
-                            .is_some_and(|(_, t)| !t.is_empty() && t.chars().all(|c| c.is_ascii_digit())) =>
+                        || segments[0].lexeme.rsplit_once('^').is_some_and(|(_, t)| {
+                            !t.is_empty() && t.chars().all(|c| c.is_ascii_digit())
+                        }) =>
                     {
                         self.quantity_annotation(segments.remove(0))
                     }
@@ -2765,10 +2801,9 @@ impl<'s> Parser<'s> {
                     // checker knows whether the head is generic or takes a unit)
                     _ if self.at(TokKind::Less) => {
                         self.bump(TokKind::Less);
-                        let args =
-                            self.list(TokKind::Greater, TokKind::starts_annotation, |p| {
-                                p.annotation()
-                            });
+                        let args = self.list(TokKind::Greater, TokKind::starts_annotation, |p| {
+                            p.annotation()
+                        });
                         Annotation::Applied(segments, args)
                     }
                     1 => Annotation::Ty(segments.remove(0)),
@@ -2828,10 +2863,7 @@ impl<'s> Parser<'s> {
         let tail = &unit.lexeme[caret + 1..];
         // `x^foo` stays one name — only a digits tail is an exponent.
         match tail.parse::<i8>() {
-            Ok(n) if !tail.is_empty() => (
-                Ident::new(&unit.lexeme[..caret], unit.location),
-                n,
-            ),
+            Ok(n) if !tail.is_empty() => (Ident::new(&unit.lexeme[..caret], unit.location), n),
             _ => {
                 let exp = self.unit_exponent();
                 (unit, exp)
@@ -3399,11 +3431,17 @@ fn num_lit(e: &Expr) -> Option<SignedLit> {
     match e.kind() {
         ExprKind::Literal(Literal::Int(n)) => Some(SignedLit::Int(*n)),
         ExprKind::Literal(Literal::Float(n)) => Some(SignedLit::Float(*n)),
-        ExprKind::Unary(Unary { op: UnaryOp::Negative, right }) => match num_lit(right)? {
+        ExprKind::Unary(Unary {
+            op: UnaryOp::Negative,
+            right,
+        }) => match num_lit(right)? {
             SignedLit::Int(n) => n.checked_neg().map(SignedLit::Int),
             SignedLit::Float(n) => Some(SignedLit::Float(-n)),
         },
-        ExprKind::Unary(Unary { op: UnaryOp::Positive, right }) => num_lit(right),
+        ExprKind::Unary(Unary {
+            op: UnaryOp::Positive,
+            right,
+        }) => num_lit(right),
         ExprKind::Grouping(g) => num_lit(&g.inner),
         _ => None,
     }
@@ -3416,21 +3454,29 @@ fn num_lit(e: &Expr) -> Option<SignedLit> {
 /// overflow falls back to float.
 fn caret_pow(left: &Expr, right: &Expr) -> Option<Literal> {
     let (negated, base) = match left.kind() {
-        ExprKind::Unary(Unary { op: UnaryOp::Negative, right }) => (true, num_lit(right)?),
-        ExprKind::Unary(Unary { op: UnaryOp::Positive, right }) => (false, num_lit(right)?),
+        ExprKind::Unary(Unary {
+            op: UnaryOp::Negative,
+            right,
+        }) => (true, num_lit(right)?),
+        ExprKind::Unary(Unary {
+            op: UnaryOp::Positive,
+            right,
+        }) => (false, num_lit(right)?),
         _ => (false, num_lit(left)?),
     };
     let exp = num_lit(right)?;
     let sign = if negated { -1.0 } else { 1.0 };
-    Some(if let (SignedLit::Int(b), SignedLit::Int(e)) = (base, exp) {
-        match u32::try_from(e).ok().and_then(|e| b.checked_pow(e)) {
-            // a `checked_pow` result can't be `i64::MIN`, so `-n` can't overflow
-            Some(n) => Literal::Int(if negated { -n } else { n }),
-            None => Literal::Float((b as f64).powf(e as f64) * sign),
-        }
-    } else {
-        Literal::Float(base.as_f64().powf(exp.as_f64()) * sign)
-    })
+    Some(
+        if let (SignedLit::Int(b), SignedLit::Int(e)) = (base, exp) {
+            match u32::try_from(e).ok().and_then(|e| b.checked_pow(e)) {
+                // a `checked_pow` result can't be `i64::MIN`, so `-n` can't overflow
+                Some(n) => Literal::Int(if negated { -n } else { n }),
+                None => Literal::Float((b as f64).powf(e as f64) * sign),
+            }
+        } else {
+            Literal::Float(base.as_f64().powf(exp.as_f64()) * sign)
+        },
+    )
 }
 
 /// `FIELD_(X, Y, W, H)` desugars to `(FIELD_X, FIELD_Y, FIELD_W, FIELD_H)`: a
@@ -3446,9 +3492,9 @@ fn desugar_prefix_pat(pat: &Pat, prefix: &str) -> Pat {
             id.lexeme = format!("{prefix}{id}");
             PatKind::Ident(id)
         }
-        PatKind::Tuple(pats) => PatKind::Tuple(
-            pats.iter().map(|p| desugar_prefix_pat(p, prefix)).collect(),
-        ),
+        PatKind::Tuple(pats) => {
+            PatKind::Tuple(pats.iter().map(|p| desugar_prefix_pat(p, prefix)).collect())
+        }
         PatKind::TupleVariant(head, pats) => {
             // only `Name_(…)` is sugar -- a real path head (`A::B(..)`) or a
             // plain `Name(..)` variant pattern is left for the solver to reject
@@ -3459,11 +3505,13 @@ fn desugar_prefix_pat(pat: &Pat, prefix: &str) -> Pat {
                 return pat.clone();
             }
             let prefix = format!("{prefix}{head}");
-            PatKind::Tuple(pats.iter().map(|p| desugar_prefix_pat(p, &prefix)).collect())
+            PatKind::Tuple(
+                pats.iter()
+                    .map(|p| desugar_prefix_pat(p, &prefix))
+                    .collect(),
+            )
         }
-        PatKind::NullBind(inner) => {
-            PatKind::NullBind(Box::new(desugar_prefix_pat(inner, prefix)))
-        }
+        PatKind::NullBind(inner) => PatKind::NullBind(Box::new(desugar_prefix_pat(inner, prefix))),
         PatKind::Or(pats) => {
             PatKind::Or(pats.iter().map(|p| desugar_prefix_pat(p, prefix)).collect())
         }

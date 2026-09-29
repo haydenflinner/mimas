@@ -1,4 +1,6 @@
-use crate::{collect_doc, convert::expand_conversion, meta_submission, param_names, register::submission};
+use crate::{
+    collect_doc, convert::expand_conversion, meta_submission, param_names, register::submission,
+};
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::{
@@ -43,8 +45,7 @@ pub fn expand_impl(block: ItemImpl) -> Result<TokenStream2, syn::Error> {
                 if let Some(meta) = meta {
                     shim.block.stmts.insert(0, meta);
                 }
-                let src =
-                    crate::src_submission(&shim.sig.ident, method.sig.ident.span());
+                let src = crate::src_submission(&shim.sig.ident, method.sig.ident.span());
                 out.extend(quote!(#shim #src #muts));
                 adds.extend(add);
             }

@@ -50,6 +50,12 @@ fn native_doc_examples_execute() {
             failures.push_str(&format!("\n=== {}\n{src}{e:?}\n", meta.path));
         }
     }
-    assert!(seen >= 50, "only {seen} doc blocks found — inventory pruned?");
-    assert!(failures.is_empty(), "{seen} blocks ({skipped} skipped):{failures}");
+    assert!(
+        seen >= 50,
+        "only {seen} doc blocks found — inventory pruned?"
+    );
+    assert!(
+        failures.is_empty(),
+        "{seen} blocks ({skipped} skipped):{failures}"
+    );
 }

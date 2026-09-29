@@ -701,11 +701,7 @@ expr_test!(
 expr_test!(
     caret_joins_ident,
     "x^2 + 1",
-    Evaluation::new(
-        ident_expr!("x^2"),
-        EvaluationOp::Plus,
-        int!(1),
-    )
+    Evaluation::new(ident_expr!("x^2"), EvaluationOp::Plus, int!(1),)
 );
 
 // The retired spellings report a misdirection and parse on as xor.
@@ -720,21 +716,13 @@ fn spaced_caret_is_old_xor() {
 
 // `lit ^ lit` reads as a power — both sides are const, so the fold
 // happens at desugar and no error fires.
-expr_test!(
-    caret_folds_lit_pow,
-    "2^10",
-    Literal::Int(1024)
-);
+expr_test!(caret_folds_lit_pow, "2^10", Literal::Int(1024));
 expr_test!(
     caret_folds_float_pow,
     "2.0 ^ 0.5",
     Literal::Float(std::f64::consts::SQRT_2)
 );
-expr_test!(
-    caret_folds_neg_exp,
-    "2^-1",
-    Literal::Float(0.5)
-);
+expr_test!(caret_folds_neg_exp, "2^-1", Literal::Float(0.5));
 expr_test!(
     caret_folds_overflow_to_float,
     "2^63",
@@ -1946,8 +1934,7 @@ expr_test!(
         ident_expr!("g"),
         vec![
             Argument::new(
-                Call::new(ident_expr!("f"), vec![Argument::new(ident_expr!("x"))])
-                    .into_expr(),
+                Call::new(ident_expr!("f"), vec![Argument::new(ident_expr!("x"))]).into_expr(),
             ),
             Argument::new(int!(2)),
         ]
@@ -1963,7 +1950,10 @@ fn plus_minus_absolute() {
 
 #[test]
 fn plus_minus_relative() {
-    assert_eq!(parse_expr("30000 ± 10%"), "Interval::pm(30000 * 1, 10 * 0.01)");
+    assert_eq!(
+        parse_expr("30000 ± 10%"),
+        "Interval::pm(30000 * 1, 10 * 0.01)"
+    );
     assert_eq!(parse_expr("a ± b %"), "Interval::pm(a * 1, b * 0.01)");
 }
 
@@ -1975,8 +1965,14 @@ fn plus_minus_binds_like_additive() {
         parse_expr("a + b ± c * 2"),
         "Interval::within(a + b * 1, c * 2 * 1)"
     );
-    assert_eq!(parse_expr("x ± d + e"), "Interval::within(x * 1, d * 1) + e");
-    assert_eq!(parse_expr("x ± d * e"), "Interval::within(x * 1, d * e * 1)");
+    assert_eq!(
+        parse_expr("x ± d + e"),
+        "Interval::within(x * 1, d * 1) + e"
+    );
+    assert_eq!(
+        parse_expr("x ± d * e"),
+        "Interval::within(x * 1, d * e * 1)"
+    );
 }
 
 #[test]

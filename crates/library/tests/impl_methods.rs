@@ -154,8 +154,7 @@ fn param_names_come_from_the_signatures() {
     // assoc fns (`Player::new`) register as methods on the adt too, `takes_self: false`
     assert_eq!(
         names_of(&|e| match e {
-            ApiEntry::Method(m) if m.name == "new" && m.recv_ty == damage =>
-                Some(&m.param_names),
+            ApiEntry::Method(m) if m.name == "new" && m.recv_ty == damage => Some(&m.param_names),
             _ => None,
         }),
         ["name"]

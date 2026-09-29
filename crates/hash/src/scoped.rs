@@ -192,7 +192,10 @@ impl Globals {
             return None;
         }
         let decls = self.decls.get(name)?;
-        let decl = decls.iter().rfind(|d| d.pos <= pos).or_else(|| decls.last())?;
+        let decl = decls
+            .iter()
+            .rfind(|d| d.pos <= pos)
+            .or_else(|| decls.last())?;
         Some(decl.index)
     }
 
@@ -253,13 +256,10 @@ impl Globals {
 
     fn item(&mut self, item: Item) {
         let index = self.items.len();
-        self.decls
-            .entry(item.name.clone())
-            .or_default()
-            .push(Decl {
-                pos: item.start,
-                index,
-            });
+        self.decls.entry(item.name.clone()).or_default().push(Decl {
+            pos: item.start,
+            index,
+        });
         self.items.push(item);
     }
 
@@ -334,7 +334,11 @@ pub enum Reloc {
     },
     /// A `@self` site — a recursive reference to the item being hashed.
     /// Links to the item's own address once it stores by hash.
-    SelfRef { name: String, start: usize, end: usize },
+    SelfRef {
+        name: String,
+        start: usize,
+        end: usize,
+    },
 }
 
 impl Reloc {
@@ -505,10 +509,7 @@ impl<'s> Scoped<'s> {
             }
             return;
         }
-        let Some(target) = self
-            .globals
-            .decl_at(&ident.lexeme, self.base + span.start)
-        else {
+        let Some(target) = self.globals.decl_at(&ident.lexeme, self.base + span.start) else {
             return;
         };
         // The marker is a placeholder until patch time: the dep table
@@ -537,7 +538,9 @@ impl<'s> Scoped<'s> {
     }
 
     fn scope_mut(&mut self) -> &mut HashMap<String, Slot> {
-        self.scopes.last_mut().expect("the fn's own frame is pushed first")
+        self.scopes
+            .last_mut()
+            .expect("the fn's own frame is pushed first")
     }
 
     fn push(&mut self) {
@@ -1010,7 +1013,10 @@ fn patch_standalone(st: &mut Scoped, globals: &Globals) {
     let analysis = globals.analysis();
     let mut dep = 0;
     for reloc in &mut st.relocs {
-        let Reloc::Dep { hash, start, end, .. } = reloc else {
+        let Reloc::Dep {
+            hash, start, end, ..
+        } = reloc
+        else {
             continue;
         };
         let target = st.targets[dep];
@@ -1230,7 +1236,10 @@ impl<'a> Analyze<'a> {
         let mut st = self.passes[i].take().expect("scoped pass ran");
         let mut dep = 0;
         for reloc in &mut st.relocs {
-            let Reloc::Dep { hash, start, end, .. } = reloc else {
+            let Reloc::Dep {
+                hash, start, end, ..
+            } = reloc
+            else {
                 continue;
             };
             let target = st.targets[dep];
@@ -1260,7 +1269,10 @@ impl<'a> Analyze<'a> {
             let mut st = self.passes[m].take().expect("scoped pass ran");
             let mut dep = 0;
             for (ridx, reloc) in st.relocs.iter_mut().enumerate() {
-                let Reloc::Dep { hash, start, end, .. } = reloc else {
+                let Reloc::Dep {
+                    hash, start, end, ..
+                } = reloc
+                else {
                     continue;
                 };
                 let target = st.targets[dep];
@@ -1410,14 +1422,20 @@ mod tests {
     fn renaming_a_callee_leaves_the_callers_scoped_hash() {
         let a = "fn square(n: int) -> int { n * n }\nfn twice(n: int) -> int { square(n) + square(n) }\n";
         let b = "fn sq(n: int) -> int { n * n }\nfn twice(n: int) -> int { sq(n) + sq(n) }\n";
-        assert_eq!(hash_of(&scoped_hashes(a), "twice"), hash_of(&scoped_hashes(b), "twice"));
+        assert_eq!(
+            hash_of(&scoped_hashes(a), "twice"),
+            hash_of(&scoped_hashes(b), "twice")
+        );
         // …and the callee itself is rename-free too.
         assert_eq!(
             hash_of(&scoped_hashes(a), "square"),
             hash_of(&scoped_hashes(b), "sq")
         );
         // Contrast: the token-level hash still moves on a rename.
-        assert_ne!(hash_item("fn twice(n: int) { square(n) }"), hash_item("fn twice(n: int) { sq(n) }"));
+        assert_ne!(
+            hash_item("fn twice(n: int) { square(n) }"),
+            hash_item("fn twice(n: int) { sq(n) }")
+        );
         // The dep really was substituted — no `square`/`sq` text survives.
         let canon = canon_of(a, "twice");
         assert!(!canon.contains("square"), "{canon}");
@@ -1430,7 +1448,10 @@ mod tests {
     fn renaming_locals_and_params_is_free() {
         let a = "fn f(x: int) -> int { let y = x * 2; y }\n";
         let b = "fn f(q: int) -> int { let w = q * 2; w }\n";
-        assert_eq!(hash_of(&scoped_hashes(a), "f"), hash_of(&scoped_hashes(b), "f"));
+        assert_eq!(
+            hash_of(&scoped_hashes(a), "f"),
+            hash_of(&scoped_hashes(b), "f")
+        );
         let canon = canon_of(a, "f");
         assert!(canon.contains("@v0"), "{canon}");
         assert!(canon.contains("@v1"), "{canon}");
@@ -1438,18 +1459,30 @@ mod tests {
         // Alpha-equal multi-param bodies.
         let c = "fn f(a: int, b: int) -> int { a + b }\n";
         let d = "fn f(x: int, y: int) -> int { x + y }\n";
-        assert_eq!(hash_of(&scoped_hashes(c), "f"), hash_of(&scoped_hashes(d), "f"));
+        assert_eq!(
+            hash_of(&scoped_hashes(c), "f"),
+            hash_of(&scoped_hashes(d), "f")
+        );
         // NOT free: same names, different structure.
         let e = "fn f(x: int) -> int { let y = x * 3; y }\n";
-        assert_ne!(hash_of(&scoped_hashes(a), "f"), hash_of(&scoped_hashes(e), "f"));
+        assert_ne!(
+            hash_of(&scoped_hashes(a), "f"),
+            hash_of(&scoped_hashes(e), "f")
+        );
     }
 
     #[test]
     fn declaration_order_does_not_matter() {
         let a = "fn a() -> int { 1 }\nfn b() -> int { a() }\n";
         let b = "fn b() -> int { a() }\nfn a() -> int { 1 }\n";
-        assert_eq!(hash_of(&scoped_hashes(a), "b"), hash_of(&scoped_hashes(b), "b"));
-        assert_eq!(hash_of(&scoped_hashes(a), "a"), hash_of(&scoped_hashes(b), "a"));
+        assert_eq!(
+            hash_of(&scoped_hashes(a), "b"),
+            hash_of(&scoped_hashes(b), "b")
+        );
+        assert_eq!(
+            hash_of(&scoped_hashes(a), "a"),
+            hash_of(&scoped_hashes(b), "a")
+        );
     }
 
     /// Editing a callee's body ripples into the caller's hash: the dep
@@ -1458,7 +1491,10 @@ mod tests {
     fn editing_a_callee_ripples_the_caller() {
         let a = "fn square(n: int) -> int { n * n }\nfn twice(n: int) -> int { square(n) + square(n) }\n";
         let b = "fn square(n: int) -> int { n * n + 1 }\nfn twice(n: int) -> int { square(n) + square(n) }\n";
-        assert_ne!(hash_of(&scoped_hashes(a), "twice"), hash_of(&scoped_hashes(b), "twice"));
+        assert_ne!(
+            hash_of(&scoped_hashes(a), "twice"),
+            hash_of(&scoped_hashes(b), "twice")
+        );
         // But the callee's *callers'* own text didn't move: same body, new dep.
         let canon_a = canon_of(a, "twice");
         let canon_b = canon_of(b, "twice");
@@ -1476,7 +1512,10 @@ mod tests {
         assert!(!canon.contains("@dep:"), "{canon}");
         // And the shadowed body alpha-renames like any other.
         let renamed = "fn f() -> int { 1 }\nfn g() -> int { let z = 0; z() }\n";
-        assert_eq!(hash_of(&scoped_hashes(src), "g"), hash_of(&scoped_hashes(renamed), "g"));
+        assert_eq!(
+            hash_of(&scoped_hashes(src), "g"),
+            hash_of(&scoped_hashes(renamed), "g")
+        );
         // …while a `let`-RHS still sees the outer fn: `let f = f` binds the
         // dep's value, then shadows the name.
         let rhs = "fn f() -> int { 1 }\nfn g() -> int { let f = f; f() }\n";
@@ -1491,7 +1530,10 @@ mod tests {
     fn recursion_terminates_and_renames_free() {
         let f = "fn f(n: int) -> int { if n <= 0 { 0 } else { f(n - 1) } }\n";
         let g = "fn g(n: int) -> int { if n <= 0 { 0 } else { g(n - 1) } }\n";
-        assert_eq!(hash_of(&scoped_hashes(f), "f"), hash_of(&scoped_hashes(g), "g"));
+        assert_eq!(
+            hash_of(&scoped_hashes(f), "f"),
+            hash_of(&scoped_hashes(g), "g")
+        );
         assert!(canon_of(f, "f").contains("@self"), "{}", canon_of(f, "f"));
         // 2a couldn't do this: token-level hashing still differs on rename.
         assert_ne!(hash_item(f), hash_item(g));
@@ -1526,7 +1568,11 @@ mod tests {
         // Unbound free idents stay literal too (a `len` with no same-source
         // `fn len` is external to us).
         let src3 = "fn f(s: str) -> int { len(s) }\n";
-        assert!(canon_of(src3, "f").contains("len ( @v0 )"), "{}", canon_of(src3, "f"));
+        assert!(
+            canon_of(src3, "f").contains("len ( @v0 )"),
+            "{}",
+            canon_of(src3, "f")
+        );
     }
 
     /// Fields, dict keys, named args, pattern paths — none are variables.
@@ -1548,17 +1594,26 @@ mod tests {
     fn every_binding_form_alpha_renames() {
         let a = "fn f(xs: [int]) -> int { for x in xs { x } }\n";
         let b = "fn f(xs: [int]) -> int { for y in xs { y } }\n";
-        assert_eq!(hash_of(&scoped_hashes(a), "f"), hash_of(&scoped_hashes(b), "f"));
+        assert_eq!(
+            hash_of(&scoped_hashes(a), "f"),
+            hash_of(&scoped_hashes(b), "f")
+        );
         let canon = canon_of(a, "f");
         assert!(canon.contains("for @v1 in @v0"), "{canon}");
 
         let c = "fn f(m: int) -> int { match m { x => x } }\n";
         let d = "fn f(m: int) -> int { match m { q => q } }\n";
-        assert_eq!(hash_of(&scoped_hashes(c), "f"), hash_of(&scoped_hashes(d), "f"));
+        assert_eq!(
+            hash_of(&scoped_hashes(c), "f"),
+            hash_of(&scoped_hashes(d), "f")
+        );
 
         let e = "fn f(g: _) -> int { let h = |x| x + 1; h(1) }\n";
         let i = "fn f(g: _) -> int { let h = |y| y + 1; h(1) }\n";
-        assert_eq!(hash_of(&scoped_hashes(e), "f"), hash_of(&scoped_hashes(i), "f"));
+        assert_eq!(
+            hash_of(&scoped_hashes(e), "f"),
+            hash_of(&scoped_hashes(i), "f")
+        );
     }
 
     /// f-string interpolation: the interior idents carry real locations;
@@ -1567,7 +1622,10 @@ mod tests {
     fn fstring_interpolations_alpha_rename() {
         let a = "fn f(x: int) -> str { f\"{x}!\" }\n";
         let b = "fn f(q: int) -> str { f\"{q}!\" }\n";
-        assert_eq!(hash_of(&scoped_hashes(a), "f"), hash_of(&scoped_hashes(b), "f"));
+        assert_eq!(
+            hash_of(&scoped_hashes(a), "f"),
+            hash_of(&scoped_hashes(b), "f")
+        );
         let canon = canon_of(a, "f");
         assert!(canon.contains("@v0"), "{canon}");
         assert!(!canon.contains('x'), "{canon}");
@@ -1579,7 +1637,10 @@ mod tests {
     fn nested_fns_bind_and_alpha_rename() {
         let a = "fn f() -> int { fn inner(n: int) -> int { if n <= 0 { 0 } else { inner(n - 1) } } inner(3) }\n";
         let b = "fn f() -> int { fn helper(n: int) -> int { if n <= 0 { 0 } else { helper(n - 1) } } helper(3) }\n";
-        assert_eq!(hash_of(&scoped_hashes(a), "f"), hash_of(&scoped_hashes(b), "f"));
+        assert_eq!(
+            hash_of(&scoped_hashes(a), "f"),
+            hash_of(&scoped_hashes(b), "f")
+        );
         let canon = canon_of(a, "f");
         assert!(canon.contains("fn @v0"), "{canon}");
         assert!(!canon.contains("inner"), "{canon}");
@@ -1590,7 +1651,10 @@ mod tests {
     fn type_params_alpha_rename() {
         let a = "fn id<T>(x: T) -> T { x }\n";
         let b = "fn id<U>(y: U) -> U { y }\n";
-        assert_eq!(hash_of(&scoped_hashes(a), "id"), hash_of(&scoped_hashes(b), "id"));
+        assert_eq!(
+            hash_of(&scoped_hashes(a), "id"),
+            hash_of(&scoped_hashes(b), "id")
+        );
         let canon = canon_of(a, "id");
         assert_eq!(canon, "fn _ < @v0 > ( @v1 : @v0 ) -> @v0 { @v1 }");
     }
@@ -1599,13 +1663,18 @@ mod tests {
     /// conservative — an ambiguous program keeps the written name.
     #[test]
     fn used_names_are_not_dep_substituted() {
-        let src = "use a::square;\nfn square(n: int) -> int { n * n }\nfn f() -> int { square(2) }\n";
+        let src =
+            "use a::square;\nfn square(n: int) -> int { n * n }\nfn f() -> int { square(2) }\n";
         let canon = canon_of(src, "f");
         assert!(canon.contains("square ( 2 )"), "{canon}");
         assert!(!canon.contains("@dep:"), "{canon}");
         // Without the `use`, the same call site dep-substitutes.
         let src2 = "fn square(n: int) -> int { n * n }\nfn f() -> int { square(2) }\n";
-        assert!(canon_of(src2, "f").contains("@dep:"), "{}", canon_of(src2, "f"));
+        assert!(
+            canon_of(src2, "f").contains("@dep:"),
+            "{}",
+            canon_of(src2, "f")
+        );
     }
 
     /// Unparseable source: `canonical_scoped` is `None`; `hash_scoped`
@@ -1666,7 +1735,11 @@ mod tests {
                 .iter()
                 .map(|r| (r.name(), r.hash()))
                 .collect::<Vec<_>>(),
-            vec![("a", Some(want_a.as_str())), ("b", Some(want_b.as_str())), ("a", Some(want_a.as_str()))]
+            vec![
+                ("a", Some(want_a.as_str())),
+                ("b", Some(want_b.as_str())),
+                ("a", Some(want_a.as_str()))
+            ]
         );
         // The site's span is the substituted ident's span in the item source.
         for reloc in &relocs {
@@ -1796,7 +1869,10 @@ mod tests {
         // … while editing the callee's body moves the edge target.
         let c = "fn square(n: int) -> int { n * n + 1 }\nfn twice(n: int) -> int { square(n) }\n";
         let mc = manifest(c);
-        assert_ne!(ma[1].dep_hashes().collect::<Vec<_>>(), mc[1].dep_hashes().collect::<Vec<_>>());
+        assert_ne!(
+            ma[1].dep_hashes().collect::<Vec<_>>(),
+            mc[1].dep_hashes().collect::<Vec<_>>()
+        );
         assert_ne!(ma[1].hash, mc[1].hash);
     }
 
@@ -1862,10 +1938,7 @@ mod tests {
         // Own decl below the call → kit's row wins.
         let below = "use \"kit\";\nfn go() -> int { row() }\nfn row() -> int { 42 }\n";
         let globals = Globals::for_page(below, resolve);
-        let go = extract(below)
-            .into_iter()
-            .find(|i| i.name == "go")
-            .unwrap();
+        let go = extract(below).into_iter().find(|i| i.name == "go").unwrap();
         assert_eq!(
             go.relocs(&globals).unwrap()[0].hash(),
             Some(extract(kit)[0].hash().as_str())
@@ -1930,10 +2003,7 @@ mod tests {
                 .find(|(name, _)| *name == n)
                 .map(|(_, s)| s.to_string())
         });
-        assert_eq!(
-            globals2.includes(),
-            &["kit".to_string(), "img".to_string()]
-        );
+        assert_eq!(globals2.includes(), &["kit".to_string(), "img".to_string()]);
         let go2 = extract(page2).into_iter().find(|i| i.name == "go").unwrap();
         let relocs = go2.relocs(&globals2).unwrap();
         assert_eq!(relocs.len(), 2);
@@ -1961,7 +2031,10 @@ mod tests {
         let canon = go.scoped_canonical(&globals).unwrap();
         assert!(canon.contains("row ( )"), "{canon}");
         // An include cycle terminates: a page using itself, or a↔b.
-        let pages = [("a", "use \"b\";\nfn f() -> int { 1 }\n"), ("b", "use \"a\";\nfn g() -> int { 2 }\n")];
+        let pages = [
+            ("a", "use \"b\";\nfn f() -> int { 1 }\n"),
+            ("b", "use \"a\";\nfn g() -> int { 2 }\n"),
+        ];
         let globals = Globals::for_page("use \"a\";\nfn go() -> int { f() }\n", |n| {
             pages
                 .iter()

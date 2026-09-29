@@ -75,7 +75,10 @@ fn from_xlsx_reads_the_products_fixture() {
         "1"
     );
     pretty_assertions::assert_eq!(
-        test_runner::render_display(&preamble, r#"df.select_names(["ProductID", "Price"])!.head(1)"#),
+        test_runner::render_display(
+            &preamble,
+            r#"df.select_names(["ProductID", "Price"])!.head(1)"#
+        ),
         "shape: (1, 2)\n┌───────────┬───────┐\n│ ProductID ┆ Price │\n│ ---       ┆ ---   │\n│ i64       ┆ f64   │\n╞═══════════╪═══════╡\n│ 1         ┆ 18.0  │\n└───────────┴───────┘"
     );
     // and the result is a full DataFrame -- every verb works on it
@@ -90,9 +93,7 @@ fn from_xlsx_reads_the_products_fixture() {
 
 #[test]
 fn from_xlsx_reads_a_named_sheet() {
-    let preamble = format!(
-        "use std::polars::*; let df = from_xlsx({PRODUCTS:?}, \"Products\")!;"
-    );
+    let preamble = format!("use std::polars::*; let df = from_xlsx({PRODUCTS:?}, \"Products\")!;");
     pretty_assertions::assert_eq!(
         test_runner::render(&preamble, r#"df.pull("ProductName")!.len()"#),
         "77"
@@ -209,7 +210,10 @@ fn to_xlsx_names_its_sheet_and_pipes() {
     pretty_assertions::assert_eq!(
         test_runner::render(
             &preamble,
-            &format!(r#"from_xlsx({:?}, "Inventory")!.pull("ProductName")![0]"#, path.display())
+            &format!(
+                r#"from_xlsx({:?}, "Inventory")!.pull("ProductName")![0]"#,
+                path.display()
+            )
         ),
         r#""Chais""#
     );

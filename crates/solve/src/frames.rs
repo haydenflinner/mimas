@@ -518,8 +518,7 @@ impl Solver {
                                 match func {
                                     // `eq(mass, 2s)` is a comparison against the column
                                     "eq" | "neq" => {
-                                        let (_, arg_d) =
-                                            self.col_expr(&extra.value, input)?;
+                                        let (_, arg_d) = self.col_expr(&extra.value, input)?;
                                         if !is_zero(&extra.value)
                                             && let Some((x, y)) = dim_clash(base_d, arg_d)
                                         {
@@ -546,11 +545,8 @@ impl Solver {
                                             extra.value.kind()
                                         {
                                             for item in items {
-                                                let (_, item_d) =
-                                                    self.col_expr(item, input)?;
-                                                if let Some((x, y)) =
-                                                    dim_clash(base_d, item_d)
-                                                {
+                                                let (_, item_d) = self.col_expr(item, input)?;
+                                                if let Some((x, y)) = dim_clash(base_d, item_d) {
                                                     return Err(self.dim_err(
                                                         item,
                                                         format!(

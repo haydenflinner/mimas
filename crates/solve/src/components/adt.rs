@@ -3,11 +3,11 @@ use crate::{
     Solver,
     components::{DecId, TyExt},
 };
-use shared::ParamId;
 use bitflags::bitflags;
 use indexmap::IndexMap;
 use itertools::Itertools;
 use shared::Location;
+use shared::ParamId;
 use std::{
     collections::HashMap,
     ops::{Deref, DerefMut},

@@ -1164,9 +1164,7 @@ stmt_test!(
     Function {
         name: ident!("id"),
         type_params: vec![ident!("T")],
-        parameters: vec![
-            Binding::new(ident!("x")).with_annotation(Annotation::Ty(ident!("T")))
-        ],
+        parameters: vec![Binding::new(ident!("x")).with_annotation(Annotation::Ty(ident!("T")))],
         return_type: Some(Annotation::Ty(ident!("T"))),
         body: block!(),
     }
@@ -1262,7 +1260,10 @@ stmt_test!(
 // ...but an `if`/`while` body may begin with an assignment
 #[test]
 fn if_body_starting_with_an_assignment_is_fine() {
-    for src in ["fn a() { let x = 0; if true { x = 1; } }", "fn a() { let x = 0; while x < 3 { x = x + 1; } }"] {
+    for src in [
+        "fn a() { let x = 0; if true { x = 1; } }",
+        "fn a() { let x = 0; while x < 3 { x = x + 1; } }",
+    ] {
         crate::Parser::new(crate::lex::Lexer::new(src, 0, "t".into()))
             .try_into_ast()
             .unwrap_or_else(|e| panic!("{src}: {e:?}"));

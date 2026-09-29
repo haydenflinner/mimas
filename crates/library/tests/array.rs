@@ -862,8 +862,17 @@ test_run!(
     "[5, 5, 5].mapi(scale)" => "[0, 5, 10]",
 );
 
-test_fail!(flat_map_rejects_non_array, "let _ = [1, 2].flat_map(|x| x);");
+test_fail!(
+    flat_map_rejects_non_array,
+    "let _ = [1, 2].flat_map(|x| x);"
+);
 test_fail!(mapi_rejects_one_arg, "let _ = [1, 2].mapi(|x| x);");
-test_fail!(mapi_rejects_str_index, r#"let _ = [1, 2].mapi(|i: str, x| x);"#);
-test_fail!(foldi_rejects_wrong_arity, "let _ = [1, 2].foldi(0, |i, acc| acc);");
+test_fail!(
+    mapi_rejects_str_index,
+    r#"let _ = [1, 2].mapi(|i: str, x| x);"#
+);
+test_fail!(
+    foldi_rejects_wrong_arity,
+    "let _ = [1, 2].foldi(0, |i, acc| acc);"
+);
 test_fail!(zip_rejects_non_array, "let _ = [1, 2].zip(5);");

@@ -38,20 +38,14 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
 /// `from_xlsx("products.xlsx")` reads the first sheet; `from_xlsx(path, "Sheet2")` picks one
 /// by name. Sheet names, missing files, and non-xlsx data all raise.
 #[native]
-fn from_xlsx<'gc>(
-    ctx: Ctx<'gc>,
-    path: &str,
-    sheet: Option<&str>,
-) -> Raisable<vm::DataFrame<'gc>> {
-    read_xlsx(path, sheet)
-        .map(|d| ctx.new_dataframe(d))
-        .into()
+fn from_xlsx<'gc>(ctx: Ctx<'gc>, path: &str, sheet: Option<&str>) -> Raisable<vm::DataFrame<'gc>> {
+    read_xlsx(path, sheet).map(|d| ctx.new_dataframe(d)).into()
 }
 
 fn read_xlsx(path: &str, sheet: Option<&str>) -> Result<polars::frame::DataFrame, String> {
     use calamine::Reader;
-    let mut workbook: calamine::Xlsx<_> = calamine::open_workbook(path)
-        .map_err(|e| format!("from_xlsx: {e}"))?;
+    let mut workbook: calamine::Xlsx<_> =
+        calamine::open_workbook(path).map_err(|e| format!("from_xlsx: {e}"))?;
     let names = workbook.sheet_names();
     let sheet = match sheet {
         Some(want) if names.iter().any(|n| n == want) => want.to_string(),
@@ -133,7 +127,12 @@ fn cell_kind(d: &calamine::Data) -> Option<Kind> {
         // a whole, finite, i64-range float is indistinguishable in xlsx from an int the
         // author typed -- calling it one keeps id/count columns as `i64` the way
         // fastexcel/polars' excel reader does
-        Data::Float(x) if x.is_finite() && x.fract() == 0.0 && *x >= i64::MIN as f64 && *x <= i64::MAX as f64 => {
+        Data::Float(x)
+            if x.is_finite()
+                && x.fract() == 0.0
+                && *x >= i64::MIN as f64
+                && *x <= i64::MAX as f64 =>
+        {
             Kind::Int
         }
         Data::Float(_) => Kind::Float,
@@ -143,9 +142,7 @@ fn cell_kind(d: &calamine::Data) -> Option<Kind> {
         Data::DateTime(dt) if dt.is_duration() => Kind::Float,
         Data::DateTime(_) => Kind::DateTime,
         // iso dates/durations and `#N/A`-style cell errors all read as their text
-        Data::String(_) | Data::DateTimeIso(_) | Data::DurationIso(_) | Data::Error(_) => {
-            Kind::Str
-        }
+        Data::String(_) | Data::DateTimeIso(_) | Data::DurationIso(_) | Data::Error(_) => Kind::Str,
     })
 }
 
@@ -228,9 +225,9 @@ fn build_column(
                 .map(|d| match d {
                     // out-of-range serials (past year 9999) just read null -- a
                     // datetime cell has no better fallback than its opaque serial
-                    Data::DateTime(dt) => dt
-                        .as_datetime()
-                        .map(|ndt| ndt.and_utc().timestamp_micros()),
+                    Data::DateTime(dt) => {
+                        dt.as_datetime().map(|ndt| ndt.and_utc().timestamp_micros())
+                    }
                     _ => None,
                 })
                 .collect::<Vec<Option<i64>>>();
@@ -308,9 +305,7 @@ fn to_xlsx<'gc>(
                         AnyValue::Null => continue,
                         AnyValue::Boolean(b) => worksheet.write_boolean(r, c, b)?,
                         AnyValue::String(s) => worksheet.write_string(r, c, s)?,
-                        AnyValue::StringOwned(s) => {
-                            worksheet.write_string(r, c, s.as_str())?
-                        }
+                        AnyValue::StringOwned(s) => worksheet.write_string(r, c, s.as_str())?,
                         other => worksheet.write_string(r, c, other.to_string())?,
                     },
                 };

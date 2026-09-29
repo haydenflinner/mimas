@@ -348,7 +348,8 @@ impl Vm {
     /// Let the thread run at most `ops` more ops before `RtErr::OutOfFuel` (re-arm per entry:
     /// per check, per live scene, per game frame). `u64::MAX` lifts the limit.
     pub fn set_op_budget(&mut self, ops: u64) {
-        self.arena.mutate(|mc, state| state.thread.borrow_mut(mc).ops_left = ops);
+        self.arena
+            .mutate(|mc, state| state.thread.borrow_mut(mc).ops_left = ops);
     }
 
     pub fn run(&mut self) -> Result<(), Error> {
@@ -365,7 +366,7 @@ impl Vm {
             let done = arena.mutate(|mc, state| {
                 let ctx = state.ctx(mc);
                 let mut thread = state.thread.borrow_mut(mc);
-                run_dispatch(
+                let done = run_dispatch(
                     ctx,
                     code,
                     chunks,
@@ -375,7 +376,11 @@ impl Vm {
                     &mut thread,
                     FUEL,
                     1,
-                )
+                )?;
+                // No frame host to hand control to — a pause native (a
+                // `use game` program run to completion) is a no-op here.
+                state.paused.set(false);
+                Ok::<bool, Error>(done)
             })?;
             if done {
                 #[cfg(feature = "op-count")]
@@ -384,6 +389,55 @@ impl Vm {
             }
             self.arena.collect_debt();
         }
+    }
+
+    /// `run()` for cooperative frames: FUEL-batched dispatch until the
+    /// program ends, an error (including the host's op budget), or a
+    /// native pauses it. Returns `true` when the program finished.
+    /// `frame`-style hosts call this once per frame instead of stepping
+    /// op-by-op through [`Vm::debug_step`] — the `paused` flag costs one
+    /// predicted branch inside the dispatch loop rather than a full
+    /// `mutate`/`collect_debt` boundary per op. The flag is cleared on
+    /// entry; ops budgeted via [`Vm::set_op_budget`].
+    pub fn run_frame(&mut self) -> Result<bool, Error> {
+        self.arena.mutate(|_, state| state.paused.set(false));
+        loop {
+            let Vm {
+                code,
+                chunks,
+                signatures,
+                c_strs: strs,
+                arena,
+                sources,
+                ..
+            } = self;
+            let (done, paused) = arena.mutate(|mc, state| {
+                let ctx = state.ctx(mc);
+                let mut thread = state.thread.borrow_mut(mc);
+                let done = run_dispatch(
+                    ctx,
+                    code,
+                    chunks,
+                    signatures,
+                    strs,
+                    sources,
+                    &mut thread,
+                    FUEL,
+                    1,
+                )?;
+                Ok::<(bool, bool), Error>((done, state.paused.get()))
+            })?;
+            if done || paused {
+                return Ok(done);
+            }
+            self.arena.collect_debt();
+        }
+    }
+
+    /// Ops left on the entry budget set by [`Vm::set_op_budget`] —
+    /// `budget - ops_left()` is what the last entry consumed.
+    pub fn ops_left(&self) -> u64 {
+        self.arena.mutate(|mc, state| state.thread.borrow_mut(mc).ops_left)
     }
 }
 
@@ -662,6 +716,18 @@ fn run_dispatch<'gc>(
 ) -> Result<bool, Error> {
     let (mut regs_ptr, mut regs_len) = window(thread, chunks);
     loop {
+        // Cooperative pause (`yield_frame` and friends) — the native set
+        // `State::paused` rather than touching the thread, which the
+        // loop already holds borrowed. Top frame's `ip` is a save slot;
+        // sync it like `debug_step` does for callers between dispatches.
+        // Ordered before the fuel check so a pause landing on the exact
+        // batch boundary still leaves the save slot fresh.
+        if ctx.state().paused.get() {
+            if let Some(top) = thread.frames.last_mut() {
+                top.ip = code.ip;
+            }
+            return Ok(false);
+        }
         if fuel == 0 {
             return Ok(false);
         }
@@ -1223,17 +1289,36 @@ fn inject_call<'gc>(
     let r0 = thread.regs[base];
     // nothing is mutated before this fails, so the thread is untouched and needs no unwinding
     enter_call(&mut thread, code, chunks, body, Reg::ZERO, values, captures).map_err(Error::msg)?;
-    let ran = run_dispatch(
-        ctx,
-        code,
-        chunks,
-        signatures,
-        strs,
-        sources,
-        &mut thread,
-        usize::MAX,
-        depth + 1,
-    );
+    // A host-injected call isn't a frame: `paused` (yield_frame) must not
+    // stop it partway, or the read of `regs[base]` below picks up garbage.
+    // Run the callee to completion like `Vm::run` does — but if the callee
+    // itself yielded, relatch the flag on the way out so the pause still
+    // lands at the caller's next dispatch boundary.
+    ctx.state().paused.set(false);
+    let mut yielded = false;
+    let ran = loop {
+        let ran = run_dispatch(
+            ctx,
+            code,
+            chunks,
+            signatures,
+            strs,
+            sources,
+            &mut thread,
+            usize::MAX,
+            depth + 1,
+        );
+        match ran {
+            Ok(false) => {
+                yielded = true;
+                ctx.state().paused.set(false);
+            }
+            _ => break ran,
+        }
+    };
+    if yielded {
+        ctx.state().paused.set(true);
+    }
     // a fault returns without unwinding, so the callee's frames are still stacked
     if ran.is_err() {
         thread.frames.truncate(depth);
@@ -1803,7 +1888,8 @@ impl Vm {
             {
                 let mut thread = state.thread.borrow_mut(mc);
                 let stop_depth = thread.frames.len() + 1;
-                enter_call(&mut thread, code, chunks, body_id, Reg::ZERO, &[], &[]).map_err(Error::msg)?;
+                enter_call(&mut thread, code, chunks, body_id, Reg::ZERO, &[], &[])
+                    .map_err(Error::msg)?;
                 run_dispatch(
                     ctx,
                     code,
@@ -2066,10 +2152,7 @@ impl Vm {
                 let t = state.thread.borrow();
                 let val = t.regs.first().unwrap();
                 let extra = read(val);
-                Ok((
-                    val.inspect(&struct_names, field_names, &mut seen),
-                    extra,
-                ))
+                Ok((val.inspect(&struct_names, field_names, &mut seen), extra))
             })
         };
         if out.is_err() {
@@ -2155,7 +2238,7 @@ impl Vm {
                 ctx,
                 code,
                 chunks,
-                    signatures,
+                signatures,
                 strs,
                 sources,
                 &mut thread,
@@ -2219,7 +2302,7 @@ impl Vm {
                 ctx,
                 code,
                 chunks,
-                    signatures,
+                signatures,
                 strs,
                 sources,
                 &mut thread,
@@ -2278,7 +2361,7 @@ impl Vm {
                         ctx,
                         code,
                         chunks,
-                    signatures,
+                        signatures,
                         strs,
                         sources,
                         &mut thread,
@@ -2314,10 +2397,23 @@ impl Vm {
             sources,
             ..
         } = self;
+        // A step is a fresh entry — clear `paused` or a prior yield would
+        // stop this step before it executes anything.
+        arena.mutate(|_, state| state.paused.set(false));
         let done = arena.mutate(|mc, state| {
             let ctx = state.ctx(mc);
             let mut thread = state.thread.borrow_mut(mc);
-            let done = run_dispatch(ctx, code, chunks, signatures, strs, sources, &mut thread, 1, 1)?;
+            let done = run_dispatch(
+                ctx,
+                code,
+                chunks,
+                signatures,
+                strs,
+                sources,
+                &mut thread,
+                1,
+                1,
+            )?;
             // `run_dispatch` only writes `code.ip` back into the top frame when a return crosses
             // `stop_depth` (see its Flow::Return arm) -- for every other stopping point (which is
             // all of them, at fuel budget 1) the top frame's own `ip` is stale until we sync it

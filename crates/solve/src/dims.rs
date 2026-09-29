@@ -19,8 +19,11 @@
 
 use std::collections::HashMap;
 
+use crate::components::TyExt;
+use indexmap::IndexMap;
 use itertools::Itertools;
 use miette::NamedSource;
+use parse::NodeId;
 use parse::{
     Access, Ast, Expr, ExprKind, FStringPart, FieldKey, Function, Ident, Item, ItemKind, Literal,
     Stmt, StmtKind, Struct,
@@ -29,13 +32,7 @@ use parse::{
     lex::TyKw,
     stmt::AssignmentOp,
 };
-use shared::{
-    Located, Location, Ty, units,
-    units::Dim,
-};
-use crate::components::TyExt;
-use indexmap::IndexMap;
-use parse::NodeId;
+use shared::{Located, Location, Ty, units, units::Dim};
 
 use crate::{Result, Solver, components::DecId, errors::DimensionMismatch};
 
@@ -148,11 +145,7 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> Result<()> {
             // one report per problem is the useful thing; miette's `{:?}` keeps each
             // diagnostic's snippet rendering intact inside the joined message
             _ => {
-                let joined = pass
-                    .errors
-                    .iter()
-                    .map(|e| format!("{e:?}"))
-                    .join("\n\n");
+                let joined = pass.errors.iter().map(|e| format!("{e:?}")).join("\n\n");
                 return Err(miette::Report::msg(joined));
             }
         }
@@ -321,7 +314,12 @@ impl<'a> Pass<'a> {
                 let d = match &l.annotation {
                     Some(a) => {
                         let want = self.annotation(a);
-                        self.expect(&want, &got, l.right.location(), "declared type doesn't match");
+                        self.expect(
+                            &want,
+                            &got,
+                            l.right.location(),
+                            "declared type doesn't match",
+                        );
                         want
                     }
                     None => got,
@@ -333,7 +331,12 @@ impl<'a> Pass<'a> {
                 let right = self.expr(&a.right);
                 match a.op {
                     AssignmentOp::Identity | AssignmentOp::PlusEqual | AssignmentOp::MinusEqual => {
-                        self.expect(&left, &right, a.right.location(), "assignment doesn't match");
+                        self.expect(
+                            &left,
+                            &right,
+                            a.right.location(),
+                            "assignment doesn't match",
+                        );
                     }
                     _ => {}
                 }
@@ -354,7 +357,12 @@ impl<'a> Pass<'a> {
                 let d = match &c.annotation {
                     Some(a) => {
                         let want = self.annotation(a);
-                        self.expect(&want, &got, c.right.location(), "declared type doesn't match");
+                        self.expect(
+                            &want,
+                            &got,
+                            c.right.location(),
+                            "declared type doesn't match",
+                        );
                         want
                     }
                     None => got,
@@ -528,7 +536,12 @@ impl<'a> Pass<'a> {
             ExprKind::Coalescence(c) => {
                 let l = self.expr(&c.left);
                 let r = self.expr(&c.right);
-                self.expect(&l, &r, c.right.location(), "`??` fallback has a different dimension");
+                self.expect(
+                    &l,
+                    &r,
+                    c.right.location(),
+                    "`??` fallback has a different dimension",
+                );
                 l
             }
             ExprKind::Unwrap(u) => self.expr(&u.expr),
@@ -656,7 +669,11 @@ impl<'a> Pass<'a> {
         if let Some((x, y)) = clash(&a, &b) {
             self.fail(
                 at,
-                format!("branches disagree: {} and {}", Self::describe(&x), Self::describe(&y)),
+                format!(
+                    "branches disagree: {} and {}",
+                    Self::describe(&x),
+                    Self::describe(&y)
+                ),
                 format!("this branch is {}", Self::describe(&y)),
                 "every branch of an `if` or `match` has to give the same dimension",
             );
@@ -701,15 +718,21 @@ impl<'a> Pass<'a> {
                     let (Some(decl), FieldKey::Ident(k)) = (decl, key) else {
                         continue;
                     };
-                    let field = decl.fields.iter().find(
-                        |f| matches!(&f.name, FieldKey::Ident(i) if i.lexeme == k.lexeme),
-                    );
+                    let field = decl
+                        .fields
+                        .iter()
+                        .find(|f| matches!(&f.name, FieldKey::Ident(i) if i.lexeme == k.lexeme));
                     if let Some(field) = field {
                         let want = self.with_ty_params(
                             decl.type_params.iter().map(|i| i.lexeme.clone()).collect(),
                             |s| s.annotation(&field.annotation),
                         );
-                        self.expect(&want, &got, value.location(), &format!("field `{}`", k.lexeme));
+                        self.expect(
+                            &want,
+                            &got,
+                            value.location(),
+                            &format!("field `{}`", k.lexeme),
+                        );
                     }
                 }
                 D::Any
@@ -753,7 +776,11 @@ impl<'a> Pass<'a> {
                 let interval = matches!(l, D::Iv(_)) || matches!(r, D::Iv(_));
                 match (l.dim(), r.dim()) {
                     (Some(a), Some(b)) => {
-                        let d = if op == EvaluationOp::Multiply { a.mul(b) } else { a.div(b) };
+                        let d = if op == EvaluationOp::Multiply {
+                            a.mul(b)
+                        } else {
+                            a.div(b)
+                        };
                         if interval { D::Iv(d) } else { D::Q(d) }
                     }
                     _ => D::Any,
@@ -796,11 +823,7 @@ impl<'a> Pass<'a> {
                             );
                         }
                         // host adts carry field dims on their api descriptor (`Input.dt` is `s`)
-                        if let Some(d) = self
-                            .solver
-                            .field_dims
-                            .get(&(ty, field.lexeme.clone()))
-                        {
+                        if let Some(d) = self.solver.field_dims.get(&(ty, field.lexeme.clone())) {
                             return D::Q(*d);
                         }
                     }
@@ -843,7 +866,11 @@ impl<'a> Pass<'a> {
         if let ExprKind::Access(Access::DoubleColon { left, right }) = c.left.kind() {
             let args: Vec<D> = c.arguments.iter().map(|a| self.expr(&a.value)).collect();
             if let ExprKind::Ident(ty) = left.kind() {
-                if let Some(f) = self.methods.get(&(ty.lexeme.clone(), right.lexeme.clone())).copied() {
+                if let Some(f) = self
+                    .methods
+                    .get(&(ty.lexeme.clone(), right.lexeme.clone()))
+                    .copied()
+                {
                     return self.apply(f, c, &args, false, Some(&ty.lexeme));
                 }
                 if ty.lexeme == "Interval" {
@@ -856,7 +883,9 @@ impl<'a> Pass<'a> {
         if let ExprKind::Ident(callee) = c.left.kind() {
             let user = self.dec_of(callee).and_then(|dec| {
                 let loc = self.solver.decs[dec].location;
-                self.fns_by_site.get(&(loc.file_id, loc.span.start)).copied()
+                self.fns_by_site
+                    .get(&(loc.file_id, loc.span.start))
+                    .copied()
             });
             if let Some(f) = user {
                 return self.apply(f, c, &args, false, None);
@@ -881,9 +910,7 @@ impl<'a> Pass<'a> {
             _ => None,
         }?;
         let binding = self.solver.dec_to_native.get(&dec)?;
-        if binding.sig.return_dim.is_none()
-            && binding.sig.param_dims.iter().all(Option::is_none)
-        {
+        if binding.sig.return_dim.is_none() && binding.sig.param_dims.iter().all(Option::is_none) {
             return None;
         }
         let name = match c.left.kind() {
@@ -895,7 +922,9 @@ impl<'a> Pass<'a> {
             _ => "?",
         };
         for (i, (arg, got)) in c.arguments.iter().zip(args).enumerate() {
-            let Some(Some(want)) = binding.sig.param_dims.get(i) else { continue };
+            let Some(Some(want)) = binding.sig.param_dims.get(i) else {
+                continue;
+            };
             if !want.is_none() {
                 self.want_dims.insert(arg.value.id(), *want);
             }
@@ -1040,13 +1069,23 @@ impl<'a> Pass<'a> {
             (D::Iv(d), "sample") => D::Q(*d),
             (D::Iv(d), "contains") => {
                 if let Some(a) = args.first() {
-                    self.expect(&D::Q(*d), a, c.arguments[0].value.location(), "`contains` needs the same dimension");
+                    self.expect(
+                        &D::Q(*d),
+                        a,
+                        c.arguments[0].value.location(),
+                        "`contains` needs the same dimension",
+                    );
                 }
                 PLAIN
             }
             (D::Iv(d), "overlaps") => {
                 if let Some(a) = args.first() {
-                    self.expect(&D::Iv(*d), a, c.arguments[0].value.location(), "`overlaps` needs the same dimension");
+                    self.expect(
+                        &D::Iv(*d),
+                        a,
+                        c.arguments[0].value.location(),
+                        "`overlaps` needs the same dimension",
+                    );
                 }
                 PLAIN
             }
@@ -1062,17 +1101,29 @@ impl<'a> Pass<'a> {
                     _ => D::Any,
                 }
             }
-            (D::Q(d), "abs" | "round" | "floor" | "ceil" | "to_int" | "to_float" | "neg") => D::Q(*d),
+            (D::Q(d), "abs" | "round" | "floor" | "ceil" | "to_int" | "to_float" | "neg") => {
+                D::Q(*d)
+            }
             (D::Q(_), "signum") => PLAIN,
             (D::Q(d), "min" | "max" | "hypot") => {
                 if let Some(a) = args.first() {
-                    self.expect(&recv, a, c.arguments[0].value.location(), &format!("`{name}` needs the same dimension"));
+                    self.expect(
+                        &recv,
+                        a,
+                        c.arguments[0].value.location(),
+                        &format!("`{name}` needs the same dimension"),
+                    );
                 }
                 D::Q(*d)
             }
             (D::Q(d), "clamp") => {
                 for (a, arg) in args.iter().zip(&c.arguments) {
-                    self.expect(&recv, a, arg.value.location(), "`clamp` bounds need the same dimension");
+                    self.expect(
+                        &recv,
+                        a,
+                        arg.value.location(),
+                        "`clamp` bounds need the same dimension",
+                    );
                 }
                 D::Q(*d)
             }
@@ -1113,7 +1164,9 @@ impl<'a> Pass<'a> {
             }
             (D::Q(d), "to") => {
                 // `x.to("kWh")`: the unit must measure the same thing; the result is a plain number
-                if let Some(ExprKind::Literal(Literal::String(u))) = c.arguments.first().map(|a| a.value.kind()) {
+                if let Some(ExprKind::Literal(Literal::String(u))) =
+                    c.arguments.first().map(|a| a.value.kind())
+                {
                     match units::parse(u) {
                         Some((ud, _)) if ud != *d => self.fail(
                             c.arguments[0].value.location(),

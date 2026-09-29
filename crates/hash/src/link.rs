@@ -137,8 +137,7 @@ impl Linker<'_> {
         if self.emitted.contains(&addr) {
             return Ok(());
         }
-        let text = (self.fetch)(key)
-            .ok_or_else(|| LinkError::MissingBlob(key.to_string()))?;
+        let text = (self.fetch)(key).ok_or_else(|| LinkError::MissingBlob(key.to_string()))?;
         let members: Vec<&str> = text.lines().collect();
         if member.is_none() && members.len() == 1 {
             // A lone blob: one canonical fn, `@dep:`/`@self`/`@v` markers.
@@ -348,8 +347,7 @@ fn rewrite(
                 }
                 if bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' {
                     let start = i;
-                    while i < bytes.len()
-                        && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_')
+                    while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_')
                     {
                         i += 1;
                     }
@@ -403,7 +401,10 @@ fn marker(
     };
     if text.starts_with("@self") {
         let end = 5;
-        if bytes.get(end).is_none_or(|b| !b.is_ascii_alphanumeric() && *b != b'_') {
+        if bytes
+            .get(end)
+            .is_none_or(|b| !b.is_ascii_alphanumeric() && *b != b'_')
+        {
             return Ok((self_name.to_string(), end));
         }
     }
@@ -426,10 +427,7 @@ fn marker(
         return Ok((format!("@addr:{addr};"), end));
     }
     if text.starts_with("@scc:") {
-        let digits = bytes[5..]
-            .iter()
-            .take_while(|b| b.is_ascii_digit())
-            .count();
+        let digits = bytes[5..].iter().take_while(|b| b.is_ascii_digit()).count();
         let end = 5 + digits;
         let i: usize = text[5..end]
             .parse()
@@ -508,7 +506,12 @@ mod tests {
         assert_eq!(linked.items.len(), 3);
         // Post-order: deps precede their dependents, root last.
         let order: Vec<&str> = linked.items.iter().map(|i| i.hash.as_str()).collect();
-        let pos = |n: &str| order.iter().position(|a| *a == addr_of(&globals, n)).unwrap();
+        let pos = |n: &str| {
+            order
+                .iter()
+                .position(|a| *a == addr_of(&globals, n))
+                .unwrap()
+        };
         assert!(pos("square") < pos("twice"));
         assert!(pos("twice") < pos("main"));
         // No markers survive; every dep site names its target.
@@ -520,7 +523,10 @@ mod tests {
             .lines()
             .find(|l| l.contains(&format!("fn {twice_name}")))
             .unwrap();
-        assert!(twice_decl.contains(&format!("{square_name} (")), "{twice_decl}");
+        assert!(
+            twice_decl.contains(&format!("{square_name} (")),
+            "{twice_decl}"
+        );
         // The linked module still parses to the same fn count.
         assert_eq!(extract(&linked.source).len(), 3);
     }
@@ -536,7 +542,11 @@ mod tests {
         let linked = link(&addr, |k| blobs.get(k).cloned()).unwrap();
         assert_eq!(linked.items.len(), 1);
         let name = &linked.items[0].name;
-        assert!(linked.source.contains(&format!("{name} (")), "{}", linked.source);
+        assert!(
+            linked.source.contains(&format!("{name} (")),
+            "{}",
+            linked.source
+        );
         assert!(!linked.source.contains('@'));
     }
 
@@ -554,8 +564,16 @@ mod tests {
         assert_eq!(linked.items.len(), 2);
         let a = name_of(&linked, &addr_of(&globals, "a"));
         let b = name_of(&linked, &addr_of(&globals, "b"));
-        assert!(linked.source.contains(&format!("fn {a}")), "{}", linked.source);
-        assert!(linked.source.contains(&format!("fn {b}")), "{}", linked.source);
+        assert!(
+            linked.source.contains(&format!("fn {a}")),
+            "{}",
+            linked.source
+        );
+        assert!(
+            linked.source.contains(&format!("fn {b}")),
+            "{}",
+            linked.source
+        );
         assert!(!linked.source.contains('@'), "{}", linked.source);
         assert_eq!(extract(&linked.source).len(), 2);
     }
@@ -570,7 +588,11 @@ mod tests {
         let linked = link(&root, |k| blobs.get(k).cloned()).unwrap();
         assert_eq!(linked.items.len(), 3);
         let help = name_of(&linked, &addr_of(&globals, "help"));
-        assert!(linked.source.contains(&format!("{help} (")), "{}", linked.source);
+        assert!(
+            linked.source.contains(&format!("{help} (")),
+            "{}",
+            linked.source
+        );
         assert!(!linked.source.contains('@'));
     }
 
@@ -605,8 +627,10 @@ mod tests {
     /// shape — same addresses, same generated names, same source.
     #[test]
     fn a_rename_links_identically() {
-        let (ga, ba) = blobs_of("fn go(x: int) -> int { leaf(x) }\nfn leaf(y: int) -> int { y + 1 }\n");
-        let (gb, bb) = blobs_of("fn run(x: int) -> int { base(x) }\nfn base(y: int) -> int { y + 1 }\n");
+        let (ga, ba) =
+            blobs_of("fn go(x: int) -> int { leaf(x) }\nfn leaf(y: int) -> int { y + 1 }\n");
+        let (gb, bb) =
+            blobs_of("fn run(x: int) -> int { base(x) }\nfn base(y: int) -> int { y + 1 }\n");
         let a = link(&addr_of(&ga, "go"), |k| ba.get(k).cloned()).unwrap();
         let b = link(&addr_of(&gb, "run"), |k| bb.get(k).cloned()).unwrap();
         assert_eq!(a, b);
@@ -643,8 +667,16 @@ mod tests {
         assert_eq!(linked.items.len(), 2);
         let leaf_name = name_of(&linked, &leaf_key);
         // The call site and the decl agree — `realname` is gone.
-        assert!(linked.source.contains(&format!("fn {leaf_name}")), "{}", linked.source);
-        assert!(linked.source.contains(&format!("{leaf_name} (")), "{}", linked.source);
+        assert!(
+            linked.source.contains(&format!("fn {leaf_name}")),
+            "{}",
+            linked.source
+        );
+        assert!(
+            linked.source.contains(&format!("{leaf_name} (")),
+            "{}",
+            linked.source
+        );
         assert!(!linked.source.contains("realname"), "{}", linked.source);
     }
 

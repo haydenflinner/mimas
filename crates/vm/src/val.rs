@@ -574,9 +574,9 @@ fn inspect_frame(df: &polars::frame::DataFrame) -> Inspect {
                     Ok(AnyValue::UInt8(v)) => Inspect::Int(v as i64),
                     Ok(AnyValue::UInt16(v)) => Inspect::Int(v as i64),
                     Ok(AnyValue::UInt32(v)) => Inspect::Int(v as i64),
-                    Ok(AnyValue::UInt64(v)) => {
-                        i64::try_from(v).map(Inspect::Int).unwrap_or(Inspect::Float(v as f64))
-                    }
+                    Ok(AnyValue::UInt64(v)) => i64::try_from(v)
+                        .map(Inspect::Int)
+                        .unwrap_or(Inspect::Float(v as f64)),
                     Ok(AnyValue::Float32(v)) => Inspect::Float(v as f64),
                     Ok(AnyValue::Float64(v)) => Inspect::Float(v),
                     Ok(AnyValue::String(s)) => Inspect::Str(s.to_string()),
@@ -850,10 +850,8 @@ impl<'gc> Val<'gc> {
 /// `RtErr::invalid_bin`. `Rc` so the dispatch can clone the impl out of
 /// the `RefCell` before calling it: the impl may itself recurse into
 /// [`bin`]/[`unary`].
-pub type InstanceBin =
-    dyn for<'gc> Fn(Ctx<'gc>, Val<'gc>, Val<'gc>, BinOp) -> RtResult<Val<'gc>>;
-pub type InstanceUnary =
-    dyn for<'gc> Fn(Ctx<'gc>, Val<'gc>, UnaryOp) -> RtResult<Val<'gc>>;
+pub type InstanceBin = dyn for<'gc> Fn(Ctx<'gc>, Val<'gc>, Val<'gc>, BinOp) -> RtResult<Val<'gc>>;
+pub type InstanceUnary = dyn for<'gc> Fn(Ctx<'gc>, Val<'gc>, UnaryOp) -> RtResult<Val<'gc>>;
 
 #[derive(Default)]
 pub struct InstanceOps {
@@ -1066,7 +1064,12 @@ pub fn unary<'gc>(this: Val<'gc>, ctx: Ctx<'gc>, op: UnaryOp) -> RtResult<Val<'g
         _ => match this {
             Val::Instance(i) => {
                 let id = i.0.borrow().struct_id;
-                let f = ctx.fixture::<InstanceOps>().unary.borrow().get(&id).cloned();
+                let f = ctx
+                    .fixture::<InstanceOps>()
+                    .unary
+                    .borrow()
+                    .get(&id)
+                    .cloned();
                 match f {
                     Some(f) => f(ctx, this, op)?,
                     None => Err(RtErr::InvalidUnaryOperand)?,

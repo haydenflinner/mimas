@@ -8,7 +8,7 @@ use rustc_hash::FxHashMap;
 use shared::{FnHeader, IdVec};
 use std::{
     any::TypeId,
-    cell::{Ref, RefCell},
+    cell::{Cell, Ref, RefCell},
     fmt::Write as _,
     ops,
     rc::Rc,
@@ -75,7 +75,7 @@ impl<'gc> InternedStrings<'gc> {
     }
 }
 
-#[derive(Copy, Clone, Collect)]
+#[derive(Clone, Collect)]
 #[collect(no_drop)]
 pub struct State<'gc> {
     pub strings: InternedStrings<'gc>,
@@ -96,6 +96,11 @@ pub struct State<'gc> {
     /// Swapped for a fresh set every time a program is loaded, which is what invalidates the
     /// handles the host took out against the previous one -- see `Ctx::reset_roots`.
     pub roots: Gc<'gc, Lock<DynamicRootSet<'gc>>>,
+    /// Cooperative pause, set by `yield_frame`-style natives. Lives on `State` (not
+    /// `ThreadState`) because the dispatch loop holds `thread.borrow_mut` for the whole
+    /// run -- a native writing thread state mid-op would double-borrow and panic. The
+    /// dispatch loop reads it per op like a second fuel line.
+    pub paused: Cell<bool>,
 }
 
 impl<'gc> State<'gc> {
@@ -122,6 +127,7 @@ impl<'gc> State<'gc> {
             struct_names,
             field_names,
             roots: Gc::new(mc, Lock::new(DynamicRootSet::new(mc))),
+            paused: Cell::new(false),
         }
     }
 

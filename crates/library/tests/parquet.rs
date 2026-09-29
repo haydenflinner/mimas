@@ -74,7 +74,10 @@ fn parquet_round_trips_dtypes() {
 fn to_parquet_pipes_as_a_free_function() {
     let path = tmp("piped");
     // `df |> to_parquet(..)` exercises the free-function registration
-    let preamble = format!("{WRITE} let ok = (df |> to_parquet({:?}))!;", path.display());
+    let preamble = format!(
+        "{WRITE} let ok = (df |> to_parquet({:?}))!;",
+        path.display()
+    );
     pretty_assertions::assert_eq!(test_runner::render(&preamble, "ok"), "true");
     std::fs::remove_file(&path).ok();
 }

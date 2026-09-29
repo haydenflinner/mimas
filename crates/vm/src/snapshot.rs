@@ -60,8 +60,14 @@ pub enum SnapVal {
 pub enum SnapNode {
     Array(Vec<SnapVal>),
     Dict(Vec<(SharedStr, SnapVal)>),
-    Instance { struct_id: u32, fields: Vec<SnapVal> },
-    Closure { function: u32, captures: Vec<SnapVal> },
+    Instance {
+        struct_id: u32,
+        fields: Vec<SnapVal>,
+    },
+    Closure {
+        function: u32,
+        captures: Vec<SnapVal>,
+    },
 }
 
 /// A call [`Frame`] as plain data — `chunk`/`ip` are only meaningful to the snapshot's program.
@@ -171,12 +177,11 @@ impl<'gc> Snapper<'gc> {
                 SnapNode::Array(items)
             }
             Val::Dict(d) => {
-                let items: Vec<(SharedStr, Val)> = d
-                    .0
-                    .borrow()
-                    .iter()
-                    .map(|(k, &v)| (Gc::as_ref(k.0).clone(), v))
-                    .collect();
+                let items: Vec<(SharedStr, Val)> =
+                    d.0.borrow()
+                        .iter()
+                        .map(|(k, &v)| (Gc::as_ref(k.0).clone(), v))
+                        .collect();
                 let items = items
                     .into_iter()
                     .map(|(k, v)| Ok((k, self.val(v)?)))
@@ -289,12 +294,7 @@ impl Vm {
             while let Some((i, v)) = snapper.pending.pop_front() {
                 snapper.fill(i, v)?;
             }
-            let warned = state
-                .fixtures
-                .get::<Prints>()
-                .warned
-                .borrow()
-                .clone();
+            let warned = state.fixtures.get::<Prints>().warned.borrow().clone();
             Ok(Snapshot {
                 ip,
                 ops_left,

@@ -189,7 +189,6 @@ test_fail!(
     "fn tick<A>(x: A) -> A { x } let y: str = tick(3);",
 );
 
-
 // -- generic field arithmetic ---------------------------------------------------
 // a field read through a generic receiver keeps the receiver's param, so `r.x + r.w`
 // is `T + T` -- unifiable, and the result rides the same param.

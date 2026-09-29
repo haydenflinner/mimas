@@ -74,7 +74,9 @@ pub enum RtErr {
     #[error("user-triggered panic")]
     UserPanic,
 
-    #[error("this program ran too long (its op budget ran out) -- is there a loop that never ends?")]
+    #[error(
+        "this program ran too long (its op budget ran out) -- is there a loop that never ends?"
+    )]
     OutOfFuel,
 
     #[error("called a value that isn't a function")]

@@ -341,7 +341,10 @@ fn argsort_float(keys: &[f64]) -> Vec<i64> {
 
 /// `xs.map(f)` -> `[U]` -- `f: (T) -> U` applied element-wise.
 #[native]
-fn map<'gc>(_arr: &[anon::T<'gc>], _f: anon::Fn1<'gc, anon::T<'gc>, anon::U<'gc>>) -> Vec<anon::U<'gc>> {
+fn map<'gc>(
+    _arr: &[anon::T<'gc>],
+    _f: anon::Fn1<'gc, anon::T<'gc>, anon::U<'gc>>,
+) -> Vec<anon::U<'gc>> {
     unreachable!("intrinsics cannot be reached")
 }
 
@@ -363,7 +366,10 @@ fn fold<'gc>(
 
 /// `xs.find(f)` -> `T?` -- the first element `f` returns `true` for, else `null`.
 #[native]
-fn find<'gc>(_arr: &[anon::T<'gc>], _f: anon::Fn1<'gc, anon::T<'gc>, bool>) -> Option<anon::T<'gc>> {
+fn find<'gc>(
+    _arr: &[anon::T<'gc>],
+    _f: anon::Fn1<'gc, anon::T<'gc>, bool>,
+) -> Option<anon::T<'gc>> {
     unreachable!("intrinsics cannot be reached")
 }
 

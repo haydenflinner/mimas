@@ -10,8 +10,14 @@ pub(crate) enum PlaceTarget {
     Variable(Local),
     /// A top-level `let` slot: an entry-body local, reachable from any body.
     Entry(Local),
-    Index { array: InstId, index: InstId },
-    Field { receiver: InstId, slot: u32 },
+    Index {
+        array: InstId,
+        index: InstId,
+    },
+    Field {
+        receiver: InstId,
+        slot: u32,
+    },
 }
 
 impl PlaceTarget {

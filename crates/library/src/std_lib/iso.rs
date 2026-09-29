@@ -33,8 +33,9 @@ use api::{ApiAdtKind, ApiVariantFields, Intrinsic, Registry};
 use macros::native;
 use shared::Ty;
 use vm::{
-    Ctx, Fields, Instance, RtErr, RtResult, Val, anon,
+    Ctx, Fields, Instance, RtErr, RtResult, Val,
     adt::{ApiAdtDescriptor, ApiVariantShape, InstanceOf, MimasAdt},
+    anon,
     api::Api,
     conversion::{MimasType, TypeError},
 };
@@ -156,7 +157,7 @@ fn un<'gc>(
     let Some(sid) = iso_struct_id(ctx) else {
         return Err(no_inverse());
     };
-    let inst = v.0 .0.borrow();
+    let inst = v.0.0.borrow();
     if inst.struct_id != sid || inst.fields.len() != 3 {
         return Err(no_inverse());
     }

@@ -17,14 +17,8 @@ let VIA_EMIT = run();
 let DIRECT = debug::caller_line(0)!;
 ";
     let mut vm = vm::Vm::execute(src, library::std).expect("compiled");
-    assert_eq!(
-        vm.resolve_name_to_string("VIA_EMIT").unwrap().unwrap(),
-        "6"
-    );
-    assert_eq!(
-        vm.resolve_name_to_string("DIRECT").unwrap().unwrap(),
-        "9"
-    );
+    assert_eq!(vm.resolve_name_to_string("VIA_EMIT").unwrap().unwrap(), "6");
+    assert_eq!(vm.resolve_name_to_string("DIRECT").unwrap().unwrap(), "9");
 }
 
 #[test]

@@ -640,9 +640,7 @@ impl Emit for Call {
                     let idx = ir.synthetic_local("$seed_idx");
                     let zero = ir.current().constant(0);
                     ir.current().set_local(idx, zero);
-                    let entered = ir
-                        .current()
-                        .bin(BinOp::LessThan, zero, n, OperandKind::Int);
+                    let entered = ir.current().bin(BinOp::LessThan, zero, n, OperandKind::Int);
                     ir.current().jump_if_false(entered, done);
                     ir.current().jump(header);
 

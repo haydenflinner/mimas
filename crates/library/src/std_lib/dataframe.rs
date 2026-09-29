@@ -289,7 +289,11 @@ fn distinct<'gc>(
     by: Vec<String>,
 ) -> Raisable<vm::DataFrame<'gc>> {
     use polars::prelude::UniqueKeepStrategy;
-    let subset = if by.is_empty() { None } else { Some(by.as_slice()) };
+    let subset = if by.is_empty() {
+        None
+    } else {
+        Some(by.as_slice())
+    };
     df.0.borrow()
         .0
         .unique_stable(subset, UniqueKeepStrategy::First, None)
@@ -305,7 +309,11 @@ fn drop_nulls<'gc>(
     df: vm::DataFrame<'gc>,
     by: Vec<String>,
 ) -> Raisable<vm::DataFrame<'gc>> {
-    let subset = if by.is_empty() { None } else { Some(by.as_slice()) };
+    let subset = if by.is_empty() {
+        None
+    } else {
+        Some(by.as_slice())
+    };
     df.0.borrow()
         .0
         .drop_nulls(subset)
@@ -331,12 +339,7 @@ fn take<'gc>(ctx: Ctx<'gc>, df: vm::DataFrame<'gc>, n: i64) -> vm::DataFrame<'gc
 }
 
 #[native]
-fn slice<'gc>(
-    ctx: Ctx<'gc>,
-    df: vm::DataFrame<'gc>,
-    offset: i64,
-    len: i64,
-) -> vm::DataFrame<'gc> {
+fn slice<'gc>(ctx: Ctx<'gc>, df: vm::DataFrame<'gc>, offset: i64, len: i64) -> vm::DataFrame<'gc> {
     ctx.new_dataframe(df.0.borrow().0.slice(offset, len.max(0) as usize))
 }
 
@@ -371,11 +374,7 @@ fn col_names<'gc>(ctx: Ctx<'gc>, df: vm::DataFrame<'gc>) -> vm::Array<'gc> {
 /// `df.pull("name")` — one column as a plain mimas array (ints, floats, bools
 /// and strings come through natively; anything else raises).
 #[native]
-fn pull<'gc>(
-    ctx: Ctx<'gc>,
-    df: vm::DataFrame<'gc>,
-    name: &str,
-) -> Raisable<vm::Array<'gc>> {
+fn pull<'gc>(ctx: Ctx<'gc>, df: vm::DataFrame<'gc>, name: &str) -> Raisable<vm::Array<'gc>> {
     let col = {
         let d = df.0.borrow();
         match d.0.column(name) {
@@ -535,7 +534,9 @@ fn record_at<'gc>(
         let v = col.get(i).map_err(|e| format!("{what}: {e}"))?;
         vals.push(cell_val(ctx, v, what, name)?);
     }
-    Ok(Val::Instance(ctx.new_instance(struct_id, vm::Fields::new(vals))))
+    Ok(Val::Instance(
+        ctx.new_instance(struct_id, vm::Fields::new(vals)),
+    ))
 }
 
 /// `df.row(2)` -- row `i` as a record: an instance of the declared struct whose
@@ -814,9 +815,10 @@ fn shift<'gc>(ctx: Ctx<'gc>, e: vm::PlExpr<'gc>, n: i64) -> vm::PlExpr<'gc> {
 /// first `n` cells are null (polars' `NullBehavior::Ignore`).
 #[native]
 fn diff<'gc>(ctx: Ctx<'gc>, e: vm::PlExpr<'gc>, n: i64) -> vm::PlExpr<'gc> {
-    ctx.new_plexpr(
-        e.0.0.clone().diff(polars::prelude::lit(n), polars::series::ops::NullBehavior::Ignore),
-    )
+    ctx.new_plexpr(e.0.0.clone().diff(
+        polars::prelude::lit(n),
+        polars::series::ops::NullBehavior::Ignore,
+    ))
 }
 
 /// An array of same-shaped struct instances -> a `DataFrame` whose columns are named after the
@@ -893,14 +895,10 @@ fn from_csv<'gc>(ctx: Ctx<'gc>, csv: &str) -> Raisable<vm::DataFrame<'gc>> {
 /// (`"moves": [[…], …]` -> a list you can `list_len`/`explode`), and mixed or
 /// object values come through as their JSON text.
 #[native]
-fn from_json<'gc>(
-    ctx: Ctx<'gc>,
-    text: &str,
-    key: Option<String>,
-) -> Raisable<vm::DataFrame<'gc>> {
+fn from_json<'gc>(ctx: Ctx<'gc>, text: &str, key: Option<String>) -> Raisable<vm::DataFrame<'gc>> {
     (|| {
-        let doc: serde_json::Value = serde_json::from_str(text)
-            .map_err(|e| format!("from_json: {e}"))?;
+        let doc: serde_json::Value =
+            serde_json::from_str(text).map_err(|e| format!("from_json: {e}"))?;
         let rows = json_rows(&doc, key.as_deref())?;
         let df = json_columns(rows)?;
         Ok::<_, String>(ctx.new_dataframe(df))
@@ -938,7 +936,10 @@ fn json_rows<'a>(
                 keys => {
                     return Err(format!(
                         "from_json: the document has several arrays ({}); pass one by name",
-                        keys.iter().map(|k| format!("`{k}`")).collect::<Vec<_>>().join(", ")
+                        keys.iter()
+                            .map(|k| format!("`{k}`"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     ));
                 }
             }
@@ -1004,7 +1005,10 @@ fn jkind(v: &serde_json::Value) -> Option<JKind> {
         }
         Value::String(_) => JKind::Str,
         Value::Array(items) => {
-            if items.iter().all(|i| !matches!(i, Value::Array(_) | Value::Object(_))) {
+            if items
+                .iter()
+                .all(|i| !matches!(i, Value::Array(_) | Value::Object(_)))
+            {
                 JKind::ArrScalar
             } else {
                 JKind::ArrDeep
@@ -1041,24 +1045,15 @@ fn json_field<'a>(
         // every cell null (or the field never appears) -- an all-null str column
         None => Column::new(name_pl, vec![Option::<&str>::None; cells.len()]),
         Some(JKind::Int) => {
-            let v: Vec<Option<i64>> = cells
-                .iter()
-                .map(|c| c.and_then(|v| v.as_i64()))
-                .collect();
+            let v: Vec<Option<i64>> = cells.iter().map(|c| c.and_then(|v| v.as_i64())).collect();
             Column::new(name_pl, v)
         }
         Some(JKind::Float) => {
-            let v: Vec<Option<f64>> = cells
-                .iter()
-                .map(|c| c.and_then(|v| v.as_f64()))
-                .collect();
+            let v: Vec<Option<f64>> = cells.iter().map(|c| c.and_then(|v| v.as_f64())).collect();
             Column::new(name_pl, v)
         }
         Some(JKind::Bool) => {
-            let v: Vec<Option<bool>> = cells
-                .iter()
-                .map(|c| c.and_then(|v| v.as_bool()))
-                .collect();
+            let v: Vec<Option<bool>> = cells.iter().map(|c| c.and_then(|v| v.as_bool())).collect();
             Column::new(name_pl, v)
         }
         // strings, objects and mixed values all land here -- objects keep
@@ -1085,7 +1080,10 @@ fn json_field<'a>(
                 .max()
                 .unwrap_or(0);
             if width == 0 {
-                cols.push(Column::new(name_pl.clone(), vec![Option::<&str>::None; cells.len()]));
+                cols.push(Column::new(
+                    name_pl.clone(),
+                    vec![Option::<&str>::None; cells.len()],
+                ));
                 return Ok(());
             }
             for i in 0..width {
@@ -1160,7 +1158,9 @@ fn json_elem_series(items: &[serde_json::Value]) -> polars::prelude::Series {
     use serde_json::Value;
     let name: polars::prelude::PlSmallStr = "".into();
     if items.iter().any(|v| matches!(v, Value::Array(_)))
-        && items.iter().all(|v| matches!(v, Value::Array(_) | Value::Null))
+        && items
+            .iter()
+            .all(|v| matches!(v, Value::Array(_) | Value::Null))
     {
         let elems: Vec<Option<Series>> = items
             .iter()
@@ -1178,9 +1178,7 @@ fn json_elem_series(items: &[serde_json::Value]) -> polars::prelude::Series {
                 name,
                 elems
                     .into_iter()
-                    .map(|e| {
-                        e.and_then(|s| s.cast(&polars::prelude::DataType::String).ok())
-                    })
+                    .map(|e| e.and_then(|s| s.cast(&polars::prelude::DataType::String).ok()))
                     .collect::<Vec<_>>(),
             );
         }
@@ -1197,9 +1195,7 @@ fn json_scalar_series(items: &[serde_json::Value]) -> polars::prelude::Series {
     let name: polars::prelude::PlSmallStr = "".into();
     let merged = merge_kinds(items.iter().filter_map(jkind));
     match merged {
-        Some(JKind::Int) => {
-            Series::new(name, items.iter().map(|v| v.as_i64()).collect::<Vec<_>>())
-        }
+        Some(JKind::Int) => Series::new(name, items.iter().map(|v| v.as_i64()).collect::<Vec<_>>()),
         Some(JKind::Float) => {
             Series::new(name, items.iter().map(|v| v.as_f64()).collect::<Vec<_>>())
         }
@@ -1274,7 +1270,11 @@ fn lit<'gc>(ctx: Ctx<'gc>, v: Val<'gc>) -> Result<vm::PlExpr<'gc>, vm::RtErr> {
         Val::Float(f) => lit(f),
         Val::Bool(b) => lit(b),
         Val::Str(s) => lit(s.as_str()),
-        _ => return Err(vm::RtErr::Custom("lit: expected an int, float, bool or str".into())),
+        _ => {
+            return Err(vm::RtErr::Custom(
+                "lit: expected an int, float, bool or str".into(),
+            ));
+        }
     };
     Ok(ctx.new_plexpr(e))
 }
@@ -1345,7 +1345,12 @@ fn str_to_lower<'gc>(ctx: Ctx<'gc>, e: vm::PlExpr<'gc>) -> vm::PlExpr<'gc> {
 /// does the cell contain this literal text (not a pattern)?
 #[native]
 fn str_contains<'gc>(ctx: Ctx<'gc>, e: vm::PlExpr<'gc>, text: &str) -> vm::PlExpr<'gc> {
-    ctx.new_plexpr(e.0.0.clone().str().contains_literal(polars::prelude::lit(text)))
+    ctx.new_plexpr(
+        e.0.0
+            .clone()
+            .str()
+            .contains_literal(polars::prelude::lit(text)),
+    )
 }
 
 #[native]
@@ -1398,7 +1403,11 @@ fn is_in<'gc>(
             Val::Float(f) => lit(f),
             Val::Bool(b) => lit(b),
             Val::Str(s) => lit(s.as_str()),
-            _ => return Err(vm::RtErr::Custom("is_in: expected ints, floats, bools or strs".into())),
+            _ => {
+                return Err(vm::RtErr::Custom(
+                    "is_in: expected ints, floats, bools or strs".into(),
+                ));
+            }
         };
         out = out.or(e.0.0.clone().eq(one));
     }
@@ -1469,7 +1478,12 @@ pl_expr_dt_accessor! {
 /// `col("t").dt_epoch_ms()` -- a datetime column back to plain milliseconds.
 #[native]
 fn dt_epoch_ms<'gc>(ctx: Ctx<'gc>, e: vm::PlExpr<'gc>) -> vm::PlExpr<'gc> {
-    ctx.new_plexpr(e.0.0.clone().dt().timestamp(polars::prelude::TimeUnit::Milliseconds))
+    ctx.new_plexpr(
+        e.0.0
+            .clone()
+            .dt()
+            .timestamp(polars::prelude::TimeUnit::Milliseconds),
+    )
 }
 
 /// `col("t").dt_strftime("%Y-%m-%d")` -- render each cell with a strftime format.
@@ -1523,12 +1537,10 @@ pl_expr_list! {
 /// the exploded rows; keep the other columns to have them repeated).
 #[native]
 fn explode<'gc>(ctx: Ctx<'gc>, e: vm::PlExpr<'gc>) -> vm::PlExpr<'gc> {
-    ctx.new_plexpr(
-        e.0.0.clone().explode(polars::prelude::ExplodeOptions {
-            empty_as_null: true,
-            keep_nulls: true,
-        }),
-    )
+    ctx.new_plexpr(e.0.0.clone().explode(polars::prelude::ExplodeOptions {
+        empty_as_null: true,
+        keep_nulls: true,
+    }))
 }
 
 macro_rules! pl_expr_numeric {
@@ -1540,8 +1552,6 @@ macro_rules! pl_expr_numeric {
     )+};
 }
 pl_expr_numeric!(abs, floor, ceil);
-
-
 
 /// `table { … }`'s starting point: a table with no columns.
 #[native]
@@ -1585,7 +1595,11 @@ fn q_expr<'gc>(v: Val<'gc>) -> Result<polars::prelude::Expr, vm::RtErr> {
         Val::Float(f) => lit(f),
         Val::Bool(b) => lit(b),
         Val::Str(s) => lit(s.as_str()),
-        other => return Err(q_err(format!("expected a column expression or a value, got {other:?}"))),
+        other => {
+            return Err(q_err(format!(
+                "expected a column expression or a value, got {other:?}"
+            )));
+        }
     })
 }
 
@@ -1593,7 +1607,9 @@ fn q_run<'gc>(
     ctx: Ctx<'gc>,
     lazy: polars::prelude::LazyFrame,
 ) -> Result<vm::DataFrame<'gc>, vm::RtErr> {
-    collect_in_memory(lazy).map(|d| ctx.new_dataframe(d)).map_err(q_err)
+    collect_in_memory(lazy)
+        .map(|d| ctx.new_dataframe(d))
+        .map_err(q_err)
 }
 
 /// a column, by name
@@ -1610,7 +1626,11 @@ fn __q_n<'gc>(ctx: Ctx<'gc>) -> vm::PlExpr<'gc> {
 
 /// name a computed column (`derive total = price * qty`)
 #[native]
-fn __q_named<'gc>(ctx: Ctx<'gc>, value: Val<'gc>, name: &str) -> Result<vm::PlExpr<'gc>, vm::RtErr> {
+fn __q_named<'gc>(
+    ctx: Ctx<'gc>,
+    value: Val<'gc>,
+    name: &str,
+) -> Result<vm::PlExpr<'gc>, vm::RtErr> {
     Ok(ctx.new_plexpr(q_expr(value)?.alias(name)))
 }
 
@@ -1681,7 +1701,10 @@ fn __q_apply<'gc>(
             } else if func == "lead" {
                 e.shift(polars::prelude::lit(-n))
             } else {
-                e.diff(polars::prelude::lit(n), polars::series::ops::NullBehavior::Ignore)
+                e.diff(
+                    polars::prelude::lit(n),
+                    polars::series::ops::NullBehavior::Ignore,
+                )
             }
         }
         // `eq(a, b)` compares two columns; for a column against an outside
@@ -1697,7 +1720,11 @@ fn __q_apply<'gc>(
         // read or reshape it. (`epoch_ms` is the way back to ints.)
         "to_datetime" => {
             let (tu, scale) = parse_time_unit(&text(arg)?)?;
-            let e = if scale == 1 { e } else { e * polars::prelude::lit(scale) };
+            let e = if scale == 1 {
+                e
+            } else {
+                e * polars::prelude::lit(scale)
+            };
             e.cast(polars::prelude::DataType::Datetime(tu, None))
         }
         "epoch_ms" => e.dt().timestamp(polars::prelude::TimeUnit::Milliseconds),
@@ -1741,7 +1768,9 @@ fn __q_apply<'gc>(
 /// so reaching this call means the escape ran where it isn't an escape.
 #[native]
 fn __q_splice<'gc>(_ctx: Ctx<'gc>, _value: Val<'gc>) -> Result<Val<'gc>, vm::RtErr> {
-    Err(q_err("`$` names an outside value only inside `query { … }`"))
+    Err(q_err(
+        "`$` names an outside value only inside `query { … }`",
+    ))
 }
 
 /// `if c { a } else { b }` inside a query
@@ -1848,7 +1877,11 @@ fn __q_distinct<'gc>(
     names: Vec<String>,
 ) -> Result<vm::DataFrame<'gc>, vm::RtErr> {
     use polars::prelude::UniqueKeepStrategy;
-    let subset = if names.is_empty() { None } else { Some(names.as_slice()) };
+    let subset = if names.is_empty() {
+        None
+    } else {
+        Some(names.as_slice())
+    };
     df.0.borrow()
         .0
         .unique_stable(subset, UniqueKeepStrategy::First, None)

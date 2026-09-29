@@ -18,7 +18,11 @@ fn a_finite_program_fits_the_budget() {
 
 #[test]
 fn budget_covers_calls_into_functions() {
-    let mut vm = Vm::compile("fn spin() { while true { } }\nfn f() -> int { spin(); 1 }", |_| {}).unwrap();
+    let mut vm = Vm::compile(
+        "fn spin() { while true { } }\nfn f() -> int { spin(); 1 }",
+        |_| {},
+    )
+    .unwrap();
     vm.set_op_budget(20_000);
     let err = vm.call_fn_result("f").unwrap_err().to_string();
     assert!(err.contains("ran too long"), "{err}");

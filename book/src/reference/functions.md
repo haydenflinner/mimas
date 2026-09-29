@@ -91,19 +91,14 @@ fn add(a: int, b: int) -> int { a + b }
 ]
 ```
 
-The literate spelling of the same list is a `where:`/`examples`/`example` check block, which lowers to exactly a `#[tests]` item. Each line is an expression, or `expr is expr` where `is` means `==`. A `where:` paragraph runs to the next blank line or item; braces make the boundary explicit.
+The literate spelling of the same thing is a `check` line, which lowers to a `#[tests]` case. Each `check` is one expression on one line; `,` chains another.
 
 ```mimas
 fn add(a: int, b: int) -> int { a + b }
 
-where:
-    add(1, 2) is 3
-    add(0, 0) is 0
-
-examples {
-    add(-1, 1) is 0
-    add(2, 2) is 4
-}
+check add(1, 2) == 3
+check add(0, 0) == 0
+check add(-1, 1) == 0, add(2, 2) == 4
 ```
 
 ## Closures

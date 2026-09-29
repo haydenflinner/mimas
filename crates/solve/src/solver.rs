@@ -608,10 +608,7 @@ impl Solver {
                 }
                 Ok(())
             }
-            (
-                PatKind::Tuple(pats),
-                Literal::Tuple(exprs) | Literal::Array(exprs),
-            ) => {
+            (PatKind::Tuple(pats), Literal::Tuple(exprs) | Literal::Array(exprs)) => {
                 for (pat, expr) in pats.iter().zip(exprs) {
                     let Some(sub) = self.reduce_const_expr(expr)? else {
                         continue;
@@ -1598,11 +1595,7 @@ impl Solver {
             },
             Ty::Array(v) => Ty::Array(Box::new(self.substitute_params(v, map))),
             Ty::Dict(v) => Ty::Dict(Box::new(self.substitute_params(v, map))),
-            Ty::Tuple(ts) => Ty::Tuple(
-                ts.iter()
-                    .map(|t| self.substitute_params(t, map))
-                    .collect(),
-            ),
+            Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| self.substitute_params(t, map)).collect()),
             Ty::Option(inner) => Ty::Option(Box::new(self.substitute_params(inner, map))),
             Ty::Result(inner) => Ty::Result(Box::new(self.substitute_params(inner, map))),
             Ty::Adt(aid, args) => Ty::Adt(
