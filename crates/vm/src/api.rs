@@ -475,13 +475,14 @@ impl<'b, 'a, 'gc> ModuleApi<'b, 'a, 'gc> {
 
     /// A module fn whose signature is only known at runtime, like [`Api::add_assoc_described`].
     /// A `None` parameter takes any value, the way `print` does.
+    /// Returns the [`NativeId`] so the caller can `mark_intrinsic` it.
     pub fn add_described(
         &mut self,
         name: impl Into<String>,
         parameters: Vec<Option<Ty>>,
         return_ty: Ty,
         call: impl for<'g> Fn(Ctx<'g>, &[Val<'g>]) -> RtResult<Val<'g>> + 'static,
-    ) {
+    ) -> NativeId {
         let native = make_native(&self.parent.ctx, move |ctx, args| call(ctx, args));
         let id = self.parent.library.function(ApiFunction {
             name: name.into(),
@@ -497,6 +498,7 @@ impl<'b, 'a, 'gc> ModuleApi<'b, 'a, 'gc> {
             call: (),
         });
         self.parent.store_native(id, native);
+        id
     }
 
     pub fn constant(

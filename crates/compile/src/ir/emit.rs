@@ -622,6 +622,66 @@ impl Emit for Call {
                     m_args.extend_from_slice(&args[1..args.len() - 1]);
                     ir.current().call_native(merge, m_args)
                 }
+                // `sim::seeds(n, prop)` — property-check loop: `prop(i)` for i in
+                // 0..n. First `false` raises "sim seed i failed"; a Raised out of
+                // `prop` itself re-raises unchanged so run errors keep their own
+                // message.
+                api::Intrinsic::SimSeeds => {
+                    let n = args[0];
+                    let prop = args[1];
+
+                    let header = ir.push_block("seeds_header");
+                    let pass = ir.push_block("seeds_pass");
+                    let latch = ir.push_block("seeds_latch");
+                    let prop_err = ir.push_block("seeds_prop_err");
+                    let fail = ir.push_block("seeds_fail");
+                    let done = ir.push_block("seeds_done");
+
+                    let idx = ir.synthetic_local("$seed_idx");
+                    let zero = ir.current().constant(0);
+                    ir.current().set_local(idx, zero);
+                    let entered = ir
+                        .current()
+                        .bin(BinOp::LessThan, zero, n, OperandKind::Int);
+                    ir.current().jump_if_false(entered, done);
+                    ir.current().jump(header);
+
+                    ir.target(header);
+                    let i = ir.current().get_local(idx);
+                    let r = ir.current().call(prop, vec![i]);
+                    let raised = ir.current().is_raised(r);
+                    ir.current().jump_if_false(raised, pass);
+                    ir.current().jump(prop_err);
+
+                    ir.target(pass);
+                    ir.current().jump_if_false(r, fail);
+                    ir.current().jump(latch);
+
+                    ir.target(latch);
+                    let i = ir.current().get_local(idx);
+                    ir.current().for_next(i, n, header);
+                    ir.current().jump(done);
+
+                    ir.target(prop_err);
+                    let err = ir.current().unwrap_raised(r);
+                    ir.current().raise(err);
+                    ir.current().jump(done);
+
+                    ir.target(fail);
+                    let i = ir.current().get_local(idx);
+                    let pre = ir.intern_str("sim seed ");
+                    let post = ir.intern_str(" failed");
+                    let msg = ir.current().format(vec![
+                        FormatPart::Literal(pre),
+                        FormatPart::Value(i),
+                        FormatPart::Literal(post),
+                    ]);
+                    ir.current().raise(msg);
+                    ir.current().jump(done);
+
+                    ir.target(done);
+                    ir.current().constant(Constant::Bool(true))
+                }
             }
         }
 

@@ -62,4 +62,10 @@ pub enum Intrinsic {
     /// Lowers to synthesized closures wrapped in an `Iso` instance; the `#[native]`
     /// body is unreachable.
     At,
+    /// `sim::seeds(n, prop)` — property-check helper: calls `prop(i)` for each
+    /// `i` in `0..n` and returns `true` when every call does. The first `false`
+    /// raises `"sim seed i failed"` so a `where:` check reports the failing
+    /// seed. Lowers to a generated loop; the `#[native]` body is unreachable
+    /// because a native can't call back into the VM.
+    SimSeeds,
 }
