@@ -100,42 +100,40 @@ impl Linker<'_> {
         }
         let text = (self.fetch)(key)
             .ok_or_else(|| LinkError::MissingBlob(key.to_string()))?;
-        match member {
+        let members: Vec<&str> = text.lines().collect();
+        if member.is_none() && members.len() == 1 {
             // A lone blob: one canonical fn, `@dep:`/`@self`/`@v` markers.
-            None => {
-                let name = self.name_for(&addr, key, None);
-                let mut deps = Vec::new();
-                let decl = self.rewrite(&text, &name, None, &mut deps)?;
-                for dep in deps {
-                    self.visit(&dep)?;
-                }
-                self.emit(&addr, &name, self.fill_names(decl));
+            let name = self.name_for(&addr, key, None);
+            let mut deps = Vec::new();
+            let decl = self.rewrite(&text, &name, None, &mut deps)?;
+            for dep in deps {
+                self.visit(&dep)?;
             }
-            // A group blob: member canonicals one per line. Every member
-            // lands — a cycle links as a unit — with `@scc:i` resolving
-            // to sibling member names.
-            Some(i) => {
-                let members: Vec<&str> = text.lines().collect();
-                if i >= members.len() {
-                    return Err(LinkError::MissingMember(addr));
-                }
-                let mut names = Vec::with_capacity(members.len());
-                for (m, _) in members.iter().enumerate() {
-                    names.push(self.name_for(&format!("{key}:{m}"), key, Some(m)));
-                }
-                let mut decls = Vec::with_capacity(members.len());
-                let mut deps = Vec::new();
-                for (m, canonical) in members.iter().enumerate() {
-                    decls.push(self.rewrite(canonical, &names[m], Some(&names), &mut deps)?);
-                }
-                for dep in deps {
-                    self.visit(&dep)?;
-                }
-                for (m, decl) in decls.into_iter().enumerate() {
-                    let decl = self.fill_names(decl);
-                    self.emit(&format!("{key}:{m}"), &names[m].clone(), decl);
-                }
-            }
+            self.emit(&addr, &name, self.fill_names(decl));
+            return Ok(());
+        }
+        // A group blob — addressed as `G:i`, or bare `G` (a multi-line
+        // blob can't be anything else). Every member lands: a cycle
+        // links as a unit, `@scc:i` resolving to sibling member names.
+        let i = member.unwrap_or(0);
+        if i >= members.len() {
+            return Err(LinkError::MissingMember(addr));
+        }
+        let mut names = Vec::with_capacity(members.len());
+        for (m, _) in members.iter().enumerate() {
+            names.push(self.name_for(&format!("{key}:{m}"), key, Some(m)));
+        }
+        let mut decls = Vec::with_capacity(members.len());
+        let mut deps = Vec::new();
+        for (m, canonical) in members.iter().enumerate() {
+            decls.push(self.rewrite(canonical, &names[m], Some(&names), &mut deps)?);
+        }
+        for dep in deps {
+            self.visit(&dep)?;
+        }
+        for (m, decl) in decls.into_iter().enumerate() {
+            let decl = self.fill_names(decl);
+            self.emit(&format!("{key}:{m}"), &names[m].clone(), decl);
         }
         Ok(())
     }
@@ -236,7 +234,12 @@ fn rewrite(
     let bytes = canonical.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(canonical.len());
     let mut stack = vec![Mode::Normal];
+    // `fn` seen, name slot still open, and not yet consumed: the first
+    // ident after the decl's `fn` becomes the generated name — `_` in
+    // scoped canonicals, the written name in token-fallback blobs (an
+    // unparseable decl publishes `canonical_source`, which keeps names).
     let mut after_fn = false;
+    let mut renamed = false;
     let mut i = 0;
     while i < bytes.len() {
         let c = bytes[i] as char;
@@ -294,6 +297,7 @@ fn rewrite(
                     stack.push(Mode::Str);
                     out.push(bytes[i]);
                     i += 1;
+                    after_fn = false;
                     continue;
                 }
                 if c == '@' {
@@ -318,13 +322,19 @@ fn rewrite(
                         after_fn = false;
                         continue;
                     }
-                    if after_fn && word == "_" {
+                    if after_fn && !renamed {
                         out.extend_from_slice(self_name.as_bytes());
+                        renamed = true;
                     } else {
                         out.extend_from_slice(word.as_bytes());
                     }
                     after_fn = word == "fn";
                     continue;
+                }
+                if !c.is_ascii_whitespace() {
+                    // `fn (`/`fn <` isn't a named decl — the name slot is
+                    // only open to the ident immediately following `fn`.
+                    after_fn = false;
                 }
                 out.push(bytes[i]);
                 i += 1;
@@ -577,5 +587,37 @@ mod tests {
             linked.source,
             format!("fn {name} ( v0 : str ) -> str {{ f\"hi {{v0}}!\" }}")
         );
+    }
+
+    /// A decl that can't scope-parse publishes its token canonical —
+    /// which keeps the written name, not `_`. The link still renames it
+    /// so call sites and decl agree.
+    #[test]
+    fn a_token_fallback_blob_still_links_by_address() {
+        let leaf = "fn realname ( ) -> int { 7 }".to_string();
+        let leaf_key = blake3::hash(leaf.as_bytes()).to_hex().to_string();
+        let caller = format!("fn _ ( ) -> int {{ @dep:{leaf_key} () }}");
+        let caller_key = blake3::hash(caller.as_bytes()).to_hex().to_string();
+        let blobs: HashMap<String, String> =
+            [(leaf_key.clone(), leaf), (caller_key.clone(), caller)].into();
+        let linked = link(&caller_key, |k| blobs.get(k).cloned()).unwrap();
+        assert_eq!(linked.items.len(), 2);
+        let leaf_name = name_of(&linked, &leaf_key);
+        // The call site and the decl agree — `realname` is gone.
+        assert!(linked.source.contains(&format!("fn {leaf_name}")), "{}", linked.source);
+        assert!(linked.source.contains(&format!("{leaf_name} (")), "{}", linked.source);
+        assert!(!linked.source.contains("realname"), "{}", linked.source);
+    }
+
+    /// A bare group hash — no `:i` — can only name a cycle's joined
+    /// blob, so it links the whole cycle.
+    #[test]
+    fn a_bare_group_address_links_every_member() {
+        let src = "fn a(n: int) -> int { b(n) }\nfn b(n: int) -> int { a(n) }\n";
+        let (globals, blobs) = blobs_of(src);
+        let group = Globals::blob_key(&addr_of(&globals, "a")).to_string();
+        let linked = link(&group, |k| blobs.get(k).cloned()).unwrap();
+        assert_eq!(linked.items.len(), 2);
+        assert!(!linked.source.contains('@'), "{}", linked.source);
     }
 }
