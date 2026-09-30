@@ -56,7 +56,7 @@ pub enum SnapVal {
 /// One heap object, children already snapped. `Closure` is immutable once created (no
 /// `RefLock`), so on restore it's built whole with resolved captures — see the two-phase
 /// comment in [`Vm::restore`].
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum SnapNode {
     Array(Vec<SnapVal>),
     Dict(Vec<(SharedStr, SnapVal)>),

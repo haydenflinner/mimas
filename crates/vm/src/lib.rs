@@ -21,6 +21,8 @@ pub mod fixtures;
 pub use fixtures::*;
 mod snapshot;
 pub use snapshot::*;
+mod rebind;
+pub use rebind::*;
 mod math;
 pub mod units;
 pub use ::glam;
