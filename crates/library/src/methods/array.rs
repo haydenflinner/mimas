@@ -178,6 +178,12 @@ fn enumerate(arr: &[anon::T<'gc>]) -> Vec<(usize, anon::T<'gc>)> {
 
 // todo, should be "flat" or "flattened"
 #[native]
+/// Returns a new array with the elements of each inner array, in order. Only one level is
+/// removed: a `[[[int]]]` flattens to a `[[int]]`.
+///
+/// ```mimas
+/// let xs = [[1, 2], [], [3]].flatten(); // [1, 2, 3]
+/// ```
 fn flatten(arr: Vec<Vec<anon::T<'gc>>>) -> Vec<anon::T<'gc>> {
     arr.into_iter().flatten().collect()
 }
@@ -250,11 +256,29 @@ fn min_int(arr: &[i64]) -> Option<i64> {
 }
 
 #[native]
+/// Returns the maximum value present in the array.
+///
+/// ```mimas
+/// let a: [int] = [0, 1, 2];
+/// let int_max = a.max(); // 2
+///
+/// let b: [float] = [0.0, 1.0, 2.0];
+/// let float_max = b.max(); // 2.0
+/// ```
 fn max_float(arr: &[f64]) -> Option<f64> {
     arr.iter().copied().max_by(f64::total_cmp)
 }
 
 #[native]
+/// Returns the minimum value present in the array.
+///
+/// ```mimas
+/// let a: [int] = [0, 1, 2];
+/// let int_min = a.min(); // 0
+///
+/// let b: [float] = [0.0, 1.0, 2.0];
+/// let float_min = b.min(); // 0.0
+/// ```
 fn min_float(arr: &[f64]) -> Option<f64> {
     arr.iter().copied().min_by(f64::total_cmp)
 }
@@ -274,6 +298,15 @@ fn sum_int(arr: &[i64]) -> i64 {
 }
 
 #[native]
+/// Returns the sum of all values in the array.
+///
+/// ```mimas
+/// let a: [int] = [0, 1, 2];
+/// let int_sum = a.sum(); // 3
+///
+/// let b: [float] = [0.0, 1.0, 2.0];
+/// let float_sum = b.sum(); // 3.0
+/// ```
 fn sum_float(arr: &[f64]) -> f64 {
     arr.iter().sum()
 }
@@ -333,6 +366,17 @@ fn argsort_int(keys: &[i64]) -> Vec<i64> {
 }
 
 #[native]
+/// Compares all elements in the array and returns a new array with the indicies sorted. For
+/// example, if the maximum value in this array is at index 3, the first element of the returned
+/// array will be `3`.
+///
+/// ```mimas
+/// let a = [5, 0, 2, 4];
+/// let a_sorted = [0, 3, 2, 1];
+///
+/// let b = [5.0, 0.0, 2.0, 4.0];
+/// let b_sorted = [0, 3, 2, 1];
+/// ```
 fn argsort_float(keys: &[f64]) -> Vec<i64> {
     let mut idx: Vec<i64> = (0..keys.len() as i64).collect();
     idx.sort_by(|&a, &b| keys[a as usize].total_cmp(&keys[b as usize]));

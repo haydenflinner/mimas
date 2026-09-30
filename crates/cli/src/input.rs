@@ -72,4 +72,17 @@ pub enum Commands {
         #[clap(parse(from_os_str))]
         path: Option<PathBuf>,
     },
+    /// Assemble a fn by scoped content address from a blob dir: fetch the
+    /// blob, follow its `@dep:` edges, rename markers, print the linked
+    /// module source. The read half of `host::publish`'s blob store.
+    Link {
+        /// The scoped address — a lone `S`, or `G:i` for a member of a
+        /// dependency cycle's group blob.
+        addr: String,
+
+        /// The blob dir — `blobs/` (its `blobs-scoped/` sibling is read)
+        /// or a `blobs-scoped/` dir directly. Defaults to `./blobs-scoped`.
+        #[clap(long, parse(from_os_str))]
+        blobs: Option<PathBuf>,
+    },
 }

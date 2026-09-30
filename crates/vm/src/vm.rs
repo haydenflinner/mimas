@@ -2633,6 +2633,38 @@ impl Vm {
         Ok(vm)
     }
 
+    /// Compile `files` into a reusable `(Program, Sources)` pair —
+    /// `compile_files` minus the Vm, for callers (sweeps, sims) that
+    /// instantiate the same program into many fresh Vms.
+    pub fn compile_parts<F>(
+        files: &[(&str, &str)],
+        install_lib: F,
+    ) -> std::result::Result<(compile::Program, Sources), ExecuteError>
+    where
+        F: for<'gc> FnOnce(&mut crate::api::Api<'_, 'gc>),
+    {
+        let mut probe = Self::new();
+        let library = probe.install_library(install_lib);
+        Self::build_program(files, &library)
+    }
+
+    /// Load a [`compile_parts`] program into this Vm — same post-load
+    /// wiring as `compile_files`, with this Vm's arena installing the
+    /// natives fresh (natives live per-Vm, in State fixtures).
+    pub fn load_prebuilt<F>(
+        &mut self,
+        program: compile::Program,
+        sources: Sources,
+        install_lib: F,
+    ) where
+        F: for<'gc> FnOnce(&mut crate::api::Api<'_, 'gc>),
+    {
+        let library = self.install_library(install_lib);
+        self.load_program(program);
+        self.set_sources(sources);
+        self.registry = library.into_registry();
+    }
+
     /// The entire compilation process -- parse, solve and compile `files` against `library`, which
     /// is the set of natives the resulting program is built to line up with.
     fn build_program(

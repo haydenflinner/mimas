@@ -12,6 +12,7 @@ use crate::{
     Reg, UnaryOp,
 };
 
+#[derive(Clone)]
 pub struct Program {
     pub entry: BodyId,
     pub chunks: IdVec<BodyId, Chunk>,

@@ -169,6 +169,31 @@ impl<'s> Lexer<'s> {
         }
     }
 
+    /// Chomps the `"""`-delimited docstring opened at `start`; `body` is everything after the
+    /// opener. Inside a docstring a lone `"` is just a character and nothing escapes the closer,
+    /// so the first `"""` ends it — same split Python's tokenizer makes.
+    fn construct_docstring(&mut self, start: usize, body: &'s str) -> &'s str {
+        let body_start = self.source.len() - body.len();
+        match body.find("\"\"\"") {
+            Some(end) => {
+                let close = body_start + end + 3;
+                while self.char_stream.position() < close {
+                    self.char_stream.chomp();
+                }
+                &body[..end]
+            }
+            None => {
+                self.unterminated(start, body_start, |location| {
+                    UnterminatedString(location).into()
+                });
+                while self.char_stream.position() < self.source.len() {
+                    self.char_stream.chomp();
+                }
+                body
+            }
+        }
+    }
+
     /// Chomps the rest of the block comment whose `/*` is at `start`. Nests like Rust's, so
     /// commenting out a region that already contains a block comment closes at the right `*/`.
     /// Returns the whole comment.
@@ -287,6 +312,11 @@ impl<'s> Lex<'s, Tok<TokKind<'s>>, TokKind<'s>> for Lexer<'s> {
                     TokKind::Int(0)
                 }
             }
+        } else if let Some(body) = rest.strip_prefix("\"\"\"") {
+            // `"""…"""` — the Python-flavored docstring: a str literal
+            // that may span lines and whose unassigned statement form
+            // is documentation; the editor typesets it.
+            TokKind::String(self.construct_docstring(start, body))
         } else if let Some(body) = rest.strip_prefix("f\"") {
             TokKind::FString(self.construct_quoted(start, body, fstring_end(body)))
         } else if let Some(body) = rest.strip_prefix('"') {

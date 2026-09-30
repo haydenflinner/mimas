@@ -43,5 +43,5 @@ pub use ::inventory;
 // say) can name `vm::DataflowGraph` etc. without also depending on `mimas-compile` directly.
 // `BinOp`/`UnaryOp` join them: `Api::add_bin_op`/`add_unary_op` take them as args.
 pub use ::compile::{
-    BinOp, DataflowEdge, DataflowError, DataflowGraph, DataflowNode, NodeKind, UnaryOp,
+    BinOp, DataflowEdge, DataflowError, DataflowGraph, DataflowNode, NodeKind, Program, UnaryOp,
 };

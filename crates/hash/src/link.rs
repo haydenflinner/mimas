@@ -381,6 +381,87 @@ fn rewrite(
     Ok(String::from_utf8(out).unwrap_or_else(|_| canonical.to_string()))
 }
 
+/// Every `@dep:` address a stored blob's markers name — the fetch keys a
+/// [`link`] of it needs. String/f-string-aware like [`rewrite`], so a
+/// marker-shaped string literal isn't reported; `@self`/`@scc:`/`@v`
+/// markers aren't fetch keys and don't appear. The housekeeping sweep
+/// walks these to find edges pointing at absent blobs.
+pub fn dep_addrs(blob_text: &str) -> Vec<String> {
+    let bytes = blob_text.as_bytes();
+    let mut deps = Vec::new();
+    let mut stack = vec![Mode::Normal];
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i] as char;
+        let in_interp = matches!(stack.last(), Some(Mode::Interp { .. }));
+        match stack.last().unwrap() {
+            Mode::Str => {
+                if c == '\\' && i + 1 < bytes.len() {
+                    i += 1;
+                } else if c == '"' {
+                    stack.pop();
+                }
+            }
+            Mode::FStr => {
+                if c == '\\' && i + 1 < bytes.len() {
+                    i += 1;
+                } else if c == '"' {
+                    stack.pop();
+                } else if c == '{' {
+                    stack.push(Mode::Interp { depth: 1 });
+                }
+            }
+            _ => {
+                if c == '{' && in_interp {
+                    if let Some(Mode::Interp { depth }) = stack.last_mut() {
+                        *depth += 1;
+                    }
+                } else if c == '}' && in_interp {
+                    let mut done = false;
+                    if let Some(Mode::Interp { depth }) = stack.last_mut() {
+                        *depth -= 1;
+                        done = *depth == 0;
+                    }
+                    if done {
+                        stack.pop();
+                    }
+                } else if c == '"' {
+                    stack.push(Mode::Str);
+                } else if bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' {
+                    let start = i;
+                    while i < bytes.len()
+                        && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_')
+                    {
+                        i += 1;
+                    }
+                    if &blob_text[start..i] == "f" && bytes.get(i) == Some(&b'"') {
+                        stack.push(Mode::FStr);
+                        i += 1; // past the opening quote — FStr owns it
+                    }
+                    continue;
+                } else if c == '@' && blob_text[i..].starts_with("@dep:") {
+                    let mut end = i + 5;
+                    while end < bytes.len() && bytes[end].is_ascii_hexdigit() {
+                        end += 1;
+                    }
+                    if bytes.get(end) == Some(&b':') {
+                        let digits = bytes[end + 1..]
+                            .iter()
+                            .take_while(|b| b.is_ascii_digit())
+                            .count();
+                        end += 1 + digits;
+                    }
+                    deps.push(blob_text[i + 5..end].to_string());
+                    i = end;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    deps
+}
+
 /// The marker at `text`'s start — `@v{n}`, `@self`, `@dep:<addr>`,
 /// `@scc:<i>` — and its replacement. Returns the replacement and the
 /// marker's byte length. A lone `@` that matches no marker is copied

@@ -166,6 +166,6 @@ fn param_names_come_from_the_signatures() {
                 Some(&f.param_names),
             _ => None,
         }),
-        ["path", "output"]
+        ["path", "contents"]
     );
 }

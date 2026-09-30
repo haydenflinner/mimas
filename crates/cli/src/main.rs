@@ -31,6 +31,7 @@ fn main() {
             input.time,
         ),
         Some(Commands::Hash { path, scoped, deps }) => hash(path, scoped || deps, deps),
+        Some(Commands::Link { addr, blobs }) => link(&addr, blobs),
         Some(Commands::Run { path, script_args }) => build(
             path,
             script_args,
@@ -175,6 +176,61 @@ fn hash(path: Option<PathBuf>, scoped: bool, deps: bool) -> i32 {
     0
 }
 
+/// `mimas link <addr> [--blobs <dir>]` — assemble the module a scoped
+/// address names: fetch its blob, follow `@dep:` edges breadth-first,
+/// patch the markers, print the self-contained source. `--blobs` names
+/// the base dir (`<dir>-scoped` is read) or a scoped dir outright.
+fn link(addr: &str, blobs: Option<PathBuf>) -> i32 {
+    let dir = match scoped_dir(blobs) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+    let fetch = |key: &str| {
+        let path = dir.join(key);
+        std::fs::read_to_string(&path).ok()
+    };
+    match hash::link::link(addr, fetch) {
+        Ok(linked) => {
+            print!("{}", linked.source);
+            if !linked.source.ends_with('\n') {
+                println!();
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("link {addr}: {e}");
+            1
+        }
+    }
+}
+
+/// `--blobs` (or its default) → the scoped blob dir: `<dir>-scoped` when
+/// the name isn't already scoped, `./blobs-scoped` when no flag is given.
+fn scoped_dir(blobs: Option<PathBuf>) -> Result<PathBuf, String> {
+    let base = blobs.unwrap_or_else(|| PathBuf::from("blobs"));
+    let scoped = if base.file_name().is_some_and(|n| {
+        n.to_string_lossy().ends_with("-scoped")
+    }) {
+        base.clone()
+    } else {
+        let mut name = base.as_os_str().to_os_string();
+        name.push("-scoped");
+        PathBuf::from(name)
+    };
+    if scoped.is_dir() {
+        Ok(scoped)
+    } else {
+        Err(format!(
+            "no scoped blob dir at {} (looked next to {})",
+            scoped.display(),
+            base.display()
+        ))
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build(
     path: Option<PathBuf>,
@@ -284,7 +340,7 @@ fn build(
 // bare `mimas foo.mim` means `mimas run foo.mim`; inject `run` when the first
 // positional isn't already a subcommand. `mimas` alone still falls through to help.
 fn massage_args(mut args: Vec<String>) -> Vec<String> {
-    const SUBCOMMANDS: [&str; 5] = ["check", "build", "hash", "run", "help"];
+    const SUBCOMMANDS: [&str; 6] = ["check", "build", "hash", "run", "link", "help"];
     if let Some(idx) = args.iter().skip(1).position(|a| !a.starts_with('-')) {
         let idx = idx + 1;
         if !SUBCOMMANDS.contains(&args[idx].as_str()) {

@@ -299,6 +299,12 @@ fn sqrt(n: f64) -> f64 {
 }
 
 #[native]
+/// Returns the length of the hypotenuse of a right triangle with legs `a` and `b`,
+/// `sqrt(a * a + b * b)`, computed without overflowing when the legs are huge.
+///
+/// ```mimas
+/// let diagonal = 3.0.hypot(4.0); // 5.0
+/// ```
 fn hypot(a: f64, b: f64) -> f64 {
     a.hypot(b)
 }

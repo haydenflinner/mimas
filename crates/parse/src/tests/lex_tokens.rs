@@ -54,6 +54,17 @@ tok_test!(fstring_plain: "f\"\"" => FString(""));
 tok_test!(fstring: "f\"foo {a}\"" => FString("foo {a}"));
 tok_test!(fstring_with_quoted_index: "f\"{m[\"k\"]}\"" => FString("{m[\"k\"]}"));
 tok_test!(fstring_with_quoted_brace: "f\"{m[\"}\"]}\"" => FString("{m[\"}\"]}"));
+
+// `"""…"""` — the docstring: one String token whose content may span
+// lines and hold lone `"`s; an unassigned one in statement position is
+// the Python-flavored doc comment the editor typesets.
+tok_test!(docstring: "\"\"\"docs\"\"\"" => String("docs"));
+tok_test!(docstring_multiline: "\"\"\"line one\nline two\"\"\"" => String("line one\nline two"));
+tok_test!(docstring_holds_lone_quotes: "\"\"\"say \"hi\" now\"\"\"" => String("say \"hi\" now"));
+tok_test!(docstring_empty: "\"\"\"\"\"\"" => String(""));
+tok_test!(docstring_then_stmt: "\"\"\"d\"\"\" 1" => String("d"), Int(1));
+// four quotes is a docstring opener + a lone `"` inside its body
+tok_test!(docstring_four_quotes: "\"\"\"\"x\"\"\"" => String("\"x"));
 tok_test!(ident: "foo" => Ident("foo"));
 
 // kebab-case identifiers: `-` continues an identifier only when it sits directly between two

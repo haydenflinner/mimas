@@ -122,14 +122,58 @@ pub struct Api<'a, 'gc> {
     pub library: &'a mut Library<()>,
 }
 
+/// The inventory registries are static once the binary links, but each
+/// install asked them four linear questions per registered fn -- an
+/// O(n²) scan over every `#[mimas]` submission, repeated on every Vm
+/// spawn (a fuzz sweep spawns thousands). Index each registry once per
+/// process instead.
+static META_BY_PATH: std::sync::LazyLock<
+    std::collections::HashMap<&'static str, &'static NativeMeta>,
+> = std::sync::LazyLock::new(|| {
+    inventory::iter::<NativeMeta>
+        .into_iter()
+        .map(|m| (m.path, m))
+        .collect()
+});
+static SRC_BY_PATH: std::sync::LazyLock<
+    std::collections::HashMap<&'static str, &'static NativeSrc>,
+> = std::sync::LazyLock::new(|| {
+    inventory::iter::<NativeSrc>
+        .into_iter()
+        .map(|s| (s.path, s))
+        .collect()
+});
+static MUTATES_RECV: std::sync::LazyLock<std::collections::HashSet<&'static str>> =
+    std::sync::LazyLock::new(|| {
+        inventory::iter::<NativeMutates>
+            .into_iter()
+            .filter(|m| m.index == 0)
+            .map(|m| m.path)
+            .collect()
+    });
+static VALIDATOR_BY_PATH: std::sync::LazyLock<
+    std::collections::HashMap<&'static str, api::LitValidator>,
+> = std::sync::LazyLock::new(|| {
+    inventory::iter::<NativeValidator>
+        .into_iter()
+        .map(|v| (v.path, v.validate))
+        .collect()
+});
+
 /// Look up what `#[native]`/`#[mimas]` submitted for the fn at `path` (`type_name_of_val(&f)`)
 /// and pair `arity` slots with their declared names, dropping the `skip` leading ones the arity
 /// doesn't cover (a method's receiver). Missing or mismatched submissions degrade to `arg{i}`
 /// names and an empty doc (see [`NativeMeta`]).
 fn meta_for(path: &str, skip: usize, arity: usize) -> (String, Vec<String>) {
-    let meta = inventory::iter::<NativeMeta>
-        .into_iter()
-        .find(|m| m.path == path);
+    // `#[native]` submits `module::name` from inside the fn body, but a
+    // method on `impl T` registers under `type_name`'s `module::T::name`
+    // -- on a miss, retry with the penultimate (impl-name) segment out.
+    let meta = META_BY_PATH.get(path).or_else(|| {
+        let (rest, last) = path.rsplit_once("::")?;
+        let (head, _) = rest.rsplit_once("::")?;
+        let stripped = format!("{head}::{last}");
+        META_BY_PATH.get(stripped.as_str())
+    });
     let names = meta
         .and_then(|m| m.parameters.get(skip..))
         .filter(|names| names.len() == arity);
@@ -142,25 +186,19 @@ fn meta_for(path: &str, skip: usize, arity: usize) -> (String, Vec<String>) {
 
 /// The def-site `(file, manifest, line)` submitted for `path` -- see [`NativeSrc`].
 fn src_for(path: &str) -> Option<api::NativeSrc> {
-    inventory::iter::<NativeSrc>
-        .into_iter()
-        .find(|s| s.path == path)
+    SRC_BY_PATH
+        .get(path)
         .map(|s| (s.file, s.manifest, s.line))
 }
 
 /// Whether `path` was submitted as mutating its receiver -- see [`NativeMutates`].
 fn mutates_recv(path: &str) -> bool {
-    inventory::iter::<NativeMutates>
-        .into_iter()
-        .any(|m| m.path == path && m.index == 0)
+    MUTATES_RECV.contains(path)
 }
 
 /// The literal-call validator for `path` if one was submitted -- see [`NativeValidator`].
 fn validator_for(path: &str) -> Option<api::LitValidator> {
-    inventory::iter::<NativeValidator>
-        .into_iter()
-        .find(|v| v.path == path)
-        .map(|v| v.validate)
+    VALIDATOR_BY_PATH.get(path).copied()
 }
 
 impl<'a, 'gc> Api<'a, 'gc> {

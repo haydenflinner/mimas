@@ -158,12 +158,14 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add_method(ceil);
 }
 
+/// `col("age")` -- an expression naming a column. Exprs are the verbs of
+/// `filter`/`select`/`mutate`/`agg`: `df.filter(col("age") > 30)`.
 #[native]
 fn col<'gc>(ctx: Ctx<'gc>, name: &str) -> vm::PlExpr<'gc> {
     ctx.new_plexpr(polars::prelude::col(name))
 }
 
-/// `n()` — the row-count expr for `agg`/`summarise`: `gb.agg([n().alias("n")])`
+/// `n()` -- the row-count expr for `agg`/`summarise`: `gb.agg([n().alias("n")])`
 /// (polars `len()`; dplyr's `n()`).
 #[native]
 fn n<'gc>(ctx: Ctx<'gc>) -> vm::PlExpr<'gc> {
@@ -183,6 +185,7 @@ fn collect_in_memory(
     lazy._with_eager(true).collect()
 }
 
+/// `df.filter(col("age") > 30)` -- the rows where `predicate` is true.
 #[native]
 fn filter<'gc>(
     ctx: Ctx<'gc>,
@@ -196,6 +199,8 @@ fn filter<'gc>(
         .into()
 }
 
+/// `df.select([col("name"), col("age")])` -- keep only the columns the
+/// exprs produce, in that order.
 #[native]
 fn select<'gc>(
     ctx: Ctx<'gc>,
@@ -210,6 +215,7 @@ fn select<'gc>(
         .into()
 }
 
+/// `df.sort(["last", "first"])` -- rows ordered by those columns, ascending.
 #[native]
 fn sort<'gc>(
     ctx: Ctx<'gc>,
@@ -224,7 +230,7 @@ fn sort<'gc>(
         .into()
 }
 
-/// `df.select_names(["name", "age"])` — `select` by bare column names, no `col()`
+/// `df.select_names(["name", "age"])` -- `select` by bare column names, no `col()`
 /// exprs needed (the tidy layer's name-driven `select`).
 #[native]
 fn select_names<'gc>(
@@ -240,7 +246,7 @@ fn select_names<'gc>(
         .into()
 }
 
-/// `df.arrange(["laps", "elapsed"], [true, false])` — multi-key sort with a
+/// `df.arrange(["laps", "elapsed"], [true, false])` -- multi-key sort with a
 /// per-key direction; a single-element `desc` broadcasts to every key.
 #[native]
 fn arrange<'gc>(
@@ -264,7 +270,7 @@ fn arrange<'gc>(
         .into()
 }
 
-/// `df.mutate([col("price") * col("qty") | alias "gross"])` — append or replace
+/// `df.mutate([col("price") * col("qty") | alias "gross"])` -- append or replace
 /// columns without dropping the rest (polars `with_columns`, dplyr's `mutate`).
 #[native]
 fn mutate<'gc>(
@@ -280,7 +286,7 @@ fn mutate<'gc>(
         .into()
 }
 
-/// `df.distinct(["dept"])` — first row per unique key combination; an empty
+/// `df.distinct(["dept"])` -- first row per unique key combination; an empty
 /// `by` dedups whole rows.
 #[native]
 fn distinct<'gc>(
@@ -301,7 +307,7 @@ fn distinct<'gc>(
         .into()
 }
 
-/// `df.drop_nulls(["age"])` — drop rows with nulls in the named columns; an
+/// `df.drop_nulls(["age"])` -- drop rows with nulls in the named columns; an
 /// empty `by` drops rows with a null anywhere.
 #[native]
 fn drop_nulls<'gc>(
@@ -321,29 +327,32 @@ fn drop_nulls<'gc>(
         .into()
 }
 
+/// `df.head(n)` -- the first `n` rows.
 #[native]
 fn head<'gc>(ctx: Ctx<'gc>, df: vm::DataFrame<'gc>, n: i64) -> vm::DataFrame<'gc> {
     ctx.new_dataframe(df.0.borrow().0.head(Some(n.max(0) as usize)))
 }
 
+/// `df.tail(n)` -- the last `n` rows.
 #[native]
 fn tail<'gc>(ctx: Ctx<'gc>, df: vm::DataFrame<'gc>, n: i64) -> vm::DataFrame<'gc> {
     ctx.new_dataframe(df.0.borrow().0.tail(Some(n.max(0) as usize)))
 }
 
-/// `df.take(n)` — the first n rows, same as `head` under the name the
+/// `df.take(n)` -- the first n rows, same as `head` under the name the
 /// domain uses ("take the podium" reads better than "head the podium").
 #[native]
 fn take<'gc>(ctx: Ctx<'gc>, df: vm::DataFrame<'gc>, n: i64) -> vm::DataFrame<'gc> {
     ctx.new_dataframe(df.0.borrow().0.head(Some(n.max(0) as usize)))
 }
 
+/// `df.slice(offset, len)` -- the `len` rows starting at `offset`.
 #[native]
 fn slice<'gc>(ctx: Ctx<'gc>, df: vm::DataFrame<'gc>, offset: i64, len: i64) -> vm::DataFrame<'gc> {
     ctx.new_dataframe(df.0.borrow().0.slice(offset, len.max(0) as usize))
 }
 
-/// `df.rename("old", "new")` — rename one column, non-destructively.
+/// `df.rename("old", "new")` -- rename one column, non-destructively.
 #[native]
 fn rename<'gc>(
     ctx: Ctx<'gc>,
@@ -357,7 +366,7 @@ fn rename<'gc>(
         .into()
 }
 
-/// `df.col_names()` — the column names, in order, as a mimas `[str]` (for
+/// `df.col_names()` -- the column names, in order, as a mimas `[str]` (for
 /// inspection and for driving table renderers/query UIs).
 #[native]
 fn col_names<'gc>(ctx: Ctx<'gc>, df: vm::DataFrame<'gc>) -> vm::Array<'gc> {
@@ -371,7 +380,7 @@ fn col_names<'gc>(ctx: Ctx<'gc>, df: vm::DataFrame<'gc>) -> vm::Array<'gc> {
     ctx.new_array(names)
 }
 
-/// `df.pull("name")` — one column as a plain mimas array (ints, floats, bools
+/// `df.pull("name")` -- one column as a plain mimas array (ints, floats, bools
 /// and strings come through natively; anything else raises).
 #[native]
 fn pull<'gc>(ctx: Ctx<'gc>, df: vm::DataFrame<'gc>, name: &str) -> Raisable<vm::Array<'gc>> {
@@ -679,6 +688,8 @@ fn group_by<'gc>(ctx: Ctx<'gc>, df: vm::DataFrame<'gc>, by: Vec<String>) -> vm::
     ctx.new_group_by(lazy.group_by(by))
 }
 
+/// `gb.agg([col("x").sum().alias("total")])` -- collapse each group to one
+/// row, one expr per output column.
 #[native]
 fn agg<'gc>(
     ctx: Ctx<'gc>,
@@ -789,21 +800,33 @@ fn pivot<'gc>(
 }
 
 macro_rules! pl_expr_reducer {
-    ($($name:ident),+ $(,)?) => {$(
+    ($($name:ident : $doc:literal),+ $(,)?) => {$(
+        #[doc = $doc]
         #[native]
         fn $name<'gc>(ctx: Ctx<'gc>, e: vm::PlExpr<'gc>) -> vm::PlExpr<'gc> {
             ctx.new_plexpr(e.0.0.clone().$name())
         }
     )+};
 }
-pl_expr_reducer!(sum, mean, median, min, max, count, n_unique, first, last);
+pl_expr_reducer! {
+    sum: "`col(\"x\").sum()` -- the cells added up: one row per group inside `agg`, a single roll-up in `select`/`mutate`.",
+    mean: "`col(\"x\").mean()` -- the arithmetic mean of the cells.",
+    median: "`col(\"x\").median()` -- the middle cell value (average of the two middle values for an even count).",
+    min: "`col(\"x\").min()` -- the smallest cell value.",
+    max: "`col(\"x\").max()` -- the largest cell value.",
+    count: "`col(\"x\").count()` -- how many cells hold a value (nulls don't count -- `n()` counts rows).",
+    n_unique: "`col(\"x\").n_unique()` -- how many distinct values the column holds.",
+    first: "`col(\"x\").first()` -- the first cell in row order (sort first when order matters).",
+    last: "`col(\"x\").last()` -- the last cell in row order.",
+}
 
+/// `col("x").sum().alias("total")` -- name an expr's output column.
 #[native]
 fn alias<'gc>(ctx: Ctx<'gc>, e: vm::PlExpr<'gc>, name: &str) -> vm::PlExpr<'gc> {
     ctx.new_plexpr(e.0.0.clone().alias(name))
 }
 
-/// `col("t").shift(1)` — the value `n` rows above (a lag); negative `n`
+/// `col("t").shift(1)` -- the value `n` rows above (a lag); negative `n`
 /// reaches the rows below (a lead). The shifted-in cells are null.
 /// Sort first: "the row above" is only meaningful in row order.
 #[native]
@@ -811,7 +834,7 @@ fn shift<'gc>(ctx: Ctx<'gc>, e: vm::PlExpr<'gc>, n: i64) -> vm::PlExpr<'gc> {
     ctx.new_plexpr(e.0.0.clone().shift(polars::prelude::lit(n)))
 }
 
-/// `col("t").diff(1)` — each cell minus the cell `n` rows above; the
+/// `col("t").diff(1)` -- each cell minus the cell `n` rows above; the
 /// first `n` cells are null (polars' `NullBehavior::Ignore`).
 #[native]
 fn diff<'gc>(ctx: Ctx<'gc>, e: vm::PlExpr<'gc>, n: i64) -> vm::PlExpr<'gc> {
@@ -1295,11 +1318,13 @@ fn when<'gc>(
     )
 }
 
+/// `col("x").is_null()` -- an expr that is true where the cell is missing.
 #[native]
 fn is_null<'gc>(ctx: Ctx<'gc>, e: vm::PlExpr<'gc>) -> vm::PlExpr<'gc> {
     ctx.new_plexpr(e.0.0.clone().is_null())
 }
 
+/// `col("x").is_not_null()` -- an expr that is true where the cell holds a value.
 #[native]
 fn is_not_null<'gc>(ctx: Ctx<'gc>, e: vm::PlExpr<'gc>) -> vm::PlExpr<'gc> {
     ctx.new_plexpr(e.0.0.clone().is_not_null())
@@ -1332,11 +1357,13 @@ fn unpivot<'gc>(
 }
 
 // text operations on a string column, as expressions (`col("email").str_ends_with(".org")`)
+/// `col("name").str_to_upper()` -- uppercase each string cell.
 #[native]
 fn str_to_upper<'gc>(ctx: Ctx<'gc>, e: vm::PlExpr<'gc>) -> vm::PlExpr<'gc> {
     ctx.new_plexpr(e.0.0.clone().str().to_uppercase())
 }
 
+/// `col("name").str_to_lower()` -- lowercase each string cell.
 #[native]
 fn str_to_lower<'gc>(ctx: Ctx<'gc>, e: vm::PlExpr<'gc>) -> vm::PlExpr<'gc> {
     ctx.new_plexpr(e.0.0.clone().str().to_lowercase())
@@ -1353,11 +1380,13 @@ fn str_contains<'gc>(ctx: Ctx<'gc>, e: vm::PlExpr<'gc>, text: &str) -> vm::PlExp
     )
 }
 
+/// `col("path").str_starts_with("/tmp")` -- cells beginning with `text`.
 #[native]
 fn str_starts_with<'gc>(ctx: Ctx<'gc>, e: vm::PlExpr<'gc>, text: &str) -> vm::PlExpr<'gc> {
     ctx.new_plexpr(e.0.0.clone().str().starts_with(polars::prelude::lit(text)))
 }
 
+/// `col("file").str_ends_with(".png")` -- cells ending with `text`.
 #[native]
 fn str_ends_with<'gc>(ctx: Ctx<'gc>, e: vm::PlExpr<'gc>, text: &str) -> vm::PlExpr<'gc> {
     ctx.new_plexpr(e.0.0.clone().str().ends_with(polars::prelude::lit(text)))
@@ -1453,7 +1482,8 @@ fn to_datetime<'gc>(
 }
 
 macro_rules! pl_expr_dt_accessor {
-    ($($name:ident => $method:ident),+ $(,)?) => {$(
+    ($($name:ident => $method:ident : $doc:literal),+ $(,)?) => {$(
+        #[doc = $doc]
         #[native]
         fn $name<'gc>(ctx: Ctx<'gc>, e: vm::PlExpr<'gc>) -> vm::PlExpr<'gc> {
             ctx.new_plexpr(e.0.0.clone().dt().$method())
@@ -1461,18 +1491,18 @@ macro_rules! pl_expr_dt_accessor {
     )+};
 }
 pl_expr_dt_accessor! {
-    dt_year => year,
-    dt_month => month,
-    dt_day => day,
-    dt_ordinal_day => ordinal_day,
-    dt_weekday => weekday,
-    dt_days_in_month => days_in_month,
-    dt_hour => hour,
-    dt_minute => minute,
-    dt_second => second,
-    dt_date => date,
-    dt_month_start => month_start,
-    dt_month_end => month_end,
+    dt_year => year: "`col(\"t\").dt_year()` -- the calendar year of each datetime cell.",
+    dt_month => month: "`col(\"t\").dt_month()` -- the calendar month (1–12) of each datetime cell.",
+    dt_day => day: "`col(\"t\").dt_day()` -- the day of the month (1–31).",
+    dt_ordinal_day => ordinal_day: "`col(\"t\").dt_ordinal_day()` -- the day of the year (1–366).",
+    dt_weekday => weekday: "`col(\"t\").dt_weekday()` -- the day of the week as a number.",
+    dt_days_in_month => days_in_month: "`col(\"t\").dt_days_in_month()` -- how many days that cell's month has (28–31).",
+    dt_hour => hour: "`col(\"t\").dt_hour()` -- the hour of the day (0–23).",
+    dt_minute => minute: "`col(\"t\").dt_minute()` -- the minute within the hour (0–59).",
+    dt_second => second: "`col(\"t\").dt_second()` -- the second within the minute (0–59).",
+    dt_date => date: "`col(\"t\").dt_date()` -- the calendar date, dropping the time of day.",
+    dt_month_start => month_start: "`col(\"t\").dt_month_start()` -- each datetime snapped to the first day of its month.",
+    dt_month_end => month_end: "`col(\"t\").dt_month_end()` -- each datetime snapped to the last day of its month.",
 }
 
 /// `col("t").dt_epoch_ms()` -- a datetime column back to plain milliseconds.
@@ -1506,6 +1536,7 @@ fn dt_round<'gc>(ctx: Ctx<'gc>, e: vm::PlExpr<'gc>, every: &str) -> vm::PlExpr<'
 }
 
 // list cells (the ones `from_json` builds out of nested arrays) as expressions
+/// `col("moves").list_len()` -- the number of elements in each list cell.
 #[native]
 fn list_len<'gc>(ctx: Ctx<'gc>, e: vm::PlExpr<'gc>) -> vm::PlExpr<'gc> {
     ctx.new_plexpr(e.0.0.clone().list().len())
@@ -1519,7 +1550,8 @@ fn list_get<'gc>(ctx: Ctx<'gc>, e: vm::PlExpr<'gc>, i: i64) -> vm::PlExpr<'gc> {
 }
 
 macro_rules! pl_expr_list {
-    ($($name:ident => $method:ident),+ $(,)?) => {$(
+    ($($name:ident => $method:ident : $doc:literal),+ $(,)?) => {$(
+        #[doc = $doc]
         #[native]
         fn $name<'gc>(ctx: Ctx<'gc>, e: vm::PlExpr<'gc>) -> vm::PlExpr<'gc> {
             ctx.new_plexpr(e.0.0.clone().list().$method())
@@ -1527,10 +1559,10 @@ macro_rules! pl_expr_list {
     )+};
 }
 pl_expr_list! {
-    list_first => first,
-    list_last => last,
-    list_sum => sum,
-    list_mean => mean,
+    list_first => first: "`col(\"moves\").list_first()` -- the first element of each list cell (null when the list is empty).",
+    list_last => last: "`col(\"moves\").list_last()` -- the last element of each list cell.",
+    list_sum => sum: "`col(\"scores\").list_sum()` -- the elements of each list cell added up.",
+    list_mean => mean: "`col(\"scores\").list_mean()` -- the mean of each list cell's elements.",
 }
 
 /// `col("moves").explode()` -- one row per list element (`select` it to see
@@ -1544,14 +1576,19 @@ fn explode<'gc>(ctx: Ctx<'gc>, e: vm::PlExpr<'gc>) -> vm::PlExpr<'gc> {
 }
 
 macro_rules! pl_expr_numeric {
-    ($($name:ident),+ $(,)?) => {$(
+    ($($name:ident : $doc:literal),+ $(,)?) => {$(
+        #[doc = $doc]
         #[native]
         fn $name<'gc>(ctx: Ctx<'gc>, e: vm::PlExpr<'gc>) -> vm::PlExpr<'gc> {
             ctx.new_plexpr(e.0.0.clone().$name())
         }
     )+};
 }
-pl_expr_numeric!(abs, floor, ceil);
+pl_expr_numeric! {
+    abs: "`col(\"x\").abs()` -- each cell's absolute value.",
+    floor: "`col(\"x\").floor()` -- each cell rounded down to a whole number.",
+    ceil: "`col(\"x\").ceil()` -- each cell rounded up to a whole number.",
+}
 
 /// `table { … }`'s starting point: a table with no columns.
 #[native]
@@ -1687,7 +1724,7 @@ fn __q_apply<'gc>(
         "cast_int" => e.cast(polars::prelude::DataType::Int64),
         "cast_float" => e.cast(polars::prelude::DataType::Float64),
         "cast_str" => e.cast(polars::prelude::DataType::String),
-        // `lag(x)`, `lead(x)`, `difference(x)` — the row `n` above/below
+        // `lag(x)`, `lead(x)`, `difference(x)` -- the row `n` above/below
         // or the gap to it (`n` defaults to 1); first/last cells come
         // back null. Order-sensitive: `sort` first.
         "lag" | "lead" | "difference" => {
@@ -1764,7 +1801,7 @@ fn __q_apply<'gc>(
     Ok(ctx.new_plexpr(out))
 }
 
-/// `$expr` outside a `query { }` — `q_lower` unwraps the marker inside one,
+/// `$expr` outside a `query { }` -- `q_lower` unwraps the marker inside one,
 /// so reaching this call means the escape ran where it isn't an escape.
 #[native]
 fn __q_splice<'gc>(_ctx: Ctx<'gc>, _value: Val<'gc>) -> Result<Val<'gc>, vm::RtErr> {
@@ -1788,6 +1825,7 @@ fn __q_when<'gc>(
     ))
 }
 
+/// query-DSL plumbing — `df | filter …` lowers here.
 #[native]
 fn __q_filter<'gc>(
     ctx: Ctx<'gc>,
@@ -1799,6 +1837,7 @@ fn __q_filter<'gc>(
     q_run(ctx, lazy)
 }
 
+/// query-DSL plumbing — `df | derive x = …` lowers here.
 #[native]
 fn __q_mutate<'gc>(
     ctx: Ctx<'gc>,
@@ -1810,6 +1849,7 @@ fn __q_mutate<'gc>(
     q_run(ctx, df.0.borrow().0.clone().lazy().with_columns(exprs))
 }
 
+/// query-DSL plumbing — `df | select a, b` lowers here.
 #[native]
 fn __q_select<'gc>(
     ctx: Ctx<'gc>,
@@ -1821,6 +1861,7 @@ fn __q_select<'gc>(
     q_run(ctx, df.0.borrow().0.clone().lazy().select(exprs))
 }
 
+/// query-DSL plumbing — `df | sort a, -b` lowers here.
 #[native]
 fn __q_sort<'gc>(
     ctx: Ctx<'gc>,
@@ -1836,11 +1877,13 @@ fn __q_sort<'gc>(
         .map_err(q_err)
 }
 
+/// query-DSL plumbing — `df | take n` lowers here.
 #[native]
 fn __q_take<'gc>(ctx: Ctx<'gc>, df: vm::DataFrame<'gc>, n: i64) -> vm::DataFrame<'gc> {
     ctx.new_dataframe(df.0.borrow().0.head(Some(n.max(0) as usize)))
 }
 
+/// query-DSL plumbing — `df | group a` lowers here.
 #[native]
 fn __q_group<'gc>(ctx: Ctx<'gc>, df: vm::DataFrame<'gc>, names: Vec<String>) -> vm::GroupBy<'gc> {
     use polars::prelude::{IntoLazy, col};
@@ -1848,6 +1891,7 @@ fn __q_group<'gc>(ctx: Ctx<'gc>, df: vm::DataFrame<'gc>, names: Vec<String>) -> 
     ctx.new_group_by(df.0.borrow().0.clone().lazy().group_by(by))
 }
 
+/// query-DSL plumbing — `… | aggregate …` lowers here.
 #[native]
 fn __q_agg<'gc>(
     ctx: Ctx<'gc>,
@@ -1858,6 +1902,7 @@ fn __q_agg<'gc>(
     q_run(ctx, gb.0.0.clone().agg(exprs))
 }
 
+/// query-DSL plumbing — `df | rename a = b` lowers here.
 #[native]
 fn __q_rename<'gc>(
     ctx: Ctx<'gc>,
@@ -1870,6 +1915,7 @@ fn __q_rename<'gc>(
     Ok(ctx.new_dataframe(out))
 }
 
+/// query-DSL plumbing — `df | distinct a` lowers here.
 #[native]
 fn __q_distinct<'gc>(
     ctx: Ctx<'gc>,
@@ -1889,6 +1935,7 @@ fn __q_distinct<'gc>(
         .map_err(q_err)
 }
 
+/// query-DSL plumbing — `df | join side=other (key)` lowers here.
 #[native]
 fn __q_join<'gc>(
     ctx: Ctx<'gc>,
