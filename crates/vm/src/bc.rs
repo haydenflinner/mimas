@@ -49,7 +49,36 @@ pub const INLINE_CALL_DEPTH: usize = 256;
 /// returns). `op_ip` is the body's output slot for the faulting op's byte
 /// offset — set it to the current op before any `Err` or `Flow::Call` return
 /// so the driver locates errors exactly as it does for `step_one`.
-pub type BodyFn = for<'gc> fn(
+/// The driver-facing ABI: `extern "C"` with raw pointers so a JIT-emitted
+/// function (mimas-jit/Cranelift) can be installed interchangeably with a
+/// bcgen Rust body. The `RtResult<Flow>` result goes through `out` — the enum
+/// has no stable layout, so generated/JIT code never *constructs* it: Rust-side
+/// trampolines (`bcgen`'s `body_N_abi`) and `jit_*` shims write the slot.
+///
+/// Contract for an implementation:
+/// - every pointer is valid for the call's duration and borrowed from the
+///   driver's live structures; `thread`/`code`/`fuel`/`op_ip` may be written,
+///   `strs`/`chunks`/`signatures` are read-only;
+/// - `out` must be fully written before returning (the driver `assume_init`s
+///   it unconditionally);
+/// - all the semantic rules in the doc comment above apply unchanged.
+pub type BodyFn = for<'gc> unsafe extern "C" fn(
+    thread: *mut ThreadState<'gc>,
+    code: *mut Decoder,
+    ctx: Ctx<'gc>,
+    strs: *const StrInterner,
+    chunks: *const IdVec<BodyId, Chunk>,
+    signatures: *const IdVec<BodyId, Option<Function>>,
+    fuel: *mut usize,
+    op_ip: *mut usize,
+    out: *mut RtResult<Flow<'gc>>,
+);
+
+/// The ordinary Rust signature a specialized body's *inner* implementation
+/// uses — bcgen bodies call each other at this ABI (no trampoline round-trip
+/// on the inlined-call path); each also emits a `BodyFn` extern-"C" shim for
+/// the driver table. Not part of any FFI contract.
+pub type InnerBodyFn = for<'gc> fn(
     thread: &mut ThreadState<'gc>,
     code: &mut Decoder,
     ctx: Ctx<'gc>,

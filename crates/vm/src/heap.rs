@@ -139,7 +139,10 @@ impl<'gc> State<'gc> {
     }
 }
 
+// `repr(C)` so `Ctx` can ride the `extern "C"` `bc::BodyFn` ABI by value:
+// two pointers, defined order — JIT bodies take it as two machine words.
 #[derive(Copy, Clone)]
+#[repr(C)]
 pub struct Ctx<'gc> {
     mutation: &'gc Mutation<'gc>,
     state: &'gc State<'gc>,
