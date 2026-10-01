@@ -44,6 +44,57 @@ for s in shapes { total += area(s); }
 print(f"area of {shapes.len()} shapes: {total}");
 ```
 
+## This fork
+
+This tree is a permanently separate fork of upstream [mimas](https://github.com/imlazyeye/mimas) (the `origin` remote; this repo's `fork` remote is [haydenflinner/mimas](https://github.com/haydenflinner/mimas)). Upstream fixes are cherry-picked in (e.g. `00681ea`), but the changes below are deliberate, ours, and not bound for upstream. Everything listed is verified against the code; paths are under `crates/`.
+
+### Language syntax & semantics
+
+| Area | Ours | Upstream |
+| --- | --- | --- |
+| Units of measure | Quantity literals `25kW`, `0.14usd/kWh`, `90deg` + compile-time dimensional analysis (`shared/src/units.rs`, `solve/src/dims.rs`); unit names work as annotations (`fn cost(e: kWh) -> usd`, `Interval<kW>`) and `pct`/`bp`/`prob`/`logit` are dimensionless intent scales | numbers are plain `int`/`float` |
+| `±` intervals | `x ± d` / `x ± d%` desugar to `Interval::within`/`Interval::pm` (`parse/src/parser.rs`, `library/src/std_lib/interval.rs`) | not present |
+| `%` / `mod` | `%` is postfix percent (`50%` = `0.5`, hugs its operand); modulo is the contextual word `a mod b`; `x %=` still means `x = x mod 2` | `%` is infix modulo |
+| `|>` | Pipeline infix, loosest precedence: `x |> f(a)` ≡ `f(x, a)` (`parse/src/lex/tok.rs` `PipeGreater`) | not present |
+| `xor` / names | xor spells `⊕`/`⊻`/`xor`; `^` and `-` join identifiers, so `x^2` and `foo-bar` are single names (`parse/src/lex/lexer.rs`) | `^` is an operator; `-` is always minus |
+| `table {}` / `query {}` | Literal dataframes and PRQL-style query blocks with `$expr` splices (`parse/src/parser.rs`, `solve/src/traits/query.rs`); the checker tracks column→type schemas (`solve/src/frames.rs`) | not present |
+| `use` | `use "page-name";` is a host-resolved include (`Use::Host`, `parse/src/item/item_kinds/use.rs`) | `use` takes `a::b::{…}` paths only |
+| `name_(…)` patterns | `FIELD_(X, Y)` binds `FIELD_X`, `FIELD_Y` in every pattern position (`parse/src/parser.rs`) | not present |
+| `const` | Takes irrefutable patterns: `const (A, B) = (1, 2)` (`parse/src/item/item_kinds/const.rs`) | `const` binds a single name |
+| Generics | `fn map<T, U>(…)`, `struct Pair<A, B>`, generic enums/impls; `Ty::Param` (`shared/src/ty.rs`) | monomorphic declarations |
+| `expr?` demote | `T!` → `T?`: a raised error reads back as `null` (`parse/src/expr/expr_kinds/demote.rs`) | `?` applies to options only |
+| Tests | `#[test]` / `tests`/`check` items are syntax (`#[attr]` tokens, `parse/src/item/item_kinds/tests.rs`) | not present |
+| Globals | Top-level `let`s are globals any `fn` can read/write via the entry frame (`LoadEntry`/`StoreEntry`) | top-level `let` is invisible inside `fn`s |
+| Docstrings | `"""…"""` in statement position is captured for tooling (`parse/src/lex/lexer.rs`) | not present |
+| Invertible fns | `iso`/`lens`/`un`/`under`/`at` (Uiua-style `un`/`under`); `under`/`at` lower in codegen (`library/src/std_lib/iso.rs`, `api/src/lib.rs` `Intrinsic`) | not present |
+
+### Host integration & embedding
+
+| Area | Ours | Upstream |
+| --- | --- | --- |
+| Native metadata | `#[native]`/`#[mimas]` submit `NativeMeta` via `inventory`: doc + `param_names` + `param_dims` on `ApiFunction`/`ApiMethod` (`api/src/records.rs`, `macros/src/lib.rs`) | `doc` only |
+| Units at the boundary | `#[mimas_dim("s")]` field attr and `Px`/`Secs`/`Hz` wrapper types put dims on native signatures (`macros/src/derive.rs`, `vm/src/units.rs`) | not present |
+| Cooperative frames | Natives can `yield_frame`-pause the VM; host pumps via `Vm::debug_step`, caps work via `set_op_budget` (`vm/src/vm.rs`) | `Vm::run` to completion |
+| Snapshots | `Vm::snapshot`/`restore` clone the whole paused heap to host memory (`vm/src/snapshot.rs`) | not present |
+| Hot reload | `Vm::rebind` carries a snapshot into an edited program, matching state by name (`vm/src/rebind.rs`) | not present |
+| Host → script calls | `call_fn`, `call_method_on_first_instance[_inspect]` invoke fns/methods from outside (`vm/src/vm.rs`) | `run` only |
+| Inspection | `Inspect` views incl. `Inspect::Table` (DataFrame flattened for hosts) (`vm/src/val.rs`) | not present |
+| Output plumbing | `print`/`warn` route through `Out`/`Prints`/`DebugInfo` fixtures to host sinks, not stdout (`library/src/prelude.rs`, `vm/src/fixtures.rs`) | `print` is `println!` |
+| Test runner | `Vm::run_tests` executes `#[test]`/`check` items for the host (`vm/src/vm.rs`) | not present |
+| Tooling maps | `Resolutions::node_dims`/`want_dims` expose each expr's computed/demanded dim to editors (`solve/src/resolutions.rs`) | not present |
+| Data values | `DataFrame`/`PlExpr` are first-class `Val`s behind the `dataframe` feature (`vm/`, `library/src/std_lib/dataframe.rs`) | not present |
+
+### Other divergences
+
+| Area | Ours | Upstream |
+| --- | --- | --- |
+| `hash` crate | Unison-style content-addressed code: scoped alpha-renamed hashing, SCC groups, link-by-hash loader, cross-page `use "…"` edges (`crates/hash/`) | no such crate |
+| Stdlib surface | Adds `std::polars` (dataframes), `std::interval`, `std::iso`, `std::darkly`, `std::debug`, parquet/xlsx I/O (`library/src/std_lib/`) | `std::{fs, math, parse, process, sys}` |
+| Deps | `polars` pinned to a git fork (`haydenflinner/polars` rev `c90a33e`); `dataframe`/`darkly`/`xlsx`/`parquet` features are default-on (`library/Cargo.toml`) | no polars dep |
+| Check-time literals | Literal args validated at compile time — `5kg.to("parsecs")`, bad regex in `str.find` fail the check (`solve/src/errors.rs` `BadLiteralArg`) | runtime errors |
+| RNG | One seeded `Rng` stream behind every random native (`library/src/methods/rng.rs`) | unseeded per-call |
+| Diagnostics | Dim mismatches name the written unit: `2px + 5ft` says `length (ft)`, not `length (m)` (`shared/src/units.rs` `describe_unit`) | n/a (no dims) |
+
 ## What you get
 
 | | |
