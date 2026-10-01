@@ -222,6 +222,19 @@ impl<'a> Pass<'a> {
         d.describe()
     }
 
+    /// `d` described with the unit as written when `e` is a quantity literal (`5ft` reads
+    /// `length (ft)`); computed values fall back to the coherent unit.
+    fn describe_operand(&self, e: &Expr, d: &Dim) -> String {
+        let inner = match e.kind() {
+            ExprKind::Unary(u) if matches!(u.op, UnaryOp::Negative | UnaryOp::Positive) => &u.right,
+            _ => e,
+        };
+        match self.ast.quantity_unit(inner.id()) {
+            Some(unit) => d.describe_unit(unit),
+            None => Self::describe(d),
+        }
+    }
+
     /// Both known and different -> the error every mismatch shares.
     fn expect(&mut self, want: &D, got: &D, at: Location, what: &str) {
         if let Some((w, g)) = clash(want, got) {
@@ -521,8 +534,16 @@ impl<'a> Pass<'a> {
                     };
                     self.fail(
                         e.location(),
-                        format!("cannot {verb} {} and {}", Self::describe(&a), Self::describe(&b)),
-                        format!("{} against {}", Self::describe(&a), Self::describe(&b)),
+                        format!(
+                            "cannot {verb} {} and {}",
+                            self.describe_operand(&eq.left, &a),
+                            self.describe_operand(&eq.right, &b)
+                        ),
+                        format!(
+                            "{} against {}",
+                            self.describe_operand(&eq.left, &a),
+                            self.describe_operand(&eq.right, &b)
+                        ),
                         "quantities are only comparable in the same dimension; convert one side with `.to(unit)`",
                     );
                 }
@@ -760,10 +781,17 @@ impl<'a> Pass<'a> {
         match op {
             EvaluationOp::Plus | EvaluationOp::Minus | EvaluationOp::Modulo => {
                 if let Some((a, b)) = clash(&l, &r) {
+                    let (da, db) = match e.kind() {
+                        ExprKind::Evaluation(ev) => (
+                            self.describe_operand(&ev.left, &a),
+                            self.describe_operand(&ev.right, &b),
+                        ),
+                        _ => (Self::describe(&a), Self::describe(&b)),
+                    };
                     self.fail(
                         e.location(),
-                        format!("cannot {} {} and {}", name(op), Self::describe(&a), Self::describe(&b)),
-                        format!("{} with {}", Self::describe(&a), Self::describe(&b)),
+                        format!("cannot {} {} and {}", name(op), da, db),
+                        format!("{} with {}", da, db),
                         "quantities only add and subtract in the same dimension -- convert one with `.to(unit)`, or multiply/divide to make a new quantity",
                     );
                 }

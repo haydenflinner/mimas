@@ -404,6 +404,19 @@ impl Solver {
         .into()
     }
 
+    /// `d` described with the unit as written when `e` is a quantity literal (`5ft` reads
+    /// `length (ft)`); computed values fall back to the coherent unit.
+    fn describe_operand(&self, e: &Expr, d: &Dim) -> String {
+        let inner = match e.kind() {
+            ExprKind::Unary(u) if matches!(u.op, UnaryOp::Negative | UnaryOp::Positive) => &u.right,
+            _ => e,
+        };
+        match self.ast_quantity_units.get(&inner.id()) {
+            Some(unit) => d.describe_unit(unit),
+            None => d.describe(),
+        }
+    }
+
     /// The column a query/derive/agg column-expression computes, given the input schema.
     /// Handles the `__q_*`/`col()`/`lit()`/`n()` forms, `| alias` / `.alias()`, method
     /// chains on `col(…)`, and arithmetic between them. A bare `Ident` here is a `$expr`
@@ -651,10 +664,14 @@ impl Solver {
                         EvaluationOp::Minus => "subtract",
                         _ => "combine",
                     };
+                    let (dx, dy) = (
+                        self.describe_operand(&ev.left, &x),
+                        self.describe_operand(&ev.right, &y),
+                    );
                     return Err(self.dim_err(
                         e,
-                        format!("cannot {verb} {} and {}", x.describe(), y.describe()),
-                        format!("{} with {}", x.describe(), y.describe()),
+                        format!("cannot {verb} {dx} and {dy}"),
+                        format!("{dx} with {dy}"),
                         "quantities only add and subtract in the same dimension -- convert one with `.to(unit)`, or multiply/divide to make a new quantity",
                     ));
                 }
@@ -680,10 +697,14 @@ impl Solver {
                         EqualityOp::Equal | EqualityOp::NotEqual => "compare",
                         _ => "order",
                     };
+                    let (dx, dy) = (
+                        self.describe_operand(&eq.left, &x),
+                        self.describe_operand(&eq.right, &y),
+                    );
                     return Err(self.dim_err(
                         e,
-                        format!("cannot {verb} {} and {}", x.describe(), y.describe()),
-                        format!("{} against {}", x.describe(), y.describe()),
+                        format!("cannot {verb} {dx} and {dy}"),
+                        format!("{dx} against {dy}"),
                         "quantities are only comparable in the same dimension; convert one side with `.to(unit)`",
                     ));
                 }

@@ -55,6 +55,9 @@ pub struct Solver {
     /// Unit dims of `25kW`-style literals, merged from every solved ast (`NodeId`s are
     /// globally unique, so one map is collision-free).
     pub(crate) ast_quantities: HashMap<NodeId, shared::units::Dim>,
+    /// The unit text as written for each literal in `ast_quantities`, so diagnostics can
+    /// name `ft` rather than collapsing it to `length (m)`.
+    pub(crate) ast_quantity_units: HashMap<NodeId, String>,
     /// Every expression's computed dimension, recorded by the dims pass —
     /// `b.x + 2.0px` is `px` here while its `node_tys` stays `Float`.
     /// Surfaces on [`Resolutions::node_dims`](crate::Resolutions).
@@ -113,6 +116,7 @@ impl Solver {
             group_schemas: HashMap::new(),
             group_decs: HashMap::new(),
             ast_quantities: HashMap::new(),
+            ast_quantity_units: HashMap::new(),
             node_dims: IndexMap::new(),
             want_dims: IndexMap::new(),
             field_dims: HashMap::new(),
@@ -221,6 +225,10 @@ impl Solver {
         let asts: Vec<_> = asts.into_iter().collect();
         for ast in &asts {
             self.ast_quantities.extend(ast.quantities());
+            self.ast_quantity_units.extend(
+                ast.quantity_units()
+                    .map(|(id, unit)| (id, unit.to_string())),
+            );
         }
         let module_names: Vec<Option<String>> = asts
             .iter()

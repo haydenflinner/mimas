@@ -22,6 +22,9 @@ pub struct Ast {
     /// Dimension of every unit-suffixed number literal (`25kW`), by node. The literal's value is
     /// already in coherent base units; this is what the dimension checker reads.
     quantities: HashMap<NodeId, Dim>,
+    /// The unit text as written for each literal in `quantities` (`5ft` -> `"ft"`), kept so
+    /// diagnostics can name the unit the user typed rather than its coherent form.
+    quantity_units: HashMap<NodeId, String>,
 }
 impl Ast {
     /// Creates a new Ast with the given statements.
@@ -31,6 +34,7 @@ impl Ast {
         stmts: Vec<Stmt>,
         docs: HashMap<usize, String>,
         quantities: HashMap<NodeId, Dim>,
+        quantity_units: HashMap<NodeId, String>,
     ) -> Self {
         Self {
             name,
@@ -38,6 +42,7 @@ impl Ast {
             stmts,
             docs,
             quantities,
+            quantity_units,
         }
     }
 
@@ -50,6 +55,16 @@ impl Ast {
     /// `table { kwh\n 5kWh }` columns can carry their unit into the schema.
     pub fn quantities(&self) -> impl Iterator<Item = (NodeId, Dim)> + '_ {
         self.quantities.iter().map(|(id, dim)| (*id, *dim))
+    }
+
+    /// The unit text as written for the quantity literal `id` (`5ft` -> `"ft"`), if it is one.
+    pub fn quantity_unit(&self, id: NodeId) -> Option<&str> {
+        self.quantity_units.get(&id).map(String::as_str)
+    }
+
+    /// Every `(node, unit-text)` pair in `quantity_units`, for the solver merge.
+    pub fn quantity_units(&self) -> impl Iterator<Item = (NodeId, &str)> + '_ {
+        self.quantity_units.iter().map(|(id, u)| (*id, u.as_str()))
     }
 
     /// Consumes the Ast into its inner collection of statements.

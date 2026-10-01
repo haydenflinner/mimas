@@ -64,6 +64,23 @@ fn nonsense_arithmetic_is_rejected() {
 }
 
 #[test]
+fn mismatches_name_the_written_unit() {
+    // `5ft` says `ft`, not the coherent `m`
+    rejected(
+        "let a = 2px + 5ft;",
+        "cannot add pixels (px) and length (ft)",
+    );
+    rejected(
+        "let a = 5kWh == 3usd;",
+        "cannot compare energy (kWh) and money (usd)",
+    );
+    // a computed value still falls back to the coherent unit
+    rejected("let x = 5s * 2; let a = x + 3m;", "time (s)");
+    // a negated literal keeps its written unit too
+    rejected("let a = 2px + -5ft;", "length (ft)");
+}
+
+#[test]
 fn declared_dimensions_are_enforced() {
     // a plain float is dimensionless: a power isn't one
     rejected("let a: float = 5kW;", "declared type doesn't match");

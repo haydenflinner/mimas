@@ -48,6 +48,8 @@ pub struct Parser<'s> {
     depth: usize,
     /// The dimension of each unit-suffixed literal (`25kW`), by the literal's node.
     quantities: HashMap<NodeId, shared::units::Dim>,
+    /// The unit text as written for each literal in `quantities` (`5ft` -> `"ft"`).
+    quantity_units: HashMap<NodeId, String>,
 }
 
 // Basic features
@@ -107,6 +109,7 @@ impl<'s> Parser<'s> {
             assert_id: 0,
             depth: 0,
             quantities: HashMap::new(),
+            quantity_units: HashMap::new(),
         }
     }
 
@@ -142,7 +145,14 @@ impl<'s> Parser<'s> {
             })
             .collect();
         (
-            Ast::new(self.file_name, self.src, statements, docs, self.quantities),
+            Ast::new(
+                self.file_name,
+                self.src,
+                statements,
+                docs,
+                self.quantities,
+                self.quantity_units,
+            ),
             self.errors,
         )
     }
@@ -1574,6 +1584,7 @@ impl<'s> Parser<'s> {
             outer.errors.extend(parser.errors);
             // units written inside the interpolation belong to the whole file's ast
             outer.quantities.extend(parser.quantities);
+            outer.quantity_units.extend(parser.quantity_units);
             expr
         }
         // `{` and `}` join the quote-chars so chompy's unescape resolves `\{` -> `{` and
@@ -1641,13 +1652,16 @@ impl<'s> Parser<'s> {
         let start = self.next_start();
         if let Ok(literal) = Literal::try_from(self.peek()) {
             let dim = match self.peek() {
-                TokKind::Quantity(_, unit) => shared::units::parse(unit).map(|(dim, _)| dim),
+                TokKind::Quantity(_, unit) => {
+                    shared::units::parse(unit).map(|(dim, _)| (dim, unit))
+                }
                 _ => None,
             };
             self.advance();
             let expr = self.new_expr(literal, start);
-            if let Some(dim) = dim {
+            if let Some((dim, unit)) = dim {
                 self.quantities.insert(expr.id(), dim);
+                self.quantity_units.insert(expr.id(), unit.to_string());
             }
 
             // todo: this might allow "hello"() or true[]" etc. only dot accesses are okay on lits"

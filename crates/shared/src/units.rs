@@ -155,6 +155,15 @@ impl Dim {
             (n, d) => format!("{n}/{d}"),
         }
     }
+
+    /// Like [`Self::describe`], but names the unit the way it was written (`length (ft)`
+    /// for `5ft`) instead of the dimension's coherent unit (`length (m)`).
+    pub fn describe_unit(&self, unit: &str) -> String {
+        if self.is_none() {
+            return "a plain number".into();
+        }
+        format!("{} ({unit})", family(*self))
+    }
 }
 
 /// The word for a dimension, when it has one.
