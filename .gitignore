@@ -17,3 +17,4 @@ node_modules/
 tools/vscode/out/
 *.vsix
 .DS_Store
+benchmarks/bc-bench/target

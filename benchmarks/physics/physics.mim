@@ -7,10 +7,10 @@ const TOUCH = 8.0;
 let balls: [Ball] = [];
 for i in COUNT {
     balls.push(Ball { 
-        x = (i % 25).to_float() * 16.0,
-        y = (i % 17).to_float() * 23.0, 
-        vx = (i % 7).to_float() - 3.0, 
-        vy = (i % 5).to_float() - 2.0 
+        x = (i mod 25).to_float() * 16.0,
+        y = (i mod 17).to_float() * 23.0, 
+        vx = (i mod 7).to_float() - 3.0, 
+        vy = (i mod 5).to_float() - 2.0 
     });
 }
 

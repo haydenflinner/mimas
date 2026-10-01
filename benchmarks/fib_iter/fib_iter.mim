@@ -5,7 +5,7 @@ fn fib_iter(n: int) -> int {
     let a = 0;
     let b = 1;
     for i in n {
-        let t = (a + b) % MOD;
+        let t = (a + b) mod MOD;
         a = b;
         b = t;
     }
