@@ -1,0 +1,8 @@
+// Linear recursion deeper than `INLINE_CALL_DEPTH` (256): the specialized
+// bodies inline the first 256 frames, then fall back to `Flow::Call` for the
+// driver — so this exercises both the fast path and the depth-cap handoff.
+fn count(n: int) -> int {
+    if n == 0 { 0 } else { count(n - 1) + 1 }
+}
+
+let TEST_VALUE = count(400);

@@ -757,14 +757,10 @@ fn run_dispatch<'gc>(
         if thread.ops_left == 0 {
             return Err(locate(RtErr::OutOfFuel, code.ip, thread, chunks, sources));
         }
-        // SAFETY: regs_ptr/regs_len describe the current top frame's window
-        // (regs[base..base+count]), refreshed after every resize/truncate below. No op between
-        // refreshes touches thread.regs, so the pointer stays valid and this is the only live
-        // reference into the window.
-        let regs = unsafe { std::slice::from_raw_parts_mut(regs_ptr, regs_len) };
         // a body with a bcgen-generated fn runs it instead of `step_one` -- same
-        // `Flow` contract, just pre-decoded ops. Looping bodies decrement fuel
-        // and ops_left themselves and report the faulting ip via `op_ip`.
+        // `Flow` contract, plus the in-body call fast path (see `bc::BodyFn`).
+        // Looping bodies decrement fuel and ops_left themselves and report the
+        // faulting ip via `op_ip`.
         let step = bc.and_then(|t| {
             t.get(thread.frames.last().unwrap().chunk.index())
                 .copied()
@@ -773,14 +769,7 @@ fn run_dispatch<'gc>(
         let mut op_ip = code.ip;
         let res = match step {
             Some(f) => f(
-                regs,
-                code,
-                ctx,
-                strs,
-                &thread.frames,
-                &mut thread.ops_left,
-                &mut fuel,
-                &mut op_ip,
+                thread, code, ctx, strs, chunks, signatures, &mut fuel, &mut op_ip,
             ),
             None => {
                 fuel -= 1;
@@ -788,11 +777,20 @@ fn run_dispatch<'gc>(
                 #[cfg(feature = "op-count")]
                 op_count::COUNTS[code.bytes[op_ip] as usize]
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                // SAFETY: regs_ptr/regs_len describe the current top frame's window
+                // (regs[base..base+count]), refreshed after every resize/truncate
+                // below. The pointer is the only live reference into the window.
+                let regs = unsafe { std::slice::from_raw_parts_mut(regs_ptr, regs_len) };
                 step_one(regs, code, ctx, strs, &thread.frames)
             }
         };
         match res {
-            Ok(Flow::Next) => {}
+            // a body that ran inline calls resized and re-truncated `thread.regs`
+            // mid-turn — the window pointer may dangle, so refresh it unconditionally
+            // before the next dispatch, whichever lane it lands in
+            Ok(Flow::Next) => {
+                (regs_ptr, regs_len) = window(thread, chunks);
+            }
             Ok(Flow::Call { target, dst, args }) => {
                 let (body, captures): (BodyId, &[Val<'gc>]) = match &target {
                     CallTarget::Fn(b) => (*b, &[]),
@@ -1246,7 +1244,8 @@ pub(crate) fn step_one<'gc>(
 /// Push a new frame for `body`: grow `regs`, copy args into the param registers and captures into
 /// the capture registers, save the caller's ip, and jump. The window pointer in `run_dispatch` is
 /// stale after the `resize` here, which is why the driver re-derives it on the next `'frame` pass.
-fn enter_call<'gc>(
+#[doc(hidden)] // `pub` for bcgen-specialized bodies — they run this inline for calls to specialized callees
+pub fn enter_call<'gc>(
     thread: &mut ThreadState<'gc>,
     code: &mut Decoder,
     chunks: &IdVec<BodyId, Chunk>,

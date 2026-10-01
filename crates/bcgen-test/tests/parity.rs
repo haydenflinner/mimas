@@ -40,12 +40,13 @@ fn every_op_specialized() {
     for src in [
         include_str!(concat!(env!("OUT_DIR"), "/basic.rs")),
         include_str!(concat!(env!("OUT_DIR"), "/cold.rs")),
+        include_str!(concat!(env!("OUT_DIR"), "/deep.rs")),
         include_str!(concat!(env!("OUT_DIR"), "/mixed.rs")),
     ] {
         let bodies = src.matches("-> RtResult<Flow<'gc>>").count();
         // shadow-init bails also say `=> return step(`; the catch-all is the
-        // only arm-shaped one (it sets `*op_ip` first)
-        let delegates = src.matches("_ => { *op_ip = code.ip; return step(").count();
+        // only `_ =>` arm (it sets `*op_ip` first, then flushes shadows)
+        let delegates = src.matches("_ => { *op_ip = code.ip;").count();
         assert_eq!(bodies, delegates, "an op arm delegated to the interpreter");
     }
 }
@@ -56,6 +57,17 @@ fn basic_parity() {
     let bodies = generated::basic::bodies();
     assert!(!bodies.is_empty());
     assert_eq!(run(source, None), run(source, Some(bodies)));
+}
+
+/// Recursion past `INLINE_CALL_DEPTH` — the body fast-path hands off to
+/// `Flow::Call` at the cap; both lanes must still land the same answer.
+#[test]
+fn deep_parity() {
+    let source = include_str!("../fixtures/deep.mimas");
+    let (v, k, e) = run(source, Some(generated::deep::bodies()));
+    assert!(e.is_none(), "specialized deep run errored: {e:?}");
+    assert!(matches!(v, Some(Captured::Int(400))));
+    assert_eq!(run(source, None), (v, k, e));
 }
 
 #[test]
