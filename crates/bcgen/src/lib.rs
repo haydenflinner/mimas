@@ -58,6 +58,16 @@ pub fn emit(program: &Program, vm: &str) -> String {
     for (body, _) in program.chunks.iter() {
         emit_body(&mut w, program, body.index());
     }
+    // Complete table for in-body dynamic `Call` dispatch; `CallDirect` bypasses
+    // it and names `body_N` directly.
+    let _ = writeln!(
+        w,
+        "\n#[allow(dead_code)]\nstatic BODIES: &[BodyFn] = &[{}];",
+        (0..program.chunks.len())
+            .map(|i| format!("body_{i}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
     let _ = writeln!(
         w,
         "\n/// The install table for `Vm::install_bc`, indexed by `BodyId`."
@@ -106,26 +116,78 @@ impl Sh {
             .contains(&(r.index() as u32))
             .then(|| format!("r{}f", r.index()))
     }
-    /// Scalar-write: `valexpr` is a bare `i64`/`f64` — shadowed registers update
-    /// the local, set its flag, and write the tagged `Val` through; unshadowed
-    /// ones just wrap.
+    /// Read `r` as a `Val` — from the live shadow (regs may lag under deferred
+    /// writeback), else the authoritative slot. Emitted parenthesized so it's
+    /// safe in any operand position.
+    fn rdv(&self, r: Reg) -> String {
+        let i = r.index();
+        if let Some(v) = self.int(r) {
+            format!(
+                "(if r{i}ok {{ Val::Int({v}) }} else {{ rd(regs, {}) }})",
+                reg(r)
+            )
+        } else if let Some(v) = self.float(r) {
+            format!(
+                "(if r{i}ok {{ Val::Float({v}) }} else {{ rd(regs, {}) }})",
+                reg(r)
+            )
+        } else {
+            format!("rd(regs, {})", reg(r))
+        }
+    }
+
+    /// Scalar-write under deferred writeback: `valexpr` is a bare `i64`/`f64`.
+    /// A shadowed register updates only the local + flag — `regs` is synced
+    /// lazily by `flush!()` at body exits and call boundaries; an unshadowed
+    /// register writes the tagged `Val` through as before.
     fn wr_shadow(&self, s: &mut String, r: Reg, kind: &str, valexpr: &str) {
         if let Some(v) = self.int(r) {
-            let _ = writeln!(
-                s,
-                "{v} = {valexpr}; r{idx}ok = true; wr(regs, {}, Val::Int({v}));",
-                reg(r),
-                idx = r.index()
-            );
+            let _ = writeln!(s, "{v} = {valexpr}; r{idx}ok = true;", idx = r.index());
         } else if let Some(v) = self.float(r) {
-            let _ = writeln!(
-                s,
-                "{v} = {valexpr}; r{idx}ok = true; wr(regs, {}, Val::Float({v}));",
-                reg(r),
-                idx = r.index()
-            );
+            let _ = writeln!(s, "{v} = {valexpr}; r{idx}ok = true;", idx = r.index());
         } else {
             let _ = writeln!(s, "wr(regs, {}, Val::{kind}({valexpr}));", reg(r));
+        }
+    }
+
+    /// Generic `Val` write into `r`, keeping the shadow + flag in sync. Only
+    /// needed for dsts `analyze` might still shadow (a `Copy` chain); every
+    /// `Dyn`-classified writer is unshadowed and compiles to a plain `wr`.
+    fn wr_val(&self, s: &mut String, r: Reg, valexpr: &str) {
+        if self.int(r).is_some() {
+            let _ = writeln!(
+                s,
+                "match ({valexpr}) {{ Val::Int(x) => {{ r{i}i = x; r{i}ok = true; }}, v => {{ r{i}ok = false; wr(regs, {}, v) }} }};",
+                reg(r),
+                i = r.index()
+            );
+        } else if self.float(r).is_some() {
+            let _ = writeln!(
+                s,
+                "match ({valexpr}) {{ Val::Float(x) => {{ r{i}f = x; r{i}ok = true; }}, v => {{ r{i}ok = false; wr(regs, {}, v) }} }};",
+                reg(r),
+                i = r.index()
+            );
+        } else {
+            let _ = writeln!(s, "wr(regs, {}, ({valexpr}));", reg(r));
+        }
+    }
+
+    /// The `flush!()` macro body: write every live shadow back to `regs`, the
+    /// authoritative frame any observer (interpreter fallback, callee frames'
+    /// snapshots, the host between batches) can read.
+    fn flush(&self, s: &mut String) {
+        for &r in &self.int {
+            let _ = writeln!(
+                s,
+                "if r{r}ok {{ wr(regs, Reg::from({r}u32), Val::Int(r{r}i)); }}"
+            );
+        }
+        for &r in &self.float {
+            let _ = writeln!(
+                s,
+                "if r{r}ok {{ wr(regs, Reg::from({r}u32), Val::Float(r{r}f)); }}"
+            );
         }
     }
 }
@@ -382,17 +444,28 @@ fn emit_body(w: &mut String, program: &Program, body: usize) {
     let sh = analyze(&ops, program.chunks[body_id].regs as u32);
     let _ = writeln!(
         w,
-        "\n#[allow(unused_variables, unused_mut, unused_assignments, unused_comparisons, clippy::all)]\n\
+        "\n#[allow(unused_variables, unused_mut, unused_assignments, unused_comparisons, unused_parens, clippy::all)]\n\
          fn body_{body}<'gc>(\n\
-         \x20   regs: &mut [Val<'gc>],\n\
+         \x20   thread: &mut ThreadState<'gc>,\n\
          \x20   code: &mut Decoder,\n\
          \x20   ctx: Ctx<'gc>,\n\
          \x20   strs: &StrInterner,\n\
-         \x20   frames: &[Frame],\n\
-         \x20   ops_left: &mut u64,\n\
+         \x20   chunks: &IdVec<BodyId, Chunk>,\n\
+         \x20   signatures: &IdVec<BodyId, Option<Function>>,\n\
          \x20   fuel: &mut usize,\n\
          \x20   op_ip: &mut usize,\n\
          ) -> RtResult<Flow<'gc>> {{"
+    );
+    let _ = writeln!(
+        w,
+        "    let base = thread.frames.last().unwrap().base;\n\
+         \x20   let nregs = chunks[thread.frames.last().unwrap().chunk].regs as usize;\n\
+         \x20   // the same raw-window idiom as `run_dispatch`'s `window()`: `regs` may\n\
+         \x20   // dangle after any `thread.regs` resize/truncate (inline `enter_call`,\n\
+         \x20   // a callee's return pop) — always rebuild it before the next use.\n\
+         \x20   let mut regs = unsafe {{\n\
+         \x20       std::slice::from_raw_parts_mut(thread.regs.as_mut_ptr().add(base), nregs)\n\
+         \x20   }};"
     );
     // Shadowed registers are initialized once per invocation, straight from
     // `regs` — which is authoritative even mid-body thanks to write-through.
@@ -417,31 +490,77 @@ fn emit_body(w: &mut String, program: &Program, body: usize) {
              \x20   }};"
         );
     }
+    // Deferred writeback: scalar writes go to the shadow locals only, and
+    // `flush!()` writes live shadows back to `regs` at every boundary where
+    // anything else can observe the frame — body exits (pause/fuel/error/
+    // interpreter fallback/`Flow::Call`), and just before an inlined
+    // `enter_call`. `return`s inside op arms get the flush from `defer`.
+    let _ = writeln!(w, "    macro_rules! flush {{ () => {{");
+    let mut flush_body = String::new();
+    sh.flush(&mut flush_body);
+    w.push_str(&flush_body);
+    let _ = writeln!(w, "    }}}}");
     // The driver's per-op bookkeeping, verbatim and in its own order. A body
     // that exits here leaves `code.ip` at the next unexecuted op, so the
     // driver re-enters cleanly — including its own paused/fuel top-checks.
     let _ = writeln!(w, "    loop {{");
     let _ = writeln!(
         w,
-        "        if ctx.state().paused.get() || *fuel == 0 {{ return Ok(Flow::Next); }}\n\
+        "        if ctx.state().paused.get() || *fuel == 0 {{ flush!(); return Ok(Flow::Next); }}\n\
          \x20       *fuel -= 1;\n\
-         \x20       if *ops_left == 0 {{ *op_ip = code.ip; return Err(RtErr::OutOfFuel); }}\n\
-         \x20       *ops_left -= 1;"
+         \x20       if thread.ops_left == 0 {{ *op_ip = code.ip; flush!(); return Err(RtErr::OutOfFuel); }}\n\
+         \x20       thread.ops_left -= 1;"
     );
     let _ = writeln!(w, "        match code.ip {{");
     for (i, (offset, op)) in ops.iter().enumerate() {
         let next = ops.get(i + 1).map(|(o, _)| *o).unwrap_or(usize::MAX);
-        emit_op(w, &sh, *offset, next, op);
+        let mut arm = String::new();
+        emit_op(&mut arm, &sh, *offset, next, op);
+        w.push_str(&defer(&arm, &sh));
     }
     // an ip outside the chunk's op stream can only come from a codegen bug --
     // hand it to the interpreter, which hits the same garbage decode either way
     let _ = writeln!(
         w,
-        "            _ => {{ *op_ip = code.ip; return step(regs, code, ctx, strs, frames); }}"
+        "            _ => {{ *op_ip = code.ip; flush!(); return step(regs, code, ctx, strs, &thread.frames); }}"
     );
     let _ = writeln!(w, "        }}");
     let _ = writeln!(w, "    }}");
     let _ = writeln!(w, "}}");
+}
+
+/// Post-processes one emitted op arm for deferred writeback:
+/// - every `return` first runs `flush!()`, restoring `regs` as the authoritative frame for whatever
+///   observes it next (the driver, an inlined callee's snapshot, the interpreter's cold dispatch);
+/// - every `rd(regs, Reg::from(Nu32))` on a shadowed register becomes a shadow-aware read — with
+///   write-through gone, `regs` there can be stale.
+fn defer(arm: &str, sh: &Sh) -> String {
+    let mut out = arm.replace("return ", "flush!(); return ");
+    // ...then reclaim the pointless ones. A `Flow::Return` destroys the
+    // frame — nothing observes its regs — except the root frame, which the
+    // host inspects after `run()`. The call fast-path's propagations are
+    // already flushed pre-`enter_call`.
+    out = out.replace(
+        "flush!(); return Ok(Flow::Return",
+        "if thread.frames.len() == 1 { flush!(); } return Ok(Flow::Return",
+    );
+    out = out.replace("flush!(); return res }", "return res }");
+    out = out.replace("flush!(); return Err(kind) }", "return Err(kind) }");
+    for &r in &sh.int {
+        let plain = format!("rd(regs, Reg::from({r}u32))");
+        out = out.replace(
+            &plain,
+            &format!("(if r{r}ok {{ Val::Int(r{r}i) }} else {{ {plain} }})"),
+        );
+    }
+    for &r in &sh.float {
+        let plain = format!("rd(regs, Reg::from({r}u32))");
+        out = out.replace(
+            &plain,
+            &format!("(if r{r}ok {{ Val::Float(r{r}f) }} else {{ {plain} }})"),
+        );
+    }
+    out
 }
 
 fn reg(r: Reg) -> String {
@@ -453,6 +572,84 @@ fn tgt(t: &BlockTarget) -> usize {
         panic!("unresolved BlockTarget in compiled program")
     };
     *o
+}
+
+/// The in-body call path: enter the callee frame ourselves (verbatim
+/// `enter_call`), recurse into its specialized body, and on `Flow::Return`
+/// run the driver's pop/`dst`-write/`ip`-restore — all without a driver
+/// round-trip. `Flow::Next`/`Err`/a `Flow::Call` from deeper (a callee at the
+/// cap) propagate unchanged: the frames are exactly as the driver would see
+/// them had it dispatched the callee itself. Depth at/over
+/// `INLINE_CALL_DEPTH` falls back to `Flow::Call` — `code.ip` is already at
+/// `next` (emitted before this) so the driver's enter_call saves the right
+/// resume slot.
+fn emit_call_fast(s: &mut String, dst: Reg, callee: &str, captures: &str, target: &str, sh: &Sh) {
+    let _ = writeln!(
+        s,
+        "if thread.frames.len() < INLINE_CALL_DEPTH {{
+            flush!();
+            match enter_call(thread, code, chunks, {callee}, {}, args.as_slice(), {captures}) {{
+                Ok(()) => {{
+                    let res = {f}(thread, code, ctx, strs, chunks, signatures, fuel, op_ip);
+                    // the callee's `enter_call` may have moved `thread.regs` —
+                    // rebuild the caller window before anything touches it
+                    // (`flush!()` on the propagate paths included)
+                    regs = unsafe {{
+                        std::slice::from_raw_parts_mut(thread.regs.as_mut_ptr().add(base), nregs)
+                    }};
+                    match res {{
+                        Ok(Flow::Return(v)) => {{
+                            let popped = thread.frames.pop().unwrap();
+                            thread.regs.truncate(popped.base);
+                            let caller = thread.frames.last().unwrap();
+                            code.ip = caller.ip;
+                            let caller_base = caller.base;
+                            thread.regs[caller_base + popped.return_reg as usize] = v;
+                            regs = unsafe {{
+                                std::slice::from_raw_parts_mut(thread.regs.as_mut_ptr().add(base), nregs)
+                            }};
+                        }}
+                        _ => {{ return res }},
+                    }}
+                }},
+                Err(kind) => {{ return Err(kind) }},
+            }}
+        }} else {{
+            return Ok(Flow::Call {{ target: {target}, dst: {}, args }});
+        }}",
+        reg(dst),
+        reg(dst),
+        f = callee_fn(callee)
+    );
+    // The callee's return wrote `regs[dst]` through `thread.regs` — a shadowed
+    // dst must refresh its local from the (possibly freshly typed) value.
+    if let Some(v) = sh.int(dst) {
+        let _ = writeln!(
+            s,
+            "{v} = match regs[{0}] {{ Val::Int(x) => {{ r{0}ok = true; x }}, _ => {{ r{0}ok = false; 0 }} }};",
+            dst.index()
+        );
+    } else if let Some(v) = sh.float(dst) {
+        let _ = writeln!(
+            s,
+            "{v} = match regs[{0}] {{ Val::Float(x) => {{ r{0}ok = true; x }}, _ => {{ r{0}ok = false; 0.0 }} }};",
+            dst.index()
+        );
+    }
+}
+
+/// The callee's body fn expression: `CallDirect` knows it statically
+/// (`body_N`), `Call` resolves through the module's `BODIES` table.
+fn callee_fn(callee: &str) -> String {
+    if let Some(i) = callee
+        .strip_prefix("BodyId::from(")
+        .and_then(|s| s.strip_suffix("u32)"))
+        .and_then(|s| s.parse::<usize>().ok())
+    {
+        format!("body_{i}")
+    } else {
+        format!("BODIES[{callee}.index()]")
+    }
 }
 
 fn access_kind(k: compile::AccessKind) -> &'static str {
@@ -526,55 +723,29 @@ fn emit_op(w: &mut String, sh: &Sh, offset: usize, next: usize, op: &Op) {
 
     match op {
         Op::Move { dst, src } => {
-            if let Some(d) = sh.int(*dst) {
-                // Copy(src) in `int` requires src ∈ int too — propagate the
-                // flag so a flag-false src poisons dst exactly as the copied
-                // non-Int Val would
-                let sflag = if sh.int(*src).is_some() {
-                    format!("r{}ok", src.index())
-                } else {
-                    format!("matches!(rd(regs, {}), Val::Int(_))", reg(*src))
-                };
-                let sv = if sh.int(*src).is_some() {
-                    format!("r{}i", src.index())
-                } else {
-                    format!(
-                        "match rd(regs, {}) {{ Val::Int(x) => x, _ => 0 }}",
-                        reg(*src)
-                    )
-                };
+            // Copy(src) in `int` requires src ∈ int too — propagate the flag so
+            // a flag-false src poisons dst exactly as the copied non-Int Val
+            // would; flag-false means `regs` is authoritative for dst, so write
+            // the (authoritative) src slot through
+            if let (Some(d), Some(sv)) = (sh.int(*dst), sh.int(*src)) {
                 wln!(
-                    "{d} = {sv}; r{didx}ok = {sflag}; wr(regs, {}, rd(regs, {})); code.ip = {next};",
+                    "{d} = {sv}; r{didx}ok = r{sidx}ok; if !r{didx}ok {{ wr(regs, {}, rd(regs, {})) }} code.ip = {next};",
                     reg(*dst),
                     reg(*src),
-                    didx = dst.index()
+                    didx = dst.index(),
+                    sidx = src.index()
                 );
-            } else if let Some(d) = sh.float(*dst) {
-                let sflag = if sh.float(*src).is_some() {
-                    format!("r{}ok", src.index())
-                } else {
-                    format!("matches!(rd(regs, {}), Val::Float(_))", reg(*src))
-                };
-                let sv = if sh.float(*src).is_some() {
-                    format!("r{}f", src.index())
-                } else {
-                    format!(
-                        "match rd(regs, {}) {{ Val::Float(x) => x, _ => 0.0 }}",
-                        reg(*src)
-                    )
-                };
+            } else if let (Some(d), Some(sv)) = (sh.float(*dst), sh.float(*src)) {
                 wln!(
-                    "{d} = {sv}; r{didx}ok = {sflag}; wr(regs, {}, rd(regs, {})); code.ip = {next};",
+                    "{d} = {sv}; r{didx}ok = r{sidx}ok; if !r{didx}ok {{ wr(regs, {}, rd(regs, {})) }} code.ip = {next};",
                     reg(*dst),
                     reg(*src),
-                    didx = dst.index()
+                    didx = dst.index(),
+                    sidx = src.index()
                 );
             } else {
-                wln!(
-                    "wr(regs, {}, rd(regs, {})); code.ip = {next};",
-                    reg(*dst),
-                    reg(*src)
-                );
+                sh.wr_val(&mut s, *dst, &sh.rdv(*src));
+                wln!("code.ip = {next};");
             }
         }
         Op::NewArray { dst } => {
@@ -647,7 +818,7 @@ fn emit_op(w: &mut String, sh: &Sh, offset: usize, next: usize, op: &Op) {
         Op::SetIndex { set, index, value } => {
             wln!("*op_ip = {offset};");
             wln!(
-                "set_index(ctx, rd(regs, {}), rd(regs, {}), rd(regs, {}))?;",
+                "if let Err(e) = set_index(ctx, rd(regs, {}), rd(regs, {}), rd(regs, {})) {{ return Err(e) }};",
                 reg(*set),
                 reg(*index),
                 reg(*value)
@@ -662,7 +833,7 @@ fn emit_op(w: &mut String, sh: &Sh, offset: usize, next: usize, op: &Op) {
         } => {
             wln!("*op_ip = {offset};");
             wln!(
-                "let v = get_index(ctx, rd(regs, {}), rd(regs, {}), {})?;",
+                "let v = match get_index(ctx, rd(regs, {}), rd(regs, {}), {}) {{ Ok(v) => v, Err(e) => {{ return Err(e) }} }};",
                 reg(*set),
                 reg(*index),
                 access_kind(*kind)
@@ -715,21 +886,16 @@ fn emit_op(w: &mut String, sh: &Sh, offset: usize, next: usize, op: &Op) {
                 let Constant::Int(v) = constant else {
                     unreachable!()
                 };
-                wln!(
-                    "{d} = {v}i64; r{}ok = true; wr(regs, {}, Val::Int({d})); code.ip = {next};",
-                    dst.index(),
-                    reg(*dst)
-                );
+                wln!("{d} = {v}i64; r{}ok = true; code.ip = {next};", dst.index(),);
             }
             (_, Some(d)) if matches!(constant, Constant::Float(_)) => {
                 let Constant::Float(v) = constant else {
                     unreachable!()
                 };
                 wln!(
-                    "{d} = f64::from_bits({}u64); r{}ok = true; wr(regs, {}, Val::Float({d})); code.ip = {next};",
+                    "{d} = f64::from_bits({}u64); r{}ok = true; code.ip = {next};",
                     v.to_bits(),
                     dst.index(),
-                    reg(*dst)
                 );
             }
             _ => {
@@ -748,7 +914,7 @@ fn emit_op(w: &mut String, sh: &Sh, offset: usize, next: usize, op: &Op) {
             );
         }
         Op::LoadEntry { dst, slot } => {
-            wln!("let base = frames.last().map(|f| f.base).unwrap_or(0);");
+            wln!("let base = thread.frames.last().map(|f| f.base).unwrap_or(0);");
             wln!(
                 "let v = unsafe {{ *regs.as_ptr().sub(base).add({}) }};",
                 slot.index()
@@ -756,7 +922,7 @@ fn emit_op(w: &mut String, sh: &Sh, offset: usize, next: usize, op: &Op) {
             wln!("wr(regs, {}, v); code.ip = {next};", reg(*dst));
         }
         Op::StoreEntry { slot, src } => {
-            wln!("let base = frames.last().map(|f| f.base).unwrap_or(0);");
+            wln!("let base = thread.frames.last().map(|f| f.base).unwrap_or(0);");
             wln!("let v = rd(regs, {});", reg(*src));
             wln!(
                 "unsafe {{ *regs.as_mut_ptr().sub(base).add({}) = v }};",
@@ -779,7 +945,8 @@ fn emit_op(w: &mut String, sh: &Sh, offset: usize, next: usize, op: &Op) {
         Op::ForNext { idx, bound, target } => {
             // shadowed-but-flag-clear falls back to `step`, whose arm hits the
             // same `unreachable!` the interpreter would
-            let bail = format!("*op_ip = {offset}; return step(regs, code, ctx, strs, frames)");
+            let bail =
+                format!("*op_ip = {offset}; return step(regs, code, ctx, strs, &thread.frames)");
             let i = match sh.int(*idx) {
                 Some(v) => format!("if r{}ok {{ {v} }} else {{ {bail} }}", idx.index()),
                 None => format!(
@@ -796,11 +963,7 @@ fn emit_op(w: &mut String, sh: &Sh, offset: usize, next: usize, op: &Op) {
             };
             wln!("let i = {i} + 1;");
             if sh.int(*idx).is_some() {
-                wln!(
-                    "r{id}i = i; r{id}ok = true; wr(regs, {}, Val::Int(i));",
-                    reg(*idx),
-                    id = idx.index()
-                );
+                wln!("r{id}i = i; r{id}ok = true; ", id = idx.index());
             } else {
                 wln!("wr(regs, {}, Val::Int(i));", reg(*idx));
             }
@@ -846,29 +1009,44 @@ fn emit_op(w: &mut String, sh: &Sh, offset: usize, next: usize, op: &Op) {
             wln!("    Val::Closure(c) => CallTarget::Closure(c),");
             wln!("    other => {{ *op_ip = {offset}; return Err(not_callable(other)); }}");
             wln!("}};");
+            // resolve `(body, captures)` exactly as the driver's `Flow::Call`
+            // handling does — the `Value` arm's signature check included
+            wln!("let (cb, captures): (BodyId, &[Val]) = match &target {{");
+            wln!("    CallTarget::Fn(b) | CallTarget::Value(b) => {{");
+            wln!("        if signatures.get(*b).and_then(|o| o.as_ref()).is_none() {{");
+            wln!("            *op_ip = {offset}; return Err(not_callable(Val::Fn(*b)));");
+            wln!("        }}");
+            wln!("        (*b, &[][..])");
+            wln!("    }}");
+            wln!("    CallTarget::Closure(c) => {{");
+            wln!("        let d = Gc::as_ref(c.0);");
+            wln!("        (d.function, d.captures.as_slice())");
+            wln!("    }}");
+            wln!("}};");
             wln!("let mut args = SmallVec::<[Val; 8]>::new();");
             for a in args {
                 wln!("args.push(rd(regs, {}));", reg(*a));
             }
             // `enter_call` saves `code.ip` as the caller's resume slot — in the
             // interpreter it's already past this op's operands by then, so the
-            // specialized arm must advance it before returning `Flow::Call`.
+            // specialized arm must advance it before either path.
             wln!("code.ip = {next}; *op_ip = {offset};");
-            wln!(
-                "return Ok(Flow::Call {{ target, dst: {}, args }});",
-                reg(*dst)
-            );
+            emit_call_fast(&mut s, *dst, "cb", "captures", "target", sh);
         }
         Op::CallDirect { dst, body, args } => {
+            let callee = format!("BodyId::from({}u32)", body.index());
             wln!("let mut args = SmallVec::<[Val; 8]>::new();");
             for a in args {
                 wln!("args.push(rd(regs, {}));", reg(*a));
             }
             wln!("code.ip = {next}; *op_ip = {offset};");
-            wln!(
-                "return Ok(Flow::Call {{ target: CallTarget::Fn(BodyId::from({}u32)), dst: {}, args }});",
-                body.index(),
-                reg(*dst)
+            emit_call_fast(
+                &mut s,
+                *dst,
+                &callee,
+                "&[]",
+                &format!("CallTarget::Fn({callee})"),
+                sh,
             );
         }
         Op::CallNative { dst, id, args } => {
@@ -888,11 +1066,13 @@ fn emit_op(w: &mut String, sh: &Sh, offset: usize, next: usize, op: &Op) {
             wln!("{{");
             wln!("    let mut stack = ctx.fixture::<DebugInfo>().stack.borrow_mut();");
             wln!("    stack.clear();");
-            wln!("    stack.extend(frames.iter().map(|f| (f.chunk, f.ip as u32)));");
+            wln!("    stack.extend(thread.frames.iter().map(|f| (f.chunk, f.ip as u32)));");
             wln!("    if let Some(top) = stack.last_mut() {{ top.1 = {next}u32; }}");
             wln!("}}");
             wln!("*op_ip = {offset};");
-            wln!("let v = native.call(ctx, &args)?;");
+            wln!(
+                "let v = match native.call(ctx, &args) {{ Ok(v) => v, Err(e) => {{ return Err(e) }} }};"
+            );
             wln!("wr(regs, {}, v);", reg(*dst));
             wln!("code.ip = {next};");
         }
@@ -951,9 +1131,8 @@ fn emit_op(w: &mut String, sh: &Sh, offset: usize, next: usize, op: &Op) {
             wln!("}};");
             if let Some(d) = sh.int(*dst) {
                 wln!(
-                    "{d} = len as i64; r{}ok = true; wr(regs, {}, Val::Int({d})); code.ip = {next};",
+                    "{d} = len as i64; r{}ok = true; code.ip = {next};",
                     dst.index(),
-                    reg(*dst)
                 );
             } else {
                 wln!(
@@ -965,7 +1144,7 @@ fn emit_op(w: &mut String, sh: &Sh, offset: usize, next: usize, op: &Op) {
         Op::ToFloat { dst, src } => {
             let i = match sh.int(*src) {
                 Some(v) => format!(
-                    "if r{}ok {{ {v} }} else {{ *op_ip = {offset}; return step(regs, code, ctx, strs, frames) }}",
+                    "if r{}ok {{ {v} }} else {{ *op_ip = {offset}; return step(regs, code, ctx, strs, &thread.frames) }}",
                     src.index()
                 ),
                 None => format!(
@@ -975,9 +1154,8 @@ fn emit_op(w: &mut String, sh: &Sh, offset: usize, next: usize, op: &Op) {
             };
             if let Some(d) = sh.float(*dst) {
                 wln!(
-                    "{d} = {i} as f64; r{}ok = true; wr(regs, {}, Val::Float({d})); code.ip = {next};",
+                    "{d} = {i} as f64; r{}ok = true; code.ip = {next};",
                     dst.index(),
-                    reg(*dst)
                 );
             } else {
                 wln!(
@@ -989,7 +1167,7 @@ fn emit_op(w: &mut String, sh: &Sh, offset: usize, next: usize, op: &Op) {
         Op::Sqrt { dst, src } => {
             let f = match sh.float(*src) {
                 Some(v) => format!(
-                    "if r{}ok {{ {v} }} else {{ *op_ip = {offset}; return step(regs, code, ctx, strs, frames) }}",
+                    "if r{}ok {{ {v} }} else {{ *op_ip = {offset}; return step(regs, code, ctx, strs, &thread.frames) }}",
                     src.index()
                 ),
                 None => format!(
@@ -999,9 +1177,8 @@ fn emit_op(w: &mut String, sh: &Sh, offset: usize, next: usize, op: &Op) {
             };
             if let Some(d) = sh.float(*dst) {
                 wln!(
-                    "{d} = {f}.sqrt(); r{}ok = true; wr(regs, {}, Val::Float({d})); code.ip = {next};",
+                    "{d} = {f}.sqrt(); r{}ok = true; code.ip = {next};",
                     dst.index(),
-                    reg(*dst)
                 );
             } else {
                 wln!(
@@ -1040,7 +1217,10 @@ fn emit_op(w: &mut String, sh: &Sh, offset: usize, next: usize, op: &Op) {
                     }
                     OpFormatPart::Value(r) => {
                         wln!("*op_ip = {offset};");
-                        wln!("ctx.to_string_into(&mut text, rd(regs, {}))?;", reg(*r));
+                        wln!(
+                            "if let Err(e) = ctx.to_string_into(&mut text, rd(regs, {})) {{ return Err(e) }};",
+                            reg(*r)
+                        );
                     }
                 }
             }
@@ -1057,7 +1237,7 @@ fn emit_op(w: &mut String, sh: &Sh, offset: usize, next: usize, op: &Op) {
         } => {
             wln!("*op_ip = {offset};");
             wln!(
-                "let v = bin(rd(regs, {}), ctx, rd(regs, {}), BinOp::{op:?})?;",
+                "let v = match bin(rd(regs, {}), ctx, rd(regs, {}), BinOp::{op:?}) {{ Ok(v) => v, Err(e) => {{ return Err(e) }} }};",
                 reg(*left),
                 reg(*right)
             );
@@ -1066,7 +1246,7 @@ fn emit_op(w: &mut String, sh: &Sh, offset: usize, next: usize, op: &Op) {
         Op::Unary { dst, op, src } => {
             wln!("*op_ip = {offset};");
             wln!(
-                "let v = unary(rd(regs, {}), ctx, UnaryOp::{op:?})?;",
+                "let v = match unary(rd(regs, {}), ctx, UnaryOp::{op:?}) {{ Ok(v) => v, Err(e) => {{ return Err(e) }} }};",
                 reg(*src)
             );
             wln!("wr(regs, {}, v); code.ip = {next};", reg(*dst));
@@ -1119,9 +1299,8 @@ fn emit_op(w: &mut String, sh: &Sh, offset: usize, next: usize, op: &Op) {
             wln!("if b == 0 {{ *op_ip = {offset}; return Err(RtErr::ModByZero); }}");
             if let Some(d) = sh.int(*dst) {
                 wln!(
-                    "{d} = {a} % b; r{}ok = true; wr(regs, {}, Val::Int({d})); code.ip = {next};",
+                    "{d} = {a} % b; r{}ok = true; code.ip = {next};",
                     dst.index(),
-                    reg(*dst)
                 );
             } else {
                 wln!(
@@ -1280,9 +1459,8 @@ fn emit_op(w: &mut String, sh: &Sh, offset: usize, next: usize, op: &Op) {
             wln!("if {val}i64 == 0 {{ *op_ip = {offset}; return Err(RtErr::ModByZero); }}");
             if let Some(d) = sh.int(*dst) {
                 wln!(
-                    "{d} = {a} % {val}i64; r{}ok = true; wr(regs, {}, Val::Int({d})); code.ip = {next};",
+                    "{d} = {a} % {val}i64; r{}ok = true; code.ip = {next};",
                     dst.index(),
-                    reg(*dst)
                 );
             } else {
                 wln!(

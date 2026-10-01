@@ -10,6 +10,9 @@ pub mod generated {
     pub mod basic {
         include!(concat!(env!("OUT_DIR"), "/basic.rs"));
     }
+    pub mod deep {
+        include!(concat!(env!("OUT_DIR"), "/deep.rs"));
+    }
     pub mod cold {
         include!(concat!(env!("OUT_DIR"), "/cold.rs"));
     }
