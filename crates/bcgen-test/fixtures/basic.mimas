@@ -1,0 +1,19 @@
+fn fib(n: int) -> int {
+    if n <= 1 { n } else { fib(n - 1) + fib(n - 2) }
+}
+
+fn sum(xs: [int]) -> int {
+    let total = 0;
+    for x in xs {
+        total += x;
+    }
+    total
+}
+
+struct Point { x: int, y: int }
+
+let add = |a: int, b: int| -> int { a + b };
+let p = Point { x = 3, y = 4 };
+keep(fib(10));
+keep(add(1, 2));
+let TEST_VALUE = fib(12) + sum([1, 2, 3, 4]) + p.x * p.y + host_add(40, 2);

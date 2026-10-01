@@ -8,7 +8,7 @@ use solve::components::AdtId;
 pub use solve::components::Vis;
 
 use crate::{
-    BinOp, BlockTarget, BodyId, Constant, ConstantCode, OpCode, OpFormatPart, OpFormatPartCode,
+    BinOp, BlockTarget, BodyId, Constant, ConstantCode, Op, OpCode, OpFormatPart, OpFormatPartCode,
     Reg, UnaryOp,
 };
 
@@ -76,6 +76,33 @@ impl Module {
     pub fn module(&self, path: &str) -> Option<&Module> {
         path.split("::")
             .try_fold(self, |module, name| module.modules.get(name))
+    }
+}
+
+impl Program {
+    /// Decode one body/chunk's op stream into `(offset, op)` pairs — offsets are
+    /// absolute into [`Self::bytes`] (so `BlockTarget::ByteOffset` targets and
+    /// generated `code.ip` writes line up). The chunk's stream ends at the next
+    /// chunk's offset or the end of `bytes`.
+    pub fn ops(&self, body: BodyId) -> Vec<(usize, Op)> {
+        let chunk = &self.chunks[body];
+        let end = self
+            .chunks
+            .iter()
+            .map(|(_, c)| c.offset)
+            .filter(|o| *o > chunk.offset)
+            .min()
+            .unwrap_or(self.bytes.len());
+        let mut decoder = Decoder {
+            bytes: self.bytes.clone(),
+            ip: chunk.offset,
+        };
+        let mut out = Vec::new();
+        while decoder.ip < end {
+            let offset = decoder.ip;
+            out.push((offset, Op::decode(&mut decoder)));
+        }
+        out
     }
 }
 

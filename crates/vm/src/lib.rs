@@ -11,6 +11,7 @@ pub use val::*;
 pub mod adt;
 pub mod anon;
 pub mod api;
+pub mod bc;
 pub mod conversion;
 pub mod freeze;
 mod heap;

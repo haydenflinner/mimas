@@ -1,0 +1,13 @@
+fn area(r: float) -> float { 3.14159 * r * r }
+
+let d = ~{ a = 1, b = 2 };
+let hits = 0;
+if d["a"]! + d["b"]! == 3 { hits += 1; }
+let i = 0;
+while i < 10 { i += 1; hits += 1; }
+let name = "mimas";
+keep(name);
+let maybe: int? = null;
+let n = maybe ?? 7;
+keep(n);
+let TEST_VALUE = f"{name}:{hits}:{area(1.0)}:{n}";

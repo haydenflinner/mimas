@@ -1,4 +1,7 @@
-use crate::{BinOp, BlockId, BodyId, Constant, Ctx, Encoder, Inst, OperandKind, Reg, UnaryOp};
+use crate::{
+    BinOp, BlockId, BodyId, Constant, Ctx, Decode, Decoder, Encoder, Inst, OperandKind, Reg,
+    UnaryOp,
+};
 use api::NativeId;
 use parse::AccessKind;
 use shared::StrId;
@@ -157,12 +160,67 @@ macro_rules! define_op {
     ( $( $name:ident [ $( ($f:ident, $ty:ty, $w:ident) )* ]; )* ) => {
         #[repr(u8)]
         #[derive(Debug, Clone)]
-        pub(crate) enum Op {
+        pub enum Op {
             $( $name { $( $f: $ty ),* }, )*
         }
     };
 }
 for_each_op!(define_op);
+
+// field decode mirrors `encode_field` -- the `for_each_op` wire kinds are the contract between
+// the compiler's Encoder and anyone reading `Program::bytes` back (the bc generator being the
+// first such consumer). Most kinds have a `Decode` impl already; the ad-hoc ones decode inline.
+macro_rules! decode_field {
+    ($code:ident, reg, $ty:ty) => {
+        <$ty>::decode($code)
+    };
+    ($code:ident, u32, $ty:ty) => {
+        <$ty>::from($code.u32())
+    };
+    ($code:ident, i64, $ty:ty) => {
+        $code.i64()
+    };
+    ($code:ident, enum8, $ty:ty) => {
+        <$ty>::decode($code)
+    };
+    ($code:ident, bool, $ty:ty) => {
+        <$ty>::decode($code)
+    };
+    ($code:ident, jump, $ty:ty) => {
+        <$ty>::decode($code)
+    };
+    ($code:ident, konst, $ty:ty) => {
+        <$ty>::decode($code)
+    };
+    ($code:ident, regs, $_ty:ty) => {{
+        let n = $code.u8() as usize;
+        (0..n).map(|_| Reg::decode($code)).collect()
+    }};
+    ($code:ident, fparts, $_ty:ty) => {{
+        let n = $code.u16() as usize;
+        (0..n).map(|_| OpFormatPart::decode($code)).collect()
+    }};
+    ($code:ident, jumptable, $_ty:ty) => {{
+        let n = $code.u16() as usize;
+        (0..n).map(|_| BlockTarget::decode($code)).collect()
+    }};
+}
+
+macro_rules! define_op_decode {
+    ( $( $name:ident [ $( ($f:ident, $ty:ty, $w:ident) )* ]; )* ) => {
+        impl Decode for Op {
+            /// Decodes one op at the decoder's current ip, advancing it past the op's bytes.
+            /// Jump targets come back as `BlockTarget::ByteOffset`, absolute into
+            /// `Program::bytes`.
+            fn decode(code: &mut Decoder) -> Self {
+                match OpCode::decode(code) {
+                    $( OpCode::$name => Op::$name { $( $f: decode_field!(code, $w, $ty) ),* }, )*
+                }
+            }
+        }
+    };
+}
+for_each_op!(define_op_decode);
 
 macro_rules! define_opcode {
     ( $( $name:ident [ $($_fields:tt)* ]; )* ) => {
@@ -402,7 +460,7 @@ impl Op {
         unsafe { *(self as *const Self as *const u8) }
     }
 
-    pub fn from_inst(inst: &Inst, mut ctx: Ctx<'_>) -> Self {
+    pub(crate) fn from_inst(inst: &Inst, mut ctx: Ctx<'_>) -> Self {
         match inst {
             Inst::Constant(constant) => Op::LoadConst {
                 dst: ctx.reg(),

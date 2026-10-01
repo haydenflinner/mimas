@@ -194,6 +194,10 @@ pub struct Vm {
     pub(crate) field_names: Vec<Vec<String>>,
     pub(crate) root: Rc<Module>,
     pub(crate) registry: Registry,
+    /// bcgen-specialized body fns, one slot per `BodyId` (`None` = no generated
+    /// body, that chunk dispatches through `step_one` as usual). Installed via
+    /// [`Vm::install_bc`].
+    pub(crate) bc: Option<Vec<Option<crate::bc::BodyFn>>>,
 }
 
 impl Vm {
@@ -220,7 +224,16 @@ impl Vm {
             field_names: Vec::new(),
             root: Rc::default(),
             registry: Registry::new(),
+            bc: None,
         }
+    }
+
+    /// Install bcgen-specialized body fns, one slot per `BodyId`. Bodies with a
+    /// `Some` entry dispatch through the generated fn instead of `step_one`;
+    /// generated code still produces the same `Flow`s, so calls, returns, fuel,
+    /// pauses and snapshots ride the usual machinery.
+    pub fn install_bc(&mut self, bodies: Vec<Option<crate::bc::BodyFn>>) {
+        self.bc = Some(bodies);
     }
 
     /// Load `program`, replacing whatever this Vm was running.
@@ -361,6 +374,7 @@ impl Vm {
                 c_strs: strs,
                 arena,
                 sources,
+                bc,
                 ..
             } = self;
             let done = arena.mutate(|mc, state| {
@@ -374,6 +388,7 @@ impl Vm {
                     strs,
                     sources,
                     &mut thread,
+                    bc.as_deref(),
                     FUEL,
                     1,
                 )?;
@@ -409,6 +424,7 @@ impl Vm {
                 c_strs: strs,
                 arena,
                 sources,
+                bc,
                 ..
             } = self;
             let (done, paused) = arena.mutate(|mc, state| {
@@ -422,6 +438,7 @@ impl Vm {
                     strs,
                     sources,
                     &mut thread,
+                    bc.as_deref(),
                     FUEL,
                     1,
                 )?;
@@ -437,7 +454,8 @@ impl Vm {
     /// Ops left on the entry budget set by [`Vm::set_op_budget`] —
     /// `budget - ops_left()` is what the last entry consumed.
     pub fn ops_left(&self) -> u64 {
-        self.arena.mutate(|mc, state| state.thread.borrow_mut(mc).ops_left)
+        self.arena
+            .mutate(|mc, state| state.thread.borrow_mut(mc).ops_left)
     }
 }
 
@@ -466,7 +484,8 @@ impl<T: 'static> std::ops::Deref for FixtureRef<T> {
 
 /// What `step_one` hands back to the dispatch loop: keep going, or a frame transition that has
 /// to touch `thread` -- and so can only run once the register window borrow has been dropped.
-enum Flow<'gc> {
+/// `pub` for `bc`-generated bodies, which produce the same `Flow`s.
+pub enum Flow<'gc> {
     Next,
     Call {
         target: CallTarget<'gc>,
@@ -476,7 +495,8 @@ enum Flow<'gc> {
     Return(Val<'gc>),
 }
 
-enum CallTarget<'gc> {
+/// `pub` for `bc`-generated bodies — see [`Flow`].
+pub enum CallTarget<'gc> {
     Fn(BodyId),
     Value(BodyId),
     Closure(Closure<'gc>),
@@ -711,6 +731,7 @@ fn run_dispatch<'gc>(
     strs: &StrInterner,
     sources: &Sources,
     thread: &mut ThreadState<'gc>,
+    bc: Option<&[Option<crate::bc::BodyFn>]>,
     mut fuel: usize,
     stop_depth: usize,
 ) -> Result<bool, Error> {
@@ -731,23 +752,46 @@ fn run_dispatch<'gc>(
         if fuel == 0 {
             return Ok(false);
         }
-        fuel -= 1;
-        let op_ip = code.ip;
         // the host's budget for this entry (checks, live scenes, game frames): a loop with no
         // end becomes an error instead of a hung page
         if thread.ops_left == 0 {
-            return Err(locate(RtErr::OutOfFuel, op_ip, thread, chunks, sources));
+            return Err(locate(RtErr::OutOfFuel, code.ip, thread, chunks, sources));
         }
-        thread.ops_left -= 1;
-        #[cfg(feature = "op-count")]
-        op_count::COUNTS[code.bytes[op_ip] as usize]
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // SAFETY: regs_ptr/regs_len describe the current top frame's window
         // (regs[base..base+count]), refreshed after every resize/truncate below. No op between
         // refreshes touches thread.regs, so the pointer stays valid and this is the only live
         // reference into the window.
         let regs = unsafe { std::slice::from_raw_parts_mut(regs_ptr, regs_len) };
-        match step_one(regs, code, ctx, strs, &thread.frames) {
+        // a body with a bcgen-generated fn runs it instead of `step_one` -- same
+        // `Flow` contract, just pre-decoded ops. Looping bodies decrement fuel
+        // and ops_left themselves and report the faulting ip via `op_ip`.
+        let step = bc.and_then(|t| {
+            t.get(thread.frames.last().unwrap().chunk.index())
+                .copied()
+                .flatten()
+        });
+        let mut op_ip = code.ip;
+        let res = match step {
+            Some(f) => f(
+                regs,
+                code,
+                ctx,
+                strs,
+                &thread.frames,
+                &mut thread.ops_left,
+                &mut fuel,
+                &mut op_ip,
+            ),
+            None => {
+                fuel -= 1;
+                thread.ops_left -= 1;
+                #[cfg(feature = "op-count")]
+                op_count::COUNTS[code.bytes[op_ip] as usize]
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                step_one(regs, code, ctx, strs, &thread.frames)
+            }
+        };
+        match res {
             Ok(Flow::Next) => {}
             Ok(Flow::Call { target, dst, args }) => {
                 let (body, captures): (BodyId, &[Val<'gc>]) = match &target {
@@ -829,7 +873,7 @@ fn window<'gc>(
 /// violation but aren't: their SmallVec is built straight into the `Flow` return slot, which
 /// lives in the caller's frame, not this one.)
 #[inline(never)]
-fn step_one<'gc>(
+pub(crate) fn step_one<'gc>(
     regs: &mut [Val<'gc>],
     code: &mut Decoder,
     ctx: Ctx<'gc>,
@@ -1247,7 +1291,8 @@ fn enter_call<'gc>(
 /// doesn't pay for the capture.
 #[cold]
 #[inline(never)]
-fn not_callable(callee: Val<'_>) -> RtErr {
+#[doc(hidden)]
+pub fn not_callable(callee: Val<'_>) -> RtErr {
     RtErr::NotCallable {
         callee: callee.capture(),
     }
@@ -1278,6 +1323,7 @@ fn inject_call<'gc>(
     signatures: &IdVec<BodyId, Option<Function>>,
     strs: &StrInterner,
     sources: &Sources,
+    thread_bc: Option<&[Option<crate::bc::BodyFn>]>,
     body: BodyId,
     values: &[Val<'gc>],
     captures: &[Val<'gc>],
@@ -1305,6 +1351,7 @@ fn inject_call<'gc>(
             strs,
             sources,
             &mut thread,
+            thread_bc,
             usize::MAX,
             depth + 1,
         );
@@ -1363,7 +1410,8 @@ fn locate(
 }
 
 #[inline(always)]
-fn get_index<'gc>(
+#[doc(hidden)]
+pub fn get_index<'gc>(
     ctx: Ctx<'gc>,
     set: Val<'gc>,
     index: Val<'gc>,
@@ -1410,7 +1458,13 @@ fn get_index<'gc>(
 }
 
 #[inline(always)]
-fn set_index<'gc>(ctx: Ctx<'gc>, set: Val<'gc>, index: Val<'gc>, value: Val<'gc>) -> RtResult<()> {
+#[doc(hidden)]
+pub fn set_index<'gc>(
+    ctx: Ctx<'gc>,
+    set: Val<'gc>,
+    index: Val<'gc>,
+    value: Val<'gc>,
+) -> RtResult<()> {
     #[inline(always)]
     fn pos(i: i64, len: usize) -> RtResult<usize> {
         let u = usize::try_from(i).map_err(|_| RtErr::IndexOutOfBounds)?;
@@ -1438,7 +1492,8 @@ fn set_index<'gc>(ctx: Ctx<'gc>, set: Val<'gc>, index: Val<'gc>, value: Val<'gc>
     Ok(())
 }
 
-fn contains<'gc>(needle: Val<'gc>, haystack: Val<'gc>, condition: bool) -> Val<'gc> {
+#[doc(hidden)]
+pub fn contains<'gc>(needle: Val<'gc>, haystack: Val<'gc>, condition: bool) -> Val<'gc> {
     let c = match haystack {
         Val::Array(a) => a.0.borrow().contains(&needle),
         Val::Dict(d) => {
@@ -1465,7 +1520,8 @@ fn contains<'gc>(needle: Val<'gc>, haystack: Val<'gc>, condition: bool) -> Val<'
 
 #[cold]
 #[inline(never)]
-fn bin_cold<'gc>(
+#[doc(hidden)]
+pub fn bin_cold<'gc>(
     regs: &mut [Val<'gc>],
     dst: Reg,
     left: Reg,
@@ -1480,7 +1536,8 @@ fn bin_cold<'gc>(
 
 #[cold]
 #[inline(never)]
-fn bin_cold_imm_int<'gc>(
+#[doc(hidden)]
+pub fn bin_cold_imm_int<'gc>(
     regs: &mut [Val<'gc>],
     dst: Reg,
     left: Reg,
@@ -1495,7 +1552,8 @@ fn bin_cold_imm_int<'gc>(
 
 #[cold]
 #[inline(never)]
-fn bin_cold_imm_float<'gc>(
+#[doc(hidden)]
+pub fn bin_cold_imm_float<'gc>(
     regs: &mut [Val<'gc>],
     dst: Reg,
     left: Reg,
@@ -1511,7 +1569,8 @@ fn bin_cold_imm_float<'gc>(
 #[cold]
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
-fn branch_cold<'gc>(
+#[doc(hidden)]
+pub fn branch_cold<'gc>(
     regs: &mut [Val<'gc>],
     code: &mut Decoder,
     target: usize,
@@ -1534,7 +1593,8 @@ fn branch_cold<'gc>(
 #[cold]
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
-fn branch_cold_imm_int<'gc>(
+#[doc(hidden)]
+pub fn branch_cold_imm_int<'gc>(
     regs: &mut [Val<'gc>],
     code: &mut Decoder,
     target: usize,
@@ -1557,7 +1617,8 @@ fn branch_cold_imm_int<'gc>(
 #[cold]
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
-fn branch_cold_imm_float<'gc>(
+#[doc(hidden)]
+pub fn branch_cold_imm_float<'gc>(
     regs: &mut [Val<'gc>],
     code: &mut Decoder,
     target: usize,
@@ -1582,7 +1643,8 @@ fn branch_cold_imm_float<'gc>(
 /// strictly a win. Reached via the wildcard arm with `return cold_dispatch(...)`.
 #[cold]
 #[inline(never)]
-fn cold_dispatch<'gc>(
+#[doc(hidden)]
+pub fn cold_dispatch<'gc>(
     code: &mut Decoder,
     regs: &mut [Val<'gc>],
     ctx: Ctx<'gc>,
@@ -1750,7 +1812,8 @@ fn cold_dispatch<'gc>(
 
 /// Convert a compile-time `Constant` into a runtime `Val<'gc>`. Str constants resolve
 /// through the chunk's string pool into the arena's interner.
-fn constant_to_val<'gc>(c: Constant, ctx: Ctx<'gc>, c_cstrs: &StrInterner) -> Val<'gc> {
+#[doc(hidden)]
+pub fn constant_to_val<'gc>(c: Constant, ctx: Ctx<'gc>, c_cstrs: &StrInterner) -> Val<'gc> {
     match c {
         Constant::Bool(b) => Val::Bool(b),
         Constant::Int(i) => Val::Int(i),
@@ -1880,6 +1943,7 @@ impl Vm {
             signatures,
             arena,
             sources,
+            bc,
             ..
         } = self;
         arena.mutate(|mc, state| {
@@ -1898,6 +1962,7 @@ impl Vm {
                     strs,
                     sources,
                     &mut thread,
+                    bc.as_deref(),
                     usize::MAX,
                     stop_depth,
                 )?;
@@ -1980,6 +2045,7 @@ impl Vm {
             c_strs: strs,
             arena,
             sources,
+            bc,
             ..
         } = self;
         let result = arena.mutate(|mc, state| {
@@ -1992,6 +2058,7 @@ impl Vm {
                 signatures,
                 strs,
                 sources,
+                bc.as_deref(),
                 f.body,
                 &values,
                 &[],
@@ -2034,6 +2101,7 @@ impl Vm {
             arena,
             sources,
             signatures,
+            bc,
             ..
         } = self;
         let result = arena.mutate(|mc, state| {
@@ -2070,7 +2138,16 @@ impl Vm {
             // `enter_call` is what rejects a wrong argument count, for the host and script alike
             let values = call_args(ctx, strs, signature, args);
             let value = inject_call(
-                ctx, code, chunks, signatures, strs, sources, body, &values, captures,
+                ctx,
+                code,
+                chunks,
+                signatures,
+                strs,
+                sources,
+                bc.as_deref(),
+                body,
+                &values,
+                captures,
             )?;
             let value = R::from_value(ctx, value).map_err(|err| Error::msg(RtErr::from(err)))?;
             Ok((value, then(ctx)))
@@ -2125,6 +2202,7 @@ impl Vm {
                 arena,
                 sources,
                 field_names,
+                bc,
                 ..
             } = self;
             arena.mutate(|mc, state| {
@@ -2142,6 +2220,7 @@ impl Vm {
                         strs,
                         sources,
                         &mut thread,
+                        bc.as_deref(),
                         usize::MAX,
                         stop_depth,
                     )?;
@@ -2203,6 +2282,7 @@ impl Vm {
             arena,
             sources,
             methods,
+            bc,
             ..
         } = self;
         arena.mutate(|mc, state| {
@@ -2242,6 +2322,7 @@ impl Vm {
                 strs,
                 sources,
                 &mut thread,
+                bc.as_deref(),
                 usize::MAX,
                 stop_depth,
             )
@@ -2269,6 +2350,7 @@ impl Vm {
             sources,
             methods,
             field_names,
+            bc,
             ..
         } = self;
         arena.mutate(|mc, state| {
@@ -2306,6 +2388,7 @@ impl Vm {
                 strs,
                 sources,
                 &mut thread,
+                bc.as_deref(),
                 usize::MAX,
                 stop_depth,
             )
@@ -2336,6 +2419,7 @@ impl Vm {
             sources,
             methods,
             field_names,
+            bc,
             ..
         } = self;
         arena.mutate(|mc, state| {
@@ -2365,6 +2449,7 @@ impl Vm {
                         strs,
                         sources,
                         &mut thread,
+                        bc.as_deref(),
                         usize::MAX,
                         stop_depth,
                     )
@@ -2395,6 +2480,7 @@ impl Vm {
             signatures,
             arena,
             sources,
+            bc,
             ..
         } = self;
         // A step is a fresh entry — clear `paused` or a prior yield would
@@ -2411,6 +2497,7 @@ impl Vm {
                 strs,
                 sources,
                 &mut thread,
+                bc.as_deref(),
                 1,
                 1,
             )?;
@@ -2683,12 +2770,8 @@ impl Vm {
     /// Load a [`compile_parts`] program into this Vm — same post-load
     /// wiring as `compile_files`, with this Vm's arena installing the
     /// natives fresh (natives live per-Vm, in State fixtures).
-    pub fn load_prebuilt<F>(
-        &mut self,
-        program: compile::Program,
-        sources: Sources,
-        install_lib: F,
-    ) where
+    pub fn load_prebuilt<F>(&mut self, program: compile::Program, sources: Sources, install_lib: F)
+    where
         F: for<'gc> FnOnce(&mut crate::api::Api<'_, 'gc>),
     {
         let library = self.install_library(install_lib);
