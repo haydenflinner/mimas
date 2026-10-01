@@ -2519,10 +2519,19 @@ impl Vm {
                     let mut locals_inspect: Vec<(String, Inspect)> = locals
                         .iter()
                         .map(|&(name, reg)| {
-                            (
-                                name.clone(),
-                                window[reg.index()].inspect(&struct_names, field_names, &mut seen),
-                            )
+                            let v = window[reg.index()];
+                            let mut i = v.inspect(&struct_names, field_names, &mut seen);
+                            if matches!(i, Inspect::Cycle) {
+                                // `v` only reads as a cycle because another
+                                // local already expanded this shared object —
+                                // not because it cycles through itself. Give
+                                // the alias its own pass so the name still
+                                // resolves to real content (e.g. `let w =
+                                // world` in game-kit's loop).
+                                let mut fresh = std::collections::HashSet::new();
+                                i = v.inspect(&struct_names, field_names, &mut fresh);
+                            }
+                            (name.clone(), i)
                         })
                         .collect();
                     let mut locals: Vec<(String, Captured)> = locals
@@ -2558,6 +2567,29 @@ impl Vm {
                     }
                 })
                 .collect()
+        })
+    }
+
+    /// One live local by name — the innermost frame's own locals, then the
+    /// entry frame's globals, matching [`frames()`]'s `locals_inspect`
+    /// resolution — inspected with a fresh `seen` so an aliased local
+    /// always resolves to real content instead of [`Inspect::Cycle`].
+    /// The cheap single-name version for callers that read one path per
+    /// step and shouldn't pay to inspect every local of every frame.
+    pub fn local_inspect(&mut self, name: &str) -> Option<Inspect> {
+        let chunks = &self.chunks;
+        let field_names = &self.field_names;
+        self.arena.mutate(|_mc, state| {
+            let struct_names = state.struct_names.borrow();
+            let t = state.thread.borrow();
+            for f in t.frames.iter().rev() {
+                if let Some(&reg) = chunks[f.chunk].locals.get(name) {
+                    let v = t.regs[f.base + reg.index()];
+                    let mut seen = std::collections::HashSet::new();
+                    return Some(v.inspect(&struct_names, field_names, &mut seen));
+                }
+            }
+            None
         })
     }
 
