@@ -27,6 +27,17 @@ pub enum Val<'gc> {
     Fn(#[collect(require_static)] BodyId),
     Str(Str<'gc>),
     Array(Array<'gc>),
+    /// A sequence backed by a homogeneous primitive store (`Vec<i64>` /
+    /// `Vec<f64>`) instead of `Vec<Val>` — the structure-of-arrays twin of
+    /// `Array`, born from `[]`/typed literals and demoting to a real `Array`
+    /// in place on the first out-of-kind write. Distinct tag on purpose:
+    /// every consumer that pattern-matches `Val::Array` (bcgen/JIT inline
+    /// paths included) misses this and falls through to the helpers that box
+    /// elements back into `Val`s. Semantically identical to `Array`.
+    IntArray(IntArray<'gc>),
+    /// Same storage as [`Val::IntArray`]; the tag records that the sequence
+    /// was born from float content (see [`ArrayStore`]).
+    FloatArray(FloatArray<'gc>),
     Dict(Dict<'gc>),
     Instance(Instance<'gc>),
     Closure(Closure<'gc>),
@@ -61,6 +72,20 @@ impl<'gc> PartialEq for Val<'gc> {
             (Val::Str(a), Val::Str(b)) => a == b,
             (Val::Array(a), Val::Array(b)) => {
                 Gc::ptr_eq(a.0, b.0) || *a.0.borrow() == *b.0.borrow()
+            }
+            // typed arrays compare element-wise against everything array-like --
+            // `[1, 2] == [1, 2]` regardless of which side stores raw `i64`s
+            (Val::IntArray(a), Val::IntArray(b))
+            | (Val::IntArray(a), Val::FloatArray(b))
+            | (Val::FloatArray(a), Val::IntArray(b))
+            | (Val::FloatArray(a), Val::FloatArray(b)) => {
+                Gc::ptr_eq(a.0, b.0) || a.0.borrow().store_eq(&b.0.borrow())
+            }
+            (Val::Array(a), Val::IntArray(b)) | (Val::Array(a), Val::FloatArray(b)) => {
+                b.0.borrow().eq_slice(&a.0.borrow())
+            }
+            (Val::IntArray(b), Val::Array(a)) | (Val::FloatArray(b), Val::Array(a)) => {
+                b.0.borrow().eq_slice(&a.0.borrow())
             }
             (Val::Dict(a), Val::Dict(b)) => Gc::ptr_eq(a.0, b.0) || *a.0.borrow() == *b.0.borrow(),
             (Val::Instance(a), Val::Instance(b)) => {
@@ -125,12 +150,59 @@ impl<'gc> Val<'gc> {
             None
         }
     }
+    /// The untyped `Array` handle only — deliberately does *not* match the
+    /// typed variants, so call sites that borrow the `Vec<Val>` directly (the
+    /// bcgen/JIT inline paths) can't misread a primitive store. Anything that
+    /// wants "any sequence" uses [`seq_len`](Self::seq_len)/
+    /// [`seq_get`](Self::seq_get) or [`as_untyped_array`](Self::as_untyped_array).
     #[inline]
     pub fn as_array(self) -> Option<Array<'gc>> {
         if let Val::Array(a) = self {
             Some(a)
         } else {
             None
+        }
+    }
+
+    /// `true` for every sequence shape — `Array`, `IntArray`, `FloatArray`.
+    #[inline]
+    pub fn is_seq(&self) -> bool {
+        matches!(self, Val::Array(_) | Val::IntArray(_) | Val::FloatArray(_))
+    }
+
+    /// Length of any sequence shape, `None` for non-sequences.
+    #[inline]
+    pub fn seq_len(&self) -> Option<usize> {
+        match *self {
+            Val::Array(a) => Some(a.0.borrow().len()),
+            Val::IntArray(a) | Val::FloatArray(a) => Some(a.0.borrow().len()),
+            _ => None,
+        }
+    }
+
+    /// Element `i` of any sequence shape, boxed back into a `Val`
+    /// (`IntArray[i]` yields `Val::Int`, `FloatArray[i]` `Val::Float`).
+    /// `None` for non-sequences and out-of-bounds.
+    #[inline]
+    pub fn seq_get(&self, i: usize) -> Option<Val<'gc>> {
+        match *self {
+            Val::Array(a) => a.0.borrow().get(i).copied(),
+            Val::IntArray(a) | Val::FloatArray(a) => a.0.borrow().get(i),
+            _ => None,
+        }
+    }
+
+    /// An `Array` handle on this sequence's contents, whatever the backing.
+    /// For a typed array this *demotes in place*: the store becomes
+    /// [`ArrayStore::Vals`] wrapping a fresh `Array`, and that inner handle is
+    /// returned — so a native handed it keeps mutating the very elements the
+    /// script's `IntArray`/`FloatArray` value still points at. `None` for
+    /// non-sequences.
+    pub fn as_untyped_array(self, ctx: Ctx<'gc>) -> Option<Array<'gc>> {
+        match self {
+            Val::Array(a) => Some(a),
+            Val::IntArray(a) | Val::FloatArray(a) => Some(a.0.borrow_mut(&ctx).demote(ctx)),
+            _ => None,
         }
     }
 
@@ -236,6 +308,178 @@ pub struct Array<'gc>(pub Gc<'gc, RefLock<Vec<Val<'gc>>>>);
 #[derive(Copy, Clone, Collect, Debug)]
 #[collect(no_drop)]
 pub struct Dict<'gc>(pub Gc<'gc, RefLock<DictMap<'gc>>>);
+
+/// The payload behind both `Val::IntArray` and `Val::FloatArray` — one GC
+/// cell holding an [`ArrayStore`]. The two `Val` tags share this payload
+/// type on purpose: the tag is a birth hint while the store records the
+/// truth (see [`ArrayStore`]), and one concrete type lets `IntArray(a) |
+/// FloatArray(a)` patterns bind the same handle.
+#[derive(Copy, Clone, Collect, Debug)]
+#[collect(no_drop)]
+pub struct Seq<'gc>(pub Gc<'gc, RefLock<ArrayStore<'gc>>>);
+
+/// `Val::IntArray`'s payload — alias of [`Seq`] so the typed tags share one
+/// handle type.
+pub type IntArray<'gc> = Seq<'gc>;
+
+/// `Val::FloatArray`'s payload — alias of [`Seq`].
+pub type FloatArray<'gc> = Seq<'gc>;
+
+/// What's inside an [`IntArray`]/[`FloatArray`]'s `RefLock` — the
+/// structure-of-arrays backing for `Vec<Val>`-free sequences.
+///
+/// ```text
+///        push(1)                push(9.9)               push("x")
+///  Empty ──────► Ints ──┐         Empty ──────► Floats ──┐
+///      │                │                  │             │ (any non-f64)
+///      └────────────────┴──────────────────┴─────────────▼─────► Vals
+///                    (first out-of-kind write demotes)
+/// ```
+///
+/// `Vals` holds a real `Array` handle rather than a bare `Vec<Val>` so a
+/// native that received `Array` via [`Val::as_untyped_array`] keeps writing
+/// the same contents the script's typed value observes. A store never moves
+/// backward: once `Vals`, always `Vals`. `Empty` is the pending state `[]`
+/// starts in — the first push picks the store kind. Either tag can hold any
+/// store shape (an `IntArray` that received `push(1.5)` as its first write
+/// holds `Floats`); the tag is only a birth hint, the store is the truth.
+#[derive(Collect, Debug)]
+#[collect(no_drop)]
+pub enum ArrayStore<'gc> {
+    Empty,
+    Ints(Vec<i64>),
+    Floats(Vec<f64>),
+    Vals(Array<'gc>),
+}
+
+impl<'gc> ArrayStore<'gc> {
+    pub fn len(&self) -> usize {
+        match self {
+            ArrayStore::Empty => 0,
+            ArrayStore::Ints(v) => v.len(),
+            ArrayStore::Floats(v) => v.len(),
+            ArrayStore::Vals(a) => a.0.borrow().len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Element `i` boxed to a `Val`, `None` out of bounds.
+    pub fn get(&self, i: usize) -> Option<Val<'gc>> {
+        match self {
+            ArrayStore::Empty => None,
+            ArrayStore::Ints(v) => v.get(i).map(|&x| Val::Int(x)),
+            ArrayStore::Floats(v) => v.get(i).map(|&x| Val::Float(x)),
+            ArrayStore::Vals(a) => a.0.borrow().get(i).copied(),
+        }
+    }
+
+    /// Element `i` boxed to a `Val`, panicking out of bounds exactly like
+    /// indexing a `Vec<Val>` does (this replaces `a.0.borrow()[i]` sites).
+    pub fn at(&self, i: usize) -> Val<'gc> {
+        self.get(i).expect("index out of bounds on typed array")
+    }
+
+    /// Write `v` at `i`, demoting to `Vals` first if `v` doesn't fit the
+    /// current primitive store. `i` is bounds-checked against the store the
+    /// same way `v[i] = x` on a `Vec` is — a mismatch panics, never writes.
+    pub fn set(&mut self, ctx: Ctx<'gc>, i: usize, v: Val<'gc>) {
+        match self {
+            ArrayStore::Ints(vs) => match v {
+                Val::Int(x) => vs[i] = x,
+                _ => self.demote(ctx).0.borrow_mut(&ctx)[i] = v,
+            },
+            ArrayStore::Floats(vs) => match v {
+                Val::Float(x) => vs[i] = x,
+                _ => self.demote(ctx).0.borrow_mut(&ctx)[i] = v,
+            },
+            ArrayStore::Vals(a) => a.0.borrow_mut(&ctx)[i] = v,
+            // `Empty[i]` has no slot — panic like `Vec::new()[i]`
+            ArrayStore::Empty => {
+                let empty: &[i64] = &[];
+                empty[i];
+            }
+        }
+    }
+
+    /// Append `v`, picking the store kind on `Empty` and demoting on an
+    /// incompatible write (the "any non-`i64` write to an `Ints`, any
+    /// non-`f64` write to a `Floats`" rule — see the enum docs).
+    pub fn push(&mut self, ctx: Ctx<'gc>, v: Val<'gc>) {
+        match self {
+            ArrayStore::Empty => {
+                *self = match v {
+                    Val::Int(x) => ArrayStore::Ints(vec![x]),
+                    Val::Float(x) => ArrayStore::Floats(vec![x]),
+                    _ => ArrayStore::Vals(ctx.new_array(vec![v])),
+                };
+            }
+            ArrayStore::Ints(vs) => match v {
+                Val::Int(x) => vs.push(x),
+                _ => self.demote(ctx).0.borrow_mut(&ctx).push(v),
+            },
+            ArrayStore::Floats(vs) => match v {
+                Val::Float(x) => vs.push(x),
+                _ => self.demote(ctx).0.borrow_mut(&ctx).push(v),
+            },
+            ArrayStore::Vals(a) => a.0.borrow_mut(&ctx).push(v),
+        }
+    }
+
+    /// Ensure `Vals` state: box the primitive contents into a fresh `Array`,
+    /// swap it in, and return the shared handle. `Vals` is a no-op returning
+    /// the existing handle, so this never breaks aliasing.
+    pub fn demote(&mut self, ctx: Ctx<'gc>) -> Array<'gc> {
+        let items: Vec<Val<'gc>> = match self {
+            ArrayStore::Empty => Vec::new(),
+            ArrayStore::Ints(v) => v.iter().map(|&x| Val::Int(x)).collect(),
+            ArrayStore::Floats(v) => v.iter().map(|&x| Val::Float(x)).collect(),
+            ArrayStore::Vals(a) => return *a,
+        };
+        let a = ctx.new_array(items);
+        *self = ArrayStore::Vals(a);
+        a
+    }
+
+    /// `contains(&needle)` semantics across all store shapes.
+    pub fn contains(&self, needle: Val<'gc>) -> bool {
+        match self {
+            ArrayStore::Empty => false,
+            ArrayStore::Ints(v) => matches!(needle, Val::Int(i) if v.contains(&i)),
+            ArrayStore::Floats(v) => matches!(needle, Val::Float(f) if v.contains(&f)),
+            ArrayStore::Vals(a) => a.0.borrow().contains(&needle),
+        }
+    }
+
+    /// Every element boxed to `Val` — for the snapshot/capture paths that
+    /// need owned materialized contents.
+    pub fn to_vals(&self) -> Vec<Val<'gc>> {
+        match self {
+            ArrayStore::Empty => Vec::new(),
+            ArrayStore::Ints(v) => v.iter().map(|&x| Val::Int(x)).collect(),
+            ArrayStore::Floats(v) => v.iter().map(|&x| Val::Float(x)).collect(),
+            ArrayStore::Vals(a) => a.0.borrow().clone(),
+        }
+    }
+
+    /// Element-wise equality against another store — `Vec` equality where the
+    /// stores match kinds, boxed `Val` comparison otherwise.
+    pub fn store_eq(&self, other: &ArrayStore<'gc>) -> bool {
+        match (self, other) {
+            (ArrayStore::Ints(a), ArrayStore::Ints(b)) => a == b,
+            (ArrayStore::Floats(a), ArrayStore::Floats(b)) => a == b,
+            _ => self.len() == other.len() && (0..self.len()).all(|i| self.at(i) == other.at(i)),
+        }
+    }
+
+    /// Element-wise equality against a `Vec<Val>` (the `Val::Array` side of a
+    /// cross-shape `==`).
+    pub fn eq_slice(&self, other: &[Val<'gc>]) -> bool {
+        self.len() == other.len() && (0..self.len()).all(|i| self.at(i) == other[i])
+    }
+}
 
 // generic over the value slot so natives can take a type-safe `DictMap<'gc, anon::T<'gc>>` view
 // (see `anon::as_dict_mut`); gc storage is always the `V = Val` default.
@@ -680,6 +924,20 @@ impl<'gc> Val<'gc> {
             Val::Array(a) => guarded(Gc::as_ptr(a.0) as *const (), path, |path| {
                 Captured::Array(a.0.borrow().iter().map(|v| v.capture_at(path)).collect())
             }),
+            // typed arrays capture as ordinary `Captured::Array` — the
+            // representation stays invisible at the snapshot boundary, and a
+            // `Vals` store boxes its elements back out.
+            Val::IntArray(a) | Val::FloatArray(a) => {
+                guarded(Gc::as_ptr(a.0) as *const (), path, |path| {
+                    Captured::Array(
+                        a.0.borrow()
+                            .to_vals()
+                            .iter()
+                            .map(|v| v.capture_at(path))
+                            .collect(),
+                    )
+                })
+            }
             Val::Dict(d) => guarded(Gc::as_ptr(d.0) as *const (), path, |path| {
                 Captured::Dict(
                     d.0.borrow()
@@ -794,6 +1052,17 @@ impl<'gc> Val<'gc> {
                         .collect(),
                 )
             }),
+            Val::IntArray(a) | Val::FloatArray(a) => {
+                guarded(Gc::as_ptr(a.0) as *const (), seen, |seen| {
+                    Inspect::Array(
+                        a.0.borrow()
+                            .to_vals()
+                            .iter()
+                            .map(|v| v.inspect(struct_names, field_names, seen))
+                            .collect(),
+                    )
+                })
+            }
             Val::Dict(d) => guarded(Gc::as_ptr(d.0) as *const (), seen, |seen| {
                 Inspect::Dict(
                     d.0.borrow()
@@ -994,34 +1263,36 @@ pub fn bin<'gc>(this: Val<'gc>, ctx: Ctx<'gc>, other: Val<'gc>, op: BinOp) -> Rt
         (op, Val::Float(a), Val::Int(b)) => float_bin(op, a, b as f64)?,
         (op, Val::Int(a), Val::Float(b)) => float_bin(op, a as f64, b)?,
         (op, Val::Int(a), Val::Int(b)) => int_bin(op, a, b)?,
-        (op, Val::Array(a), Val::Array(b)) => {
-            let n = a.0.borrow().len();
+        // elementwise over any sequence pair — `IntArray`/`FloatArray` read
+        // their elements boxed back into `Val`s, so a typed array broadcasts
+        // exactly like the `Vec<Val>` it replaces.
+        (op, a, b) if a.is_seq() && b.is_seq() => {
+            let n = a.seq_len().unwrap();
             let mut out = Vec::with_capacity(n);
             for i in 0..n {
-                // re-borrow each iteration so the recursive bin call can allocate freely.
-                let l = a.0.borrow()[i];
-                let r = b.0.borrow()[i];
+                let l = a.seq_get(i).unwrap();
+                let r = b.seq_get(i).unwrap();
                 out.push(bin(l, ctx, r, op)?);
             }
-            Val::Array(ctx.new_array(out))
+            ctx.array_val(out)
         }
-        (op, Val::Array(a), s @ (Val::Int(_) | Val::Float(_))) => {
-            let n = a.0.borrow().len();
+        (op, a, s @ (Val::Int(_) | Val::Float(_))) if a.is_seq() => {
+            let n = a.seq_len().unwrap();
             let mut out = Vec::with_capacity(n);
             for i in 0..n {
-                let l = a.0.borrow()[i];
+                let l = a.seq_get(i).unwrap();
                 out.push(bin(l, ctx, s, op)?);
             }
-            Val::Array(ctx.new_array(out))
+            ctx.array_val(out)
         }
-        (op, s @ (Val::Int(_) | Val::Float(_)), Val::Array(b)) => {
-            let n = b.0.borrow().len();
+        (op, s @ (Val::Int(_) | Val::Float(_)), b) if b.is_seq() => {
+            let n = b.seq_len().unwrap();
             let mut out = Vec::with_capacity(n);
             for i in 0..n {
-                let r = b.0.borrow()[i];
+                let r = b.seq_get(i).unwrap();
                 out.push(bin(s, ctx, r, op)?);
             }
-            Val::Array(ctx.new_array(out))
+            ctx.array_val(out)
         }
         _ => match instance_bin(this, ctx, other, op) {
             Some(v) => v?,
@@ -1052,14 +1323,14 @@ pub fn unary<'gc>(this: Val<'gc>, ctx: Ctx<'gc>, op: UnaryOp) -> RtResult<Val<'g
         (UnaryOp::Not, Val::Bool(value)) => Val::Bool(!value),
         (op, Val::Float(value)) => float_unary(op, value)?,
         (op, Val::Int(value)) => int_unary(op, value)?,
-        (op, Val::Array(a)) => {
-            let n = a.0.borrow().len();
+        (op, a) if a.is_seq() => {
+            let n = a.seq_len().unwrap();
             let mut out = Vec::with_capacity(n);
             for i in 0..n {
-                let v = a.0.borrow()[i];
+                let v = a.seq_get(i).unwrap();
                 out.push(unary(v, ctx, op)?);
             }
-            Val::Array(ctx.new_array(out))
+            ctx.array_val(out)
         }
         _ => match this {
             Val::Instance(i) => {

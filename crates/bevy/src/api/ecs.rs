@@ -122,7 +122,7 @@ pub(crate) fn install(api: &mut Api, catalog: &Arc<Catalog>) {
                         .map(|entity| ScriptEntity::from(entity).into_value(ctx))
                         .collect()
                 });
-                Ok(Val::Array(ctx.new_array(entities)))
+                Ok(ctx.array_val(entities))
             },
         );
     }
@@ -206,7 +206,7 @@ pub(crate) fn install_message<T: Message + FromReflect + Typed>(api: &mut Api) {
                         .collect()
                 })
             });
-            Ok(Val::Array(ctx.new_array(messages)))
+            Ok(ctx.array_val(messages))
         },
     );
     api.add_assoc_described(ty.clone(), "write", vec![ty], Ty::Unit, |ctx, args| {

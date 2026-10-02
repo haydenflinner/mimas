@@ -56,7 +56,7 @@ impl Convert {
                     .iter()
                     .map(|item| Self::to_mimas(ctx, inner, item))
                     .collect::<Option<Vec<_>>>()?;
-                Val::Array(ctx.new_array(items))
+                ctx.array_val(items)
             }
             Kind::Type(id) => {
                 let binding = ctx.binding(id)?;
@@ -112,7 +112,7 @@ impl Convert {
                 DynamicEnum::new("Some", DynamicVariant::Tuple(some))
             }),
             Kind::List(inner) => {
-                let Val::Array(array) = value else {
+                let Some(array) = value.as_untyped_array(ctx) else {
                     return None;
                 };
                 let list: DynamicList = array

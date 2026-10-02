@@ -6,9 +6,9 @@
 //! yield (correct layout, fresh values) and overwrites every named local with the snapshot's
 //! value of the same name, translating the heap on the way:
 //!
-//! * struct instances are matched by struct name and their fields by field name — a field the
-//!   edit added keeps the value the edited program's first frame gave it, when the same local
-//!   path has one there;
+//! * struct instances are matched by struct name and their fields by field name — a field the edit
+//!   added keeps the value the edited program's first frame gave it, when the same local path has
+//!   one there;
 //! * function values (`Val::Fn`, closure bodies) are matched by item name;
 //! * each paused call frame must be the same function paused on the same source text.
 //!
@@ -207,6 +207,10 @@ impl<'a> Tx<'a> {
                 }
                 SnapNode::Array(vals)
             }
+            // primitive stores hold no `SnapVal`s — nothing to translate, the
+            // elements carry over as-is (typed tags ride with the contents)
+            SnapNode::IntArray(items) => SnapNode::IntArray(items.clone()),
+            SnapNode::FloatArray(items) => SnapNode::FloatArray(items.clone()),
             SnapNode::Dict(items) => {
                 let h = match hint {
                     Some(SnapNode::Dict(h)) => Some(h),

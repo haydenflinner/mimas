@@ -18,7 +18,8 @@ use std::{
 use crate::{
     Fields, RtErr, RtResult,
     val::{
-        Array, Closure, ClosureData, Dict, DictMap, Instance, InstanceData, SharedStr, Str, Val,
+        Array, ArrayStore, Closure, ClosureData, Dict, DictMap, FloatArray, Instance, InstanceData,
+        IntArray, Seq, SharedStr, Str, Val,
     },
 };
 
@@ -280,6 +281,57 @@ impl<'gc> Ctx<'gc> {
         Array(Gc::new(self.mutation, RefLock::new(items)))
     }
 
+    /// The `[]` op's result: an empty sequence in `ArrayStore::Empty`, which
+    /// picks `Ints`/`Floats`/`Vals` from its first pushed element. Semantically
+    /// indistinguishable from an empty `Val::Array` (`[] == []`, prints `[]`),
+    /// but the hot `arr = []; for .. arr.push(i)` loop never allocates per
+    /// element's 16-byte tag.
+    pub fn new_seq(self) -> Val<'gc> {
+        Val::IntArray(Seq(Gc::new(self.mutation, RefLock::new(ArrayStore::Empty))))
+    }
+
+    /// Wrap `items` in the cheapest sequence shape that holds them: all-`Int`
+    /// becomes `IntArray(Ints)`, all-`Float` becomes `FloatArray(Floats)`, and
+    /// anything else stays an ordinary `Val::Array`. (Promotion only ever
+    /// happens at construction — see [`ArrayStore`].)
+    pub fn array_val(self, items: Vec<Val<'gc>>) -> Val<'gc> {
+        if items.iter().all(|v| matches!(v, Val::Int(_))) {
+            let ints = items
+                .into_iter()
+                .map(|v| match v {
+                    Val::Int(i) => i,
+                    _ => unreachable!(),
+                })
+                .collect();
+            Val::IntArray(self.new_int_array(ints))
+        } else if items.iter().all(|v| matches!(v, Val::Float(_))) {
+            let floats = items
+                .into_iter()
+                .map(|v| match v {
+                    Val::Float(f) => f,
+                    _ => unreachable!(),
+                })
+                .collect();
+            Val::FloatArray(self.new_float_array(floats))
+        } else {
+            Val::Array(self.new_array(items))
+        }
+    }
+
+    pub fn new_int_array(self, items: Vec<i64>) -> IntArray<'gc> {
+        Seq(Gc::new(
+            self.mutation,
+            RefLock::new(ArrayStore::Ints(items)),
+        ))
+    }
+
+    pub fn new_float_array(self, items: Vec<f64>) -> FloatArray<'gc> {
+        Seq(Gc::new(
+            self.mutation,
+            RefLock::new(ArrayStore::Floats(items)),
+        ))
+    }
+
     pub fn new_dict(self, items: DictMap<'gc>) -> Dict<'gc> {
         Dict(Gc::new(self.mutation, RefLock::new(items)))
     }
@@ -325,6 +377,24 @@ impl<'gc> Ctx<'gc> {
                     a.0.borrow().iter().map(|&v| self.deep_clone(v)).collect();
                 Val::Array(self.new_array(items))
             }
+            // clone keeps the backing kind: a typed array deep-clones into a
+            // fresh typed array (demoted `Vals` stores re-box through
+            // `array_val`, re-promoting if the contents happen to be
+            // homogeneous again — invisible either way).
+            Val::IntArray(a) | Val::FloatArray(a) => match &*a.0.borrow() {
+                ArrayStore::Empty => self.new_seq(),
+                ArrayStore::Ints(v) => Val::IntArray(self.new_int_array(v.clone())),
+                ArrayStore::Floats(v) => Val::FloatArray(self.new_float_array(v.clone())),
+                ArrayStore::Vals(inner) => {
+                    let items: Vec<Val<'gc>> = inner
+                        .0
+                        .borrow()
+                        .iter()
+                        .map(|&v| self.deep_clone(v))
+                        .collect();
+                    self.array_val(items)
+                }
+            },
             Val::Dict(d) => {
                 let items: DictMap<'gc> =
                     d.0.borrow()
@@ -403,6 +473,21 @@ impl<'gc> Ctx<'gc> {
                     if i > 0 {
                         out.push_str(", ");
                     }
+                    self.render_into(out, v, true, depth + 1)?;
+                }
+                out.push(']');
+            }
+            // identical rendering to `Val::Array` — `[1, 2]` is `[1, 2]`
+            // however it's backed. Elements box out one at a time so the
+            // borrow drops before the recursive render.
+            Val::IntArray(a) | Val::FloatArray(a) => {
+                let n = a.0.borrow().len();
+                out.push('[');
+                for i in 0..n {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    let v = a.0.borrow().at(i);
                     self.render_into(out, v, true, depth + 1)?;
                 }
                 out.push(']');

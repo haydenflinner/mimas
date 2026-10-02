@@ -59,6 +59,13 @@ pub enum SnapVal {
 #[derive(Debug, Clone)]
 pub enum SnapNode {
     Array(Vec<SnapVal>),
+    /// A live `IntArray`/`FloatArray` holding a primitive store — the raw
+    /// elements ride the snapshot unboxed, so a typed array restores as a
+    /// typed array. A typed array whose store demoted to `Vals` snapshots as
+    /// `SnapNode::Array` of the *inner* handle (see `Snapper::val`) and
+    /// restores as `Val::Array` — same contents, same aliasing.
+    IntArray(Vec<i64>),
+    FloatArray(Vec<f64>),
     Dict(Vec<(SharedStr, SnapVal)>),
     Instance {
         struct_id: u32,
@@ -150,6 +157,20 @@ impl<'gc> Snapper<'gc> {
             Val::Str(s) => SnapVal::Str(Gc::as_ref(s.0).clone()),
             Val::Raised(s) => SnapVal::Raised(Gc::as_ref(s.0).clone()),
             Val::Array(a) => self.node(Gc::as_ptr(a.0) as *const (), v),
+            // A demoted typed array snaps as the *inner* `Array`'s node —
+            // keyed on the inner `Gc` — so a `Val::Array` handle a native
+            // pulled out of it earlier (via `as_untyped_array`) snaps to the
+            // same node and the alias survives restore.
+            Val::IntArray(a) | Val::FloatArray(a)
+                if matches!(&*a.0.borrow(), crate::val::ArrayStore::Vals(_)) =>
+            {
+                let crate::val::ArrayStore::Vals(inner) = &*a.0.borrow() else {
+                    unreachable!()
+                };
+                self.node(Gc::as_ptr(inner.0) as *const (), Val::Array(*inner))
+            }
+            Val::IntArray(a) => self.node(Gc::as_ptr(a.0) as *const (), v),
+            Val::FloatArray(a) => self.node(Gc::as_ptr(a.0) as *const (), v),
             Val::Dict(d) => self.node(Gc::as_ptr(d.0) as *const (), v),
             Val::Instance(i) => self.node(Gc::as_ptr(i.0) as *const (), v),
             Val::Closure(c) => self.node(Gc::as_ptr(c.0) as *const (), v),
@@ -176,6 +197,19 @@ impl<'gc> Snapper<'gc> {
                     .collect::<Result<_, _>>()?;
                 SnapNode::Array(items)
             }
+            // primitives ride unboxed; the node's tag is chosen by the store's
+            // content kind (an `IntArray` holding `Floats` after a mixed-write
+            // restore comes back a `FloatArray` — tags are birth hints only).
+            // `Vals` never reaches here: `val` forwards demoted stores to the
+            // inner `Array`'s node.
+            Val::IntArray(a) | Val::FloatArray(a) => match &*a.0.borrow() {
+                crate::val::ArrayStore::Empty => SnapNode::IntArray(Vec::new()),
+                crate::val::ArrayStore::Ints(v) => SnapNode::IntArray(v.clone()),
+                crate::val::ArrayStore::Floats(v) => SnapNode::FloatArray(v.clone()),
+                crate::val::ArrayStore::Vals(_) => {
+                    unreachable!("demoted stores snap as the inner array's node")
+                }
+            },
             Val::Dict(d) => {
                 let items: Vec<(SharedStr, Val)> =
                     d.0.borrow()
@@ -326,6 +360,8 @@ impl Vm {
             for (i, node) in snap.nodes.iter().enumerate() {
                 thaw.resolved[i] = Some(match node {
                     SnapNode::Array(_) => Val::Array(ctx.new_array(Vec::new())),
+                    SnapNode::IntArray(_) => Val::IntArray(ctx.new_int_array(Vec::new())),
+                    SnapNode::FloatArray(_) => Val::FloatArray(ctx.new_float_array(Vec::new())),
                     SnapNode::Dict(_) => Val::Dict(ctx.new_dict(DictMap::new())),
                     SnapNode::Instance { struct_id, .. } => {
                         Val::Instance(ctx.new_instance(*struct_id, Fields::new(Vec::new())))
@@ -346,6 +382,12 @@ impl Vm {
                             .map(|sv| thaw.thaw(sv))
                             .collect::<Result<Vec<_>, _>>()?;
                         *a.0.borrow_mut(mc) = vals;
+                    }
+                    (SnapNode::IntArray(items), Some(Val::IntArray(a))) => {
+                        *a.0.borrow_mut(mc) = crate::val::ArrayStore::Ints(items.clone());
+                    }
+                    (SnapNode::FloatArray(items), Some(Val::FloatArray(a))) => {
+                        *a.0.borrow_mut(mc) = crate::val::ArrayStore::Floats(items.clone());
                     }
                     (SnapNode::Dict(items), Some(Val::Dict(d))) => {
                         let mut map = DictMap::new();
