@@ -297,6 +297,341 @@ pub mod jit {
         unsafe { regs.add(i) }
     }
 
+    /// One [`flush`] entry — `#[repr(C)]` so JIT code can pack entries into a
+    /// stack slot without the Val layout.
+    #[repr(C)]
+    pub struct FlushEnt {
+        /// Register index in the window.
+        pub idx: u32,
+        /// 0 = skip (shadow's `ok` flag clear), 1 = `Val::Int`, 2 = `Val::Float`.
+        pub tag: u8,
+        pub _pad: [u8; 3],
+        /// Payload — `f64::to_bits` for `tag == 2`.
+        pub val: i64,
+    }
+
+    /// Bulk shadow writeback — replaces `n` per-reg `wr_i`/`wr_f` calls with a
+    /// single helper: `buf` holds `n` packed entries built by the JIT body;
+    /// `tag` 0 skips (shadow dead), 1 writes `Val::Int`, 2 `Val::Float`.
+    pub unsafe extern "C" fn flush<'gc>(regs: *mut Val<'gc>, buf: *const FlushEnt, n: usize) {
+        unsafe {
+            for j in 0..n {
+                let e = &*buf.add(j);
+                match e.tag {
+                    1 => *regs.add(e.idx as usize) = Val::Int(e.val),
+                    2 => *regs.add(e.idx as usize) = Val::Float(f64::from_bits(e.val as u64)),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// Layout facts JIT-emitted code bakes in as immediates so hot paths can
+    /// touch `Val`s, `thread.regs`/`frames`/`ops_left` and `code.ip` with raw
+    /// loads/stores instead of FFI round-trips. Nothing here is *assumed*:
+    /// `Val`'s tag/payload placement and `Vec`'s header order are probed by
+    /// inspecting known values of the same build, and the struct offsets come
+    /// from `offset_of!` — the compiler's own answer, so a field reorder or a
+    /// rustc layout change yields different numbers, not silent breakage.
+    /// Anything the probe can't verify panics at compile time.
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug)]
+    pub struct Layout {
+        /// `size_of::<Val>` — the window stride (multiple of 8).
+        pub val_size: usize,
+        /// Byte offset of the discriminant inside a `Val`.
+        pub val_tag: usize,
+        /// Width of the discriminant in bytes (1/2/4/8).
+        pub tag_size: usize,
+        /// Byte offset of the `i64`/`f64` payload inside `Val::Int`/`Val::Float`
+        /// (the two share the union's 8-byte slot).
+        pub val_pay: usize,
+        /// Byte offset of the `u8` payload inside `Val::Bool` — rustc is free
+        /// to place a 1-byte payload somewhere other than the union's base,
+        /// so it's probed separately rather than assumed equal to `val_pay`.
+        pub bool_pay: usize,
+        /// Byte offset of the `u32` payload inside `Val::Fn` (ditto).
+        pub fn_pay: usize,
+        /// Discriminant value for `Val::Null` (`tag_size`-byte LE).
+        pub t_null: u64,
+        /// Discriminant value for `Val::Bool`.
+        pub t_bool: u64,
+        /// Discriminant value for `Val::Int`.
+        pub t_int: u64,
+        /// Discriminant value for `Val::Float`.
+        pub t_float: u64,
+        /// Discriminant value for `Val::Fn`.
+        pub t_fn: u64,
+        /// `offset_of!(ThreadState, regs)` — a `Vec<Val>` header.
+        pub regs_off: usize,
+        /// `offset_of!(ThreadState, frames)` — a `Vec<Frame>` header.
+        pub frames_off: usize,
+        /// `offset_of!(ThreadState, ops_left)`.
+        pub ops_left_off: usize,
+        /// Byte offset of the buffer pointer inside a `Vec<T>` header.
+        pub vec_ptr: usize,
+        /// Byte offset of `len` inside a `Vec<T>` header.
+        pub vec_len: usize,
+        /// `size_of::<Frame>`.
+        pub frame_size: usize,
+        /// `offset_of!(Frame, base)`.
+        pub frame_base: usize,
+        /// `offset_of!(Decoder, ip)`.
+        pub code_ip: usize,
+    }
+
+    /// Probe this build's layouts — see [`Layout`]. Called once per
+    /// `mimas_jit::compile`, not from emitted code.
+    pub fn layout() -> Layout {
+        use std::mem::{offset_of, size_of};
+
+        const N: usize = size_of::<Val<'static>>();
+        let vsz = N;
+        assert_eq!(vsz % 8, 0, "Val size not a multiple of 8");
+        assert!(vsz <= 64, "Val unexpectedly large: {vsz}");
+        // Raw bytes of a live `Val`. Uninit padding may hold garbage, so
+        // nothing is *assumed* from these bytes — every derived offset is
+        // verified by a `bake` round-trip through rustc's own decode below.
+        let bytes = |v: &Val<'static>| -> [u8; N] {
+            let mut b = [0u8; N];
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    v as *const Val<'static> as *const u8,
+                    b.as_mut_ptr(),
+                    N,
+                );
+            }
+            b
+        };
+        // Decoded probe result. `Bad` = byte pattern whose discriminant
+        // matches no probed variant — how corrupt encodings surface.
+        #[derive(PartialEq)]
+        enum Pb {
+            Bad,
+            Null,
+            Bool(bool),
+            Int(i64),
+            Float(f64),
+            Fn(u32),
+            Other,
+        }
+        // Raw bytes → which `Val` variant they encode. `ptr::read` (unlike
+        // `transmute`) performs no validity check, so a pattern with a
+        // corrupt discriminant — e.g. a candidate offset that overlaps the
+        // tag — yields `Bad` instead of a hard `invalid value` abort. The
+        // payload is matched out only once the variant is identified by its
+        // `Discriminant`, at which point the read is fully determined.
+        let decode = |raw: [u8; N]| -> Pb {
+            let v: Val<'static> = unsafe { std::ptr::read_unaligned(raw.as_ptr().cast()) };
+            use std::mem::discriminant;
+            let d = discriminant(&v);
+            if d == discriminant(&Val::Null) {
+                return Pb::Null;
+            }
+            if d == discriminant(&Val::Bool(false)) {
+                return match v {
+                    Val::Bool(b) => Pb::Bool(b),
+                    _ => Pb::Bad,
+                };
+            }
+            if d == discriminant(&Val::Int(0)) {
+                return match v {
+                    Val::Int(x) => Pb::Int(x),
+                    _ => Pb::Bad,
+                };
+            }
+            if d == discriminant(&Val::Float(0.0)) {
+                return match v {
+                    Val::Float(x) => Pb::Float(x),
+                    _ => Pb::Bad,
+                };
+            }
+            if d == discriminant(&Val::Fn(BodyId::ZERO)) {
+                return match v {
+                    Val::Fn(x) => Pb::Fn(u32::from(x)),
+                    _ => Pb::Bad,
+                };
+            }
+            Pb::Other
+        };
+        let i0 = bytes(&Val::Int(7));
+        let f0 = bytes(&Val::Float(0.0));
+        // Discriminant position/width, found by *semantic* round-trip:
+        // rewriting a candidate byte range of an `Int`'s encoding with
+        // `Float`'s bytes must produce `Float` with the same payload bits;
+        // candidates that miss the tag decode as `Int`/`Bad` and are
+        // rejected. Probe the *smallest* width first —
+        // `size_of::<Discriminant<Val>>` overstates the field width when the
+        // enum's tag sits next to padding (rustc then leaves stale bytes
+        // there, which would poison an 8-byte tag compare). A tag narrower
+        // than the true discriminant is still correct here: every probed
+        // variant differs within its low byte(s), and tag writes only need
+        // to set those same low bytes — the rest of the discriminant is
+        // already `0` in every `Val` encoding this register file can hold.
+        let mut found = None;
+        'widths: for w in [1usize, 2, 4, 8] {
+            if w > vsz {
+                continue;
+            }
+            for p in 0..=vsz - w {
+                if i0[p..p + w] == f0[p..p + w] {
+                    continue;
+                }
+                let mut raw = i0;
+                raw[p..p + w].copy_from_slice(&f0[p..p + w]);
+                if matches!(decode(raw), Pb::Float(x) if x.to_bits() == 7) {
+                    assert!(found.is_none(), "ambiguous tag positions for Val");
+                    found = Some((p, w));
+                }
+            }
+            if found.is_some() {
+                break 'widths;
+            }
+        }
+        let (tag, dsz) = found.expect("no inline discriminant found in Val");
+        let tagv = |b: &[u8; N]| -> u64 {
+            let mut w = [0u8; 8];
+            w[..dsz].copy_from_slice(&b[tag..tag + dsz]);
+            u64::from_le_bytes(w)
+        };
+        let t_int = tagv(&i0);
+        let t_float = tagv(&f0);
+        // Tag values for the other variants the JIT touches — verified by
+        // writing the discriminant onto an Int's encoding and reading it back.
+        let b0 = bytes(&Val::Bool(false));
+        let null = bytes(&Val::Null);
+        let fn0 = bytes(&Val::Fn(BodyId::ZERO));
+        let t_bool = tagv(&b0);
+        let t_null = tagv(&null);
+        let t_fn = tagv(&fn0);
+        let wtag = |raw: &mut [u8; N], v: u64| {
+            raw[tag..tag + dsz].copy_from_slice(&v.to_le_bytes()[..dsz]);
+        };
+        {
+            let mut raw = i0;
+            wtag(&mut raw, t_bool);
+            assert!(
+                matches!(decode(raw), Pb::Bool(_)),
+                "t_bool is not the Bool tag"
+            );
+            let mut raw = i0;
+            wtag(&mut raw, t_null);
+            assert!(
+                matches!(decode(raw), Pb::Null),
+                "t_null is not the Null tag"
+            );
+            let mut raw = i0;
+            wtag(&mut raw, t_fn);
+            assert!(matches!(decode(raw), Pb::Fn(_)), "t_fn is not the Fn tag");
+        }
+        // And no two tags may coincide — the emitted `tag == t_int` checks
+        // rely on it.
+        for (a, b, name) in [
+            (t_int, t_float, "int/float"),
+            (t_int, t_bool, "int/bool"),
+            (t_int, t_null, "int/null"),
+            (t_int, t_fn, "int/fn"),
+            (t_float, t_bool, "float/bool"),
+            (t_float, t_null, "float/null"),
+            (t_float, t_fn, "float/fn"),
+            (t_bool, t_null, "bool/null"),
+            (t_bool, t_fn, "bool/fn"),
+            (t_null, t_fn, "null/fn"),
+        ] {
+            assert_ne!(a, b, "indistinguishable Val tags: {name}");
+        }
+        // Payload offsets, again by semantic round-trip: start from a Null's
+        // encoding, write the tag + a candidate payload position, and see
+        // what value comes back out. Anything rustc puts elsewhere survives
+        // unchanged, so only the true payload offset yields a match;
+        // candidate ranges overlapping the tag corrupt the discriminant and
+        // decode as `Bad`.
+        let mut pay = None;
+        for p in 0..=vsz - 8 {
+            let mut raw = null;
+            wtag(&mut raw, t_int);
+            raw[p..p + 8].copy_from_slice(&42i64.to_ne_bytes());
+            if matches!(decode(raw), Pb::Int(42)) {
+                assert!(pay.is_none(), "ambiguous int payload offsets");
+                pay = Some(p);
+            }
+        }
+        let pay = pay.expect("no 8-byte int payload found in Val");
+        let mut bool_pay = None;
+        for p in 0..vsz {
+            let mut raw = null;
+            wtag(&mut raw, t_bool);
+            raw[p] = 1;
+            if matches!(decode(raw), Pb::Bool(true)) {
+                assert!(bool_pay.is_none(), "ambiguous bool payload offsets");
+                bool_pay = Some(p);
+            }
+        }
+        let bool_pay = bool_pay.expect("no bool payload byte found in Val");
+        let mut fn_pay = None;
+        for p in 0..=vsz - 4 {
+            let mut raw = null;
+            wtag(&mut raw, t_fn);
+            raw[p..p + 4].copy_from_slice(&0x1122_3344u32.to_ne_bytes());
+            if matches!(decode(raw), Pb::Fn(0x1122_3344)) {
+                assert!(fn_pay.is_none(), "ambiguous fn payload offsets");
+                fn_pay = Some(p);
+            }
+        }
+        let fn_pay = fn_pay.expect("no u32 fn payload found in Val");
+        // Every emitted write touches tag + payload only; prove that's a
+        // complete encoding by checking a read-back on a fourth variant.
+        assert_eq!(tagv(&bytes(&Val::Float(1.5))), t_float);
+        let mut raw = null;
+        wtag(&mut raw, t_float);
+        raw[pay..pay + 8].copy_from_slice(&1.5f64.to_ne_bytes());
+        assert!(
+            matches!(decode(raw), Pb::Float(x) if x == 1.5),
+            "float tag+payload write does not round-trip"
+        );
+        // Vec<T> = three words {ptr, cap, len} in rustc's chosen order —
+        // identify each against a vec with unambiguous values.
+        let mut v: Vec<u64> = Vec::with_capacity(61);
+        v.push(7);
+        let words: [usize; 3] = unsafe { std::mem::transmute_copy(&v) };
+        let pos = |w: usize| {
+            words
+                .iter()
+                .position(|&x| x == w)
+                .unwrap_or_else(|| panic!("Vec word {w:#x} not found in {words:x?}"))
+        };
+        let (vec_ptr, vec_len, vec_cap) = (
+            pos(v.as_ptr() as usize) * 8,
+            pos(v.len()) * 8,
+            pos(v.capacity()) * 8,
+        );
+        assert!(
+            vec_ptr != vec_len && vec_len != vec_cap && vec_ptr != vec_cap,
+            "Vec header words not distinct: ptr={vec_ptr} len={vec_len} cap={vec_cap}"
+        );
+        Layout {
+            val_size: vsz,
+            val_tag: tag,
+            tag_size: dsz,
+            val_pay: pay,
+            bool_pay,
+            fn_pay,
+            t_null,
+            t_bool,
+            t_int,
+            t_float,
+            t_fn,
+            regs_off: offset_of!(ThreadState, regs),
+            frames_off: offset_of!(ThreadState, frames),
+            ops_left_off: offset_of!(ThreadState, ops_left),
+            vec_ptr,
+            vec_len,
+            frame_size: size_of::<Frame>(),
+            frame_base: offset_of!(Frame, base),
+            code_ip: offset_of!(Decoder, ip),
+        }
+    }
+
     // ---- result-slot writers (`out: *mut RtResult<Flow>`) ----
 
     /// `*out = Ok(Flow::Next)` — pause/fuel exits and plain propagation.
@@ -703,7 +1038,12 @@ pub mod jit {
     }
 
     /// `Op::Push` — `regs[array].as_array().push(regs[value])`.
-    pub unsafe extern "C" fn push<'gc>(regs: *mut Val<'gc>, array: usize, value: usize, ctx: Ctx<'gc>) {
+    pub unsafe extern "C" fn push<'gc>(
+        regs: *mut Val<'gc>,
+        array: usize,
+        value: usize,
+        ctx: Ctx<'gc>,
+    ) {
         unsafe {
             let arr = (*regs.add(array)).as_array().unwrap();
             arr.0.borrow_mut(&ctx).push(*regs.add(value));
@@ -777,12 +1117,7 @@ pub mod jit {
     }
 
     /// `Op::IsInstance`.
-    pub unsafe extern "C" fn is_instance<'gc>(
-        regs: *mut Val<'gc>,
-        d: usize,
-        s: usize,
-        adt: u32,
-    ) {
+    pub unsafe extern "C" fn is_instance<'gc>(regs: *mut Val<'gc>, d: usize, s: usize, adt: u32) {
         unsafe {
             let m = matches!(*regs.add(s), Val::Instance(i) if i.0.borrow().struct_id == adt);
             *regs.add(d) = Val::Bool(m);
@@ -1015,5 +1350,225 @@ pub mod jit {
             2
         }
     }
-}
 
+    // ---- inline calls: resolve + enter + run + pop in one FFI hop ----
+
+    /// Shared tail of `call_body`/`call_dyn`: the `enter_call_regs` frame
+    /// push — args copied straight out of the caller window by register index
+    /// — then invoke the callee's `BodyFn`, and on `Flow::Return` run the
+    /// driver's pop/truncate/ip-restore/`dst`-write. Returns the caller's
+    /// rebuilt window base so JIT code can re-pin it, or null to propagate
+    /// `out` verbatim (paused/`Flow::Call`/`Err`, or a failed arity check).
+    ///
+    /// `code.ip` must already hold the caller's resume offset — it becomes
+    /// the caller frame's saved ip exactly like `enter_call`.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn enter_run_pop<'gc>(
+        t: &mut ThreadState<'gc>,
+        code: *mut Decoder,
+        chunks: *const IdVec<BodyId, Chunk>,
+        body: BodyId,
+        dst: u32,
+        args_idx: *const u32,
+        nargs: usize,
+        captures: &[Val<'gc>],
+        f: BodyFn,
+        ctx: Ctx<'gc>,
+        strs: *const StrInterner,
+        sigs: *const IdVec<BodyId, Option<Function>>,
+        fuel: *mut usize,
+        op_ip: *mut usize,
+        out: *mut RtResult<Flow<'gc>>,
+    ) -> *mut Val<'gc> {
+        unsafe {
+            let chunk = &(&*chunks)[body];
+            // same arity check `enter_call` would run on the driver's
+            // `Flow::Call` path — `*op_ip` already sits at this op
+            if nargs != chunk.args as usize {
+                *out = Err(RtErr::WrongArity {
+                    wanted: chunk.args as usize,
+                    got: nargs,
+                });
+                return std::ptr::null_mut();
+            }
+            debug_assert_eq!(captures.len(), chunk.captures.len());
+            let caller_base = t.frames.last().unwrap().base;
+            let new_base = t.regs.len();
+            t.regs.resize(new_base + chunk.regs as usize, Val::Null);
+            // caller slots stay live below `new_base` across the grow — the
+            // `enter_call_regs` idiom
+            for (param_reg, i) in chunk.params.iter().zip(0..nargs) {
+                let ai = *args_idx.add(i) as usize;
+                t.regs[new_base + param_reg.index()] = t.regs[caller_base + ai];
+            }
+            for (cap_reg, &cap) in chunk.captures.iter().zip(captures) {
+                t.regs[new_base + cap_reg.index()] = cap;
+            }
+            t.frames.last_mut().unwrap().ip = (*code).ip;
+            t.frames.push(Frame {
+                chunk: body,
+                ip: chunk.offset,
+                return_reg: dst,
+                base: new_base,
+            });
+            (*code).ip = chunk.offset;
+            f(t, code, ctx, strs, chunks, sigs, fuel, op_ip, out);
+            let Ok(Flow::Return(v)) = &*out else {
+                return std::ptr::null_mut();
+            };
+            let v = *v;
+            let popped = t.frames.pop().unwrap();
+            t.regs.truncate(popped.base);
+            let caller = t.frames.last().unwrap();
+            (*code).ip = caller.ip;
+            let caller_base = caller.base;
+            t.regs[caller_base + popped.return_reg as usize] = v;
+            t.regs.as_mut_ptr().add(caller_base)
+        }
+    }
+
+    /// `Op::CallDirect`'s whole call path in one FFI hop: at/over
+    /// `INLINE_CALL_DEPTH` produces `Flow::Call{CallTarget::Fn}` for the
+    /// driver (its `enter_call` then runs the arity check, so none here);
+    /// below the cap, enters the callee frame, calls its body fn looked up
+    /// through `tbl` (the JIT module's body-pointer table), and pops on
+    /// `Flow::Return`. Returns the rebuilt caller-window base pointer, or
+    /// null to propagate `out` to the driver.
+    #[allow(clippy::too_many_arguments)]
+    pub unsafe extern "C" fn call_body<'gc>(
+        thread: *mut ThreadState<'gc>,
+        code: *mut Decoder,
+        chunks: *const IdVec<BodyId, Chunk>,
+        tbl: *const usize,
+        body: u32,
+        dst: u32,
+        args_idx: *const u32,
+        nargs: usize,
+        mc: *const Mutation<'gc>,
+        st: *const State<'gc>,
+        strs: *const StrInterner,
+        sigs: *const IdVec<BodyId, Option<Function>>,
+        fuel: *mut usize,
+        op_ip: *mut usize,
+        out: *mut RtResult<Flow<'gc>>,
+    ) -> *mut Val<'gc> {
+        unsafe {
+            let t = &mut *thread;
+            if t.frames.len() >= INLINE_CALL_DEPTH {
+                let caller_base = t.frames.last().unwrap().base;
+                let mut args = SmallVec::<[Val; 8]>::new();
+                for i in 0..nargs {
+                    args.push(t.regs[caller_base + *args_idx.add(i) as usize]);
+                }
+                *out = Ok(Flow::Call {
+                    target: CallTarget::Fn(BodyId::from(body)),
+                    dst: Reg::from(dst),
+                    args,
+                });
+                return std::ptr::null_mut();
+            }
+            // SAFETY: `tbl` is the JIT module's `BodyFn` table, indexed by body.
+            let f: BodyFn = std::mem::transmute(*tbl.add(body as usize));
+            enter_run_pop(
+                t,
+                code,
+                chunks,
+                BodyId::from(body),
+                dst,
+                args_idx,
+                nargs,
+                &[],
+                f,
+                Ctx::from_parts(mc, st),
+                strs,
+                sigs,
+                fuel,
+                op_ip,
+                out,
+            )
+        }
+    }
+
+    /// `Op::Call`'s whole call path in one FFI hop: resolve `regs[callee]`
+    /// (`Val::Fn` gets the `CallTarget::Value` signature check, `Val::Closure`
+    /// unpacks its `ClosureData`, anything else is `not_callable` into `out`),
+    /// then the same cap/enter/run/pop as `call_body`. `regs` is the caller's
+    /// (flushed) window — read before any `thread.regs` resize.
+    #[allow(clippy::too_many_arguments)]
+    pub unsafe extern "C" fn call_dyn<'gc>(
+        thread: *mut ThreadState<'gc>,
+        code: *mut Decoder,
+        chunks: *const IdVec<BodyId, Chunk>,
+        sigs: *const IdVec<BodyId, Option<Function>>,
+        regs: *const Val<'gc>,
+        callee: usize,
+        dst: u32,
+        args_idx: *const u32,
+        nargs: usize,
+        tbl: *const usize,
+        mc: *const Mutation<'gc>,
+        st: *const State<'gc>,
+        strs: *const StrInterner,
+        fuel: *mut usize,
+        op_ip: *mut usize,
+        out: *mut RtResult<Flow<'gc>>,
+    ) -> *mut Val<'gc> {
+        unsafe {
+            let t = &mut *thread;
+            let cv = *regs.add(callee);
+            let (body, captures): (BodyId, &[Val<'gc>]) = match cv {
+                Val::Fn(b) => {
+                    if (&*sigs).get(b).and_then(|o| o.as_ref()).is_none() {
+                        *out = Err(not_callable(cv));
+                        return std::ptr::null_mut();
+                    }
+                    (b, &[][..])
+                }
+                Val::Closure(c) => {
+                    let d = Gc::as_ref(c.0);
+                    (d.function, d.captures.as_slice())
+                }
+                other => {
+                    *out = Err(not_callable(other));
+                    return std::ptr::null_mut();
+                }
+            };
+            if t.frames.len() >= INLINE_CALL_DEPTH {
+                let target = match cv {
+                    Val::Fn(b) => CallTarget::Value(b),
+                    Val::Closure(c) => CallTarget::Closure(c),
+                    _ => unreachable!(),
+                };
+                let mut args = SmallVec::<[Val; 8]>::new();
+                for i in 0..nargs {
+                    args.push(*regs.add(*args_idx.add(i) as usize));
+                }
+                *out = Ok(Flow::Call {
+                    target,
+                    dst: Reg::from(dst),
+                    args,
+                });
+                return std::ptr::null_mut();
+            }
+            // SAFETY: `tbl` is the JIT module's `BodyFn` table, indexed by body.
+            let f: BodyFn = std::mem::transmute(*tbl.add(body.index()));
+            enter_run_pop(
+                t,
+                code,
+                chunks,
+                body,
+                dst,
+                args_idx,
+                nargs,
+                captures,
+                f,
+                Ctx::from_parts(mc, st),
+                strs,
+                sigs,
+                fuel,
+                op_ip,
+                out,
+            )
+        }
+    }
+}
