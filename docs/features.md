@@ -2,6 +2,42 @@
 
 Memorable additions to mimas beyond what the changelog tracks — newest first.
 
+## Typed arrays — `IntArray`/`FloatArray` backing stores — branch `typed-arrays`
+
+Homogeneous `[int]`/`[float]` sequences stop paying `Vec<Val>`'s 16-byte
+tagged cells (and a GC trace per element): they get a structure-of-arrays
+backing instead — `Gc<RefLock<ArrayStore>>` where `ArrayStore` is
+`Empty | Ints(Vec<i64>) | Floats(Vec<f64>) | Vals(Array)` (`val.rs`).
+
+**Distinct `Val` tags on purpose.** `Val::IntArray`/`Val::FloatArray` are
+separate discriminants, so every existing `Val::Array` pattern — including
+the bcgen-generated and JIT-inlined fast paths that borrow the `Vec<Val>`
+directly — *misses* typed arrays and falls through to the helpers that box
+elements back out. That's the safety property; no inline path can misread a
+`Vec<i64>` as `Vec<Val>`. The JIT needed zero changes: `GetIndex`/`SetIndex`/
+`GetField`/`SetField` tag-compare against `t_array` before touching the vec
+layout, and `Push`/`NewArray`/`Len` were already helper-backed (`bc.rs`'s
+`jit::*` shims now share the same `seq_push`/`new_seq` bodies).
+
+**Promotion/demotion policy.** `[]` (`Ctx::new_seq`) starts `Empty`; the
+first `Push` of an int/float picks `Ints`/`Floats`. `Ctx::array_val` maps an
+all-`Int`/`Float` `Vec<Val>` to the typed tags (constants, `collect`
+results, native `Vec<T>` returns — tuples like `(1,2,3)` included).
+Promotion happens *only* at construction — an existing `Val::Array` never
+upgrades. Any write that doesn't fit demotes in place: `set`/`push` box the
+store into `Vals`, which holds a real `Array` handle so a native that took
+`as_untyped_array` keeps mutating the very contents the typed `Val` still
+observes. The tag is a birth hint; the store is the truth (an
+`IntArray`-tagged value can hold `Floats`).
+
+**Everywhere else it's just an array.** Reads box to `Val::Int`/`Val::Float`;
+`==`, `display`, `capture`/`inspect`, iteration, `in`, `len`, broadcast
+`bin`/`unary`, deep-clone, snapshots (`SnapNode::IntArray/FloatArray` ride
+unboxed) and rebind all go through `ArrayStore`'s boxed accessors, so
+semantics — including cross-representation equality between a typed array
+and a `Vec<Val>` array — are identical. `crates/vm/tests/typed_arrays.rs`
+pins both halves of that contract.
+
 ## `|>` — why the pipe operator is worth keeping
 
 The TODO asked the honest question: nobody who doesn't write pipelines uses it, so what

@@ -442,7 +442,7 @@ fn cell_val<'gc>(
             for cell in s.iter() {
                 vals.push(cell_val(ctx, cell, what, col)?);
             }
-            Val::Array(ctx.new_array(vals))
+            ctx.array_val(vals)
         }
         other => {
             return Err(format!(
@@ -754,8 +754,10 @@ fn pivot<'gc>(
     values: Vec<String>,
     agg: &str,
 ) -> Raisable<vm::DataFrame<'gc>> {
-    use polars::frame::PivotColumnNaming;
-    use polars::prelude::{IntoLazy, UniqueKeepStrategy, cols, element};
+    use polars::{
+        frame::PivotColumnNaming,
+        prelude::{IntoLazy, UniqueKeepStrategy, cols, element},
+    };
     let agg_expr = match agg {
         "sum" => element().sum(),
         "mean" => element().mean(),
@@ -1705,7 +1707,7 @@ fn __q_apply<'gc>(
         "ends_with" => e.str().ends_with(polars::prelude::lit(text(arg)?)),
         "fill_null" => e.fill_null(q_expr(arg)?),
         "is_in" => {
-            let Val::Array(items) = arg else {
+            let Some(items) = arg.as_untyped_array(ctx) else {
                 return Err(q_err("is_in needs a list of values"));
             };
             let mut out = polars::prelude::lit(false);

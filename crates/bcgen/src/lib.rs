@@ -1509,10 +1509,9 @@ fn emit_op(
             }
         }
         Op::NewArray { dst } => {
-            wln!(
-                "wr(regs, {}, Val::Array(ctx.new_array(Vec::new()))); code.ip = {next};",
-                reg(*dst)
-            )
+            // `ctx.new_seq()` — the pending-typed `[]` the interpreter's cold
+            // arm emits, so bcgen bodies get the same typed-array promotion.
+            wln!("wr(regs, {}, ctx.new_seq()); code.ip = {next};", reg(*dst))
         }
         Op::NewDict { dst } => {
             wln!(
@@ -1558,9 +1557,14 @@ fn emit_op(
             );
         }
         Op::Push { array, value } => {
-            wln!("let arr = rd(regs, {}).as_array().unwrap();", reg(*array));
-            wln!("let value = rd(regs, {});", reg(*value));
-            wln!("arr.0.borrow_mut(&ctx).push(value);");
+            // `seq_push` is the shared body — its `Val::Array` case is the old
+            // borrow_mut+push; `IntArray`/`FloatArray` go through `ArrayStore`
+            // (demoting on an out-of-kind element), anything else panics.
+            wln!(
+                "seq_push(ctx, rd(regs, {}), rd(regs, {}));",
+                reg(*array),
+                reg(*value)
+            );
             wln!("code.ip = {next};");
         }
         Op::Insert { dict, key, value } => {
@@ -1635,6 +1639,7 @@ fn emit_op(
             wln!("    let v = match receiver {{");
             wln!("        Val::Instance(i) => i.0.borrow().fields[{slot}],");
             wln!("        Val::Array(a) => a.0.borrow()[{slot}],");
+            wln!("        Val::IntArray(a) | Val::FloatArray(a) => a.0.borrow().at({slot}),");
             wln!("        Val::Null => {{ *io.op_ip = {offset}; return Err(RtErr::UnwrappedNull); }}");
             wln!(
                 "        other => {{ *io.op_ip = {offset}; return Err(RtErr::Custom(format!(\"no fields on {{:?}}\", other.capture()))); }}"
@@ -1653,6 +1658,7 @@ fn emit_op(
             wln!("match receiver {{");
             wln!("    Val::Instance(i) => i.0.borrow_mut(&ctx).fields[{slot}] = value,");
             wln!("    Val::Array(a) => a.0.borrow_mut(&ctx)[{slot}] = value,");
+            wln!("    Val::IntArray(a) | Val::FloatArray(a) => a.0.borrow_mut(&ctx).set(ctx, {slot}, value),");
             wln!("    Val::Null => {{ *io.op_ip = {offset}; return Err(RtErr::UnwrappedNull); }}");
             wln!(
                 "    other => {{ *io.op_ip = {offset}; return Err(RtErr::Custom(format!(\"no fields on {{:?}}\", other.capture()))); }}"
@@ -1924,6 +1930,7 @@ fn emit_op(
         Op::Len { dst, src } => {
             wln!("let len = match rd(regs, {}) {{", reg(*src));
             wln!("    Val::Array(a) => a.0.borrow().len(),");
+            wln!("    Val::IntArray(a) | Val::FloatArray(a) => a.0.borrow().len(),");
             wln!("    Val::Dict(d) => d.0.borrow().len(),");
             wln!("    Val::Str(s) => s.as_str().chars().count(),");
             wln!("    Val::Int(i) => i as usize,");

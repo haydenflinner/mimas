@@ -984,6 +984,8 @@ pub(crate) fn step_one<'gc>(
             let v = match receiver {
                 Val::Instance(i) => i.0.borrow().fields[slot],
                 Val::Array(a) => a.0.borrow()[slot],
+                // positional `v.k` reads box the element back out
+                Val::IntArray(a) | Val::FloatArray(a) => a.0.borrow().at(slot),
                 Val::Null => return Err(RtErr::UnwrappedNull),
                 other => {
                     return Err(RtErr::Custom(format!("no fields on {:?}", other.capture())));
@@ -1000,6 +1002,7 @@ pub(crate) fn step_one<'gc>(
             match receiver {
                 Val::Instance(i) => i.0.borrow_mut(&ctx).fields[slot] = value,
                 Val::Array(a) => a.0.borrow_mut(&ctx)[slot] = value,
+                Val::IntArray(a) | Val::FloatArray(a) => a.0.borrow_mut(&ctx).set(ctx, slot, value),
                 Val::Null => return Err(RtErr::UnwrappedNull),
                 other => {
                     return Err(RtErr::Custom(format!("no fields on {:?}", other.capture())));
@@ -1009,15 +1012,20 @@ pub(crate) fn step_one<'gc>(
         OpCode::Push => {
             let array_reg = Reg::decode(code);
             let value_reg = Reg::decode(code);
-            let arr = rd!(regs, array_reg).as_array().unwrap();
             let value = rd!(regs, value_reg);
-            arr.0.borrow_mut(&ctx).push(value);
+            match rd!(regs, array_reg) {
+                Val::Array(a) => a.0.borrow_mut(&ctx).push(value),
+                // `IntArray`/`FloatArray`/`Anything` — typed push + demote,
+                // or the old `unwrap` panic for non-sequences
+                arr => seq_push(ctx, arr, value),
+            }
         }
         OpCode::Len => {
             let dst = Reg::decode(code);
             let src = Reg::decode(code);
             let len = match rd!(regs, src) {
                 Val::Array(a) => a.0.borrow().len(),
+                Val::IntArray(a) | Val::FloatArray(a) => a.0.borrow().len(),
                 Val::Dict(d) => d.0.borrow().len(),
                 Val::Str(s) => s.as_str().chars().count(),
                 Val::Int(i) => i as usize,
@@ -1496,6 +1504,11 @@ pub fn get_index<'gc>(
             let v = a.0.borrow();
             v[pos(i, v.len())?]
         }
+        // typed arrays read boxed — `a[i]` still yields `Val::Int`/`Val::Float`
+        (Val::IntArray(a) | Val::FloatArray(a), Val::Int(i)) => {
+            let v = a.0.borrow();
+            v.get(pos(i, v.len())?).unwrap()
+        }
         (Val::Dict(d), Val::Str(key)) => d.0.borrow().get(&key).copied().unwrap_or(Val::Null),
         (Val::Dict(d), Val::Int(i)) => {
             let m = d.0.borrow();
@@ -1543,6 +1556,13 @@ pub fn set_index<'gc>(
             let p = pos(i, v.len())?;
             v[p] = value;
         }
+        // typed write — stores the scalar in place, or demotes the whole
+        // sequence to `Vals` when `value` doesn't fit the backing kind
+        (Val::IntArray(a) | Val::FloatArray(a), Val::Int(i)) => {
+            let mut s = a.0.borrow_mut(&ctx);
+            let p = pos(i, s.len())?;
+            s.set(ctx, p, value);
+        }
         (Val::Dict(d), Val::Str(key)) => {
             d.0.borrow_mut(&ctx).insert(key, value);
         }
@@ -1556,10 +1576,25 @@ pub fn set_index<'gc>(
     Ok(())
 }
 
+/// `Op::Push`'s shared body for generated/JIT code — and the interpreter's
+/// non-`Array` arm. A typed array pushes through its `ArrayStore` (picking
+/// the store kind on `Empty`, demoting through an incompatible element);
+/// anything that isn't a sequence at all is the old `as_array().unwrap()`
+/// panic, kept as an explicit message.
+#[doc(hidden)]
+pub fn seq_push<'gc>(ctx: Ctx<'gc>, arr: Val<'gc>, value: Val<'gc>) {
+    match arr {
+        Val::Array(a) => a.0.borrow_mut(&ctx).push(value),
+        Val::IntArray(a) | Val::FloatArray(a) => a.0.borrow_mut(&ctx).push(ctx, value),
+        _ => panic!("push: `array` register held a non-array"),
+    }
+}
+
 #[doc(hidden)]
 pub fn contains<'gc>(needle: Val<'gc>, haystack: Val<'gc>, condition: bool) -> Val<'gc> {
     let c = match haystack {
         Val::Array(a) => a.0.borrow().contains(&needle),
+        Val::IntArray(a) | Val::FloatArray(a) => a.0.borrow().contains(needle),
         Val::Dict(d) => {
             let Val::Str(key) = needle else { todo!() };
             d.0.borrow().contains_key(&key)
@@ -1760,7 +1795,7 @@ pub fn cold_dispatch<'gc>(
         }
         OpCode::NewArray => {
             let dst = Reg::decode(code);
-            wr!(regs, dst, Val::Array(ctx.new_array(Vec::new())));
+            wr!(regs, dst, ctx.new_seq());
         }
         OpCode::NewDict => {
             let dst = Reg::decode(code);
@@ -1888,7 +1923,7 @@ pub fn constant_to_val<'gc>(c: Constant, ctx: Ctx<'gc>, c_cstrs: &StrInterner) -
                 .into_iter()
                 .map(|c| constant_to_val(c, ctx, c_cstrs))
                 .collect();
-            Val::Array(ctx.new_array(out))
+            ctx.array_val(out)
         }
         Constant::Null => Val::Null,
     }

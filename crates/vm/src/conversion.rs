@@ -199,8 +199,11 @@ impl<'gc> MimasType<'gc> for Array<'gc> {
     fn mimas_ty(_: &Registry) -> Option<Ty> {
         Some(Ty::Array(Box::new(Ty::Anon(0))))
     }
-    fn from_value(_ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError> {
-        v.as_array().ok_or_else(|| ty_error("array", v))
+    fn from_value(ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError> {
+        // `as_untyped_array` demotes a typed array in place and hands back its
+        // inner `Array`, so a mutating native writes through to the same
+        // elements the script's `IntArray`/`FloatArray` still points at.
+        v.as_untyped_array(ctx).ok_or_else(|| ty_error("array", v))
     }
     fn into_value(self, _ctx: Ctx<'gc>) -> Val<'gc> {
         Val::Array(self)
@@ -439,13 +442,15 @@ impl<'gc, T: MimasType<'gc>> MimasType<'gc> for Vec<T> {
         T::mimas_ty(reg).map(|i| Ty::Array(Box::new(i)))
     }
     fn from_value(ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError> {
-        let arr = v.as_array().ok_or_else(|| ty_error("array", v))?;
+        let arr = v
+            .as_untyped_array(ctx)
+            .ok_or_else(|| ty_error("array", v))?;
         let items: Vec<Val<'gc>> = arr.0.borrow().iter().copied().collect();
         items.into_iter().map(|v| T::from_value(ctx, v)).collect()
     }
     fn into_value(self, ctx: Ctx<'gc>) -> Val<'gc> {
         let out: Vec<Val<'gc>> = self.into_iter().map(|v| v.into_value(ctx)).collect();
-        Val::Array(ctx.new_array(out))
+        ctx.array_val(out)
     }
 }
 
@@ -490,8 +495,8 @@ impl<'gc, const N: u32> MimasType<'gc> for crate::anon::ArrayOf<'gc, N> {
     fn mimas_ty(_: &Registry) -> Option<Ty> {
         Some(Ty::Array(Box::new(Ty::Anon(N))))
     }
-    fn from_value(_ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError> {
-        v.as_array()
+    fn from_value(ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError> {
+        v.as_untyped_array(ctx)
             .map(crate::anon::ArrayOf)
             .ok_or_else(|| ty_error("array", v))
     }
@@ -596,7 +601,9 @@ macro_rules! impl_tuple {
             }
             #[allow(non_snake_case)]
             fn from_value(ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError> {
-                let arr = v.as_array().ok_or_else(|| ty_error("tuple", v))?;
+                let arr = v
+                    .as_untyped_array(ctx)
+                    .ok_or_else(|| ty_error("tuple", v))?;
                 let items: Vec<Val<'gc>> = arr.0.borrow().iter().copied().collect();
                 let mut it = items.into_iter();
                 let $head = <$head as MimasType<'gc>>::from_value(
@@ -618,7 +625,7 @@ macro_rules! impl_tuple {
                     <$head as MimasType<'gc>>::into_value($head, ctx),
                     $(<$tail as MimasType<'gc>>::into_value($tail, ctx),)*
                 ];
-                Val::Array(ctx.new_array(items))
+                ctx.array_val(items)
             }
         }
         impl_tuple!($($tail),*);

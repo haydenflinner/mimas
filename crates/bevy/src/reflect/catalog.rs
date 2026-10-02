@@ -122,7 +122,7 @@ impl Catalog {
                 }
             });
             if let Some(default) = reflected.default.clone() {
-                let ty = Ty::Adt(binding.adt_id);
+                let ty = Ty::adt(binding.adt_id);
                 api.add_assoc_described(ty.clone(), "default", vec![], ty, move |ctx, _| {
                     let value =
                         Convert::to_mimas(ctx, info, default.default().as_partial_reflect());

@@ -203,7 +203,7 @@ pub use crate::{
     CallTarget, Closure, Ctx, DebugInfo, DictMap, Fields, Flow, Frame, INLINE_FIELDS, Native,
     RtErr, RtResult, ThreadState, Val, bin, bin_cold, bin_cold_imm_float, bin_cold_imm_int,
     branch_cold, branch_cold_imm_float, branch_cold_imm_int, constant_to_val, contains, enter_call,
-    enter_call_regs, get_index, not_callable, set_index, unary,
+    enter_call_regs, get_index, not_callable, seq_push, set_index, unary,
 };
 pub use api::NativeId;
 pub use compile::{
@@ -1220,6 +1220,7 @@ pub mod jit {
         unsafe {
             let len = match *regs.add(s) {
                 Val::Array(a) => a.0.borrow().len(),
+                Val::IntArray(a) | Val::FloatArray(a) => a.0.borrow().len(),
                 Val::Dict(d) => d.0.borrow().len(),
                 Val::Str(s) => s.as_str().chars().count(),
                 Val::Int(i) => i as usize,
@@ -1436,6 +1437,7 @@ pub mod jit {
             let v = match receiver {
                 Val::Instance(i) => i.0.borrow().fields[slot],
                 Val::Array(a) => a.0.borrow()[slot],
+                Val::IntArray(a) | Val::FloatArray(a) => a.0.borrow().at(slot),
                 Val::Null => {
                     *out = Err(RtErr::UnwrappedNull);
                     return 1;
@@ -1465,6 +1467,7 @@ pub mod jit {
             match receiver {
                 Val::Instance(i) => i.0.borrow_mut(&ctx).fields[slot] = value,
                 Val::Array(a) => a.0.borrow_mut(&ctx)[slot] = value,
+                Val::IntArray(a) | Val::FloatArray(a) => a.0.borrow_mut(&ctx).set(ctx, slot, value),
                 Val::Null => {
                     *out = Err(RtErr::UnwrappedNull);
                     return 1;
@@ -1478,7 +1481,9 @@ pub mod jit {
         }
     }
 
-    /// `Op::Push` — `regs[array].as_array().push(regs[value])`.
+    /// `Op::Push` — `seq_push(ctx, regs[array], regs[value])`, the shared body
+    /// (typed arrays push through `ArrayStore`; `Val::Array` is just the
+    /// `Vec<Val>` push it always was).
     pub unsafe extern "C" fn push<'gc>(
         regs: *mut Val<'gc>,
         array: usize,
@@ -1486,8 +1491,7 @@ pub mod jit {
         ctx: Ctx<'gc>,
     ) {
         unsafe {
-            let arr = (*regs.add(array)).as_array().unwrap();
-            arr.0.borrow_mut(&ctx).push(*regs.add(value));
+            seq_push(ctx, *regs.add(array), *regs.add(value));
         }
     }
 
@@ -1565,10 +1569,11 @@ pub mod jit {
         }
     }
 
-    /// `Op::NewArray` — `regs[d] = []`.
+    /// `Op::NewArray` — `regs[d] = []` (the pending-typed `new_seq` — same
+    /// shape `step_one`'s cold arm produces).
     pub unsafe extern "C" fn new_array<'gc>(regs: *mut Val<'gc>, d: usize, ctx: Ctx<'gc>) {
         unsafe {
-            *regs.add(d) = Val::Array(ctx.new_array(Vec::new()));
+            *regs.add(d) = ctx.new_seq();
         }
     }
 
