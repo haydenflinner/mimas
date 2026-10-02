@@ -40,6 +40,47 @@ fn different_seeds_diverge() {
 }
 
 #[test]
+fn program_seed_pins_the_stream() {
+    // `random::seed` inside the source starts the same stream the host
+    // would with `Rng::seed` — same position, same draws.
+    let via_native = r#"
+random::seed(42);
+let a = float::random(1.0);
+let b = int::random(1000);
+"#;
+    let mut vm = Vm::compile(via_native, library::std).expect("rng test compiled");
+    vm.run().expect("rng test ran");
+    let got: Vec<String> = ["a", "b"]
+        .iter()
+        .map(|n| vm.resolve_name_to_string(n).unwrap().unwrap())
+        .collect();
+    let via_host = run_seeded(
+        "let a = float::random(1.0);\nlet b = int::random(1000);",
+        &["a", "b"],
+        42,
+    );
+    assert_eq!(got, via_host, "random::seed diverged from a host-seeded stream");
+}
+
+#[test]
+fn program_reseed_repeats_the_sequence() {
+    // Seeding mid-run rewinds the stream — a fuzz harness gets the same
+    // playout out of one seed twice.
+    let src = r#"
+random::seed(7);
+let a = int::random(1000);
+random::seed(7);
+let b = int::random(1000);
+"#;
+    let mut vm = Vm::compile(src, library::std).expect("rng test compiled");
+    vm.run().expect("rng test ran");
+    assert_eq!(
+        vm.resolve_name_to_string("a").unwrap().unwrap(),
+        vm.resolve_name_to_string("b").unwrap().unwrap(),
+    );
+}
+
+#[test]
 fn unseeded_still_works() {
     let mut vm =
         Vm::compile("let out = int::random(10);", library::std).expect("rng test compiled");

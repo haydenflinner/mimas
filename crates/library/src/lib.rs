@@ -52,6 +52,7 @@ pub fn std<'gc>(api: &mut Api<'_, 'gc>) {
     methods::int::install(api);
     methods::str::install(api);
     methods::bool::install(api);
+    methods::rng::install(api);
     #[cfg(feature = "dataframe")]
     std_lib::dataframe::install(api);
     #[cfg(feature = "xlsx")]
