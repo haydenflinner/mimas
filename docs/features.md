@@ -236,3 +236,40 @@ Four layered optimizations over the tier above, all semantics-preserving
   fib_iter 89 vs 60; prime_numbers 334 vs 255; fib_rec 1006 vs 723 and
   physics 1065 vs 273 — call-heavy still trails; next lever is inlining /
   direct body dispatch to skip the megacall FFI hop.
+
+## bcgen generated call path — branch `bcgen-calls2`
+
+Recursive `CallDirect` was ~330x rustgen on `fib_rec`. Profiling the
+generated call path found the costs in order: (1) `Val`'s derived
+`PartialEq` never inlines, so `rd(regs, r) == Val::Bool(x)` on `JumpIf`
+conditions without a bool shadow compiled to a *call* per branch — two per
+mandelbrot inner iteration and one per `fib` call frame; (2) full
+`Vec::resize(..., Val::Null)` + `enter_call_regs` bookkeeping on every
+generated-to-generated call; (3) `RtResult<Flow>` construction on every
+return and quota settle/re-arm at each boundary.
+
+- **Const-folded `enter_call_regs`** (`emit_call_fast`): snapshots args,
+  writes the callee window into spare capacity directly, Null-fills only
+  uncovered slots, emits a literal `Frame`; generic helper stays as the
+  capacity/dynamic-call fallback.
+- **`u8` return tag**: successful inline returns run `gen_return_pop`
+  (frame pop, `regs.truncate`, IP restore, dst writeback) and yield 0;
+  tag 1 means `io.out` holds the callee's `RtResult<Flow>` verbatim.
+- **`GenIo` boundary bundle**: `out`/`fuel`/`op_ip`/quota-pair/`inl` move
+  into one struct — the inner ABI drops from 11 params to 7 (no AArch64
+  stack spill) and `[bcn0, bcn]` rides the same `io` across inline calls,
+  so quota settles once per propagating exit instead of once per call.
+- **`gbail` cold exit**: all tag-1 exits funnel the `io.out` write through
+  a `#[cold]` helper — keeps big call-free bodies small enough that LLVM
+  stops spilling loop-carried shadows.
+- **`matches!` discriminant checks**: `JumpIf` and `GetField` option-null
+  checks emit `matches!(v, Val::Bool(..)/Val::Null)` — same predicate,
+  no `Val::eq` call.
+- Debug `INLINE_CALL_DEPTH` is 48 (release 256): generated debug frames
+  are ~7.7KB, so ~96 nested inline calls overflowed the parity thread's
+  stack.
+
+Measured (`bc-bench` bc lane, min-of-5, vs `e5b6214` binary): fib_rec
+714→534ms (−25%), mandelbrot 90→54ms (−40%), prime_numbers ~202ms flat,
+fib_iter ~56ms flat, physics ~268→280ms (+4.5%, regalloc noise). rustgen
+`fib_rec` is ~2.2ms — still ~245x ahead.
