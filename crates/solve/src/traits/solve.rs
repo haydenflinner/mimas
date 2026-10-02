@@ -1,8 +1,8 @@
 use crate::{
     Error, FnRun, LoopRun, Result, Solver, Unification, array,
     components::{
-        Adt, AdtFlags, AdtId, DecKind, Field, Flow, FnHeader, FnParam, Quantification, Ty, TyExt,
-        Variant,
+        Adt, AdtFlags, AdtId, DecKind, Field, Flow, FnHeader, FnParam, Len, Quantification, Ty,
+        TyExt, Variant,
     },
     errors::*,
     option,
@@ -224,7 +224,7 @@ impl Solve for Access {
 
                 let shape = |inner: Ty| -> Result<Ty> {
                     match &k {
-                        Ty::Int => Ok(Ty::Array(Box::new(inner))),
+                        Ty::Int => Ok(Ty::array(inner)),
                         Ty::Str => Ok(Ty::Dict(Box::new(inner))),
                         _ => Err(InvalidAccess {
                             src: key_src.clone(),
@@ -745,6 +745,18 @@ impl Solve for Call {
                 let dec = field.dec;
                 solver.check_vis(dec, ident.location)?;
                 solver.node_decs.insert(call.left.id(), dec);
+                // `push`/`pop`/`extend` on a `[T; n]` -- the type pins the length,
+                // so length-changing methods are rejected outright
+                if crate::lens::LEN_MUTATING.contains(&ident.lexeme.as_str())
+                    && let Ty::Array(_, Len::Const(n)) = lhs
+                {
+                    Err(crate::errors::SizedArrayMutation {
+                        src: solver.src(ident.location),
+                        at: ident.location.into(),
+                        method: ident.lexeme.clone(),
+                        ty: format!("[_; {n}]"),
+                    })?
+                }
                 // a `&mut`-receiver method on a collection a `for` loop is iterating
                 // (`xs.push(..)` inside `for x in xs`) -- see `check_iter_guard`
                 if solver
@@ -885,6 +897,17 @@ impl Solve for Call {
                     src: solver.src(location),
                     at: location.into(),
                 })?;
+            }
+
+            // `where` predicates on the callee: prove what the call site's args can
+            // prove -- a predicate that's false-forever fails here, anything unknown
+            // defers to the callee's entry check (see lens.rs).
+            if let Some(&dec) = solver.node_decs.get(&self.left.id()) {
+                let receiver = match self.left.kind() {
+                    ExprKind::Access(Access::Dot { left, .. }) if fn_data.is_method => Some(left),
+                    _ => None,
+                };
+                solver.check_call_wheres(dec, &params, &args_by_slot, receiver, location)?;
             }
 
             let ty = fn_data.return_ty.as_ref().clone().normalized(solver);
@@ -1132,6 +1155,23 @@ fn plexpr_overload_ty(lhs: &Ty, rhs: &Ty, solver: &Solver) -> Option<Ty> {
     }
 }
 
+/// `tensor + tensor` / `tensor * 0.5` / `2 - tensor` -- the same kind of dynamic VM-level
+/// overload as `PlExpr`'s, resolved through the `Val::Tensor` arms of `bin()` (broadcast
+/// elementwise on the burn backend). Either operand being the native `Tensor` adt types the
+/// whole expr `Tensor`; anything that can't broadcast is a runtime error, same tradeoff as
+/// above. `==`/`!=` stay structural (`Val::eq`), and ordering ops stay compile-time-invalid --
+/// elementwise bool tensors aren't part of this surface.
+fn tensor_overload_ty(lhs: &Ty, rhs: &Ty, solver: &Solver) -> Option<Ty> {
+    let is_tensor = |ty: &Ty| matches!(ty, Ty::Adt(id, _) if solver.adts[*id].name == "Tensor");
+    if is_tensor(lhs) {
+        Some(lhs.clone())
+    } else if is_tensor(rhs) {
+        Some(rhs.clone())
+    } else {
+        None
+    }
+}
+
 impl Solve for Equality {
     fn solve(&self, _id: NodeId, location: Location, solver: &mut Solver) -> Result<Ty> {
         let lhs = self.left.query(solver)?;
@@ -1277,7 +1317,9 @@ impl Solve for Evaluation {
         let rhs = self.right.query(solver)?;
         let mut lhs_n = lhs.clone().normalized(solver);
         let mut rhs_n = rhs.clone().normalized(solver);
-        if let Some(ty) = plexpr_overload_ty(&lhs_n, &rhs_n, solver) {
+        if let Some(ty) = plexpr_overload_ty(&lhs_n, &rhs_n, solver)
+            .or_else(|| tensor_overload_ty(&lhs_n, &rhs_n, solver))
+        {
             return Ok(ty);
         }
         // unresolved operands -- `r.x + r.w` on a `Rect<T>` receiver, or two params of an
@@ -1348,7 +1390,7 @@ impl Solve for For {
             Ty::Int => {
                 solver.solve_pat(&self.binding, Ty::Int)?;
             }
-            Ty::Array(value) => {
+            Ty::Array(value, _) => {
                 solver.solve_pat(&self.binding, value.as_ref().clone())?;
             }
             Ty::Dict(value) => {
@@ -1373,7 +1415,7 @@ impl Solve for For {
         // would grow the bound mid-loop. only arrays/dicts can be mutated at all, and only a
         // name-rooted iterator (`xs`, `s.arr`, `xs[0]` -- not `f()`) names a place to guard.
         let guard = match &iter_ty {
-            Ty::Array(_) | Ty::Dict(_) => {
+            Ty::Array(..) | Ty::Dict(_) => {
                 crate::root_and_path(&self.iterator).and_then(|(root, path)| {
                     solver.ribs.resolve(root).map(|dec| crate::IterGuard {
                         dec,
@@ -1457,6 +1499,13 @@ impl Solve for Function {
 
         for (param, Binding { left, .. }) in param_tys.zip(parse_params) {
             solver.declare(left.as_ident().unwrap(), left.id(), param.ty.clone())?;
+        }
+
+        // `where` predicates solve in the parameter scope -- `xs.len() > 2` sees
+        // `xs` bound to its declared type. Each must be a bool; whether it provably
+        // holds is a call-site question (see lens.rs), not a body-condition one.
+        for w in &self.wheres {
+            w.fulfill_ty(Ty::Bool, solver)?;
         }
 
         let expected_ty = fn_data.return_ty.as_ref().clone();
@@ -1778,7 +1827,7 @@ impl Solve for In {
     fn solve(&self, _id: NodeId, location: Location, solver: &mut Solver) -> Result<Ty> {
         let rhs = self.right.query(solver)?;
         match rhs {
-            Ty::Array(ref inner) => {
+            Ty::Array(ref inner, _) => {
                 self.left.fulfill_ty(*inner.clone(), solver)?;
             }
             Ty::Dict(_) => {
@@ -1831,7 +1880,9 @@ impl Solve for Literal {
             Ok(ty)
         }
         Ok(match self {
-            Literal::Array(exprs) => Ty::Array(Box::new(assemble(exprs.iter().collect(), solver)?)),
+            // literals stay growable `[T]` in the type; their exact length is a
+            // `lens` fact consulted where a sized slot wants it
+            Literal::Array(exprs) => Ty::array(assemble(exprs.iter().collect(), solver)?),
             Literal::Dictionary(fields) => Ty::Dict(Box::new(assemble(
                 fields.iter().map(|(_, v)| v).collect(),
                 solver,

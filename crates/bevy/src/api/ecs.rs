@@ -107,7 +107,7 @@ pub(crate) fn install(api: &mut Api, catalog: &Arc<Catalog>) {
             ty,
             "entities",
             vec![],
-            Ty::Array(Box::new(entity.clone())),
+            Ty::array(entity.clone()),
             move |ctx, _| {
                 let queries = ctx.fixture::<EntityQueries>();
                 let entities = ctx.world(|world| {
@@ -184,7 +184,7 @@ pub(crate) fn install_message<T: Message + FromReflect + Typed>(api: &mut Api) {
         ty.clone(),
         "read",
         vec![],
-        Ty::Array(Box::new(ty.clone())),
+        Ty::array(ty.clone()),
         |ctx, _| {
             let entity = ctx.entity()?;
             let messages = ctx.world(|world| {

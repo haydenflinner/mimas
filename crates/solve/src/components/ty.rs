@@ -5,7 +5,7 @@ use crate::{
     traits::Query,
 };
 use parse::{components::Annotation, lex::TyKw};
-pub use shared::{AdtId, FnHeader, FnParam, PactId, Ty, Vid};
+pub use shared::{AdtId, FnHeader, FnParam, Len, PactId, Ty, Vid};
 
 pub trait TyExt: Sized {
     fn occurs(&self, other: Vid, solver: &Solver) -> bool;
@@ -28,7 +28,7 @@ impl TyExt for Ty {
         match self {
             Ty::Vid(vid) if *vid == other => true,
             Ty::Vid(vid) => solver.sub(*vid).is_some_and(|v| v.occurs(other, solver)),
-            Ty::Array(ty) | Ty::Dict(ty) => ty.occurs(other, solver),
+            Ty::Array(ty, _) | Ty::Dict(ty) => ty.occurs(other, solver),
             Ty::Fn(fn_data) => {
                 fn_data
                     .parameters
@@ -122,7 +122,18 @@ impl TyExt for Ty {
             Annotation::Kw(kw) => Ok(ty_from_kw(kw)),
             Annotation::Option(ty) => Ok(Ty::Option(Box::new(Ty::from_annotation(*ty, solver)?))),
             Annotation::Result(ty) => Ok(Ty::Result(Box::new(Ty::from_annotation(*ty, solver)?))),
-            Annotation::Array(ty) => Ok(Ty::Array(Box::new(Ty::from_annotation(*ty, solver)?))),
+            Annotation::Array(ty, dims) => {
+                let mut elem = Ty::from_annotation(*ty, solver)?;
+                // `[f32; 4, 8]` nests outermost-first into `[ [f32; 8]; 4 ]`
+                for d in dims.iter().rev() {
+                    elem = Ty::Array(Box::new(elem), Len::Const(*d));
+                }
+                Ok(if dims.is_empty() {
+                    Ty::Array(Box::new(elem), Len::Unknown)
+                } else {
+                    elem
+                })
+            }
             Annotation::Dictionary(ty) => Ok(Ty::Dict(Box::new(Ty::from_annotation(*ty, solver)?))),
             Annotation::Function(params, ret) => {
                 let parameters = params
@@ -300,7 +311,7 @@ impl TyExt for Ty {
                 .sub(vid)
                 .map(|ty| ty.clone().normalized(solver))
                 .unwrap_or(Ty::Vid(vid)),
-            Ty::Array(ty) => Ty::Array(Box::new(ty.normalized(solver))),
+            Ty::Array(ty, len) => Ty::Array(Box::new(ty.normalized(solver)), len),
             Ty::Dict(ty) => Ty::Dict(Box::new(ty.normalized(solver))),
             Ty::Tuple(members) => {
                 Ty::Tuple(members.into_iter().map(|v| v.normalized(solver)).collect())
@@ -343,7 +354,7 @@ impl TyExt for Ty {
 
     fn filter_adt(&self, adt: AdtId) -> Ty {
         match self {
-            Ty::Array(ty) => Ty::Array(Box::new(ty.filter_adt(adt))),
+            Ty::Array(ty, len) => Ty::Array(Box::new(ty.filter_adt(adt)), *len),
             Ty::Dict(ty) => Ty::Dict(Box::new(ty.filter_adt(adt))),
             Ty::Tuple(members) => Ty::Tuple(members.iter().map(|m| m.filter_adt(adt)).collect()),
             Ty::Adt(this_adt, args) if *this_adt == adt => {

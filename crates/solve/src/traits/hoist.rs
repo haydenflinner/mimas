@@ -87,7 +87,10 @@ impl<'a> HoistCtx<'a> {
                 let kind = if constant {
                     DecKind::Constant(None)
                 } else {
-                    DecKind::Item { defaults: vec![] }
+                    DecKind::Item {
+                        defaults: vec![],
+                        wheres: vec![],
+                    }
                 };
 
                 if let Some(existing) = self.solver.adts[*adt].impls.get(&ident.lexeme) {
@@ -421,7 +424,10 @@ impl Hoist for Pact {
                     let dec = ctx.solver.dec_id(
                         name,
                         Ty::Fn(header.clone()),
-                        DecKind::Item { defaults: vec![] },
+                        DecKind::Item {
+                            defaults: vec![],
+                            wheres: vec![],
+                        },
                         ctx.vis,
                     );
                     ctx.solver
@@ -492,7 +498,12 @@ impl Hoist for Function {
                     },
                 })
                 .collect::<Result<_>>()?;
-            if let DecKind::Item { defaults: slot } = &mut ctx.solver.decs[dec].kind {
+            if let DecKind::Item {
+                defaults: slot,
+                wheres: where_slot,
+            } = &mut ctx.solver.decs[dec].kind
+            {
+                *where_slot = self.wheres.clone();
                 *slot = defaults;
             }
         }

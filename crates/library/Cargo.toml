@@ -77,11 +77,16 @@ calamine = { version = "0.36.1", optional = true, features = ["chrono"] }
 rust_xlsxwriter = { version = "0.99.1", optional = true }
 
 [features]
-default = ["dataframe", "darkly", "xlsx", "parquet"]
+default = ["dataframe", "darkly", "xlsx", "parquet", "tensor"]
 dataframe = ["dep:polars", "dep:polars-io", "vm/dataframe"]
 darkly = ["dep:zip", "dep:serde", "vm/darkly"]
 xlsx = ["dataframe", "dep:calamine", "dep:rust_xlsxwriter"]
 parquet = ["dataframe", "polars-io/parquet"]
+# `std::tensor` -- an N-D `f32` tensor type (`Tensor` adt) + constructors (`tensor(..)`,
+# `zeros`/`randn`/`eye`/...) and methods (`.matmul`, `.softmax`, `.reshape`, ...) over a real
+# `Val::Tensor`, all implemented against Burn's backend-ops traits in `vm::tensor`. All burn
+# contact is on the `vm` side, so this feature only needs to enable the `Val` variant.
+tensor = ["vm/tensor"]
 
 [dev-dependencies]
 parse = { package = "mimas-parse", path = "../parse", version = "0.2.0" }

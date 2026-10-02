@@ -574,3 +574,33 @@ fn misdirection_renders_spelling() {
         "the `and` hint should teach `&&`: {rendered}"
     );
 }
+
+// `where` predicates on fns + fixed-size array annotations
+test_ok!(
+    where_clauses_parse,
+    "fn f(xs: [int]) where xs.len() > 2 { xs }",
+    "fn f(xs: [int], n: int) where xs.len() > n, n > 0 { xs[0] }",
+    // `where` stays an ordinary identifier everywhere else
+    "let where = 5;",
+    "let b = where_fn(a);",
+    // impl methods take them too
+    "impl P { fn f(self, xs: [int]) where xs.len() > 0 {} }"
+);
+test_ok!(
+    sized_array_annotations_parse,
+    "let a: [int; 4] = x;",
+    "let m: [f32; 4, 8] = x;",
+    "fn f(m: [f32; 4, 8]) -> [f32; 4] { m[0] }",
+    "let growable: [int] = y;"
+);
+test_fail!(
+    malformed_where_clauses,
+    "fn f(xs: [int]) where { xs }",
+    "fn f(xs: [int]) where, { xs }"
+);
+test_fail!(
+    malformed_sized_arrays,
+    "let a: [int;] = x;",
+    "let a: [int; x] = x;",
+    "let a: [int; 4,] = x;"
+);

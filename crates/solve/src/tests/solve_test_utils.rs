@@ -78,7 +78,7 @@ impl LooseEq for Ty {
     fn loose_eq(&self, other: &Ty, solver: &Solver) -> bool {
         match (self, other) {
             (Ty::Vid(_), Ty::Vid(_)) => true, // may live to regret that?
-            (Ty::Array(ty), Ty::Array(o_ty)) | (Ty::Dict(ty), Ty::Dict(o_ty)) => {
+            (Ty::Array(ty, _), Ty::Array(o_ty, _)) | (Ty::Dict(ty), Ty::Dict(o_ty)) => {
                 ty.loose_eq(o_ty, solver)
             }
             // vids and declared params are both "a type variable we can't name from the test
@@ -157,7 +157,7 @@ impl LooseEq for FnHeader {
 }
 
 macro_rules! array {
-    ($ty:expr) => {{ $crate::components::Ty::Array(Box::new($ty)) }};
+    ($ty:expr) => {{ $crate::components::Ty::array($ty) }};
 }
 
 macro_rules! tuple {

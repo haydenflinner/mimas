@@ -275,7 +275,7 @@ impl<'a> Pass<'a> {
                 }
             }
             Annotation::Option(inner) | Annotation::Result(inner) => self.annotation(inner),
-            Annotation::Array(inner) => D::Arr(Box::new(self.annotation(inner))),
+            Annotation::Array(inner, _) => D::Arr(Box::new(self.annotation(inner))),
             _ => D::Any,
         }
     }

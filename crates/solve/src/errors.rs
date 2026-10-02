@@ -964,3 +964,45 @@ pub struct BadSchemaSpec {
     pub at: SourceSpan,
     pub msg: String,
 }
+
+/// An expr fulfills a `[T; n]` position but carries a statically known length that
+/// disagrees -- e.g. a two-element literal into a `len == 4` slot. Unproven lengths
+/// don't reach this error: they lower to a runtime check instead.
+#[derive(Error, Debug, Diagnostic)]
+#[error("array size mismatch")]
+pub struct ArrayLenMismatch {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("expected {expected} but this is provably {found}")]
+    pub at: SourceSpan,
+    pub expected: String,
+    pub found: String,
+}
+
+/// A call site provably violates a `where` predicate on the callee -- the args are
+/// concrete enough to show it can never hold, so it fails now rather than at the
+/// function's entry check.
+#[derive(Error, Debug, Diagnostic)]
+#[error("`where` clause cannot hold")]
+pub struct WhereViolation {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("`{fn_name}` requires `{predicate}`, which is false for these arguments")]
+    pub at: SourceSpan,
+    pub fn_name: String,
+    pub predicate: String,
+}
+
+/// `push`/`pop`/`extend` on a `[T; n]` -- the type pins the length, so
+/// length-changing methods are rejected outright (in-place permutations like
+/// `sort` stay legal).
+#[derive(Error, Debug, Diagnostic)]
+#[error("cannot change a fixed-size array's length")]
+pub struct SizedArrayMutation {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("`{method}` changes the length of `{ty}`")]
+    pub at: SourceSpan,
+    pub method: String,
+    pub ty: String,
+}

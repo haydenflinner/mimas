@@ -197,7 +197,7 @@ impl<'gc> MimasType<'gc> for &'gc str {
 
 impl<'gc> MimasType<'gc> for Array<'gc> {
     fn mimas_ty(_: &Registry) -> Option<Ty> {
-        Some(Ty::Array(Box::new(Ty::Anon(0))))
+        Some(Ty::array(Ty::Anon(0)))
     }
     fn from_value(ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError> {
         // `as_untyped_array` demotes a typed array in place and hands back its
@@ -326,6 +326,42 @@ impl<'gc> MimasType<'gc> for crate::val::GroupBy<'gc> {
     }
 }
 
+// ----- Tensor ------------------------------------------------------------------------------
+//
+// Same shape as `DataFrameTy`: the payload lives in a real `Val` variant (`val::Tensor`), and
+// this marker exists purely to be `add_adt`'d so `Tensor` works in mimas annotations.
+#[cfg(feature = "tensor")]
+pub struct TensorTy;
+#[cfg(feature = "tensor")]
+impl crate::adt::MimasAdt for TensorTy {
+    fn descriptor(_reg: &Registry) -> crate::adt::ApiAdtDescriptor {
+        crate::adt::ApiAdtDescriptor {
+            name: "Tensor",
+            module: &["std", "tensor"],
+            kind: api::ApiAdtKind::Struct,
+            doc: "An N-D `f32` tensor on the Burn NdArray backend (std::tensor).",
+            variants: vec![crate::adt::ApiVariantShape {
+                name: "Tensor".into(),
+                doc: "",
+                fields: api::ApiVariantFields::Unit,
+            }],
+        }
+    }
+}
+
+#[cfg(feature = "tensor")]
+impl<'gc> MimasType<'gc> for crate::val::Tensor<'gc> {
+    fn mimas_ty(reg: &Registry) -> Option<Ty> {
+        Some(Ty::adt(reg.get::<TensorTy>()?.adt_id))
+    }
+    fn from_value(_ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError> {
+        v.as_tensor().ok_or_else(|| ty_error("Tensor", v))
+    }
+    fn into_value(self, _ctx: Ctx<'gc>) -> Val<'gc> {
+        Val::Tensor(self)
+    }
+}
+
 // ----- DarklyImage -------------------------------------------------------------------------
 //
 // Same reasoning as DataFrame/PlExpr above: a decoded pixel buffer doesn't fit Val's closed set
@@ -439,7 +475,7 @@ impl<'gc, T: MimasType<'gc>> MimasType<'gc> for Raisable<T> {
 
 impl<'gc, T: MimasType<'gc>> MimasType<'gc> for Vec<T> {
     fn mimas_ty(reg: &Registry) -> Option<Ty> {
-        T::mimas_ty(reg).map(|i| Ty::Array(Box::new(i)))
+        T::mimas_ty(reg).map(|i| Ty::array(i))
     }
     fn from_value(ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError> {
         let arr = v
@@ -493,7 +529,7 @@ impl<'gc, const N: u32> MimasType<'gc> for crate::anon::Anon<'gc, N> {
 
 impl<'gc, const N: u32> MimasType<'gc> for crate::anon::ArrayOf<'gc, N> {
     fn mimas_ty(_: &Registry) -> Option<Ty> {
-        Some(Ty::Array(Box::new(Ty::Anon(N))))
+        Some(Ty::array(Ty::Anon(N)))
     }
     fn from_value(ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError> {
         v.as_untyped_array(ctx)

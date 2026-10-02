@@ -13,7 +13,10 @@ pub enum Annotation {
     Option(Box<Annotation>),
     Result(Box<Annotation>),
     Tuple(Vec<Annotation>),
-    Array(Box<Annotation>),
+    /// `[T]`, or a fixed-size `[T; n]` / `[T; m, n]`. The dims list is empty for a
+    /// growable array; each `n` pins one level's length, outermost first -- so
+    /// `[f32; 4, 8]` reads as "4 rows of `[f32; 8]`".
+    Array(Box<Annotation>, Vec<usize>),
     Dictionary(Box<Annotation>),
     Function(Vec<Annotation>, Box<Annotation>),
     Ty(Ident),
@@ -41,7 +44,8 @@ impl std::fmt::Display for Annotation {
                 "({})",
                 members.iter().map(|p| p.to_string()).join(", "),
             )),
-            Annotation::Array(e) => f.pad(&format!("[{e}]")),
+            Annotation::Array(e, dims) if dims.is_empty() => f.pad(&format!("[{e}]")),
+            Annotation::Array(e, dims) => f.pad(&format!("[{e}; {}]", dims.iter().join(", "))),
             Annotation::Dictionary(e) => f.pad(&format!("~{{{e}}}")),
             Annotation::Function(params, ret) => f.pad(&format!(
                 "({}) -> {ret}",

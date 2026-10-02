@@ -21,7 +21,20 @@ pub trait Query: Located {
         let mut ty = ty.normalized(solver);
         Unification::unify(&mut found, &mut ty, solver)
             .and_then(|v| v.commit(solver))
-            .map_err(|e| e.into_type_mismatch(solver, self.location()))
+            .map_err(|e| e.into_type_mismatch(solver, self.location()))?;
+        // `[T; n]` slots: unify let an unknown length through, so compare the
+        // expr's provable dims now -- error when they disagree, runtime check
+        // when they can't be proven (see lens.rs).
+        if let Some(expr) = self.contract_expr() {
+            solver.check_len_contract(expr, &ty)?;
+        }
+        Ok(())
+    }
+
+    /// The expression this query emanates from, when there is one. `Some` lets the
+    /// sized-array contract key a runtime check onto the expr's node.
+    fn contract_expr(&self) -> Option<&Expr> {
+        None
     }
 
     /// Returns the Ty for this item normalized with all substitutions the solver has
@@ -30,6 +43,10 @@ pub trait Query: Located {
 }
 
 impl Query for Expr {
+    fn contract_expr(&self) -> Option<&Expr> {
+        Some(self)
+    }
+
     /// Returns the Ty for this expression normalized with all substitutions the solver has
     /// currently found. If this expression has never been visited, it is first solved.
     fn query(&self, solver: &mut Solver) -> Result<Ty> {

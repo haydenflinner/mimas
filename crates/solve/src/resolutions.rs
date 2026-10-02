@@ -27,6 +27,15 @@ pub struct Resolutions {
     pub pact_names: IdVec<PactId, String>,
     pub module_paths: HashMap<AdtId, Vec<String>>,
     pub closure_captures: IndexMap<NodeId, Vec<DecId>>,
+    /// Exprs whose array lengths the solver couldn't prove against a `[T; n]`
+    /// contract -- emit wraps each in a runtime dim check (see `lens.rs`).
+    pub len_checks: IndexMap<NodeId, Vec<Option<usize>>>,
+    /// The `__contract_fail` native's id, for contract-failure lowering at emit.
+    /// `None` in embeddings that never installed the stdlib.
+    pub contract_native: Option<NativeId>,
+    /// The `panic` native's id -- emit's contract-failure fallback when the
+    /// prettier `__contract_fail` channel isn't installed.
+    pub panic_native: Option<NativeId>,
     pub root: ResolvedModule,
     pub sources: HashMap<FileId, NamedSource<Arc<str>>>,
 }
@@ -267,6 +276,22 @@ impl From<Solver> for Resolutions {
             }
         }
 
+        // contract checks emit as native calls -- find the real natives even if
+        // user decls shadow the names (theirs won't be in dec_to_native).
+        // computed before `decs` is consumed below.
+        let contract_native = solver
+            .decs
+            .iter()
+            .filter(|(id, _)| solver.dec_to_native.contains_key(id))
+            .find(|(_, dec)| dec.name == "__contract_fail")
+            .map(|(id, _)| solver.dec_to_native[&id].id);
+        let panic_native = solver
+            .decs
+            .iter()
+            .filter(|(id, _)| solver.dec_to_native.contains_key(id))
+            .find(|(_, dec)| dec.name == "panic")
+            .map(|(id, _)| solver.dec_to_native[&id].id);
+
         let tys: Vec<Ty> = solver
             .decs
             .iter()
@@ -279,7 +304,7 @@ impl From<Solver> for Resolutions {
             let kind = match dec.kind {
                 DecKind::Local | DecKind::LoopVar => ResolvedDeclKind::Local,
                 DecKind::Global => ResolvedDeclKind::Global,
-                DecKind::Item { defaults } => ResolvedDeclKind::Item {
+                DecKind::Item { defaults, .. } => ResolvedDeclKind::Item {
                     defaults,
                     native: solver.dec_to_native.get(&id).map(|b| b.id),
                     takes_self: match solver.dec_to_native.get(&id) {
@@ -330,6 +355,9 @@ impl From<Solver> for Resolutions {
             pact_names,
             module_paths: paths,
             closure_captures,
+            len_checks: solver.len_checks,
+            contract_native,
+            panic_native,
             root,
             sources: solver.sources,
         }

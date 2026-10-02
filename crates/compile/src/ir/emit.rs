@@ -1,6 +1,6 @@
 use crate::{
     OperandKind,
-    ir::{BinOp, BlockId, BodyId, Constant, FormatPart, Inst, InstId, Ir, LoopCtx, Place},
+    ir::{BinOp, BlockId, BodyId, Constant, FormatPart, Inst, InstId, Ir, Local, LoopCtx, Place},
 };
 use api::NativeId;
 use parse::{
@@ -70,7 +70,7 @@ impl Ir {
                             ir.tests.push(case.name.lexeme.clone());
                             let dec = ir.node_dec(case.id);
                             let bid = ir.item_body_for(dec);
-                            ir.in_body(bid, |ir| ir.lower_fn_body(&[], &case.expr));
+                            ir.in_body(bid, |ir| ir.lower_fn_body(&[], &[], &case.expr));
                         }
                     }
                     // impl walks its inner items
@@ -90,7 +90,7 @@ impl Ir {
                             {
                                 let dec = ir.node_dec(body.id());
                                 let bid = ir.item_body_for(dec);
-                                ir.in_body(bid, |ir| ir.lower_fn_body(parameters, body));
+                                ir.in_body(bid, |ir| ir.lower_fn_body(parameters, &[], body));
                             }
                         }
                     }
@@ -135,7 +135,7 @@ impl Ir {
     /// Binds parameters as locals of the current body and lowers `body`, emitting a trailing
     /// null-return if control flow reached the end without an explicit terminator. Used by both
     /// function and closure emit; the caller picks the body id and any captures.
-    pub(crate) fn lower_fn_body(&mut self, parameters: &[Binding], body: &Expr) {
+    pub(crate) fn lower_fn_body(&mut self, parameters: &[Binding], wheres: &[Expr], body: &Expr) {
         let params: Vec<_> = parameters
             .iter()
             .map(|b| {
@@ -143,7 +143,8 @@ impl Ir {
                 self.local_for(dec)
             })
             .collect();
-        self.current_body_mut().params = params;
+        self.current_body_mut().params = params.clone();
+        self.emit_entry_checks(parameters, &params, wheres);
 
         // check termination *before* synthesizing a null -- a return-terminated body already
         // emitted its return; don't add a dead const + second ret
@@ -151,6 +152,99 @@ impl Ir {
         if !self.is_terminated() {
             let value = body_value.unwrap_or_else(|| self.current().constant(Constant::Null));
             self.current().ret(value);
+        }
+    }
+
+    /// The function's contract prologue: `[T; n]` params re-assert their lengths
+    /// (unification admits unknown-length arguments against them) and each `where`
+    /// predicate runs its check. Failures go through the `panic` native when it's
+    /// installed, falling back to a bare `Panic` inst otherwise.
+    fn emit_entry_checks(&mut self, parameters: &[Binding], locals: &[Local], wheres: &[Expr]) {
+        for (binding, &local) in parameters.iter().zip(locals) {
+            let Some(dec) = self.try_node_dec(binding.left.id()) else {
+                continue;
+            };
+            let dims = self.resolutions.decs[dec].ty.fixed_dims();
+            if dims.iter().any(Option::is_some) {
+                let value = self.current().get_local(local);
+                // failure underlines the parameter it was pinned on
+                self.with_loc(binding.location(), |ir| {
+                    ir.emit_dim_contract(value, &dims, 0)
+                });
+            }
+        }
+        for w in wheres {
+            // the failing check underlines the predicate's own source text
+            self.with_loc(w.location(), |ir| {
+                if let Some(cond) = w.lower(ir) {
+                    ir.emit_contract_check(cond, &format!("where `{w}` failed"), None);
+                }
+            });
+        }
+    }
+
+    /// `if !(cond) { __contract_fail(msg, got) }` at the current point. `got` is
+    /// the runtime value that broke the check (the length that arrived, say) --
+    /// the native appends it to the message when present.
+    fn emit_contract_check(&mut self, cond: InstId, msg: &str, got: Option<InstId>) {
+        let ok = self.push_block("contract_ok");
+        let fail = self.push_block("contract_fail");
+        self.current().jump_if_false(cond, fail);
+        self.current().jump(ok);
+
+        self.target(fail);
+        let msg = self.intern_str(msg);
+        let msg = self.current().constant(Constant::Str(msg));
+        // `__contract_fail` renders the message as the diagnostic title itself;
+        // `panic` (one-arg) is the fallback for pre-contract stdlibs, `Panic`
+        // for no-stdlib embeds
+        match (
+            self.resolutions.contract_native,
+            self.resolutions.panic_native,
+        ) {
+            (Some(nid), _) => {
+                let got = got.unwrap_or_else(|| self.current().constant(Constant::Null));
+                self.current().call_native(nid, vec![msg, got]);
+                // the native never returns -- the terminator only exists for the
+                // IR's sake; codegen never reaches it past the call
+                self.current().panic();
+            }
+            (None, Some(nid)) => {
+                self.current().call_native(nid, vec![msg]);
+                self.current().panic();
+            }
+            (None, None) => {
+                self.current().panic();
+            }
+        }
+        self.target(ok);
+    }
+
+    /// Re-asserts a value's `Some(n)` dims at runtime -- the outer level by a
+    /// direct `len` check, deeper levels by walking elements recursively.
+    /// `depth` names the dimension in the message so a matrix's wrong row reads
+    /// as such, and the actual length goes along so the user sees what arrived.
+    fn emit_dim_contract(&mut self, value: InstId, dims: &[Option<usize>], depth: usize) {
+        let Some((first, rest)) = dims.split_first() else {
+            return;
+        };
+        if let Some(n) = first {
+            let len = self.current().len(value);
+            let want = self.current().constant(*n);
+            let right_len = self
+                .current()
+                .bin(BinOp::Identity, len, want, OperandKind::Int);
+            let msg = match depth {
+                0 => format!("expected an array of length {n}"),
+                d => format!("expected an array of length {n} at dimension {d}"),
+            };
+            self.emit_contract_check(right_len, &msg, Some(len));
+        }
+        if rest.iter().any(Option::is_some) {
+            let exit = emit_array_walk(self, value, |ir, elem, _i, _latch| {
+                ir.emit_dim_contract(elem, rest, depth + 1);
+            });
+            self.target(exit);
         }
     }
 
@@ -920,7 +1014,7 @@ impl Emit for Closure {
         ir.in_body(bid, |ir| {
             let capture_locals: Vec<_> = captured_decs.iter().map(|&d| ir.local_for(d)).collect();
             ir.current_body_mut().captures = capture_locals;
-            ir.lower_fn_body(&self.parameters, &self.body);
+            ir.lower_fn_body(&self.parameters, &[], &self.body);
         });
 
         Some(ir.current().make_closure(bid, capture_insts))
@@ -1014,7 +1108,7 @@ impl Emit for Evaluation {
 impl Lower for Expr {
     fn lower(&self, ir: &mut Ir) -> Option<InstId> {
         let id = self.id();
-        ir.with_loc(self.location(), |ir| match self.kind() {
+        let out = ir.with_loc(self.location(), |ir| match self.kind() {
             ExprKind::Poison(poison) => poison.escaped(),
             ExprKind::Absolve(absolve) => absolve.emit(id, ir),
             ExprKind::Demote(demote) => demote.emit(id, ir),
@@ -1046,7 +1140,17 @@ impl Lower for Expr {
             ExprKind::Unary(unary) => unary.emit(id, ir),
             ExprKind::Unwrap(un) => un.emit(id, ir),
             ExprKind::While(while_expr) => while_expr.emit(id, ir),
-        })
+        });
+        // the solver marked this expr as fulfilling a `[T; n]` slot it couldn't
+        // prove -- re-assert the dims on the value now (see lens.rs). Inside the
+        // expr's own loc so a failure underlines the argument, not the caller.
+        if let Some(v) = out
+            && let Some(dims) = ir.resolutions.len_checks.get(&id)
+        {
+            let dims = dims.clone();
+            ir.with_loc(self.location(), |ir| ir.emit_dim_contract(v, &dims, 0));
+        }
+        out
     }
 }
 
@@ -1174,7 +1278,9 @@ impl Emit for parse::Function {
     fn emit(&self, id: NodeId, ir: &mut Ir) -> Option<InstId> {
         let dec = ir.node_dec(id);
         let bid = ir.item_body_for(dec);
-        ir.in_body(bid, |ir| ir.lower_fn_body(&self.parameters, &self.body));
+        ir.in_body(bid, |ir| {
+            ir.lower_fn_body(&self.parameters, &self.wheres, &self.body)
+        });
         None
     }
 }

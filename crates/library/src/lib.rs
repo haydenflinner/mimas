@@ -22,6 +22,8 @@ mod std_lib {
     pub(crate) mod darkly;
     #[cfg(feature = "dataframe")]
     pub(crate) mod dataframe;
+    #[cfg(feature = "tensor")]
+    pub(crate) mod tensor;
     pub(crate) mod debug;
     pub(crate) mod fs;
     pub(crate) mod interval;
@@ -55,6 +57,8 @@ pub fn std<'gc>(api: &mut Api<'_, 'gc>) {
     methods::rng::install(api);
     #[cfg(feature = "dataframe")]
     std_lib::dataframe::install(api);
+    #[cfg(feature = "tensor")]
+    std_lib::tensor::install(api);
     #[cfg(feature = "xlsx")]
     std_lib::xlsx::install(api);
     #[cfg(feature = "parquet")]

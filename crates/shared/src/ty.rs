@@ -101,11 +101,12 @@ pub enum Ty {
     /// globally unique to one declared parameter, so `T` in `map` can never collide with `T`
     /// somewhere else.
     Param(ParamId),
-    /// An ordered, growable sequence of values that all share one type, like a `Vec` in Rust.
-    /// Written `[T]`.
+    /// An ordered sequence of values that all share one type, like a `Vec` in Rust.
+    /// Written `[T]` when the [Len] is `Unknown` (a growable list), or `[T; n]` when
+    /// it's `Const` (an exact-length value -- pushing to one is a compile error).
     ///
     /// See more in the [book](https://mim.as/reference/collections/arrays.html).
-    Array(Box<Ty>),
+    Array(Box<Ty>, Len),
     /// A hash map from string keys to values of one type, like a `HashMap<String, T>` in Rust.
     /// Written `~{T}`. Any key might be absent, so indexing one yields `T?`.
     ///
@@ -158,12 +159,27 @@ pub enum Ty {
     Skolem(PactId),
 }
 
+/// What the type knows about an array's length. `Unknown` is the growable `[T]` a
+/// literal or bare annotation produces; `Const(n)` is the exact-length `[T; n]` an
+/// annotation pins. The checker uses the distinction to accept
+/// `f([[1, 2], [3, 4]])` into `f(m: [int; 2, 2])` statically, to reject `push`/`pop`
+/// on a fixed array, and to emit a runtime check wherever a growable value meets a
+/// sized slot it can't prove.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Len {
+    /// A growable `[T]`, or a length the checker doesn't know.
+    #[default]
+    Unknown,
+    /// Exactly this many elements; the length is part of the type's contract.
+    Const(usize),
+}
+
 impl PartialEq for Ty {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Vid(l), Self::Vid(r)) => l == r,
             (Self::Anon(l), Self::Anon(r)) => l == r,
-            (Self::Array(l), Self::Array(r)) => l == r,
+            (Self::Array(l, ll), Self::Array(r, rl)) => l == r && ll == rl,
             (Self::Dict(l), Self::Dict(r)) => l == r,
             (Self::Tuple(l), Self::Tuple(r)) => l == r,
             (Self::Fn(l), Self::Fn(r)) => l == r,
@@ -215,6 +231,33 @@ impl Ty {
         Ty::Adt(id, vec![])
     }
 
+    /// A growable `[elem]` -- the array type any unsized context wants.
+    pub fn array(elem: Ty) -> Ty {
+        Ty::Array(Box::new(elem), Len::Unknown)
+    }
+
+    /// A fixed `[elem; n]`.
+    pub fn sized_array(elem: Ty, n: usize) -> Ty {
+        Ty::Array(Box::new(elem), Len::Const(n))
+    }
+
+    /// The fixed extent at each array level, outermost first, stopping where the
+    /// type stops being an array. `[f32; 4, 8]` is `[Some(4), Some(8)]`, `[f32]` is
+    /// `[None]`, and `[[f32; 8]]` is `[None, Some(8)]` -- a `None` level is a
+    /// growable layer between pinned ones.
+    pub fn fixed_dims(&self) -> Vec<Option<usize>> {
+        let mut dims = vec![];
+        let mut ty = self;
+        while let Ty::Array(inner, len) = ty {
+            dims.push(match len {
+                Len::Const(n) => Some(*n),
+                Len::Unknown => None,
+            });
+            ty = inner;
+        }
+        dims
+    }
+
     /// A generic adt applied to `args`: `Ty::Adt(id, args)`.
     pub fn app(id: AdtId, args: Vec<Ty>) -> Ty {
         Ty::Adt(id, args)
@@ -244,7 +287,7 @@ impl Ty {
     pub fn contains_params(&self) -> bool {
         match self {
             Ty::Param(_) => true,
-            Ty::Array(inner) | Ty::Dict(inner) | Ty::Option(inner) | Ty::Result(inner) => {
+            Ty::Array(inner, _) | Ty::Dict(inner) | Ty::Option(inner) | Ty::Result(inner) => {
                 inner.contains_params()
             }
             Ty::Tuple(members) => members.iter().any(Ty::contains_params),
@@ -260,7 +303,7 @@ impl Ty {
     pub fn contains_skolem(&self) -> bool {
         match self {
             Ty::Skolem(_) => true,
-            Ty::Array(inner) | Ty::Dict(inner) | Ty::Option(inner) | Ty::Result(inner) => {
+            Ty::Array(inner, _) | Ty::Dict(inner) | Ty::Option(inner) | Ty::Result(inner) => {
                 inner.contains_skolem()
             }
             Ty::Tuple(members) => members.iter().any(Ty::contains_skolem),
@@ -452,7 +495,17 @@ impl Ty {
             Ty::Int => "int".into(),
             Ty::Float => "float".into(),
             Ty::Str => "str".into(),
-            Ty::Array(ty) => format!("[{}]", ty.display(names)),
+            Ty::Array(ty, Len::Unknown) => format!("[{}]", ty.display(names)),
+            // adjacent fixed levels flatten back to the `[f32; 4, 8]` spelling
+            Ty::Array(ty, Len::Const(n)) => {
+                let mut dims = vec![*n];
+                let mut elem = ty.as_ref();
+                while let Ty::Array(inner, Len::Const(d)) = elem {
+                    dims.push(*d);
+                    elem = inner;
+                }
+                format!("[{}; {}]", elem.display(names), dims.iter().join(", "))
+            }
             Ty::Dict(ty) => format!("~{{{}}}", ty.display(names)),
             Ty::Tuple(members) => {
                 format!("({})", members.iter().map(|v| v.display(names)).join(", "))

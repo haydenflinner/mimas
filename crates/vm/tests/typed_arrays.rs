@@ -136,11 +136,9 @@ fn native_vec_result_is_typed() {
 #[test]
 fn demotion_via_native_push() {
     assert_eq!(
-        run(
-            r#"let a = [1, 2];
+        run(r#"let a = [1, 2];
 push_val(a, "x");
-let TEST_VALUE = seq_kind(a);"#
-        ),
+let TEST_VALUE = seq_kind(a);"#),
         // same `Val::IntArray` handle, now fronting a `Vals` store
         Str("typed:vals".into())
     );
@@ -149,11 +147,9 @@ let TEST_VALUE = seq_kind(a);"#
 #[test]
 fn demoted_contents_survive() {
     assert_eq!(
-        run(
-            r#"let a = [1, 2];
+        run(r#"let a = [1, 2];
 push_val(a, "x");
-let TEST_VALUE = a;"#
-        ),
+let TEST_VALUE = a;"#),
         array!(Int(1), Int(2), Str("x".into()))
     );
 }
@@ -161,11 +157,9 @@ let TEST_VALUE = a;"#
 #[test]
 fn same_kind_native_push_keeps_backing() {
     assert_eq!(
-        run(
-            r#"let a = [1, 2];
+        run(r#"let a = [1, 2];
 push_val(a, 7);
-let TEST_VALUE = seq_kind(a);"#
-        ),
+let TEST_VALUE = seq_kind(a);"#),
         // wait — `push_val` takes `vm::Array`, which demotes to `Vals` first
         Str("typed:vals".into())
     );
@@ -244,12 +238,18 @@ fn tuple_literal_is_typed_and_broadcasts() {
         run("let TEST_VALUE = seq_kind((1, 2, 3));"),
         Str("typed:ints".into())
     );
-    assert_eq!(run("let TEST_VALUE = (1, 2, 3) * 2;"), array!(Int(2), Int(4), Int(6)));
+    assert_eq!(
+        run("let TEST_VALUE = (1, 2, 3) * 2;"),
+        array!(Int(2), Int(4), Int(6))
+    );
     assert_eq!(
         run("let TEST_VALUE = (1, 2, 3) + (10, 20, 30);"),
         array!(Int(11), Int(22), Int(33))
     );
-    assert_eq!(run("let TEST_VALUE = 10 - (1, 2, 3);"), array!(Int(9), Int(8), Int(7)));
+    assert_eq!(
+        run("let TEST_VALUE = 10 - (1, 2, 3);"),
+        array!(Int(9), Int(8), Int(7))
+    );
     assert_eq!(
         run("let TEST_VALUE = -(1, 2, 3);"),
         array!(Int(-1), Int(-2), Int(-3))
@@ -273,11 +273,9 @@ fn typed_eq_plain_array() {
 #[test]
 fn demoted_eq_plain_array() {
     assert_eq!(
-        run(
-            r#"let a = [1, 2];
+        run(r#"let a = [1, 2];
 push_val(a, "x");
-let TEST_VALUE = seq_eq(a, plain_ints(1, 2));"#
-        ),
+let TEST_VALUE = seq_eq(a, plain_ints(1, 2));"#),
         Bool(false) // [1, 2, "x"] != [1, 2]
     );
 }
@@ -331,8 +329,12 @@ let TEST_VALUE = 0;
     let mut vm = vm::Vm::execute(source, install).expect("compiled and ran");
     let snap = vm.snapshot().expect("snapshot");
     let has = |f: fn(&vm::SnapNode) -> bool| snap.nodes.iter().any(f);
-    assert!(has(|n| matches!(n, vm::SnapNode::IntArray(v) if v == &[1, 2, 3])));
-    assert!(has(|n| matches!(n, vm::SnapNode::FloatArray(v) if v == &[4.5, 5.5])));
+    assert!(has(
+        |n| matches!(n, vm::SnapNode::IntArray(v) if v == &[1, 2, 3])
+    ));
+    assert!(has(
+        |n| matches!(n, vm::SnapNode::FloatArray(v) if v == &[4.5, 5.5])
+    ));
     // `mixed` demoted to `Vals` before the snapshot, so its node is the
     // inner array — a `SnapNode::Array`, not a primitive store
     assert!(has(|n| matches!(n, vm::SnapNode::Array(_))));

@@ -59,6 +59,12 @@ pub enum Val<'gc> {
     /// once decoded (nothing mutates one in place), so no `RefLock` -- same reasoning as `PlExpr`.
     #[cfg(feature = "darkly")]
     DarklyImage(DarklyImage<'gc>),
+    /// An N-D tensor on the Burn NdArray backend (`std::tensor`). The payload is
+    /// `TensorPrimitive` -- rank-erased, shape lives at runtime -- so one variant covers every
+    /// rank. No `RefLock`: every burn op is functional (consumes and returns a new tensor), same
+    /// reasoning as `PlExpr`.
+    #[cfg(feature = "tensor")]
+    Tensor(Tensor<'gc>),
 }
 
 impl<'gc> PartialEq for Val<'gc> {
@@ -109,6 +115,12 @@ impl<'gc> PartialEq for Val<'gc> {
             (Val::GroupBy(a), Val::GroupBy(b)) => Gc::ptr_eq(a.0, b.0),
             #[cfg(feature = "darkly")]
             (Val::DarklyImage(a), Val::DarklyImage(b)) => Gc::ptr_eq(a.0, b.0),
+            #[cfg(feature = "tensor")]
+            // structural like Array: `tensor([[1]]) == tensor([[1]])`. bitwise-compare the
+            // flat f32 payload (a DataFrame compares by content the same way).
+            (Val::Tensor(a), Val::Tensor(b)) => {
+                Gc::ptr_eq(a.0, b.0) || crate::tensor::all_equal(&a.0 .0, &b.0 .0)
+            }
             _ => false,
         }
     }
@@ -281,6 +293,16 @@ impl<'gc> Val<'gc> {
     pub fn as_group_by(self) -> Option<GroupBy<'gc>> {
         if let Val::GroupBy(g) = self {
             Some(g)
+        } else {
+            None
+        }
+    }
+
+    #[cfg(feature = "tensor")]
+    #[inline]
+    pub fn as_tensor(self) -> Option<Tensor<'gc>> {
+        if let Val::Tensor(t) = self {
+            Some(t)
         } else {
             None
         }
@@ -713,6 +735,30 @@ impl std::fmt::Debug for GroupBy<'_> {
     }
 }
 
+/// A Burn `TensorPrimitive` on the NdArray backend -- a plain `'static` Rust value whose
+/// internal sharing is `Arc`-based, so `Static` (no GC tracing) is what it's for. No `RefLock`:
+/// burn ops are functional -- `a.matmul(b)` returns a new tensor rather than mutating -- so a
+/// mimas-level mutation like `t[0] = x` would have to be implemented as read-modify-swap anyway.
+#[cfg(feature = "tensor")]
+#[derive(Copy, Clone, Collect)]
+#[collect(no_drop)]
+pub struct Tensor<'gc>(pub Gc<'gc, Static<crate::tensor::Prim>>);
+
+#[cfg(feature = "tensor")]
+impl std::fmt::Debug for Tensor<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Tensor{:?}", crate::tensor::dims(&self.0 .0))
+    }
+}
+
+#[cfg(feature = "tensor")]
+impl<'gc> Tensor<'gc> {
+    /// The backend primitive -- `Clone` is an `Arc` bump, so ops take it by value cheaply.
+    pub fn inner(self) -> crate::tensor::Prim {
+        self.0 .0.clone()
+    }
+}
+
 /// Decoded pixel bytes from a `.darkly` raster/mask layer -- `width * height * channels` bytes,
 /// tightly packed, no compression (that's exactly how `.darkly`'s own `.pixels` files store them
 /// on disk, so `std_lib::darkly::open` reads them straight in with no decode step). `Static`
@@ -963,6 +1009,8 @@ impl<'gc> Val<'gc> {
             Val::DataFrame(_) | Val::PlExpr(_) | Val::GroupBy(_) => Captured::Other,
             #[cfg(feature = "darkly")]
             Val::DarklyImage(_) => Captured::Other,
+            #[cfg(feature = "tensor")]
+            Val::Tensor(_) => Captured::Other,
         }
     }
 }
@@ -1109,6 +1157,8 @@ impl<'gc> Val<'gc> {
             Val::PlExpr(_) | Val::GroupBy(_) => Inspect::Other,
             #[cfg(feature = "darkly")]
             Val::DarklyImage(_) => Inspect::Other,
+            #[cfg(feature = "tensor")]
+            Val::Tensor(_) => Inspect::Other,
         }
     }
 }
@@ -1263,6 +1313,29 @@ pub fn bin<'gc>(this: Val<'gc>, ctx: Ctx<'gc>, other: Val<'gc>, op: BinOp) -> Rt
         (op, Val::Float(a), Val::Int(b)) => float_bin(op, a, b as f64)?,
         (op, Val::Int(a), Val::Float(b)) => float_bin(op, a as f64, b)?,
         (op, Val::Int(a), Val::Int(b)) => int_bin(op, a, b)?,
+        // `tensor + tensor` / `tensor * 0.5` / `2 - tensor` -- broadcasting elementwise via the
+        // burn ops layer; dim mismatches surface the backend's message as a Custom runtime error
+        // rather than unwinding (the ops are `catch_unwind`ed in `tensor::bin`).
+        #[cfg(feature = "tensor")]
+        (op, Val::Tensor(a), Val::Tensor(b)) => Val::Tensor(ctx.new_tensor(
+            crate::tensor::bin(a.inner(), op, b.inner()).map_err(RtErr::Custom)?,
+        )),
+        #[cfg(feature = "tensor")]
+        (op, Val::Tensor(a), Val::Float(s)) => Val::Tensor(ctx.new_tensor(
+            crate::tensor::bin_scalar(a.inner(), op, s).map_err(RtErr::Custom)?,
+        )),
+        #[cfg(feature = "tensor")]
+        (op, Val::Tensor(a), Val::Int(s)) => Val::Tensor(ctx.new_tensor(
+            crate::tensor::bin_scalar(a.inner(), op, s as f64).map_err(RtErr::Custom)?,
+        )),
+        #[cfg(feature = "tensor")]
+        (op, Val::Float(s), Val::Tensor(b)) => Val::Tensor(ctx.new_tensor(
+            crate::tensor::scalar_bin(s, op, b.inner()).map_err(RtErr::Custom)?,
+        )),
+        #[cfg(feature = "tensor")]
+        (op, Val::Int(s), Val::Tensor(b)) => Val::Tensor(ctx.new_tensor(
+            crate::tensor::scalar_bin(s as f64, op, b.inner()).map_err(RtErr::Custom)?,
+        )),
         // elementwise over any sequence pair — `IntArray`/`FloatArray` read
         // their elements boxed back into `Val`s, so a typed array broadcasts
         // exactly like the `Vec<Val>` it replaces.

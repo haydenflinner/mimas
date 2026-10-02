@@ -70,6 +70,10 @@ pub struct Solver {
     /// Populated by `install_user_adt` from `ApiVariantFields::Named` dims; the dims pass
     /// consults it when a `.field` read isn't on a source-declared struct.
     pub(crate) field_dims: HashMap<(String, String), shared::units::Dim>,
+    /// Exprs that fulfill a `[T; n]` position with a length the compiler couldn't
+    /// prove -- emit wraps each in a runtime dim check (see `lens.rs`).
+    /// Surfaces on [`Resolutions::len_checks`](crate::Resolutions).
+    pub(crate) len_checks: IndexMap<NodeId, Vec<Option<usize>>>,
 
     pub(crate) control_flow: ControlFlow,
     pub(crate) ribs: Ribs,
@@ -120,6 +124,7 @@ impl Solver {
             node_dims: IndexMap::new(),
             want_dims: IndexMap::new(),
             field_dims: HashMap::new(),
+            len_checks: IndexMap::new(),
             non_value: None,
             iter_guards: vec![],
             type_params: vec![],
@@ -210,7 +215,7 @@ impl Solver {
             Ty::Float => "float",
             Ty::Str => "str",
             Ty::Bool => "bool",
-            Ty::Array(_) => "array",
+            Ty::Array(..) => "array",
             Ty::Dict(_) => "dict",
             _ => return None,
         };
@@ -870,7 +875,10 @@ impl Solver {
         let dec_id = self.dec_id(
             &ident,
             initial,
-            DecKind::Item { defaults: vec![] },
+            DecKind::Item {
+                defaults: vec![],
+                wheres: vec![],
+            },
             Vis::Public,
         );
         self.ribs.module_mut().insert(ident, dec_id);
@@ -946,7 +954,9 @@ impl Solver {
         match t.clone().normalized(self) {
             Ty::Vid(v) => Ty::Vid(*memo.entry(v).or_insert_with(|| self.vid())),
             Ty::Skolem(_) => self_ty.clone(),
-            Ty::Array(inner) => Ty::Array(Box::new(self.fresh_vids(&inner, self_ty, memo))),
+            Ty::Array(inner, len) => {
+                Ty::Array(Box::new(self.fresh_vids(&inner, self_ty, memo)), len)
+            }
             Ty::Dict(inner) => Ty::Dict(Box::new(self.fresh_vids(&inner, self_ty, memo))),
             Ty::Option(inner) => Ty::Option(Box::new(self.fresh_vids(&inner, self_ty, memo))),
             Ty::Result(inner) => Ty::Result(Box::new(self.fresh_vids(&inner, self_ty, memo))),
@@ -993,7 +1003,7 @@ impl Solver {
     pub(crate) fn substitute_anons(&mut self, t: &Ty, memo: &mut HashMap<u32, Vid>) -> Ty {
         match t {
             Ty::Anon(n) => Ty::Vid(*memo.entry(*n).or_insert_with(|| self.vid())),
-            Ty::Array(v) => Ty::Array(Box::new(self.substitute_anons(v, memo))),
+            Ty::Array(v, len) => Ty::Array(Box::new(self.substitute_anons(v, memo)), *len),
             Ty::Dict(v) => Ty::Dict(Box::new(self.substitute_anons(v, memo))),
             Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| self.substitute_anons(t, memo)).collect()),
             Ty::Option(inner) => Ty::Option(Box::new(self.substitute_anons(inner, memo))),
@@ -1244,7 +1254,10 @@ impl Solver {
                     let dec_id = self.dec_id(
                         &ident,
                         ty.clone(),
-                        DecKind::Item { defaults: vec![] },
+                        DecKind::Item {
+                            defaults: vec![],
+                            wheres: vec![],
+                        },
                         Vis::Public,
                     );
                     self.dec_to_native.insert(
@@ -1291,7 +1304,10 @@ impl Solver {
                     let dec_id = self.dec_id(
                         &ident,
                         ty.clone(),
-                        DecKind::Item { defaults: vec![] },
+                        DecKind::Item {
+                            defaults: vec![],
+                            wheres: vec![],
+                        },
                         Vis::Public,
                     );
                     self.dec_to_native.insert(
@@ -1601,7 +1617,7 @@ impl Solver {
                     ty
                 }
             },
-            Ty::Array(v) => Ty::Array(Box::new(self.substitute_params(v, map))),
+            Ty::Array(v, len) => Ty::Array(Box::new(self.substitute_params(v, map)), *len),
             Ty::Dict(v) => Ty::Dict(Box::new(self.substitute_params(v, map))),
             Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| self.substitute_params(t, map)).collect()),
             Ty::Option(inner) => Ty::Option(Box::new(self.substitute_params(inner, map))),
@@ -2398,7 +2414,10 @@ impl Solver {
             let kind = if import.constant {
                 DecKind::Constant(None)
             } else {
-                DecKind::Item { defaults: vec![] }
+                DecKind::Item {
+                    defaults: vec![],
+                    wheres: vec![],
+                }
             };
             self.dec_id(&ident, import.ty.clone(), kind, Vis::Public)
         };
@@ -2458,7 +2477,10 @@ impl Solver {
         let kind = if constant {
             DecKind::Constant(None)
         } else {
-            DecKind::Item { defaults: vec![] }
+            DecKind::Item {
+                defaults: vec![],
+                wheres: vec![],
+            }
         };
         let dec_id = self.dec_id(ident, ty.clone(), kind, vis);
         self.ribs.module_mut().insert(ident.clone(), dec_id);

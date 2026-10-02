@@ -75,7 +75,10 @@ stmt_test!(
     Let::new(
         ident!("a").into(),
         Literal::Array(vec![int!(0)]).into_expr(),
-        Some(Annotation::Array(Box::new(Annotation::Kw(TyKw::Int)))),
+        Some(Annotation::Array(
+            Box::new(Annotation::Kw(TyKw::Int)),
+            vec![]
+        )),
     )
 );
 stmt_test!(
@@ -331,7 +334,10 @@ stmt_test!(
     Let::new(
         ident!("i").into(),
         int!(0),
-        Some(Annotation::Array(Box::new(Annotation::Kw(TyKw::Int)))),
+        Some(Annotation::Array(
+            Box::new(Annotation::Kw(TyKw::Int)),
+            vec![]
+        )),
     )
 );
 
@@ -402,20 +408,26 @@ stmt_test!(
     Let::new(
         ident!("i").into(),
         int!(0),
-        Some(Annotation::Array(Box::new(Annotation::Dictionary(
-            Box::new(Annotation::Function(
+        Some(Annotation::Array(
+            Box::new(Annotation::Dictionary(Box::new(Annotation::Function(
                 vec![
                     Annotation::Option(Box::new(Annotation::Kw(TyKw::Int))),
                     Annotation::Kw(TyKw::Str),
                     Annotation::Kw(TyKw::Int),
                 ],
-                Box::new(Annotation::Option(Box::new(Annotation::Array(Box::new(
-                    Annotation::Array(Box::new(Annotation::Array(Box::new(Annotation::Kw(
-                        TyKw::Int
-                    )))))
-                )))))
-            ))
-        )))),
+                Box::new(Annotation::Option(Box::new(Annotation::Array(
+                    Box::new(Annotation::Array(
+                        Box::new(Annotation::Array(
+                            Box::new(Annotation::Kw(TyKw::Int)),
+                            vec![]
+                        )),
+                        vec![]
+                    )),
+                    vec![]
+                ))))
+            )))),
+            vec![]
+        )),
     )
 );
 
@@ -829,9 +841,10 @@ stmt_test!(
     Let::new(
         ident!("i").into(),
         Literal::Null.into_expr(),
-        Some(Annotation::Option(Box::new(Annotation::Array(Box::new(
-            Annotation::Kw(TyKw::Int)
-        ))))),
+        Some(Annotation::Option(Box::new(Annotation::Array(
+            Box::new(Annotation::Kw(TyKw::Int)),
+            vec![]
+        )))),
     )
 );
 
@@ -1044,6 +1057,7 @@ stmt_test!(
     Function {
         name: ident!("foo"),
         type_params: vec![],
+        wheres: vec![],
         parameters: vec![Binding::new(ident!("self"))],
         return_type: None,
         body: block!(),
@@ -1164,6 +1178,7 @@ stmt_test!(
     Function {
         name: ident!("id"),
         type_params: vec![ident!("T")],
+        wheres: vec![],
         parameters: vec![Binding::new(ident!("x")).with_annotation(Annotation::Ty(ident!("T")))],
         return_type: Some(Annotation::Ty(ident!("T"))),
         body: block!(),
@@ -1177,9 +1192,12 @@ stmt_test!(
     Function {
         name: ident!("map"),
         type_params: vec![ident!("T"), ident!("U")],
+        wheres: vec![],
         parameters: vec![
-            Binding::new(ident!("xs"))
-                .with_annotation(Annotation::Array(Box::new(Annotation::Ty(ident!("T")))))
+            Binding::new(ident!("xs")).with_annotation(Annotation::Array(
+                Box::new(Annotation::Ty(ident!("T"))),
+                vec![]
+            ))
         ],
         return_type: None,
         body: block!(),

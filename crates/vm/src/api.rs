@@ -186,9 +186,7 @@ fn meta_for(path: &str, skip: usize, arity: usize) -> (String, Vec<String>) {
 
 /// The def-site `(file, manifest, line)` submitted for `path` -- see [`NativeSrc`].
 fn src_for(path: &str) -> Option<api::NativeSrc> {
-    SRC_BY_PATH
-        .get(path)
-        .map(|s| (s.file, s.manifest, s.line))
+    SRC_BY_PATH.get(path).map(|s| (s.file, s.manifest, s.line))
 }
 
 /// Whether `path` was submitted as mutating its receiver -- see [`NativeMutates`].

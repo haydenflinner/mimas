@@ -163,10 +163,7 @@ impl<'gc> Ctx<'gc> {
     /// lands *entirely* on the stack while the emitter's flat signature sends
     /// the first word in a register — a corrupting ABI mismatch.
     #[doc(hidden)]
-    pub unsafe fn from_parts(
-        mutation: *const Mutation<'gc>,
-        state: *const State<'gc>,
-    ) -> Ctx<'gc> {
+    pub unsafe fn from_parts(mutation: *const Mutation<'gc>, state: *const State<'gc>) -> Ctx<'gc> {
         // SAFETY: callers pass the two words of a live `Ctx` verbatim.
         unsafe {
             Ctx {
@@ -367,6 +364,11 @@ impl<'gc> Ctx<'gc> {
         crate::val::DarklyImage(Gc::new(self.mutation, gc_arena::Static(image)))
     }
 
+    #[cfg(feature = "tensor")]
+    pub fn new_tensor(self, t: crate::tensor::Prim) -> crate::val::Tensor<'gc> {
+        crate::val::Tensor(Gc::new(self.mutation, gc_arena::Static(t)))
+    }
+
     // fresh allocation per container so the result shares no mutable state with `value`. scalars,
     // interned strs, fns and closures are copied by handle (immutable / callable). recurses like
     // `display`, so it shares display's no-cycles assumption.
@@ -553,6 +555,10 @@ impl<'gc> Ctx<'gc> {
             #[cfg(feature = "darkly")]
             Val::DarklyImage(img) => {
                 let _ = write!(out, "<image {}x{}>", img.0.0.width, img.0.0.height);
+            }
+            #[cfg(feature = "tensor")]
+            Val::Tensor(t) => {
+                let _ = write!(out, "{}", crate::tensor::render(&t.0 .0));
             }
         }
         Ok(())

@@ -36,6 +36,7 @@ pub mod utils {
 
 mod exhaustion;
 mod frames;
+mod lens;
 mod load;
 mod resolutions;
 mod solver;
@@ -55,6 +56,7 @@ mod tests {
     pub mod solve_test_utils;
 
     mod reduce_exprs;
+    mod solve_contracts;
     mod solve_enums;
     mod solve_exprs;
     mod solve_functions;

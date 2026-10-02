@@ -359,7 +359,7 @@ pub fn walk_annotation(annotation: &Annotation, visitor: &mut impl Visitor) {
         }
         Annotation::Option(inner)
         | Annotation::Result(inner)
-        | Annotation::Array(inner)
+        | Annotation::Array(inner, _)
         | Annotation::Dictionary(inner) => walk_annotation(inner, visitor),
         Annotation::Tuple(members) => {
             for member in members {

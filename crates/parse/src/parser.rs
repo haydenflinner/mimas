@@ -1068,6 +1068,7 @@ impl<'s> Parser<'s> {
     fn function(&mut self) -> Function {
         let start = self.next_start();
         let (name, type_params, parameters, return_type) = self.function_sig(true);
+        let wheres = self.where_clause();
         let body = if self.at(TokKind::LeftBrace) {
             self.block()
         } else {
@@ -1082,9 +1083,36 @@ impl<'s> Parser<'s> {
             name,
             type_params,
             parameters,
+            wheres,
             return_type,
             body,
         }
+    }
+
+    /// An optional `where` clause on a `fn` declaration: a comma-separated run of bool
+    /// predicates over the parameters (`fn f(xs: [int]) where xs.len() > 2 { ... }`),
+    /// checked statically where provable and again on entry at runtime. `where` is a
+    /// word only in this position -- everywhere else it stays an ordinary identifier.
+    fn where_clause(&mut self) -> Vec<Expr> {
+        if !self.at(TokKind::Ident("where")) {
+            return vec![];
+        }
+        self.advance();
+        let mut wheres = vec![];
+        loop {
+            // a `{` where a predicate should be is the function's body arriving early
+            if self.at(TokKind::LeftBrace) || !self.peek().starts_expr() {
+                self.expected("where predicate");
+                break;
+            }
+            // `where xs { }` -- like an `if` condition, a bare `{` is the body, not a
+            // struct literal tail on the predicate
+            wheres.push(self.struct_literals(false, Self::expr));
+            if !self.eat(TokKind::Comma) {
+                break;
+            }
+        }
+        wheres
     }
 
     fn closure(&mut self) -> Expr {
@@ -2832,8 +2860,28 @@ impl<'s> Parser<'s> {
             TokKind::LeftSquare => {
                 self.bump(TokKind::LeftSquare);
                 let inner = self.annotation();
+                // `[T; n]` pins an exact length, and `[T; m, n]` nests: the first dim
+                // is the outermost (`[f32; 4, 8]` is 4 rows of `[f32; 8]`).
+                let mut dims = vec![];
+                if self.eat(TokKind::SemiColon) {
+                    loop {
+                        match self.peek() {
+                            TokKind::Int(n) => {
+                                self.advance();
+                                dims.push(usize::try_from(n).unwrap_or(usize::MAX));
+                            }
+                            _ => {
+                                self.expected("array size");
+                                break;
+                            }
+                        }
+                        if !self.eat(TokKind::Comma) {
+                            break;
+                        }
+                    }
+                }
                 self.expect(TokKind::RightSquare);
-                Annotation::Array(Box::new(inner))
+                Annotation::Array(Box::new(inner), dims)
             }
             TokKind::TildeLeftBrace => {
                 self.bump(TokKind::TildeLeftBrace);

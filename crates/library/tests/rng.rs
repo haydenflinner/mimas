@@ -59,7 +59,10 @@ let b = int::random(1000);
         &["a", "b"],
         42,
     );
-    assert_eq!(got, via_host, "random::seed diverged from a host-seeded stream");
+    assert_eq!(
+        got, via_host,
+        "random::seed diverged from a host-seeded stream"
+    );
 }
 
 #[test]

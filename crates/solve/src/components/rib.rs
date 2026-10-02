@@ -293,6 +293,9 @@ pub enum DecKind {
     Global,
     Item {
         defaults: Vec<Option<parse::Literal>>,
+        /// `where` predicates from the fn decl, in source order. Stored unevaluated --
+        /// call sites re-derive provability against their own arguments.
+        wheres: Vec<parse::Expr>,
     },
     Constant(Option<parse::Literal>),
     Variant {

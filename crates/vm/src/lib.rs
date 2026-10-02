@@ -25,6 +25,8 @@ pub use snapshot::*;
 mod rebind;
 pub use rebind::*;
 mod math;
+#[cfg(feature = "tensor")]
+pub mod tensor;
 pub mod units;
 pub use ::glam;
 pub use units::{Beats, Bits, Hz, Px, PxS, PxS2, Secs, St, Tempo};

@@ -182,6 +182,8 @@ impl<'gc> Snapper<'gc> {
             Val::GroupBy(_) => return Err(SnapError::Unshareable("group_by")),
             #[cfg(feature = "darkly")]
             Val::DarklyImage(_) => return Err(SnapError::Unshareable("image")),
+            #[cfg(feature = "tensor")]
+            Val::Tensor(_) => return Err(SnapError::Unshareable("tensor")),
         })
     }
 

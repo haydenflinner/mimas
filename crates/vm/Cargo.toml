@@ -47,9 +47,15 @@ polars = { git = "https://github.com/haydenflinner/polars.git", rev = "c90a33e76
     "fmt_no_tty",
     "dtype-full",
 ] }
+# `Val::Tensor` storage + operator overloads in `bin()`. We depend on the backend traits and the
+# pure-Rust NdArray CPU backend directly (no `burn` umbrella: that always drags in nn/optim). The
+# payload is `TensorPrimitive<NdArray>` -- rank-erased, dims live in the tensor at runtime, so
+# one `Val` variant covers every rank. NdArray is pure Rust + matrixmultiply, so wasm builds.
+burn-backend = { version = "0.21", optional = true }
+burn-ndarray = { version = "0.21", optional = true }
 
 [features]
-default = ["dataframe", "darkly"]
+default = ["dataframe", "darkly", "tensor"]
 # Val::DataFrame/Val::PlExpr, operator overloading for them in bin(), and the polars dependency
 # itself. On by default so existing embedders see no change; `default-features = false` opts out.
 dataframe = ["dep:polars"]
@@ -59,6 +65,10 @@ dataframe = ["dep:polars"]
 # `std::darkly` can still opt the variant itself out) and to gate `library`'s actual `zip`/`serde`
 # dependencies behind its own same-named feature.
 darkly = []
+# Val::Tensor (a Burn `TensorPrimitive` on the NdArray backend), tensor arithmetic in `bin()`, and
+# the burn dependency itself. On by default; `default-features = false` opts out. `library`'s
+# `tensor` feature adds the `std::tensor` native surface on top.
+tensor = ["dep:burn-backend", "dep:burn-ndarray"]
 op-count = []
 
 [dev-dependencies]

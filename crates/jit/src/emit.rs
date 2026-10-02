@@ -1222,10 +1222,7 @@ pub(crate) fn emit_body(
     // `&code.ip`, `&thread.ops_left`, the top frame's `base`, the `regs`
     // buffer — is a handful of loads over the probed layout. `nregs` is the
     // chunk's own `regs` field: a compile-time constant.
-    let paused_p = em
-        .fb
-        .ins()
-        .iadd_imm_s(em.env.ctx1, lyt.state_paused as i64);
+    let paused_p = em.fb.ins().iadd_imm_s(em.env.ctx1, lyt.state_paused as i64);
     let opsleft_p = em
         .fb
         .ins()
@@ -2721,25 +2718,26 @@ impl Em<'_> {
     /// `tag` (i64) names a non-Gc `Val` variant → the value adopts nothing and
     /// a container write may skip `Gc::write`'s barrier.
     fn is_non_gc_tag(&mut self, t64: Value) -> Value {
-        let mask: u64 = [self.lyt.t_null, self.lyt.t_bool, self.lyt.t_int, self.lyt.t_float, self
-            .lyt
-            .t_fn]
-            .iter()
-            .map(|t| {
-                assert!(*t < 64, "Val discriminant exceeds mask domain");
-                1u64 << t
-            })
-            .sum();
+        let mask: u64 = [
+            self.lyt.t_null,
+            self.lyt.t_bool,
+            self.lyt.t_int,
+            self.lyt.t_float,
+            self.lyt.t_fn,
+        ]
+        .iter()
+        .map(|t| {
+            assert!(*t < 64, "Val discriminant exceeds mask domain");
+            1u64 << t
+        })
+        .sum();
         let m = self.iconst(mask as i64);
         let one = self.iconst(1);
         let bit = self.fb.ins().ishl(one, t64);
         let hit = self.fb.ins().band(bit, m);
         // guard the shift domain: a tag >= 64 can't be a real discriminant,
         // but a masked-out answer must be *certain*, not just plausible
-        let inr = self
-            .fb
-            .ins()
-            .icmp_imm_u(IntCC::UnsignedLessThan, t64, 64);
+        let inr = self.fb.ins().icmp_imm_u(IntCC::UnsignedLessThan, t64, 64);
         let nz = self.fb.ins().icmp_imm_u(IntCC::NotEqual, hit, 0);
         self.fb.ins().band(nz, inr)
     }
@@ -2777,18 +2775,12 @@ impl Em<'_> {
         pre: Value,
         slow: Block,
     ) {
-        let inb = self
-            .fb
-            .ins()
-            .icmp(IntCC::UnsignedLessThan, slot, len);
+        let inb = self.fb.ins().icmp(IntCC::UnsignedLessThan, slot, len);
         let k = self.fb.ins().band(pre, inb);
         let good = self.fb.create_block();
         self.fb.ins().brif(k, good, &[], slow, &[]);
         self.fb.switch_to_block(good);
-        let off = self
-            .fb
-            .ins()
-            .imul_imm_s(slot, self.lyt.val_size as i64);
+        let off = self.fb.ins().imul_imm_s(slot, self.lyt.val_size as i64);
         let sa = self.fb.ins().iadd(data, off);
         let d = dst.index() as u32;
         if self.v.int.contains_key(&d) || self.v.float.contains_key(&d) {
@@ -2829,18 +2821,12 @@ impl Em<'_> {
         pre: Value,
         slow: Block,
     ) {
-        let inb = self
-            .fb
-            .ins()
-            .icmp(IntCC::UnsignedLessThan, slot, len);
+        let inb = self.fb.ins().icmp(IntCC::UnsignedLessThan, slot, len);
         let k = self.fb.ins().band(pre, inb);
         let good = self.fb.create_block();
         self.fb.ins().brif(k, good, &[], slow, &[]);
         self.fb.switch_to_block(good);
-        let off = self
-            .fb
-            .ins()
-            .imul_imm_s(slot, self.lyt.val_size as i64);
+        let off = self.fb.ins().imul_imm_s(slot, self.lyt.val_size as i64);
         let sa = self.fb.ins().iadd(data, off);
         self.cpy_val(sa, srcv);
         let nb = self.next_blk(i);
@@ -3157,7 +3143,16 @@ impl Em<'_> {
                 off,
                 next,
                 H::GetIndex,
-                &[regs, d, s, ii, kk, self.env.ctx0, self.env.ctx1, self.env.out],
+                &[
+                    regs,
+                    d,
+                    s,
+                    ii,
+                    kk,
+                    self.env.ctx0,
+                    self.env.ctx1,
+                    self.env.out,
+                ],
                 dst,
             );
         }
@@ -3213,10 +3208,7 @@ impl Em<'_> {
         self.seq_read(i, dst, iv, gc, slow);
         // ---- receiver is Array ----
         self.fb.switch_to_block(arrb);
-        let gc = self
-            .fb
-            .ins()
-            .load(I64, tf(), sa, self.lyt.arr_pay as i32);
+        let gc = self.fb.ins().load(I64, tf(), sa, self.lyt.arr_pay as i32);
         let fok = self.borrow_ok(gc, self.lyt.rl_flag, false);
         let vp = self
             .fb
@@ -3241,14 +3233,31 @@ impl Em<'_> {
             off,
             next,
             H::GetIndex,
-            &[regs, d, s, ii, kk, self.env.ctx0, self.env.ctx1, self.env.out],
+            &[
+                regs,
+                d,
+                s,
+                ii,
+                kk,
+                self.env.ctx0,
+                self.env.ctx1,
+                self.env.out,
+            ],
             dst,
         );
     }
 
     /// `Op::SetIndex` — inline `(Array, Int, non-Gc)`; everything else goes
     /// through the `mj_set_index` helper (which carries the write barrier).
-    fn emit_set_index(&mut self, i: usize, off: usize, next: usize, set: Reg, index: Reg, value: Reg) {
+    fn emit_set_index(
+        &mut self,
+        i: usize,
+        off: usize,
+        next: usize,
+        set: Reg,
+        index: Reg,
+        value: Reg,
+    ) {
         // selective materialization instead of `flush_seq` — see
         // `emit_get_index`.
         let slow = self.fb.create_block();
@@ -3274,10 +3283,7 @@ impl Em<'_> {
         self.seq_write(i, iv, gc, va, slow);
         // ---- receiver is Array ----
         self.fb.switch_to_block(arrb);
-        let gc = self
-            .fb
-            .ins()
-            .load(I64, tf(), sa, self.lyt.arr_pay as i32);
+        let gc = self.fb.ins().load(I64, tf(), sa, self.lyt.arr_pay as i32);
         let fok = self.borrow_ok(gc, self.lyt.rl_flag, true);
         // value must adopt no Gc pointer → the write barrier is a no-op
         let va = self.val_ptr(value.index() as u32);
@@ -3387,10 +3393,7 @@ impl Em<'_> {
         let sv = self.iconst(slot as i64);
         self.seq_read(i, dst, sv, gc, slow);
         self.fb.switch_to_block(arrb);
-        let gc = self
-            .fb
-            .ins()
-            .load(I64, tf(), ra, self.lyt.arr_pay as i32);
+        let gc = self.fb.ins().load(I64, tf(), ra, self.lyt.arr_pay as i32);
         let fok = self.borrow_ok(gc, self.lyt.rl_flag, false);
         let vp = self
             .fb
@@ -3405,10 +3408,7 @@ impl Em<'_> {
         // ---- receiver is Instance: `i.0.borrow().fields[slot]` ----
         // (`Fields::Spilled` goes to `slow` — the helper's `Index` covers it.)
         self.fb.switch_to_block(instb);
-        let gc = self
-            .fb
-            .ins()
-            .load(I64, tf(), ra, self.lyt.inst_pay as i32);
+        let gc = self.fb.ins().load(I64, tf(), ra, self.lyt.inst_pay as i32);
         let fok = self.borrow_ok(gc, self.lyt.rl_flag_i, false);
         let fp = self
             .fb
@@ -3439,7 +3439,15 @@ impl Em<'_> {
 
     /// `Op::SetField` — inline `Instance`/`Array` receivers storing non-Gc
     /// values; misses and Gc-carrying values go through `mj_set_field`.
-    fn emit_set_field(&mut self, i: usize, off: usize, next: usize, receiver: Reg, slot: u32, value: Reg) {
+    fn emit_set_field(
+        &mut self,
+        i: usize,
+        off: usize,
+        next: usize,
+        receiver: Reg,
+        slot: u32,
+        value: Reg,
+    ) {
         // selective materialization instead of `flush_seq` — see
         // `emit_get_index`
         let slow = self.fb.create_block();
@@ -3475,10 +3483,7 @@ impl Em<'_> {
         let sv = self.iconst(slot as i64);
         self.seq_write(i, sv, gc, va, slow);
         self.fb.switch_to_block(arrb);
-        let gc = self
-            .fb
-            .ins()
-            .load(I64, tf(), ra, self.lyt.arr_pay as i32);
+        let gc = self.fb.ins().load(I64, tf(), ra, self.lyt.arr_pay as i32);
         let fok = self.borrow_ok(gc, self.lyt.rl_flag, true);
         let pre = self.fb.ins().band(fok, ngc);
         let vp = self
@@ -3493,10 +3498,7 @@ impl Em<'_> {
         self.write_elem(i, sv, vl, vp, va, pre, slow);
         // ---- receiver is Instance: `i.0.borrow_mut(&ctx).fields[slot] = v` ----
         self.fb.switch_to_block(instb);
-        let gc = self
-            .fb
-            .ins()
-            .load(I64, tf(), ra, self.lyt.inst_pay as i32);
+        let gc = self.fb.ins().load(I64, tf(), ra, self.lyt.inst_pay as i32);
         let fok = self.borrow_ok(gc, self.lyt.rl_flag_i, true);
         let fp = self
             .fb
@@ -3916,12 +3918,16 @@ impl Em<'_> {
         let nfo = self.fb.ins().imul_imm_s(flen, fsz);
         let nf = self.fb.ins().iadd(fptr, nfo);
         let bi = self.iconst32(body.index() as i64);
-        self.fb.ins().store(tf(), bi, nf, self.lyt.frame_chunk as i32);
+        self.fb
+            .ins()
+            .store(tf(), bi, nf, self.lyt.frame_chunk as i32);
         let cip = self.iconst(cchunk.offset as i64);
         self.fb.ins().store(tf(), cip, nf, self.lyt.frame_ip as i32);
         let rr = self.iconst32(dst.index() as i64);
         self.fb.ins().store(tf(), rr, nf, self.lyt.frame_ret as i32);
-        self.fb.ins().store(tf(), rlen, nf, self.lyt.frame_base as i32);
+        self.fb
+            .ins()
+            .store(tf(), rlen, nf, self.lyt.frame_base as i32);
         let nfl = self.fb.ins().iadd_imm_s(flen, 1);
         self.fb.ins().store(
             tf(),
@@ -3981,11 +3987,11 @@ impl Em<'_> {
         let fm2 = self.fb.ins().iadd_imm_s(flen2, -1);
         let pfo = self.fb.ins().imul_imm_s(fm2, fsz);
         let pf = self.fb.ins().iadd(fptr2, pfo);
-        let pbase = self.fb.ins().load(I64, tf(), pf, self.lyt.frame_base as i32);
-        let pret32 = self
+        let pbase = self
             .fb
             .ins()
-            .load(I32, tf(), pf, self.lyt.frame_ret as i32);
+            .load(I64, tf(), pf, self.lyt.frame_base as i32);
+        let pret32 = self.fb.ins().load(I32, tf(), pf, self.lyt.frame_ret as i32);
         let pret = self.fb.ins().uextend(I64, pret32);
         self.fb.ins().store(
             tf(),

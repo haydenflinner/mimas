@@ -429,8 +429,7 @@ pub fn dep_addrs(blob_text: &str) -> Vec<String> {
                     stack.push(Mode::Str);
                 } else if bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' {
                     let start = i;
-                    while i < bytes.len()
-                        && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_')
+                    while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_')
                     {
                         i += 1;
                     }

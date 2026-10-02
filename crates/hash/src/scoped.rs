@@ -573,6 +573,10 @@ impl<'s> Scoped<'s> {
         if let Some(return_type) = &f.return_type {
             self.annotation(return_type);
         }
+        // wheres share the params' scope -- `where xs.len() > 0` names them
+        for wheres in &f.wheres {
+            self.expr(wheres);
+        }
         self.expr(&f.body);
         self.pop();
     }
@@ -685,7 +689,7 @@ impl<'s> Scoped<'s> {
             Annotation::Ty(ident) => self.ty_reference(ident),
             Annotation::Option(inner)
             | Annotation::Result(inner)
-            | Annotation::Array(inner)
+            | Annotation::Array(inner, _)
             | Annotation::Dictionary(inner) => self.annotation(inner),
             Annotation::Tuple(members) => {
                 for member in members {

@@ -90,6 +90,12 @@ pub enum RtErr {
 
     #[error("{0}")]
     Custom(String),
+
+    /// A `[T; n]` or `where` contract the compiler couldn't prove failed at
+    /// runtime. Unlike `Custom`, the message is the whole diagnostic title --
+    /// authored at emit, no `panic:`/`todo:`-style prefix.
+    #[error("{0}")]
+    Contract(String),
 }
 
 impl RtErr {
@@ -118,6 +124,7 @@ impl RtErr {
             Self::NotCallable { callee } => format!("`{callee}` cannot be called"),
             Self::WrongArity { got, .. } => format!("this call passes {got}"),
             Self::InvalidArgument(_) | Self::Custom(_) => "here".to_string(),
+            Self::Contract(_) => "the contract fails here".to_string(),
         }
     }
 }

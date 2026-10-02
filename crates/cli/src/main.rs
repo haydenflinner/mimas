@@ -211,9 +211,10 @@ fn link(addr: &str, blobs: Option<PathBuf>) -> i32 {
 /// the name isn't already scoped, `./blobs-scoped` when no flag is given.
 fn scoped_dir(blobs: Option<PathBuf>) -> Result<PathBuf, String> {
     let base = blobs.unwrap_or_else(|| PathBuf::from("blobs"));
-    let scoped = if base.file_name().is_some_and(|n| {
-        n.to_string_lossy().ends_with("-scoped")
-    }) {
+    let scoped = if base
+        .file_name()
+        .is_some_and(|n| n.to_string_lossy().ends_with("-scoped"))
+    {
         base.clone()
     } else {
         let mut name = base.as_os_str().to_os_string();

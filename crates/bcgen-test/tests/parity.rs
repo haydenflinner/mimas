@@ -45,8 +45,7 @@ fn every_op_specialized() {
     ] {
         // the inner-body signature is `-> u8` (the gout/tag call convention);
         // the outlined cold exit helper `gbail` shares it — don't count it
-        let bodies =
-            src.matches(") -> u8 {").count() - src.matches("fn gbail").count();
+        let bodies = src.matches(") -> u8 {").count() - src.matches("fn gbail").count();
         // shadow-init bails also say `=> return step(`; the catch-all is the
         // only `_ =>` arm (it sets `*op_ip` first, then flushes shadows)
         let delegates = src.matches("_ => { *io.op_ip = code.ip;").count();

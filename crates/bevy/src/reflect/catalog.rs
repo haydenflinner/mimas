@@ -62,7 +62,7 @@ impl Catalog {
                 Kind::Str => Ty::Str,
                 Kind::Entity => ScriptEntity::mimas_ty(registry).expect(REGISTERED),
                 Kind::Option(inner) => Ty::Option(Box::new(ty(registry, inner))),
-                Kind::List(inner) => Ty::Array(Box::new(ty(registry, inner))),
+                Kind::List(inner) => Ty::array(ty(registry, inner)),
                 Kind::Vec2 | Kind::Vec3 | Kind::Quat | Kind::Type(_) => {
                     registry.ty_of_id(info.type_id()).expect(REGISTERED)
                 }

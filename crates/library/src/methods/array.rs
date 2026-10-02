@@ -4,8 +4,8 @@ use shared::Ty;
 use vm::{Array, Ctx, RtErr, Val, anon, api::Api};
 
 pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
-    api.add_assoc(Ty::Array(Box::new(Ty::Anon(0))), new);
-    api.add_assoc(Ty::Array(Box::new(Ty::Anon(0))), new_filled);
+    api.add_assoc(Ty::array(Ty::Anon(0)), new);
+    api.add_assoc(Ty::array(Ty::Anon(0)), new_filled);
     let id = api.add_method(len);
     api.mark_intrinsic(id, Intrinsic::Len);
     let id = api.add_method(contains);

@@ -13,6 +13,7 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add(panic);
     api.add(todo);
     api.add(dbg);
+    api.add(__contract_fail);
 }
 
 #[native]
@@ -85,6 +86,27 @@ fn todo<'gc>(ctx: Ctx<'gc>, msg: Option<anon::T<'gc>>) -> Result<NeverReturn, Rt
         Some(m) => RtErr::Custom(format!("todo: {}", ctx.to_string(m.0)?)),
         None => RtErr::Custom("todo".into()),
     })
+}
+
+/// Compiler-emitted contract check (`[T; n]` dims, `where` predicates). Its message is the
+/// diagnostic title as authored at emit -- no `panic:`-style prefix -- carried on
+/// `RtErr::Contract`. Not for user code; the `__` marks it internal.
+#[native]
+fn __contract_fail<'gc>(
+    ctx: Ctx<'gc>,
+    msg: Option<anon::T<'gc>>,
+    got: Option<anon::T<'gc>>,
+) -> Result<NeverReturn, RtErr> {
+    let mut text = match msg {
+        Some(msg) => ctx.to_string(msg.0)?,
+        None => "contract failed".to_string(),
+    };
+    // the value that broke the check, when the check has one -- the length that
+    // arrived against the one that was pinned, say
+    if let Some(got) = got {
+        text = format!("{text}, got {}", ctx.to_string(got.0)?);
+    }
+    Err(RtErr::Contract(text))
 }
 
 #[native]

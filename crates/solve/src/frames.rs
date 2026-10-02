@@ -232,7 +232,7 @@ fn apply_result_col(f: &str, base: FrameCol) -> FrameCol {
             FrameCol::known(Ty::Str)
         }
         "unique" | "sort" | "sort_desc" | "reverse" => FrameCol {
-            ty: base.ty.clone().map(|t| Ty::Array(Box::new(t))),
+            ty: base.ty.clone().map(|t| Ty::array(t)),
             dim: base.dim,
         },
         // sum/min/max/first/last/fill_null and anything unlisted: same shape out as in
@@ -949,9 +949,7 @@ impl Solver {
                     return Ok(ty);
                 };
                 match schema.col(self, &call.arguments[0].value, name)? {
-                    FrameCol { ty: Some(t), .. } => {
-                        Ok(Ty::Result(Box::new(Ty::Array(Box::new(t)))))
-                    }
+                    FrameCol { ty: Some(t), .. } => Ok(Ty::Result(Box::new(Ty::array(t)))),
                     _ => Ok(ty),
                 }
             }
@@ -970,12 +968,12 @@ impl Solver {
                 Ok(Ty::Result(Box::new(if method == "row" {
                     record
                 } else {
-                    Ty::Array(Box::new(record))
+                    Ty::array(record)
                 })))
             }
             // a unit column pulled as a unit is still `[float]` at the Ty layer
             "pull_as" => Ok(match self.frame_schema_of(recv) {
-                Some(_) => Ty::Result(Box::new(Ty::Array(Box::new(Ty::Float)))),
+                Some(_) => Ty::Result(Box::new(Ty::array(Ty::Float))),
                 None => ty,
             }),
             "schema" => self.apply_schema_spec(id, call, recv, ty),
@@ -1201,7 +1199,7 @@ impl Solver {
                     _ => self.ast_quantities.get(&e.id()).copied(),
                 };
                 let ty = match e.query(self)?.normalized(self) {
-                    Ty::Array(inner) => Some(*inner),
+                    Ty::Array(inner, _) => Some(*inner),
                     _ => None,
                 };
                 (ty, dim)

@@ -185,10 +185,12 @@ fn open<'gc>(
     };
     let selection = match manifest.selection_id {
         None => None,
-        Some(id) => match read_filter_pixels(ctx, &mut archive, &nodes, id, "selection", &mut pixels) {
-            Ok(()) => Some(id),
-            Err(e) => return Raisable::Raised(e),
-        },
+        Some(id) => {
+            match read_filter_pixels(ctx, &mut archive, &nodes, id, "selection", &mut pixels) {
+                Ok(()) => Some(id),
+                Err(e) => return Raisable::Raised(e),
+            }
+        }
     };
     let doc = DarklyDocument::Document {
         name: manifest.name,

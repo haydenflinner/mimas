@@ -1,6 +1,6 @@
 use crate::{
     Error, Solver,
-    components::{Ty, Vid},
+    components::{Len, Ty, Vid},
     errors::TypeMismatch,
 };
 use shared::Location;
@@ -91,8 +91,18 @@ impl Unification {
                 Ok(sub)
             }
 
-            // Collections
-            (Ty::Array(ty), Ty::Array(exp_ty)) | (Ty::Dict(ty), Ty::Dict(exp_ty)) => {
+            // Collections. Two pinned lengths must agree exactly; `Const` vs `Unknown`
+            // unifies either way -- the size contract is enforced where a value is
+            // produced (`Query::fulfill_ty` on the expr), not here in the type merge.
+            (Ty::Array(ty, lhs_len), Ty::Array(exp_ty, rhs_len)) => {
+                if let (Len::Const(a), Len::Const(b)) = (lhs_len, rhs_len)
+                    && a != b
+                {
+                    return Err(potential_err);
+                }
+                Self::unify(ty, exp_ty, solver).map_err(|_| potential_err)
+            }
+            (Ty::Dict(ty), Ty::Dict(exp_ty)) => {
                 Self::unify(ty, exp_ty, solver).map_err(|_| potential_err)
             }
             (Ty::Tuple(lhs), Ty::Tuple(rhs)) if lhs.len() == rhs.len() => lhs
