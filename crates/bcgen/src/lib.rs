@@ -514,7 +514,9 @@ fn emit_body(w: &mut String, program: &Program, body: usize) {
          \x20   signatures: &IdVec<BodyId, Option<Function>>,\n\
          \x20   fuel: &mut usize,\n\
          \x20   op_ip: &mut usize,\n\
-         ) -> RtResult<Flow<'gc>> {{"
+         \x20   gout: &mut std::mem::MaybeUninit<RtResult<Flow<'gc>>>,\n\
+         \x20   inl: bool,\n\
+         ) -> u8 {{"
     );
     let _ = writeln!(
         w,
@@ -589,8 +591,8 @@ fn emit_body(w: &mut String, program: &Program, body: usize) {
          \x20   }}}}}}\n\
          \x20   macro_rules! gexit {{ () => {{{{\n\
          \x20       settle!();\n\
-         \x20       if ctx.state().paused.get() | (*fuel == 0) {{ flush!(); return Ok(Flow::Next); }}\n\
-         \x20       if thread.ops_left == 0 {{ *op_ip = code.ip; flush!(); return Err(RtErr::OutOfFuel); }}\n\
+         \x20       if ctx.state().paused.get() | (*fuel == 0) {{ flush!(); gout.write(Ok(Flow::Next)); return 1u8; }}\n\
+         \x20       if thread.ops_left == 0 {{ *op_ip = code.ip; flush!(); gout.write(Err(RtErr::OutOfFuel)); return 1u8; }}\n\
          \x20       bcn = (*fuel as u64).min(thread.ops_left); bcn0 = bcn;\n\
          \x20   }}}}}}\n\
          \x20   macro_rules! gateq {{ () => {{{{\n\
@@ -602,7 +604,7 @@ fn emit_body(w: &mut String, program: &Program, body: usize) {
          \x20       bcn -= 1;\n\
          \x20   }}}}}}\n\
          \x20   macro_rules! pchk {{ () => {{{{\n\
-         \x20       if ctx.state().paused.get() {{ settle!(); flush!(); return Ok(Flow::Next); }}\n\
+         \x20       if ctx.state().paused.get() {{ settle!(); flush!(); gout.write(Ok(Flow::Next)); return 1u8; }}\n\
          \x20   }}}}}}"
     );
     let _ = writeln!(w, "    loop {{");
@@ -855,7 +857,7 @@ fn emit_body(w: &mut String, program: &Program, body: usize) {
     // hand it to the interpreter, which hits the same garbage decode either way
     let _ = writeln!(
         w,
-        "            _ => {{ *op_ip = code.ip; gatep!(); settle!(); flush!(); return step(regs, code, ctx, strs, &thread.frames); }}"
+        "            _ => {{ *op_ip = code.ip; gatep!(); settle!(); flush!(); gout.write(step(regs, code, ctx, strs, &thread.frames)); return 1u8; }}"
     );
     let _ = writeln!(w, "        }}");
     let _ = writeln!(w, "    }}");
@@ -880,11 +882,14 @@ fn emit_body(w: &mut String, program: &Program, body: usize) {
          ) {{\n\
          \x20   // SAFETY: the BodyFn contract — pointers borrow live driver\n\
          \x20   // state for the call's duration; `out` is a live slot.\n\
+         \x20   // `gen = false`: every exit lands in `gout` (tag is always 1).\n\
          \x20   unsafe {{\n\
-         \x20       *out = body_{body}(\n\
+         \x20       let mut gout = std::mem::MaybeUninit::<RtResult<Flow>>::uninit();\n\
+         \x20       body_{body}(\n\
          \x20           &mut *thread, &mut *code, ctx, &*strs, &*chunks, &*signatures,\n\
-         \x20           &mut *fuel, &mut *op_ip,\n\
+         \x20           &mut *fuel, &mut *op_ip, &mut gout, false,\n\
          \x20       );\n\
+         \x20       *out = gout.assume_init();\n\
          \x20   }}\n\
          }}"
     );
@@ -1045,25 +1050,70 @@ fn grow_region(
 ///   write-through gone, `regs` there can be stale.
 fn defer(arm: &str, sh: &Sh, restock: u64) -> String {
     // `restock` > 0 means the op ran under a pre-paid fast path (`bcn -= len`
-    // covered the whole region): returns hand back the ops that never ran so
+    // covered the whole region): exits hand back the ops that never ran so
     // `settle!()` charges exactly the ones that did.
-    let mut out = arm.replace(
-        "return ",
-        &format!("bcn += {restock}u64; settle!(); flush!(); return "),
-    );
+    //
+    // `return <expr>` exit kinds under the tag convention (`InnerBodyFn`):
+    // Flow-producing exits settle + flush, write the `gout` slot, yield tag 1;
+    // bare `Nu8` tag exits (call-path propagation, the callee-side pop) get
+    // the restock + settle only — `gout` and the dying frame need no flush.
+    // The expression ends at the first `;` or `}` at brace depth 0 — emitted
+    // `return`s sit either statement-position (`expr;`) or last inside an
+    // else/match block (`expr }`), and `Flow::Call { .. }` literals carry
+    // their own braces.
+    let mut out = String::with_capacity(arm.len() + 64);
+    let mut rest = arm;
+    while let Some(p) = rest.find("return ") {
+        out.push_str(&rest[..p]);
+        let tail = &rest[p + "return ".len()..];
+        let mut depth = 0i32;
+        let mut end = tail.len();
+        for (i, ch) in tail.char_indices() {
+            match ch {
+                '{' => depth += 1,
+                ';' if depth == 0 => {
+                    end = i;
+                    break;
+                }
+                '}' => {
+                    if depth == 0 {
+                        end = i;
+                        break;
+                    }
+                    depth -= 1;
+                }
+                _ => {}
+            }
+        }
+        let expr = tail[..end].trim();
+        let is_tag = expr
+            .strip_suffix("u8")
+            .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()));
+        if is_tag {
+            let _ = write!(out, "bcn += {restock}u64; settle!(); return {expr};");
+        } else {
+            let _ = write!(
+                out,
+                "bcn += {restock}u64; settle!(); flush!(); gout.write({expr}); return 1u8;"
+            );
+        }
+        rest = &tail[end + usize::from(tail.as_bytes().get(end) == Some(&b';'))..];
+    }
+    out.push_str(rest);
+    let mut out = out;
     if restock == 0 {
         out = out.replace("bcn += 0u64; ", "");
     }
-    // ...then reclaim the pointless ones. A `Flow::Return` destroys the
+    // ...then reclaim the pointless flushes. A `Flow::Return` destroys the
     // frame — nothing observes its regs — except the root frame, which the
-    // host inspects after `run()`. The call fast-path's propagations are
-    // already flushed pre-`enter_call`.
+    // host inspects after `run()`. The call fast-path's propagations and
+    // arity errors were already flushed pre-`enter_call`.
     out = out.replace(
-        "flush!(); return Ok(Flow::Return",
-        "if thread.frames.len() == 1 { flush!(); } return Ok(Flow::Return",
+        "flush!(); gout.write(Ok(Flow::Return",
+        "if thread.frames.len() == 1 { flush!(); } gout.write(Ok(Flow::Return",
     );
-    out = out.replace("flush!(); return res }", "return res }");
-    out = out.replace("flush!(); return Err(kind) }", "return Err(kind) }");
+    out = out.replace("flush!(); gout.write(res)", "gout.write(res)");
+    out = out.replace("flush!(); gout.write(Err(kind))", "gout.write(Err(kind))");
     for &r in &sh.int {
         let plain = format!("rd(regs, Reg::from({r}u32))");
         out = out.replace(
@@ -1086,6 +1136,20 @@ fn defer(arm: &str, sh: &Sh, restock: u64) -> String {
         );
     }
     out
+}
+
+/// The `gen`-entered `Flow::Return` fast path, shared by `Return`/`Raise`:
+/// the callee runs the driver's pop itself — frame popped, `regs` truncated,
+/// `code.ip` restored to the caller's saved resume slot, and `rv` written
+/// straight into the caller's `return_reg` — then yields tag 0. `rv` must be
+/// bound (a `Val`) already: it may read the callee's dying window. The
+/// `frames.len() > 1` guard can only fail on a misused `gen` entry and falls
+/// back to the `gout` path below it.
+fn gen_pop(s: &mut String) {
+    let _ = writeln!(s, "if inl && thread.frames.len() > 1 {{");
+    let _ = writeln!(s, "    gen_return_pop(thread, code, rv);");
+    let _ = writeln!(s, "    return 0u8;");
+    let _ = writeln!(s, "}}");
 }
 
 fn reg(r: Reg) -> String {
@@ -1214,26 +1278,22 @@ fn emit_call_fast(
             reg(dst)
         );
     }
+    // Tag 1 means `gout` already holds the callee's `RtResult<Flow>` —
+    // propagate verbatim (the settle defer prepends charges nothing: our
+    // spend was settled pre-call and the callee settled its own). Tag 0: the
+    // callee ran the driver's pop itself — frame popped, `regs` truncated,
+    // `code.ip` restored to our resume slot, `regs[dst]` written.
     let _ = writeln!(
         s,
-        "let res = {f}(thread, code, ctx, strs, chunks, signatures, fuel, op_ip);
-        match res {{
-            Ok(Flow::Return(v)) => {{
-                \x20   let popped = thread.frames.pop().unwrap();
-                \x20   thread.regs.truncate(popped.base);
-                \x20   let caller = thread.frames.last().unwrap();
-                \x20   code.ip = caller.ip;
-                \x20   let caller_base = caller.base;
-                \x20   thread.regs[caller_base + popped.return_reg as usize] = v;
-                \x20   // the callee's `enter_call`/pop may have moved
-                \x20   // `thread.regs` — rebuild the caller window before
-                \x20   // anything touches it (dst-shadow refresh included)
-                \x20   regs = unsafe {{
-                \x20       std::slice::from_raw_parts_mut(thread.regs.as_mut_ptr().add(base), nregs)
-                \x20   }};
-                \x20}},
-                \x20_ => {{ return res }},
+        "if {f}(thread, code, ctx, strs, chunks, signatures, fuel, op_ip, gout, true) != 0u8 {{
+            \x20return 1u8;
             \x20}}
+            \x20// deeper `enter_call`s may have moved `thread.regs` — rebuild
+            \x20// the caller window before anything touches it (the
+            \x20// dst-shadow refresh included)
+            \x20regs = unsafe {{
+            \x20    std::slice::from_raw_parts_mut(thread.regs.as_mut_ptr().add(base), nregs)
+            \x20}};
             \x20// the callee consumed fuel/ops_left through its own
             \x20// `bcn` quota — re-arm ours from the settled counters
             \x20bcn = (*fuel as u64).min(thread.ops_left); bcn0 = bcn;",
@@ -1752,14 +1812,20 @@ fn emit_op(
             wln!("wr(regs, {}, v);", reg(*dst));
             wln!("code.ip = {next};");
         }
-        Op::Return { val } => wln!("return Ok(Flow::Return(rd(regs, {})));", reg(*val)),
+        Op::Return { val } => {
+            wln!("let rv = {};", sh.rdv(*val));
+            gen_pop(&mut s);
+            wln!("return Ok(Flow::Return(rv));");
+        }
         Op::Panic {} => wln!("*op_ip = {offset}; return Err(RtErr::MatchPanicReached);"),
         Op::Raise { val } => {
             wln!(
                 "let Val::Str(err) = rd(regs, {}) else {{ unreachable!(\"raise on a non-str value\") }};",
                 reg(*val)
             );
-            wln!("return Ok(Flow::Return(Val::Raised(err)));");
+            wln!("let rv = Val::Raised(err);");
+            gen_pop(&mut s);
+            wln!("return Ok(Flow::Return(rv));");
         }
         Op::IsRaised { dst, src } => {
             sh.wr_shadow(

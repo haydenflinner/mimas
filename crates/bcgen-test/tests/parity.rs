@@ -43,7 +43,8 @@ fn every_op_specialized() {
         include_str!(concat!(env!("OUT_DIR"), "/deep.rs")),
         include_str!(concat!(env!("OUT_DIR"), "/mixed.rs")),
     ] {
-        let bodies = src.matches("-> RtResult<Flow<'gc>>").count();
+        // the inner-body signature is `-> u8` (the gout/tag call convention)
+        let bodies = src.matches(") -> u8 {").count();
         // shadow-init bails also say `=> return step(`; the catch-all is the
         // only `_ =>` arm (it sets `*op_ip` first, then flushes shadows)
         let delegates = src.matches("_ => { *op_ip = code.ip;").count();

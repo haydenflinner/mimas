@@ -28,7 +28,7 @@ use crate::vm::step_one;
 pub const INLINE_CALL_DEPTH: usize = 256;
 /// See the non-debug const above.
 #[cfg(debug_assertions)]
-pub const INLINE_CALL_DEPTH: usize = 96;
+pub const INLINE_CALL_DEPTH: usize = 48;
 
 /// One bcgen-specialized body — a chunk-local `step_one`. The driver invokes it
 /// with `code.ip` at the body's next unexecuted op and the body's frame on top
@@ -87,6 +87,16 @@ pub type BodyFn = for<'gc> unsafe extern "C" fn(
 /// uses — bcgen bodies call each other at this ABI (no trampoline round-trip
 /// on the inlined-call path); each also emits a `BodyFn` extern-"C" shim for
 /// the driver table. Not part of any FFI contract.
+///
+/// The inner convention avoids building the ~`Flow`-sized `RtResult` on the
+/// hot return path: `gout` is an out-slot for results that must propagate to
+/// the driver (`Flow::Next`/`Err`/`Flow::Call`/a `Flow::Return` seen by an
+/// ABI-entered body), and the return tag is `0` when an `inl`-entered callee
+/// finished a call itself — its frame already popped, `regs` truncated,
+/// `code.ip` restored, and the value written into the caller's `return_reg`
+/// slot. `1` means `gout` holds the `RtResult<Flow>` to propagate verbatim.
+/// `inl` is `true` only for generated-caller invocations (they pushed the
+/// frame); `false` entries always produce tag `1`.
 pub type InnerBodyFn = for<'gc> fn(
     thread: &mut ThreadState<'gc>,
     code: &mut Decoder,
@@ -96,7 +106,27 @@ pub type InnerBodyFn = for<'gc> fn(
     signatures: &IdVec<BodyId, Option<Function>>,
     fuel: &mut usize,
     op_ip: &mut usize,
-) -> RtResult<Flow<'gc>>;
+    gout: &mut std::mem::MaybeUninit<RtResult<Flow<'gc>>>,
+    inl: bool,
+) -> u8;
+
+/// The callee-side `Flow::Return` for `inl`-entered bodies (`InnerBodyFn`
+/// tag-0 exits): pop our frame, truncate `regs` back to the caller's window,
+/// restore the caller's saved `code.ip`, and write `rv` straight into its
+/// `return_reg` slot — the driver's exact pop sequence, run early so the
+/// `RtResult<Flow>` round-trip never happens for generated-caller returns.
+///
+/// `rv` must already be materialized: it may read the dying window.
+#[doc(hidden)]
+#[inline]
+pub fn gen_return_pop<'gc>(t: &mut ThreadState<'gc>, code: &mut Decoder, rv: Val<'gc>) {
+    let popped = t.frames.pop().unwrap();
+    t.regs.truncate(popped.base);
+    let caller = t.frames.last().unwrap();
+    code.ip = caller.ip;
+    let caller_base = caller.base;
+    t.regs[caller_base + popped.return_reg as usize] = rv;
+}
 
 /// The interpreter's own `step_one`, exposed so generated bodies can delegate any
 /// op they don't specialize — `code.ip` sits at the op's first byte. Never
