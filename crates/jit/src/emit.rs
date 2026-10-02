@@ -26,7 +26,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::{BodyFacts, Frozen, FrozenKind, H, Obs, ObsTag};
-use compile::{AccessKind, BlockTarget, Constant, Op, Program, Reg};
+use compile::{AccessKind, BlockTarget, Constant, Op, Program, Reg, UnaryOp};
 use cranelift_codegen::Context;
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::{
@@ -1059,12 +1059,7 @@ pub(crate) fn emit_body(
     // reads stay exact (`unguarded` additionally requires `!sh.written` —
     // `Em::frozen_of` decides).
     let known: HashMap<u32, Obs> = (0..nregs)
-        .filter(|&r| {
-            spec.facts
-                .entry
-                .get(r)
-                .is_some_and(|o| o.ptr != 0)
-        })
+        .filter(|&r| spec.facts.entry.get(r).is_some_and(|o| o.ptr != 0))
         .map(|r| (r as u32, spec.facts.entry[r]))
         .collect();
 
@@ -1274,6 +1269,13 @@ pub(crate) fn emit_body(
     em.rearm_seq();
 
     // shadow init: `(v, ok) = match regs[r] { Int(v) => (v, true), _ => (0,false) }`
+    // — but only for regs that can hold a non-`Null` Val at entry: params
+    // (arg-copied) and captures (capture-copied). Every other window slot is
+    // `Null` by construction, so its probe can never hit — emit `ok=0`
+    // directly instead (a Null reads `ok=0` → `estep`, same as probing).
+    let mut initd: HashSet<u32> =
+        chunk.params.iter().map(|p| p.index() as u32).collect();
+    initd.extend(chunk.captures.iter().map(|p| p.index() as u32));
     let int_keys: Vec<u32> = {
         let mut k: Vec<u32> = em.v.int.keys().copied().collect();
         k.sort_unstable();
@@ -1281,6 +1283,11 @@ pub(crate) fn emit_body(
     };
     for r in int_keys {
         let (sv, ok) = em.v.int[&r];
+        if !initd.contains(&r) {
+            em.fb.def_var(sv, z64);
+            em.fb.def_var(ok, z8);
+            continue;
+        }
         let a = em.vaddr(regs0, r);
         let t = em.ld_tag(a);
         let want = em.tconst(lyt.t_int);
@@ -1295,15 +1302,20 @@ pub(crate) fn emit_body(
         k.sort_unstable();
         k
     };
+    let zf0 = em.fb.ins().f64const(0.0);
     for r in float_keys {
         let (sv, ok) = em.v.float[&r];
+        if !initd.contains(&r) {
+            em.fb.def_var(sv, zf0);
+            em.fb.def_var(ok, z8);
+            continue;
+        }
         let a = em.vaddr(regs0, r);
         let t = em.ld_tag(a);
         let want = em.tconst(lyt.t_float);
         let k = em.fb.ins().icmp(IntCC::Equal, t, want);
         let v = em.fb.ins().load(F64, tf(), a, lyt.val_pay as i32);
-        let zf = em.fb.ins().f64const(0.0);
-        let sv0 = em.fb.ins().select(k, v, zf);
+        let sv0 = em.fb.ins().select(k, v, zf0);
         em.fb.def_var(sv, sv0);
         em.fb.def_var(ok, k);
     }
@@ -2391,20 +2403,7 @@ impl Em<'_> {
                 );
             }
             Op::Unary { dst, op, src } => {
-                let (regs, d, o, s) = (
-                    self.regs(),
-                    self.iconst(dst.index() as i64),
-                    self.iconst8(*op as i64),
-                    self.iconst(src.index() as i64),
-                );
-                self.helper_op(
-                    i,
-                    off,
-                    next,
-                    H::Unary,
-                    &[regs, d, o, s, self.env.ctx0, self.env.ctx1, self.env.out],
-                    Some(dst.index() as u32),
-                );
+                self.emit_unary(i, off, next, *dst, *op, *src)
             }
             Op::CallNative { dst, id, args } => {
                 let ap = self.reg_list_slot(args);
@@ -2557,6 +2556,106 @@ impl Em<'_> {
             let nb = self.next_blk(i);
             self.fb.ins().jump(nb, &[]);
         }
+    }
+
+    /// `Op::Unary` — `!` on `Bool`, `~`/`-`/`+` on `Int`, `-`/`+` on `Float`
+    /// inline. Seqs (the helper maps elementwise), `Instance` (its
+    /// `InstanceOps` hook can run user code), and `InvalidUnaryOperand` keep
+    /// the verbatim `mj_unary` path — as do the `i64::MIN` edges of
+    /// `-`/`+`, where the helper reproduces `IntegerOverflow`.
+    fn emit_unary(&mut self, i: usize, off: usize, next: usize, dst: Reg, op: UnaryOp, src: Reg) {
+        let slow = self.fb.create_block();
+        self.fb.set_cold_block(slow);
+        let sa = self.val_ptr(src.index() as u32);
+        let st = self.ld_tag(sa);
+        let tint = self.tconst(self.lyt.t_int);
+        let isint = self.fb.ins().icmp(IntCC::Equal, st, tint);
+        let intb = self.fb.create_block();
+        let noti = self.fb.create_block();
+        self.fb.ins().brif(isint, intb, &[], noti, &[]);
+        // ---- Int arm ----
+        self.fb.switch_to_block(intb);
+        match op {
+            UnaryOp::BitwiseNot | UnaryOp::Negative | UnaryOp::Positive => {
+                let x = self.fb.ins().load(I64, tf(), sa, self.lyt.val_pay as i32);
+                let v = match op {
+                    UnaryOp::BitwiseNot => self.fb.ins().bnot(x),
+                    _ => {
+                        // `checked_neg`/`checked_abs` overflow only at MIN
+                        let cmin = self.iconst(i64::MIN);
+                        let ismin = self.fb.ins().icmp(IntCC::Equal, x, cmin);
+                        let okb = self.fb.create_block();
+                        self.fb.ins().brif(ismin, slow, &[], okb, &[]);
+                        self.fb.switch_to_block(okb);
+                        if op == UnaryOp::Negative {
+                            self.fb.ins().ineg(x)
+                        } else {
+                            self.fb.ins().iabs(x)
+                        }
+                    }
+                };
+                self.wr_int_dst(dst.index() as u32, v);
+                let nb = self.next_blk(i);
+                self.fb.ins().jump(nb, &[]);
+            }
+            _ => {
+                self.fb.ins().jump(slow, &[]);
+            }
+        }
+        // ---- non-Int: `!` on Bool, `-`/`+` on Float ----
+        self.fb.switch_to_block(noti);
+        match op {
+            UnaryOp::Negative | UnaryOp::Positive => {
+                let tfloat = self.tconst(self.lyt.t_float);
+                let isf = self.fb.ins().icmp(IntCC::Equal, st, tfloat);
+                let fltb = self.fb.create_block();
+                self.fb.ins().brif(isf, fltb, &[], slow, &[]);
+                self.fb.switch_to_block(fltb);
+                let x = self.fb.ins().load(F64, tf(), sa, self.lyt.val_pay as i32);
+                let v = if op == UnaryOp::Negative {
+                    self.fb.ins().fneg(x)
+                } else {
+                    x
+                };
+                self.wr_float_dst(dst.index() as u32, v);
+                let nb = self.next_blk(i);
+                self.fb.ins().jump(nb, &[]);
+            }
+            UnaryOp::Not => {
+                let tbool = self.tconst(self.lyt.t_bool);
+                let isb = self.fb.ins().icmp(IntCC::Equal, st, tbool);
+                let boolb = self.fb.create_block();
+                self.fb.ins().brif(isb, boolb, &[], slow, &[]);
+                self.fb.switch_to_block(boolb);
+                let b = self.fb.ins().load(I8, tf(), sa, self.lyt.bool_pay as i32);
+                let z = self.iconst8(0);
+                let nb8 = self.fb.ins().icmp(IntCC::Equal, b, z);
+                self.wr_bool_dst(dst.index() as u32, nb8);
+                // a forced shadow on `dst` saw `Bool` — resync it
+                self.refresh_shadow(dst.index() as u32);
+                let nb = self.next_blk(i);
+                self.fb.ins().jump(nb, &[]);
+            }
+            UnaryOp::BitwiseNot => {
+                self.fb.ins().jump(slow, &[]);
+            }
+        }
+        // ---- slow: verbatim helper ----
+        self.fb.switch_to_block(slow);
+        let (regs, d, o, s) = (
+            self.regs(),
+            self.iconst(dst.index() as i64),
+            self.iconst8(op as i64),
+            self.iconst(src.index() as i64),
+        );
+        self.helper_op(
+            i,
+            off,
+            next,
+            H::Unary,
+            &[regs, d, o, s, self.env.ctx0, self.env.ctx1, self.env.out],
+            Some(dst.index() as u32),
+        );
     }
 
     fn emit_eval_imm_i(&mut self, i: usize, dst: Reg, left: Reg, val: i64, cc: IntCC) {
@@ -3001,9 +3100,33 @@ impl Em<'_> {
         let wf = self.aconst(self.lyt.as_floats);
         let isflts = self.fb.ins().icmp(IntCC::Equal, stag, wf);
         let fltsb = self.fb.create_block();
-        self.fb.ins().brif(isflts, fltsb, &[], slow, &[]);
+        let notf = self.fb.create_block();
+        self.fb.ins().brif(isflts, fltsb, &[], notf, &[]);
         self.fb.switch_to_block(fltsb);
         self.seq_read_chain(i, dst, slot, gc, false, self.lyt.as_floats_vec, fok, slow);
+        // ---- store is Vals: `a.borrow()[slot]` through the nested `Array`'s
+        // own RefLock — the `arrb` arm's access shape, one indirection down.
+        self.fb.switch_to_block(notf);
+        let wv = self.aconst(self.lyt.as_vals);
+        let isvals = self.fb.ins().icmp(IntCC::Equal, stag, wv);
+        let valsb = self.fb.create_block();
+        self.fb.ins().brif(isvals, valsb, &[], slow, &[]);
+        self.fb.switch_to_block(valsb);
+        let arr = self
+            .fb
+            .ins()
+            .load(I64, tf(), gc, (self.lyt.rl_seq + self.lyt.as_vals_arr) as i32);
+        let fok2 = self.borrow_ok(arr, self.lyt.rl_flag, false);
+        let pre = self.fb.ins().band(fok, fok2);
+        let vp = self
+            .fb
+            .ins()
+            .load(I64, tf(), arr, (self.lyt.rl_vec + self.lyt.vec_ptr) as i32);
+        let vl = self
+            .fb
+            .ins()
+            .load(I64, tf(), arr, (self.lyt.rl_vec + self.lyt.vec_len) as i32);
+        self.read_elem(i, dst, slot, vl, vp, pre, slow);
     }
 
     /// The shared dispatch for a `Val::IntArray`/`Val::FloatArray` write:
@@ -3011,14 +3134,7 @@ impl Em<'_> {
     /// else — demotion, `Empty`, `Vals`, contended flag — lands in `slow`
     /// where `set_index`/`set_field` run their demote semantics.
     #[allow(clippy::too_many_arguments)]
-    fn seq_write(
-        &mut self,
-        i: usize,
-        slot: Value,
-        gc: Value,
-        va: Value,
-        slow: Block,
-    ) {
+    fn seq_write(&mut self, i: usize, slot: Value, gc: Value, va: Value, slow: Block) {
         let fok = self.borrow_ok(gc, self.lyt.rl_flag_s, true);
         let aty = self.asty();
         let stag = self
@@ -3048,17 +3164,15 @@ impl Em<'_> {
                 gc,
                 (self.lyt.rl_seq + self.lyt.as_ints_vec + self.lyt.vec_len) as i32,
             );
-            let xv = self
-                .fb
-                .ins()
-                .load(I64, tf(), va, self.lyt.val_pay as i32);
+            let xv = self.fb.ins().load(I64, tf(), va, self.lyt.val_pay as i32);
             self.write_elem_prim(i, slot, vl, vp, xv, pre, slow);
         }
         self.fb.switch_to_block(noti);
         let wf = self.aconst(self.lyt.as_floats);
         let isflts = self.fb.ins().icmp(IntCC::Equal, stag, wf);
         let fltsb = self.fb.create_block();
-        self.fb.ins().brif(isflts, fltsb, &[], slow, &[]);
+        let notf = self.fb.create_block();
+        self.fb.ins().brif(isflts, fltsb, &[], notf, &[]);
         self.fb.switch_to_block(fltsb);
         {
             let want = self.tconst(self.lyt.t_float);
@@ -3076,11 +3190,35 @@ impl Em<'_> {
                 gc,
                 (self.lyt.rl_seq + self.lyt.as_floats_vec + self.lyt.vec_len) as i32,
             );
-            let xv = self
+            let xv = self.fb.ins().load(F64, tf(), va, self.lyt.val_pay as i32);
+            self.write_elem_prim(i, slot, vl, vp, xv, pre, slow);
+        }
+        // ---- store is Vals: write a whole `Val` through the nested `Array`'s
+        // RefLock — non-Gc values only (the write barrier lives in `slow`).
+        self.fb.switch_to_block(notf);
+        let wv = self.aconst(self.lyt.as_vals);
+        let isvals = self.fb.ins().icmp(IntCC::Equal, stag, wv);
+        let valsb = self.fb.create_block();
+        self.fb.ins().brif(isvals, valsb, &[], slow, &[]);
+        self.fb.switch_to_block(valsb);
+        {
+            let arr = self
                 .fb
                 .ins()
-                .load(F64, tf(), va, self.lyt.val_pay as i32);
-            self.write_elem_prim(i, slot, vl, vp, xv, pre, slow);
+                .load(I64, tf(), gc, (self.lyt.rl_seq + self.lyt.as_vals_arr) as i32);
+            let fok2 = self.borrow_ok(arr, self.lyt.rl_flag, true);
+            let ngc = self.is_non_gc_tag(vt);
+            let pre = self.fb.ins().band(fok, fok2);
+            let pre = self.fb.ins().band(pre, ngc);
+            let vp = self
+                .fb
+                .ins()
+                .load(I64, tf(), arr, (self.lyt.rl_vec + self.lyt.vec_ptr) as i32);
+            let vl = self
+                .fb
+                .ins()
+                .load(I64, tf(), arr, (self.lyt.rl_vec + self.lyt.vec_len) as i32);
+            self.write_elem(i, slot, vl, vp, va, pre, slow);
         }
     }
 
@@ -3863,7 +4001,9 @@ impl Em<'_> {
         // new_base = old regs.len (loaded above as `rlen`)
         let nboff = self.fb.ins().imul_imm_s(rlen, vs);
         let nwin = self.fb.ins().iadd(rp0, nboff); // callee window base
-        // resize fill: `Val::Null` — only the tag byte is ever read
+        // resize fill: `Val::Null` for the whole window — every slot in
+        // `regs[0..len]` must hold a valid Val (driver `truncate`/`Drop`
+        // and GC root scans read the tag), so this is unconditional.
         let tnull = self.tconst(self.lyt.t_null);
         for k in 0..cchunk.regs as i32 {
             let a = self
@@ -4481,7 +4621,9 @@ impl Em<'_> {
             vm::Val::Int(x) => Baked::Int(x),
             vm::Val::Float(x) => Baked::Float(x),
             vm::Val::Fn(b) => Baked::Fn(b.index() as u32),
-            vm::Val::Str(s) => Baked::Gc(self.lyt.t_str, self.lyt.str_pay, Gc::as_ptr(s.0) as usize),
+            vm::Val::Str(s) => {
+                Baked::Gc(self.lyt.t_str, self.lyt.str_pay, Gc::as_ptr(s.0) as usize)
+            }
             vm::Val::Array(a) => {
                 Baked::Gc(self.lyt.t_array, self.lyt.arr_pay, Gc::as_ptr(a.0) as usize)
             }
@@ -4503,9 +4645,11 @@ impl Em<'_> {
                 self.lyt.inst_pay,
                 Gc::as_ptr(i.0) as usize,
             ),
-            vm::Val::Closure(c) => {
-                Baked::Gc(self.lyt.t_closure, self.lyt.cl_pay, Gc::as_ptr(c.0) as usize)
-            }
+            vm::Val::Closure(c) => Baked::Gc(
+                self.lyt.t_closure,
+                self.lyt.cl_pay,
+                Gc::as_ptr(c.0) as usize,
+            ),
             _ => return None,
         })
     }
