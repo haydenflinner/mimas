@@ -444,7 +444,7 @@ fn emit_body(w: &mut String, program: &Program, body: usize) {
     let sh = analyze(&ops, program.chunks[body_id].regs as u32);
     let _ = writeln!(
         w,
-        "\n#[allow(unused_variables, unused_mut, unused_assignments, unused_comparisons, unused_parens, clippy::all)]\n\
+        "\n#[allow(unused_variables, unused_mut, unused_assignments, unused_comparisons, unused_parens, unused_macros, clippy::all)]\n\
          fn body_{body}<'gc>(\n\
          \x20   thread: &mut ThreadState<'gc>,\n\
          \x20   code: &mut Decoder,\n\
@@ -896,18 +896,31 @@ fn tgt(t: &BlockTarget) -> usize {
 /// `INLINE_CALL_DEPTH` falls back to `Flow::Call` — `code.ip` is already at
 /// `next` (emitted before this) so the driver's enter_call saves the right
 /// resume slot.
-fn emit_call_fast(s: &mut String, dst: Reg, callee: &str, captures: &str, target: &str, sh: &Sh) {
+fn emit_call_fast(
+    s: &mut String,
+    dst: Reg,
+    callee: &str,
+    captures: &str,
+    target: &str,
+    arg_regs: &[Reg],
+    sh: &Sh,
+) {
     // `settle!()` before entering the callee: it draws fuel/ops_left from the
     // same counters our `bcn` was armed against, so our spent ops must be
     // charged first or the propagate-path `settle!()` would subtract them
     // twice (debug underflow). Natives can't observe this — `thread` stays
     // `borrow_mut`-held for the whole dispatch.
+    let regs_list = arg_regs
+        .iter()
+        .map(|r| format!("Reg::from({}u32)", r.index()))
+        .collect::<Vec<_>>()
+        .join(", ");
     let _ = writeln!(
         s,
         "if thread.frames.len() < INLINE_CALL_DEPTH {{
             settle!();
             flush!();
-            match enter_call(thread, code, chunks, {callee}, {}, args.as_slice(), {captures}) {{
+            match enter_call_regs(thread, code, chunks, {callee}, {}, &[{regs_list}], {captures}) {{
                 Ok(()) => {{
                     let res = {f}(thread, code, ctx, strs, chunks, signatures, fuel, op_ip);
                     // the callee's `enter_call` may have moved `thread.regs` —
@@ -936,12 +949,22 @@ fn emit_call_fast(s: &mut String, dst: Reg, callee: &str, captures: &str, target
                 }},
                 Err(kind) => {{ return Err(kind) }},
             }}
-        }} else {{
-            return Ok(Flow::Call {{ target: {target}, dst: {}, args }});
         }}",
         reg(dst),
-        reg(dst),
         f = callee_fn(callee)
+    );
+    // The at-cap path needs `args` as values for the `Flow::Call` payload —
+    // only build the SmallVec there; the inline path read the caller window
+    // straight through `enter_call_regs`.
+    let _ = writeln!(s, "else {{");
+    let _ = writeln!(s, "    let mut args = SmallVec::<[Val; 8]>::new();");
+    for a in arg_regs {
+        let _ = writeln!(s, "    args.push(rd(regs, {}));", reg(*a));
+    }
+    let _ = writeln!(
+        s,
+        "    return Ok(Flow::Call {{ target: {target}, dst: {}, args }});\n}}",
+        reg(dst)
     );
     // The callee's return wrote `regs[dst]` through `thread.regs` — a shadowed
     // dst must refresh its local from the (possibly freshly typed) value.
@@ -1354,22 +1377,14 @@ fn emit_op(
             wln!("        (d.function, d.captures.as_slice())");
             wln!("    }}");
             wln!("}};");
-            wln!("let mut args = SmallVec::<[Val; 8]>::new();");
-            for a in args {
-                wln!("args.push(rd(regs, {}));", reg(*a));
-            }
             // `enter_call` saves `code.ip` as the caller's resume slot — in the
             // interpreter it's already past this op's operands by then, so the
             // specialized arm must advance it before either path.
             wln!("code.ip = {next}; *op_ip = {offset};");
-            emit_call_fast(&mut s, *dst, "cb", "captures", "target", sh);
+            emit_call_fast(&mut s, *dst, "cb", "captures", "target", args, sh);
         }
         Op::CallDirect { dst, body, args } => {
             let callee = format!("BodyId::from({}u32)", body.index());
-            wln!("let mut args = SmallVec::<[Val; 8]>::new();");
-            for a in args {
-                wln!("args.push(rd(regs, {}));", reg(*a));
-            }
             wln!("code.ip = {next}; *op_ip = {offset};");
             emit_call_fast(
                 &mut s,
@@ -1377,6 +1392,7 @@ fn emit_op(
                 &callee,
                 "&[]",
                 &format!("CallTarget::Fn({callee})"),
+                args,
                 sh,
             );
         }

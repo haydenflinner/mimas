@@ -112,7 +112,7 @@ pub use crate::{
     CallTarget, Closure, Ctx, DebugInfo, DictMap, Fields, Flow, Frame, INLINE_FIELDS, Native,
     RtErr, RtResult, ThreadState, Val, bin, bin_cold, bin_cold_imm_float, bin_cold_imm_int,
     branch_cold, branch_cold_imm_float, branch_cold_imm_int, constant_to_val, contains, enter_call,
-    get_index, not_callable, set_index, unary,
+    enter_call_regs, get_index, not_callable, set_index, unary,
 };
 pub use api::NativeId;
 pub use compile::{
