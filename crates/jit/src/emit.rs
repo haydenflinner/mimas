@@ -25,7 +25,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::H;
+use crate::{BodyFacts, Frozen, H, ObsTag};
 use compile::{AccessKind, BlockTarget, Constant, Op, Program, Reg};
 use cranelift_codegen::Context;
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
@@ -71,9 +71,13 @@ enum W {
 
 /// bcgen's `analyze`, verbatim: the set of registers eligible for an int/float
 /// SSA shadow — every writer is that scalar kind or a `Copy` of a member.
+/// `written` records every register any op writes — entry-observed container
+/// pointers (for frozen-constant lookups) are only trusted on regs that are
+/// never re-seated.
 struct Sh {
     int: HashSet<u32>,
     float: HashSet<u32>,
+    written: HashSet<u32>,
 }
 
 fn analyze(ops: &[(usize, Op)], nregs: u32) -> Sh {
@@ -314,7 +318,11 @@ fn analyze(ops: &[(usize, Op)], nregs: u32) -> Sh {
             break;
         }
     }
-    Sh { int, float }
+    Sh {
+        int,
+        float,
+        written: writes.keys().copied().collect(),
+    }
 }
 
 /// Immutable body-wide values: the `BodyFn` params plus pointers hoisted once
@@ -381,6 +389,13 @@ struct Ex {
     eend: Block,
 }
 
+/// Per-body specialization context handed to [`emit_body`] — the slice of
+/// `crate::Facts` that applies to this chunk plus the shared frozen table.
+pub(crate) struct BodySpec<'a> {
+    pub facts: &'a BodyFacts,
+    pub frozen: &'a HashMap<usize, Frozen>,
+}
+
 struct Em<'a> {
     fb: FunctionBuilder<'a>,
     hrefs: Vec<FuncRef>,
@@ -393,6 +408,11 @@ struct Em<'a> {
     /// `Decoder` field offsets, `Vec` header order. Emitted code reads and
     /// writes these inline instead of FFI-ing per access.
     lyt: Layout,
+    /// Specialization context for this body (empty for `compile`).
+    spec: &'a BodySpec<'a>,
+    /// `regs[r]`'s observed GC payload pointer — only for regs never
+    /// re-seated (no writers), so the identity stays the entry value's.
+    known: HashMap<u32, usize>,
     /// The whole program — `CallDirect` needs the callee's `Chunk` (offset,
     /// regs, param mapping) to emit the inline frame push.
     prog: &'a Program,
@@ -746,20 +766,47 @@ impl Em<'_> {
     /// Helper-op shape: inline shadow writeback, then stores `code.ip`/
     /// `*op_ip`, calls the `u8` helper, then `1`→`eret` / `0`→fallthrough.
     /// `args` are built by the caller before this runs — the writeback blocks
-    /// are all dominated by the current block, so they stay usable.
-    fn helper_op(&mut self, i: usize, off: usize, next: usize, h: H, args: &[Value]) {
+    /// are all dominated by the current block, so they stay usable. `dst`
+    /// names the op's destination register when it has one — a forced
+    /// shadow must be re-derived after the helper's window write.
+    fn helper_op(
+        &mut self,
+        i: usize,
+        off: usize,
+        next: usize,
+        h: H,
+        args: &[Value],
+        dst: Option<u32>,
+    ) {
         self.flush_seq();
         self.mark_op(off, next);
         let k = self.hcall(h, args).unwrap();
+        let post = self.fb.create_block();
+        self.fb.ins().brif(k, self.ex.eret, &[], post, &[]);
+        self.fb.switch_to_block(post);
+        if let Some(d) = dst {
+            self.refresh_shadow(d);
+        }
         let nb = self.next_blk(i);
-        self.fb.ins().brif(k, self.ex.eret, &[], nb, &[]);
+        self.fb.ins().jump(nb, &[]);
     }
 
     /// Same but the helper returns void — always continues.
-    fn helper_op_v(&mut self, i: usize, off: usize, next: usize, h: H, args: &[Value]) {
+    fn helper_op_v(
+        &mut self,
+        i: usize,
+        off: usize,
+        next: usize,
+        h: H,
+        args: &[Value],
+        dst: Option<u32>,
+    ) {
         self.flush_seq();
         self.mark_op(off, next);
         self.hcall(h, args);
+        if let Some(d) = dst {
+            self.refresh_shadow(d);
+        }
         {
             let nb = self.next_blk(i);
             self.fb.ins().jump(nb, &[]);
@@ -971,6 +1018,7 @@ pub(crate) fn emit_body(
     lyt: &Layout,
     fbc: &mut FunctionBuilderContext,
     ctx: &mut Context,
+    spec: &BodySpec<'_>,
 ) -> ModuleResult<()> {
     let body_id = compile::BodyId::from(body as u32);
     let ops = program.ops(body_id);
@@ -985,7 +1033,36 @@ pub(crate) fn emit_body(
         .min()
         .unwrap_or(program.bytes.len());
     let span = end - chunk_off;
-    let sh = analyze(&ops, chunk.regs as u32);
+    let mut sh = analyze(&ops, chunk.regs as u32);
+    // Facts-forced shadows: a reg observed `Int`/`Float` on *every* body
+    // entry joins the shadow set even though `analyze` couldn't prove its
+    // writers — the entry probe still loads the real tag (`ok` = guard), and
+    // every write site refreshes or clears the shadow, so a wrong guess can
+    // only ever deopt, never miscompute.
+    let nregs = chunk.regs as usize;
+    for (r, obs) in spec.facts.entry.iter().enumerate().take(nregs) {
+        match obs.tag {
+            ObsTag::Int => {
+                sh.int.insert(r as u32);
+            }
+            ObsTag::Float => {
+                sh.float.insert(r as u32);
+            }
+            _ => {}
+        }
+    }
+    // Regs that always held the *same* GC pointer at entry and are never
+    // re-seated — the frozen-table lookup key for baked reads.
+    let known: HashMap<u32, usize> = (0..nregs)
+        .filter(|&r| {
+            spec.facts
+                .entry
+                .get(r)
+                .is_some_and(|o| o.ptr != 0)
+                && !sh.written.contains(&(r as u32))
+        })
+        .map(|r| (r as u32, spec.facts.entry[r].ptr))
+        .collect();
 
     // ip2idx blob: u32 dense index per byte of this chunk's span, MAX elsewhere
     let map_data = {
@@ -1115,6 +1192,8 @@ pub(crate) fn emit_body(
         sh: &sh,
         ops: &ops,
         lyt: *lyt,
+        spec,
+        known,
         prog: program,
         call_refs,
         blocks,
@@ -1328,7 +1407,23 @@ pub(crate) fn emit_body(
             ],
         )
         .unwrap();
-    em.fb.ins().brif(k, eret, &[], dispatch, &[]);
+    let estep_post = em.fb.create_block();
+    em.fb.ins().brif(k, eret, &[], estep_post, &[]);
+    // `step` ran a whole op in the window — it may have written ANY reg,
+    // shadowed or not, so resync every shadow before dispatching the next
+    // op. (Facts-forced shadows make this reachable for almost any reg.)
+    em.fb.switch_to_block(estep_post);
+    let refresh: Vec<u32> = em
+        .v
+        .int
+        .keys()
+        .chain(em.v.float.keys())
+        .copied()
+        .collect();
+    for r in refresh {
+        em.refresh_shadow(r);
+    }
+    em.fb.ins().jump(dispatch, &[]);
 
     em.fb.switch_to_block(eerr);
     em.settle_seq();
@@ -1470,6 +1565,7 @@ impl Em<'_> {
                     let regs = self.regs();
                     let a = self.vaddr(regs, dst.index() as u32);
                     self.st_bool(a, v);
+                    self.refresh_shadow(dst.index() as u32);
                     {
                         let nb = self.next_blk(i);
                         self.fb.ins().jump(nb, &[]);
@@ -1479,6 +1575,7 @@ impl Em<'_> {
                     let regs = self.regs();
                     let a = self.vaddr(regs, dst.index() as u32);
                     self.st_null(a);
+                    self.refresh_shadow(dst.index() as u32);
                     {
                         let nb = self.next_blk(i);
                         self.fb.ins().jump(nb, &[]);
@@ -1496,6 +1593,7 @@ impl Em<'_> {
                         next,
                         H::LoadConstStr,
                         &[regs, d, id, self.env.ctx0, self.env.ctx1, self.env.strs],
+                        Some(dst.index() as u32),
                     );
                 }
                 Constant::Array(_) => self.estep(),
@@ -1505,6 +1603,7 @@ impl Em<'_> {
                 let a = self.vaddr(regs, dst.index() as u32);
                 let b = self.iconst32(body.index() as i64);
                 self.st_fn(a, b);
+                self.refresh_shadow(dst.index() as u32);
                 {
                     let nb = self.next_blk(i);
                     self.fb.ins().jump(nb, &[]);
@@ -1521,6 +1620,7 @@ impl Em<'_> {
                     .iadd_imm_s(tb, slot.index() as i64 * self.lyt.val_size as i64);
                 let d = self.vaddr(regs, dst.index() as u32);
                 self.cpy_val(d, vp);
+                self.refresh_shadow(dst.index() as u32);
                 {
                     let nb = self.next_blk(i);
                     self.fb.ins().jump(nb, &[]);
@@ -1536,6 +1636,9 @@ impl Em<'_> {
                     .ins()
                     .iadd_imm_s(tb, slot.index() as i64 * self.lyt.val_size as i64);
                 self.cpy_val(d, vp);
+                // for the entry body itself `regs` *is* the entry frame —
+                // resync `slot`'s shadow (a reload no-op otherwise).
+                self.refresh_shadow(slot.index() as u32);
                 {
                     let nb = self.next_blk(i);
                     self.fb.ins().jump(nb, &[]);
@@ -2036,6 +2139,7 @@ impl Em<'_> {
                     next,
                     H::NewArray,
                     &[regs, d, self.env.ctx0, self.env.ctx1],
+                    Some(dst.index() as u32),
                 );
             }
             Op::NewDict { dst } => {
@@ -2046,6 +2150,7 @@ impl Em<'_> {
                     next,
                     H::NewDict,
                     &[regs, d, self.env.ctx0, self.env.ctx1],
+                    Some(dst.index() as u32),
                 );
             }
             Op::NewInstance { dst, adt, fields } => {
@@ -2062,6 +2167,7 @@ impl Em<'_> {
                     next,
                     H::NewInstance,
                     &[regs, d, a, fp, n, self.env.ctx0, self.env.ctx1],
+                    Some(dst.index() as u32),
                 );
             }
             Op::NewClosure {
@@ -2082,6 +2188,7 @@ impl Em<'_> {
                     next,
                     H::NewClosure,
                     &[regs, d, b, cp, n, self.env.ctx0, self.env.ctx1],
+                    Some(dst.index() as u32),
                 );
             }
             Op::Push { array, value } => {
@@ -2096,6 +2203,7 @@ impl Em<'_> {
                     next,
                     H::Push,
                     &[regs, a, v, self.env.ctx0, self.env.ctx1],
+                    None,
                 );
             }
             Op::Insert { dict, key, value } => {
@@ -2111,6 +2219,7 @@ impl Em<'_> {
                     next,
                     H::Insert,
                     &[regs, d, k, v, self.env.ctx0, self.env.ctx1, self.env.strs],
+                    None,
                 );
             }
             Op::SetIndex { set, index, value } => {
@@ -2152,7 +2261,14 @@ impl Em<'_> {
                     self.iconst(haystack.index() as i64),
                     self.iconst8(*condition as i64),
                 );
-                self.helper_op_v(i, off, next, H::ContainsOp, &[regs, d, n, h, c]);
+                self.helper_op_v(
+                    i,
+                    off,
+                    next,
+                    H::ContainsOp,
+                    &[regs, d, n, h, c],
+                    Some(dst.index() as u32),
+                );
             }
             Op::IsInstance { dst, src, adt } => {
                 let (regs, d, s, a) = (
@@ -2161,7 +2277,14 @@ impl Em<'_> {
                     self.iconst(src.index() as i64),
                     self.iconst32(adt.index() as i64),
                 );
-                self.helper_op_v(i, off, next, H::IsInstance, &[regs, d, s, a]);
+                self.helper_op_v(
+                    i,
+                    off,
+                    next,
+                    H::IsInstance,
+                    &[regs, d, s, a],
+                    Some(dst.index() as u32),
+                );
             }
             Op::IsRaised { dst, src } => {
                 let (regs, d, s) = (
@@ -2169,7 +2292,14 @@ impl Em<'_> {
                     self.iconst(dst.index() as i64),
                     self.iconst(src.index() as i64),
                 );
-                self.helper_op_v(i, off, next, H::IsRaised, &[regs, d, s]);
+                self.helper_op_v(
+                    i,
+                    off,
+                    next,
+                    H::IsRaised,
+                    &[regs, d, s],
+                    Some(dst.index() as u32),
+                );
             }
             Op::UnwrapRaised { dst, src } => {
                 let (regs, d, s) = (
@@ -2177,7 +2307,14 @@ impl Em<'_> {
                     self.iconst(dst.index() as i64),
                     self.iconst(src.index() as i64),
                 );
-                self.helper_op_v(i, off, next, H::UnwrapRaised, &[regs, d, s]);
+                self.helper_op_v(
+                    i,
+                    off,
+                    next,
+                    H::UnwrapRaised,
+                    &[regs, d, s],
+                    Some(dst.index() as u32),
+                );
             }
             Op::Unwrap { dst, src } => {
                 let (regs, d, s) = (
@@ -2185,7 +2322,14 @@ impl Em<'_> {
                     self.iconst(dst.index() as i64),
                     self.iconst(src.index() as i64),
                 );
-                self.helper_op(i, off, next, H::Unwrap, &[regs, d, s, self.env.out]);
+                self.helper_op(
+                    i,
+                    off,
+                    next,
+                    H::Unwrap,
+                    &[regs, d, s, self.env.out],
+                    Some(dst.index() as u32),
+                );
             }
             Op::UnwrapUnit { dst, src } => {
                 let (regs, d, s) = (
@@ -2193,7 +2337,14 @@ impl Em<'_> {
                     self.iconst(dst.index() as i64),
                     self.iconst(src.index() as i64),
                 );
-                self.helper_op(i, off, next, H::UnwrapUnit, &[regs, d, s, self.env.out]);
+                self.helper_op(
+                    i,
+                    off,
+                    next,
+                    H::UnwrapUnit,
+                    &[regs, d, s, self.env.out],
+                    Some(dst.index() as u32),
+                );
             }
             Op::Len { dst, src } => {
                 self.flush_seq();
@@ -2233,6 +2384,7 @@ impl Em<'_> {
                     next,
                     H::Bin,
                     &[regs, d, l, o, r, self.env.ctx0, self.env.ctx1, self.env.out],
+                    Some(dst.index() as u32),
                 );
             }
             Op::Unary { dst, op, src } => {
@@ -2248,6 +2400,7 @@ impl Em<'_> {
                     next,
                     H::Unary,
                     &[regs, d, o, s, self.env.ctx0, self.env.ctx1, self.env.out],
+                    Some(dst.index() as u32),
                 );
             }
             Op::CallNative { dst, id, args } => {
@@ -2275,6 +2428,7 @@ impl Em<'_> {
                         self.env.ctx1,
                         self.env.out,
                     ],
+                    Some(dst.index() as u32),
                 );
             }
             Op::CallDirect { dst, body, args } => {
@@ -2335,6 +2489,8 @@ impl Em<'_> {
         let cc = if eq { IntCC::Equal } else { IntCC::NotEqual };
         let c = self.fb.ins().icmp(cc, l, r);
         self.wr_bool_dst(dst.index() as u32, c);
+        // a forced shadow on `dst` saw `Bool` — resync it
+        self.refresh_shadow(dst.index() as u32);
         {
             let nb = self.next_blk(i);
             self.fb.ins().jump(nb, &[]);
@@ -2479,8 +2635,12 @@ impl Em<'_> {
         );
         // 0 → wrote regs[dst]; 1 → both-Str fast path missed → `step`
         let k = self.hcall(H::BinStr, &[regs, d, l, r, e]).unwrap();
+        let post = self.fb.create_block();
+        self.fb.ins().brif(k, self.ex.estep, &[], post, &[]);
+        self.fb.switch_to_block(post);
+        self.refresh_shadow(dst.index() as u32);
         let nb = self.next_blk(i);
-        self.fb.ins().brif(k, self.ex.estep, &[], nb, &[]);
+        self.fb.ins().jump(nb, &[]);
     }
 
     /// `B*` register/imm branch ops: `hit = a cc b`, then
@@ -3116,6 +3276,7 @@ impl Em<'_> {
             next,
             H::SetIndex,
             &[regs, s, ii, v, self.env.ctx0, self.env.ctx1, self.env.out],
+            None,
         );
     }
 
@@ -3313,6 +3474,7 @@ impl Em<'_> {
             next,
             H::SetField,
             &[regs, r, sl, v, self.env.ctx0, self.env.ctx1, self.env.out],
+            None,
         );
     }
 
@@ -3846,12 +4008,20 @@ impl Em<'_> {
     }
 
     /// Post-call tail: `regs[dst]` now holds the callee's return value —
-    /// refresh its scalar shadow (if any) and resume at the next op.
+    /// refresh its scalar shadow(s) (a reg can sit in both maps) and resume
+    /// at the next op.
     fn dst_refresh(&mut self, i: usize, dst: Reg, regs2: Value) {
         let d = dst.index() as u32;
-        if let Some(&(sv, ok)) = self.v.int.get(&d) {
+        let t = self
+            .v
+            .int
+            .contains_key(&d)
+            .then(|| {
+                let a = self.vaddr(regs2, d);
+                self.ld_tag(a)
+            });
+        if let (Some(&(sv, ok)), Some(t)) = (self.v.int.get(&d), t) {
             let a = self.vaddr(regs2, d);
-            let t = self.ld_tag(a);
             let want = self.tconst(self.lyt.t_int);
             let k = self.fb.ins().icmp(IntCC::Equal, t, want);
             let v = self.fb.ins().load(I64, tf(), a, self.lyt.val_pay as i32);
@@ -3859,9 +4029,13 @@ impl Em<'_> {
             let sv0 = self.fb.ins().select(k, v, z);
             self.fb.def_var(sv, sv0);
             self.fb.def_var(ok, k);
-        } else if let Some(&(sv, ok)) = self.v.float.get(&d) {
+        }
+        if let Some(&(sv, ok)) = self.v.float.get(&d) {
             let a = self.vaddr(regs2, d);
-            let t = self.ld_tag(a);
+            let t = match t {
+                Some(t) => t,
+                None => self.ld_tag(a),
+            };
             let want = self.tconst(self.lyt.t_float);
             let k = self.fb.ins().icmp(IntCC::Equal, t, want);
             let v = self.fb.ins().load(F64, tf(), a, self.lyt.val_pay as i32);
