@@ -645,7 +645,6 @@ fn emit_body(w: &mut String, program: &Program, body: usize) {
         }
         i
     };
-    let tail_norm = |t: usize| format!("code.ip = {t};");
     for i in 0..n_ops {
         let head = ops[i].0;
         let seq: Vec<usize> = if leader(i) {
@@ -654,46 +653,117 @@ fn emit_body(w: &mut String, program: &Program, body: usize) {
             vec![i]
         };
         let term = *seq.last().unwrap();
-        // Loop-wrap: if the block's terminator can branch back to `head`,
-        // emit the whole arm as a Rust `loop` so the back-edge is a direct
-        // `continue` — no `match` re-dispatch. Also covers the `while`
-        // shape: head block ends in a conditional whose taken target is a
-        // block that jumps back to `head`.
-        let mut extra: Vec<usize> = vec![];
-        let mut fall_t = usize::MAX; // a taken edge of `term` that falls into `extra`
-        let mut wrap = !matches!(ops[term].1, Op::Switch { .. })
+        // Loop-wrap: emit a set of blocks as a Rust `loop` so a back-edge is
+        // a direct `continue` — no `match` re-dispatch. The region needn't
+        // be contiguous — a `for`/`while` body's `if` stays outside and its
+        // edge becomes a `code.ip = t; break;` exit. Region discovery is a
+        // bounded DFS over terminator edges: while the last block can't
+        // branch to `head`, append the block at a continuation edge —
+        // explicit jump target first (a `for`'s "stay in the loop" side),
+        // then the conditional's implicit fallthrough — backtracking when a
+        // path dead-ends or produces an invalid interior edge. Covers plain
+        // loops, `while A && B` short-circuits, and multi-JumpIf conditions.
+        let mut region: Vec<usize> = seq.clone();
+        // A region can be emitted as a `loop` iff every terminator's edges
+        // land on `head` (`continue`), the next *emitted* op
+        // (fallthrough-position — the conditional's other side runs it
+        // straight on), or a byte offset outside the region entirely (exit).
+        // `Switch` is rejected on sight — its arms write `code.ip` directly
+        // instead of going through `tail`, so a `continue`/`break` edge
+        // couldn't be expressed anyway.
+        let validate = |region: &[usize]| {
+            let roff: HashSet<usize> = region.iter().map(|&j| ops[j].0).collect();
+            // Interior edges must land on `head`, the next emitted op, or
+            // outside the region.
+            let interior_ok = region.iter().enumerate().all(|(k, &j)| {
+                if fallthrough(&ops[j].1) {
+                    return true;
+                }
+                if matches!(ops[j].1, Op::Switch { .. }) {
+                    return false;
+                }
+                let enext = region.get(k + 1).map(|&m| ops[m].0);
+                edge_targets(&ops[j].1)
+                    .iter()
+                    .all(|&t| t == head || Some(t) == enext || !roff.contains(&t))
+            });
+            interior_ok
+        };
+        let mut wrap = validate(&region)
             && edge_targets(&ops[term].1).contains(&head);
-        if !wrap && let Some(tk) = cond_target(&ops[term].1) {
-            if let Some(&m) = off_idx.get(&tk)
-                && m > term
-                && !matches!(ops[chain_end(m)].1, Op::Switch { .. })
-                && edge_targets(&ops[chain_end(m)].1).contains(&head)
-            {
-                wrap = true;
-                extra = (m..=chain_end(m)).collect();
-                fall_t = tk;
+        if !wrap {
+            // `reach`: op indices whose block can get back to `head` — the
+            // only edges worth chasing. A block joins when its terminator
+            // targets `head` or another reachable op; every op index of a
+            // reachable block is marked since a jump may land mid-block.
+            let wend = (i + 64).min(n_ops);
+            let mut reach: HashSet<usize> = HashSet::new();
+            loop {
+                let mut grew = false;
+                let mut b = i;
+                while b < wend {
+                    let e = chain_end(b);
+                    let edges = edge_targets(&ops[e].1);
+                    let mut hits = edges.iter().any(|t| {
+                        *t == head || off_idx.get(t).is_some_and(|m| reach.contains(m))
+                    });
+                    // a conditional's implicit not-taken edge continues to
+                    // the next block — `e + 1` is a block start
+                    if !hits
+                        && !edges.is_empty()
+                        && !matches!(ops[e].1, Op::Jump { .. } | Op::Switch { .. })
+                    {
+                        hits = reach.contains(&(e + 1));
+                    }
+                    if hits {
+                        grew |= (b..=e).any(|j| reach.insert(j));
+                    }
+                    b = e + 1;
+                }
+                if !grew {
+                    break;
+                }
             }
+            wrap = grow_region(
+                &ops,
+                head,
+                &mut region,
+                &reach,
+                &off_idx,
+                &chain_end,
+                &validate,
+            );
         }
-        // Emits one run of ops (`seq`, then `extra`): `gates` toggles the
-        // per-op `gateq!()`/`gatep!()` bookkeeping; when off (the fast path),
-        // `restock` is the whole region's op count and the exit paths hand
-        // back the ops that never ran — `bcn` was pre-paid `bcn -= len`, so
-        // an op at region position `pos0 + k` restocks `len-1-(pos0+k)`
-        // before `settle!()` computes `spent`. Keeps the interpreter's
-        // decrement-before-run accounting exact on error/bail exits.
+        // Emits one run of ops: `gates` toggles the per-op `gateq!()`/
+        // `gatep!()` bookkeeping; when off (the fast path), `restock` is the
+        // whole region's op count and the exit paths hand back the ops that
+        // never ran — `bcn` was pre-paid `bcn -= len`, so an op at region
+        // position `k` restocks `len-1-k` before `settle!()` computes
+        // `spent`. Keeps the interpreter's decrement-before-run accounting
+        // exact on error/bail exits.
+        //
+        // `term_tail(region_pos, fallthrough_off, target)` renders a branch
+        // edge: only terminator ops ever call `tail`, so one closure covers
+        // every op in the run — mid-region ops never invoke it.
         let emit_ops = |w: &mut String,
                         idxs: &[usize],
                         gates: bool,
                         restock: usize,
-                        pos0: usize,
-                        term_tail: &dyn Fn(usize) -> String| {
+                        term_tail: &dyn Fn(usize, usize, usize) -> String| {
             if idxs.is_empty() {
                 return;
             }
-            let last = *idxs.last().unwrap();
             for (k, &j) in idxs.iter().enumerate() {
                 let (off, op) = &ops[j];
+                // `next` is the byte offset `code.ip` holds once this op has
+                // been decoded — bookkeeping for bails, NOT a fallthrough
+                // check. `enext` is the next op *emitted* in this run; in a
+                // sparse loop region the two differ.
                 let next = ops.get(j + 1).map(|(o, _)| *o).unwrap_or(usize::MAX);
+                let enext = idxs
+                    .get(k + 1)
+                    .map(|&m| ops[m].0)
+                    .unwrap_or(usize::MAX);
                 if gates {
                     w.push_str(if j > 0 && may_pause(&ops[j - 1].1) {
                         "            gatep!();\n"
@@ -702,54 +772,49 @@ fn emit_body(w: &mut String, program: &Program, body: usize) {
                     });
                 }
                 let mut arm = String::new();
-                let t: &dyn Fn(usize) -> String = if j == last {
-                    term_tail
-                } else {
-                    &tail_norm
-                };
-                emit_op(&mut arm, &sh, *off, next, op, t);
+                let t = |x: usize| term_tail(k, enext, x);
+                emit_op(&mut arm, &sh, *off, next, op, &t);
                 w.push_str(&defer(&arm, &sh, if gates {
                     0
                 } else {
-                    (restock - 1 - (pos0 + k)) as u64
+                    (restock - 1 - k) as u64
                 }));
             }
         };
         if wrap {
-            let region: Vec<usize> = seq.iter().chain(extra.iter()).copied().collect();
             let pure = region.iter().all(|&j| !may_pause(&ops[j].1));
             let blen = region.len();
-            // terminator tails: an edge to `head` is `continue`, `term`'s
-            // `fall_t` edge falls into the inlined `extra` block, anything
-            // else exits the loop and re-dispatches on `code.ip`.
-            let tail_head = |t: usize| {
-                if t == fall_t {
-                    String::new()
-                } else if t == head {
-                    "continue;".to_string()
-                } else {
-                    format!("code.ip = {t}; break;")
-                }
-            };
-            // Same shape for the pre-paid fast path, except an exit edge at
-            // `term` skips the whole `extra` block — hand those ops back or
-            // the counters would charge for ops that never ran.
-            let tail_head_fast = |t: usize| {
-                if t == fall_t {
-                    String::new()
-                } else if t == head {
-                    "continue;".to_string()
-                } else if extra.is_empty() {
-                    format!("code.ip = {t}; break;")
-                } else {
-                    format!("code.ip = {t}; bcn += {}u64; break;", extra.len())
-                }
-            };
-            let tail_loop = |t: usize| {
+            // terminator tails: an edge to `head` is `continue`, an edge to
+            // the op right after the terminator is a plain fallthrough
+            // (`code.ip` must still advance so mid-block bails decode the
+            // right op), anything else exits the loop and re-dispatches. The
+            // region's last op has no next op inside — every non-`head` edge
+            // exits.
+            let tail_gated = |k: usize, next: usize, t: usize| {
                 if t == head {
                     "continue;".to_string()
+                } else if t == next && k + 1 < blen {
+                    format!("code.ip = {next};")
                 } else {
                     format!("code.ip = {t}; break;")
+                }
+            };
+            // Same shape for the pre-paid fast path, except a `continue` or
+            // exit at region position `k` skips the ops after it — hand
+            // them back or the counters would charge for ops that never
+            // ran.
+            let tail_fast = |k: usize, next: usize, t: usize| {
+                let back = if blen - 1 - k > 0 {
+                    format!("bcn += {}u64; ", blen - 1 - k)
+                } else {
+                    String::new()
+                };
+                if t == head {
+                    format!("{back}continue;")
+                } else if t == next && k + 1 < blen {
+                    format!("code.ip = {next};")
+                } else {
+                    format!("code.ip = {t}; {back}break;")
                 }
             };
             let _ = writeln!(w, "            {head} => {{");
@@ -769,21 +834,20 @@ fn emit_body(w: &mut String, program: &Program, body: usize) {
                     w,
                     "            if bcn >= {blen}u64 {{ bcn -= {blen}u64;"
                 );
-                emit_ops(w, &seq, false, blen, 0, &tail_head_fast);
-                emit_ops(w, &extra, false, blen, seq.len(), &tail_loop);
+                emit_ops(w, &region, false, blen, &tail_fast);
                 let _ = writeln!(w, "            }} else {{");
-                emit_ops(w, &seq, true, blen, 0, &tail_head);
-                emit_ops(w, &extra, true, blen, seq.len(), &tail_loop);
+                emit_ops(w, &region, true, blen, &tail_gated);
                 let _ = writeln!(w, "            }}");
             } else {
-                emit_ops(w, &seq, true, blen, 0, &tail_head);
-                emit_ops(w, &extra, true, blen, seq.len(), &tail_loop);
+                emit_ops(w, &region, true, blen, &tail_gated);
             }
             let _ = writeln!(w, "            }}");
             let _ = writeln!(w, "            }}");
         } else {
             let _ = writeln!(w, "            {head} => {{");
-            emit_ops(w, &seq, true, 0, 0, &tail_norm);
+            emit_ops(w, &seq, true, 0, &|_k, _n, t| {
+                format!("code.ip = {t};")
+            });
             let _ = writeln!(w, "            }}");
         }
     }
@@ -922,12 +986,56 @@ fn edge_targets(op: &Op) -> Vec<usize> {
     }
 }
 
-/// The taken edge of a two-edge conditional terminator — `None` for
-/// unconditional (Jump), multi-edge (Switch), or non-branching ops.
-fn cond_target(op: &Op) -> Option<usize> {
-    edge_targets(op).into_iter().next().filter(|_| {
-        !matches!(op, Op::Jump { .. } | Op::Switch { .. })
-    })
+/// DFS continuation of loop-wrap region growth (see `emit_body`): appends
+/// whole blocks at continuation edges until the region's last terminator can
+/// branch to `head` *and* `validate` accepts — backtracking on dead ends.
+/// Returns whether `region` ended up a wrappable loop.
+fn grow_region(
+    ops: &[(usize, Op)],
+    head: usize,
+    region: &mut Vec<usize>,
+    reach: &HashSet<usize>,
+    off_idx: &HashMap<usize, usize>,
+    chain_end: &dyn Fn(usize) -> usize,
+    validate: &dyn Fn(&[usize]) -> bool,
+) -> bool {
+    let last = *region.last().unwrap();
+    let term = &ops[last].1;
+    if !matches!(term, Op::Switch { .. }) && edge_targets(term).contains(&head) && validate(region)
+    {
+        return true;
+    }
+    if region.len() > 32 {
+        return false;
+    }
+    // Continuation candidates: explicit jump targets first — a `for`/`while`
+    // "stay in the loop" edge — then a conditional's implicit not-taken edge
+    // (the op right after it; `Jump`/`Switch` have none).
+    let mut cands = edge_targets(term);
+    if !matches!(term, Op::Jump { .. } | Op::Switch { .. })
+        && !cands.is_empty()
+        && let Some(&(o, _)) = ops.get(last + 1)
+    {
+        cands.push(o);
+    }
+    for t in cands {
+        let Some(&m) = off_idx.get(&t) else {
+            continue;
+        };
+        // keep the region ascending — a backward edge other than `head` is a
+        // mid-region landing the tails can't express
+        if m <= last || !reach.contains(&m) {
+            continue;
+        }
+        let e = chain_end(m);
+        let extra = e + 1 - m;
+        region.extend(m..=e);
+        if grow_region(ops, head, region, reach, off_idx, chain_end, validate) {
+            return true;
+        }
+        region.truncate(region.len() - extra);
+    }
+    false
 }
 
 /// Post-processes one emitted op arm for deferred writeback:
