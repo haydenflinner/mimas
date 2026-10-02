@@ -97,6 +97,14 @@ pub type BodyFn = for<'gc> unsafe extern "C" fn(
 /// slot. `1` means `gout` holds the `RtResult<Flow>` to propagate verbatim.
 /// `inl` is `true` only for generated-caller invocations (they pushed the
 /// frame); `false` entries always produce tag `1`.
+///
+/// `qp` chains the batched op quota across an `inl` call so neither side
+/// settles `*fuel`/`ops_left` at the boundary: the caller leaves
+/// `[armed_baseline, remaining]` in it and the callee runs its `bcn`/`bcn0`
+/// pair straight from those values, writing the pair back on a tag-0 exit
+/// (tag-1 exits settle the whole chain — caller's pending spend included —
+/// before landing in `gout`, so the propagate side reads nothing back).
+/// `inl = false` callers pass a scratch cell; it is never read.
 pub type InnerBodyFn = for<'gc> fn(
     thread: &mut ThreadState<'gc>,
     code: &mut Decoder,
@@ -104,11 +112,35 @@ pub type InnerBodyFn = for<'gc> fn(
     strs: &StrInterner,
     chunks: &IdVec<BodyId, Chunk>,
     signatures: &IdVec<BodyId, Option<Function>>,
-    fuel: &mut usize,
-    op_ip: &mut usize,
-    gout: &mut std::mem::MaybeUninit<RtResult<Flow<'gc>>>,
-    inl: bool,
+    io: &mut GenIo<'_, 'gc>,
 ) -> u8;
+
+/// The generated-body boundary bundle: every per-call input/output that is
+/// not `thread`/`code`/the read-only environment rides one `&mut` so the
+/// inner-call ABI stays inside the arg registers — and the caller-to-callee
+/// handoff is a couple of stores into this one already-live cell rather than
+/// stack-arg marshaling.
+///
+/// - `out`: the tag-1 `RtResult<Flow>` payload slot (see `InnerBodyFn`);
+/// - `fuel`/`op_ip`: the driver's counters — written at body exits exactly
+///   where `run_dispatch` would have read them;
+/// - `qp`: the `[bcn0, bcn]` quota chain handed to `inl` callees;
+/// - `inl`: `true` when a generated caller pushed the frame (the body's own
+///   entry mode — a caller re-arms it to `true` before each inline call;
+///   bodies cache it into a local at entry).
+#[doc(hidden)]
+pub struct GenIo<'a, 'gc> {
+    /// Tag-1 payload slot.
+    pub out: std::mem::MaybeUninit<RtResult<Flow<'gc>>>,
+    /// The driver's fuel counter.
+    pub fuel: &'a mut usize,
+    /// The driver's faulting-op slot.
+    pub op_ip: &'a mut usize,
+    /// Quota chain `[armed_baseline, remaining]` — see `InnerBodyFn`.
+    pub qp: [u64; 2],
+    /// Generated-caller entry flag.
+    pub inl: bool,
+}
 
 /// The callee-side `Flow::Return` for `inl`-entered bodies (`InnerBodyFn`
 /// tag-0 exits): pop our frame, truncate `regs` back to the caller's window,

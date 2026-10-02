@@ -512,10 +512,7 @@ fn emit_body(w: &mut String, program: &Program, body: usize) {
          \x20   strs: &StrInterner,\n\
          \x20   chunks: &IdVec<BodyId, Chunk>,\n\
          \x20   signatures: &IdVec<BodyId, Option<Function>>,\n\
-         \x20   fuel: &mut usize,\n\
-         \x20   op_ip: &mut usize,\n\
-         \x20   gout: &mut std::mem::MaybeUninit<RtResult<Flow<'gc>>>,\n\
-         \x20   inl: bool,\n\
+         \x20   io: &mut GenIo<'_, 'gc>,\n\
          ) -> u8 {{"
     );
     let _ = writeln!(
@@ -527,7 +524,10 @@ fn emit_body(w: &mut String, program: &Program, body: usize) {
          \x20   // a callee's return pop) — always rebuild it before the next use.\n\
          \x20   let mut regs = unsafe {{\n\
          \x20       std::slice::from_raw_parts_mut(thread.regs.as_mut_ptr().add(base), nregs)\n\
-         \x20   }};"
+         \x20   }};\n\
+         \x20   // our own entry mode — `io.inl` is re-armed for *callees* before\n\
+         \x20   // every inline call, so the field is only meaningful here\n\
+         \x20   let inl = io.inl;"
     );
     // Shadowed registers are initialized once per invocation, straight from
     // `regs` — which is authoritative even mid-body thanks to write-through.
@@ -574,26 +574,37 @@ fn emit_body(w: &mut String, program: &Program, body: usize) {
     // Per-op bookkeeping is the driver's, batched: `bcn` counts down a local
     // quota of `min(fuel, ops_left)` — both are consumed strictly per op and
     // can't be touched mid-body (natives never see `fuel`, and `thread` is
-    // borrow_mut-held), so `*fuel`/`thread.ops_left` are only synced by
-    // `settle!()` at body exits and re-armed after an inlined call consumed
-    // some. `bcn0` remembers `bcn` at the last settle so `spent` is exact.
-    // When `bcn` hits 0 the ordered exit reasons reproduce run_dispatch's:
-    // paused or `fuel == 0` → `Flow::Next`, `ops_left == 0` → `OutOfFuel`
-    // (paused first, matching the driver's own ordering).
-    let _ = writeln!(w, "    let mut bcn: u64 = (*fuel as u64).min(thread.ops_left);");
-    let _ = writeln!(w, "    let mut bcn0: u64 = bcn;");
+    // borrow_mut-held), so `*io.fuel`/`thread.ops_left` are only synced by
+    // `settle!()` at body exits. `bcn0` remembers `bcn` at the last settle so
+    // `spent` is exact. `inl` entries skip the arm entirely: the caller's
+    // `[bcn0, bcn]` arrive in `qp` — the caller's unsettled spend is folded
+    // into the baseline (`bcn0` chain), so this body's first `settle!()`
+    // charges it exactly. The pair is written back through `qp` on the
+    // callee-side-pop (tag 0) exit instead of settling + re-arming around
+    // the call. When `bcn` hits 0 the ordered exit reasons reproduce
+    // run_dispatch's: paused or `fuel == 0` → `Flow::Next`,
+    // `ops_left == 0` → `OutOfFuel` (paused first, matching the driver's own
+    // ordering).
+    let _ = writeln!(
+        w,
+        "    let (mut bcn0, mut bcn): (u64, u64) = if inl {{\n\
+         \x20       (io.qp[0], io.qp[1])\n\
+         \x20   }} else {{\n\
+         \x20       let b = (*io.fuel as u64).min(thread.ops_left); (b, b)\n\
+         \x20   }};"
+    );
     let _ = writeln!(
         w,
         "    macro_rules! settle {{ () => {{{{\n\
          \x20       let spent = bcn0 - bcn; bcn0 = bcn;\n\
-         \x20       *fuel -= spent as usize;\n\
+         \x20       *io.fuel -= spent as usize;\n\
          \x20       thread.ops_left -= spent;\n\
          \x20   }}}}}}\n\
          \x20   macro_rules! gexit {{ () => {{{{\n\
          \x20       settle!();\n\
-         \x20       if ctx.state().paused.get() | (*fuel == 0) {{ flush!(); gout.write(Ok(Flow::Next)); return 1u8; }}\n\
-         \x20       if thread.ops_left == 0 {{ *op_ip = code.ip; flush!(); gout.write(Err(RtErr::OutOfFuel)); return 1u8; }}\n\
-         \x20       bcn = (*fuel as u64).min(thread.ops_left); bcn0 = bcn;\n\
+         \x20       if ctx.state().paused.get() | (*io.fuel == 0) {{ flush!(); io.out.write(Ok(Flow::Next)); return 1u8; }}\n\
+         \x20       if thread.ops_left == 0 {{ *io.op_ip = code.ip; flush!(); io.out.write(Err(RtErr::OutOfFuel)); return 1u8; }}\n\
+         \x20       bcn = (*io.fuel as u64).min(thread.ops_left); bcn0 = bcn;\n\
          \x20   }}}}}}\n\
          \x20   macro_rules! gateq {{ () => {{{{\n\
          \x20       if bcn == 0 {{ gexit!(); }}\n\
@@ -604,7 +615,7 @@ fn emit_body(w: &mut String, program: &Program, body: usize) {
          \x20       bcn -= 1;\n\
          \x20   }}}}}}\n\
          \x20   macro_rules! pchk {{ () => {{{{\n\
-         \x20       if ctx.state().paused.get() {{ settle!(); flush!(); gout.write(Ok(Flow::Next)); return 1u8; }}\n\
+         \x20       if ctx.state().paused.get() {{ settle!(); flush!(); io.out.write(Ok(Flow::Next)); return 1u8; }}\n\
          \x20   }}}}}}"
     );
     let _ = writeln!(w, "    loop {{");
@@ -828,7 +839,7 @@ fn emit_body(w: &mut String, program: &Program, body: usize) {
             }
             let _ = writeln!(w, "            loop {{");
             // `code.ip` must sit at `head` on every iteration: the head op's
-            // own `step`-bails and the gates' `*op_ip`/Flow::Next save slot
+            // own `step`-bails and the gates' `*io.op_ip`/Flow::Next save slot
             // all read it.
             let _ = writeln!(w, "            code.ip = {head};");
             if pure {
@@ -857,7 +868,7 @@ fn emit_body(w: &mut String, program: &Program, body: usize) {
     // hand it to the interpreter, which hits the same garbage decode either way
     let _ = writeln!(
         w,
-        "            _ => {{ *op_ip = code.ip; gatep!(); settle!(); flush!(); gout.write(step(regs, code, ctx, strs, &thread.frames)); return 1u8; }}"
+        "            _ => {{ *io.op_ip = code.ip; gatep!(); settle!(); flush!(); io.out.write(step(regs, code, ctx, strs, &thread.frames)); return 1u8; }}"
     );
     let _ = writeln!(w, "        }}");
     let _ = writeln!(w, "    }}");
@@ -882,14 +893,20 @@ fn emit_body(w: &mut String, program: &Program, body: usize) {
          ) {{\n\
          \x20   // SAFETY: the BodyFn contract — pointers borrow live driver\n\
          \x20   // state for the call's duration; `out` is a live slot.\n\
-         \x20   // `gen = false`: every exit lands in `gout` (tag is always 1).\n\
+         \x20   // `inl = false`: every exit lands in `io.out` (tag is always 1).\n\
          \x20   unsafe {{\n\
-         \x20       let mut gout = std::mem::MaybeUninit::<RtResult<Flow>>::uninit();\n\
+         \x20       let mut io = GenIo {{\n\
+         \x20           out: std::mem::MaybeUninit::uninit(),\n\
+         \x20           fuel: &mut *fuel,\n\
+         \x20           op_ip: &mut *op_ip,\n\
+         \x20           qp: [0, 0],\n\
+         \x20           inl: false,\n\
+         \x20       }};\n\
          \x20       body_{body}(\n\
          \x20           &mut *thread, &mut *code, ctx, &*strs, &*chunks, &*signatures,\n\
-         \x20           &mut *fuel, &mut *op_ip, &mut gout, false,\n\
+         \x20           &mut io,\n\
          \x20       );\n\
-         \x20       *out = gout.assume_init();\n\
+         \x20       *out = io.out.assume_init();\n\
          \x20   }}\n\
          }}"
     );
@@ -1089,12 +1106,29 @@ fn defer(arm: &str, sh: &Sh, restock: u64) -> String {
         let is_tag = expr
             .strip_suffix("u8")
             .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()));
-        if is_tag {
-            let _ = write!(out, "bcn += {restock}u64; settle!(); return {expr};");
+        if expr == "0u8" {
+            // callee-side pop (`gen` return): the quota chain rides back in
+            // `qp` unsettled — the caller resumes `bcn`/`bcn0` from it, so a
+            // settle here would only pay a write it immediately re-reads.
+            let _ = write!(
+                out,
+                "bcn += {restock}u64; io.qp[0] = bcn0; io.qp[1] = bcn; return {expr};"
+            );
+        } else if is_tag {
+            // tag-1 call propagation: the callee's own `settle!()` already
+            // charged the whole `bcn0` chain — our pending spend included —
+            // so only the pre-paid ops this arm never ran need refunding.
+            if restock > 0 {
+                let _ = write!(
+                    out,
+                    "*io.fuel += {restock}usize; thread.ops_left += {restock}u64; "
+                );
+            }
+            let _ = write!(out, "return {expr};");
         } else {
             let _ = write!(
                 out,
-                "bcn += {restock}u64; settle!(); flush!(); gout.write({expr}); return 1u8;"
+                "bcn += {restock}u64; settle!(); flush!(); io.out.write({expr}); return 1u8;"
             );
         }
         rest = &tail[end + usize::from(tail.as_bytes().get(end) == Some(&b';'))..];
@@ -1109,11 +1143,11 @@ fn defer(arm: &str, sh: &Sh, restock: u64) -> String {
     // host inspects after `run()`. The call fast-path's propagations and
     // arity errors were already flushed pre-`enter_call`.
     out = out.replace(
-        "flush!(); gout.write(Ok(Flow::Return",
-        "if thread.frames.len() == 1 { flush!(); } gout.write(Ok(Flow::Return",
+        "flush!(); io.out.write(Ok(Flow::Return",
+        "if thread.frames.len() == 1 { flush!(); } io.out.write(Ok(Flow::Return",
     );
-    out = out.replace("flush!(); gout.write(res)", "gout.write(res)");
-    out = out.replace("flush!(); gout.write(Err(kind))", "gout.write(Err(kind))");
+    out = out.replace("flush!(); io.out.write(res)", "io.out.write(res)");
+    out = out.replace("flush!(); io.out.write(Err(kind))", "io.out.write(Err(kind))");
     for &r in &sh.int {
         let plain = format!("rd(regs, Reg::from({r}u32))");
         out = out.replace(
@@ -1182,11 +1216,15 @@ fn emit_call_fast(
     arg_regs: &[Reg],
     sh: &Sh,
 ) {
-    // `settle!()` before entering the callee: it draws fuel/ops_left from the
-    // same counters our `bcn` was armed against, so our spent ops must be
-    // charged first or the propagate-path `settle!()` would subtract them
-    // twice (debug underflow). Natives can't observe this — `thread` stays
-    // `borrow_mut`-held for the whole dispatch.
+    // No `settle!()` before the callee: `qp` hands it `[bcn0, bcn]` — the
+    // baseline/remaining pair our own `settle!()` would sync anyway — so the
+    // callee's `bcn0` chain charges our unsettled spend inside *its* first
+    // settle, and its tag-0 exit hands the pair straight back (a tag-1
+    // propagate needs nothing: every `gout` exit settles first, and the
+    // restock refund for ops that never ran is emitted by `defer`).
+    // `flush!()` still runs: a propagated `Flow::Next`/`Err` suspends with
+    // our frame live underneath the callee's, so the window must be
+    // authoritative.
     let regs_list = arg_regs
         .iter()
         .map(|r| format!("Reg::from({}u32)", r.index()))
@@ -1195,7 +1233,8 @@ fn emit_call_fast(
     let _ = writeln!(
         s,
         "if thread.frames.len() < INLINE_CALL_DEPTH {{
-            settle!();
+            io.qp = [bcn0, bcn];
+            io.inl = true;
             flush!();"
     );
     // The frame push is verbatim `enter_call_regs`; when the callee is known
@@ -1279,13 +1318,14 @@ fn emit_call_fast(
         );
     }
     // Tag 1 means `gout` already holds the callee's `RtResult<Flow>` —
-    // propagate verbatim (the settle defer prepends charges nothing: our
-    // spend was settled pre-call and the callee settled its own). Tag 0: the
-    // callee ran the driver's pop itself — frame popped, `regs` truncated,
-    // `code.ip` restored to our resume slot, `regs[dst]` written.
+    // propagate verbatim (the callee's settle covered the whole `bcn0`
+    // chain, our pending included; `defer` refunds only this arm's
+    // restock). Tag 0: the callee ran the driver's pop itself — frame
+    // popped, `regs` truncated, `code.ip` restored to our resume slot,
+    // `regs[dst]` written.
     let _ = writeln!(
         s,
-        "if {f}(thread, code, ctx, strs, chunks, signatures, fuel, op_ip, gout, true) != 0u8 {{
+        "if {f}(thread, code, ctx, strs, chunks, signatures, io) != 0u8 {{
             \x20return 1u8;
             \x20}}
             \x20// deeper `enter_call`s may have moved `thread.regs` — rebuild
@@ -1294,9 +1334,9 @@ fn emit_call_fast(
             \x20regs = unsafe {{
             \x20    std::slice::from_raw_parts_mut(thread.regs.as_mut_ptr().add(base), nregs)
             \x20}};
-            \x20// the callee consumed fuel/ops_left through its own
-            \x20// `bcn` quota — re-arm ours from the settled counters
-            \x20bcn = (*fuel as u64).min(thread.ops_left); bcn0 = bcn;",
+            \x20// the callee rode our `bcn0`/`bcn` chain — take back whatever
+            \x20// quota it left (unsettled spend stays folded in the baseline)
+            \x20bcn0 = io.qp[0]; bcn = io.qp[1];",
         f = callee_fn(callee)
     );
     let _ = writeln!(s, "}}");
@@ -1375,11 +1415,11 @@ fn int_opnd(sh: &Sh, r: Reg, next: usize, off: usize, cold: &str) -> String {
         // flag-clear means `regs[r]` holds a non-Int right now — take the same
         // cold path the interpreter's tag-miss would
         Some(v) => format!(
-            "if r{idx}ok {{ {v} }} else {{ code.ip = {next}; *op_ip = {off}; {cold} }}",
+            "if r{idx}ok {{ {v} }} else {{ code.ip = {next}; *io.op_ip = {off}; {cold} }}",
             idx = r.index()
         ),
         None => format!(
-            "match rd(regs, {}) {{ Val::Int(x) => x, _ => {{ code.ip = {next}; *op_ip = {off}; {cold} }} }}",
+            "match rd(regs, {}) {{ Val::Int(x) => x, _ => {{ code.ip = {next}; *io.op_ip = {off}; {cold} }} }}",
             reg(r)
         ),
     }
@@ -1388,11 +1428,11 @@ fn int_opnd(sh: &Sh, r: Reg, next: usize, off: usize, cold: &str) -> String {
 fn float_opnd(sh: &Sh, r: Reg, next: usize, off: usize, cold: &str) -> String {
     match sh.float(r) {
         Some(v) => format!(
-            "if r{idx}ok {{ {v} }} else {{ code.ip = {next}; *op_ip = {off}; {cold} }}",
+            "if r{idx}ok {{ {v} }} else {{ code.ip = {next}; *io.op_ip = {off}; {cold} }}",
             idx = r.index()
         ),
         None => format!(
-            "match rd(regs, {}) {{ Val::Float(x) => x, _ => {{ code.ip = {next}; *op_ip = {off}; {cold} }} }}",
+            "match rd(regs, {}) {{ Val::Float(x) => x, _ => {{ code.ip = {next}; *io.op_ip = {off}; {cold} }} }}",
             reg(r)
         ),
     }
@@ -1402,7 +1442,7 @@ fn float_opnd(sh: &Sh, r: Reg, next: usize, off: usize, cold: &str) -> String {
 /// of the following op — the value `code.ip` would hold after decoding this op,
 /// which the specialized body must reproduce by hand since it never decodes.
 /// Every `return` that leaves the body with `Err` or `Flow::Call` first stores
-/// the op's offset into `*op_ip` for the driver's `locate`.
+/// the op's offset into `*io.op_ip` for the driver's `locate`.
 fn emit_op(
     w: &mut String,
     sh: &Sh,
@@ -1530,7 +1570,7 @@ fn emit_op(
             let se = sh.rdv(*set);
             let ie = sh.rdv(*index);
             let ve = sh.rdv(*value);
-            wln!("*op_ip = {offset};");
+            wln!("*io.op_ip = {offset};");
             wln!("match ({se}, {ie}) {{");
             wln!("    (Val::Array(a), Val::Int(i)) => {{");
             wln!("        let Ok(u) = usize::try_from(i) else {{ return Err(RtErr::IndexOutOfBounds) }};");
@@ -1552,7 +1592,7 @@ fn emit_op(
         } => {
             let se = sh.rdv(*set);
             let ie = sh.rdv(*index);
-            wln!("*op_ip = {offset};");
+            wln!("*io.op_ip = {offset};");
             wln!("let v = match ({se}, {ie}) {{");
             wln!("    (Val::Array(a), Val::Int(i)) => {{");
             wln!("        let Ok(u) = usize::try_from(i) else {{ return Err(RtErr::IndexOutOfBounds) }};");
@@ -1583,9 +1623,9 @@ fn emit_op(
             wln!("    let v = match receiver {{");
             wln!("        Val::Instance(i) => i.0.borrow().fields[{slot}],");
             wln!("        Val::Array(a) => a.0.borrow()[{slot}],");
-            wln!("        Val::Null => {{ *op_ip = {offset}; return Err(RtErr::UnwrappedNull); }}");
+            wln!("        Val::Null => {{ *io.op_ip = {offset}; return Err(RtErr::UnwrappedNull); }}");
             wln!(
-                "        other => {{ *op_ip = {offset}; return Err(RtErr::Custom(format!(\"no fields on {{:?}}\", other.capture()))); }}"
+                "        other => {{ *io.op_ip = {offset}; return Err(RtErr::Custom(format!(\"no fields on {{:?}}\", other.capture()))); }}"
             );
             wln!("    }};");
             wln!("    wr(regs, {}, v); code.ip = {next};", reg(*dst));
@@ -1601,9 +1641,9 @@ fn emit_op(
             wln!("match receiver {{");
             wln!("    Val::Instance(i) => i.0.borrow_mut(&ctx).fields[{slot}] = value,");
             wln!("    Val::Array(a) => a.0.borrow_mut(&ctx)[{slot}] = value,");
-            wln!("    Val::Null => {{ *op_ip = {offset}; return Err(RtErr::UnwrappedNull); }}");
+            wln!("    Val::Null => {{ *io.op_ip = {offset}; return Err(RtErr::UnwrappedNull); }}");
             wln!(
-                "    other => {{ *op_ip = {offset}; return Err(RtErr::Custom(format!(\"no fields on {{:?}}\", other.capture()))); }}"
+                "    other => {{ *io.op_ip = {offset}; return Err(RtErr::Custom(format!(\"no fields on {{:?}}\", other.capture()))); }}"
             );
             wln!("}}");
             wln!("code.ip = {next};");
@@ -1687,7 +1727,7 @@ fn emit_op(
             // shadowed-but-flag-clear falls back to `step`, whose arm hits the
             // same `unreachable!` the interpreter would
             let bail =
-                format!("*op_ip = {offset}; return step(regs, code, ctx, strs, &thread.frames)");
+                format!("*io.op_ip = {offset}; return step(regs, code, ctx, strs, &thread.frames)");
             let i = match sh.int(*idx) {
                 Some(v) => format!("if r{}ok {{ {v} }} else {{ {bail} }}", idx.index()),
                 None => format!(
@@ -1749,14 +1789,14 @@ fn emit_op(
             wln!("let target = match rd(regs, {}) {{", reg(*callee));
             wln!("    Val::Fn(b) => CallTarget::Value(b),");
             wln!("    Val::Closure(c) => CallTarget::Closure(c),");
-            wln!("    other => {{ *op_ip = {offset}; return Err(not_callable(other)); }}");
+            wln!("    other => {{ *io.op_ip = {offset}; return Err(not_callable(other)); }}");
             wln!("}};");
             // resolve `(body, captures)` exactly as the driver's `Flow::Call`
             // handling does — the `Value` arm's signature check included
             wln!("let (cb, captures): (BodyId, &[Val]) = match &target {{");
             wln!("    CallTarget::Fn(b) | CallTarget::Value(b) => {{");
             wln!("        if signatures.get(*b).and_then(|o| o.as_ref()).is_none() {{");
-            wln!("            *op_ip = {offset}; return Err(not_callable(Val::Fn(*b)));");
+            wln!("            *io.op_ip = {offset}; return Err(not_callable(Val::Fn(*b)));");
             wln!("        }}");
             wln!("        (*b, &[][..])");
             wln!("    }}");
@@ -1768,12 +1808,12 @@ fn emit_op(
             // `enter_call` saves `code.ip` as the caller's resume slot — in the
             // interpreter it's already past this op's operands by then, so the
             // specialized arm must advance it before either path.
-            wln!("code.ip = {next}; *op_ip = {offset};");
+            wln!("code.ip = {next}; *io.op_ip = {offset};");
             emit_call_fast(&mut s, *dst, "cb", None, "captures", "target", args, sh);
         }
         Op::CallDirect { dst, body, args } => {
             let callee = format!("BodyId::from({}u32)", body.index());
-            wln!("code.ip = {next}; *op_ip = {offset};");
+            wln!("code.ip = {next}; *io.op_ip = {offset};");
             emit_call_fast(
                 &mut s,
                 *dst,
@@ -1805,7 +1845,7 @@ fn emit_op(
             wln!("    stack.extend(thread.frames.iter().map(|f| (f.chunk, f.ip as u32)));");
             wln!("    if let Some(top) = stack.last_mut() {{ top.1 = {next}u32; }}");
             wln!("}}");
-            wln!("*op_ip = {offset};");
+            wln!("*io.op_ip = {offset};");
             wln!(
                 "let v = match native.call(ctx, &args) {{ Ok(v) => v, Err(e) => {{ return Err(e) }} }};"
             );
@@ -1817,7 +1857,7 @@ fn emit_op(
             gen_pop(&mut s);
             wln!("return Ok(Flow::Return(rv));");
         }
-        Op::Panic {} => wln!("*op_ip = {offset}; return Err(RtErr::MatchPanicReached);"),
+        Op::Panic {} => wln!("*io.op_ip = {offset}; return Err(RtErr::MatchPanicReached);"),
         Op::Raise { val } => {
             wln!(
                 "let Val::Str(err) = rd(regs, {}) else {{ unreachable!(\"raise on a non-str value\") }};",
@@ -1846,9 +1886,9 @@ fn emit_op(
         Op::Unwrap { dst, src } => {
             wln!("let v = rd(regs, {});", reg(*src));
             wln!("match v {{");
-            wln!("    Val::Null => {{ *op_ip = {offset}; return Err(RtErr::UnwrappedNull); }}");
+            wln!("    Val::Null => {{ *io.op_ip = {offset}; return Err(RtErr::UnwrappedNull); }}");
             wln!(
-                "    Val::Raised(err) => {{ *op_ip = {offset}; return Err(RtErr::UnwrappedRaised(err.as_str().to_string())); }}"
+                "    Val::Raised(err) => {{ *io.op_ip = {offset}; return Err(RtErr::UnwrappedRaised(err.as_str().to_string())); }}"
             );
             wln!("    _ => wr(regs, {}, v),", reg(*dst));
             wln!("}}");
@@ -1857,7 +1897,7 @@ fn emit_op(
         Op::UnwrapUnit { dst, src } => {
             wln!("match rd(regs, {}) {{", reg(*src));
             wln!(
-                "    Val::Raised(err) => {{ *op_ip = {offset}; return Err(RtErr::UnwrappedRaised(err.as_str().to_string())); }}"
+                "    Val::Raised(err) => {{ *io.op_ip = {offset}; return Err(RtErr::UnwrappedRaised(err.as_str().to_string())); }}"
             );
             wln!("    _ => wr(regs, {}, Val::Null),", reg(*dst));
             wln!("}}");
@@ -1870,7 +1910,7 @@ fn emit_op(
             wln!("    Val::Str(s) => s.as_str().chars().count(),");
             wln!("    Val::Int(i) => i as usize,");
             wln!(
-                "    other => {{ *op_ip = {offset}; return Err(RtErr::Custom(format!(\"len: {{:?}} has no length\", other.capture()))); }}"
+                "    other => {{ *io.op_ip = {offset}; return Err(RtErr::Custom(format!(\"len: {{:?}} has no length\", other.capture()))); }}"
             );
             wln!("}};");
             if let Some(d) = sh.int(*dst) {
@@ -1888,7 +1928,7 @@ fn emit_op(
         Op::ToFloat { dst, src } => {
             let i = match sh.int(*src) {
                 Some(v) => format!(
-                    "if r{}ok {{ {v} }} else {{ *op_ip = {offset}; return step(regs, code, ctx, strs, &thread.frames) }}",
+                    "if r{}ok {{ {v} }} else {{ *io.op_ip = {offset}; return step(regs, code, ctx, strs, &thread.frames) }}",
                     src.index()
                 ),
                 None => format!(
@@ -1911,7 +1951,7 @@ fn emit_op(
         Op::Sqrt { dst, src } => {
             let f = match sh.float(*src) {
                 Some(v) => format!(
-                    "if r{}ok {{ {v} }} else {{ *op_ip = {offset}; return step(regs, code, ctx, strs, &thread.frames) }}",
+                    "if r{}ok {{ {v} }} else {{ *io.op_ip = {offset}; return step(regs, code, ctx, strs, &thread.frames) }}",
                     src.index()
                 ),
                 None => format!(
@@ -1962,7 +2002,7 @@ fn emit_op(
                         wln!("text.push_str(strs.get(StrId::from({}u32)));", id.index())
                     }
                     OpFormatPart::Value(r) => {
-                        wln!("*op_ip = {offset};");
+                        wln!("*io.op_ip = {offset};");
                         wln!(
                             "if let Err(e) = ctx.to_string_into(&mut text, rd(regs, {})) {{ return Err(e) }};",
                             reg(*r)
@@ -1981,7 +2021,7 @@ fn emit_op(
             op,
             right,
         } => {
-            wln!("*op_ip = {offset};");
+            wln!("*io.op_ip = {offset};");
             wln!(
                 "let v = match bin(rd(regs, {}), ctx, rd(regs, {}), BinOp::{op:?}) {{ Ok(v) => v, Err(e) => {{ return Err(e) }} }};",
                 reg(*left),
@@ -1990,7 +2030,7 @@ fn emit_op(
             wln!("wr(regs, {}, v); code.ip = {next};", reg(*dst));
         }
         Op::Unary { dst, op, src } => {
-            wln!("*op_ip = {offset};");
+            wln!("*io.op_ip = {offset};");
             if matches!(op, compile::UnaryOp::Not) {
                 // `!b` is the common shape — anything else keeps the generic
                 // helper (Neg on Int/Float, array ops, errors).
@@ -2063,7 +2103,7 @@ fn emit_op(
             let a = int_opnd(sh, *left, next, offset, &cold);
             let b = int_opnd(sh, *right, next, offset, &cold);
             wln!("let b = {b};");
-            wln!("if b == 0 {{ *op_ip = {offset}; return Err(RtErr::ModByZero); }}");
+            wln!("if b == 0 {{ *io.op_ip = {offset}; return Err(RtErr::ModByZero); }}");
             if let Some(d) = sh.int(*dst) {
                 wln!(
                     "{d} = {a} % b; r{}ok = true; code.ip = {next};",
@@ -2223,7 +2263,7 @@ fn emit_op(
                     reg(*left)
                 ),
             );
-            wln!("if {val}i64 == 0 {{ *op_ip = {offset}; return Err(RtErr::ModByZero); }}");
+            wln!("if {val}i64 == 0 {{ *io.op_ip = {offset}; return Err(RtErr::ModByZero); }}");
             if let Some(d) = sh.int(*dst) {
                 wln!(
                     "{d} = {a} % {val}i64; r{}ok = true; code.ip = {next};",
@@ -2832,7 +2872,7 @@ fn emit_bool(s: &mut String, sh: &Sh, dst: Reg, left: Reg, right: Reg, next: usi
 // Below, the emit_* fns write the arm's *contents* into `s` and `emit_op` wraps
 // it in `{offset} => {{ ... }}`. Operand expressions come from `int_opnd` /
 // `float_opnd`: a shadow-local name when unboxed, else a `regs` match whose
-// miss arm pre-advances `code.ip`, stores `*op_ip`, and tail-calls the same
+// miss arm pre-advances `code.ip`, stores `*io.op_ip`, and tail-calls the same
 // `bin_cold*`/`branch_cold*` helper the interpreter's macro would have reached.
 
 #[allow(clippy::too_many_arguments)]
@@ -2857,7 +2897,7 @@ fn emit_int_arith(
     let b = int_opnd(sh, right, next, off, &cold);
     let _ = writeln!(
         s,
-        "let Some(v) = ({a}).{checked}({b}) else {{ *op_ip = {off}; return Err(RtErr::IntegerOverflow) }};"
+        "let Some(v) = ({a}).{checked}({b}) else {{ *io.op_ip = {off}; return Err(RtErr::IntegerOverflow) }};"
     );
     sh.wr_shadow(s, dst, "Int", "v");
     let _ = writeln!(s, "code.ip = {next};");
@@ -2963,7 +3003,7 @@ fn emit_str_eval(
     let _ = writeln!(
         s,
         "code.ip = {next}; }}\n\
-         _ => {{ code.ip = {next}; *op_ip = {off}; {cold} }}\n\
+         _ => {{ code.ip = {next}; *io.op_ip = {off}; {cold} }}\n\
          }}",
     );
 }
@@ -2988,7 +3028,7 @@ fn emit_int_arith_imm(
     let a = int_opnd(sh, left, next, off, &cold);
     let _ = writeln!(
         s,
-        "let Some(v) = ({a}).{checked}({val}i64) else {{ *op_ip = {off}; return Err(RtErr::IntegerOverflow) }};"
+        "let Some(v) = ({a}).{checked}({val}i64) else {{ *io.op_ip = {off}; return Err(RtErr::IntegerOverflow) }};"
     );
     sh.wr_shadow(s, dst, "Int", "v");
     let _ = writeln!(s, "code.ip = {next};");

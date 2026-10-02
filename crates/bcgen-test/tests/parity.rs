@@ -47,7 +47,7 @@ fn every_op_specialized() {
         let bodies = src.matches(") -> u8 {").count();
         // shadow-init bails also say `=> return step(`; the catch-all is the
         // only `_ =>` arm (it sets `*op_ip` first, then flushes shadows)
-        let delegates = src.matches("_ => { *op_ip = code.ip;").count();
+        let delegates = src.matches("_ => { *io.op_ip = code.ip;").count();
         assert_eq!(bodies, delegates, "an op arm delegated to the interpreter");
     }
 }
