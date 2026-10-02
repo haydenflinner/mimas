@@ -23,8 +23,7 @@ use compile::{Decode, Op, Program};
 use vm::Vm;
 use vm::bc::jit::{frame_base, frame_nregs, regs_ptr, step_at};
 use vm::bc::{
-    BodyFn, BodyId, Chunk, Ctx, Decoder, Flow, Frame, Function, Gc, IdVec, RtResult, StrInterner,
-    ThreadState, Val,
+    BodyEnv, BodyFn, BodyId, Chunk, Ctx, Decoder, Frame, Gc, IdVec, ThreadState, Val,
 };
 
 use crate::{BodyFacts, Error, Facts, Jit, Obs, ObsTag};
@@ -149,11 +148,7 @@ impl Profile {
     /// itself never touches the live `ip`).
     ///
     /// SAFETY: same contract as [`record`](Self::record).
-    unsafe fn record_site<'gc>(
-        &mut self,
-        t: *const ThreadState<'gc>,
-        code: *mut Decoder,
-    ) {
+    unsafe fn record_site<'gc>(&mut self, t: *const ThreadState<'gc>, code: *mut Decoder) {
         unsafe {
             let ip = (*code).ip;
             let mut dec = Decoder {
@@ -170,7 +165,12 @@ impl Profile {
             let top = (*t).frames.last().unwrap();
             let regs = regs_ptr(t as *mut ThreadState<'gc>);
             let o = classify(*regs.add(top.base + r));
-            merge(self.sites.entry((top.chunk.index() as u32, ip)).or_default(), o);
+            merge(
+                self.sites
+                    .entry((top.chunk.index() as u32, ip))
+                    .or_default(),
+                o,
+            );
         }
     }
 }
@@ -188,18 +188,13 @@ thread_local! {
 ///
 /// SAFETY: the `BodyFn` contract — all pointers borrow the driver's live
 /// state; `out` is fully written (by `step_at`) before returning.
-unsafe extern "C" fn prof_body<'gc>(
-    thread: *mut ThreadState<'gc>,
-    code: *mut Decoder,
-    ctx: Ctx<'gc>,
-    strs: *const StrInterner,
-    chunks: *const IdVec<BodyId, Chunk>,
-    _signatures: *const IdVec<BodyId, Option<Function>>,
-    fuel: *mut usize,
-    _op_ip: *mut usize,
-    out: *mut RtResult<Flow<'gc>>,
-) {
+unsafe extern "C" fn prof_body<'gc>(env: *const BodyEnv<'gc>) {
     unsafe {
+        let e = &*env;
+        let thread = e.thread;
+        let code = e.code;
+        let chunks = e.chunks;
+        let ctx = Ctx::from_parts(e.mutation, e.state);
         // fresh frame entry iff ip sits at the chunk's first op — a body
         // re-dispatched after `Flow::Next` resumes mid-stream and must not
         // be mistaken for an entry (its regs are mid-body values).
@@ -216,12 +211,12 @@ unsafe extern "C" fn prof_body<'gc>(
         });
         // the driver's own accounting for a `step` dispatch: one op each
         // from `fuel` and `ops_left`.
-        *fuel -= 1;
+        *e.fuel -= 1;
         (*thread).ops_left -= 1;
         let regs = regs_ptr(thread);
         let base = frame_base(thread);
         let n = frame_nregs(thread, chunks);
-        step_at(thread, regs.add(base), n, code, ctx, strs, out);
+        step_at(thread, regs.add(base), n, code, ctx, e.strs, e.out);
     }
 }
 
@@ -325,9 +320,13 @@ impl JitSession {
     /// it's broken.
     pub fn freeze(&self, facts: &mut Facts, ptr: usize, kind: crate::FrozenKind) {
         if ptr != 0 {
-            facts
-                .frozen
-                .insert(ptr, crate::Frozen { kind, unguarded: false });
+            facts.frozen.insert(
+                ptr,
+                crate::Frozen {
+                    kind,
+                    unguarded: false,
+                },
+            );
         }
     }
 
@@ -339,7 +338,12 @@ impl JitSession {
     /// Safe to call mid-run between `run_frame`/`run` boundaries: installed
     /// bodies are looked up per dispatch, so in-flight frames continue in
     /// the new code on their next op.
-    pub fn specialize(&mut self, vm: &mut Vm, program: &Program, facts: &Facts) -> Result<(), Error> {
+    pub fn specialize(
+        &mut self,
+        vm: &mut Vm,
+        program: &Program,
+        facts: &Facts,
+    ) -> Result<(), Error> {
         let jit = crate::compile_with(program, facts)?;
         vm.install_bc(jit.bodies());
         PROFILING.with(|p| *p.borrow_mut() = None);

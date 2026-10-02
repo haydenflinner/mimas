@@ -336,13 +336,13 @@ pub(crate) static SPECS: LazyLock<Vec<Spec>> = LazyLock::new(|| {
         spec!(
             "mj_call_body",
             jit::call_body,
-            [P, P, P, P, P, P, P, P, P, P, P, P, P, P, P],
+            [P, P, P, P, P, P],
             P
         ),
         spec!(
             "mj_call_dyn",
             jit::call_dyn,
-            [P, P, P, P, P, P, P, P, P, P, P, P, P, P, P, P],
+            [P, P, P, P, P, P, P],
             P
         ),
     ]
@@ -465,12 +465,10 @@ pub fn compile_with(program: &Program, facts: &Facts) -> Result<Jit, Error> {
     }
     let mut module = JITModule::new(jb);
 
-    // The BodyFn C ABI: (thread, code, Ctx-by-value as two i64s, strs, chunks,
-    // signatures, fuel, op_ip, out) — ten pointer-width params, no return.
+    // The BodyFn C ABI: `(*const BodyEnv)` — one param holding the whole
+    // dispatch-time driver-state bundle (see `vm::bc::BodyEnv`).
     let mut body_sig = module.make_signature();
-    for _ in 0..10 {
-        body_sig.params.push(AbiParam::new(types::I64));
-    }
+    body_sig.params.push(AbiParam::new(types::I64));
 
     // Helper imports — named symbols resolved through JITBuilder.
     let helper_ids: Vec<FuncId> = SPECS

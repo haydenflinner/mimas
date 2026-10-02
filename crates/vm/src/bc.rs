@@ -13,6 +13,8 @@
 //! from the VM — only from not being faster yet.
 
 use crate::vm::step_one;
+use crate::State;
+use gc_arena::Mutation;
 
 /// Frame depth at which generated bodies still enter calls inline (push the
 /// frame and recurse into the callee's body) instead of returning
@@ -71,17 +73,36 @@ pub const INLINE_CALL_DEPTH: usize = 48;
 /// - `out` must be fully written before returning (the driver `assume_init`s
 ///   it unconditionally);
 /// - all the semantic rules in the doc comment above apply unchanged.
-pub type BodyFn = for<'gc> unsafe extern "C" fn(
-    thread: *mut ThreadState<'gc>,
-    code: *mut Decoder,
-    ctx: Ctx<'gc>,
-    strs: *const StrInterner,
-    chunks: *const IdVec<BodyId, Chunk>,
-    signatures: *const IdVec<BodyId, Option<Function>>,
-    fuel: *mut usize,
-    op_ip: *mut usize,
-    out: *mut RtResult<Flow<'gc>>,
-);
+///
+/// The dispatch-time driver-state bundle every `BodyFn` reads through.
+/// Every input is a per-dispatch constant — the same ten words reach
+/// every body a `run` dispatches, including each body→body call on the
+/// inline fast path — so they ride one `*const`: bodies load the fields
+/// they use at entry rather than pinning ten argument registers across
+/// the whole function (and re-marshaling them before every nested call).
+/// Same pointer contract as the flat params it replaces.
+///
+/// All fields are pointer-width, `repr(C)` — generated code reads them
+/// by `offset_of!`.
+#[repr(C)]
+pub struct BodyEnv<'gc> {
+    pub thread: *mut ThreadState<'gc>,
+    pub code: *mut Decoder,
+    /// `Ctx`'s first word (`Ctx::from_parts` reassembles it).
+    pub mutation: *const Mutation<'gc>,
+    /// `Ctx`'s second word.
+    pub state: *const State<'gc>,
+    pub strs: *const StrInterner,
+    pub chunks: *const IdVec<BodyId, Chunk>,
+    pub signatures: *const IdVec<BodyId, Option<Function>>,
+    pub fuel: *mut usize,
+    pub op_ip: *mut usize,
+    pub out: *mut RtResult<Flow<'gc>>,
+}
+
+/// The driver-facing ABI — see the `BodyFn` contract above. One param:
+/// the [`BodyEnv`] bundle.
+pub type BodyFn = for<'gc> unsafe extern "C" fn(env: *const BodyEnv<'gc>);
 
 /// The ordinary Rust signature a specialized body's *inner* implementation
 /// uses — bcgen bodies call each other at this ABI (no trampoline round-trip
@@ -550,6 +571,12 @@ pub mod jit {
         pub as_ints_vec: usize,
         /// Byte offset of the `Vec<f64>` inside `ArrayStore::Floats`.
         pub as_floats_vec: usize,
+        /// Discriminant value of `ArrayStore::Vals`.
+        pub as_vals: u64,
+        /// Byte offset of the `Array` inside `ArrayStore::Vals` — a `Gc`
+        /// pointer to `RefLock<Vec<Val>>`, so `rl_flag`/`rl_vec` apply
+        /// through it (one more indirection than the primitive stores).
+        pub as_vals_arr: usize,
         /// Discriminant for `Val::Closure` — monomorphic dynamic-call
         /// caches branch on it to reach `ClosureData`.
         pub t_closure: u64,
@@ -909,6 +936,8 @@ pub mod jit {
             as_floats,
             as_ints_vec,
             as_floats_vec,
+            as_vals,
+            as_vals_arr,
             t_closure,
             cl_pay,
         ) = gc_arena::arena::rootless_mutate(|mc| {
@@ -951,7 +980,9 @@ pub mod jit {
                 mc,
                 crate::val::SharedStr::from("k"),
             )));
-            let Val::Str(key_str) = sv_str else { unreachable!() };
+            let Val::Str(key_str) = sv_str else {
+                unreachable!()
+            };
             let str_pay = pay_of(&sv_str, Gc::as_ptr(key_str.0) as usize);
             // RefLock<ArrayStore>: inner-enum offset + per-T borrow flag —
             // the same trick `rl_vec`/`rl_flag` used for RefLock<Vec<Val>>.
@@ -1068,6 +1099,14 @@ pub mod jit {
                 }
                 _ => unreachable!(),
             };
+            // `Vals` holds an `Array` — the emitted code dereferences the
+            // `Gc` at this offset, then `rl_flag`/`rl_vec` reach the
+            // `Vec<Val>` exactly like a plain `Val::Array` payload.
+            let as_vals = stagv(&abytes(&av));
+            let as_vals_arr = match &av {
+                ArrayStore::Vals(a) => a as *const _ as usize - &av as *const _ as usize,
+                _ => unreachable!(),
+            };
             // `Val::Closure` — a plain `Gc<ClosureData>` payload; the call
             // IC guards tag + `ClosureData.function` then copies `captures`.
             let cv = Closure(Gc::new(
@@ -1094,6 +1133,8 @@ pub mod jit {
                 as_floats,
                 as_ints_vec,
                 as_floats_vec,
+                as_vals,
+                as_vals_arr,
                 t_closure,
                 cl_pay,
             )
@@ -1342,6 +1383,8 @@ pub mod jit {
             as_floats,
             as_ints_vec,
             as_floats_vec,
+            as_vals,
+            as_vals_arr,
             t_closure,
             cl_pay,
             cl_func: offset_of!(crate::val::ClosureData, function),
@@ -2084,26 +2127,20 @@ pub mod jit {
     ///
     /// `code.ip` must already hold the caller's resume offset — it becomes
     /// the caller frame's saved ip exactly like `enter_call`.
-    #[allow(clippy::too_many_arguments)]
     unsafe fn enter_run_pop<'gc>(
-        t: &mut ThreadState<'gc>,
-        code: *mut Decoder,
-        chunks: *const IdVec<BodyId, Chunk>,
+        env: *const BodyEnv<'gc>,
         body: BodyId,
         dst: u32,
         args_idx: *const u32,
         nargs: usize,
         captures: &[Val<'gc>],
         f: BodyFn,
-        ctx: Ctx<'gc>,
-        strs: *const StrInterner,
-        sigs: *const IdVec<BodyId, Option<Function>>,
-        fuel: *mut usize,
-        op_ip: *mut usize,
-        out: *mut RtResult<Flow<'gc>>,
     ) -> *mut Val<'gc> {
         unsafe {
-            let chunk = &(&*chunks)[body];
+            let e = &*env;
+            let t = &mut *e.thread;
+            let chunk = &(&*e.chunks)[body];
+            let out = e.out;
             // same arity check `enter_call` would run on the driver's
             // `Flow::Call` path — `*op_ip` already sits at this op
             if nargs != chunk.args as usize {
@@ -2126,15 +2163,15 @@ pub mod jit {
             for (cap_reg, &cap) in chunk.captures.iter().zip(captures) {
                 t.regs[new_base + cap_reg.index()] = cap;
             }
-            t.frames.last_mut().unwrap().ip = (*code).ip;
+            t.frames.last_mut().unwrap().ip = (*e.code).ip;
             t.frames.push(Frame {
                 chunk: body,
                 ip: chunk.offset,
                 return_reg: dst,
                 base: new_base,
             });
-            (*code).ip = chunk.offset;
-            f(t, code, ctx, strs, chunks, sigs, fuel, op_ip, out);
+            (*e.code).ip = chunk.offset;
+            f(env);
             let Ok(Flow::Return(v)) = &*out else {
                 return std::ptr::null_mut();
             };
@@ -2142,7 +2179,7 @@ pub mod jit {
             let popped = t.frames.pop().unwrap();
             t.regs.truncate(popped.base);
             let caller = t.frames.last().unwrap();
-            (*code).ip = caller.ip;
+            (*e.code).ip = caller.ip;
             let caller_base = caller.base;
             t.regs[caller_base + popped.return_reg as usize] = v;
             t.regs.as_mut_ptr().add(caller_base)
@@ -2156,33 +2193,24 @@ pub mod jit {
     /// through `tbl` (the JIT module's body-pointer table), and pops on
     /// `Flow::Return`. Returns the rebuilt caller-window base pointer, or
     /// null to propagate `out` to the driver.
-    #[allow(clippy::too_many_arguments)]
     pub unsafe extern "C" fn call_body<'gc>(
-        thread: *mut ThreadState<'gc>,
-        code: *mut Decoder,
-        chunks: *const IdVec<BodyId, Chunk>,
+        env: *const BodyEnv<'gc>,
         tbl: *const usize,
         body: u32,
         dst: u32,
         args_idx: *const u32,
         nargs: usize,
-        mc: *const Mutation<'gc>,
-        st: *const State<'gc>,
-        strs: *const StrInterner,
-        sigs: *const IdVec<BodyId, Option<Function>>,
-        fuel: *mut usize,
-        op_ip: *mut usize,
-        out: *mut RtResult<Flow<'gc>>,
     ) -> *mut Val<'gc> {
         unsafe {
-            let t = &mut *thread;
+            let e = &*env;
+            let t = &mut *e.thread;
             if t.frames.len() >= INLINE_CALL_DEPTH {
                 let caller_base = t.frames.last().unwrap().base;
                 let mut args = SmallVec::<[Val; 8]>::new();
                 for i in 0..nargs {
                     args.push(t.regs[caller_base + *args_idx.add(i) as usize]);
                 }
-                *out = Ok(Flow::Call {
+                *e.out = Ok(Flow::Call {
                     target: CallTarget::Fn(BodyId::from(body)),
                     dst: Reg::from(dst),
                     args,
@@ -2192,21 +2220,13 @@ pub mod jit {
             // SAFETY: `tbl` is the JIT module's `BodyFn` table, indexed by body.
             let f: BodyFn = std::mem::transmute(*tbl.add(body as usize));
             enter_run_pop(
-                t,
-                code,
-                chunks,
+                env,
                 BodyId::from(body),
                 dst,
                 args_idx,
                 nargs,
                 &[],
                 f,
-                Ctx::from_parts(mc, st),
-                strs,
-                sigs,
-                fuel,
-                op_ip,
-                out,
             )
         }
     }
@@ -2216,32 +2236,23 @@ pub mod jit {
     /// unpacks its `ClosureData`, anything else is `not_callable` into `out`),
     /// then the same cap/enter/run/pop as `call_body`. `regs` is the caller's
     /// (flushed) window — read before any `thread.regs` resize.
-    #[allow(clippy::too_many_arguments)]
     pub unsafe extern "C" fn call_dyn<'gc>(
-        thread: *mut ThreadState<'gc>,
-        code: *mut Decoder,
-        chunks: *const IdVec<BodyId, Chunk>,
-        sigs: *const IdVec<BodyId, Option<Function>>,
+        env: *const BodyEnv<'gc>,
+        tbl: *const usize,
         regs: *const Val<'gc>,
         callee: usize,
         dst: u32,
         args_idx: *const u32,
         nargs: usize,
-        tbl: *const usize,
-        mc: *const Mutation<'gc>,
-        st: *const State<'gc>,
-        strs: *const StrInterner,
-        fuel: *mut usize,
-        op_ip: *mut usize,
-        out: *mut RtResult<Flow<'gc>>,
     ) -> *mut Val<'gc> {
         unsafe {
-            let t = &mut *thread;
+            let e = &*env;
+            let t = &mut *e.thread;
             let cv = *regs.add(callee);
             let (body, captures): (BodyId, &[Val<'gc>]) = match cv {
                 Val::Fn(b) => {
-                    if (&*sigs).get(b).and_then(|o| o.as_ref()).is_none() {
-                        *out = Err(not_callable(cv));
+                    if (&*e.signatures).get(b).and_then(|o| o.as_ref()).is_none() {
+                        *e.out = Err(not_callable(cv));
                         return std::ptr::null_mut();
                     }
                     (b, &[][..])
@@ -2251,7 +2262,7 @@ pub mod jit {
                     (d.function, d.captures.as_slice())
                 }
                 other => {
-                    *out = Err(not_callable(other));
+                    *e.out = Err(not_callable(other));
                     return std::ptr::null_mut();
                 }
             };
@@ -2265,7 +2276,7 @@ pub mod jit {
                 for i in 0..nargs {
                     args.push(*regs.add(*args_idx.add(i) as usize));
                 }
-                *out = Ok(Flow::Call {
+                *e.out = Ok(Flow::Call {
                     target,
                     dst: Reg::from(dst),
                     args,
@@ -2274,23 +2285,7 @@ pub mod jit {
             }
             // SAFETY: `tbl` is the JIT module's `BodyFn` table, indexed by body.
             let f: BodyFn = std::mem::transmute(*tbl.add(body.index()));
-            enter_run_pop(
-                t,
-                code,
-                chunks,
-                body,
-                dst,
-                args_idx,
-                nargs,
-                captures,
-                f,
-                Ctx::from_parts(mc, st),
-                strs,
-                sigs,
-                fuel,
-                op_ip,
-                out,
-            )
+            enter_run_pop(env, body, dst, args_idx, nargs, captures, f)
         }
     }
 }

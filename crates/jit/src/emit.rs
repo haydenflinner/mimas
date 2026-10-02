@@ -36,7 +36,19 @@ use cranelift_codegen::ir::{
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::JITModule;
 use cranelift_module::{DataDescription, DataId, FuncId, Module, ModuleResult};
-use vm::bc::{INLINE_CALL_DEPTH, jit::Layout};
+use vm::bc::{BodyEnv, INLINE_CALL_DEPTH, jit::Layout};
+
+/// `BodyEnv` field offsets — all fields are pointer-width under `repr(C)`,
+/// so `offset_of!` gives each word's byte position for the entry loads.
+const ENV_THREAD: i32 = std::mem::offset_of!(BodyEnv<'static>, thread) as i32;
+const ENV_CODE: i32 = std::mem::offset_of!(BodyEnv<'static>, code) as i32;
+const ENV_MC: i32 = std::mem::offset_of!(BodyEnv<'static>, mutation) as i32;
+const ENV_ST: i32 = std::mem::offset_of!(BodyEnv<'static>, state) as i32;
+const ENV_STRS: i32 = std::mem::offset_of!(BodyEnv<'static>, strs) as i32;
+// `chunks`/`signatures` fields aren't loaded — no emitted site needs them.
+const ENV_FUEL: i32 = std::mem::offset_of!(BodyEnv<'static>, fuel) as i32;
+const ENV_OPIP: i32 = std::mem::offset_of!(BodyEnv<'static>, op_ip) as i32;
+const ENV_OUT: i32 = std::mem::offset_of!(BodyEnv<'static>, out) as i32;
 
 const I64: ir::Type = types::I64;
 const I32: ir::Type = types::I32;
@@ -94,8 +106,7 @@ fn analyze(ops: &[(usize, Op)], nregs: u32) -> Sh {
     for (_, op) in ops {
         match op {
             Op::Move { dst, src } => put(*dst, W::Copy(src.index() as u32)),
-            Op::LoadConst { dst, constant } => put(
-                *dst,
+            Op::LoadConst { dst, constant } => put(*dst,
                 match constant {
                     Constant::Int(_) => W::Int,
                     Constant::Float(_) => W::Float,
@@ -114,8 +125,7 @@ fn analyze(ops: &[(usize, Op)], nregs: u32) -> Sh {
             | Op::IntNe { dst, left, right } => {
                 iread(*left);
                 iread(*right);
-                put(
-                    *dst,
+                put(*dst,
                     if matches!(
                         op,
                         Op::AddInt { .. }
@@ -329,23 +339,22 @@ fn analyze(ops: &[(usize, Op)], nregs: u32) -> Sh {
 /// in `entry` (the cells live in `State`/`ThreadState`, stable for the call).
 #[derive(Clone, Copy)]
 struct Env {
-    thread: Value,
-    code: Value,
-    ctx0: Value,
-    ctx1: Value,
-    strs: Value,
-    chunks: Value,
-    sigs: Value,
-    fuel_p: Value,
-    opip_p: Value,
-    out: Value,
-    paused_p: Value,
-    opsleft_p: Value,
-    ip_p: Value,
+    /// `*const BodyEnv` — the function's single argument. Every other
+    /// dispatch-time pointer is a `readonly` load off it emitted *at the use
+    /// site* (`Em::eload` and the field accessors below): eager entry loads
+    /// kept ~14 values pinned across the whole function, which pushed Ion
+    /// into spilling shadow vars. Lazily loading trades one `ldr` per use —
+    /// GVN dedupes repeats within a block — for drastically shorter live
+    /// ranges. Kept raw because body→body calls on the inline fast path
+    /// forward it verbatim (`call(fref, &[env])`).
+    env: Value,
+    /// The current frame's window base — the only *mutable* piece: call
+    /// helpers return a rebuilt base after `regs` resizes.
     base: Value,
+    /// `chunk.regs` — compile-time constant, rematerialized on demand.
     nregs: Value,
-    /// `mj_bodies` data-object address — `body_id`-indexed fn-ptr table.
-    bodies_tbl: Value,
+    /// `mj_bodies` data object — `symbol_value` re-emitted per use.
+    bodies_gv: ir::GlobalValue,
 }
 
 /// The body's mutable state as frontend `Variable`s — `def_var`/`use_var` and
@@ -453,15 +462,80 @@ impl Em<'_> {
         self.fb.use_var(self.v.regs)
     }
 
+    // ---- lazy `BodyEnv` fields: one readonly `ldr` at each use site (see
+    // `Env::env`) — call sites hoist `let t = self.<field>();` since these
+    // borrow `self` mutably ----
+
+    fn eload(&mut self, off: i32) -> Value {
+        let ev = self.env.env;
+        self.fb.ins().load(I64, tf().with_readonly(), ev, off)
+    }
+
+    fn thread(&mut self) -> Value {
+        self.eload(ENV_THREAD)
+    }
+
+    fn code(&mut self) -> Value {
+        self.eload(ENV_CODE)
+    }
+
+    fn ctx0(&mut self) -> Value {
+        self.eload(ENV_MC)
+    }
+
+    fn ctx1(&mut self) -> Value {
+        self.eload(ENV_ST)
+    }
+
+    fn strs(&mut self) -> Value {
+        self.eload(ENV_STRS)
+    }
+
+    fn fuel_p(&mut self) -> Value {
+        self.eload(ENV_FUEL)
+    }
+
+    fn opip_p(&mut self) -> Value {
+        self.eload(ENV_OPIP)
+    }
+
+    fn out(&mut self) -> Value {
+        self.eload(ENV_OUT)
+    }
+
+    /// `&state.paused` — `ctx1` word + probed `paused` offset.
+    fn paused_p(&mut self) -> Value {
+        let c = self.ctx1();
+        self.fb.ins().iadd_imm_s(c, self.lyt.state_paused as i64)
+    }
+
+    /// `&thread.ops_left` — `thread` + probed `ops_left` offset.
+    fn opsleft_p(&mut self) -> Value {
+        let t = self.thread();
+        self.fb.ins().iadd_imm_s(t, self.lyt.ops_left_off as i64)
+    }
+
+    /// `&mut code.ip` — `code` + probed `ip` offset.
+    fn ip_p(&mut self) -> Value {
+        let c = self.code();
+        self.fb.ins().iadd_imm_s(c, self.lyt.code_ip as i64)
+    }
+
+    /// `mj_bodies` table address — adrp+add, re-emitted per call site.
+    fn bodies_tbl(&mut self) -> Value {
+        self.fb.ins().symbol_value(I64, self.env.bodies_gv)
+    }
+
     // ---- inline `Val` access over the probed layout (`lyt`) — the emit-time
     // twin of `bc::jit`'s `ri`/`wr_*`/`rval` FFI helpers ----
 
     /// `thread.frames.len()` — one load through the probed Vec header.
     fn frames_len(&mut self) -> Value {
+        let __e_thread = self.thread();
         self.fb.ins().load(
             I64,
             tf(),
-            self.env.thread,
+            __e_thread,
             (self.lyt.frames_off + self.lyt.vec_len) as i32,
         )
     }
@@ -642,12 +716,14 @@ impl Em<'_> {
 
     /// `code.ip = v` through the hoisted cell pointer.
     fn store_ip(&mut self, v: Value) {
-        self.fb.ins().store(tf(), v, self.env.ip_p, 0);
+        let __e_ip_p = self.ip_p();
+        self.fb.ins().store(tf(), v, __e_ip_p, 0);
     }
 
     /// `*op_ip = v` through the hoisted cell pointer.
     fn store_opip(&mut self, v: Value) {
-        self.fb.ins().store(tf(), v, self.env.opip_p, 0);
+        let __e_opip_p = self.opip_p();
+        self.fb.ins().store(tf(), v, __e_opip_p, 0);
     }
 
     /// `code.ip = next; *op_ip = off` — bcgen's pre-helper/pre-call idiom.
@@ -664,7 +740,11 @@ impl Em<'_> {
     /// call [`Em::fill_err`] after the current path is terminated (switching
     /// mid-emission from a partially-filled block is illegal).
     fn err_tramp(&mut self) -> Block {
-        self.fb.create_block()
+        // error sites are all cold — keep them off the hot code's fallthrough
+        // and out of its register allocation
+        let b = self.fb.create_block();
+        self.fb.set_cold_block(b);
+        b
     }
 
     /// Fill a trampoline created by [`Em::err_tramp`]: `ekind = kind; →eerr`.
@@ -915,12 +995,16 @@ impl Em<'_> {
         let b = self.fb.use_var(self.v.bcn);
         let spent = self.fb.ins().isub(b0, b);
         self.fb.def_var(self.v.bcn0, b);
-        let f = self.fb.ins().load(I64, tf(), self.env.fuel_p, 0);
+        let __e_fuel_p = self.fuel_p();
+        let f = self.fb.ins().load(I64, tf(), __e_fuel_p, 0);
         let f2 = self.fb.ins().isub(f, spent);
-        self.fb.ins().store(tf(), f2, self.env.fuel_p, 0);
-        let ol = self.fb.ins().load(I64, tf(), self.env.opsleft_p, 0);
+        let __e_fuel_p = self.fuel_p();
+        self.fb.ins().store(tf(), f2, __e_fuel_p, 0);
+        let __e_opsleft_p = self.opsleft_p();
+        let ol = self.fb.ins().load(I64, tf(), __e_opsleft_p, 0);
         let ol2 = self.fb.ins().isub(ol, spent);
-        self.fb.ins().store(tf(), ol2, self.env.opsleft_p, 0);
+        let __e_opsleft_p = self.opsleft_p();
+        self.fb.ins().store(tf(), ol2, __e_opsleft_p, 0);
         (f2, ol2)
     }
 
@@ -928,8 +1012,10 @@ impl Em<'_> {
     /// wherever quota was spent outside our count (an inlined callee draws
     /// from the same counters through its own `bcn`).
     fn rearm_seq(&mut self) {
-        let f = self.fb.ins().load(I64, tf(), self.env.fuel_p, 0);
-        let ol = self.fb.ins().load(I64, tf(), self.env.opsleft_p, 0);
+        let __e_fuel_p = self.fuel_p();
+        let f = self.fb.ins().load(I64, tf(), __e_fuel_p, 0);
+        let __e_opsleft_p = self.opsleft_p();
+        let ol = self.fb.ins().load(I64, tf(), __e_opsleft_p, 0);
         let m = self.fb.ins().umin(f, ol);
         self.fb.def_var(self.v.bcn, m);
         self.fb.def_var(self.v.bcn0, m);
@@ -948,7 +1034,8 @@ impl Em<'_> {
         let tramp = self.fb.create_block();
         self.fb.set_cold_block(tramp);
         if i > 0 && may_pause(&self.ops[i - 1].1) {
-            let p = self.fb.ins().load(I8, tf(), self.env.paused_p, 0);
+            let __e_paused_p = self.paused_p();
+            let p = self.fb.ins().load(I8, tf(), __e_paused_p, 0);
             let g = self.fb.create_block();
             self.fb.ins().brif(p, tramp, &[], g, &[]);
             self.fb.switch_to_block(g);
@@ -972,7 +1059,8 @@ impl Em<'_> {
     fn fill_gate_tramp(&mut self, tramp: Block, cont: Block) {
         self.fb.switch_to_block(tramp);
         let (f, ol) = self.settle_seq();
-        let p = self.fb.ins().load(I8, tf(), self.env.paused_p, 0);
+        let __e_paused_p = self.paused_p();
+        let p = self.fb.ins().load(I8, tf(), __e_paused_p, 0);
         let z = self.iconst(0);
         let fz = self.fb.ins().icmp(IntCC::Equal, f, z);
         let nx = self.fb.ins().bor(p, fz);
@@ -1144,6 +1232,12 @@ pub(crate) fn emit_body(
     fb.set_cold_block(estep_g);
     fb.set_cold_block(eerr);
     fb.set_cold_block(eoof);
+    // `enext` (pause/fuel trip), `eend` (fallthrough → interpreter), `eret`
+    // (propagate a helper-written `out` — errors, Flow::Call, Raise) all end
+    // the body's run or hand off — sampled at <=0.3% across the bench suite.
+    fb.set_cold_block(enext);
+    fb.set_cold_block(eend);
+    fb.set_cold_block(eret);
     let blocks: Vec<Block> = ops.iter().map(|_| fb.create_block()).collect();
 
     let off2idx: HashMap<usize, usize> =
@@ -1153,23 +1247,16 @@ pub(crate) fn emit_body(
     fb.append_block_params_for_function_params(entry);
     fb.switch_to_block(entry);
     let p: Vec<Value> = fb.block_params(entry).to_vec();
+    // `env` is the only param — the `BodyEnv` bundle. Its fields are *not*
+    // loaded here: each accessor (`Em::thread`, `Em::ctx0`, …) emits the
+    // readonly load at its use site so nothing stays pinned from entry —
+    // see `Env::env`. `base`/`nregs` are assigned below once computed.
+    let ev = p[0];
     let env = Env {
-        thread: p[0],
-        code: p[1],
-        ctx0: p[2],
-        ctx1: p[3],
-        strs: p[4],
-        chunks: p[5],
-        sigs: p[6],
-        fuel_p: p[7],
-        opip_p: p[8],
-        out: p[9],
-        paused_p: Value::from_u32(0),
-        opsleft_p: Value::from_u32(0),
-        ip_p: Value::from_u32(0),
+        env: ev,
         base: Value::from_u32(0),
         nregs: Value::from_u32(0),
-        bodies_tbl: Value::from_u32(0),
+        bodies_gv,
     };
     let mut em = Em {
         fb,
@@ -1218,52 +1305,43 @@ pub(crate) fn emit_body(
     em.slot_b = mk_slot(&mut em.fb, 8);
     em.slot_c = mk_slot(&mut em.fb, 24);
 
-    // hoist environment pointers — `&state.paused` is one add off `Ctx`'s
-    // second word now that `State`'s layout is probed; everything else —
-    // `&code.ip`, `&thread.ops_left`, the top frame's `base`, the `regs`
-    // buffer — is a handful of loads over the probed layout. `nregs` is the
-    // chunk's own `regs` field: a compile-time constant.
-    let paused_p = em.fb.ins().iadd_imm_s(em.env.ctx1, lyt.state_paused as i64);
-    let opsleft_p = em
-        .fb
-        .ins()
-        .iadd_imm_s(em.env.thread, lyt.ops_left_off as i64);
-    let ip_p = em.fb.ins().iadd_imm_s(em.env.code, lyt.code_ip as i64);
+    // The frame-base and `regs` derivations still need `thread` here —
+    // `em.thread()` emits the load (GVN folds the four repeats into one).
+    // `nregs` is the chunk's own `regs` field: a compile-time constant.
     // `thread.frames.last().unwrap().base`
-    let fptr = em.fb.ins().load(
-        I64,
-        tf(),
-        em.env.thread,
-        (lyt.frames_off + lyt.vec_ptr) as i32,
-    );
-    let flen = em.fb.ins().load(
-        I64,
-        tf(),
-        em.env.thread,
-        (lyt.frames_off + lyt.vec_len) as i32,
-    );
+    let fptr = {
+        let t = em.thread();
+        em.fb.ins().load(
+            I64,
+            tf(),
+            t,
+            (lyt.frames_off + lyt.vec_ptr) as i32,
+        )
+    };
+    let flen = {
+        let t = em.thread();
+        em.fb.ins().load(
+            I64,
+            tf(),
+            t,
+            (lyt.frames_off + lyt.vec_len) as i32,
+        )
+    };
     let fm1 = em.fb.ins().iadd_imm_s(flen, -1);
     let foff = em.fb.ins().imul_imm_s(fm1, lyt.frame_size as i64);
     let faddr = em.fb.ins().iadd(fptr, foff);
     let base = em.fb.ins().load(I64, tf(), faddr, lyt.frame_base as i32);
     // `thread.regs.as_mut_ptr()`
-    let rp = em.fb.ins().load(
-        I64,
-        tf(),
-        em.env.thread,
-        (lyt.regs_off + lyt.vec_ptr) as i32,
-    );
+    let rp = {
+        let t = em.thread();
+        em.fb.ins().load(I64, tf(), t, (lyt.regs_off + lyt.vec_ptr) as i32)
+    };
     let boff = em.fb.ins().imul_imm_s(base, lyt.val_size as i64);
     let regs0 = em.fb.ins().iadd(rp, boff);
     let nregs = em.iconst(chunk.regs as i64);
-    let tbl = em.fb.ins().symbol_value(I64, bodies_gv);
     let map_addr = em.fb.ins().symbol_value(I64, map_gv);
-    em.env.paused_p = paused_p;
-    em.env.opsleft_p = opsleft_p;
-    em.env.ip_p = ip_p;
     em.env.base = base;
     em.env.nregs = nregs;
-    em.env.bodies_tbl = tbl;
     em.fb.def_var(v_regs, regs0);
     let z64 = em.iconst(0);
     em.fb.def_var(v_cur_ip, z64);
@@ -1340,6 +1418,7 @@ pub(crate) fn emit_body(
         em.fb.def_var(v_cur_ip, z64);
         em.fb.ins().jump(estep_g, &[]);
     } else {
+        let ip_p = em.ip_p();
         let ip = em.fb.ins().load(I64, tf(), ip_p, 0);
         let rel = em.fb.ins().iadd_imm_s(ip, -(chunk_off as i64));
         let spanc = em.iconst(span as i64);
@@ -1378,7 +1457,8 @@ pub(crate) fn emit_body(
     let g_cont = em.fb.create_block();
     let g_tramp = em.fb.create_block();
     em.fb.set_cold_block(g_tramp);
-    let pv = em.fb.ins().load(I8, tf(), em.env.paused_p, 0);
+    let __e_paused_p = em.paused_p();
+    let pv = em.fb.ins().load(I8, tf(), __e_paused_p, 0);
     em.fb.ins().brif(pv, g_tramp, &[], g_cont, &[]);
     em.fb.switch_to_block(g_cont);
     let g2 = em.fb.create_block();
@@ -1399,7 +1479,8 @@ pub(crate) fn emit_body(
     em.flush_seq();
     let ip = em.fb.use_var(v_cur_ip);
     em.store_ip(ip);
-    em.hcall(H::OutNext, &[em.env.out]);
+    let __e_out = em.out();
+    em.hcall(H::OutNext, &[__e_out]);
     em.fb.ins().return_(&[]);
 
     em.fb.switch_to_block(eoof);
@@ -1408,7 +1489,8 @@ pub(crate) fn emit_body(
     let ip = em.fb.use_var(v_cur_ip);
     em.store_opip(ip);
     let k = em.iconst8(ERR_OOF);
-    em.hcall(H::OutErr, &[em.env.out, k]);
+    let __e_out = em.out();
+    em.hcall(H::OutErr, &[__e_out, k]);
     em.fb.ins().return_(&[]);
 
     em.fb.switch_to_block(estep);
@@ -1418,18 +1500,24 @@ pub(crate) fn emit_body(
     em.store_ip(ip);
     em.store_opip(ip);
     let regs = em.regs();
+    let __e_code = em.code();
+    let __e_ctx0 = em.ctx0();
+    let __e_ctx1 = em.ctx1();
+    let __e_out = em.out();
+    let __e_strs = em.strs();
+    let __e_thread = em.thread();
     let k = em
         .hcall(
             H::StepAt,
             &[
-                em.env.thread,
+                __e_thread,
                 regs,
                 em.env.nregs,
-                em.env.code,
-                em.env.ctx0,
-                em.env.ctx1,
-                em.env.strs,
-                em.env.out,
+                __e_code,
+                __e_ctx0,
+                __e_ctx1,
+                __e_strs,
+                __e_out,
             ],
         )
         .unwrap();
@@ -1439,13 +1527,7 @@ pub(crate) fn emit_body(
     // shadowed or not, so resync every shadow before dispatching the next
     // op. (Facts-forced shadows make this reachable for almost any reg.)
     em.fb.switch_to_block(estep_post);
-    let refresh: Vec<u32> = em
-        .v
-        .int
-        .keys()
-        .chain(em.v.float.keys())
-        .copied()
-        .collect();
+    let refresh: Vec<u32> = em.v.int.keys().chain(em.v.float.keys()).copied().collect();
     for r in refresh {
         em.refresh_shadow(r);
     }
@@ -1457,7 +1539,8 @@ pub(crate) fn emit_body(
     let ip = em.fb.use_var(v_cur_ip);
     em.store_opip(ip);
     let kk = em.fb.use_var(v_ekind);
-    em.hcall(H::OutErr, &[em.env.out, kk]);
+    let __e_out = em.out();
+    em.hcall(H::OutErr, &[__e_out, kk]);
     em.fb.ins().return_(&[]);
 
     em.fb.switch_to_block(eret);
@@ -1565,13 +1648,15 @@ impl Em<'_> {
                     d => unreachable!("bad out tag width {d}"),
                 };
                 let oret = self.fb.ins().iconst(oty, self.lyt.out_ret as i64);
+                let __e_out = self.out();
                 self.fb
                     .ins()
-                    .store(tf(), oret, self.env.out, self.lyt.out_tag as i32);
+                    .store(tf(), oret, __e_out, self.lyt.out_tag as i32);
+                let __e_out = self.out();
                 let dp = self
                     .fb
                     .ins()
-                    .iadd_imm_s(self.env.out, self.lyt.out_ret_pay as i64);
+                    .iadd_imm_s(__e_out, self.lyt.out_ret_pay as i64);
                 self.cpy_val(dp, vp);
                 self.fb.ins().return_(&[]);
             }
@@ -1584,7 +1669,8 @@ impl Em<'_> {
                 self.flush_seq();
                 self.mark_op(off, next);
                 let (regs, s) = (self.regs(), self.iconst(val.index() as i64));
-                self.hcall(H::Raise, &[regs, s, self.env.out]);
+                let __e_out = self.out();
+                self.hcall(H::Raise, &[regs, s, __e_out]);
                 self.root_flush(self.ex.eret);
             }
             Op::LoadConst { dst, constant } => match constant {
@@ -1631,12 +1717,15 @@ impl Em<'_> {
                         self.iconst(dst.index() as i64),
                         self.iconst32(id.index() as i64),
                     );
+                    let __e_ctx0 = self.ctx0();
+                    let __e_ctx1 = self.ctx1();
+                    let __e_strs = self.strs();
                     self.helper_op_v(
                         i,
                         off,
                         next,
                         H::LoadConstStr,
-                        &[regs, d, id, self.env.ctx0, self.env.ctx1, self.env.strs],
+                        &[regs, d, id, __e_ctx0, __e_ctx1, __e_strs],
                         Some(dst.index() as u32),
                     );
                 }
@@ -2177,23 +2266,27 @@ impl Em<'_> {
             // ---- helper-backed ops ----
             Op::NewArray { dst } => {
                 let (regs, d) = (self.regs(), self.iconst(dst.index() as i64));
+                let __e_ctx0 = self.ctx0();
+                let __e_ctx1 = self.ctx1();
                 self.helper_op_v(
                     i,
                     off,
                     next,
                     H::NewArray,
-                    &[regs, d, self.env.ctx0, self.env.ctx1],
+                    &[regs, d, __e_ctx0, __e_ctx1],
                     Some(dst.index() as u32),
                 );
             }
             Op::NewDict { dst } => {
                 let (regs, d) = (self.regs(), self.iconst(dst.index() as i64));
+                let __e_ctx0 = self.ctx0();
+                let __e_ctx1 = self.ctx1();
                 self.helper_op_v(
                     i,
                     off,
                     next,
                     H::NewDict,
-                    &[regs, d, self.env.ctx0, self.env.ctx1],
+                    &[regs, d, __e_ctx0, __e_ctx1],
                     Some(dst.index() as u32),
                 );
             }
@@ -2205,12 +2298,14 @@ impl Em<'_> {
                     self.iconst32(adt.index() as i64),
                     self.iconst(fields.len() as i64),
                 );
+                let __e_ctx0 = self.ctx0();
+                let __e_ctx1 = self.ctx1();
                 self.helper_op_v(
                     i,
                     off,
                     next,
                     H::NewInstance,
-                    &[regs, d, a, fp, n, self.env.ctx0, self.env.ctx1],
+                    &[regs, d, a, fp, n, __e_ctx0, __e_ctx1],
                     Some(dst.index() as u32),
                 );
             }
@@ -2226,12 +2321,14 @@ impl Em<'_> {
                     self.iconst32(body.index() as i64),
                     self.iconst(captures.len() as i64),
                 );
+                let __e_ctx0 = self.ctx0();
+                let __e_ctx1 = self.ctx1();
                 self.helper_op_v(
                     i,
                     off,
                     next,
                     H::NewClosure,
-                    &[regs, d, b, cp, n, self.env.ctx0, self.env.ctx1],
+                    &[regs, d, b, cp, n, __e_ctx0, __e_ctx1],
                     Some(dst.index() as u32),
                 );
             }
@@ -2241,12 +2338,14 @@ impl Em<'_> {
                     self.iconst(array.index() as i64),
                     self.iconst(value.index() as i64),
                 );
+                let __e_ctx0 = self.ctx0();
+                let __e_ctx1 = self.ctx1();
                 self.helper_op_v(
                     i,
                     off,
                     next,
                     H::Push,
-                    &[regs, a, v, self.env.ctx0, self.env.ctx1],
+                    &[regs, a, v, __e_ctx0, __e_ctx1],
                     None,
                 );
             }
@@ -2257,12 +2356,15 @@ impl Em<'_> {
                     self.iconst32(key.index() as i64),
                     self.iconst(value.index() as i64),
                 );
+                let __e_ctx0 = self.ctx0();
+                let __e_ctx1 = self.ctx1();
+                let __e_strs = self.strs();
                 self.helper_op_v(
                     i,
                     off,
                     next,
                     H::Insert,
-                    &[regs, d, k, v, self.env.ctx0, self.env.ctx1, self.env.strs],
+                    &[regs, d, k, v, __e_ctx0, __e_ctx1, __e_strs],
                     None,
                 );
             }
@@ -2366,12 +2468,13 @@ impl Em<'_> {
                     self.iconst(dst.index() as i64),
                     self.iconst(src.index() as i64),
                 );
+                let __e_out = self.out();
                 self.helper_op(
                     i,
                     off,
                     next,
                     H::Unwrap,
-                    &[regs, d, s, self.env.out],
+                    &[regs, d, s, __e_out],
                     Some(dst.index() as u32),
                 );
             }
@@ -2381,12 +2484,13 @@ impl Em<'_> {
                     self.iconst(dst.index() as i64),
                     self.iconst(src.index() as i64),
                 );
+                let __e_out = self.out();
                 self.helper_op(
                     i,
                     off,
                     next,
                     H::UnwrapUnit,
-                    &[regs, d, s, self.env.out],
+                    &[regs, d, s, __e_out],
                     Some(dst.index() as u32),
                 );
             }
@@ -2398,7 +2502,8 @@ impl Em<'_> {
                     self.iconst(src.index() as i64),
                     self.fb.ins().stack_addr(I64, self.slot_i, 0),
                 );
-                let k = self.hcall(H::Len, &[regs, s, v, self.env.out]).unwrap();
+                let __e_out = self.out();
+                let k = self.hcall(H::Len, &[regs, s, v, __e_out]).unwrap();
                 let w = self.fb.create_block();
                 self.fb.ins().brif(k, self.ex.eret, &[], w, &[]);
                 self.fb.switch_to_block(w);
@@ -2422,12 +2527,15 @@ impl Em<'_> {
                     self.iconst8(*op as i64),
                     self.iconst(right.index() as i64),
                 );
+                let __e_ctx0 = self.ctx0();
+                let __e_ctx1 = self.ctx1();
+                let __e_out = self.out();
                 self.helper_op(
                     i,
                     off,
                     next,
                     H::Bin,
-                    &[regs, d, l, o, r, self.env.ctx0, self.env.ctx1, self.env.out],
+                    &[regs, d, l, o, r, __e_ctx0, __e_ctx1, __e_out],
                     Some(dst.index() as u32),
                 );
             }
@@ -2442,22 +2550,27 @@ impl Em<'_> {
                     self.iconst32(id.index() as i64),
                     self.iconst(args.len() as i64),
                 );
+                let __e_code = self.code();
+                let __e_ctx0 = self.ctx0();
+                let __e_ctx1 = self.ctx1();
+                let __e_out = self.out();
+                let __e_thread = self.thread();
                 self.helper_op(
                     i,
                     off,
                     next,
                     H::CallNative,
                     &[
-                        self.env.thread,
+                        __e_thread,
                         regs,
                         d,
                         nid,
                         ap,
                         n,
-                        self.env.code,
-                        self.env.ctx0,
-                        self.env.ctx1,
-                        self.env.out,
+                        __e_code,
+                        __e_ctx0,
+                        __e_ctx1,
+                        __e_out,
                     ],
                     Some(dst.index() as u32),
                 );
@@ -2677,12 +2790,15 @@ impl Em<'_> {
             self.iconst8(op as i64),
             self.iconst(src.index() as i64),
         );
+        let __e_ctx0 = self.ctx0();
+        let __e_ctx1 = self.ctx1();
+        let __e_out = self.out();
         self.helper_op(
             i,
             off,
             next,
             H::Unary,
-            &[regs, d, o, s, self.env.ctx0, self.env.ctx1, self.env.out],
+            &[regs, d, o, s, __e_ctx0, __e_ctx1, __e_out],
             Some(dst.index() as u32),
         );
     }
@@ -2995,10 +3111,7 @@ impl Em<'_> {
         is_int: bool,
         slow: Block,
     ) {
-        let inb = self
-            .fb
-            .ins()
-            .icmp(IntCC::UnsignedLessThan, slot, len);
+        let inb = self.fb.ins().icmp(IntCC::UnsignedLessThan, slot, len);
         let k = self.fb.ins().band(pre, inb);
         let good = self.fb.create_block();
         self.fb.ins().brif(k, good, &[], slow, &[]);
@@ -3060,10 +3173,7 @@ impl Em<'_> {
         pre: Value,
         slow: Block,
     ) {
-        let inb = self
-            .fb
-            .ins()
-            .icmp(IntCC::UnsignedLessThan, slot, len);
+        let inb = self.fb.ins().icmp(IntCC::UnsignedLessThan, slot, len);
         let k = self.fb.ins().band(pre, inb);
         let good = self.fb.create_block();
         self.fb.ins().brif(k, good, &[], slow, &[]);
@@ -3305,6 +3415,9 @@ impl Em<'_> {
                 self.iconst(index.index() as i64),
                 self.iconst8(kind as i64),
             );
+            let __e_ctx0 = self.ctx0();
+            let __e_ctx1 = self.ctx1();
+            let __e_out = self.out();
             return self.helper_op_read(
                 i,
                 off,
@@ -3316,9 +3429,9 @@ impl Em<'_> {
                     s,
                     ii,
                     kk,
-                    self.env.ctx0,
-                    self.env.ctx1,
-                    self.env.out,
+                    __e_ctx0,
+                    __e_ctx1,
+                    __e_out,
                 ],
                 dst,
             );
@@ -3368,10 +3481,7 @@ impl Em<'_> {
         let seqb = self.fb.create_block();
         self.is_seq_tag(st, seqb, slow);
         self.fb.switch_to_block(seqb);
-        let gc = self
-            .fb
-            .ins()
-            .load(I64, tf(), sa, self.lyt.seq_pay as i32);
+        let gc = self.fb.ins().load(I64, tf(), sa, self.lyt.seq_pay as i32);
         self.seq_read(i, dst, iv, gc, slow);
         // ---- receiver is Array ----
         self.fb.switch_to_block(arrb);
@@ -3395,6 +3505,9 @@ impl Em<'_> {
             self.iconst(index.index() as i64),
         );
         let kk = self.iconst8(kind as i64);
+        let __e_ctx0 = self.ctx0();
+        let __e_ctx1 = self.ctx1();
+        let __e_out = self.out();
         self.helper_op_read(
             i,
             off,
@@ -3406,9 +3519,9 @@ impl Em<'_> {
                 s,
                 ii,
                 kk,
-                self.env.ctx0,
-                self.env.ctx1,
-                self.env.out,
+                __e_ctx0,
+                __e_ctx1,
+                __e_out,
             ],
             dst,
         );
@@ -3442,10 +3555,7 @@ impl Em<'_> {
         let seqb = self.fb.create_block();
         self.is_seq_tag(st, seqb, slow);
         self.fb.switch_to_block(seqb);
-        let gc = self
-            .fb
-            .ins()
-            .load(I64, tf(), sa, self.lyt.seq_pay as i32);
+        let gc = self.fb.ins().load(I64, tf(), sa, self.lyt.seq_pay as i32);
         let va = self.val_ptr(value.index() as u32);
         self.seq_write(i, iv, gc, va, slow);
         // ---- receiver is Array ----
@@ -3474,12 +3584,15 @@ impl Em<'_> {
             self.iconst(index.index() as i64),
             self.iconst(value.index() as i64),
         );
+        let __e_ctx0 = self.ctx0();
+        let __e_ctx1 = self.ctx1();
+        let __e_out = self.out();
         self.helper_op(
             i,
             off,
             next,
             H::SetIndex,
-            &[regs, s, ii, v, self.env.ctx0, self.env.ctx1, self.env.out],
+            &[regs, s, ii, v, __e_ctx0, __e_ctx1, __e_out],
             None,
         );
     }
@@ -3505,12 +3618,13 @@ impl Em<'_> {
                 self.iconst(slot as i64),
                 self.iconst8(kind as i64),
             );
+            let __e_out = self.out();
             return self.helper_op_read(
                 i,
                 off,
                 next,
                 H::GetField,
-                &[regs, d, s, sl, kk, self.env.out],
+                &[regs, d, s, sl, kk, __e_out],
                 dst,
             );
         }
@@ -3518,8 +3632,7 @@ impl Em<'_> {
         // time — a pointer guard (unless `unguarded`) then constant stores.
         // A non-bakeable value keeps the whole site generic.
         if let Some((obs, fr)) = self.site_frozen(off, src.index() as u32) {
-            let b = Self::frozen_slot(&fr, obs.ptr, slot as usize)
-                .and_then(|v| self.bake_of(v));
+            let b = Self::frozen_slot(&fr, obs.ptr, slot as usize).and_then(|v| self.bake_of(v));
             if let Some(b) = b {
                 let gfall = self.fb.create_block();
                 self.fb.set_cold_block(gfall);
@@ -3553,10 +3666,7 @@ impl Em<'_> {
         let seqb = self.fb.create_block();
         self.is_seq_tag(rt, seqb, slow);
         self.fb.switch_to_block(seqb);
-        let gc = self
-            .fb
-            .ins()
-            .load(I64, tf(), ra, self.lyt.seq_pay as i32);
+        let gc = self.fb.ins().load(I64, tf(), ra, self.lyt.seq_pay as i32);
         let sv = self.iconst(slot as i64);
         self.seq_read(i, dst, sv, gc, slow);
         self.fb.switch_to_block(arrb);
@@ -3594,12 +3704,13 @@ impl Em<'_> {
             self.iconst(slot as i64),
             self.iconst8(kind as i64),
         );
+        let __e_out = self.out();
         self.helper_op_read(
             i,
             off,
             next,
             H::GetField,
-            &[regs, d, s, sl, kk, self.env.out],
+            &[regs, d, s, sl, kk, __e_out],
             dst,
         );
     }
@@ -3643,10 +3754,7 @@ impl Em<'_> {
         let seqb = self.fb.create_block();
         self.is_seq_tag(rt, seqb, slow);
         self.fb.switch_to_block(seqb);
-        let gc = self
-            .fb
-            .ins()
-            .load(I64, tf(), ra, self.lyt.seq_pay as i32);
+        let gc = self.fb.ins().load(I64, tf(), ra, self.lyt.seq_pay as i32);
         let sv = self.iconst(slot as i64);
         self.seq_write(i, sv, gc, va, slow);
         self.fb.switch_to_block(arrb);
@@ -3684,12 +3792,15 @@ impl Em<'_> {
             self.iconst(slot as i64),
             self.iconst(value.index() as i64),
         );
+        let __e_ctx0 = self.ctx0();
+        let __e_ctx1 = self.ctx1();
+        let __e_out = self.out();
         self.helper_op(
             i,
             off,
             next,
             H::SetField,
-            &[regs, r, sl, v, self.env.ctx0, self.env.ctx1, self.env.out],
+            &[regs, r, sl, v, __e_ctx0, __e_ctx1, __e_out],
             None,
         );
     }
@@ -3869,26 +3980,11 @@ impl Em<'_> {
             self.iconst(dst.index() as i64),
             self.iconst(nargs as i64),
         );
+        let __e_bodies_tbl = self.bodies_tbl();
         let rp = self
             .hcall(
                 H::CallBody,
-                &[
-                    self.env.thread,
-                    self.env.code,
-                    self.env.chunks,
-                    self.env.bodies_tbl,
-                    b,
-                    d,
-                    ap,
-                    n,
-                    self.env.ctx0,
-                    self.env.ctx1,
-                    self.env.strs,
-                    self.env.sigs,
-                    self.env.fuel_p,
-                    self.env.opip_p,
-                    self.env.out,
-                ],
+                &[self.env.env, __e_bodies_tbl, b, d, ap, n],
             )
             .unwrap();
         self.post_call(i, dst, rp);
@@ -3934,26 +4030,11 @@ impl Em<'_> {
             self.iconst(dst.index() as i64),
             self.iconst(args.len() as i64),
         );
+        let __e_bodies_tbl = self.bodies_tbl();
         let rp = self
             .hcall(
                 H::CallBody,
-                &[
-                    self.env.thread,
-                    self.env.code,
-                    self.env.chunks,
-                    self.env.bodies_tbl,
-                    b,
-                    d,
-                    ap,
-                    n,
-                    self.env.ctx0,
-                    self.env.ctx1,
-                    self.env.strs,
-                    self.env.sigs,
-                    self.env.fuel_p,
-                    self.env.opip_p,
-                    self.env.out,
-                ],
+                &[self.env.env, __e_bodies_tbl, b, d, ap, n],
             )
             .unwrap();
         self.post_call(i, dst, rp);
@@ -4037,16 +4118,18 @@ impl Em<'_> {
         let flen = self.frames_len();
         let dcap = self.iconst(INLINE_CALL_DEPTH as i64);
         let depth_ok = self.fb.ins().icmp(IntCC::UnsignedLessThan, flen, dcap);
+        let __e_thread = self.thread();
         let rlen = self.fb.ins().load(
             I64,
             tf(),
-            self.env.thread,
+            __e_thread,
             (self.lyt.regs_off + self.lyt.vec_len) as i32,
         );
+        let __e_thread = self.thread();
         let rcap = self.fb.ins().load(
             I64,
             tf(),
-            self.env.thread,
+            __e_thread,
             (self.lyt.regs_off + self.lyt.vec_cap) as i32,
         );
         let slack = self.fb.ins().isub(rcap, rlen);
@@ -4055,10 +4138,11 @@ impl Em<'_> {
             .fb
             .ins()
             .icmp(IntCC::UnsignedGreaterThanOrEqual, slack, need);
+        let __e_thread = self.thread();
         let fcap = self.fb.ins().load(
             I64,
             tf(),
-            self.env.thread,
+            __e_thread,
             (self.lyt.frames_off + self.lyt.vec_cap) as i32,
         );
         let frames_ok = self.fb.ins().icmp(IntCC::UnsignedLessThan, flen, fcap);
@@ -4089,10 +4173,11 @@ impl Em<'_> {
     ) {
         let vs = self.lyt.val_size as i64;
         let fsz = self.lyt.frame_size as i64;
+        let __e_thread = self.thread();
         let rp0 = self.fb.ins().load(
             I64,
             tf(),
-            self.env.thread,
+            __e_thread,
             (self.lyt.regs_off + self.lyt.vec_ptr) as i32,
         );
         // new_base = old regs.len (loaded above as `rlen`)
@@ -4110,10 +4195,11 @@ impl Em<'_> {
             self.fb.ins().store(tf(), tnull, a, 0);
         }
         let nlen = self.fb.ins().iadd_imm_s(rlen, cchunk.regs as i64);
+        let __e_thread = self.thread();
         self.fb.ins().store(
             tf(),
             nlen,
-            self.env.thread,
+            __e_thread,
             (self.lyt.regs_off + self.lyt.vec_len) as i32,
         );
         // arg copies: `regs[new_base + param] = regs[caller_base + arg]` —
@@ -4129,21 +4215,19 @@ impl Em<'_> {
         // already verified `captures.len() == cchunk.captures.len()`.
         if let Some(cp) = capsp {
             let cvec = self.fb.ins().iadd_imm_s(cp, self.lyt.cl_caps as i64);
-            let cdata = self
-                .fb
-                .ins()
-                .load(I64, tf(), cvec, self.lyt.vec_ptr as i32);
+            let cdata = self.fb.ins().load(I64, tf(), cvec, self.lyt.vec_ptr as i32);
             for (i, &cr) in cchunk.captures.iter().enumerate() {
                 let s = self.fb.ins().iadd_imm_s(cdata, i as i64 * vs);
                 let d = self.vaddr(nwin, cr.index() as u32);
                 self.cpy_val(d, s);
             }
         }
+        let __e_thread = self.thread();
         // caller frame's saved ip = resume offset (what `code.ip` held)
         let fptr = self.fb.ins().load(
             I64,
             tf(),
-            self.env.thread,
+            __e_thread,
             (self.lyt.frames_off + self.lyt.vec_ptr) as i32,
         );
         let fm1 = self.fb.ins().iadd_imm_s(flen, -1);
@@ -4166,31 +4250,20 @@ impl Em<'_> {
             .ins()
             .store(tf(), rlen, nf, self.lyt.frame_base as i32);
         let nfl = self.fb.ins().iadd_imm_s(flen, 1);
+        let __e_thread = self.thread();
         self.fb.ins().store(
             tf(),
             nfl,
-            self.env.thread,
+            __e_thread,
             (self.lyt.frames_off + self.lyt.vec_len) as i32,
         );
         // code.ip = callee chunk offset
         self.store_ip(cip);
-        // the call itself — a direct native call, same `out` slot
+        // the call itself — a direct native call; the callee reads the same
+        // `BodyEnv` bundle (every field is dispatch-invariant), so `env` is
+        // forwarded verbatim — one argument register, no re-marshaling.
         let fref = self.call_refs[&(body.index() as u32)];
-        self.fb.ins().call(
-            fref,
-            &[
-                self.env.thread,
-                self.env.code,
-                self.env.ctx0,
-                self.env.ctx1,
-                self.env.strs,
-                self.env.chunks,
-                self.env.sigs,
-                self.env.fuel_p,
-                self.env.opip_p,
-                self.env.out,
-            ],
-        );
+        self.fb.ins().call(fref, &[self.env.env]);
         // driver's `Flow::Return` pop, inlined over the probed
         // `RtResult<Flow>`/Frame layout: `*out == Ok(Flow::Return(v))` → pop
         // the callee frame, truncate `regs`, restore the caller's saved ip,
@@ -4204,10 +4277,11 @@ impl Em<'_> {
             8 => I64,
             d => unreachable!("bad out tag width {d}"),
         };
+        let __e_out = self.out();
         let otag = self
             .fb
             .ins()
-            .load(oty, tf(), self.env.out, self.lyt.out_tag as i32);
+            .load(oty, tf(), __e_out, self.lyt.out_tag as i32);
         let orwant = self.fb.ins().iconst(oty, self.lyt.out_ret as i64);
         let isret = self.fb.ins().icmp(IntCC::Equal, otag, orwant);
         let resumed = self.fb.create_block();
@@ -4215,10 +4289,11 @@ impl Em<'_> {
         self.fb.switch_to_block(resumed);
         // popped = frames[flen-1]; frames.len -= 1; regs.len = popped.base
         let flen2 = self.frames_len();
+        let __e_thread = self.thread();
         let fptr2 = self.fb.ins().load(
             I64,
             tf(),
-            self.env.thread,
+            __e_thread,
             (self.lyt.frames_off + self.lyt.vec_ptr) as i32,
         );
         let fm2 = self.fb.ins().iadd_imm_s(flen2, -1);
@@ -4230,16 +4305,18 @@ impl Em<'_> {
             .load(I64, tf(), pf, self.lyt.frame_base as i32);
         let pret32 = self.fb.ins().load(I32, tf(), pf, self.lyt.frame_ret as i32);
         let pret = self.fb.ins().uextend(I64, pret32);
+        let __e_thread = self.thread();
         self.fb.ins().store(
             tf(),
             fm2,
-            self.env.thread,
+            __e_thread,
             (self.lyt.frames_off + self.lyt.vec_len) as i32,
         );
+        let __e_thread = self.thread();
         self.fb.ins().store(
             tf(),
             pbase,
-            self.env.thread,
+            __e_thread,
             (self.lyt.regs_off + self.lyt.vec_len) as i32,
         );
         // caller = frames[flen-2]; code.ip = caller.ip
@@ -4252,21 +4329,23 @@ impl Em<'_> {
             .fb
             .ins()
             .load(I64, tf(), cf2, self.lyt.frame_base as i32);
+        let __e_thread = self.thread();
         // `thread.regs` may have moved under the callee — rebuild the window
         // and write the return value into `caller_base + return_reg`
         let rp2 = self.fb.ins().load(
             I64,
             tf(),
-            self.env.thread,
+            __e_thread,
             (self.lyt.regs_off + self.lyt.vec_ptr) as i32,
         );
         let widx = self.fb.ins().iadd(cbase, pret);
         let woff = self.fb.ins().imul_imm_s(widx, vs);
         let daddr = self.fb.ins().iadd(rp2, woff);
+        let __e_out = self.out();
         let retp = self
             .fb
             .ins()
-            .iadd_imm_s(self.env.out, self.lyt.out_ret_pay as i64);
+            .iadd_imm_s(__e_out, self.lyt.out_ret_pay as i64);
         self.cpy_val(daddr, retp);
         let boff2 = self.fb.ins().imul_imm_s(cbase, vs);
         let regs2 = self.fb.ins().iadd(rp2, boff2);
@@ -4318,27 +4397,11 @@ impl Em<'_> {
             self.iconst(dst.index() as i64),
             self.iconst(nargs as i64),
         );
+        let __e_bodies_tbl = self.bodies_tbl();
         let rp = self
             .hcall(
                 H::CallDyn,
-                &[
-                    self.env.thread,
-                    self.env.code,
-                    self.env.chunks,
-                    self.env.sigs,
-                    regs,
-                    c,
-                    d,
-                    ap,
-                    n,
-                    self.env.bodies_tbl,
-                    self.env.ctx0,
-                    self.env.ctx1,
-                    self.env.strs,
-                    self.env.fuel_p,
-                    self.env.opip_p,
-                    self.env.out,
-                ],
+                &[self.env.env, __e_bodies_tbl, regs, c, d, ap, n],
             )
             .unwrap();
         self.post_call(i, dst, rp);
@@ -4408,10 +4471,7 @@ impl Em<'_> {
         self.fb.ins().brif(is_cl, cl_load, &[], slow, &[]);
         self.fb.switch_to_block(cl_load);
         let clp = self.fb.ins().load(I64, tf(), ca, self.lyt.cl_pay as i32);
-        let cb32 = self
-            .fb
-            .ins()
-            .load(I32, tf(), clp, self.lyt.cl_func as i32);
+        let cb32 = self.fb.ins().load(I32, tf(), clp, self.lyt.cl_func as i32);
         let cb = self.fb.ins().uextend(I64, cb32);
         let cl_eq = self.fb.ins().icmp(IntCC::Equal, cb, want);
         // a captures-carrying callee also needs `captures.len` to match —
@@ -4421,10 +4481,7 @@ impl Em<'_> {
             cl_eq
         } else {
             let cvec = self.fb.ins().iadd_imm_s(clp, self.lyt.cl_caps as i64);
-            let clen = self
-                .fb
-                .ins()
-                .load(I64, tf(), cvec, self.lyt.vec_len as i32);
+            let clen = self.fb.ins().load(I64, tf(), cvec, self.lyt.vec_len as i32);
             let cn = self.iconst(cchunk.captures.len() as i64);
             let len_eq = self.fb.ins().icmp(IntCC::Equal, clen, cn);
             self.fb.ins().band(cl_eq, len_eq)
@@ -4442,27 +4499,11 @@ impl Em<'_> {
             self.iconst(dst.index() as i64),
             self.iconst(args.len() as i64),
         );
+        let __e_bodies_tbl = self.bodies_tbl();
         let rp = self
             .hcall(
                 H::CallDyn,
-                &[
-                    self.env.thread,
-                    self.env.code,
-                    self.env.chunks,
-                    self.env.sigs,
-                    regs,
-                    c,
-                    d,
-                    ap,
-                    n,
-                    self.env.bodies_tbl,
-                    self.env.ctx0,
-                    self.env.ctx1,
-                    self.env.strs,
-                    self.env.fuel_p,
-                    self.env.opip_p,
-                    self.env.out,
-                ],
+                &[self.env.env, __e_bodies_tbl, regs, c, d, ap, n],
             )
             .unwrap();
         self.post_call(i, dst, rp);
@@ -4504,14 +4545,10 @@ impl Em<'_> {
     /// at the next op.
     fn dst_refresh(&mut self, i: usize, dst: Reg, regs2: Value) {
         let d = dst.index() as u32;
-        let t = self
-            .v
-            .int
-            .contains_key(&d)
-            .then(|| {
-                let a = self.vaddr(regs2, d);
-                self.ld_tag(a)
-            });
+        let t = self.v.int.contains_key(&d).then(|| {
+            let a = self.vaddr(regs2, d);
+            self.ld_tag(a)
+        });
         if let (Some(&(sv, ok)), Some(t)) = (self.v.int.get(&d), t) {
             let a = self.vaddr(regs2, d);
             let want = self.tconst(self.lyt.t_int);
@@ -4894,10 +4931,7 @@ impl Em<'_> {
         let cmpb = self.fb.create_block();
         self.fb.ins().brif(isstr, cmpb, &[], gfall, &[]);
         self.fb.switch_to_block(cmpb);
-        let kp = self
-            .fb
-            .ins()
-            .load(I64, tf(), ka, self.lyt.str_pay as i32);
+        let kp = self.fb.ins().load(I64, tf(), ka, self.lyt.str_pay as i32);
         for (kptr, v) in &entries {
             let kv = self.iconst(*kptr as i64);
             let eq = self.fb.ins().icmp(IntCC::Equal, kp, kv);

@@ -772,21 +772,29 @@ fn run_dispatch<'gc>(
                 // The `BodyFn` ABI returns `RtResult<Flow>` through an out-slot
                 // (the enum has no stable/FFI-safe layout — JIT bodies fill it
                 // via `jit_*` shims, bcgen bodies via their extern-"C" shim).
-                let mut slot = std::mem::MaybeUninit::<RtResult<Flow>>::uninit();
+                // All other inputs are per-dispatch constants and ride the
+                // `BodyEnv` bundle — `out` is the only field refreshed per call.
+                // Seeded, not uninit: every writer stores via `*out = …`,
+                // which drops the previous occupant — the slot must always
+                // hold a valid `RtResult`. `Flow::Next` is payload-free, so
+                // those drops are free; `assume_init` reads the last write.
+                let mut slot = std::mem::MaybeUninit::new(Ok(Flow::Next));
+                let env = crate::bc::BodyEnv {
+                    thread,
+                    code,
+                    mutation: ctx.mutation(),
+                    state: ctx.state(),
+                    strs,
+                    chunks,
+                    signatures,
+                    fuel: &mut fuel,
+                    op_ip: &mut op_ip,
+                    out: slot.as_mut_ptr(),
+                };
                 // SAFETY: all pointers borrow live driver state; the BodyFn
-                // contract requires `out` to be written before return.
+                // contract requires `*env.out` to be written before return.
                 unsafe {
-                    f(
-                        thread,
-                        code,
-                        ctx,
-                        strs,
-                        chunks,
-                        signatures,
-                        &mut fuel,
-                        &mut op_ip,
-                        slot.as_mut_ptr(),
-                    );
+                    f(&env);
                     slot.assume_init()
                 }
             }

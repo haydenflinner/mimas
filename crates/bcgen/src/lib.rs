@@ -870,40 +870,33 @@ fn emit_body(w: &mut String, program: &Program, body: usize) {
     let _ = writeln!(w, "        }}");
     let _ = writeln!(w, "    }}");
     let _ = writeln!(w, "}}");
-    // The driver-facing ABI shim: `BodyFn` is `extern "C"` with the result
-    // routed through `out` so Cranelift-JIT bodies install interchangeably.
-    // In-module calls (the inline-call fast path, `BODIES`) use the inner
-    // `body_N` directly and never pay this hop.
+    // The driver-facing ABI shim: `BodyFn` is `extern "C"` taking the
+    // `BodyEnv` bundle, with the result routed through `env.out` so
+    // Cranelift-JIT bodies install interchangeably. In-module calls (the
+    // inline-call fast path, `BODIES`) use the inner `body_N` directly and
+    // never pay this hop.
     let _ = writeln!(
         w,
         "\n#[allow(clippy::all)]\n\
-         unsafe extern \"C\" fn body_{body}_abi<'gc>(\n\
-         \x20   thread: *mut ThreadState<'gc>,\n\
-         \x20   code: *mut Decoder,\n\
-         \x20   ctx: Ctx<'gc>,\n\
-         \x20   strs: *const StrInterner,\n\
-         \x20   chunks: *const IdVec<BodyId, Chunk>,\n\
-         \x20   signatures: *const IdVec<BodyId, Option<Function>>,\n\
-         \x20   fuel: *mut usize,\n\
-         \x20   op_ip: *mut usize,\n\
-         \x20   out: *mut RtResult<Flow<'gc>>,\n\
-         ) {{\n\
+         unsafe extern \"C\" fn body_{body}_abi<'gc>(env: *const BodyEnv<'gc>) {{\n\
          \x20   // SAFETY: the BodyFn contract — pointers borrow live driver\n\
-         \x20   // state for the call's duration; `out` is a live slot.\n\
+         \x20   // state for the call's duration; `env.out` is a live slot.\n\
          \x20   // `inl = false`: every exit lands in `io.out` (tag is always 1).\n\
          \x20   unsafe {{\n\
+         \x20       let e = &*env;\n\
          \x20       let mut io = GenIo {{\n\
          \x20           out: std::mem::MaybeUninit::uninit(),\n\
-         \x20           fuel: &mut *fuel,\n\
-         \x20           op_ip: &mut *op_ip,\n\
+         \x20           fuel: &mut *e.fuel,\n\
+         \x20           op_ip: &mut *e.op_ip,\n\
          \x20           qp: [0, 0],\n\
          \x20           inl: false,\n\
          \x20       }};\n\
          \x20       body_{body}(\n\
-         \x20           &mut *thread, &mut *code, ctx, &*strs, &*chunks, &*signatures,\n\
+         \x20           &mut *e.thread, &mut *e.code, Ctx::from_parts(e.mutation, e.state),\n\
+         \x20           &*e.strs, &*e.chunks, &*e.signatures,\n\
          \x20           &mut io,\n\
          \x20       );\n\
-         \x20       *out = io.out.assume_init();\n\
+         \x20       *e.out = io.out.assume_init();\n\
          \x20   }}\n\
          }}"
     );
