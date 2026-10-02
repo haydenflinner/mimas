@@ -36,7 +36,7 @@ use cranelift_codegen::ir::{
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::JITModule;
 use cranelift_module::{DataDescription, DataId, FuncId, Module, ModuleResult};
-use vm::bc::jit::Layout;
+use vm::bc::{INLINE_CALL_DEPTH, jit::Layout};
 
 const I64: ir::Type = types::I64;
 const I32: ir::Type = types::I32;
@@ -381,6 +381,12 @@ struct Em<'a> {
     /// `Decoder` field offsets, `Vec` header order. Emitted code reads and
     /// writes these inline instead of FFI-ing per access.
     lyt: Layout,
+    /// The whole program — `CallDirect` needs the callee's `Chunk` (offset,
+    /// regs, param mapping) to emit the inline frame push.
+    prog: &'a Program,
+    /// `FuncRef`s for `CallDirect` targets, so the fast path is a direct
+    /// native `call`, not an FFI hop.
+    call_refs: HashMap<u32, FuncRef>,
     blocks: Vec<Block>,
     off2idx: HashMap<usize, usize>,
     slot_i: StackSlot,
@@ -942,6 +948,23 @@ pub(crate) fn emit_body(
         .collect();
     let bodies_gv = module.declare_data_in_func(bodies_data, &mut ctx.func);
     let map_gv = module.declare_data_in_func(map_data, &mut ctx.func);
+    // `CallDirect`'s inline fast path calls the callee's native body directly —
+    // one FuncRef per distinct target.
+    let call_refs: HashMap<u32, FuncRef> = ops
+        .iter()
+        .filter_map(|(_, op)| match op {
+            Op::CallDirect { body, .. } => Some(*body),
+            _ => None,
+        })
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .map(|b| {
+            (
+                b.index() as u32,
+                module.declare_func_in_func(body_ids[b.index()], &mut ctx.func),
+            )
+        })
+        .collect();
 
     let mut fb = FunctionBuilder::new(&mut ctx.func, fbc);
 
@@ -1030,6 +1053,8 @@ pub(crate) fn emit_body(
         sh: &sh,
         ops: &ops,
         lyt: *lyt,
+        prog: program,
+        call_refs,
         blocks,
         off2idx,
         slot_i: StackSlot::from_u32(0),
@@ -1045,12 +1070,15 @@ pub(crate) fn emit_body(
     em.slot_b = mk_slot(&mut em.fb, 8);
     em.slot_c = mk_slot(&mut em.fb, 24);
 
-    // hoist environment pointers. `paused` still goes through the FFI helper
-    // (it lives behind `ctx` → `Gc` → `State`, too deep to probe); everything
-    // else — `&code.ip`, `&thread.ops_left`, the top frame's `base`, the
-    // `regs` buffer — is a handful of loads over the probed layout. `nregs`
-    // is the chunk's own `regs` field: a compile-time constant.
-    let paused_p = em.hcall(H::PausedPtr, &[em.env.ctx0, em.env.ctx1]).unwrap();
+    // hoist environment pointers — `&state.paused` is one add off `Ctx`'s
+    // second word now that `State`'s layout is probed; everything else —
+    // `&code.ip`, `&thread.ops_left`, the top frame's `base`, the `regs`
+    // buffer — is a handful of loads over the probed layout. `nregs` is the
+    // chunk's own `regs` field: a compile-time constant.
+    let paused_p = em
+        .fb
+        .ins()
+        .iadd_imm_s(em.env.ctx1, lyt.state_paused as i64);
     let opsleft_p = em
         .fb
         .ins()
@@ -2627,10 +2655,14 @@ impl Em<'_> {
         self.fb.switch_to_block(done);
     }
 
-    /// `CallDirect` — one `mj_call_body` hop: the shim runs the depth-cap
-    /// check, the `enter_call_regs` frame push, the callee body call, and
-    /// the `Flow::Return` pop — returning the rebuilt window pointer (or null
-    /// to propagate `out`).
+    /// `CallDirect`. Fast path (inline, no FFI): depth below
+    /// `INLINE_CALL_DEPTH`, `thread.regs`/`thread.frames` capacity already
+    /// sufficient, static arity match — then the `enter_call_regs` frame push
+    /// is emitted inline over the probed layout, the callee runs as a direct
+    /// native `call`, and `mj_pop_return` runs the driver's `Flow::Return`
+    /// handling. Anything slower — capacity growth, depth cap (which must
+    /// produce `Flow::Call`), or a malformed arity — routes to the
+    /// `mj_call_body` megashim, unchanged.
     fn emit_call_direct(
         &mut self,
         i: usize,
@@ -2640,6 +2672,18 @@ impl Em<'_> {
         body: compile::BodyId,
         args: &[Reg],
     ) {
+        let cchunk = &self.prog.chunks[body];
+        // Compile-time gates: a static arity miss and a callee with captures
+        // (only ever entered through `Val::Closure`) keep the megashim, which
+        // reports `WrongArity` / hits the captures debug_assert exactly like
+        // before. Large frames take the shim too — the unrolled Null fill
+        // isn't worth it there.
+        let fast_ok = args.len() == cchunk.args as usize
+            && cchunk.captures.is_empty()
+            && (cchunk.regs as usize) <= 64;
+        if fast_ok {
+            return self.emit_call_direct_inline(i, off, next, dst, body, args, cchunk);
+        }
         let ap = self.reg_list_slot(args);
         let nargs = args.len();
         self.flush_seq();
@@ -2678,6 +2722,206 @@ impl Em<'_> {
             )
             .unwrap();
         self.post_call(i, dst, rp);
+    }
+
+    /// The inline `CallDirect` fast path — see [`Em::emit_call_direct`].
+    #[allow(clippy::too_many_arguments)]
+    fn emit_call_direct_inline(
+        &mut self,
+        i: usize,
+        off: usize,
+        next: usize,
+        dst: Reg,
+        body: compile::BodyId,
+        args: &[Reg],
+        cchunk: &compile::Chunk,
+    ) {
+        let vs = self.lyt.val_size as i64;
+        let fsz = self.lyt.frame_size as i64;
+        self.flush_seq();
+        // `code.ip = next; *op_ip = off` — on the fast path `code.ip` gets
+        // overwritten with the callee offset below, but `*op_ip` locates this
+        // op for any propagated error, and the slow path needs both.
+        self.mark_op(off, next);
+        self.settle_seq();
+
+        // Runtime gates, all checked in the pre-branch block so the fast
+        // block can reuse the loaded Vec headers:
+        //   frames.len() < INLINE_CALL_DEPTH    (else Flow::Call to driver)
+        //   regs.cap - regs.len >= callee.regs  (else Vec grow → shim)
+        //   frames.len() < frames.cap           (ditto for the push)
+        let flen = self.frames_len();
+        let dcap = self.iconst(INLINE_CALL_DEPTH as i64);
+        let depth_ok = self.fb.ins().icmp(IntCC::UnsignedLessThan, flen, dcap);
+        let rlen = self.fb.ins().load(
+            I64,
+            tf(),
+            self.env.thread,
+            (self.lyt.regs_off + self.lyt.vec_len) as i32,
+        );
+        let rcap = self.fb.ins().load(
+            I64,
+            tf(),
+            self.env.thread,
+            (self.lyt.regs_off + self.lyt.vec_cap) as i32,
+        );
+        let slack = self.fb.ins().isub(rcap, rlen);
+        let need = self.iconst(cchunk.regs as i64);
+        let regs_ok = self
+            .fb
+            .ins()
+            .icmp(IntCC::UnsignedGreaterThanOrEqual, slack, need);
+        let fcap = self.fb.ins().load(
+            I64,
+            tf(),
+            self.env.thread,
+            (self.lyt.frames_off + self.lyt.vec_cap) as i32,
+        );
+        let frames_ok = self.fb.ins().icmp(IntCC::UnsignedLessThan, flen, fcap);
+        let ok01 = self.fb.ins().band(depth_ok, regs_ok);
+        let ok = self.fb.ins().band(ok01, frames_ok);
+        let fast = self.fb.create_block();
+        let slow = self.fb.create_block();
+        self.fb.set_cold_block(slow);
+        self.fb.ins().brif(ok, fast, &[], slow, &[]);
+
+        // ---- slow: the megashim handles Flow::Call-at-cap, grows, errors ----
+        self.fb.switch_to_block(slow);
+        let ap = self.reg_list_slot(args);
+        let (b, d, n) = (
+            self.iconst(body.index() as i64),
+            self.iconst(dst.index() as i64),
+            self.iconst(args.len() as i64),
+        );
+        let rp = self
+            .hcall(
+                H::CallBody,
+                &[
+                    self.env.thread,
+                    self.env.code,
+                    self.env.chunks,
+                    self.env.bodies_tbl,
+                    b,
+                    d,
+                    ap,
+                    n,
+                    self.env.ctx0,
+                    self.env.ctx1,
+                    self.env.strs,
+                    self.env.sigs,
+                    self.env.fuel_p,
+                    self.env.opip_p,
+                    self.env.out,
+                ],
+            )
+            .unwrap();
+        self.post_call(i, dst, rp);
+
+        // ---- fast: enter_call_regs inline ----
+        self.fb.switch_to_block(fast);
+        let rp0 = self.fb.ins().load(
+            I64,
+            tf(),
+            self.env.thread,
+            (self.lyt.regs_off + self.lyt.vec_ptr) as i32,
+        );
+        // new_base = old regs.len (loaded above as `rlen`)
+        let nboff = self.fb.ins().imul_imm_s(rlen, vs);
+        let nwin = self.fb.ins().iadd(rp0, nboff); // callee window base
+        // resize fill: `Val::Null` — only the tag byte is ever read
+        let tnull = self.tconst(self.lyt.t_null);
+        for k in 0..cchunk.regs as i32 {
+            let a = self
+                .fb
+                .ins()
+                .iadd_imm_s(nwin, k as i64 * vs + self.lyt.val_tag as i64);
+            self.fb.ins().store(tf(), tnull, a, 0);
+        }
+        let nlen = self.fb.ins().iadd_imm_s(rlen, cchunk.regs as i64);
+        self.fb.ins().store(
+            tf(),
+            nlen,
+            self.env.thread,
+            (self.lyt.regs_off + self.lyt.vec_len) as i32,
+        );
+        // arg copies: `regs[new_base + param] = regs[caller_base + arg]` —
+        // both indices are compile-time constants; the caller window is
+        // `v.regs` (unmoved — capacity was checked).
+        let caller = self.regs();
+        for (i, &pr) in cchunk.params.iter().enumerate() {
+            let s = self.vaddr(caller, args[i].index() as u32);
+            let d = self.vaddr(nwin, pr.index() as u32);
+            self.cpy_val(d, s);
+        }
+        // caller frame's saved ip = resume offset (what `code.ip` held)
+        let fptr = self.fb.ins().load(
+            I64,
+            tf(),
+            self.env.thread,
+            (self.lyt.frames_off + self.lyt.vec_ptr) as i32,
+        );
+        let fm1 = self.fb.ins().iadd_imm_s(flen, -1);
+        let cfo = self.fb.ins().imul_imm_s(fm1, fsz);
+        let cf = self.fb.ins().iadd(fptr, cfo);
+        let nxt = self.iconst(next as i64);
+        self.fb.ins().store(tf(), nxt, cf, self.lyt.frame_ip as i32);
+        // push the callee frame
+        let nfo = self.fb.ins().imul_imm_s(flen, fsz);
+        let nf = self.fb.ins().iadd(fptr, nfo);
+        let bi = self.iconst32(body.index() as i64);
+        self.fb.ins().store(tf(), bi, nf, self.lyt.frame_chunk as i32);
+        let cip = self.iconst(cchunk.offset as i64);
+        self.fb.ins().store(tf(), cip, nf, self.lyt.frame_ip as i32);
+        let rr = self.iconst32(dst.index() as i64);
+        self.fb.ins().store(tf(), rr, nf, self.lyt.frame_ret as i32);
+        self.fb.ins().store(tf(), rlen, nf, self.lyt.frame_base as i32);
+        let nfl = self.fb.ins().iadd_imm_s(flen, 1);
+        self.fb.ins().store(
+            tf(),
+            nfl,
+            self.env.thread,
+            (self.lyt.frames_off + self.lyt.vec_len) as i32,
+        );
+        // code.ip = callee chunk offset
+        self.store_ip(cip);
+        // the call itself — a direct native call, same `out` slot
+        let fref = self.call_refs[&(body.index() as u32)];
+        self.fb.ins().call(
+            fref,
+            &[
+                self.env.thread,
+                self.env.code,
+                self.env.ctx0,
+                self.env.ctx1,
+                self.env.strs,
+                self.env.chunks,
+                self.env.sigs,
+                self.env.fuel_p,
+                self.env.opip_p,
+                self.env.out,
+            ],
+        );
+        // driver's `Flow::Return` pop: 2 = returned & popped, else propagate
+        let k = self
+            .hcall(H::PopReturn, &[self.env.thread, self.env.code, self.env.out])
+            .unwrap();
+        let two = self.iconst8(2);
+        let isret = self.fb.ins().icmp(IntCC::Equal, k, two);
+        let resumed = self.fb.create_block();
+        self.fb.ins().brif(isret, resumed, &[], self.ex.eret, &[]);
+        self.fb.switch_to_block(resumed);
+        // `thread.regs` may have moved under the callee — rebuild the window
+        let rp2 = self.fb.ins().load(
+            I64,
+            tf(),
+            self.env.thread,
+            (self.lyt.regs_off + self.lyt.vec_ptr) as i32,
+        );
+        let boff = self.fb.ins().imul_imm_s(self.env.base, vs);
+        let regs2 = self.fb.ins().iadd(rp2, boff);
+        self.fb.def_var(self.v.regs, regs2);
+        self.rearm_seq();
+        self.dst_refresh(i, dst, regs2);
     }
 
     /// `Call` — one `mj_call_dyn` hop: callee resolution (incl. the
@@ -2745,7 +2989,12 @@ impl Em<'_> {
         self.fb.switch_to_block(resumed);
         self.rearm_seq();
         self.fb.def_var(self.v.regs, rp);
-        let regs2 = rp;
+        self.dst_refresh(i, dst, rp);
+    }
+
+    /// Post-call tail: `regs[dst]` now holds the callee's return value —
+    /// refresh its scalar shadow (if any) and resume at the next op.
+    fn dst_refresh(&mut self, i: usize, dst: Reg, regs2: Value) {
         let d = dst.index() as u32;
         if let Some(&(sv, ok)) = self.v.int.get(&d) {
             let a = self.vaddr(regs2, d);
