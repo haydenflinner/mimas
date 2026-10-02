@@ -5,28 +5,11 @@
 //!           (`Vm::install_bc`); identical semantics, generated dispatch
 //!   jit   — Cranelift-JIT'd bodies through the same `install_bc` slot
 //!           (`mimas_jit::compile` once per workload, timing amortized out)
-//!   rust  — the rustgen-transpiled module from `host/corpus-gen/src/gen/`
-//!           (typed native Rust against the mrt shim below)
 //!
 //! Usage: `bc-bench [workload ...] [iters]` — defaults to every workload,
 //! best-of-3.
 
 use std::time::{Duration, Instant};
-
-// The rustgen-emitted modules `use crate::mrt::*`; the bench's mrt shim covers
-// exactly the surface these five pages use.
-pub mod mrt {
-    pub type Arr<T> = imbl::Vector<T>;
-    pub fn print<T: std::fmt::Display>(x: T) {
-        println!("{x}");
-    }
-    pub fn to_float(x: i64) -> f64 {
-        x as f64
-    }
-    pub fn new_filled<T: Clone>(v: T, n: i64) -> Arr<T> {
-        (0..n.max(0)).map(|_| v.clone()).collect()
-    }
-}
 
 mod bc {
     pub mod fib_iter {
@@ -43,29 +26,6 @@ mod bc {
     }
     pub mod physics {
         include!(concat!(env!("OUT_DIR"), "/physics.rs"));
-    }
-}
-
-mod rust {
-    pub mod fib_iter {
-        #![allow(warnings)]
-        include!("../../../../host/corpus-gen/src/gen/mimas_benchmarks_fib_iter_fib_iter.rs");
-    }
-    pub mod fib_rec {
-        #![allow(warnings)]
-        include!("../../../../host/corpus-gen/src/gen/mimas_benchmarks_fib_rec_fib_rec.rs");
-    }
-    pub mod mandelbrot {
-        #![allow(warnings)]
-        include!("../../../../host/corpus-gen/src/gen/mimas_benchmarks_mandelbrot_mandelbrot.rs");
-    }
-    pub mod prime_numbers {
-        #![allow(warnings)]
-        include!("../../../../host/corpus-gen/src/gen/mimas_benchmarks_prime_numbers_prime_numbers.rs");
-    }
-    pub mod physics {
-        #![allow(warnings)]
-        include!("../../../../host/corpus-gen/src/gen/mimas_benchmarks_physics_physics.rs");
     }
 }
 
@@ -88,32 +48,22 @@ fn run_vm(source: &str, bodies: Option<Vec<Option<mimas::vm::bc::BodyFn>>>) -> D
     t.elapsed()
 }
 
-fn run_rust(f: fn()) -> Duration {
-    let t = Instant::now();
-    f();
-    t.elapsed()
-}
-
-/// `BC_LANES=bc,rust` selects which lanes run (default: all) — for profiling a
+/// `BC_LANES=bc,jit` selects which lanes run (default: all) — for profiling a
 /// single lane without paying for the others.
 fn lanes() -> Vec<String> {
     std::env::var("BC_LANES")
         .map(|s| s.split(',').map(|x| x.trim().to_string()).collect())
         .unwrap_or_else(|_| {
-            ["vm", "bc", "jit", "rust"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect()
+            ["vm", "bc", "jit"].iter().map(|s| s.to_string()).collect()
         })
 }
 
-fn bench(name: &str, bodies: fn() -> Vec<Option<mimas::vm::bc::BodyFn>>, rust_fn: fn(), iters: usize) {
+fn bench(name: &str, bodies: fn() -> Vec<Option<mimas::vm::bc::BodyFn>>, iters: usize) {
     let src = source(name);
     let lanes = lanes();
     let mut vm_best = Duration::MAX;
     let mut bc_best = Duration::MAX;
     let mut jit_best = Duration::MAX;
-    let mut rust_best = Duration::MAX;
     if lanes.iter().any(|l| l == "vm") {
         for _ in 0..iters {
             vm_best = vm_best.min(run_vm(&src, None));
@@ -140,11 +90,6 @@ fn bench(name: &str, bodies: fn() -> Vec<Option<mimas::vm::bc::BodyFn>>, rust_fn
             jit_best = jit_best.min(run_vm(&src, Some(jit.bodies())));
         }
     }
-    if lanes.iter().any(|l| l == "rust") {
-        for _ in 0..iters {
-            rust_best = rust_best.min(run_rust(rust_fn));
-        }
-    }
     // Unselected lanes stay `Duration::MAX` — show them as `-` rather than a
     // garbage ratio (MAX as f64 prints 18446744073709551616.000s).
     let dur = |d: Duration| {
@@ -162,15 +107,13 @@ fn bench(name: &str, bodies: fn() -> Vec<Option<mimas::vm::bc::BodyFn>>, rust_fn
         }
     };
     println!(
-        "{name:>14}  vm {}  bc {} ({})  jit {} ({}, compile {})  rust {} ({} vs bc)",
+        "{name:>14}  vm {}  bc {} ({})  jit {} ({}, compile {})",
         dur(vm_best),
         dur(bc_best),
         ratio(vm_best, bc_best),
         dur(jit_best),
         ratio(vm_best, jit_best),
         dur(jit_compile),
-        dur(rust_best),
-        ratio(bc_best, rust_best),
     );
 }
 
@@ -183,17 +126,17 @@ fn main() {
             Err(_) => names.push(Box::leak(arg.into_boxed_str())),
         }
     }
-    let all: [(&str, fn() -> Vec<Option<mimas::vm::bc::BodyFn>>, fn()); 5] = [
-        ("fib_iter", bc::fib_iter::bodies, rust::fib_iter::run_top_level),
-        ("fib_rec", bc::fib_rec::bodies, rust::fib_rec::run_top_level),
-        ("mandelbrot", bc::mandelbrot::bodies, rust::mandelbrot::run_top_level),
-        ("prime_numbers", bc::prime_numbers::bodies, rust::prime_numbers::run_top_level),
-        ("physics", bc::physics::bodies, rust::physics::run_top_level),
+    let all: [(&str, fn() -> Vec<Option<mimas::vm::bc::BodyFn>>); 5] = [
+        ("fib_iter", bc::fib_iter::bodies),
+        ("fib_rec", bc::fib_rec::bodies),
+        ("mandelbrot", bc::mandelbrot::bodies),
+        ("prime_numbers", bc::prime_numbers::bodies),
+        ("physics", bc::physics::bodies),
     ];
-    println!("workload           vm          bc (speedup)      jit (speedup)            rust (bc/rust)");
-    for (name, bodies, rust_fn) in all {
+    println!("workload           vm          bc (speedup)      jit (speedup, compile)");
+    for (name, bodies) in all {
         if names.is_empty() || names.contains(&name) {
-            bench(name, bodies, rust_fn, iters);
+            bench(name, bodies, iters);
         }
     }
 }
