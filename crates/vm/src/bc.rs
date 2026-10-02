@@ -423,6 +423,10 @@ pub mod jit {
         /// `offset_of!(RefLock<InstanceData>'s inner InstanceData)` — the
         /// `Gc` payload of `Val::Instance` points at the RefLock.
         pub rl_inst: usize,
+        /// The `RefCell` borrow flag's offset inside `RefLock<InstanceData>`
+        /// — probed separately from `rl_flag`; rustc is free to order the
+        /// `RefCell`'s fields differently per `T`.
+        pub rl_flag_i: usize,
         /// `Fields` discriminant offset/width and the tag value selecting
         /// `Fields::Inline` (`Spilled` is the only other variant).
         pub fld_tag: usize,
@@ -670,7 +674,7 @@ pub mod jit {
         // Gc-carrying variants and the containers behind them — probed on
         // live arena objects, not assumed. `Gc` is a plain pointer to T, so
         // `Val::Array`'s payload IS the `RefLock<Vec<Val>>` address.
-        let (t_str, t_array, t_instance, arr_pay, inst_pay, rl_vec, rl_flag, rl_inst) =
+        let (t_str, t_array, t_instance, arr_pay, inst_pay, rl_vec, rl_flag, rl_inst, rl_flag_i) =
             gc_arena::arena::rootless_mutate(|mc| {
                 use crate::val::{Array, Instance, InstanceData, SharedStr, Str};
                 let s = Str(Gc::new(mc, SharedStr::from("p")));
@@ -737,8 +741,33 @@ pub mod jit {
                     }
                 }
                 let rl_flag = flag.expect("RefCell borrow flag not found");
+                // same flag probe for `RefLock<InstanceData>` — `RefCell`'s
+                // field order is rustc's to choose per T
+                let nwords_i = size_of::<gc_arena::RefLock<InstanceData>>() / 8;
+                let rlib = rli as *const _ as *const u8;
+                let words_i = |p: *const u8| -> Vec<i64> {
+                    (0..nwords_i)
+                        .map(|w| unsafe { p.add(w * 8).cast::<i64>().read_unaligned() })
+                        .collect()
+                };
+                let before_i = words_i(rlib);
+                let during_i = {
+                    let r = rli.borrow();
+                    let w = words_i(rlib);
+                    drop(r);
+                    w
+                };
+                let mut flag_i = None;
+                for w in 0..nwords_i {
+                    if before_i[w] == 0 && during_i[w] == 1 {
+                        assert!(flag_i.is_none(), "ambiguous borrow flag word");
+                        flag_i = Some(w * 8);
+                    }
+                }
+                let rl_flag_i = flag_i.expect("RefCell borrow flag not found");
                 (
                     t_str, t_array, t_instance, arr_pay, inst_pay, rl_vec, rl_flag, rl_inst,
+                    rl_flag_i,
                 )
             });
         // sanity: Gc-variant tags differ from everything else probed
@@ -871,6 +900,7 @@ pub mod jit {
             id_sid: offset_of!(InstanceData, struct_id),
             id_fields: offset_of!(InstanceData, fields),
             rl_inst,
+            rl_flag_i,
             fld_tag,
             fld_tsz,
             fld_inline,
