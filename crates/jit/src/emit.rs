@@ -25,19 +25,18 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::H;
 use compile::{BlockTarget, Constant, Op, Program, Reg};
 use cranelift_codegen::Context;
+use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::{
-    self, AbiParam, Block, FuncRef, InstBuilder, JumpTableData, MemFlagsData, Signature, StackSlot,
+    self, Block, FuncRef, InstBuilder, JumpTableData, MemFlagsData, Signature, StackSlot,
     StackSlotData, StackSlotKind, Value, types,
 };
-use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::JITModule;
 use cranelift_module::{DataDescription, DataId, FuncId, Module, ModuleResult};
-use vm::bc::INLINE_CALL_DEPTH;
-
-use crate::H;
+use vm::bc::jit::Layout;
 
 const I64: ir::Type = types::I64;
 const I32: ir::Type = types::I32;
@@ -46,11 +45,6 @@ const F64: ir::Type = types::F64;
 
 fn tf() -> MemFlagsData {
     MemFlagsData::trusted()
-}
-
-/// `size_of::<Val>()` — the window stride.
-fn val_size() -> i64 {
-    std::mem::size_of::<vm::bc::Val<'static>>() as i64
 }
 
 /// `RtErr` kind codes matching `jit::out_err`'s table.
@@ -343,6 +337,11 @@ struct Vs {
     cur_ip: Variable,
     /// `RtErr` code for the `eerr` exit.
     ekind: Variable,
+    /// Batched op quota — `min(*fuel, thread.ops_left)` at the last re-arm;
+    /// decremented per op, `settle`d back into the real counters at every
+    /// observable boundary. bcgen's `bcn`/`bcn0`, verbatim.
+    bcn: Variable,
+    bcn0: Variable,
     /// Scalar shadows: `(value, ok)` vars per register.
     int: HashMap<u32, (Variable, Variable)>,
     float: HashMap<u32, (Variable, Variable)>,
@@ -358,6 +357,10 @@ struct Ex {
     enext: Block,
     eoof: Block,
     estep: Block,
+    /// `edef`/`eend` route here first — `run_dispatch` checks the quota and
+    /// charges one op even for a garbage decode.
+    #[allow(dead_code)]
+    estep_g: Block,
     eerr: Block,
     /// Propagate `out` verbatim (inlined-callee results, helper errors).
     eret: Block,
@@ -369,12 +372,15 @@ struct Ex {
 struct Em<'a> {
     fb: FunctionBuilder<'a>,
     hrefs: Vec<FuncRef>,
-    brefs: Vec<FuncRef>,
     env: Env,
     v: Vs,
     ex: Ex,
     sh: &'a Sh,
     ops: &'a [(usize, Op)],
+    /// Probed VM layouts — `Val` tag/payload offsets, `ThreadState`/`Frame`/
+    /// `Decoder` field offsets, `Vec` header order. Emitted code reads and
+    /// writes these inline instead of FFI-ing per access.
+    lyt: Layout,
     blocks: Vec<Block>,
     off2idx: HashMap<usize, usize>,
     slot_i: StackSlot,
@@ -400,6 +406,118 @@ impl Em<'_> {
 
     fn regs(&mut self) -> Value {
         self.fb.use_var(self.v.regs)
+    }
+
+    // ---- inline `Val` access over the probed layout (`lyt`) — the emit-time
+    // twin of `bc::jit`'s `ri`/`wr_*`/`rval` FFI helpers ----
+
+    /// `thread.frames.len()` — one load through the probed Vec header.
+    fn frames_len(&mut self) -> Value {
+        self.fb.ins().load(
+            I64,
+            tf(),
+            self.env.thread,
+            (self.lyt.frames_off + self.lyt.vec_len) as i32,
+        )
+    }
+
+    /// `regs + r*val_size` — `&regs[r]` for a window base `regs`.
+    fn vaddr(&mut self, regs: Value, r: u32) -> Value {
+        self.fb
+            .ins()
+            .iadd_imm_s(regs, r as i64 * self.lyt.val_size as i64)
+    }
+
+    /// The discriminant's CLIF type (its probed byte width).
+    fn tag_ty(&self) -> ir::Type {
+        match self.lyt.tag_size {
+            1 => I8,
+            2 => types::I16,
+            4 => I32,
+            8 => I64,
+            d => unreachable!("bad tag width {d}"),
+        }
+    }
+
+    /// A discriminant constant at the probed width.
+    fn tconst(&mut self, t: u64) -> Value {
+        let ty = self.tag_ty();
+        self.fb.ins().iconst(ty, t as i64)
+    }
+
+    /// `regs[r]`'s discriminant.
+    fn ld_tag(&mut self, a: Value) -> Value {
+        let ty = self.tag_ty();
+        self.fb.ins().load(ty, tf(), a, self.lyt.val_tag as i32)
+    }
+
+    /// `regs[r]` as `Val::Int`: inline tag probe → payload load; a miss routes
+    /// to `estep` exactly like the `ri` helper's `0` return did.
+    fn ld_int(&mut self, regs: Value, r: u32) -> Value {
+        let good = self.fb.create_block();
+        let a = self.vaddr(regs, r);
+        let t = self.ld_tag(a);
+        let want = self.tconst(self.lyt.t_int);
+        let hit = self.fb.ins().icmp(IntCC::Equal, t, want);
+        self.fb.ins().brif(hit, good, &[], self.ex.estep, &[]);
+        self.fb.switch_to_block(good);
+        self.fb.ins().load(I64, tf(), a, self.lyt.val_pay as i32)
+    }
+
+    /// `regs[r]` as `Val::Float`.
+    fn ld_float(&mut self, regs: Value, r: u32) -> Value {
+        let good = self.fb.create_block();
+        let a = self.vaddr(regs, r);
+        let t = self.ld_tag(a);
+        let want = self.tconst(self.lyt.t_float);
+        let hit = self.fb.ins().icmp(IntCC::Equal, t, want);
+        self.fb.ins().brif(hit, good, &[], self.ex.estep, &[]);
+        self.fb.switch_to_block(good);
+        self.fb.ins().load(F64, tf(), a, self.lyt.val_pay as i32)
+    }
+
+    /// `*a = Val::Int(v)` — tag byte plus the 8-byte union slot.
+    fn st_int(&mut self, a: Value, v: Value) {
+        let t = self.tconst(self.lyt.t_int);
+        self.fb.ins().store(tf(), t, a, self.lyt.val_tag as i32);
+        self.fb.ins().store(tf(), v, a, self.lyt.val_pay as i32);
+    }
+
+    /// `*a = Val::Float(v)` (ditto, `f64` store).
+    fn st_float(&mut self, a: Value, v: Value) {
+        let t = self.tconst(self.lyt.t_float);
+        self.fb.ins().store(tf(), t, a, self.lyt.val_tag as i32);
+        self.fb.ins().store(tf(), v, a, self.lyt.val_pay as i32);
+    }
+
+    /// `*a = Val::Bool(v8)` — tag plus the `u8` union slot.
+    fn st_bool(&mut self, a: Value, v8: Value) {
+        let t = self.tconst(self.lyt.t_bool);
+        self.fb.ins().store(tf(), t, a, self.lyt.val_tag as i32);
+        self.fb.ins().store(tf(), v8, a, self.lyt.bool_pay as i32);
+    }
+
+    /// `*a = Val::Null` — only the tag byte is read for payload-less
+    /// variants, so only it is written.
+    fn st_null(&mut self, a: Value) {
+        let t = self.tconst(self.lyt.t_null);
+        self.fb.ins().store(tf(), t, a, self.lyt.val_tag as i32);
+    }
+
+    /// `*a = Val::Fn(body)` — tag plus the `u32` index in the union slot.
+    fn st_fn(&mut self, a: Value, body32: Value) {
+        let t = self.tconst(self.lyt.t_fn);
+        self.fb.ins().store(tf(), t, a, self.lyt.val_tag as i32);
+        self.fb.ins().store(tf(), body32, a, self.lyt.fn_pay as i32);
+    }
+
+    /// `val_size`-byte `Val` copy `*d = *s` (eight-byte chunks; the probe
+    /// asserts the stride is a multiple of 8).
+    fn cpy_val(&mut self, d: Value, s: Value) {
+        for k in 0..(self.lyt.val_size / 8) as i32 {
+            let w = self.fb.ins().load(I64, tf(), s, k * 8);
+            self.fb.ins().store(tf(), w, d, k * 8);
+        }
     }
 
     /// Call a `vm::bc::jit` helper; returns the `u8` status if the signature
@@ -437,32 +555,43 @@ impl Em<'_> {
 
     /// The inline shadow-writeback sequence — used inside shared exits (which
     /// are already merge points, so no `fret` dispatch needed there).
+    /// Branch-free: a dead shadow (`ok == 0`) means the window is already
+    /// authoritative, so the tag/payload stores rewrite the bytes just
+    /// loaded — a `select` per field instead of a branch per reg.
     fn flush_seq(&mut self) {
         let mut ints: Vec<u32> = self.sh.int.iter().copied().collect();
         ints.sort_unstable();
+        let mut floats: Vec<u32> = self.sh.float.iter().copied().collect();
+        floats.sort_unstable();
+        if ints.is_empty() && floats.is_empty() {
+            return;
+        }
+        let regs = self.regs();
+        let tint = self.tconst(self.lyt.t_int);
         for r in ints {
             let (sv, ok) = self.v.int[&r];
             let okv = self.fb.use_var(ok);
-            let (w, c) = (self.fb.create_block(), self.fb.create_block());
-            self.fb.ins().brif(okv, w, &[], c, &[]);
-            self.fb.switch_to_block(w);
-            let (regs, idx, v) = (self.regs(), self.iconst(r as i64), self.fb.use_var(sv));
-            self.hcall(H::WrI, &[regs, idx, v]);
-            self.fb.ins().jump(c, &[]);
-            self.fb.switch_to_block(c);
+            let v = self.fb.use_var(sv);
+            let a = self.vaddr(regs, r);
+            let old = self.ld_tag(a);
+            let nt = self.fb.ins().select(okv, tint, old);
+            self.fb.ins().store(tf(), nt, a, self.lyt.val_tag as i32);
+            let oldp = self.fb.ins().load(I64, tf(), a, self.lyt.val_pay as i32);
+            let np = self.fb.ins().select(okv, v, oldp);
+            self.fb.ins().store(tf(), np, a, self.lyt.val_pay as i32);
         }
-        let mut floats: Vec<u32> = self.sh.float.iter().copied().collect();
-        floats.sort_unstable();
+        let tflt = self.tconst(self.lyt.t_float);
         for r in floats {
             let (sv, ok) = self.v.float[&r];
             let okv = self.fb.use_var(ok);
-            let (w, c) = (self.fb.create_block(), self.fb.create_block());
-            self.fb.ins().brif(okv, w, &[], c, &[]);
-            self.fb.switch_to_block(w);
-            let (regs, idx, v) = (self.regs(), self.iconst(r as i64), self.fb.use_var(sv));
-            self.hcall(H::WrF, &[regs, idx, v]);
-            self.fb.ins().jump(c, &[]);
-            self.fb.switch_to_block(c);
+            let v = self.fb.use_var(sv);
+            let a = self.vaddr(regs, r);
+            let old = self.ld_tag(a);
+            let nt = self.fb.ins().select(okv, tflt, old);
+            self.fb.ins().store(tf(), nt, a, self.lyt.val_tag as i32);
+            let oldp = self.fb.ins().load(F64, tf(), a, self.lyt.val_pay as i32);
+            let np = self.fb.ins().select(okv, v, oldp);
+            self.fb.ins().store(tf(), np, a, self.lyt.val_pay as i32);
         }
     }
 
@@ -506,54 +635,42 @@ impl Em<'_> {
     /// A miss routes to `estep`: `step` runs the op verbatim — the same
     /// outcome bcgen's `bin_cold`/`branch_cold` tail-calls produce.
     fn int_opnd(&mut self, r: u32) -> Value {
-        let good = self.fb.create_block();
         if let Some(&(sv, ok)) = self.v.int.get(&r) {
+            let good = self.fb.create_block();
             let okv = self.fb.use_var(ok);
             self.fb.ins().brif(okv, good, &[], self.ex.estep, &[]);
             self.fb.switch_to_block(good);
             self.fb.use_var(sv)
         } else {
-            let (regs, idx, addr) = (
-                self.regs(),
-                self.iconst(r as i64),
-                self.fb.ins().stack_addr(I64, self.slot_i, 0),
-            );
-            let ok = self.hcall(H::Ri, &[regs, idx, addr]).unwrap();
-            self.fb.ins().brif(ok, good, &[], self.ex.estep, &[]);
-            self.fb.switch_to_block(good);
-            self.fb.ins().stack_load(I64, I64, self.slot_i, 0)
+            let regs = self.regs();
+            self.ld_int(regs, r)
         }
     }
 
     fn float_opnd(&mut self, r: u32) -> Value {
-        let good = self.fb.create_block();
         if let Some(&(sv, ok)) = self.v.float.get(&r) {
+            let good = self.fb.create_block();
             let okv = self.fb.use_var(ok);
             self.fb.ins().brif(okv, good, &[], self.ex.estep, &[]);
             self.fb.switch_to_block(good);
             self.fb.use_var(sv)
         } else {
-            let (regs, idx, addr) = (
-                self.regs(),
-                self.iconst(r as i64),
-                self.fb.ins().stack_addr(I64, self.slot_f, 0),
-            );
-            let ok = self.hcall(H::Rf, &[regs, idx, addr]).unwrap();
-            self.fb.ins().brif(ok, good, &[], self.ex.estep, &[]);
-            self.fb.switch_to_block(good);
-            self.fb.ins().stack_load(I64, F64, self.slot_f, 0)
+            let regs = self.regs();
+            self.ld_float(regs, r)
         }
     }
 
-    /// Scalar write into `dst`: shadow-var update when shadowed, else `wr_*`.
+    /// Scalar write into `dst`: shadow-var update when shadowed, else an
+    /// inline `Val` store.
     fn wr_int_dst(&mut self, d: u32, v: Value) {
         if let Some(&(sv, ok)) = self.v.int.get(&d) {
             self.fb.def_var(sv, v);
             let one = self.iconst8(1);
             self.fb.def_var(ok, one);
         } else {
-            let (regs, idx) = (self.regs(), self.iconst(d as i64));
-            self.hcall(H::WrI, &[regs, idx, v]);
+            let regs = self.regs();
+            let a = self.vaddr(regs, d);
+            self.st_int(a, v);
         }
     }
 
@@ -563,15 +680,17 @@ impl Em<'_> {
             let one = self.iconst8(1);
             self.fb.def_var(ok, one);
         } else {
-            let (regs, idx) = (self.regs(), self.iconst(d as i64));
-            self.hcall(H::WrF, &[regs, idx, v]);
+            let regs = self.regs();
+            let a = self.vaddr(regs, d);
+            self.st_float(a, v);
         }
     }
 
     /// Bool write into `dst` — eval dsts are always `W::Dyn` (unshadowed).
     fn wr_bool_dst(&mut self, d: u32, v8: Value) {
-        let (regs, idx) = (self.regs(), self.iconst(d as i64));
-        self.hcall(H::WrB, &[regs, idx, v8]);
+        let regs = self.regs();
+        let a = self.vaddr(regs, d);
+        self.st_bool(a, v8);
     }
 
     /// A `*const Val` for reg `s`, materializing a live shadow first — after
@@ -583,8 +702,10 @@ impl Em<'_> {
             let okv = self.fb.use_var(ok);
             self.fb.ins().brif(okv, m, &[], c, &[]);
             self.fb.switch_to_block(m);
-            let (regs, idx, v) = (self.regs(), self.iconst(s as i64), self.fb.use_var(sv));
-            self.hcall(H::WrI, &[regs, idx, v]);
+            let regs = self.regs();
+            let a = self.vaddr(regs, s);
+            let v = self.fb.use_var(sv);
+            self.st_int(a, v);
             self.fb.ins().jump(c, &[]);
             self.fb.switch_to_block(c);
         } else if let Some(&(sv, ok)) = self.v.float.get(&s) {
@@ -593,13 +714,15 @@ impl Em<'_> {
             let okv = self.fb.use_var(ok);
             self.fb.ins().brif(okv, m, &[], c, &[]);
             self.fb.switch_to_block(m);
-            let (regs, idx, v) = (self.regs(), self.iconst(s as i64), self.fb.use_var(sv));
-            self.hcall(H::WrF, &[regs, idx, v]);
+            let regs = self.regs();
+            let a = self.vaddr(regs, s);
+            let v = self.fb.use_var(sv);
+            self.st_float(a, v);
             self.fb.ins().jump(c, &[]);
             self.fb.switch_to_block(c);
         }
-        let (regs, idx) = (self.regs(), self.iconst(s as i64));
-        self.hcall(H::Rval, &[regs, idx]).unwrap()
+        let regs = self.regs();
+        self.vaddr(regs, s)
     }
 
     /// Helper-op shape: inline shadow writeback, then stores `code.ip`/
@@ -619,16 +742,21 @@ impl Em<'_> {
         self.flush_seq();
         self.mark_op(off, next);
         self.hcall(h, args);
-        { let nb = self.next_blk(i); self.fb.ins().jump(nb, &[]); }
+        {
+            let nb = self.next_blk(i);
+            self.fb.ins().jump(nb, &[]);
+        }
     }
 
     /// A `u32` register-index list (call args / field regs / captures) spilled
     /// to a stack slot; returns the slot address for the helper.
     fn reg_list_slot(&mut self, regs_idx: &[Reg]) -> Value {
         let size = (regs_idx.len().max(1) * 4) as u32;
-        let slot = self
-            .fb
-            .create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, size, 3));
+        let slot = self.fb.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            size,
+            3,
+        ));
         for (j, r) in regs_idx.iter().enumerate() {
             let v = self.iconst32(r.index() as i64);
             self.fb.ins().stack_store(I64, v, slot, (j * 4) as i32);
@@ -640,7 +768,7 @@ impl Em<'_> {
     /// the host reads the root frame's regs after `run()`. Continues in
     /// `cont` either way.
     fn root_flush(&mut self, cont: Block) {
-        let flen = self.hcall(H::FramesLen, &[self.env.thread]).unwrap();
+        let flen = self.frames_len();
         let one = self.iconst(1);
         let is_root = self.fb.ins().icmp(IntCC::Equal, flen, one);
         let ft = self.fb.create_block();
@@ -654,6 +782,104 @@ impl Em<'_> {
     fn estep(&mut self) {
         self.fb.ins().jump(self.ex.estep, &[]);
     }
+
+    // ---- batched quota (`bcn`) plumbing — bcgen's settle!/gexit!/gateq! ----
+
+    /// `spent = bcn0 - bcn; bcn0 = bcn; *fuel -= spent; ops_left -= spent`.
+    /// Idempotent (a second settle charges 0), so exits can run it
+    /// unconditionally. Returns the post-settle `(fuel, ops_left)` values.
+    fn settle_seq(&mut self) -> (Value, Value) {
+        let b0 = self.fb.use_var(self.v.bcn0);
+        let b = self.fb.use_var(self.v.bcn);
+        let spent = self.fb.ins().isub(b0, b);
+        self.fb.def_var(self.v.bcn0, b);
+        let f = self.fb.ins().load(I64, tf(), self.env.fuel_p, 0);
+        let f2 = self.fb.ins().isub(f, spent);
+        self.fb.ins().store(tf(), f2, self.env.fuel_p, 0);
+        let ol = self.fb.ins().load(I64, tf(), self.env.opsleft_p, 0);
+        let ol2 = self.fb.ins().isub(ol, spent);
+        self.fb.ins().store(tf(), ol2, self.env.opsleft_p, 0);
+        (f2, ol2)
+    }
+
+    /// `bcn = min(*fuel, ops_left); bcn0 = bcn` — armed at entry and re-armed
+    /// wherever quota was spent outside our count (an inlined callee draws
+    /// from the same counters through its own `bcn`).
+    fn rearm_seq(&mut self) {
+        let f = self.fb.ins().load(I64, tf(), self.env.fuel_p, 0);
+        let ol = self.fb.ins().load(I64, tf(), self.env.opsleft_p, 0);
+        let m = self.fb.ins().umin(f, ol);
+        self.fb.def_var(self.v.bcn, m);
+        self.fb.def_var(self.v.bcn0, m);
+    }
+
+    /// One op's quota gate — bcgen's `gateq!()`/`gatep!()`: `paused` is only
+    /// loaded when the static fallthrough predecessor can run foreign code
+    /// (`may_pause`); a `bcn == 0` trip (or the pause flag) routes to a
+    /// per-op cold trampoline running `gexit` — settle, then the driver's
+    /// ordered exit reasons, then re-arm and resume the op. Returns the
+    /// continuation block the op body emits into.
+    fn gate(&mut self, i: usize, off: usize) -> (Block, Block) {
+        let o = self.iconst(off as i64);
+        self.fb.def_var(self.v.cur_ip, o);
+        let cont = self.fb.create_block();
+        let tramp = self.fb.create_block();
+        self.fb.set_cold_block(tramp);
+        if i > 0 && may_pause(&self.ops[i - 1].1) {
+            let p = self.fb.ins().load(I8, tf(), self.env.paused_p, 0);
+            let g = self.fb.create_block();
+            self.fb.ins().brif(p, tramp, &[], g, &[]);
+            self.fb.switch_to_block(g);
+        }
+        let bcnv = self.fb.use_var(self.v.bcn);
+        let z = self.iconst(0);
+        let bz = self.fb.ins().icmp(IntCC::Equal, bcnv, z);
+        self.fb.ins().brif(bz, tramp, &[], cont, &[]);
+        self.fb.switch_to_block(cont);
+        // `use_var` again — the trampoline's re-arm path also lands here, so
+        // the decrement must read the merged value, not the pre-branch one.
+        let cur = self.fb.use_var(self.v.bcn);
+        let b1 = self.fb.ins().iadd_imm_s(cur, -1);
+        self.fb.def_var(self.v.bcn, b1);
+        (cont, tramp)
+    }
+
+    /// Fill a gate trampoline (created by [`Em::gate`] or `estep_g`): settle,
+    /// then `paused || fuel == 0` → `enext`, `ops_left == 0` → `eoof`, else
+    /// re-arm and resume at `cont`. Call when the current block is terminated.
+    fn fill_gate_tramp(&mut self, tramp: Block, cont: Block) {
+        self.fb.switch_to_block(tramp);
+        let (f, ol) = self.settle_seq();
+        let p = self.fb.ins().load(I8, tf(), self.env.paused_p, 0);
+        let z = self.iconst(0);
+        let fz = self.fb.ins().icmp(IntCC::Equal, f, z);
+        let nx = self.fb.ins().bor(p, fz);
+        let t2 = self.fb.create_block();
+        self.fb.ins().brif(nx, self.ex.enext, &[], t2, &[]);
+        self.fb.switch_to_block(t2);
+        let oz = self.fb.ins().icmp(IntCC::Equal, ol, z);
+        let t3 = self.fb.create_block();
+        self.fb.ins().brif(oz, self.ex.eoof, &[], t3, &[]);
+        self.fb.switch_to_block(t3);
+        self.rearm_seq();
+        self.fb.ins().jump(cont, &[]);
+    }
+}
+
+/// bcgen's `may_pause`, verbatim: the `paused` flag can only change inside an
+/// op that runs foreign code — `bin`/`unary` can reach registered instance-op
+/// impls, and `Call*`/`CallNative` run natives and callee bodies (whose own
+/// gates propagate a pause as `Flow::Next`). An op gates on `paused` iff its
+/// static fallthrough predecessor is one of these.
+fn may_pause(op: &Op) -> bool {
+    matches!(
+        op,
+        Op::Bin { .. }
+            | Op::Unary { .. }
+            | Op::Call { .. }
+            | Op::CallDirect { .. }
+            | Op::CallNative { .. }
+    )
 }
 
 #[allow(dead_code)]
@@ -674,6 +900,7 @@ pub(crate) fn emit_body(
     helper_ids: &[FuncId],
     body_ids: &[FuncId],
     bodies_data: DataId,
+    lyt: &Layout,
     fbc: &mut FunctionBuilderContext,
     ctx: &mut Context,
 ) -> ModuleResult<()> {
@@ -713,10 +940,6 @@ pub(crate) fn emit_body(
         .iter()
         .map(|id| module.declare_func_in_func(*id, &mut ctx.func))
         .collect();
-    let brefs: Vec<FuncRef> = body_ids
-        .iter()
-        .map(|id| module.declare_func_in_func(*id, &mut ctx.func))
-        .collect();
     let bodies_gv = module.declare_data_in_func(bodies_data, &mut ctx.func);
     let map_gv = module.declare_data_in_func(map_data, &mut ctx.func);
 
@@ -726,6 +949,8 @@ pub(crate) fn emit_body(
     let v_regs = fb.declare_var(I64);
     let v_cur_ip = fb.declare_var(I64);
     let v_ekind = fb.declare_var(I8);
+    let v_bcn = fb.declare_var(I64);
+    let v_bcn0 = fb.declare_var(I64);
     let mut int_vars = HashMap::new();
     let mut float_vars = HashMap::new();
     for &r in &sh.int {
@@ -742,20 +967,19 @@ pub(crate) fn emit_body(
     let enext = fb.create_block();
     let eoof = fb.create_block();
     let estep = fb.create_block();
+    let estep_g = fb.create_block();
     let eerr = fb.create_block();
     let eret = fb.create_block();
     let eend = fb.create_block();
     fb.set_cold_block(edef);
     fb.set_cold_block(estep);
+    fb.set_cold_block(estep_g);
     fb.set_cold_block(eerr);
     fb.set_cold_block(eoof);
     let blocks: Vec<Block> = ops.iter().map(|_| fb.create_block()).collect();
 
-    let off2idx: HashMap<usize, usize> = ops
-        .iter()
-        .enumerate()
-        .map(|(i, (o, _))| (*o, i))
-        .collect();
+    let off2idx: HashMap<usize, usize> =
+        ops.iter().enumerate().map(|(i, (o, _))| (*o, i)).collect();
 
     // ---- entry ----
     fb.append_block_params_for_function_params(entry);
@@ -782,12 +1006,13 @@ pub(crate) fn emit_body(
     let mut em = Em {
         fb,
         hrefs,
-        brefs,
         env,
         v: Vs {
             regs: v_regs,
             cur_ip: v_cur_ip,
             ekind: v_ekind,
+            bcn: v_bcn,
+            bcn0: v_bcn0,
             int: int_vars,
             float: float_vars,
         },
@@ -797,12 +1022,14 @@ pub(crate) fn emit_body(
             enext,
             eoof,
             estep,
+            estep_g,
             eerr,
             eret,
             eend,
         },
         sh: &sh,
         ops: &ops,
+        lyt: *lyt,
         blocks,
         off2idx,
         slot_i: StackSlot::from_u32(0),
@@ -818,19 +1045,44 @@ pub(crate) fn emit_body(
     em.slot_b = mk_slot(&mut em.fb, 8);
     em.slot_c = mk_slot(&mut em.fb, 24);
 
-    // hoist environment pointers
-    let paused_p = em
-        .hcall(H::PausedPtr, &[em.env.ctx0, em.env.ctx1])
-        .unwrap();
-    let opsleft_p = em.hcall(H::OpsLeftPtr, &[em.env.thread]).unwrap();
-    let ip_p = em.hcall(H::IpPtr, &[em.env.code]).unwrap();
-    let base = em.hcall(H::FrameBase, &[em.env.thread]).unwrap();
-    let nregs = em
-        .hcall(H::FrameNregs, &[em.env.thread, em.env.chunks])
-        .unwrap();
-    let rp = em.hcall(H::RegsPtr, &[em.env.thread]).unwrap();
-    let boff = em.fb.ins().imul_imm_s(base, val_size());
+    // hoist environment pointers. `paused` still goes through the FFI helper
+    // (it lives behind `ctx` → `Gc` → `State`, too deep to probe); everything
+    // else — `&code.ip`, `&thread.ops_left`, the top frame's `base`, the
+    // `regs` buffer — is a handful of loads over the probed layout. `nregs`
+    // is the chunk's own `regs` field: a compile-time constant.
+    let paused_p = em.hcall(H::PausedPtr, &[em.env.ctx0, em.env.ctx1]).unwrap();
+    let opsleft_p = em
+        .fb
+        .ins()
+        .iadd_imm_s(em.env.thread, lyt.ops_left_off as i64);
+    let ip_p = em.fb.ins().iadd_imm_s(em.env.code, lyt.code_ip as i64);
+    // `thread.frames.last().unwrap().base`
+    let fptr = em.fb.ins().load(
+        I64,
+        tf(),
+        em.env.thread,
+        (lyt.frames_off + lyt.vec_ptr) as i32,
+    );
+    let flen = em.fb.ins().load(
+        I64,
+        tf(),
+        em.env.thread,
+        (lyt.frames_off + lyt.vec_len) as i32,
+    );
+    let fm1 = em.fb.ins().iadd_imm_s(flen, -1);
+    let foff = em.fb.ins().imul_imm_s(fm1, lyt.frame_size as i64);
+    let faddr = em.fb.ins().iadd(fptr, foff);
+    let base = em.fb.ins().load(I64, tf(), faddr, lyt.frame_base as i32);
+    // `thread.regs.as_mut_ptr()`
+    let rp = em.fb.ins().load(
+        I64,
+        tf(),
+        em.env.thread,
+        (lyt.regs_off + lyt.vec_ptr) as i32,
+    );
+    let boff = em.fb.ins().imul_imm_s(base, lyt.val_size as i64);
     let regs0 = em.fb.ins().iadd(rp, boff);
+    let nregs = em.iconst(chunk.regs as i64);
     let tbl = em.fb.ins().symbol_value(I64, bodies_gv);
     let map_addr = em.fb.ins().symbol_value(I64, map_gv);
     em.env.paused_p = paused_p;
@@ -844,6 +1096,10 @@ pub(crate) fn emit_body(
     em.fb.def_var(v_cur_ip, z64);
     let z8 = em.iconst8(0);
     em.fb.def_var(v_ekind, z8);
+    // arm the batched quota: `bcn = min(*fuel, ops_left)` (bcgen's entry arm).
+    // The driver already checked paused/fuel/ops_left before invoking the
+    // body, so bcn >= 1 here.
+    em.rearm_seq();
 
     // shadow init: `(v, ok) = match regs[r] { Int(v) => (v, true), _ => (0,false) }`
     let int_keys: Vec<u32> = {
@@ -853,10 +1109,11 @@ pub(crate) fn emit_body(
     };
     for r in int_keys {
         let (sv, ok) = em.v.int[&r];
-        let idx = em.iconst(r as i64);
-        let addr = em.fb.ins().stack_addr(I64, em.slot_i, 0);
-        let k = em.hcall(H::Ri, &[regs0, idx, addr]).unwrap();
-        let v = em.fb.ins().stack_load(I64, I64, em.slot_i, 0);
+        let a = em.vaddr(regs0, r);
+        let t = em.ld_tag(a);
+        let want = em.tconst(lyt.t_int);
+        let k = em.fb.ins().icmp(IntCC::Equal, t, want);
+        let v = em.fb.ins().load(I64, tf(), a, lyt.val_pay as i32);
         let sv0 = em.fb.ins().select(k, v, z64);
         em.fb.def_var(sv, sv0);
         em.fb.def_var(ok, k);
@@ -868,10 +1125,11 @@ pub(crate) fn emit_body(
     };
     for r in float_keys {
         let (sv, ok) = em.v.float[&r];
-        let idx = em.iconst(r as i64);
-        let addr = em.fb.ins().stack_addr(I64, em.slot_f, 0);
-        let k = em.hcall(H::Rf, &[regs0, idx, addr]).unwrap();
-        let v = em.fb.ins().stack_load(I64, F64, em.slot_f, 0);
+        let a = em.vaddr(regs0, r);
+        let t = em.ld_tag(a);
+        let want = em.tconst(lyt.t_float);
+        let k = em.fb.ins().icmp(IntCC::Equal, t, want);
+        let v = em.fb.ins().load(F64, tf(), a, lyt.val_pay as i32);
         let zf = em.fb.ins().f64const(0.0);
         let sv0 = em.fb.ins().select(k, v, zf);
         em.fb.def_var(sv, sv0);
@@ -885,7 +1143,7 @@ pub(crate) fn emit_body(
         em.fb.ins().jump(edef, &[]);
         em.fb.switch_to_block(edef);
         em.fb.def_var(v_cur_ip, z64);
-        em.fb.ins().jump(estep, &[]);
+        em.fb.ins().jump(estep_g, &[]);
     } else {
         let ip = em.fb.ins().load(I64, tf(), ip_p, 0);
         let rel = em.fb.ins().iadd_imm_s(ip, -(chunk_off as i64));
@@ -908,18 +1166,41 @@ pub(crate) fn emit_body(
             .iter()
             .map(|b| em.fb.func.dfg.block_call(*b, &[]))
             .collect();
-        let table = em
-            .fb
-            .create_jump_table(JumpTableData::new(def_bc, &calls));
+        let table = em.fb.create_jump_table(JumpTableData::new(def_bc, &calls));
         em.fb.ins().br_table(idx, table);
         // `edef` needs the raw ip for the step fallback
         em.fb.switch_to_block(edef);
         em.fb.def_var(v_cur_ip, ip);
-        em.fb.ins().jump(estep, &[]);
+        em.fb.ins().jump(estep_g, &[]);
     }
 
     // ---- shared exits ----
+    // `estep_g` — the quota gate for `edef`/`eend`: `run_dispatch` runs its
+    // paused/fuel/ops_left checks and charges one op even for a garbage
+    // decode, so the fallback entry gates `bcn` exactly like an op would
+    // (`gatep` — the stepped op before a re-dispatch can be anything).
+    em.fb.switch_to_block(estep_g);
+    let g_cont = em.fb.create_block();
+    let g_tramp = em.fb.create_block();
+    em.fb.set_cold_block(g_tramp);
+    let pv = em.fb.ins().load(I8, tf(), em.env.paused_p, 0);
+    em.fb.ins().brif(pv, g_tramp, &[], g_cont, &[]);
+    em.fb.switch_to_block(g_cont);
+    let g2 = em.fb.create_block();
+    let bcnv = em.fb.use_var(v_bcn);
+    let g0 = em.iconst(0);
+    let bz = em.fb.ins().icmp(IntCC::Equal, bcnv, g0);
+    em.fb.ins().brif(bz, g_tramp, &[], g2, &[]);
+    em.fb.switch_to_block(g2);
+    // merged `bcn` (the gate-tramp re-arm also lands here) — not `bcnv`
+    let cur = em.fb.use_var(v_bcn);
+    let b1 = em.fb.ins().iadd_imm_s(cur, -1);
+    em.fb.def_var(v_bcn, b1);
+    em.fb.ins().jump(estep, &[]);
+    em.fill_gate_tramp(g_tramp, g2);
+
     em.fb.switch_to_block(enext);
+    em.settle_seq();
     em.flush_seq();
     let ip = em.fb.use_var(v_cur_ip);
     em.store_ip(ip);
@@ -927,6 +1208,7 @@ pub(crate) fn emit_body(
     em.fb.ins().return_(&[]);
 
     em.fb.switch_to_block(eoof);
+    em.settle_seq();
     em.flush_seq();
     let ip = em.fb.use_var(v_cur_ip);
     em.store_opip(ip);
@@ -935,6 +1217,7 @@ pub(crate) fn emit_body(
     em.fb.ins().return_(&[]);
 
     em.fb.switch_to_block(estep);
+    em.settle_seq();
     em.flush_seq();
     let ip = em.fb.use_var(v_cur_ip);
     em.store_ip(ip);
@@ -958,6 +1241,7 @@ pub(crate) fn emit_body(
     em.fb.ins().brif(k, eret, &[], dispatch, &[]);
 
     em.fb.switch_to_block(eerr);
+    em.settle_seq();
     em.flush_seq();
     let ip = em.fb.use_var(v_cur_ip);
     em.store_opip(ip);
@@ -966,12 +1250,13 @@ pub(crate) fn emit_body(
     em.fb.ins().return_(&[]);
 
     em.fb.switch_to_block(eret);
+    em.settle_seq();
     em.fb.ins().return_(&[]);
 
     em.fb.switch_to_block(eend);
     let max = em.iconst(-1); // usize::MAX — garbage decode, same as bcgen's `_ =>`
     em.fb.def_var(v_cur_ip, max);
-    em.fb.ins().jump(estep, &[]);
+    em.fb.ins().jump(estep_g, &[]);
 
     // ---- op blocks ----
     for (i, (off, op)) in ops.iter().enumerate() {
@@ -988,47 +1273,36 @@ pub(crate) fn emit_body(
             cranelift_codegen::CodegenError::Verifier(errs),
         ) = &e
         {
-            eprintln!("verifier errors in body {body}:\n{errs}\n{}", ctx.func.display());
+            eprintln!(
+                "verifier errors in body {body}:\n{errs}\n{}",
+                ctx.func.display()
+            );
         }
         e
     })
 }
 
 impl Em<'_> {
-    /// One op block: the driver's per-op bookkeeping preamble, then semantics.
+    /// One op block: the driver's per-op bookkeeping as a batched-quota gate
+    /// (bcgen's `gateq!`/`gatep!`), then semantics.
     fn emit_op(&mut self, i: usize, off: usize, next: usize, op: &Op) {
         self.fb.switch_to_block(self.blocks[i]);
-        let o = self.iconst(off as i64);
-        self.fb.def_var(self.v.cur_ip, o);
-        // `if paused || *fuel == 0 { flush; return Flow::Next }` — same order
-        // as run_dispatch / bcgen's loop head.
-        let c1 = self.fb.create_block();
-        let p = self.fb.ins().load(I8, tf(), self.env.paused_p, 0);
-        self.fb.ins().brif(p, self.ex.enext, &[], c1, &[]);
-        self.fb.switch_to_block(c1);
-        let f = self.fb.ins().load(I64, tf(), self.env.fuel_p, 0);
-        let z0 = self.iconst(0);
-        let isz = self.fb.ins().icmp(IntCC::Equal, f, z0);
-        let c2 = self.fb.create_block();
-        self.fb.ins().brif(isz, self.ex.enext, &[], c2, &[]);
-        self.fb.switch_to_block(c2);
-        let f1 = self.fb.ins().iadd_imm_s(f, -1);
-        self.fb.ins().store(tf(), f1, self.env.fuel_p, 0);
-        let ol = self.fb.ins().load(I64, tf(), self.env.opsleft_p, 0);
-        let isz = self.fb.ins().icmp(IntCC::Equal, ol, z0);
-        let c3 = self.fb.create_block();
-        self.fb.ins().brif(isz, self.ex.eoof, &[], c3, &[]);
-        self.fb.switch_to_block(c3);
-        let o1 = self.fb.ins().iadd_imm_s(ol, -1);
-        self.fb.ins().store(tf(), o1, self.env.opsleft_p, 0);
+        let (_cont, tramp) = self.gate(i, off);
         self.semantics(i, off, next, op);
+        // the gate's cold trampoline — `fill_gate_tramp` needs the current
+        // block terminated, which `semantics` guarantees (every arm ends in a
+        // branch or return).
+        self.fill_gate_tramp(tramp, _cont);
     }
 
     fn semantics(&mut self, i: usize, off: usize, next: usize, op: &Op) {
         match op {
             Op::Move { dst, src } => {
                 self.emit_move(*dst, *src);
-                { let nb = self.next_blk(i); self.fb.ins().jump(nb, &[]); }
+                {
+                    let nb = self.next_blk(i);
+                    self.fb.ins().jump(nb, &[]);
+                }
             }
             Op::Jump { target } => {
                 let t = self.tgt_blk(target);
@@ -1039,18 +1313,21 @@ impl Em<'_> {
                 target,
                 is_true,
             } => {
-                let (regs, idx) = (self.regs(), self.iconst(cond.index() as i64));
-                let t8 = self.iconst8(*is_true as i64);
-                let k = self.hcall(H::IsBool, &[regs, idx, t8]).unwrap();
+                // `regs[cond] == Val::Bool(is_true)` — tag + payload byte.
+                let regs = self.regs();
+                let a = self.vaddr(regs, cond.index() as u32);
+                let t = self.ld_tag(a);
+                let want = self.tconst(self.lyt.t_bool);
+                let tb2 = self.fb.ins().icmp(IntCC::Equal, t, want);
+                let pb = self.fb.ins().load(I8, tf(), a, self.lyt.bool_pay as i32);
+                let bv = self.iconst8(*is_true as i64);
+                let peq = self.fb.ins().icmp(IntCC::Equal, pb, bv);
+                let k = self.fb.ins().band(tb2, peq);
                 let hit = self.mask_by_shadow(*cond, k);
                 let (tb, fb) = (self.tgt_blk(target), self.next_blk(i));
                 self.fb.ins().brif(hit, tb, &[], fb, &[]);
             }
-            Op::ForNext {
-                idx,
-                bound,
-                target,
-            } => {
+            Op::ForNext { idx, bound, target } => {
                 let iv = self.int_opnd(idx.index() as u32);
                 let bv = self.int_opnd(bound.index() as u32);
                 let i2 = self.fb.ins().iadd_imm_s(iv, 1);
@@ -1065,6 +1342,7 @@ impl Em<'_> {
                 let do_ret = self.fb.create_block();
                 self.root_flush(do_ret);
                 self.fb.switch_to_block(do_ret);
+                self.settle_seq();
                 self.hcall(H::OutReturn, &[self.env.out, vp]);
                 self.fb.ins().return_(&[]);
             }
@@ -1084,23 +1362,37 @@ impl Em<'_> {
                 Constant::Int(v) => {
                     let v = self.iconst(*v);
                     self.wr_int_dst(dst.index() as u32, v);
-                    { let nb = self.next_blk(i); self.fb.ins().jump(nb, &[]); }
+                    {
+                        let nb = self.next_blk(i);
+                        self.fb.ins().jump(nb, &[]);
+                    }
                 }
                 Constant::Float(v) => {
                     let v = self.fb.ins().f64const(*v);
                     self.wr_float_dst(dst.index() as u32, v);
-                    { let nb = self.next_blk(i); self.fb.ins().jump(nb, &[]); }
+                    {
+                        let nb = self.next_blk(i);
+                        self.fb.ins().jump(nb, &[]);
+                    }
                 }
                 Constant::Bool(b) => {
                     let v = self.iconst8(*b as i64);
-                    let (regs, idx) = (self.regs(), self.iconst(dst.index() as i64));
-                    self.hcall(H::WrB, &[regs, idx, v]);
-                    { let nb = self.next_blk(i); self.fb.ins().jump(nb, &[]); }
+                    let regs = self.regs();
+                    let a = self.vaddr(regs, dst.index() as u32);
+                    self.st_bool(a, v);
+                    {
+                        let nb = self.next_blk(i);
+                        self.fb.ins().jump(nb, &[]);
+                    }
                 }
                 Constant::Null => {
-                    let (regs, idx) = (self.regs(), self.iconst(dst.index() as i64));
-                    self.hcall(H::WrNull, &[regs, idx]);
-                    { let nb = self.next_blk(i); self.fb.ins().jump(nb, &[]); }
+                    let regs = self.regs();
+                    let a = self.vaddr(regs, dst.index() as u32);
+                    self.st_null(a);
+                    {
+                        let nb = self.next_blk(i);
+                        self.fb.ins().jump(nb, &[]);
+                    }
                 }
                 Constant::Str(id) => {
                     let (regs, d, id) = (
@@ -1119,35 +1411,45 @@ impl Em<'_> {
                 Constant::Array(_) => self.estep(),
             },
             Op::LoadBody { dst, body } => {
-                let (regs, d, b) = (
-                    self.regs(),
-                    self.iconst(dst.index() as i64),
-                    self.iconst32(body.index() as i64),
-                );
-                self.hcall(H::WrFn, &[regs, d, b]);
-                { let nb = self.next_blk(i); self.fb.ins().jump(nb, &[]); }
+                let regs = self.regs();
+                let a = self.vaddr(regs, dst.index() as u32);
+                let b = self.iconst32(body.index() as i64);
+                self.st_fn(a, b);
+                {
+                    let nb = self.next_blk(i);
+                    self.fb.ins().jump(nb, &[]);
+                }
             }
             Op::LoadEntry { dst, slot } => {
                 // entry-frame absolute slot: tb = regs - base*VS; v = tb[slot]
                 let (regs, base) = (self.regs(), self.env.base);
-                let boff = self.fb.ins().imul_imm_s(base, val_size());
+                let boff = self.fb.ins().imul_imm_s(base, self.lyt.val_size as i64);
                 let tb = self.fb.ins().isub(regs, boff);
                 let vp = self
                     .fb
                     .ins()
-                    .iadd_imm_s(tb, slot.index() as i64 * val_size());
-                let d = self.iconst(dst.index() as i64);
-                self.hcall(H::WrV, &[regs, d, vp]);
-                { let nb = self.next_blk(i); self.fb.ins().jump(nb, &[]); }
+                    .iadd_imm_s(tb, slot.index() as i64 * self.lyt.val_size as i64);
+                let d = self.vaddr(regs, dst.index() as u32);
+                self.cpy_val(d, vp);
+                {
+                    let nb = self.next_blk(i);
+                    self.fb.ins().jump(nb, &[]);
+                }
             }
             Op::StoreEntry { slot, src } => {
                 let vp = self.val_ptr(src.index() as u32);
                 let (regs, base) = (self.regs(), self.env.base);
-                let boff = self.fb.ins().imul_imm_s(base, val_size());
+                let boff = self.fb.ins().imul_imm_s(base, self.lyt.val_size as i64);
                 let tb = self.fb.ins().isub(regs, boff);
-                let s = self.iconst(slot.index() as i64);
-                self.hcall(H::WrV, &[tb, s, vp]);
-                { let nb = self.next_blk(i); self.fb.ins().jump(nb, &[]); }
+                let d = self
+                    .fb
+                    .ins()
+                    .iadd_imm_s(tb, slot.index() as i64 * self.lyt.val_size as i64);
+                self.cpy_val(d, vp);
+                {
+                    let nb = self.next_blk(i);
+                    self.fb.ins().jump(nb, &[]);
+                }
             }
             Op::BoolEq { dst, left, right } => self.emit_bool(i, *dst, *left, *right, true),
             Op::BoolNe { dst, left, right } => self.emit_bool(i, *dst, *left, *right, false),
@@ -1170,7 +1472,10 @@ impl Em<'_> {
                 self.fb.ins().brif(of, t, &[], okb, &[]);
                 self.fb.switch_to_block(okb);
                 self.wr_int_dst(dst.index() as u32, v);
-                { let nb = self.next_blk(i); self.fb.ins().jump(nb, &[]); }
+                {
+                    let nb = self.next_blk(i);
+                    self.fb.ins().jump(nb, &[]);
+                }
                 self.fill_err(t, ERR_OVFW);
             }
             Op::ModInt { dst, left, right } => {
@@ -1215,7 +1520,10 @@ impl Em<'_> {
                 self.fb.ins().brif(of, t, &[], okb, &[]);
                 self.fb.switch_to_block(okb);
                 self.wr_int_dst(dst.index() as u32, v);
-                { let nb = self.next_blk(i); self.fb.ins().jump(nb, &[]); }
+                {
+                    let nb = self.next_blk(i);
+                    self.fb.ins().jump(nb, &[]);
+                }
                 self.fill_err(t, ERR_OVFW);
             }
             Op::ModIntImm { dst, left, val } => {
@@ -1241,18 +1549,10 @@ impl Em<'_> {
             Op::IntNeImm { dst, left, val } => {
                 self.emit_eval_imm_i(i, *dst, *left, *val, IntCC::NotEqual)
             }
-            Op::AddFloat { dst, left, right } => {
-                self.emit_farit(i, *dst, *left, *right, FOp::Add)
-            }
-            Op::SubFloat { dst, left, right } => {
-                self.emit_farit(i, *dst, *left, *right, FOp::Sub)
-            }
-            Op::MultFloat { dst, left, right } => {
-                self.emit_farit(i, *dst, *left, *right, FOp::Mul)
-            }
-            Op::DivFloat { dst, left, right } => {
-                self.emit_farit(i, *dst, *left, *right, FOp::Div)
-            }
+            Op::AddFloat { dst, left, right } => self.emit_farit(i, *dst, *left, *right, FOp::Add),
+            Op::SubFloat { dst, left, right } => self.emit_farit(i, *dst, *left, *right, FOp::Sub),
+            Op::MultFloat { dst, left, right } => self.emit_farit(i, *dst, *left, *right, FOp::Mul),
+            Op::DivFloat { dst, left, right } => self.emit_farit(i, *dst, *left, *right, FOp::Div),
             Op::FloatLt { dst, left, right } => {
                 self.emit_eval_f(i, *dst, *left, *right, FloatCC::LessThan)
             }
@@ -1312,7 +1612,15 @@ impl Em<'_> {
                 left,
                 right,
                 is_true,
-            } => self.emit_brr(i, target, *left, Some(*right), None, *is_true, IntCC::SignedLessThan),
+            } => self.emit_brr(
+                i,
+                target,
+                *left,
+                Some(*right),
+                None,
+                *is_true,
+                IntCC::SignedLessThan,
+            ),
             Op::BIntLe {
                 target,
                 left,
@@ -1366,7 +1674,15 @@ impl Em<'_> {
                 left,
                 right,
                 is_true,
-            } => self.emit_brr(i, target, *left, Some(*right), None, *is_true, IntCC::NotEqual),
+            } => self.emit_brr(
+                i,
+                target,
+                *left,
+                Some(*right),
+                None,
+                *is_true,
+                IntCC::NotEqual,
+            ),
             Op::BIntLtImm {
                 target,
                 left,
@@ -1434,13 +1750,29 @@ impl Em<'_> {
                 left,
                 val,
                 is_true,
-            } => self.emit_brr(i, target, *left, None, Some(*val), *is_true, IntCC::NotEqual),
+            } => self.emit_brr(
+                i,
+                target,
+                *left,
+                None,
+                Some(*val),
+                *is_true,
+                IntCC::NotEqual,
+            ),
             Op::BFloatLt {
                 target,
                 left,
                 right,
                 is_true,
-            } => self.emit_brf(i, target, *left, Some(*right), None, *is_true, FloatCC::LessThan),
+            } => self.emit_brf(
+                i,
+                target,
+                *left,
+                Some(*right),
+                None,
+                *is_true,
+                FloatCC::LessThan,
+            ),
             Op::BFloatLe {
                 target,
                 left,
@@ -1488,19 +1820,43 @@ impl Em<'_> {
                 left,
                 right,
                 is_true,
-            } => self.emit_brf(i, target, *left, Some(*right), None, *is_true, FloatCC::Equal),
+            } => self.emit_brf(
+                i,
+                target,
+                *left,
+                Some(*right),
+                None,
+                *is_true,
+                FloatCC::Equal,
+            ),
             Op::BFloatNe {
                 target,
                 left,
                 right,
                 is_true,
-            } => self.emit_brf(i, target, *left, Some(*right), None, *is_true, FloatCC::NotEqual),
+            } => self.emit_brf(
+                i,
+                target,
+                *left,
+                Some(*right),
+                None,
+                *is_true,
+                FloatCC::NotEqual,
+            ),
             Op::BFloatLtImm {
                 target,
                 left,
                 val,
                 is_true,
-            } => self.emit_brf(i, target, *left, None, Some(*val), *is_true, FloatCC::LessThan),
+            } => self.emit_brf(
+                i,
+                target,
+                *left,
+                None,
+                Some(*val),
+                *is_true,
+                FloatCC::LessThan,
+            ),
             Op::BFloatLeImm {
                 target,
                 left,
@@ -1554,18 +1910,32 @@ impl Em<'_> {
                 left,
                 val,
                 is_true,
-            } => self.emit_brf(i, target, *left, None, Some(*val), *is_true, FloatCC::NotEqual),
+            } => self.emit_brf(
+                i,
+                target,
+                *left,
+                None,
+                Some(*val),
+                *is_true,
+                FloatCC::NotEqual,
+            ),
             Op::ToFloat { dst, src } => {
                 let iv = self.int_opnd(src.index() as u32);
                 let f = self.fb.ins().fcvt_from_sint(F64, iv);
                 self.wr_float_dst(dst.index() as u32, f);
-                { let nb = self.next_blk(i); self.fb.ins().jump(nb, &[]); }
+                {
+                    let nb = self.next_blk(i);
+                    self.fb.ins().jump(nb, &[]);
+                }
             }
             Op::Sqrt { dst, src } => {
                 let f = self.float_opnd(src.index() as u32);
                 let r = self.fb.ins().sqrt(f);
                 self.wr_float_dst(dst.index() as u32, r);
-                { let nb = self.next_blk(i); self.fb.ins().jump(nb, &[]); }
+                {
+                    let nb = self.next_blk(i);
+                    self.fb.ins().jump(nb, &[]);
+                }
             }
             // ---- helper-backed ops ----
             Op::NewArray { dst } => {
@@ -1686,7 +2056,16 @@ impl Em<'_> {
                     off,
                     next,
                     H::GetIndex,
-                    &[regs, d, s, ii, kk, self.env.ctx0, self.env.ctx1, self.env.out],
+                    &[
+                        regs,
+                        d,
+                        s,
+                        ii,
+                        kk,
+                        self.env.ctx0,
+                        self.env.ctx1,
+                        self.env.out,
+                    ],
                 );
             }
             Op::GetField {
@@ -1702,7 +2081,13 @@ impl Em<'_> {
                     self.iconst(*slot as i64),
                     self.iconst8(*kind as i64),
                 );
-                self.helper_op(i, off, next, H::GetField, &[regs, d, s, sl, kk, self.env.out]);
+                self.helper_op(
+                    i,
+                    off,
+                    next,
+                    H::GetField,
+                    &[regs, d, s, sl, kk, self.env.out],
+                );
             }
             Op::SetField {
                 receiver,
@@ -1793,7 +2178,10 @@ impl Em<'_> {
                 self.fb.switch_to_block(w);
                 let v = self.fb.ins().stack_load(I64, I64, self.slot_i, 0);
                 self.wr_int_dst(dst.index() as u32, v);
-                { let nb = self.next_blk(i); self.fb.ins().jump(nb, &[]); }
+                {
+                    let nb = self.next_blk(i);
+                    self.fb.ins().jump(nb, &[]);
+                }
             }
             Op::Bin {
                 dst,
@@ -1901,7 +2289,10 @@ impl Em<'_> {
         self.fb.ins().brif(of, t, &[], okb, &[]);
         self.fb.switch_to_block(okb);
         self.wr_int_dst(dst.index() as u32, v);
-        { let nb = self.next_blk(i); self.fb.ins().jump(nb, &[]); }
+        {
+            let nb = self.next_blk(i);
+            self.fb.ins().jump(nb, &[]);
+        }
         self.fill_err(t, ERR_OVFW);
     }
 
@@ -1913,7 +2304,10 @@ impl Em<'_> {
         let cc = if eq { IntCC::Equal } else { IntCC::NotEqual };
         let c = self.fb.ins().icmp(cc, l, r);
         self.wr_bool_dst(dst.index() as u32, c);
-        { let nb = self.next_blk(i); self.fb.ins().jump(nb, &[]); }
+        {
+            let nb = self.next_blk(i);
+            self.fb.ins().jump(nb, &[]);
+        }
     }
 
     fn bool_opnd(&mut self, r: Reg) -> Value {
@@ -1928,15 +2322,14 @@ impl Em<'_> {
             self.fb.switch_to_block(nb);
         }
         let good = self.fb.create_block();
-        let (regs, i64idx, addr) = (
-            self.regs(),
-            self.iconst(idx as i64),
-            self.fb.ins().stack_addr(I64, self.slot_b, 0),
-        );
-        let ok = self.hcall(H::Rb, &[regs, i64idx, addr]).unwrap();
+        let regs = self.regs();
+        let a = self.vaddr(regs, idx);
+        let t = self.ld_tag(a);
+        let want = self.tconst(self.lyt.t_bool);
+        let ok = self.fb.ins().icmp(IntCC::Equal, t, want);
         self.fb.ins().brif(ok, good, &[], self.ex.estep, &[]);
         self.fb.switch_to_block(good);
-        self.fb.ins().stack_load(I64, I8, self.slot_b, 0)
+        self.fb.ins().load(I8, tf(), a, self.lyt.bool_pay as i32)
     }
 
     fn emit_mod_int(&mut self, i: usize, dst: Reg, a: Value, b: Value) {
@@ -1958,7 +2351,10 @@ impl Em<'_> {
         self.fb.switch_to_block(run2);
         let v = self.fb.ins().srem(a, b);
         self.wr_int_dst(dst.index() as u32, v);
-        { let nb = self.next_blk(i); self.fb.ins().jump(nb, &[]); }
+        {
+            let nb = self.next_blk(i);
+            self.fb.ins().jump(nb, &[]);
+        }
         self.fill_err(tramp, ERR_MOD0);
     }
 
@@ -1967,7 +2363,10 @@ impl Em<'_> {
         let b = self.int_opnd(right.index() as u32);
         let c = self.fb.ins().icmp(cc, a, b);
         self.wr_bool_dst(dst.index() as u32, c);
-        { let nb = self.next_blk(i); self.fb.ins().jump(nb, &[]); }
+        {
+            let nb = self.next_blk(i);
+            self.fb.ins().jump(nb, &[]);
+        }
     }
 
     fn emit_eval_imm_i(&mut self, i: usize, dst: Reg, left: Reg, val: i64, cc: IntCC) {
@@ -1975,7 +2374,10 @@ impl Em<'_> {
         let b = self.iconst(val);
         let c = self.fb.ins().icmp(cc, a, b);
         self.wr_bool_dst(dst.index() as u32, c);
-        { let nb = self.next_blk(i); self.fb.ins().jump(nb, &[]); }
+        {
+            let nb = self.next_blk(i);
+            self.fb.ins().jump(nb, &[]);
+        }
     }
 
     fn emit_eval_f(&mut self, i: usize, dst: Reg, left: Reg, right: Reg, cc: FloatCC) {
@@ -1983,7 +2385,10 @@ impl Em<'_> {
         let b = self.float_opnd(right.index() as u32);
         let c = self.fb.ins().fcmp(cc, a, b);
         self.wr_bool_dst(dst.index() as u32, c);
-        { let nb = self.next_blk(i); self.fb.ins().jump(nb, &[]); }
+        {
+            let nb = self.next_blk(i);
+            self.fb.ins().jump(nb, &[]);
+        }
     }
 
     fn emit_eval_fimm(&mut self, i: usize, dst: Reg, left: Reg, val: i64, cc: FloatCC) {
@@ -1991,7 +2396,10 @@ impl Em<'_> {
         let b = self.fb.ins().f64const(f64::from_bits(val as u64));
         let c = self.fb.ins().fcmp(cc, a, b);
         self.wr_bool_dst(dst.index() as u32, c);
-        { let nb = self.next_blk(i); self.fb.ins().jump(nb, &[]); }
+        {
+            let nb = self.next_blk(i);
+            self.fb.ins().jump(nb, &[]);
+        }
     }
 
     fn emit_farit(&mut self, i: usize, dst: Reg, left: Reg, right: Reg, o: FOp) {
@@ -1999,7 +2407,10 @@ impl Em<'_> {
         let b = self.float_opnd(right.index() as u32);
         let v = o.emit(&mut self.fb, a, b);
         self.wr_float_dst(dst.index() as u32, v);
-        { let nb = self.next_blk(i); self.fb.ins().jump(nb, &[]); }
+        {
+            let nb = self.next_blk(i);
+            self.fb.ins().jump(nb, &[]);
+        }
     }
 
     fn emit_farit_imm(&mut self, i: usize, dst: Reg, left: Reg, val: i64, o: FOp) {
@@ -2007,13 +2418,25 @@ impl Em<'_> {
         let b = self.fb.ins().f64const(f64::from_bits(val as u64));
         let v = o.emit(&mut self.fb, a, b);
         self.wr_float_dst(dst.index() as u32, v);
-        { let nb = self.next_blk(i); self.fb.ins().jump(nb, &[]); }
+        {
+            let nb = self.next_blk(i);
+            self.fb.ins().jump(nb, &[]);
+        }
     }
 
     /// `StrEq`/`StrNe`: the (Str, Str) fast path via `bin_str`; anything else
     /// runs the op through `step` (which reaches `bin_cold` for the general
     /// pair — the interpreter's own behavior).
-    fn emit_str_eval(&mut self, i: usize, off: usize, next: usize, dst: Reg, left: Reg, right: Reg, eq: bool) {
+    fn emit_str_eval(
+        &mut self,
+        i: usize,
+        off: usize,
+        next: usize,
+        dst: Reg,
+        left: Reg,
+        right: Reg,
+        eq: bool,
+    ) {
         self.flush_seq();
         self.mark_op(off, next);
         let (regs, d, l, r, e) = (
@@ -2096,10 +2519,9 @@ impl Em<'_> {
             self.fb.ins().brif(dokv, c, &[], w, &[]);
             self.fb.switch_to_block(w);
             let regs = self.regs();
-            let sidx = self.iconst(s as i64);
-            let vp = self.hcall(H::Rval, &[regs, sidx]).unwrap();
-            let dd = self.iconst(d as i64);
-            self.hcall(H::WrV, &[regs, dd, vp]);
+            let vp = self.vaddr(regs, s);
+            let dd = self.vaddr(regs, d);
+            self.cpy_val(dd, vp);
             self.fb.ins().jump(c, &[]);
             self.fb.switch_to_block(c);
         } else if df.is_some() && sf.is_some() {
@@ -2115,10 +2537,9 @@ impl Em<'_> {
             self.fb.ins().brif(dokv, c, &[], w, &[]);
             self.fb.switch_to_block(w);
             let regs = self.regs();
-            let sidx = self.iconst(s as i64);
-            let vp = self.hcall(H::Rval, &[regs, sidx]).unwrap();
-            let dd = self.iconst(d as i64);
-            self.hcall(H::WrV, &[regs, dd, vp]);
+            let vp = self.vaddr(regs, s);
+            let dd = self.vaddr(regs, d);
+            self.cpy_val(dd, vp);
             self.fb.ins().jump(c, &[]);
             self.fb.switch_to_block(c);
         } else if let Some(dv) = di {
@@ -2131,8 +2552,8 @@ impl Em<'_> {
             // unshadowed dst: materialize a live shadow src into regs first
             let vp = self.val_ptr(s);
             let regs = self.regs();
-            let dd = self.iconst(d as i64);
-            self.hcall(H::WrV, &[regs, dd, vp]);
+            let dd = self.vaddr(regs, d);
+            self.cpy_val(dd, vp);
         }
     }
 
@@ -2160,11 +2581,12 @@ impl Em<'_> {
             self.fb.ins().brif(okv, fmiss, &[], genb, &[]);
             self.fb.switch_to_block(fmiss);
             let v = self.fb.use_var(ssv);
-            let (regs, dd) = (self.regs(), self.iconst(d as i64));
+            let regs = self.regs();
+            let dd = self.vaddr(regs, d);
             if dst_is_int {
-                self.hcall(H::WrF, &[regs, dd, v]);
+                self.st_float(dd, v);
             } else {
-                self.hcall(H::WrI, &[regs, dd, v]);
+                self.st_int(dd, v);
             }
             let z = self.iconst8(0);
             self.fb.def_var(dok, z);
@@ -2172,25 +2594,23 @@ impl Em<'_> {
             self.fb.switch_to_block(genb);
         }
         // generic: probe the authoritative slot for the wanted tag
-        let (slot, rh, wh) = if dst_is_int {
-            (self.slot_i, H::Ri, H::WrI)
+        let want = if dst_is_int {
+            self.lyt.t_int
         } else {
-            (self.slot_f, H::Rf, H::WrF)
+            self.lyt.t_float
         };
-        let _ = wh;
-        let (regs, ss, addr) = (
-            self.regs(),
-            self.iconst(s as i64),
-            self.fb.ins().stack_addr(I64, slot, 0),
-        );
-        let k = self.hcall(rh, &[regs, ss, addr]).unwrap();
+        let regs = self.regs();
+        let sa = self.vaddr(regs, s);
+        let t = self.ld_tag(sa);
+        let w8 = self.tconst(want);
+        let k = self.fb.ins().icmp(IntCC::Equal, t, w8);
         self.fb.ins().brif(k, good, &[], miss, &[]);
         self.fb.switch_to_block(good);
-        let v = self.fb.ins().stack_load(
-            I64,
+        let v = self.fb.ins().load(
             if dst_is_int { I64 } else { F64 },
-            slot,
-            0,
+            tf(),
+            sa,
+            self.lyt.val_pay as i32,
         );
         self.fb.def_var(dsv, v);
         let one = self.iconst8(1);
@@ -2198,18 +2618,19 @@ impl Em<'_> {
         self.fb.ins().jump(done, &[]);
         self.fb.switch_to_block(miss);
         let regs = self.regs();
-        let vp = self.hcall(H::Rval, &[regs, ss]).unwrap();
-        let dd = self.iconst(d as i64);
-        self.hcall(H::WrV, &[regs, dd, vp]);
+        let vp = self.vaddr(regs, s);
+        let dd = self.vaddr(regs, d);
+        self.cpy_val(dd, vp);
         let z = self.iconst8(0);
         self.fb.def_var(dok, z);
         self.fb.ins().jump(done, &[]);
         self.fb.switch_to_block(done);
     }
 
-    /// `CallDirect` — the inline fast path: `enter_call` via shim, then a direct
-    /// call to the callee's JIT body; `Flow::Return` pops and resumes in-place.
-    /// At/over `INLINE_CALL_DEPTH`, produce `Flow::Call` for the driver.
+    /// `CallDirect` — one `mj_call_body` hop: the shim runs the depth-cap
+    /// check, the `enter_call_regs` frame push, the callee body call, and
+    /// the `Flow::Return` pop — returning the rebuilt window pointer (or null
+    /// to propagate `out`).
     fn emit_call_direct(
         &mut self,
         i: usize,
@@ -2221,217 +2642,136 @@ impl Em<'_> {
     ) {
         let ap = self.reg_list_slot(args);
         let nargs = args.len();
-        // `code.ip = next; *op_ip = off` before either path (enter_call saves
-        // `code.ip` as the caller resume slot; errors locate via op_ip).
+        self.flush_seq();
+        // `code.ip = next; *op_ip = off` before the call (the shim's frame
+        // push saves `code.ip` as the caller resume slot; errors locate via
+        // op_ip).
         self.mark_op(off, next);
-        let depth = self.hcall(H::FramesLen, &[self.env.thread]).unwrap();
-        let cap = self.iconst(INLINE_CALL_DEPTH as i64);
-        let inl = self.fb.ins().icmp(IntCC::UnsignedLessThan, depth, cap);
-        let capt = self.fb.create_block();
-        let inlt = self.fb.create_block();
-        self.fb.ins().brif(inl, inlt, &[], capt, &[]);
-
-        // depth cap → `Flow::Call` for the driver
-        self.fb.switch_to_block(capt);
-        self.flush_seq();
-        let (regs, b, d, n) = (
-            self.regs(),
-            self.iconst32(body.index() as i64),
+        // the callee draws fuel/ops_left through its own `bcn` — charge our
+        // spent ops first so its reads are exact
+        self.settle_seq();
+        let (b, d, n) = (
+            self.iconst(body.index() as i64),
             self.iconst(dst.index() as i64),
             self.iconst(nargs as i64),
         );
-        self.hcall(H::OutCallDirect, &[self.env.out, regs, b, d, ap, n]);
-        self.fb.ins().return_(&[]);
-
-        // inline: enter the callee frame, call its JIT body, pop on Return
-        self.fb.switch_to_block(inlt);
-        self.flush_seq();
-        let (regs, b, d, n, zp) = (
-            self.regs(),
-            self.iconst32(body.index() as i64),
-            self.iconst(dst.index() as i64),
-            self.iconst(nargs as i64),
-            self.iconst(0),
-        );
-        let k = self
+        let rp = self
             .hcall(
-                H::Enter,
+                H::CallBody,
                 &[
                     self.env.thread,
                     self.env.code,
                     self.env.chunks,
+                    self.env.bodies_tbl,
                     b,
                     d,
-                    regs,
                     ap,
                     n,
-                    zp,
-                    zp,
+                    self.env.ctx0,
+                    self.env.ctx1,
+                    self.env.strs,
+                    self.env.sigs,
+                    self.env.fuel_p,
+                    self.env.opip_p,
                     self.env.out,
                 ],
             )
             .unwrap();
-        let callb = self.fb.create_block();
-        self.fb.ins().brif(k, self.ex.eret, &[], callb, &[]);
-        self.fb.switch_to_block(callb);
-        self.call_body(self.brefs[body.index()]);
-        self.emit_pop_resume(i, dst);
+        self.post_call(i, dst, rp);
     }
 
-    /// `Call` — resolve the callee register through `call_target`, then the
-    /// same inline path with an indirect call through the `mj_bodies` table.
-    fn emit_call(&mut self, i: usize, off: usize, next: usize, dst: Reg, callee: Reg, args: &[Reg]) {
-        // Resolve first — `call_target` reads regs, so flush before it (this
-        // covers the error-arms' `*op_ip` too). bcgen resolves the target
-        // before storing `code.ip = next`, so the same ordering holds here.
+    /// `Call` — one `mj_call_dyn` hop: callee resolution (incl. the
+    /// `CallTarget::Value` signature check), depth cap, enter/run/pop.
+    fn emit_call(
+        &mut self,
+        i: usize,
+        off: usize,
+        next: usize,
+        dst: Reg,
+        callee: Reg,
+        args: &[Reg],
+    ) {
+        // Flush first — the shim reads the callee Val and arg slots out of
+        // the window. `code.ip = next; *op_ip = off` before the call: a
+        // `not_callable` error locates via `op_ip` exactly like the
+        // interpreter's decoder-advanced arm.
         self.flush_seq();
-        let bp = self.fb.ins().stack_addr(I64, self.slot_c, 0);
-        let cp = self.fb.ins().stack_addr(I64, self.slot_c, 8);
-        let np = self.fb.ins().stack_addr(I64, self.slot_c, 16);
-        let (regs, c) = (self.regs(), self.iconst(callee.index() as i64));
-        let k = self
-            .hcall(
-                H::CallTarget,
-                &[regs, c, self.env.sigs, bp, cp, np, self.env.out],
-            )
-            .unwrap();
-        let rok = self.fb.create_block();
-        let rerr = self.fb.create_block();
-        self.fb.ins().brif(k, rerr, &[], rok, &[]);
-        self.fb.switch_to_block(rerr);
-        let o = self.iconst(off as i64);
-        self.store_opip(o);
-        self.fb.ins().return_(&[]);
-
-        self.fb.switch_to_block(rok);
+        self.mark_op(off, next);
+        self.settle_seq();
         let ap = self.reg_list_slot(args);
         let nargs = args.len();
-        self.mark_op(off, next);
-        let depth = self.hcall(H::FramesLen, &[self.env.thread]).unwrap();
-        let cap = self.iconst(INLINE_CALL_DEPTH as i64);
-        let inl = self.fb.ins().icmp(IntCC::UnsignedLessThan, depth, cap);
-        let capt = self.fb.create_block();
-        let inlt = self.fb.create_block();
-        self.fb.ins().brif(inl, inlt, &[], capt, &[]);
-
-        self.fb.switch_to_block(capt);
-        let (regs2, c2, d, n) = (
+        let (regs, c, d, n) = (
             self.regs(),
             self.iconst(callee.index() as i64),
             self.iconst(dst.index() as i64),
             self.iconst(nargs as i64),
         );
-        self.hcall(H::OutCall, &[self.env.out, regs2, c2, d, ap, n]);
-        self.fb.ins().return_(&[]);
-
-        self.fb.switch_to_block(inlt);
-        let b32 = self.fb.ins().stack_load(I64, I32, self.slot_c, 0);
-        let caps = self.fb.ins().stack_load(I64, I64, self.slot_c, 8);
-        let ncaps = self.fb.ins().stack_load(I64, I64, self.slot_c, 16);
-        let (regs, d, n) = (
-            self.regs(),
-            self.iconst(dst.index() as i64),
-            self.iconst(nargs as i64),
-        );
-        let k = self
+        let rp = self
             .hcall(
-                H::Enter,
+                H::CallDyn,
                 &[
                     self.env.thread,
                     self.env.code,
                     self.env.chunks,
-                    b32,
-                    d,
+                    self.env.sigs,
                     regs,
+                    c,
+                    d,
                     ap,
                     n,
-                    caps,
-                    ncaps,
+                    self.env.bodies_tbl,
+                    self.env.ctx0,
+                    self.env.ctx1,
+                    self.env.strs,
+                    self.env.fuel_p,
+                    self.env.opip_p,
                     self.env.out,
                 ],
             )
             .unwrap();
-        let callb = self.fb.create_block();
-        self.fb.ins().brif(k, self.ex.eret, &[], callb, &[]);
-        self.fb.switch_to_block(callb);
-        // `BODIES[body]` — indirect call through the fn-ptr data table
-        let b64 = self.fb.ins().uextend(I64, b32);
-        let boff = self.fb.ins().ishl_imm_s(b64, 3);
-        let adr = self.fb.ins().iadd(self.env.bodies_tbl, boff);
-        let fptr = self.fb.ins().load(I64, tf().with_readonly(), adr, 0);
-        let sig_ref = self.sigref();
-        let e = self.env;
-        self.fb.ins().call_indirect(
-            sig_ref,
-            fptr,
-            &[
-                e.thread, e.code, e.ctx0, e.ctx1, e.strs, e.chunks, e.sigs, e.fuel_p, e.opip_p,
-                e.out,
-            ],
-        );
-        self.emit_pop_resume(i, dst);
+        self.post_call(i, dst, rp);
     }
 
-    /// Direct call to a callee JIT body — the same extern-C signature the
-    /// driver uses.
-    fn call_body(&mut self, f: FuncRef) {
-        let e = self.env;
-        self.fb.ins().call(
-            f,
-            &[
-                e.thread, e.code, e.ctx0, e.ctx1, e.strs, e.chunks, e.sigs, e.fuel_p, e.opip_p,
-                e.out,
-            ],
-        );
-    }
-
-    /// After an inlined callee returns: `pop_return` (the driver's Return
-    /// handling), rebuild the caller window, refresh dst's shadow, resume at
-    /// the next op. Any other `out` propagates verbatim via `eret`.
-    fn emit_pop_resume(&mut self, i: usize, dst: Reg) {
-        let k = self
-            .hcall(H::PopReturn, &[self.env.thread, self.env.code, self.env.out])
-            .unwrap();
-        let two = self.iconst8(2);
-        let popped = self.fb.ins().icmp(IntCC::Equal, k, two);
+    /// After an inlined callee returns through the megashim: null means
+    /// propagate `out` verbatim (`eret`); otherwise the returned pointer is
+    /// the caller's rebuilt window — re-pin it, re-arm the quota (the callee
+    /// consumed fuel/ops_left through its own `bcn`), refresh dst's shadow,
+    /// and resume at the next op.
+    fn post_call(&mut self, i: usize, dst: Reg, rp: Value) {
+        let z = self.iconst(0);
+        let isz = self.fb.ins().icmp(IntCC::Equal, rp, z);
         let resumed = self.fb.create_block();
-        self.fb.ins().brif(popped, resumed, &[], self.ex.eret, &[]);
+        self.fb.ins().brif(isz, self.ex.eret, &[], resumed, &[]);
         self.fb.switch_to_block(resumed);
-        // callee's enter_call may have moved `thread.regs` — rebuild the window
-        let rp = self.hcall(H::RegsPtr, &[self.env.thread]).unwrap();
-        let boff = self.fb.ins().imul_imm_s(self.env.base, val_size());
-        let regs2 = self.fb.ins().iadd(rp, boff);
-        self.fb.def_var(self.v.regs, regs2);
+        self.rearm_seq();
+        self.fb.def_var(self.v.regs, rp);
+        let regs2 = rp;
         let d = dst.index() as u32;
         if let Some(&(sv, ok)) = self.v.int.get(&d) {
-            let idx = self.iconst(d as i64);
-            let addr = self.fb.ins().stack_addr(I64, self.slot_i, 0);
-            let k = self.hcall(H::Ri, &[regs2, idx, addr]).unwrap();
-            let v = self.fb.ins().stack_load(I64, I64, self.slot_i, 0);
+            let a = self.vaddr(regs2, d);
+            let t = self.ld_tag(a);
+            let want = self.tconst(self.lyt.t_int);
+            let k = self.fb.ins().icmp(IntCC::Equal, t, want);
+            let v = self.fb.ins().load(I64, tf(), a, self.lyt.val_pay as i32);
             let z = self.iconst(0);
             let sv0 = self.fb.ins().select(k, v, z);
             self.fb.def_var(sv, sv0);
             self.fb.def_var(ok, k);
         } else if let Some(&(sv, ok)) = self.v.float.get(&d) {
-            let idx = self.iconst(d as i64);
-            let addr = self.fb.ins().stack_addr(I64, self.slot_f, 0);
-            let k = self.hcall(H::Rf, &[regs2, idx, addr]).unwrap();
-            let v = self.fb.ins().stack_load(I64, F64, self.slot_f, 0);
+            let a = self.vaddr(regs2, d);
+            let t = self.ld_tag(a);
+            let want = self.tconst(self.lyt.t_float);
+            let k = self.fb.ins().icmp(IntCC::Equal, t, want);
+            let v = self.fb.ins().load(F64, tf(), a, self.lyt.val_pay as i32);
             let z = self.fb.ins().f64const(0.0);
             let sv0 = self.fb.ins().select(k, v, z);
             self.fb.def_var(sv, sv0);
             self.fb.def_var(ok, k);
         }
-        { let nb = self.next_blk(i); self.fb.ins().jump(nb, &[]); }
-    }
-
-    /// `import_signature` for indirect body calls.
-    fn sigref(&mut self) -> ir::SigRef {
-        let mut sig = Signature::new(cranelift_codegen::isa::CallConv::SystemV);
-        for _ in 0..10 {
-            sig.params.push(AbiParam::new(I64));
+        {
+            let nb = self.next_blk(i);
+            self.fb.ins().jump(nb, &[]);
         }
-        self.fb.func.import_signature(sig)
     }
 }
 

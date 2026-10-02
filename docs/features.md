@@ -206,3 +206,33 @@ prime_numbers 245→196–210ms (typed indexing ≈ −10%), physics ~unchanged,
 fib_iter/fib_rec unchanged. Rejected along the way: contiguous gap-fill of
 sparse regions (regressed hot inner loops) and `_vN` write-forwarding locals
 (the extra copies cost more than the `rd` slot loads they saved — +6–7%).
+
+## JIT round-2 perf — branch `jit-perf` (PR haydenflinner/mimas#7)
+
+Four layered optimizations over the tier above, all semantics-preserving
+(helpers/`estep` still provide the ground truth):
+
+- **Quota batching (M1):** CLIF `bcn`/`bcn0` vars mirror bcgen's
+  `settle!`/`gateq!`/`gatep!`: each op decrements a batched counter; pause,
+  fuel-out and ops_left exhaustion escape through cold gate trampolines;
+  `settle` runs at every observable boundary (calls, helper ops, exits).
+- **Bulk shadow flush (M2):** one `mj_flush` FFI call drains a packed
+  `FlushEnt` list — replaces per-register `wr_i`/`wr_f` calls.
+- **Megacalls (M3):** `mj_call_body`/`mj_call_dyn` fold callee resolution,
+  `enter_call_regs` frame push, callee `BodyFn` invocation, and the
+  `Flow::Return` pop/truncate/dst writeback into one FFI hop, returning the
+  rebuilt caller-window pointer for re-pinning.
+- **Direct `Val` access (M4):** `bc::jit::layout()` probes the live layout —
+  discriminant position/width, `Int`/`Float`/`Bool`/`Fn` payload offsets,
+  `ThreadState`/`Frame`/`Decoder` fields, `Vec` header order — by semantic
+  round-trip (mutate bytes of a known `Val`, `ptr::read` it back and compare
+  `discriminant()`; invalid patterns decode as "other", never abort).
+  Emitted code then does tag compares + payload loads/stores inline —
+  `ri`/`rf`/`rval`/`wr_*` FFI calls vanish from hot paths.
+  **Gotcha:** `size_of::<Discriminant<Val>>` (8) is the *token* width, not
+  the field width — rustc leaves stale bytes in discriminant padding, so
+  the probe tries widths smallest-first and emits 1-byte tag compares.
+- Result (release): mandelbrot jit 117ms vs bc 199ms (**jit wins x1.7**);
+  fib_iter 89 vs 60; prime_numbers 334 vs 255; fib_rec 1006 vs 723 and
+  physics 1065 vs 273 — call-heavy still trails; next lever is inlining /
+  direct body dispatch to skip the megacall FFI hop.
