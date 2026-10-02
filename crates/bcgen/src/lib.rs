@@ -90,6 +90,7 @@ pub fn emit(program: &Program, vm: &str) -> String {
 enum W {
     Int,
     Float,
+    Bool,
     /// The written value copies another register — inherits its class.
     Copy(u32),
     /// Anything else: the register isn't eligible for a scalar shadow.
@@ -105,6 +106,7 @@ enum W {
 struct Sh {
     int: HashSet<u32>,
     float: HashSet<u32>,
+    bools: HashSet<u32>,
 }
 
 impl Sh {
@@ -118,6 +120,12 @@ impl Sh {
         self.float
             .contains(&(r.index() as u32))
             .then(|| format!("r{}f", r.index()))
+    }
+    /// The shadow local's name if `r` is bool-shadowed.
+    fn bool(&self, r: Reg) -> Option<String> {
+        self.bools
+            .contains(&(r.index() as u32))
+            .then(|| format!("r{}b", r.index()))
     }
     /// Read `r` as a `Val` — from the live shadow (regs may lag under deferred
     /// writeback), else the authoritative slot. Emitted parenthesized so it's
@@ -134,19 +142,27 @@ impl Sh {
                 "(if r{i}ok {{ Val::Float({v}) }} else {{ rd(regs, {}) }})",
                 reg(r)
             )
+        } else if let Some(v) = self.bool(r) {
+            format!(
+                "(if r{i}ok {{ Val::Bool({v}) }} else {{ rd(regs, {}) }})",
+                reg(r)
+            )
         } else {
             format!("rd(regs, {})", reg(r))
         }
     }
 
-    /// Scalar-write under deferred writeback: `valexpr` is a bare `i64`/`f64`.
-    /// A shadowed register updates only the local + flag — `regs` is synced
-    /// lazily by `flush!()` at body exits and call boundaries; an unshadowed
-    /// register writes the tagged `Val` through as before.
+    /// Scalar-write under deferred writeback: `valexpr` is a bare
+    /// `i64`/`f64`/`bool`. A shadowed register updates only the local + flag —
+    /// `regs` is synced lazily by `flush!()` at body exits and call
+    /// boundaries; an unshadowed register writes the tagged `Val` through as
+    /// before.
     fn wr_shadow(&self, s: &mut String, r: Reg, kind: &str, valexpr: &str) {
         if let Some(v) = self.int(r) {
             let _ = writeln!(s, "{v} = {valexpr}; r{idx}ok = true;", idx = r.index());
         } else if let Some(v) = self.float(r) {
+            let _ = writeln!(s, "{v} = {valexpr}; r{idx}ok = true;", idx = r.index());
+        } else if let Some(v) = self.bool(r) {
             let _ = writeln!(s, "{v} = {valexpr}; r{idx}ok = true;", idx = r.index());
         } else {
             let _ = writeln!(s, "wr(regs, {}, Val::{kind}({valexpr}));", reg(r));
@@ -171,6 +187,13 @@ impl Sh {
                 reg(r),
                 i = r.index()
             );
+        } else if self.bool(r).is_some() {
+            let _ = writeln!(
+                s,
+                "match ({valexpr}) {{ Val::Bool(x) => {{ r{i}b = x; r{i}ok = true; }}, v => {{ r{i}ok = false; wr(regs, {}, v) }} }};",
+                reg(r),
+                i = r.index()
+            );
         } else {
             let _ = writeln!(s, "wr(regs, {}, ({valexpr}));", reg(r));
         }
@@ -192,6 +215,12 @@ impl Sh {
                 "if r{r}ok {{ wr(regs, Reg::from({r}u32), Val::Float(r{r}f)); }}"
             );
         }
+        for &r in &self.bools {
+            let _ = writeln!(
+                s,
+                "if r{r}ok {{ wr(regs, Reg::from({r}u32), Val::Bool(r{r}b)); }}"
+            );
+        }
     }
 }
 
@@ -203,11 +232,15 @@ fn analyze(ops: &[(usize, Op)], nregs: u32) -> Sh {
     let mut put = |r: Reg, w: W| writes.entry(r.index() as u32).or_default().push(w);
     let mut int_reads: HashSet<u32> = HashSet::new();
     let mut float_reads: HashSet<u32> = HashSet::new();
+    let mut bool_reads: HashSet<u32> = HashSet::new();
     let mut iread = |r: Reg| {
         int_reads.insert(r.index() as u32);
     };
     let mut fread = |r: Reg| {
         float_reads.insert(r.index() as u32);
+    };
+    let mut bread = |r: Reg| {
+        bool_reads.insert(r.index() as u32);
     };
     for (_, op) in ops {
         match op {
@@ -217,14 +250,19 @@ fn analyze(ops: &[(usize, Op)], nregs: u32) -> Sh {
                 match constant {
                     Constant::Int(_) => W::Int,
                     Constant::Float(_) => W::Float,
+                    Constant::Bool(_) => W::Bool,
                     _ => W::Dyn,
                 },
             ),
             Op::AddInt { dst, left, right }
             | Op::SubInt { dst, left, right }
             | Op::MultInt { dst, left, right }
-            | Op::ModInt { dst, left, right }
-            | Op::IntLt { dst, left, right }
+            | Op::ModInt { dst, left, right } => {
+                iread(*left);
+                iread(*right);
+                put(*dst, W::Int);
+            }
+            Op::IntLt { dst, left, right }
             | Op::IntLe { dst, left, right }
             | Op::IntGt { dst, left, right }
             | Op::IntGe { dst, left, right }
@@ -232,20 +270,7 @@ fn analyze(ops: &[(usize, Op)], nregs: u32) -> Sh {
             | Op::IntNe { dst, left, right } => {
                 iread(*left);
                 iread(*right);
-                put(
-                    *dst,
-                    if matches!(
-                        op,
-                        Op::AddInt { .. }
-                            | Op::SubInt { .. }
-                            | Op::MultInt { .. }
-                            | Op::ModInt { .. }
-                    ) {
-                        W::Int
-                    } else {
-                        W::Dyn
-                    },
-                );
+                put(*dst, W::Bool);
             }
             Op::AddIntImm { dst, left, .. }
             | Op::SubIntImm { dst, left, .. }
@@ -261,7 +286,7 @@ fn analyze(ops: &[(usize, Op)], nregs: u32) -> Sh {
             | Op::IntEqImm { dst, left, .. }
             | Op::IntNeImm { dst, left, .. } => {
                 iread(*left);
-                put(*dst, W::Dyn);
+                put(*dst, W::Bool);
             }
             Op::AddFloat { dst, left, right }
             | Op::SubFloat { dst, left, right }
@@ -279,7 +304,7 @@ fn analyze(ops: &[(usize, Op)], nregs: u32) -> Sh {
             | Op::FloatNe { dst, left, right } => {
                 fread(*left);
                 fread(*right);
-                put(*dst, W::Dyn);
+                put(*dst, W::Bool);
             }
             Op::AddFloatImm { dst, left, .. }
             | Op::SubFloatImm { dst, left, .. }
@@ -295,7 +320,7 @@ fn analyze(ops: &[(usize, Op)], nregs: u32) -> Sh {
             | Op::FloatEqImm { dst, left, .. }
             | Op::FloatNeImm { dst, left, .. } => {
                 fread(*left);
-                put(*dst, W::Dyn);
+                put(*dst, W::Bool);
             }
             Op::Len { dst, .. } => put(*dst, W::Int),
             Op::ToFloat { dst, src } => {
@@ -341,21 +366,30 @@ fn analyze(ops: &[(usize, Op)], nregs: u32) -> Sh {
             | Op::BFloatGeImm { left, .. }
             | Op::BFloatEqImm { left, .. }
             | Op::BFloatNeImm { left, .. } => fread(*left),
+            // Bool producers — the shadow keeps them as native `bool`.
+            Op::BoolEq {
+                dst, left, right, ..
+            }
+            | Op::BoolNe {
+                dst, left, right, ..
+            } => {
+                bread(*left);
+                bread(*right);
+                put(*dst, W::Bool);
+            }
+            Op::StrEq { dst, .. }
+            | Op::StrNe { dst, .. }
+            | Op::In { dst, .. }
+            | Op::IsInstance { dst, .. }
+            | Op::IsRaised { dst, .. } => put(*dst, W::Bool),
             // every other op that carries a dst writes a dynamically-typed
-            // value (bools, strings, calls, collections, ...)
+            // value (strings, calls, collections, ...)
             Op::GetField { dst, .. }
             | Op::GetIndex { dst, .. }
             | Op::LoadBody { dst, .. }
             | Op::LoadEntry { dst, .. }
-            | Op::BoolEq { dst, .. }
-            | Op::BoolNe { dst, .. }
-            | Op::StrEq { dst, .. }
-            | Op::StrNe { dst, .. }
             | Op::Bin { dst, .. }
             | Op::Unary { dst, .. }
-            | Op::In { dst, .. }
-            | Op::IsInstance { dst, .. }
-            | Op::IsRaised { dst, .. }
             | Op::UnwrapRaised { dst, .. }
             | Op::Unwrap { dst, .. }
             | Op::UnwrapUnit { dst, .. }
@@ -367,9 +401,11 @@ fn analyze(ops: &[(usize, Op)], nregs: u32) -> Sh {
             | Op::Call { dst, .. }
             | Op::CallDirect { dst, .. }
             | Op::CallNative { dst, .. } => put(*dst, W::Dyn),
+            Op::JumpIf { cond, .. } => {
+                bread(*cond);
+            }
             // no register destination
             Op::Jump { .. }
-            | Op::JumpIf { .. }
             | Op::Switch { .. }
             | Op::Push { .. }
             | Op::Insert { .. }
@@ -384,26 +420,34 @@ fn analyze(ops: &[(usize, Op)], nregs: u32) -> Sh {
 
     let mut int: HashSet<u32> = HashSet::new();
     let mut float: HashSet<u32> = HashSet::new();
+    let mut bools: HashSet<u32> = HashSet::new();
     // Phase 1: never-written registers (params, scratch) — the only writers
     // can't pin a class, so the *reads* decide. An unwritten reg shadowed as
     // int that actually holds a float at runtime bails to `step` at body
-    // entry, so at most one of the two sets claims it.
+    // entry, so at most one of the three sets claims it.
     for r in 0..nregs {
         if writes.contains_key(&r) {
             continue;
         }
-        match (int_reads.contains(&r), float_reads.contains(&r)) {
-            (true, false) => {
+        match (
+            int_reads.contains(&r),
+            float_reads.contains(&r),
+            bool_reads.contains(&r),
+        ) {
+            (true, false, false) => {
                 int.insert(r);
             }
-            (false, true) => {
+            (false, true, false) => {
                 float.insert(r);
+            }
+            (false, false, true) => {
+                bools.insert(r);
             }
             _ => {}
         }
     }
     // Phase 2 fixpoint: a written reg shadows as int iff every writer produces
-    // Int or Copies an int-set member (likewise float).
+    // Int or Copies an int-set member (likewise float/bool).
     loop {
         let mut changed = false;
         for (&r, ws) in &writes {
@@ -415,6 +459,11 @@ fn analyze(ops: &[(usize, Op)], nregs: u32) -> Sh {
             let ok_f = ws.iter().all(|w| match w {
                 W::Float => true,
                 W::Copy(src) => float.contains(src),
+                _ => false,
+            });
+            let ok_b = ws.iter().all(|w| match w {
+                W::Bool => true,
+                W::Copy(src) => bools.contains(src),
                 _ => false,
             });
             if ok_i != int.contains(&r) {
@@ -433,12 +482,20 @@ fn analyze(ops: &[(usize, Op)], nregs: u32) -> Sh {
                 }
                 changed = true;
             }
+            if ok_b != bools.contains(&r) {
+                if ok_b {
+                    bools.insert(r);
+                } else {
+                    bools.remove(&r);
+                }
+                changed = true;
+            }
         }
         if !changed {
             break;
         }
     }
-    Sh { int, float }
+    Sh { int, float, bools }
 }
 
 fn emit_body(w: &mut String, program: &Program, body: usize) {
@@ -490,6 +547,15 @@ fn emit_body(w: &mut String, program: &Program, body: usize) {
             "    let (mut r{r}f, mut r{r}ok) = match rd(regs, Reg::from({r}u32)) {{\n\
              \x20       Val::Float(v) => (v, true),\n\
              \x20       _ => (0.0f64, false),\n\
+             \x20   }};"
+        );
+    }
+    for &r in &sh.bools {
+        let _ = writeln!(
+            w,
+            "    let (mut r{r}b, mut r{r}ok) = match rd(regs, Reg::from({r}u32)) {{\n\
+             \x20       Val::Bool(v) => (v, true),\n\
+             \x20       _ => (false, false),\n\
              \x20   }};"
         );
     }
@@ -904,6 +970,13 @@ fn defer(arm: &str, sh: &Sh, restock: u64) -> String {
             &format!("(if r{r}ok {{ Val::Float(r{r}f) }} else {{ {plain} }})"),
         );
     }
+    for &r in &sh.bools {
+        let plain = format!("rd(regs, Reg::from({r}u32))");
+        out = out.replace(
+            &plain,
+            &format!("(if r{r}ok {{ Val::Bool(r{r}b) }} else {{ {plain} }})"),
+        );
+    }
     out
 }
 
@@ -1126,6 +1199,14 @@ fn emit_op(
                     didx = dst.index(),
                     sidx = src.index()
                 );
+            } else if let (Some(d), Some(sv)) = (sh.bool(*dst), sh.bool(*src)) {
+                wln!(
+                    "{d} = {sv}; r{didx}ok = r{sidx}ok; if !r{didx}ok {{ wr(regs, {}, rd(regs, {})) }} code.ip = {next};",
+                    reg(*dst),
+                    reg(*src),
+                    didx = dst.index(),
+                    sidx = src.index()
+                );
             } else {
                 sh.wr_val(&mut s, *dst, &sh.rdv(*src));
                 wln!("code.ip = {next};");
@@ -1199,13 +1280,24 @@ fn emit_op(
             wln!("code.ip = {next};");
         }
         Op::SetIndex { set, index, value } => {
+            // `(Array, Int)` is the hot shape — bounds-check inline, store
+            // straight into the borrowed vec; everything else keeps the
+            // generic helper (identical `pos` error contract).
+            let se = sh.rdv(*set);
+            let ie = sh.rdv(*index);
+            let ve = sh.rdv(*value);
             wln!("*op_ip = {offset};");
+            wln!("match ({se}, {ie}) {{");
+            wln!("    (Val::Array(a), Val::Int(i)) => {{");
+            wln!("        let Ok(u) = usize::try_from(i) else {{ return Err(RtErr::IndexOutOfBounds) }};");
+            wln!("        let mut arr = a.0.borrow_mut(&ctx);");
+            wln!("        if u >= arr.len() {{ return Err(RtErr::IndexOutOfBounds) }};");
+            wln!("        arr[u] = {ve};");
+            wln!("    }},");
             wln!(
-                "if let Err(e) = set_index(ctx, rd(regs, {}), rd(regs, {}), rd(regs, {})) {{ return Err(e) }};",
-                reg(*set),
-                reg(*index),
-                reg(*value)
+                "    (sv, iv) => {{ if let Err(e) = set_index(ctx, sv, iv, {ve}) {{ return Err(e) }} }},"
             );
+            wln!("}}");
             wln!("code.ip = {next};");
         }
         Op::GetIndex {
@@ -1214,13 +1306,21 @@ fn emit_op(
             index,
             kind,
         } => {
+            let se = sh.rdv(*set);
+            let ie = sh.rdv(*index);
             wln!("*op_ip = {offset};");
+            wln!("let v = match ({se}, {ie}) {{");
+            wln!("    (Val::Array(a), Val::Int(i)) => {{");
+            wln!("        let Ok(u) = usize::try_from(i) else {{ return Err(RtErr::IndexOutOfBounds) }};");
+            wln!("        let arr = a.0.borrow();");
+            wln!("        if u >= arr.len() {{ return Err(RtErr::IndexOutOfBounds) }};");
+            wln!("        arr[u]");
+            wln!("    }},");
             wln!(
-                "let v = match get_index(ctx, rd(regs, {}), rd(regs, {}), {}) {{ Ok(v) => v, Err(e) => {{ return Err(e) }} }};",
-                reg(*set),
-                reg(*index),
+                "    (sv, iv) => match get_index(ctx, sv, iv, {}) {{ Ok(v) => v, Err(e) => {{ return Err(e) }} }},",
                 access_kind(*kind)
             );
+            wln!("}};");
             wln!("wr(regs, {}, v); code.ip = {next};", reg(*dst));
         }
         Op::GetField {
@@ -1264,31 +1364,39 @@ fn emit_op(
             wln!("}}");
             wln!("code.ip = {next};");
         }
-        Op::LoadConst { dst, constant } => match (sh.int(*dst), sh.float(*dst)) {
-            (Some(d), _) if matches!(constant, Constant::Int(_)) => {
-                let Constant::Int(v) = constant else {
-                    unreachable!()
-                };
-                wln!("{d} = {v}i64; r{}ok = true; code.ip = {next};", dst.index(),);
+        Op::LoadConst { dst, constant } => {
+            match (sh.int(*dst), sh.float(*dst), sh.bool(*dst)) {
+                (Some(d), _, _) if matches!(constant, Constant::Int(_)) => {
+                    let Constant::Int(v) = constant else {
+                        unreachable!()
+                    };
+                    wln!("{d} = {v}i64; r{}ok = true; code.ip = {next};", dst.index(),);
+                }
+                (_, Some(d), _) if matches!(constant, Constant::Float(_)) => {
+                    let Constant::Float(v) = constant else {
+                        unreachable!()
+                    };
+                    wln!(
+                        "{d} = f64::from_bits({}u64); r{}ok = true; code.ip = {next};",
+                        v.to_bits(),
+                        dst.index(),
+                    );
+                }
+                (_, _, Some(d)) if matches!(constant, Constant::Bool(_)) => {
+                    let Constant::Bool(v) = constant else {
+                        unreachable!()
+                    };
+                    wln!("{d} = {v}; r{}ok = true; code.ip = {next};", dst.index(),);
+                }
+                _ => {
+                    wln!(
+                        "wr(regs, {}, constant_to_val({}, ctx, strs)); code.ip = {next};",
+                        reg(*dst),
+                        konst(constant)
+                    );
+                }
             }
-            (_, Some(d)) if matches!(constant, Constant::Float(_)) => {
-                let Constant::Float(v) = constant else {
-                    unreachable!()
-                };
-                wln!(
-                    "{d} = f64::from_bits({}u64); r{}ok = true; code.ip = {next};",
-                    v.to_bits(),
-                    dst.index(),
-                );
-            }
-            _ => {
-                wln!(
-                    "wr(regs, {}, constant_to_val({}, ctx, strs)); code.ip = {next};",
-                    reg(*dst),
-                    konst(constant)
-                );
-            }
-        },
+        }
         Op::LoadBody { dst, body } => {
             wln!(
                 "wr(regs, {}, Val::Fn(BodyId::from({}u32))); code.ip = {next};",
@@ -1319,12 +1427,17 @@ fn emit_op(
             target,
             is_true,
         } => {
-            wln!(
-                "if rd(regs, {}) == Val::Bool({is_true}) {{ {} }} else {{ {} }}",
-                reg(*cond),
-                tail(tgt(target)),
-                tail(next)
-            );
+            // flag-clear still takes the authoritative slot — same predicate
+            // the interpreter computes, just off the shadow when it can.
+            let c = match sh.bool(*cond) {
+                Some(v) => format!(
+                    "if r{ci}ok {{ {v} == {is_true} }} else {{ rd(regs, {}) == Val::Bool({is_true}) }}",
+                    reg(*cond),
+                    ci = cond.index()
+                ),
+                None => format!("rd(regs, {}) == Val::Bool({is_true})", reg(*cond)),
+            };
+            wln!("if {c} {{ {} }} else {{ {} }}", tail(tgt(target)), tail(next));
         }
         Op::ForNext { idx, bound, target } => {
             // shadowed-but-flag-clear falls back to `step`, whose arm hits the
@@ -1464,11 +1577,13 @@ fn emit_op(
             wln!("return Ok(Flow::Return(Val::Raised(err)));");
         }
         Op::IsRaised { dst, src } => {
-            wln!(
-                "wr(regs, {}, Val::Bool(matches!(rd(regs, {}), Val::Raised(_)))); code.ip = {next};",
-                reg(*dst),
-                reg(*src)
+            sh.wr_shadow(
+                &mut s,
+                *dst,
+                "Bool",
+                &format!("matches!({}, Val::Raised(_))", sh.rdv(*src)),
             );
+            wln!("code.ip = {next};");
         }
         Op::UnwrapRaised { dst, src } => {
             wln!(
@@ -1576,7 +1691,8 @@ fn emit_op(
                 reg(*needle),
                 reg(*haystack)
             );
-            wln!("wr(regs, {}, v); code.ip = {next};", reg(*dst));
+            sh.wr_val(&mut s, *dst, "v");
+            wln!("code.ip = {next};");
         }
         Op::IsInstance { dst, src, adt } => {
             wln!(
@@ -1584,7 +1700,8 @@ fn emit_op(
                 reg(*src),
                 adt.index()
             );
-            wln!("wr(regs, {}, Val::Bool(m)); code.ip = {next};", reg(*dst));
+            sh.wr_shadow(&mut s, *dst, "Bool", "m");
+            wln!("code.ip = {next};");
         }
         Op::Format { dst, parts } => {
             wln!("let mut text = String::with_capacity(32);");
@@ -1623,14 +1740,35 @@ fn emit_op(
         }
         Op::Unary { dst, op, src } => {
             wln!("*op_ip = {offset};");
-            wln!(
-                "let v = match unary(rd(regs, {}), ctx, UnaryOp::{op:?}) {{ Ok(v) => v, Err(e) => {{ return Err(e) }} }};",
-                reg(*src)
-            );
-            wln!("wr(regs, {}, v); code.ip = {next};", reg(*dst));
+            if matches!(op, compile::UnaryOp::Not) {
+                // `!b` is the common shape — anything else keeps the generic
+                // helper (Neg on Int/Float, array ops, errors).
+                let se = sh.rdv(*src);
+                wln!("match {se} {{");
+                wln!("    Val::Bool(b) => {{");
+                sh.wr_shadow(&mut s, *dst, "Bool", "!b");
+                wln!("    }},");
+                wln!(
+                    "    v => {{ let v = match unary(v, ctx, UnaryOp::Not) {{ Ok(v) => v, Err(e) => {{ return Err(e) }} }};"
+                );
+                sh.wr_val(&mut s, *dst, "v");
+                wln!("    }},");
+                wln!("}}");
+            } else {
+                wln!(
+                    "let v = match unary(rd(regs, {}), ctx, UnaryOp::{op:?}) {{ Ok(v) => v, Err(e) => {{ return Err(e) }} }};",
+                    reg(*src)
+                );
+                sh.wr_val(&mut s, *dst, "v");
+            }
+            wln!("code.ip = {next};");
         }
-        Op::BoolEq { dst, left, right } => emit_bool(&mut s, *dst, *left, *right, next, "=="),
-        Op::BoolNe { dst, left, right } => emit_bool(&mut s, *dst, *left, *right, next, "!="),
+        Op::BoolEq { dst, left, right } => {
+            emit_bool(&mut s, sh, *dst, *left, *right, next, "==")
+        }
+        Op::BoolNe { dst, left, right } => {
+            emit_bool(&mut s, sh, *dst, *left, *right, next, "!=")
+        }
         Op::AddInt { dst, left, right } => emit_int_arith(
             &mut s,
             sh,
@@ -1784,10 +1922,10 @@ fn emit_op(
             &mut s, sh, offset, *dst, *left, *right, next, "!=", "NotEqual",
         ),
         Op::StrEq { dst, left, right } => {
-            emit_str_eval(&mut s, offset, *dst, *left, *right, next, "==", "Identity")
+            emit_str_eval(&mut s, sh, offset, *dst, *left, *right, next, "==", "Identity")
         }
         Op::StrNe { dst, left, right } => {
-            emit_str_eval(&mut s, offset, *dst, *left, *right, next, "!=", "NotEqual")
+            emit_str_eval(&mut s, sh, offset, *dst, *left, *right, next, "!=", "NotEqual")
         }
         Op::AddIntImm { dst, left, val } => emit_int_arith_imm(
             &mut s,
@@ -2427,17 +2565,17 @@ fn emit_op(
     let _ = write!(w, "{s}");
 }
 
-fn emit_bool(s: &mut String, dst: Reg, left: Reg, right: Reg, next: usize, op: &str) {
+fn emit_bool(s: &mut String, sh: &Sh, dst: Reg, left: Reg, right: Reg, next: usize, op: &str) {
     let name = if op == "==" { "eq" } else { "ne" };
+    let l = sh.rdv(left);
+    let r = sh.rdv(right);
     let _ = writeln!(
         s,
-        "let Val::Bool(l) = rd(regs, {}) else {{ unreachable!(\"illegal bool {name} op\") }};\n\
-         let Val::Bool(r) = rd(regs, {}) else {{ unreachable!(\"illegal bool {name} op\") }};\n\
-         wr(regs, {}, Val::Bool(l {op} r)); code.ip = {next};",
-        reg(left),
-        reg(right),
-        reg(dst),
+        "let Val::Bool(l) = {l} else {{ unreachable!(\"illegal bool {name} op\") }};\n\
+         let Val::Bool(r) = {r} else {{ unreachable!(\"illegal bool {name} op\") }};",
     );
+    sh.wr_shadow(s, dst, "Bool", &format!("l {op} r"));
+    let _ = writeln!(s, "code.ip = {next};");
 }
 
 // Below, the emit_* fns write the arm's *contents* into `s` and `emit_op` wraps
@@ -2494,11 +2632,8 @@ fn emit_int_eval(
     );
     let a = int_opnd(sh, left, next, off, &cold);
     let b = int_opnd(sh, right, next, off, &cold);
-    let _ = writeln!(
-        s,
-        "wr(regs, {}, Val::Bool({a} {op} {b})); code.ip = {next};",
-        reg(dst)
-    );
+    sh.wr_shadow(s, dst, "Bool", &format!("{a} {op} {b}"));
+    let _ = writeln!(s, "code.ip = {next};");
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2545,15 +2680,13 @@ fn emit_float_eval(
     );
     let a = float_opnd(sh, left, next, off, &cold);
     let b = float_opnd(sh, right, next, off, &cold);
-    let _ = writeln!(
-        s,
-        "wr(regs, {}, Val::Bool({a} {op} {b})); code.ip = {next};",
-        reg(dst)
-    );
+    sh.wr_shadow(s, dst, "Bool", &format!("{a} {op} {b}"));
+    let _ = writeln!(s, "code.ip = {next};");
 }
 
 fn emit_str_eval(
     s: &mut String,
+    sh: &Sh,
     off: usize,
     dst: Reg,
     left: Reg,
@@ -2571,12 +2704,16 @@ fn emit_str_eval(
     let _ = writeln!(
         s,
         "match (rd(regs, {l}), rd(regs, {r})) {{\n\
-         (Val::Str(a), Val::Str(b)) => {{ wr(regs, {d}, Val::Bool(a {op} b)); code.ip = {next}; }}\n\
-         _ => {{ code.ip = {next}; *op_ip = {off}; {cold} }}\n\
-         }}",
+         (Val::Str(a), Val::Str(b)) => {{",
         l = reg(left),
         r = reg(right),
-        d = reg(dst),
+    );
+    sh.wr_shadow(s, dst, "Bool", &format!("a {op} b"));
+    let _ = writeln!(
+        s,
+        "code.ip = {next}; }}\n\
+         _ => {{ code.ip = {next}; *op_ip = {off}; {cold} }}\n\
+         }}",
     );
 }
 
@@ -2624,11 +2761,8 @@ fn emit_int_eval_imm(
         reg(left)
     );
     let a = int_opnd(sh, left, next, off, &cold);
-    let _ = writeln!(
-        s,
-        "wr(regs, {}, Val::Bool({a} {op} {val}i64)); code.ip = {next};",
-        reg(dst)
-    );
+    sh.wr_shadow(s, dst, "Bool", &format!("{a} {op} {val}i64"));
+    let _ = writeln!(s, "code.ip = {next};");
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2676,11 +2810,13 @@ fn emit_float_eval_imm(
         reg(left)
     );
     let a = float_opnd(sh, left, next, off, &cold);
-    let _ = writeln!(
+    sh.wr_shadow(
         s,
-        "wr(regs, {}, Val::Bool({a} {op} f64::from_bits({val}i64 as u64))); code.ip = {next};",
-        reg(dst)
+        dst,
+        "Bool",
+        &format!("{a} {op} f64::from_bits({val}i64 as u64)"),
     );
+    let _ = writeln!(s, "code.ip = {next};");
 }
 
 /// The `B*` branch family — `right` for the register variant, `imm` for the
