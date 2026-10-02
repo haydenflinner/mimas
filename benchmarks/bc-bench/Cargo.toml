@@ -3,7 +3,7 @@ name = "bc-bench"
 version = "0.0.0"
 edition = "2021"
 publish = false
-description = "Three-way benchmark: plain mimas VM vs bcgen-specialized bodies vs Cranelift-JIT'd bodies, over the shared .mim benchmark suite."
+description = "Four-way benchmark: plain mimas VM vs bcgen-specialized bodies vs Cranelift-JIT'd bodies vs handwritten native Rust, over the shared .mim benchmark suite."
 
 [dependencies]
 mimas = { path = "../../crates/mimas" }
