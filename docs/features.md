@@ -178,3 +178,31 @@ bodies interleave freely.
   mandelbrot 519 vs 710 — beats pre-tuning bcgen on scalar loops; fib_rec
   2313 vs 1089 and physics 2897 vs 704 lose (call-shim + flush overhead is the
   known gap vs the batched-quota/loop-form bcgen on `bcgen-tuning`).
+
+## bcgen second specialization pass — branch `bcgen-perf`
+
+On top of `bcgen-tuning`'s scalar shadows and batched quota gates:
+
+- **Sparse multi-block loop wrapping** (`emit_body` + `grow_region` in
+  `crates/bcgen/src/lib.rs`): a bounded DFS grows a loop region over
+  continuation edges — jump targets first, then conditional fallthrough —
+  backtracking on dead ends. Regions stay ascending and validate iff every
+  interior edge lands on the head (`continue`), the next emitted op, or
+  outside the region (`code.ip` + `break`). Handles `while A && B`
+  short-circuit re-entry (mandelbrot's inner loop) and physics' 13-block
+  loop; `Switch` regions are rejected outright.
+- **Bool shadows**: `W::Bool` joins int/float in `analyze` — comparisons,
+  `JumpIf` conditions and `Constant::Bool` keep a native `bool` + ok flag
+  instead of boxing `Val::Bool` per write. `Unary::Not` emits a direct
+  `Val::Bool(b) => !b` arm, generic `unary` otherwise.
+- **Typed (Array, Int) indexing**: `GetIndex`/`SetIndex` inline the
+  bounds-checked `borrow`/`borrow_mut(&ctx)` path; every other
+  collection/index combo keeps the `get_index`/`set_index` helpers, so the
+  `IndexOutOfBounds`/`Option`-Null error contract is identical.
+
+Measured (`bc-bench` bc lane vs the pre-pass tree, best-of ≥20): mandelbrot
+190→86–104ms (bool shadows alone ≈ −17%, the rest mostly the loop form),
+prime_numbers 245→196–210ms (typed indexing ≈ −10%), physics ~unchanged,
+fib_iter/fib_rec unchanged. Rejected along the way: contiguous gap-fill of
+sparse regions (regressed hot inner loops) and `_vN` write-forwarding locals
+(the extra copies cost more than the `rd` slot loads they saved — +6–7%).
