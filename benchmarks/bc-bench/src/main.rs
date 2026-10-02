@@ -5,8 +5,8 @@
 //!           (`Vm::install_bc`); identical semantics, generated dispatch
 //!   jit   — Cranelift-JIT'd bodies through the same `install_bc` slot
 //!           (`mimas_jit::compile` once per workload, timing amortized out)
-//!   rust  — the rustgen-transpiled module from `host/corpus-gen/src/gen/`
-//!           (typed native Rust against the mrt shim below)
+//!   rust  — the rustgen-transpiled module (build.rs emits it into
+//!           OUT_DIR — same output corpus-gen gates on)
 //!
 //! Usage: `bc-bench [workload ...] [iters]` — defaults to every workload,
 //! best-of-3.
@@ -17,6 +17,30 @@ use std::time::{Duration, Instant};
 // exactly the surface these five pages use.
 pub mod mrt {
     pub type Arr<T> = imbl::Vector<T>;
+
+    /// `let`-shared cell — `.clone()` aliases the cell like the VM's
+    /// `let b = a`; rebinding swaps the handle, not the value.
+    pub struct Shared<T>(pub std::rc::Rc<std::cell::RefCell<T>>);
+    impl<T> Shared<T> {
+        pub fn new(v: T) -> Self {
+            Self(std::rc::Rc::new(std::cell::RefCell::new(v)))
+        }
+        pub fn borrow(&self) -> std::cell::Ref<'_, T> {
+            self.0.borrow()
+        }
+        pub fn borrow_mut(&self) -> std::cell::RefMut<'_, T> {
+            self.0.borrow_mut()
+        }
+        pub fn is(&self, other: &Self) -> bool {
+            std::rc::Rc::ptr_eq(&self.0, &other.0)
+        }
+    }
+    impl<T> Clone for Shared<T> {
+        fn clone(&self) -> Self {
+            Self(std::rc::Rc::clone(&self.0))
+        }
+    }
+
     pub fn print<T: std::fmt::Display>(x: T) {
         println!("{x}");
     }
@@ -49,23 +73,23 @@ mod bc {
 mod rust {
     pub mod fib_iter {
         #![allow(warnings)]
-        include!("../../../../host/corpus-gen/src/gen/mimas_benchmarks_fib_iter_fib_iter.rs");
+        include!(concat!(env!("OUT_DIR"), "/fib_iter_rustgen.rs"));
     }
     pub mod fib_rec {
         #![allow(warnings)]
-        include!("../../../../host/corpus-gen/src/gen/mimas_benchmarks_fib_rec_fib_rec.rs");
+        include!(concat!(env!("OUT_DIR"), "/fib_rec_rustgen.rs"));
     }
     pub mod mandelbrot {
         #![allow(warnings)]
-        include!("../../../../host/corpus-gen/src/gen/mimas_benchmarks_mandelbrot_mandelbrot.rs");
+        include!(concat!(env!("OUT_DIR"), "/mandelbrot_rustgen.rs"));
     }
     pub mod prime_numbers {
         #![allow(warnings)]
-        include!("../../../../host/corpus-gen/src/gen/mimas_benchmarks_prime_numbers_prime_numbers.rs");
+        include!(concat!(env!("OUT_DIR"), "/prime_numbers_rustgen.rs"));
     }
     pub mod physics {
         #![allow(warnings)]
-        include!("../../../../host/corpus-gen/src/gen/mimas_benchmarks_physics_physics.rs");
+        include!(concat!(env!("OUT_DIR"), "/physics_rustgen.rs"));
     }
 }
 

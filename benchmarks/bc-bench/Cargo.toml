@@ -14,6 +14,7 @@ imbl = "7.0.2"
 [build-dependencies]
 mimas = { path = "../../crates/mimas" }
 bcgen = { package = "mimas-bcgen", path = "../../crates/bcgen" }
+rustgen = { path = "../../../host/rustgen" }
 
 [profile.release]
 lto = "thin"

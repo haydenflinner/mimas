@@ -15,5 +15,12 @@ fn main() {
                 .unwrap_or_else(|e| panic!("{name} failed to compile: {e:?}"));
         fs::write(out.join(format!("{name}.rs")), bcgen::emit(&program, "mimas::vm"))
             .expect("write emitted module");
+        // The rustgen lane — emitted here rather than borrowed from
+        // corpus-gen's checked-in output, which no longer exists.
+        // `transpile` installs `library::std` itself; the natives slot
+        // is for *extra* host APIs (none here).
+        let code = rustgen::transpile(&source, |_| {}, |_| None)
+            .unwrap_or_else(|e| panic!("{name} failed to transpile: {e}"));
+        fs::write(out.join(format!("{name}_rustgen.rs")), code).expect("write rustgen module");
     }
 }
