@@ -449,6 +449,12 @@ pub fn compile_with(program: &Program, facts: &Facts) -> Result<Jit, Error> {
     flags
         .set("opt_level", "speed")
         .map_err(|e| Error(format!("cranelift flag: {e}")))?;
+    let dump_dir = std::env::var_os("MIMAS_JIT_CODE_DUMP");
+    if dump_dir.is_some() {
+        flags
+            .set("machine_code_cfg_info", "true")
+            .map_err(|e| Error(format!("cranelift flag: {e}")))?;
+    }
     let isa = cranelift_native::builder()
         .map_err(|e| Error(format!("native isa: {e}")))?
         .finish(cranelift_codegen::settings::Flags::new(flags))
@@ -516,6 +522,8 @@ pub fn compile_with(program: &Program, facts: &Facts) -> Result<Jit, Error> {
     // fields, `Vec` header order) — emitted code reads/writes these inline.
     let lyt = jit::layout();
     let empty_bf = BodyFacts::default();
+    let mut sizes = Vec::with_capacity(nbodies);
+    let mut bb_map = Vec::with_capacity(nbodies);
     for body in 0..nbodies {
         let bfacts = facts.bodies.get(body).unwrap_or(&empty_bf);
         let spec = emit::BodySpec {
@@ -537,8 +545,34 @@ pub fn compile_with(program: &Program, facts: &Facts) -> Result<Jit, Error> {
             &mut ctx,
             &spec,
         )?;
+        if dump_dir.is_some() {
+            let cc = ctx.compiled_code();
+            sizes.push(cc.map(|c| c.buffer.data().len()).unwrap_or(0));
+            bb_map.push(cc.map(|c| c.bb_starts.clone()).unwrap_or_default());
+        }
     }
     module.finalize_definitions()?;
+
+    // `MIMAS_JIT_CODE_DUMP=<dir>`: write each body's machine code to
+    // `<dir>/body_<i>.bin` and its clif-block offsets to
+    // `<dir>/body_<i>.map`, and print its runtime address — for offline
+    // disassembly + sample-PC correlation.
+    if let Some(dir) = dump_dir {
+        for (i, id) in body_ids.iter().enumerate() {
+            let p = module.get_finalized_function(*id);
+            eprintln!("jit body {i} @ {p:p} size {}", sizes[i]);
+            let bytes = unsafe { std::slice::from_raw_parts(p, sizes[i]) };
+            let d = dir.to_string_lossy();
+            std::fs::write(format!("{d}/body_{i}.bin"), bytes).ok();
+            let map = bb_map[i]
+                .iter()
+                .enumerate()
+                .map(|(b, o)| format!("block{b} 0x{o:x}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            std::fs::write(format!("{d}/body_{i}.map"), map).ok();
+        }
+    }
 
     let bodies = body_ids
         .iter()

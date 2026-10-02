@@ -19,7 +19,9 @@ pub fn fib_iter() -> String {
     a.to_string()
 }
 
-/// `fib_rec.mim` — plain recursion, `fib(30)` x `REPEAT = 20`.
+/// `fib_rec.mim` — plain recursion, `fib(30)` x `REPEAT = 20`. The arg goes
+/// through `black_box` so LLVM can't hoist the pure call out of the loop
+/// (otherwise this measures one `fib(30)`, not twenty).
 pub fn fib_rec() -> String {
     const TARGET: i64 = 30;
     const REPEAT: i64 = 20;
@@ -28,7 +30,7 @@ pub fn fib_rec() -> String {
     }
     let mut result = 0;
     for _ in 0..REPEAT {
-        result = fib(TARGET);
+        result = std::hint::black_box(fib(std::hint::black_box(TARGET)));
     }
     result.to_string()
 }
