@@ -147,3 +147,34 @@ no editing existing workbooks). Behind the default-on `xlsx` feature on
   crates.io `polars` that doesn't unify with the workspace's path-dep clone.
 - Deferred: in-place workbook editing → `umya-spreadsheet` if the need ever
   shows up. SheetJS and the C `xlsxwriter` bindings were ruled out.
+
+## Cranelift JIT tier — `mimas-jit` (branch `jit-cranelift`)
+
+Second Futamura projection: `jit::compile(&program)` emits one native function
+per bytecode chunk with Cranelift (`FunctionBuilder`, dense op dispatch through
+`br_table` on a byte-offset→op-index map) and returns a `Vec<Option<BodyFn>>`
+for `Vm::install_bc` — the same slot bcgen bodies use, so interpreter/JIT
+bodies interleave freely.
+
+- Scalar int/float registers live in SSA vars ("shadows" with ok-flags) inside
+  a body; they flush to the register window before any call that observes it.
+  Unsupported ops delegate to `bc::jit::step_at` (= the interpreter's own
+  `step_one`), so semantics can't drift — only speed can.
+- `vm::bc::jit` is the `extern "C"` helper layer bound via `JITBuilder::symbol`
+  (`mj_*` names in `crates/jit/src/lib.rs::SPECS`, `H` indexes it 1:1).
+  **ABI gotcha:** `Ctx` is a repr(C) 2-pointer struct; under AAPCS64 a composite
+  that doesn't fully fit in remaining arg registers goes *wholly* to the stack,
+  while a flat Cranelift signature would split it — so `call_native` (ctx at
+  arg slot 7) takes `mc`/`st` as two pointers and rebuilds via
+  `Ctx::from_parts`. Any new helper with `Ctx` past arg 6 must do the same.
+- Calls: `CallDirect`/dynamic `Call` run inline below `INLINE_CALL_DEPTH` via
+  `jit::enter` (=`enter_call`) + a direct/indirect call into the callee body
+  (fn-ptr table in JIT module data), `pop_return` on `Flow::Return`; deeper
+  frames return `Flow::Call` to the driver as before.
+- Parity: `mimas-jit-test` runs each fixture under both lanes and diffs
+  `TEST_VALUE` + `keep` log + error — including op-budget *counts*, fuel
+  windows, pause/resume (`run_frame`), snapshot/restore, and GC pressure.
+- Bench (bc-bench `jit` lane, M-series arm64): fib_iter jit 172ms vs bc 254ms,
+  mandelbrot 519 vs 710 — beats pre-tuning bcgen on scalar loops; fib_rec
+  2313 vs 1089 and physics 2897 vs 704 lose (call-shim + flush overhead is the
+  known gap vs the batched-quota/loop-form bcgen on `bcgen-tuning`).

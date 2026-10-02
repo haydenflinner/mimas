@@ -1,0 +1,22 @@
+[package]
+name = "mimas-jit"
+version = "0.2.0"
+edition = "2024"
+publish = false
+description = "Cranelift JIT tier for mimas bytecode: emits one native body fn per chunk at the BodyFn ABI, installed through Vm::install_bc just like bcgen bodies. Unspecialized ops delegate to the interpreter via extern-C shims."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "mimas_jit"
+
+[dependencies]
+vm = { package = "mimas-vm", path = "../vm", version = "0.2.0", default-features = false }
+compile = { package = "mimas-compile", path = "../compile", version = "0.2.0" }
+cranelift-codegen = "0.135.2"
+cranelift-frontend = "0.135.2"
+cranelift-jit = "0.135.2"
+cranelift-module = "0.135.2"
+cranelift-native = "0.135.2"

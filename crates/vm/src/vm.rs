@@ -768,9 +768,28 @@ fn run_dispatch<'gc>(
         });
         let mut op_ip = code.ip;
         let res = match step {
-            Some(f) => f(
-                thread, code, ctx, strs, chunks, signatures, &mut fuel, &mut op_ip,
-            ),
+            Some(f) => {
+                // The `BodyFn` ABI returns `RtResult<Flow>` through an out-slot
+                // (the enum has no stable/FFI-safe layout — JIT bodies fill it
+                // via `jit_*` shims, bcgen bodies via their extern-"C" shim).
+                let mut slot = std::mem::MaybeUninit::<RtResult<Flow>>::uninit();
+                // SAFETY: all pointers borrow live driver state; the BodyFn
+                // contract requires `out` to be written before return.
+                unsafe {
+                    f(
+                        thread,
+                        code,
+                        ctx,
+                        strs,
+                        chunks,
+                        signatures,
+                        &mut fuel,
+                        &mut op_ip,
+                        slot.as_mut_ptr(),
+                    );
+                    slot.assume_init()
+                }
+            }
             None => {
                 fuel -= 1;
                 thread.ops_left -= 1;

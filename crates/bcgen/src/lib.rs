@@ -59,10 +59,11 @@ pub fn emit(program: &Program, vm: &str) -> String {
         emit_body(&mut w, program, body.index());
     }
     // Complete table for in-body dynamic `Call` dispatch; `CallDirect` bypasses
-    // it and names `body_N` directly.
+    // it and names `body_N` directly. These are the *inner* Rust fns — the
+    // driver-facing `BodyFn` ABI goes through the `body_N_abi` wrappers.
     let _ = writeln!(
         w,
-        "\n#[allow(dead_code)]\nstatic BODIES: &[BodyFn] = &[{}];",
+        "\n#[allow(dead_code)]\nstatic BODIES: &[InnerBodyFn] = &[{}];",
         (0..program.chunks.len())
             .map(|i| format!("body_{i}"))
             .collect::<Vec<_>>()
@@ -70,12 +71,14 @@ pub fn emit(program: &Program, vm: &str) -> String {
     );
     let _ = writeln!(
         w,
-        "\n/// The install table for `Vm::install_bc`, indexed by `BodyId`."
+        "\n/// The install table for `Vm::install_bc`, indexed by `BodyId` — the\n\
+         /// extern-\"C\" ABI wrappers, so the same table shape also accepts\n\
+         /// Cranelift-JIT bodies.\n\
+         pub fn bodies() -> Vec<Option<BodyFn>> {{"
     );
-    let _ = writeln!(w, "pub fn bodies() -> Vec<Option<BodyFn>> {{");
     let _ = writeln!(w, "    vec![");
     for (body, _) in program.chunks.iter() {
-        let _ = writeln!(w, "        Some(body_{}),", body.index());
+        let _ = writeln!(w, "        Some(body_{}_abi),", body.index());
     }
     let _ = writeln!(w, "    ]");
     let _ = writeln!(w, "}}");
@@ -727,6 +730,34 @@ fn emit_body(w: &mut String, program: &Program, body: usize) {
     let _ = writeln!(w, "        }}");
     let _ = writeln!(w, "    }}");
     let _ = writeln!(w, "}}");
+    // The driver-facing ABI shim: `BodyFn` is `extern "C"` with the result
+    // routed through `out` so Cranelift-JIT bodies install interchangeably.
+    // In-module calls (the inline-call fast path, `BODIES`) use the inner
+    // `body_N` directly and never pay this hop.
+    let _ = writeln!(
+        w,
+        "\n#[allow(clippy::all)]\n\
+         unsafe extern \"C\" fn body_{body}_abi<'gc>(\n\
+         \x20   thread: *mut ThreadState<'gc>,\n\
+         \x20   code: *mut Decoder,\n\
+         \x20   ctx: Ctx<'gc>,\n\
+         \x20   strs: *const StrInterner,\n\
+         \x20   chunks: *const IdVec<BodyId, Chunk>,\n\
+         \x20   signatures: *const IdVec<BodyId, Option<Function>>,\n\
+         \x20   fuel: *mut usize,\n\
+         \x20   op_ip: *mut usize,\n\
+         \x20   out: *mut RtResult<Flow<'gc>>,\n\
+         ) {{\n\
+         \x20   // SAFETY: the BodyFn contract — pointers borrow live driver\n\
+         \x20   // state for the call's duration; `out` is a live slot.\n\
+         \x20   unsafe {{\n\
+         \x20       *out = body_{body}(\n\
+         \x20           &mut *thread, &mut *code, ctx, &*strs, &*chunks, &*signatures,\n\
+         \x20           &mut *fuel, &mut *op_ip,\n\
+         \x20       );\n\
+         \x20   }}\n\
+         }}"
+    );
 }
 
 /// The interpreter checks `State::paused` before every op, but the flag can
