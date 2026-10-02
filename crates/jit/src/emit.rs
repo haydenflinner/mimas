@@ -3382,24 +3382,85 @@ impl Em<'_> {
                 self.env.out,
             ],
         );
-        // driver's `Flow::Return` pop: 2 = returned & popped, else propagate
-        let k = self
-            .hcall(H::PopReturn, &[self.env.thread, self.env.code, self.env.out])
-            .unwrap();
-        let two = self.iconst8(2);
-        let isret = self.fb.ins().icmp(IntCC::Equal, k, two);
+        // driver's `Flow::Return` pop, inlined over the probed
+        // `RtResult<Flow>`/Frame layout: `*out == Ok(Flow::Return(v))` → pop
+        // the callee frame, truncate `regs`, restore the caller's saved ip,
+        // write `v` into the `return_reg` slot; anything else propagates
+        // `out` verbatim through `eret` (what `mj_pop_return`'s non-2 tags
+        // did).
+        let oty = match self.lyt.out_tsz {
+            1 => I8,
+            2 => types::I16,
+            4 => I32,
+            8 => I64,
+            d => unreachable!("bad out tag width {d}"),
+        };
+        let otag = self
+            .fb
+            .ins()
+            .load(oty, tf(), self.env.out, self.lyt.out_tag as i32);
+        let orwant = self.fb.ins().iconst(oty, self.lyt.out_ret as i64);
+        let isret = self.fb.ins().icmp(IntCC::Equal, otag, orwant);
         let resumed = self.fb.create_block();
         self.fb.ins().brif(isret, resumed, &[], self.ex.eret, &[]);
         self.fb.switch_to_block(resumed);
+        // popped = frames[flen-1]; frames.len -= 1; regs.len = popped.base
+        let flen2 = self.frames_len();
+        let fptr2 = self.fb.ins().load(
+            I64,
+            tf(),
+            self.env.thread,
+            (self.lyt.frames_off + self.lyt.vec_ptr) as i32,
+        );
+        let fm2 = self.fb.ins().iadd_imm_s(flen2, -1);
+        let pfo = self.fb.ins().imul_imm_s(fm2, fsz);
+        let pf = self.fb.ins().iadd(fptr2, pfo);
+        let pbase = self.fb.ins().load(I64, tf(), pf, self.lyt.frame_base as i32);
+        let pret32 = self
+            .fb
+            .ins()
+            .load(I32, tf(), pf, self.lyt.frame_ret as i32);
+        let pret = self.fb.ins().uextend(I64, pret32);
+        self.fb.ins().store(
+            tf(),
+            fm2,
+            self.env.thread,
+            (self.lyt.frames_off + self.lyt.vec_len) as i32,
+        );
+        self.fb.ins().store(
+            tf(),
+            pbase,
+            self.env.thread,
+            (self.lyt.regs_off + self.lyt.vec_len) as i32,
+        );
+        // caller = frames[flen-2]; code.ip = caller.ip
+        let fm3 = self.fb.ins().iadd_imm_s(flen2, -2);
+        let cfo2 = self.fb.ins().imul_imm_s(fm3, fsz);
+        let cf2 = self.fb.ins().iadd(fptr2, cfo2);
+        let cip2 = self.fb.ins().load(I64, tf(), cf2, self.lyt.frame_ip as i32);
+        self.store_ip(cip2);
+        let cbase = self
+            .fb
+            .ins()
+            .load(I64, tf(), cf2, self.lyt.frame_base as i32);
         // `thread.regs` may have moved under the callee — rebuild the window
+        // and write the return value into `caller_base + return_reg`
         let rp2 = self.fb.ins().load(
             I64,
             tf(),
             self.env.thread,
             (self.lyt.regs_off + self.lyt.vec_ptr) as i32,
         );
-        let boff = self.fb.ins().imul_imm_s(self.env.base, vs);
-        let regs2 = self.fb.ins().iadd(rp2, boff);
+        let widx = self.fb.ins().iadd(cbase, pret);
+        let woff = self.fb.ins().imul_imm_s(widx, vs);
+        let daddr = self.fb.ins().iadd(rp2, woff);
+        let retp = self
+            .fb
+            .ins()
+            .iadd_imm_s(self.env.out, self.lyt.out_ret_pay as i64);
+        self.cpy_val(daddr, retp);
+        let boff2 = self.fb.ins().imul_imm_s(cbase, vs);
+        let regs2 = self.fb.ins().iadd(rp2, boff2);
         self.fb.def_var(self.v.regs, regs2);
         self.rearm_seq();
         self.dst_refresh(i, dst, regs2);

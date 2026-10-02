@@ -441,6 +441,16 @@ pub mod jit {
         pub fld_data: usize,
         /// Byte offset of the `Vec<Val>` inside `Fields::Spilled`.
         pub fld_spilled: usize,
+        /// Byte offset/width of the discriminant inside `RtResult<Flow>`
+        /// that selects `Ok(Flow::Return(_))` from every other outcome —
+        /// the inlined-call tail classifies `*out` without an FFI hop.
+        pub out_tag: usize,
+        /// Width in bytes of that discriminant (see `out_tag`).
+        pub out_tsz: usize,
+        /// The `Ok(Flow::Return(_))` discriminant value.
+        pub out_ret: u64,
+        /// Byte offset of the returned `Val` inside `Ok(Flow::Return(..))`.
+        pub out_ret_pay: usize,
     }
 
     /// Probe this build's layouts — see [`Layout`]. Called once per
@@ -865,6 +875,93 @@ pub mod jit {
             0,
             "Fields::Inline.data is not Val-aligned"
         );
+        // `RtResult<Flow>` — the `out` slot's layout. The probe works exactly
+        // like `Val`'s: rewrite a candidate tag window of an `Ok(Return)`'s
+        // encoding with the other outcomes' bytes and require the result to
+        // decode correctly (through `ManuallyDrop` — the enum can hold a
+        // `SmallVec` and must not be dropped from a fabricated bit pattern).
+        const OSZ: usize = size_of::<RtResult<Flow<'static>>>();
+        let obytes = |v: &RtResult<Flow<'static>>| -> [u8; OSZ] {
+            let mut b = [0u8; OSZ];
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    v as *const RtResult<Flow<'static>> as *const u8,
+                    b.as_mut_ptr(),
+                    OSZ,
+                );
+            }
+            b
+        };
+        let oret: RtResult<Flow> = Ok(Flow::Return(Val::Int(0)));
+        let onext: RtResult<Flow> = Ok(Flow::Next);
+        let oerr: RtResult<Flow> = Err(RtErr::DivByZero);
+        let ocall: RtResult<Flow> = Ok(Flow::Call {
+            target: CallTarget::Fn(BodyId::ZERO),
+            dst: Reg::from(0u32),
+            args: smallvec::SmallVec::new(),
+        });
+        let (oret_b, onext_b, oerr_b, ocall_b) =
+            (obytes(&oret), obytes(&onext), obytes(&oerr), obytes(&ocall));
+        let oclass = |raw: &[u8; OSZ]| -> u8 {
+            let v: std::mem::ManuallyDrop<RtResult<Flow<'static>>> =
+                unsafe { std::ptr::read_unaligned(raw.as_ptr().cast()) };
+            match &*v {
+                Ok(Flow::Next) => 0,
+                Ok(Flow::Call { .. }) => 1,
+                Ok(Flow::Return(_)) => 2,
+                Err(_) => 3,
+            }
+        };
+        let mut ofound = None;
+        'ow: for w in [1usize, 2, 4, 8] {
+            if w > OSZ {
+                continue;
+            }
+            for p in 0..=OSZ - w {
+                if oret_b[p..p + w] == onext_b[p..p + w]
+                    && oret_b[p..p + w] == oerr_b[p..p + w]
+                    && oret_b[p..p + w] == ocall_b[p..p + w]
+                {
+                    continue;
+                }
+                let mut raw = oret_b;
+                raw[p..p + w].copy_from_slice(&onext_b[p..p + w]);
+                if oclass(&raw) != 0 {
+                    continue;
+                }
+                let mut raw = oret_b;
+                raw[p..p + w].copy_from_slice(&oerr_b[p..p + w]);
+                if oclass(&raw) != 3 {
+                    continue;
+                }
+                let mut raw = oret_b;
+                raw[p..p + w].copy_from_slice(&ocall_b[p..p + w]);
+                if oclass(&raw) != 1 {
+                    continue;
+                }
+                // and the return tag written onto a Next must decode as Return
+                let mut raw = onext_b;
+                raw[p..p + w].copy_from_slice(&oret_b[p..p + w]);
+                if oclass(&raw) != 2 {
+                    continue;
+                }
+                assert!(ofound.is_none(), "ambiguous out tag positions");
+                ofound = Some((p, w));
+            }
+            if ofound.is_some() {
+                break 'ow;
+            }
+        }
+        let (out_tag, out_tsz) = ofound.expect("no discriminant found in RtResult<Flow>");
+        let out_ret = {
+            let mut w = [0u8; 8];
+            w[..out_tsz].copy_from_slice(&oret_b[out_tag..out_tag + out_tsz]);
+            u64::from_le_bytes(w)
+        };
+        let out_ret_pay = match &oret {
+            Ok(Flow::Return(v)) => v as *const Val as usize - &oret as *const _ as usize,
+            _ => unreachable!(),
+        };
         Layout {
             val_size: vsz,
             val_tag: tag,
@@ -907,6 +1004,10 @@ pub mod jit {
             fld_len,
             fld_data,
             fld_spilled,
+            out_tag,
+            out_tsz,
+            out_ret,
+            out_ret_pay,
         }
     }
 
