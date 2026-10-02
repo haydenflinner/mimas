@@ -1,0 +1,22 @@
+[package]
+name = "mimas-llvm-jit"
+version = "0.2.0"
+edition = "2024"
+publish = false
+description = "LLVM JIT tier for mimas bytecode (spike): emits one LLVM-IR body fn per chunk at the BodyFn ABI, MCJIT'd and installed through Vm::install_bc just like bcgen/cranelift bodies. Unspecialized ops delegate to the interpreter via extern-C shims."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "mimas_llvm_jit"
+
+[dependencies]
+vm = { package = "mimas-vm", path = "../vm", version = "0.2.0", default-features = false }
+compile = { package = "mimas-compile", path = "../compile", version = "0.2.0" }
+inkwell = { version = "0.9.0", features = ["llvm20-1"] }
+
+[dev-dependencies]
+jit-test = { package = "mimas-jit-test", path = "../jit-test" }
+mimas = { path = "../mimas" }

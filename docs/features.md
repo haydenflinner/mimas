@@ -2,6 +2,34 @@
 
 Memorable additions to mimas beyond what the changelog tracks — newest first.
 
+## `crates/llvm-jit` — LLVM MCJIT tier (spike)
+
+A fourth codegen tier above interpreter / bcgen / Cranelift: `mimas_llvm_jit::compile`
+emits one LLVM-IR function per chunk at the `BodyFn` ABI, runs `default<O2>` (so the
+scalar shadows are plain allocas promoted by mem2reg — no manual SSA plumbing), MCJITs
+it, and binds the `vm::bc::jit` shim layer by absolute address via
+`ExecutionEngine::add_global_mapping`. Dispatch is a sparse `switch` on
+`code.ip - chunk.offset` instead of an `ip2idx` blob + `br_table`; calls go through the
+`mj_call_body`/`mj_call_dyn` megashims (the inline container/call fast paths from
+`crates/jit` were not ported). All 11 `jit-test` parity tests pass verbatim — budgets,
+fuel, pause, snapshot, GC.
+
+Measured (`bc-bench`, min-of-3, vs Cranelift `jit` and rustgen):
+
+| workload | vm | bc | jit | **llvm** | rust | llvm compile |
+|---|---|---|---|---|---|---|
+| fib_iter | 396ms | 62ms | 100ms | **64ms** | 62ms | 112ms |
+| fib_rec | 1.51s | 564ms | 789ms | **997ms** | 2.2ms | 84ms |
+| mandelbrot | 1.11s | 58ms | 115ms | **117ms** | 39ms | 3.4s |
+| prime_numbers | 637ms | 214ms | 171ms | **332ms** | 825ms | 139ms |
+| physics | 1.11s | 274ms | 455ms | **1.48s** | 238ms | 6.0s |
+
+Verdict: viable as a *compile-once top tier* for scalar loops (fib_iter already beats
+Cranelift and sits at rustgen parity), but LLVM compile latency is 20–70x Cranelift's,
+so it can't be a warm/hot tier. The megashim FFI hop makes call-heavy bodies slower
+than Cranelift's inline frame path — porting `GetField`/`GetIndex`/call inlining is
+the next lever before this could lead on `fib_rec`/`physics`.
+
 ## `|>` — why the pipe operator is worth keeping
 
 The TODO asked the honest question: nobody who doesn't write pipelines uses it, so what

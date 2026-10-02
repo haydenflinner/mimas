@@ -100,7 +100,7 @@ fn lanes() -> Vec<String> {
     std::env::var("BC_LANES")
         .map(|s| s.split(',').map(|x| x.trim().to_string()).collect())
         .unwrap_or_else(|_| {
-            ["vm", "bc", "jit", "rust"]
+            ["vm", "bc", "jit", "llvm", "rust"]
                 .iter()
                 .map(|s| s.to_string())
                 .collect()
@@ -113,6 +113,7 @@ fn bench(name: &str, bodies: fn() -> Vec<Option<mimas::vm::bc::BodyFn>>, rust_fn
     let mut vm_best = Duration::MAX;
     let mut bc_best = Duration::MAX;
     let mut jit_best = Duration::MAX;
+    let mut llvm_best = Duration::MAX;
     let mut rust_best = Duration::MAX;
     if lanes.iter().any(|l| l == "vm") {
         for _ in 0..iters {
@@ -140,6 +141,21 @@ fn bench(name: &str, bodies: fn() -> Vec<Option<mimas::vm::bc::BodyFn>>, rust_fn
             jit_best = jit_best.min(run_vm(&src, Some(jit.bodies())));
         }
     }
+    // Same one-off-compile treatment as the Cranelift lane — the LLVM tier's
+    // compile latency is reported separately since it decides whether this is
+    // a hot-tier or a compile-once top tier.
+    let mut llvm_compile = Duration::ZERO;
+    if lanes.iter().any(|l| l == "llvm") {
+        let (program, _s) =
+            mimas::Vm::compile_parts(&[("main", src.as_str())], mimas::library::std)
+                .expect("llvm lane compile");
+        let t = Instant::now();
+        let llvm = llvm_jit::compile(&program).expect("llvm-jit compile");
+        llvm_compile = t.elapsed();
+        for _ in 0..iters {
+            llvm_best = llvm_best.min(run_vm(&src, Some(llvm.bodies())));
+        }
+    }
     if lanes.iter().any(|l| l == "rust") {
         for _ in 0..iters {
             rust_best = rust_best.min(run_rust(rust_fn));
@@ -162,13 +178,16 @@ fn bench(name: &str, bodies: fn() -> Vec<Option<mimas::vm::bc::BodyFn>>, rust_fn
         }
     };
     println!(
-        "{name:>14}  vm {}  bc {} ({})  jit {} ({}, compile {})  rust {} ({} vs bc)",
+        "{name:>14}  vm {}  bc {} ({})  jit {} ({}, compile {})  llvm {} ({}, compile {})  rust {} ({} vs bc)",
         dur(vm_best),
         dur(bc_best),
         ratio(vm_best, bc_best),
         dur(jit_best),
         ratio(vm_best, jit_best),
         dur(jit_compile),
+        dur(llvm_best),
+        ratio(vm_best, llvm_best),
+        dur(llvm_compile),
         dur(rust_best),
         ratio(bc_best, rust_best),
     );
@@ -190,7 +209,7 @@ fn main() {
         ("prime_numbers", bc::prime_numbers::bodies, rust::prime_numbers::run_top_level),
         ("physics", bc::physics::bodies, rust::physics::run_top_level),
     ];
-    println!("workload           vm          bc (speedup)      jit (speedup)            rust (bc/rust)");
+    println!("workload           vm          bc (speedup)      jit (speedup)            llvm (speedup)           rust (bc/rust)");
     for (name, bodies, rust_fn) in all {
         if names.is_empty() || names.contains(&name) {
             bench(name, bodies, rust_fn, iters);

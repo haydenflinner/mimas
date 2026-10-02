@@ -9,6 +9,7 @@ description = "Three-way benchmark: plain mimas VM vs bcgen-specialized bodies v
 mimas = { path = "../../crates/mimas" }
 bcgen = { package = "mimas-bcgen", path = "../../crates/bcgen" }
 jit = { package = "mimas-jit", path = "../../crates/jit" }
+llvm-jit = { package = "mimas-llvm-jit", path = "../../crates/llvm-jit" }
 imbl = "7.0.2"
 
 [build-dependencies]
