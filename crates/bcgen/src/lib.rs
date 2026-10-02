@@ -53,7 +53,16 @@ pub fn emit(program: &Program, vm: &str) -> String {
          // (inner `#![allow]`s aren't permitted inside `include!`, so the\n\
          // allows live on the items themselves.)\n\
          #[allow(unused_imports)]\n\
-         use {vm}::bc::*;\n"
+         use {vm}::bc::*;\n\
+         // Tag-1 exits all end the same way — keeping the `io.out` write +\n\
+         // `return` out of the hot bodies shrinks them enough that the\n\
+         // register allocator stops spilling loop-carried shadows.\n\
+         #[cold]\n\
+         #[inline(never)]\n\
+         fn gbail<'gc>(io: &mut GenIo<'_, 'gc>, v: RtResult<Flow<'gc>>) -> u8 {{\n\
+         \x20   io.out.write(v);\n\
+         \x20   1u8\n\
+         }}\n"
     );
     for (body, _) in program.chunks.iter() {
         emit_body(&mut w, program, body.index());
@@ -602,8 +611,8 @@ fn emit_body(w: &mut String, program: &Program, body: usize) {
          \x20   }}}}}}\n\
          \x20   macro_rules! gexit {{ () => {{{{\n\
          \x20       settle!();\n\
-         \x20       if ctx.state().paused.get() | (*io.fuel == 0) {{ flush!(); io.out.write(Ok(Flow::Next)); return 1u8; }}\n\
-         \x20       if thread.ops_left == 0 {{ *io.op_ip = code.ip; flush!(); io.out.write(Err(RtErr::OutOfFuel)); return 1u8; }}\n\
+         \x20       if ctx.state().paused.get() | (*io.fuel == 0) {{ flush!(); return gbail(io, Ok(Flow::Next)); }}\n\
+         \x20       if thread.ops_left == 0 {{ *io.op_ip = code.ip; flush!(); return gbail(io, Err(RtErr::OutOfFuel)); }}\n\
          \x20       bcn = (*io.fuel as u64).min(thread.ops_left); bcn0 = bcn;\n\
          \x20   }}}}}}\n\
          \x20   macro_rules! gateq {{ () => {{{{\n\
@@ -615,7 +624,7 @@ fn emit_body(w: &mut String, program: &Program, body: usize) {
          \x20       bcn -= 1;\n\
          \x20   }}}}}}\n\
          \x20   macro_rules! pchk {{ () => {{{{\n\
-         \x20       if ctx.state().paused.get() {{ settle!(); flush!(); io.out.write(Ok(Flow::Next)); return 1u8; }}\n\
+         \x20       if ctx.state().paused.get() {{ settle!(); flush!(); return gbail(io, Ok(Flow::Next)); }}\n\
          \x20   }}}}}}"
     );
     let _ = writeln!(w, "    loop {{");
@@ -868,7 +877,7 @@ fn emit_body(w: &mut String, program: &Program, body: usize) {
     // hand it to the interpreter, which hits the same garbage decode either way
     let _ = writeln!(
         w,
-        "            _ => {{ *io.op_ip = code.ip; gatep!(); settle!(); flush!(); io.out.write(step(regs, code, ctx, strs, &thread.frames)); return 1u8; }}"
+        "            _ => {{ *io.op_ip = code.ip; gatep!(); settle!(); flush!(); return gbail(io, step(regs, code, ctx, strs, &thread.frames)); }}"
     );
     let _ = writeln!(w, "        }}");
     let _ = writeln!(w, "    }}");
@@ -1128,7 +1137,7 @@ fn defer(arm: &str, sh: &Sh, restock: u64) -> String {
         } else {
             let _ = write!(
                 out,
-                "bcn += {restock}u64; settle!(); flush!(); io.out.write({expr}); return 1u8;"
+                "bcn += {restock}u64; settle!(); flush!(); return gbail(io, {expr});"
             );
         }
         rest = &tail[end + usize::from(tail.as_bytes().get(end) == Some(&b';'))..];
@@ -1143,11 +1152,14 @@ fn defer(arm: &str, sh: &Sh, restock: u64) -> String {
     // host inspects after `run()`. The call fast-path's propagations and
     // arity errors were already flushed pre-`enter_call`.
     out = out.replace(
-        "flush!(); io.out.write(Ok(Flow::Return",
-        "if thread.frames.len() == 1 { flush!(); } io.out.write(Ok(Flow::Return",
+        "flush!(); return gbail(io, Ok(Flow::Return",
+        "if thread.frames.len() == 1 { flush!(); } return gbail(io, Ok(Flow::Return",
     );
-    out = out.replace("flush!(); io.out.write(res)", "io.out.write(res)");
-    out = out.replace("flush!(); io.out.write(Err(kind))", "io.out.write(Err(kind))");
+    out = out.replace("flush!(); return gbail(io, res)", "return gbail(io, res)");
+    out = out.replace(
+        "flush!(); return gbail(io, Err(kind))",
+        "return gbail(io, Err(kind))",
+    );
     for &r in &sh.int {
         let plain = format!("rd(regs, Reg::from({r}u32))");
         out = out.replace(
