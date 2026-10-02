@@ -773,7 +773,7 @@ fn emit_body(w: &mut String, program: &Program, body: usize) {
                 }
                 let mut arm = String::new();
                 let t = |x: usize| term_tail(k, enext, x);
-                emit_op(&mut arm, &sh, *off, next, op, &t);
+                emit_op(&mut arm, &sh, program, *off, next, op, &t);
                 w.push_str(&defer(&arm, &sh, if gates {
                     0
                 } else {
@@ -1112,6 +1112,7 @@ fn emit_call_fast(
     s: &mut String,
     dst: Reg,
     callee: &str,
+    callee_chunk: Option<&compile::Chunk>,
     captures: &str,
     target: &str,
     arg_regs: &[Reg],
@@ -1131,40 +1132,114 @@ fn emit_call_fast(
         s,
         "if thread.frames.len() < INLINE_CALL_DEPTH {{
             settle!();
-            flush!();
-            match enter_call_regs(thread, code, chunks, {callee}, {}, &[{regs_list}], {captures}) {{
-                Ok(()) => {{
-                    let res = {f}(thread, code, ctx, strs, chunks, signatures, fuel, op_ip);
-                    // the callee's `enter_call` may have moved `thread.regs` —
-                    // rebuild the caller window before anything touches it
-                    // (`flush!()` on the propagate paths included)
-                    regs = unsafe {{
-                        std::slice::from_raw_parts_mut(thread.regs.as_mut_ptr().add(base), nregs)
-                    }};
-                    match res {{
-                        Ok(Flow::Return(v)) => {{
-                            let popped = thread.frames.pop().unwrap();
-                            thread.regs.truncate(popped.base);
-                            let caller = thread.frames.last().unwrap();
-                            code.ip = caller.ip;
-                            let caller_base = caller.base;
-                            thread.regs[caller_base + popped.return_reg as usize] = v;
-                            regs = unsafe {{
-                                std::slice::from_raw_parts_mut(thread.regs.as_mut_ptr().add(base), nregs)
-                            }};
-                        }}
-                        _ => {{ return res }},
-                    }}
-                    // the callee consumed fuel/ops_left through its own
-                    // `bcn` quota — re-arm ours from the settled counters
-                    bcn = (*fuel as u64).min(thread.ops_left); bcn0 = bcn;
-                }},
-                Err(kind) => {{ return Err(kind) }},
-            }}
-        }}",
-        reg(dst),
+            flush!();"
+    );
+    // The frame push is verbatim `enter_call_regs`; when the callee is known
+    // at codegen (`CallDirect`) and the op's arity matches its signature, the
+    // whole thing constant-folds: the callee window is filled inside spare
+    // capacity (Null-init for slots no param/capture covers — locals must read
+    // Null even when a dead frame left stale Vals there), the params/captures
+    // are written straight in, and the `Frame` push carries literal fields.
+    // Only the (rare) out-of-capacity grow falls back to the shared helper.
+    let folded = callee_chunk.filter(|c| c.args as usize == arg_regs.len());
+    if let Some(c) = folded {
+        // arg Vals are read *before* the grow — `regs` (and the shadows)
+        // still describe the caller window here
+        for (k, a) in arg_regs.iter().enumerate() {
+            let _ = writeln!(s, "let cargs_{k} = {};", sh.rdv(*a));
+        }
+        let _ = writeln!(s, "let new_base = thread.regs.len();");
+        let _ = writeln!(
+            s,
+            "if thread.regs.capacity() - new_base >= {}usize {{",
+            c.regs
+        );
+        let _ = writeln!(s, "    unsafe {{");
+        let _ = writeln!(
+            s,
+            "        let nw = thread.regs.as_mut_ptr().add(new_base);"
+        );
+        let mut covered: HashSet<usize> = HashSet::new();
+        for p in &c.params {
+            covered.insert(p.index());
+        }
+        for cap in &c.captures {
+            covered.insert(cap.index());
+        }
+        for i in 0..c.regs as usize {
+            if !covered.contains(&i) {
+                let _ = writeln!(s, "        nw.add({i}).write(Val::Null);");
+            }
+        }
+        for (k, p) in c.params.iter().enumerate() {
+            let _ = writeln!(s, "        nw.add({}).write(cargs_{k});", p.index());
+        }
+        for (i, cap) in c.captures.iter().enumerate() {
+            let _ = writeln!(s, "        nw.add({}).write({captures}[{i}]);", cap.index());
+        }
+        let _ = writeln!(
+            s,
+            "        thread.regs.set_len(new_base + {}usize);",
+            c.regs
+        );
+        let _ = writeln!(s, "    }}");
+        let _ = writeln!(
+            s,
+            "    thread.frames.last_mut().unwrap().ip = code.ip;"
+        );
+        let _ = writeln!(
+            s,
+            "    thread.frames.push(Frame {{ chunk: {callee}, ip: {}, return_reg: {}u32, base: new_base }});",
+            c.offset,
+            dst.index()
+        );
+        let _ = writeln!(s, "    code.ip = {};", c.offset);
+        let _ = writeln!(s, "}} else {{");
+        let _ = writeln!(
+            s,
+            "    match enter_call_regs(thread, code, chunks, {callee}, {}, &[{regs_list}], {captures}) {{
+                \x20   Ok(()) => {{}},
+                \x20   Err(kind) => {{ return Err(kind) }},
+                \x20}}",
+            reg(dst)
+        );
+        let _ = writeln!(s, "}}");
+    } else {
+        let _ = writeln!(
+            s,
+            "match enter_call_regs(thread, code, chunks, {callee}, {}, &[{regs_list}], {captures}) {{
+            \x20   Ok(()) => {{}},
+            \x20   Err(kind) => {{ return Err(kind) }},
+            \x20}}",
+            reg(dst)
+        );
+    }
+    let _ = writeln!(
+        s,
+        "let res = {f}(thread, code, ctx, strs, chunks, signatures, fuel, op_ip);
+        match res {{
+            Ok(Flow::Return(v)) => {{
+                \x20   let popped = thread.frames.pop().unwrap();
+                \x20   thread.regs.truncate(popped.base);
+                \x20   let caller = thread.frames.last().unwrap();
+                \x20   code.ip = caller.ip;
+                \x20   let caller_base = caller.base;
+                \x20   thread.regs[caller_base + popped.return_reg as usize] = v;
+                \x20   // the callee's `enter_call`/pop may have moved
+                \x20   // `thread.regs` — rebuild the caller window before
+                \x20   // anything touches it (dst-shadow refresh included)
+                \x20   regs = unsafe {{
+                \x20       std::slice::from_raw_parts_mut(thread.regs.as_mut_ptr().add(base), nregs)
+                \x20   }};
+                \x20}},
+                \x20_ => {{ return res }},
+            \x20}}
+            \x20// the callee consumed fuel/ops_left through its own
+            \x20// `bcn` quota — re-arm ours from the settled counters
+            \x20bcn = (*fuel as u64).min(thread.ops_left); bcn0 = bcn;",
         f = callee_fn(callee)
     );
+    let _ = writeln!(s, "}}");
     // The at-cap path needs `args` as values for the `Flow::Call` payload —
     // only build the SmallVec there; the inline path read the caller window
     // straight through `enter_call_regs`.
@@ -1271,6 +1346,7 @@ fn float_opnd(sh: &Sh, r: Reg, next: usize, off: usize, cold: &str) -> String {
 fn emit_op(
     w: &mut String,
     sh: &Sh,
+    program: &Program,
     offset: usize,
     next: usize,
     op: &Op,
@@ -1633,7 +1709,7 @@ fn emit_op(
             // interpreter it's already past this op's operands by then, so the
             // specialized arm must advance it before either path.
             wln!("code.ip = {next}; *op_ip = {offset};");
-            emit_call_fast(&mut s, *dst, "cb", "captures", "target", args, sh);
+            emit_call_fast(&mut s, *dst, "cb", None, "captures", "target", args, sh);
         }
         Op::CallDirect { dst, body, args } => {
             let callee = format!("BodyId::from({}u32)", body.index());
@@ -1642,6 +1718,7 @@ fn emit_op(
                 &mut s,
                 *dst,
                 &callee,
+                Some(&program.chunks[*body]),
                 "&[]",
                 &format!("CallTarget::Fn({callee})"),
                 args,
