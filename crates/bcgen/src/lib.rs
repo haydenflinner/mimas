@@ -1627,7 +1627,7 @@ fn emit_op(
         } => {
             wln!("let receiver = rd(regs, {});", reg(*src));
             wln!(
-                "if {} == AccessKind::Option && receiver == Val::Null {{",
+                "if {} == AccessKind::Option && matches!(receiver, Val::Null) {{",
                 access_kind(*kind)
             );
             wln!("    wr(regs, {}, Val::Null); code.ip = {next};", reg(*dst));
@@ -1726,12 +1726,18 @@ fn emit_op(
             // flag-clear still takes the authoritative slot — same predicate
             // the interpreter computes, just off the shadow when it can.
             let c = match sh.bool(*cond) {
+                // `matches!` is `rd == Val::Bool(x)` lowered to a
+                // discriminant+payload check — the derived `PartialEq` isn't
+                // inlined, so the plain `==` compiles to a call per branch.
                 Some(v) => format!(
-                    "if r{ci}ok {{ {v} == {is_true} }} else {{ rd(regs, {}) == Val::Bool({is_true}) }}",
+                    "if r{ci}ok {{ {v} == {is_true} }} else {{ matches!(rd(regs, {}), Val::Bool(x) if x == {is_true}) }}",
                     reg(*cond),
                     ci = cond.index()
                 ),
-                None => format!("rd(regs, {}) == Val::Bool({is_true})", reg(*cond)),
+                None => format!(
+                    "matches!(rd(regs, {}), Val::Bool(x) if x == {is_true})",
+                    reg(*cond)
+                ),
             };
             wln!("if {c} {{ {} }} else {{ {} }}", tail(tgt(target)), tail(next));
         }
