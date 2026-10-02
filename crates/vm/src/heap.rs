@@ -156,6 +156,25 @@ impl<'gc> ops::Deref for Ctx<'gc> {
 }
 
 impl<'gc> Ctx<'gc> {
+    /// Rebuild a `Ctx` from its two machine words. `bc::jit` shims take the
+    /// pair split into two params: AAPCS64 never splits a composite across the
+    /// register/stack boundary, so a by-value `Ctx` at argument position ≥ 7
+    /// lands *entirely* on the stack while the emitter's flat signature sends
+    /// the first word in a register — a corrupting ABI mismatch.
+    #[doc(hidden)]
+    pub unsafe fn from_parts(
+        mutation: *const Mutation<'gc>,
+        state: *const State<'gc>,
+    ) -> Ctx<'gc> {
+        // SAFETY: callers pass the two words of a live `Ctx` verbatim.
+        unsafe {
+            Ctx {
+                mutation: &*mutation,
+                state: &*state,
+            }
+        }
+    }
+
     pub fn state(self) -> &'gc State<'gc> {
         self.state
     }

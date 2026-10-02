@@ -3,6 +3,8 @@
 //!   vm    — the stock interpreter (`Vm::run`)
 //!   bc    — the same `Program` with bcgen-specialized bodies installed
 //!           (`Vm::install_bc`); identical semantics, generated dispatch
+//!   jit   — Cranelift-JIT'd bodies through the same `install_bc` slot
+//!           (`mimas_jit::compile` once per workload, timing amortized out)
 //!   rust  — the rustgen-transpiled module from `host/corpus-gen/src/gen/`
 //!           (typed native Rust against the mrt shim below)
 //!
@@ -96,6 +98,7 @@ fn bench(name: &str, bodies: fn() -> Vec<Option<mimas::vm::bc::BodyFn>>, rust_fn
     let src = source(name);
     let mut vm_best = Duration::MAX;
     let mut bc_best = Duration::MAX;
+    let mut jit_best = Duration::MAX;
     let mut rust_best = Duration::MAX;
     for _ in 0..iters {
         vm_best = vm_best.min(run_vm(&src, None));
@@ -104,14 +107,29 @@ fn bench(name: &str, bodies: fn() -> Vec<Option<mimas::vm::bc::BodyFn>>, rust_fn
         let b = bodies();
         bc_best = bc_best.min(run_vm(&src, Some(b)));
     }
+    // The JIT module is compiled once (its `compile` time is a one-off cost,
+    // reported separately); every iteration installs the same body table into a
+    // fresh Vm, exactly like the bc lane.
+    let (program, _s) =
+        mimas::Vm::compile_parts(&[("main", src.as_str())], mimas::library::std)
+            .expect("jit lane compile");
+    let t = Instant::now();
+    let jit = jit::compile(&program).expect("jit compile");
+    let jit_compile = t.elapsed();
+    for _ in 0..iters {
+        jit_best = jit_best.min(run_vm(&src, Some(jit.bodies())));
+    }
     for _ in 0..iters {
         rust_best = rust_best.min(run_rust(rust_fn));
     }
     println!(
-        "{name:>14}  vm {:>9.3?}  bc {:>9.3?} (x{:.2})  rust {:>9.3?} (x{:.2} vs bc)",
+        "{name:>14}  vm {:>9.3?}  bc {:>9.3?} (x{:.2})  jit {:>9.3?} (x{:.2}, compile {:>9.3?})  rust {:>9.3?} (x{:.2} vs bc)",
         vm_best,
         bc_best,
         vm_best.as_secs_f64() / bc_best.as_secs_f64(),
+        jit_best,
+        vm_best.as_secs_f64() / jit_best.as_secs_f64(),
+        jit_compile,
         rust_best,
         bc_best.as_secs_f64() / rust_best.as_secs_f64(),
     );
@@ -133,7 +151,7 @@ fn main() {
         ("prime_numbers", bc::prime_numbers::bodies, rust::prime_numbers::run_top_level),
         ("physics", bc::physics::bodies, rust::physics::run_top_level),
     ];
-    println!("workload           vm          bc (speedup)      rust (bc/rust)");
+    println!("workload           vm          bc (speedup)      jit (speedup)            rust (bc/rust)");
     for (name, bodies, rust_fn) in all {
         if names.is_empty() || names.contains(&name) {
             bench(name, bodies, rust_fn, iters);
