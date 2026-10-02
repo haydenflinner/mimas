@@ -2681,6 +2681,268 @@ impl Em<'_> {
         self.fb.ins().jump(nb, &[]);
     }
 
+    /// The `ArrayStore` discriminant's CLIF type (its probed byte width).
+    fn asty(&self) -> ir::Type {
+        match self.lyt.as_tsz {
+            1 => I8,
+            2 => types::I16,
+            4 => I32,
+            8 => I64,
+            d => unreachable!("bad ArrayStore tag width {d}"),
+        }
+    }
+
+    /// An `ArrayStore` discriminant constant at the probed width.
+    fn aconst(&mut self, t: u64) -> Value {
+        let ty = self.asty();
+        self.fb.ins().iconst(ty, t as i64)
+    }
+
+    /// `*dst = data[slot]` for a primitive typed-array store: the raw
+    /// `i64`/`f64` element becomes a `Val::Int`/`Val::Float` — the tag is
+    /// statically known, so `dst`'s DynCheck shadows get a direct answer
+    /// instead of a re-probe. A miss routes to `slow`, where the helper
+    /// reproduces bounds/type behavior verbatim.
+    #[allow(clippy::too_many_arguments)]
+    fn read_elem_prim(
+        &mut self,
+        i: usize,
+        dst: Reg,
+        slot: Value,
+        len: Value,
+        data: Value,
+        pre: Value,
+        is_int: bool,
+        slow: Block,
+    ) {
+        let inb = self
+            .fb
+            .ins()
+            .icmp(IntCC::UnsignedLessThan, slot, len);
+        let k = self.fb.ins().band(pre, inb);
+        let good = self.fb.create_block();
+        self.fb.ins().brif(k, good, &[], slow, &[]);
+        self.fb.switch_to_block(good);
+        let off = self.fb.ins().ishl_imm_s(slot, 3);
+        let ea = self.fb.ins().iadd(data, off);
+        let v = self
+            .fb
+            .ins()
+            .load(if is_int { I64 } else { F64 }, tf(), ea, 0);
+        let d = dst.index() as u32;
+        let mut covered = false;
+        if is_int {
+            if let Some(&(sv, ok)) = self.v.int.get(&d) {
+                self.fb.def_var(sv, v);
+                let one = self.iconst8(1);
+                self.fb.def_var(ok, one);
+                covered = true;
+            }
+            if let Some(&(_, ok)) = self.v.float.get(&d) {
+                let z = self.iconst8(0);
+                self.fb.def_var(ok, z);
+            }
+        } else {
+            if let Some(&(sv, ok)) = self.v.float.get(&d) {
+                self.fb.def_var(sv, v);
+                let one = self.iconst8(1);
+                self.fb.def_var(ok, one);
+                covered = true;
+            }
+            if let Some(&(_, ok)) = self.v.int.get(&d) {
+                let z = self.iconst8(0);
+                self.fb.def_var(ok, z);
+            }
+        }
+        if !covered {
+            let regs = self.regs();
+            let dd = self.vaddr(regs, d);
+            if is_int {
+                self.st_int(dd, v);
+            } else {
+                self.st_float(dd, v);
+            }
+        }
+        let nb = self.next_blk(i);
+        self.fb.ins().jump(nb, &[]);
+    }
+
+    /// `data[slot] = v` for a primitive typed-array store — a raw 8-byte
+    /// store under `pre && slot < len`; a miss runs the helper (demotion
+    /// and bounds behavior live there).
+    fn write_elem_prim(
+        &mut self,
+        i: usize,
+        slot: Value,
+        len: Value,
+        data: Value,
+        v: Value,
+        pre: Value,
+        slow: Block,
+    ) {
+        let inb = self
+            .fb
+            .ins()
+            .icmp(IntCC::UnsignedLessThan, slot, len);
+        let k = self.fb.ins().band(pre, inb);
+        let good = self.fb.create_block();
+        self.fb.ins().brif(k, good, &[], slow, &[]);
+        self.fb.switch_to_block(good);
+        let off = self.fb.ins().ishl_imm_s(slot, 3);
+        let ea = self.fb.ins().iadd(data, off);
+        self.fb.ins().store(tf(), v, ea, 0);
+        let nb = self.next_blk(i);
+        self.fb.ins().jump(nb, &[]);
+    }
+
+    /// After `regs[r]` was established to be a typed array (`st` holds its
+    /// already-loaded discriminant): load the `Seq` Gc, check the shared
+    /// borrow flag, load the `ArrayStore` tag, and split `Ints`/`Floats`
+    /// reads into the raw-load tails. Anything else — `Empty`, `Vals`,
+    /// contended flag — lands in `slow`.
+    #[allow(clippy::too_many_arguments)]
+    fn seq_read_chain(
+        &mut self,
+        i: usize,
+        dst: Reg,
+        slot: Value,
+        gc: Value,
+        is_int_store: bool,
+        store_off: usize,
+        fok: Value,
+        slow: Block,
+    ) {
+        let vp = self.fb.ins().load(
+            I64,
+            tf(),
+            gc,
+            (self.lyt.rl_seq + store_off + self.lyt.vec_ptr) as i32,
+        );
+        let vl = self.fb.ins().load(
+            I64,
+            tf(),
+            gc,
+            (self.lyt.rl_seq + store_off + self.lyt.vec_len) as i32,
+        );
+        self.read_elem_prim(i, dst, slot, vl, vp, fok, is_int_store, slow);
+    }
+
+    /// The shared dispatch for a confirmed `Val::IntArray`/`Val::FloatArray`
+    /// read: `gc` = the `Seq` payload. Loads `ArrayStore`'s tag once and
+    /// fans out `Ints` → i64 read, `Floats` → f64 read, else `slow`.
+    #[allow(clippy::too_many_arguments)]
+    fn seq_read(&mut self, i: usize, dst: Reg, slot: Value, gc: Value, slow: Block) {
+        let fok = self.borrow_ok(gc, self.lyt.rl_flag_s, false);
+        let aty = self.asty();
+        let stag = self
+            .fb
+            .ins()
+            .load(aty, tf(), gc, (self.lyt.rl_seq + self.lyt.as_tag) as i32);
+        let wi = self.aconst(self.lyt.as_ints);
+        let isints = self.fb.ins().icmp(IntCC::Equal, stag, wi);
+        let intsb = self.fb.create_block();
+        let noti = self.fb.create_block();
+        self.fb.ins().brif(isints, intsb, &[], noti, &[]);
+        self.fb.switch_to_block(intsb);
+        self.seq_read_chain(i, dst, slot, gc, true, self.lyt.as_ints_vec, fok, slow);
+        self.fb.switch_to_block(noti);
+        let wf = self.aconst(self.lyt.as_floats);
+        let isflts = self.fb.ins().icmp(IntCC::Equal, stag, wf);
+        let fltsb = self.fb.create_block();
+        self.fb.ins().brif(isflts, fltsb, &[], slow, &[]);
+        self.fb.switch_to_block(fltsb);
+        self.seq_read_chain(i, dst, slot, gc, false, self.lyt.as_floats_vec, fok, slow);
+    }
+
+    /// The shared dispatch for a `Val::IntArray`/`Val::FloatArray` write:
+    /// `Ints` accepts `Val::Int`, `Floats` accepts `Val::Float`, everything
+    /// else — demotion, `Empty`, `Vals`, contended flag — lands in `slow`
+    /// where `set_index`/`set_field` run their demote semantics.
+    #[allow(clippy::too_many_arguments)]
+    fn seq_write(
+        &mut self,
+        i: usize,
+        slot: Value,
+        gc: Value,
+        va: Value,
+        slow: Block,
+    ) {
+        let fok = self.borrow_ok(gc, self.lyt.rl_flag_s, true);
+        let aty = self.asty();
+        let stag = self
+            .fb
+            .ins()
+            .load(aty, tf(), gc, (self.lyt.rl_seq + self.lyt.as_tag) as i32);
+        let vt = self.ld_tag(va);
+        let wi = self.aconst(self.lyt.as_ints);
+        let isints = self.fb.ins().icmp(IntCC::Equal, stag, wi);
+        let intsb = self.fb.create_block();
+        let noti = self.fb.create_block();
+        self.fb.ins().brif(isints, intsb, &[], noti, &[]);
+        self.fb.switch_to_block(intsb);
+        {
+            let want = self.tconst(self.lyt.t_int);
+            let vis = self.fb.ins().icmp(IntCC::Equal, vt, want);
+            let pre = self.fb.ins().band(fok, vis);
+            let vp = self.fb.ins().load(
+                I64,
+                tf(),
+                gc,
+                (self.lyt.rl_seq + self.lyt.as_ints_vec + self.lyt.vec_ptr) as i32,
+            );
+            let vl = self.fb.ins().load(
+                I64,
+                tf(),
+                gc,
+                (self.lyt.rl_seq + self.lyt.as_ints_vec + self.lyt.vec_len) as i32,
+            );
+            let xv = self
+                .fb
+                .ins()
+                .load(I64, tf(), va, self.lyt.val_pay as i32);
+            self.write_elem_prim(i, slot, vl, vp, xv, pre, slow);
+        }
+        self.fb.switch_to_block(noti);
+        let wf = self.aconst(self.lyt.as_floats);
+        let isflts = self.fb.ins().icmp(IntCC::Equal, stag, wf);
+        let fltsb = self.fb.create_block();
+        self.fb.ins().brif(isflts, fltsb, &[], slow, &[]);
+        self.fb.switch_to_block(fltsb);
+        {
+            let want = self.tconst(self.lyt.t_float);
+            let vis = self.fb.ins().icmp(IntCC::Equal, vt, want);
+            let pre = self.fb.ins().band(fok, vis);
+            let vp = self.fb.ins().load(
+                I64,
+                tf(),
+                gc,
+                (self.lyt.rl_seq + self.lyt.as_floats_vec + self.lyt.vec_ptr) as i32,
+            );
+            let vl = self.fb.ins().load(
+                I64,
+                tf(),
+                gc,
+                (self.lyt.rl_seq + self.lyt.as_floats_vec + self.lyt.vec_len) as i32,
+            );
+            let xv = self
+                .fb
+                .ins()
+                .load(F64, tf(), va, self.lyt.val_pay as i32);
+            self.write_elem_prim(i, slot, vl, vp, xv, pre, slow);
+        }
+    }
+
+    /// Branch to `seqb` when `st` (an already-loaded `Val` discriminant) is
+    /// one of the two typed-array tags; `miss` otherwise.
+    fn is_seq_tag(&mut self, st: Value, seqb: Block, miss: Block) {
+        let wi = self.tconst(self.lyt.t_intarray);
+        let a = self.fb.ins().icmp(IntCC::Equal, st, wi);
+        let wf = self.tconst(self.lyt.t_floatarray);
+        let b = self.fb.ins().icmp(IntCC::Equal, st, wf);
+        let k = self.fb.ins().bor(a, b);
+        self.fb.ins().brif(k, seqb, &[], miss, &[]);
+    }
+
     /// `(len, data)` of an `Instance`'s `Fields` at `fp`, restricted to the
     /// `Inline` variant: returns the `(len, data, isinl)` triple so callers
     /// fold the tag check into the access `brif`; `Spilled` therefore routes
@@ -2746,7 +3008,19 @@ impl Em<'_> {
         let tarr = self.tconst(self.lyt.t_array);
         let isarr = self.fb.ins().icmp(IntCC::Equal, st, tarr);
         let arrb = self.fb.create_block();
-        self.fb.ins().brif(isarr, arrb, &[], slow, &[]);
+        let notarr = self.fb.create_block();
+        self.fb.ins().brif(isarr, arrb, &[], notarr, &[]);
+        // ---- receiver is IntArray/FloatArray: raw store element ----
+        self.fb.switch_to_block(notarr);
+        let seqb = self.fb.create_block();
+        self.is_seq_tag(st, seqb, slow);
+        self.fb.switch_to_block(seqb);
+        let gc = self
+            .fb
+            .ins()
+            .load(I64, tf(), sa, self.lyt.seq_pay as i32);
+        self.seq_read(i, dst, iv, gc, slow);
+        // ---- receiver is Array ----
         self.fb.switch_to_block(arrb);
         let gc = self
             .fb
@@ -2794,7 +3068,20 @@ impl Em<'_> {
         let tarr = self.tconst(self.lyt.t_array);
         let isarr = self.fb.ins().icmp(IntCC::Equal, st, tarr);
         let arrb = self.fb.create_block();
-        self.fb.ins().brif(isarr, arrb, &[], slow, &[]);
+        let notarr = self.fb.create_block();
+        self.fb.ins().brif(isarr, arrb, &[], notarr, &[]);
+        // ---- receiver is IntArray/FloatArray: raw primitive store ----
+        self.fb.switch_to_block(notarr);
+        let seqb = self.fb.create_block();
+        self.is_seq_tag(st, seqb, slow);
+        self.fb.switch_to_block(seqb);
+        let gc = self
+            .fb
+            .ins()
+            .load(I64, tf(), sa, self.lyt.seq_pay as i32);
+        let va = self.val_ptr(value.index() as u32);
+        self.seq_write(i, iv, gc, va, slow);
+        // ---- receiver is Array ----
         self.fb.switch_to_block(arrb);
         let gc = self
             .fb
@@ -2878,7 +3165,19 @@ impl Em<'_> {
         let tarr = self.tconst(self.lyt.t_array);
         let isarr = self.fb.ins().icmp(IntCC::Equal, rt, tarr);
         let arrb = self.fb.create_block();
-        self.fb.ins().brif(isarr, arrb, &[], slow, &[]);
+        let notarr = self.fb.create_block();
+        self.fb.ins().brif(isarr, arrb, &[], notarr, &[]);
+        // ---- receiver is IntArray/FloatArray: `a.0.borrow().at(slot)` ----
+        self.fb.switch_to_block(notarr);
+        let seqb = self.fb.create_block();
+        self.is_seq_tag(rt, seqb, slow);
+        self.fb.switch_to_block(seqb);
+        let gc = self
+            .fb
+            .ins()
+            .load(I64, tf(), ra, self.lyt.seq_pay as i32);
+        let sv = self.iconst(slot as i64);
+        self.seq_read(i, dst, sv, gc, slow);
         self.fb.switch_to_block(arrb);
         let gc = self
             .fb
@@ -2954,7 +3253,19 @@ impl Em<'_> {
         let tarr = self.tconst(self.lyt.t_array);
         let isarr = self.fb.ins().icmp(IntCC::Equal, rt, tarr);
         let arrb = self.fb.create_block();
-        self.fb.ins().brif(isarr, arrb, &[], slow, &[]);
+        let notarr = self.fb.create_block();
+        self.fb.ins().brif(isarr, arrb, &[], notarr, &[]);
+        // ---- receiver is IntArray/FloatArray: demoting write ----
+        self.fb.switch_to_block(notarr);
+        let seqb = self.fb.create_block();
+        self.is_seq_tag(rt, seqb, slow);
+        self.fb.switch_to_block(seqb);
+        let gc = self
+            .fb
+            .ins()
+            .load(I64, tf(), ra, self.lyt.seq_pay as i32);
+        let sv = self.iconst(slot as i64);
+        self.seq_write(i, sv, gc, va, slow);
         self.fb.switch_to_block(arrb);
         let gc = self
             .fb

@@ -513,6 +513,43 @@ pub mod jit {
         pub out_ret: u64,
         /// Byte offset of the returned `Val` inside `Ok(Flow::Return(..))`.
         pub out_ret_pay: usize,
+        /// Discriminants for the typed-array `Val` variants (`Seq` payloads)
+        /// and `Val::Dict` — the raw-load fast path and frozen-constant
+        /// pointer guards compare these.
+        pub t_intarray: u64,
+        /// See `t_intarray`.
+        pub t_floatarray: u64,
+        /// See `t_intarray`.
+        pub t_dict: u64,
+        /// Byte offset of the `Gc` payload inside `Val::IntArray`/
+        /// `Val::FloatArray` — a pointer to `RefLock<ArrayStore>`. Both tags
+        /// share one payload position (verified by the probe).
+        pub seq_pay: usize,
+        /// Byte offset of the `Gc` payload inside `Val::Dict`.
+        pub dict_pay: usize,
+        /// Byte offset of the `Gc` payload inside `Val::Str` — the
+        /// baked-key guard compares it.
+        pub str_pay: usize,
+        /// Offset of the `ArrayStore` inside `RefLock<ArrayStore>` — `Gc`
+        /// points at the RefLock, so `gc + rl_seq` is the enum.
+        pub rl_seq: usize,
+        /// The `RefCell` borrow flag (`isize`) inside `RefLock<ArrayStore>` —
+        /// probed per-`T` like `rl_flag`/`rl_flag_i`.
+        pub rl_flag_s: usize,
+        /// `ArrayStore` discriminant position/width — same semantic
+        /// round-trip probe as `Val`'s.
+        pub as_tag: usize,
+        /// Discriminant width in bytes for `ArrayStore` (see `as_tag`).
+        pub as_tsz: usize,
+        /// Discriminant value of `ArrayStore::Ints`.
+        pub as_ints: u64,
+        /// Discriminant value of `ArrayStore::Floats`.
+        pub as_floats: u64,
+        /// Byte offset of the `Vec<i64>` inside `ArrayStore::Ints` —
+        /// `vec_ptr`/`vec_len` apply inside it.
+        pub as_ints_vec: usize,
+        /// Byte offset of the `Vec<f64>` inside `ArrayStore::Floats`.
+        pub as_floats_vec: usize,
     }
 
     /// Probe this build's layouts — see [`Layout`]. Called once per
@@ -842,6 +879,198 @@ pub mod jit {
                     rl_flag_i,
                 )
             });
+        // Typed arrays + dicts — `Seq`/`Dict` payloads, the `ArrayStore`
+        // enum behind the typed tags, and `Str`'s payload for baked-key
+        // guards. Same discipline as above: probes on live arena objects.
+        let (
+            t_intarray,
+            t_floatarray,
+            t_dict,
+            seq_pay,
+            dict_pay,
+            str_pay,
+            rl_seq,
+            rl_flag_s,
+            as_tag,
+            as_tsz,
+            as_ints,
+            as_floats,
+            as_ints_vec,
+            as_floats_vec,
+        ) = gc_arena::arena::rootless_mutate(|mc| {
+            use crate::val::{ArrayStore, Dict, DictMap, Seq};
+            let dg: Dict = Dict(Gc::new(mc, gc_arena::RefLock::new(DictMap::new())));
+            let di = Val::Dict(dg);
+            let si = Seq(Gc::new(
+                mc,
+                gc_arena::RefLock::new(ArrayStore::Ints(vec![3, 4])),
+            ));
+            let sf = Seq(Gc::new(
+                mc,
+                gc_arena::RefLock::new(ArrayStore::Floats(vec![1.5, 2.5])),
+            ));
+            let t_intarray = tagv(&bytes(&Val::IntArray(si)));
+            let t_floatarray = tagv(&bytes(&Val::FloatArray(sf)));
+            let t_dict = tagv(&bytes(&di));
+            let pay_of = |v: &Val<'_>, p: usize| -> usize {
+                let b = bytes(v);
+                let want = p.to_ne_bytes();
+                let mut found = None;
+                for off in 0..=vsz - 8 {
+                    if b[off..off + 8] == want {
+                        assert!(found.is_none(), "ambiguous gc payload offset");
+                        found = Some(off);
+                    }
+                }
+                found.expect("gc payload not found in Val")
+            };
+            // Both Seq tags must carry the Gc at one offset — the emitted
+            // tag check only selects which primitive store to try.
+            let seq_pay = pay_of(&Val::IntArray(si), Gc::as_ptr(si.0) as usize);
+            assert_eq!(
+                seq_pay,
+                pay_of(&Val::FloatArray(sf), Gc::as_ptr(sf.0) as usize),
+                "Seq payload must sit at one offset for both tags"
+            );
+            let dict_pay = pay_of(&di, Gc::as_ptr(dg.0) as usize);
+            let sv_str = Val::Str(crate::val::Str(Gc::new(
+                mc,
+                crate::val::SharedStr::from("k"),
+            )));
+            let Val::Str(key_str) = sv_str else { unreachable!() };
+            let str_pay = pay_of(&sv_str, Gc::as_ptr(key_str.0) as usize);
+            // RefLock<ArrayStore>: inner-enum offset + per-T borrow flag —
+            // the same trick `rl_vec`/`rl_flag` used for RefLock<Vec<Val>>.
+            let rls = &*si.0;
+            let rl_seq = rls.as_ptr() as usize - rls as *const _ as usize;
+            let nwords_s = size_of_val(rls) / 8;
+            let rlsb = rls as *const _ as *const u8;
+            let words_s = |p: *const u8| -> Vec<i64> {
+                (0..nwords_s)
+                    .map(|w| unsafe { p.add(w * 8).cast::<i64>().read_unaligned() })
+                    .collect()
+            };
+            let before_s = words_s(rlsb);
+            let during_s = {
+                let r = rls.borrow();
+                let w = words_s(rlsb);
+                drop(r);
+                w
+            };
+            let mut flag_s = None;
+            for w in 0..nwords_s {
+                if before_s[w] == 0 && during_s[w] == 1 {
+                    assert!(flag_s.is_none(), "ambiguous borrow flag word");
+                    flag_s = Some(w * 8);
+                }
+            }
+            let rl_flag_s = flag_s.expect("RefLock<ArrayStore> flag probe failed");
+            // `ArrayStore`'s discriminant: rewrite a candidate window of an
+            // `Empty`'s encoding with each variant's bytes and require the
+            // result's discriminant to be that variant's. `Ints`/`Floats`
+            // payloads are Vecs, `Vals`'s is a `Gc`-holding `Array` — all
+            // read via ManuallyDrop so nothing fabricated gets dropped.
+            const ASZ: usize = size_of::<ArrayStore<'static>>();
+            assert_eq!(ASZ % 8, 0, "ArrayStore size not a multiple of 8");
+            let abytes = |v: &ArrayStore<'_>| -> [u8; ASZ] {
+                let mut b = [0u8; ASZ];
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        v as *const ArrayStore<'_> as *const u8,
+                        b.as_mut_ptr(),
+                        ASZ,
+                    );
+                }
+                b
+            };
+            let av = ArrayStore::Vals(crate::val::Array(Gc::new(
+                mc,
+                gc_arena::RefLock::new(vec![Val::Int(1)]),
+            )));
+            let (ae_b, ai_b, af_b, av_b) = (
+                abytes(&ArrayStore::Empty),
+                abytes(&ArrayStore::Ints(vec![0])),
+                abytes(&ArrayStore::Floats(vec![0.0])),
+                abytes(&av),
+            );
+            let discs = [
+                std::mem::discriminant(&ArrayStore::Empty),
+                std::mem::discriminant(&ArrayStore::Ints(vec![0])),
+                std::mem::discriminant(&ArrayStore::Floats(vec![0.0])),
+                std::mem::discriminant(&av),
+            ];
+            let aclass = |raw: &[u8; ASZ]| -> Option<usize> {
+                let v: std::mem::ManuallyDrop<ArrayStore<'_>> =
+                    unsafe { std::ptr::read_unaligned(raw.as_ptr().cast()) };
+                discs.iter().position(|d| *d == std::mem::discriminant(&*v))
+            };
+            let mut afound = None;
+            'aw: for w in [1usize, 2, 4, 8] {
+                if w > ASZ {
+                    continue;
+                }
+                for p in 0..=ASZ - w {
+                    let srcs: [&[u8; ASZ]; 4] = [&ae_b, &ai_b, &af_b, &av_b];
+                    let mut ok = true;
+                    for (j, src) in srcs.iter().enumerate() {
+                        let mut raw = ae_b;
+                        raw[p..p + w].copy_from_slice(&src[p..p + w]);
+                        if aclass(&raw) != Some(j) {
+                            ok = false;
+                            break;
+                        }
+                    }
+                    if ok {
+                        assert!(afound.is_none(), "ambiguous ArrayStore tag positions");
+                        afound = Some((p, w));
+                    }
+                }
+                if afound.is_some() {
+                    break 'aw;
+                }
+            }
+            let (as_tag, as_tsz) = afound.expect("no discriminant found in ArrayStore");
+            let stagv = |b: &[u8; ASZ]| -> u64 {
+                let mut w = [0u8; 8];
+                w[..as_tsz].copy_from_slice(&b[as_tag..as_tag + as_tsz]);
+                u64::from_le_bytes(w)
+            };
+            let as_ints = stagv(&abytes(&*si.0.borrow()));
+            let as_floats = stagv(&abytes(&*sf.0.borrow()));
+            assert_ne!(as_ints, as_floats, "indistinguishable ArrayStore tags");
+            // `Vec<T>` payload offsets inside each variant — the `vec_*`
+            // header probes apply within them.
+            let as_ints_vec = match &*si.0.borrow() {
+                ArrayStore::Ints(v) => {
+                    let v: &Vec<i64> = v;
+                    v as *const Vec<i64> as usize - rls.as_ptr() as usize
+                }
+                _ => unreachable!(),
+            };
+            let as_floats_vec = match &*sf.0.borrow() {
+                ArrayStore::Floats(v) => {
+                    let v: &Vec<f64> = v;
+                    v as *const Vec<f64> as usize - (*sf.0).as_ptr() as usize
+                }
+                _ => unreachable!(),
+            };
+            (
+                t_intarray,
+                t_floatarray,
+                t_dict,
+                seq_pay,
+                dict_pay,
+                str_pay,
+                rl_seq,
+                rl_flag_s,
+                as_tag,
+                as_tsz,
+                as_ints,
+                as_floats,
+                as_ints_vec,
+                as_floats_vec,
+            )
+        });
         // sanity: Gc-variant tags differ from everything else probed
         for (a, b, name) in [
             (t_array, t_int, "array/int"),
@@ -1070,6 +1299,20 @@ pub mod jit {
             out_tsz,
             out_ret,
             out_ret_pay,
+            t_intarray,
+            t_floatarray,
+            t_dict,
+            seq_pay,
+            dict_pay,
+            str_pay,
+            rl_seq,
+            rl_flag_s,
+            as_tag,
+            as_tsz,
+            as_ints,
+            as_floats,
+            as_ints_vec,
+            as_floats_vec,
         }
     }
 
