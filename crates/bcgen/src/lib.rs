@@ -444,7 +444,7 @@ fn emit_body(w: &mut String, program: &Program, body: usize) {
     let sh = analyze(&ops, program.chunks[body_id].regs as u32);
     let _ = writeln!(
         w,
-        "\n#[allow(unused_variables, unused_mut, unused_assignments, unused_comparisons, unused_parens, clippy::all)]\n\
+        "\n#[allow(unused_variables, unused_mut, unused_assignments, unused_comparisons, unused_parens, unused_macros, clippy::all)]\n\
          fn body_{body}<'gc>(\n\
          \x20   thread: &mut ThreadState<'gc>,\n\
          \x20   code: &mut Decoder,\n\
@@ -500,33 +500,337 @@ fn emit_body(w: &mut String, program: &Program, body: usize) {
     sh.flush(&mut flush_body);
     w.push_str(&flush_body);
     let _ = writeln!(w, "    }}}}");
-    // The driver's per-op bookkeeping, verbatim and in its own order. A body
-    // that exits here leaves `code.ip` at the next unexecuted op, so the
-    // driver re-enters cleanly — including its own paused/fuel top-checks.
-    let _ = writeln!(w, "    loop {{");
+    // Per-op bookkeeping is the driver's, batched: `bcn` counts down a local
+    // quota of `min(fuel, ops_left)` — both are consumed strictly per op and
+    // can't be touched mid-body (natives never see `fuel`, and `thread` is
+    // borrow_mut-held), so `*fuel`/`thread.ops_left` are only synced by
+    // `settle!()` at body exits and re-armed after an inlined call consumed
+    // some. `bcn0` remembers `bcn` at the last settle so `spent` is exact.
+    // When `bcn` hits 0 the ordered exit reasons reproduce run_dispatch's:
+    // paused or `fuel == 0` → `Flow::Next`, `ops_left == 0` → `OutOfFuel`
+    // (paused first, matching the driver's own ordering).
+    let _ = writeln!(w, "    let mut bcn: u64 = (*fuel as u64).min(thread.ops_left);");
+    let _ = writeln!(w, "    let mut bcn0: u64 = bcn;");
     let _ = writeln!(
         w,
-        "        if ctx.state().paused.get() || *fuel == 0 {{ flush!(); return Ok(Flow::Next); }}\n\
-         \x20       *fuel -= 1;\n\
+        "    macro_rules! settle {{ () => {{{{\n\
+         \x20       let spent = bcn0 - bcn; bcn0 = bcn;\n\
+         \x20       *fuel -= spent as usize;\n\
+         \x20       thread.ops_left -= spent;\n\
+         \x20   }}}}}}\n\
+         \x20   macro_rules! gexit {{ () => {{{{\n\
+         \x20       settle!();\n\
+         \x20       if ctx.state().paused.get() | (*fuel == 0) {{ flush!(); return Ok(Flow::Next); }}\n\
          \x20       if thread.ops_left == 0 {{ *op_ip = code.ip; flush!(); return Err(RtErr::OutOfFuel); }}\n\
-         \x20       thread.ops_left -= 1;"
+         \x20       bcn = (*fuel as u64).min(thread.ops_left); bcn0 = bcn;\n\
+         \x20   }}}}}}\n\
+         \x20   macro_rules! gateq {{ () => {{{{\n\
+         \x20       if bcn == 0 {{ gexit!(); }}\n\
+         \x20       bcn -= 1;\n\
+         \x20   }}}}}}\n\
+         \x20   macro_rules! gatep {{ () => {{{{\n\
+         \x20       if ctx.state().paused.get() | (bcn == 0) {{ gexit!(); }}\n\
+         \x20       bcn -= 1;\n\
+         \x20   }}}}}}\n\
+         \x20   macro_rules! pchk {{ () => {{{{\n\
+         \x20       if ctx.state().paused.get() {{ settle!(); flush!(); return Ok(Flow::Next); }}\n\
+         \x20   }}}}}}"
     );
+    let _ = writeln!(w, "    loop {{");
     let _ = writeln!(w, "        match code.ip {{");
-    for (i, (offset, op)) in ops.iter().enumerate() {
-        let next = ops.get(i + 1).map(|(o, _)| *o).unwrap_or(usize::MAX);
-        let mut arm = String::new();
-        emit_op(&mut arm, &sh, *offset, next, op);
-        w.push_str(&defer(&arm, &sh));
+    let n_ops = ops.len();
+    let off_idx: HashMap<usize, usize> = ops
+        .iter()
+        .enumerate()
+        .map(|(i, (o, _))| (*o, i))
+        .collect();
+    let mut is_tgt = vec![false; n_ops];
+    for (_, op) in &ops {
+        for t in edge_targets(op) {
+            if let Some(&j) = off_idx.get(&t) {
+                is_tgt[j] = true;
+            }
+        }
+    }
+    // Calls are never inlined into a chain: they always lead (or stand as)
+    // their own arm. Besides being the fattest emitted code (doubling it
+    // would bloat the body's stack frame — visible in debug builds where
+    // the inline-call recursion is deepest), a mid-chain `Flow::Call`
+    // resume lands on `next` anyway, which already re-dispatches.
+    let is_call = |op: &Op| {
+        matches!(
+            op,
+            Op::Call { .. } | Op::CallDirect { .. } | Op::CallNative { .. }
+        )
+    };
+    // A "leader" is an arm whose fallthrough chain gets inlined into it —
+    // chunk entry, a branch target, or the op right after a terminator.
+    // Non-leader arms stay single-op stubs; they're only reached on resume
+    // after a pause/fuel/call return mid-block.
+    let leader =
+        |i: usize| i == 0 || is_tgt[i] || !fallthrough(&ops[i - 1].1) || is_call(&ops[i].1);
+    // The last op index of the fallthrough chain starting at `i`.
+    let chain_end = |mut i: usize| {
+        while i + 1 < n_ops && fallthrough(&ops[i].1) && !is_call(&ops[i + 1].1) {
+            i += 1;
+        }
+        i
+    };
+    let tail_norm = |t: usize| format!("code.ip = {t};");
+    for i in 0..n_ops {
+        let head = ops[i].0;
+        let seq: Vec<usize> = if leader(i) {
+            (i..=chain_end(i)).collect()
+        } else {
+            vec![i]
+        };
+        let term = *seq.last().unwrap();
+        // Loop-wrap: if the block's terminator can branch back to `head`,
+        // emit the whole arm as a Rust `loop` so the back-edge is a direct
+        // `continue` — no `match` re-dispatch. Also covers the `while`
+        // shape: head block ends in a conditional whose taken target is a
+        // block that jumps back to `head`.
+        let mut extra: Vec<usize> = vec![];
+        let mut fall_t = usize::MAX; // a taken edge of `term` that falls into `extra`
+        let mut wrap = !matches!(ops[term].1, Op::Switch { .. })
+            && edge_targets(&ops[term].1).contains(&head);
+        if !wrap && let Some(tk) = cond_target(&ops[term].1) {
+            if let Some(&m) = off_idx.get(&tk)
+                && m > term
+                && !matches!(ops[chain_end(m)].1, Op::Switch { .. })
+                && edge_targets(&ops[chain_end(m)].1).contains(&head)
+            {
+                wrap = true;
+                extra = (m..=chain_end(m)).collect();
+                fall_t = tk;
+            }
+        }
+        // Emits one run of ops (`seq`, then `extra`): `gates` toggles the
+        // per-op `gateq!()`/`gatep!()` bookkeeping; when off (the fast path),
+        // `restock` is the whole region's op count and the exit paths hand
+        // back the ops that never ran — `bcn` was pre-paid `bcn -= len`, so
+        // an op at region position `pos0 + k` restocks `len-1-(pos0+k)`
+        // before `settle!()` computes `spent`. Keeps the interpreter's
+        // decrement-before-run accounting exact on error/bail exits.
+        let emit_ops = |w: &mut String,
+                        idxs: &[usize],
+                        gates: bool,
+                        restock: usize,
+                        pos0: usize,
+                        term_tail: &dyn Fn(usize) -> String| {
+            if idxs.is_empty() {
+                return;
+            }
+            let last = *idxs.last().unwrap();
+            for (k, &j) in idxs.iter().enumerate() {
+                let (off, op) = &ops[j];
+                let next = ops.get(j + 1).map(|(o, _)| *o).unwrap_or(usize::MAX);
+                if gates {
+                    w.push_str(if j > 0 && may_pause(&ops[j - 1].1) {
+                        "            gatep!();\n"
+                    } else {
+                        "            gateq!();\n"
+                    });
+                }
+                let mut arm = String::new();
+                let t: &dyn Fn(usize) -> String = if j == last {
+                    term_tail
+                } else {
+                    &tail_norm
+                };
+                emit_op(&mut arm, &sh, *off, next, op, t);
+                w.push_str(&defer(&arm, &sh, if gates {
+                    0
+                } else {
+                    (restock - 1 - (pos0 + k)) as u64
+                }));
+            }
+        };
+        if wrap {
+            let region: Vec<usize> = seq.iter().chain(extra.iter()).copied().collect();
+            let pure = region.iter().all(|&j| !may_pause(&ops[j].1));
+            let blen = region.len();
+            // terminator tails: an edge to `head` is `continue`, `term`'s
+            // `fall_t` edge falls into the inlined `extra` block, anything
+            // else exits the loop and re-dispatches on `code.ip`.
+            let tail_head = |t: usize| {
+                if t == fall_t {
+                    String::new()
+                } else if t == head {
+                    "continue;".to_string()
+                } else {
+                    format!("code.ip = {t}; break;")
+                }
+            };
+            // Same shape for the pre-paid fast path, except an exit edge at
+            // `term` skips the whole `extra` block — hand those ops back or
+            // the counters would charge for ops that never ran.
+            let tail_head_fast = |t: usize| {
+                if t == fall_t {
+                    String::new()
+                } else if t == head {
+                    "continue;".to_string()
+                } else if extra.is_empty() {
+                    format!("code.ip = {t}; break;")
+                } else {
+                    format!("code.ip = {t}; bcn += {}u64; break;", extra.len())
+                }
+            };
+            let tail_loop = |t: usize| {
+                if t == head {
+                    "continue;".to_string()
+                } else {
+                    format!("code.ip = {t}; break;")
+                }
+            };
+            let _ = writeln!(w, "            {head} => {{");
+            // `paused` can't change inside a pure region — one entry check
+            // covers the whole loop when the fallthrough predecessor could
+            // have set it (the flag is then unset for every iteration).
+            if pure && i > 0 && may_pause(&ops[i - 1].1) {
+                let _ = writeln!(w, "            pchk!();");
+            }
+            let _ = writeln!(w, "            loop {{");
+            // `code.ip` must sit at `head` on every iteration: the head op's
+            // own `step`-bails and the gates' `*op_ip`/Flow::Next save slot
+            // all read it.
+            let _ = writeln!(w, "            code.ip = {head};");
+            if pure {
+                let _ = writeln!(
+                    w,
+                    "            if bcn >= {blen}u64 {{ bcn -= {blen}u64;"
+                );
+                emit_ops(w, &seq, false, blen, 0, &tail_head_fast);
+                emit_ops(w, &extra, false, blen, seq.len(), &tail_loop);
+                let _ = writeln!(w, "            }} else {{");
+                emit_ops(w, &seq, true, blen, 0, &tail_head);
+                emit_ops(w, &extra, true, blen, seq.len(), &tail_loop);
+                let _ = writeln!(w, "            }}");
+            } else {
+                emit_ops(w, &seq, true, blen, 0, &tail_head);
+                emit_ops(w, &extra, true, blen, seq.len(), &tail_loop);
+            }
+            let _ = writeln!(w, "            }}");
+            let _ = writeln!(w, "            }}");
+        } else {
+            let _ = writeln!(w, "            {head} => {{");
+            emit_ops(w, &seq, true, 0, 0, &tail_norm);
+            let _ = writeln!(w, "            }}");
+        }
     }
     // an ip outside the chunk's op stream can only come from a codegen bug --
     // hand it to the interpreter, which hits the same garbage decode either way
     let _ = writeln!(
         w,
-        "            _ => {{ *op_ip = code.ip; flush!(); return step(regs, code, ctx, strs, &thread.frames); }}"
+        "            _ => {{ *op_ip = code.ip; gatep!(); settle!(); flush!(); return step(regs, code, ctx, strs, &thread.frames); }}"
     );
     let _ = writeln!(w, "        }}");
     let _ = writeln!(w, "    }}");
     let _ = writeln!(w, "}}");
+}
+
+/// The interpreter checks `State::paused` before every op, but the flag can
+/// only change inside an op that runs foreign code — `bin`/`unary` can reach
+/// registered instance-op impls, and `Call*`/`CallNative` run natives and
+/// callee bodies (whose own gates propagate a pause as `Flow::Next`). Every
+/// other op is pure register/Rust work, so `paused` only needs checking on
+/// the op *after* one of these — and inline callees return `Flow::Return`
+/// only when their last gate saw the flag clear.
+fn may_pause(op: &Op) -> bool {
+    matches!(
+        op,
+        Op::Bin { .. }
+            | Op::Unary { .. }
+            | Op::Call { .. }
+            | Op::CallDirect { .. }
+            | Op::CallNative { .. }
+    )
+}
+
+/// Falls through to the next op on the success path — every other way out is
+/// a `return`. Terminators (branches, switches, exits) have no fallthrough.
+fn fallthrough(op: &Op) -> bool {
+    !matches!(
+        op,
+        Op::Jump { .. }
+            | Op::JumpIf { .. }
+            | Op::Switch { .. }
+            | Op::ForNext { .. }
+            | Op::BIntLt { .. }
+            | Op::BIntLe { .. }
+            | Op::BIntGt { .. }
+            | Op::BIntGe { .. }
+            | Op::BIntEq { .. }
+            | Op::BIntNe { .. }
+            | Op::BIntLtImm { .. }
+            | Op::BIntLeImm { .. }
+            | Op::BIntGtImm { .. }
+            | Op::BIntGeImm { .. }
+            | Op::BIntEqImm { .. }
+            | Op::BIntNeImm { .. }
+            | Op::BFloatLt { .. }
+            | Op::BFloatLe { .. }
+            | Op::BFloatGt { .. }
+            | Op::BFloatGe { .. }
+            | Op::BFloatEq { .. }
+            | Op::BFloatNe { .. }
+            | Op::BFloatLtImm { .. }
+            | Op::BFloatLeImm { .. }
+            | Op::BFloatGtImm { .. }
+            | Op::BFloatGeImm { .. }
+            | Op::BFloatEqImm { .. }
+            | Op::BFloatNeImm { .. }
+            | Op::Return { .. }
+            | Op::Raise { .. }
+            | Op::Panic {}
+    )
+}
+
+/// Every successor `op` may jump to, as byte offsets — the `next` fallthrough
+/// edge is implicit, so only branch/switch targets are listed.
+fn edge_targets(op: &Op) -> Vec<usize> {
+    let t = |target: &BlockTarget| tgt(target);
+    match op {
+        Op::Jump { target } | Op::JumpIf { target, .. } | Op::ForNext { target, .. } => {
+            vec![t(target)]
+        }
+        Op::Switch {
+            table, default, ..
+        } => table.iter().map(t).chain(std::iter::once(t(default))).collect(),
+        Op::BIntLt { target, .. }
+        | Op::BIntLe { target, .. }
+        | Op::BIntGt { target, .. }
+        | Op::BIntGe { target, .. }
+        | Op::BIntEq { target, .. }
+        | Op::BIntNe { target, .. }
+        | Op::BIntLtImm { target, .. }
+        | Op::BIntLeImm { target, .. }
+        | Op::BIntGtImm { target, .. }
+        | Op::BIntGeImm { target, .. }
+        | Op::BIntEqImm { target, .. }
+        | Op::BIntNeImm { target, .. }
+        | Op::BFloatLt { target, .. }
+        | Op::BFloatLe { target, .. }
+        | Op::BFloatGt { target, .. }
+        | Op::BFloatGe { target, .. }
+        | Op::BFloatEq { target, .. }
+        | Op::BFloatNe { target, .. }
+        | Op::BFloatLtImm { target, .. }
+        | Op::BFloatLeImm { target, .. }
+        | Op::BFloatGtImm { target, .. }
+        | Op::BFloatGeImm { target, .. }
+        | Op::BFloatEqImm { target, .. }
+        | Op::BFloatNeImm { target, .. } => vec![t(target)],
+        _ => vec![],
+    }
+}
+
+/// The taken edge of a two-edge conditional terminator — `None` for
+/// unconditional (Jump), multi-edge (Switch), or non-branching ops.
+fn cond_target(op: &Op) -> Option<usize> {
+    edge_targets(op).into_iter().next().filter(|_| {
+        !matches!(op, Op::Jump { .. } | Op::Switch { .. })
+    })
 }
 
 /// Post-processes one emitted op arm for deferred writeback:
@@ -534,8 +838,17 @@ fn emit_body(w: &mut String, program: &Program, body: usize) {
 ///   observes it next (the driver, an inlined callee's snapshot, the interpreter's cold dispatch);
 /// - every `rd(regs, Reg::from(Nu32))` on a shadowed register becomes a shadow-aware read — with
 ///   write-through gone, `regs` there can be stale.
-fn defer(arm: &str, sh: &Sh) -> String {
-    let mut out = arm.replace("return ", "flush!(); return ");
+fn defer(arm: &str, sh: &Sh, restock: u64) -> String {
+    // `restock` > 0 means the op ran under a pre-paid fast path (`bcn -= len`
+    // covered the whole region): returns hand back the ops that never ran so
+    // `settle!()` charges exactly the ones that did.
+    let mut out = arm.replace(
+        "return ",
+        &format!("bcn += {restock}u64; settle!(); flush!(); return "),
+    );
+    if restock == 0 {
+        out = out.replace("bcn += 0u64; ", "");
+    }
     // ...then reclaim the pointless ones. A `Flow::Return` destroys the
     // frame — nothing observes its regs — except the root frame, which the
     // host inspects after `run()`. The call fast-path's propagations are
@@ -583,12 +896,31 @@ fn tgt(t: &BlockTarget) -> usize {
 /// `INLINE_CALL_DEPTH` falls back to `Flow::Call` — `code.ip` is already at
 /// `next` (emitted before this) so the driver's enter_call saves the right
 /// resume slot.
-fn emit_call_fast(s: &mut String, dst: Reg, callee: &str, captures: &str, target: &str, sh: &Sh) {
+fn emit_call_fast(
+    s: &mut String,
+    dst: Reg,
+    callee: &str,
+    captures: &str,
+    target: &str,
+    arg_regs: &[Reg],
+    sh: &Sh,
+) {
+    // `settle!()` before entering the callee: it draws fuel/ops_left from the
+    // same counters our `bcn` was armed against, so our spent ops must be
+    // charged first or the propagate-path `settle!()` would subtract them
+    // twice (debug underflow). Natives can't observe this — `thread` stays
+    // `borrow_mut`-held for the whole dispatch.
+    let regs_list = arg_regs
+        .iter()
+        .map(|r| format!("Reg::from({}u32)", r.index()))
+        .collect::<Vec<_>>()
+        .join(", ");
     let _ = writeln!(
         s,
         "if thread.frames.len() < INLINE_CALL_DEPTH {{
+            settle!();
             flush!();
-            match enter_call(thread, code, chunks, {callee}, {}, args.as_slice(), {captures}) {{
+            match enter_call_regs(thread, code, chunks, {callee}, {}, &[{regs_list}], {captures}) {{
                 Ok(()) => {{
                     let res = {f}(thread, code, ctx, strs, chunks, signatures, fuel, op_ip);
                     // the callee's `enter_call` may have moved `thread.regs` —
@@ -611,15 +943,28 @@ fn emit_call_fast(s: &mut String, dst: Reg, callee: &str, captures: &str, target
                         }}
                         _ => {{ return res }},
                     }}
+                    // the callee consumed fuel/ops_left through its own
+                    // `bcn` quota — re-arm ours from the settled counters
+                    bcn = (*fuel as u64).min(thread.ops_left); bcn0 = bcn;
                 }},
                 Err(kind) => {{ return Err(kind) }},
             }}
-        }} else {{
-            return Ok(Flow::Call {{ target: {target}, dst: {}, args }});
         }}",
         reg(dst),
-        reg(dst),
         f = callee_fn(callee)
+    );
+    // The at-cap path needs `args` as values for the `Flow::Call` payload —
+    // only build the SmallVec there; the inline path read the caller window
+    // straight through `enter_call_regs`.
+    let _ = writeln!(s, "else {{");
+    let _ = writeln!(s, "    let mut args = SmallVec::<[Val; 8]>::new();");
+    for a in arg_regs {
+        let _ = writeln!(s, "    args.push(rd(regs, {}));", reg(*a));
+    }
+    let _ = writeln!(
+        s,
+        "    return Ok(Flow::Call {{ target: {target}, dst: {}, args }});\n}}",
+        reg(dst)
     );
     // The callee's return wrote `regs[dst]` through `thread.regs` — a shadowed
     // dst must refresh its local from the (possibly freshly typed) value.
@@ -711,7 +1056,14 @@ fn float_opnd(sh: &Sh, r: Reg, next: usize, off: usize, cold: &str) -> String {
 /// which the specialized body must reproduce by hand since it never decodes.
 /// Every `return` that leaves the body with `Err` or `Flow::Call` first stores
 /// the op's offset into `*op_ip` for the driver's `locate`.
-fn emit_op(w: &mut String, sh: &Sh, offset: usize, next: usize, op: &Op) {
+fn emit_op(
+    w: &mut String,
+    sh: &Sh,
+    offset: usize,
+    next: usize,
+    op: &Op,
+    tail: &dyn Fn(usize) -> String,
+) {
     // The cold helpers (`bin_cold`, `branch_cold`) expect `code.ip` past the
     // op's operands — the interpreter's decode already did that for them — so
     // generated code sets it explicitly before tail-calling. `step` instead
@@ -930,16 +1282,17 @@ fn emit_op(w: &mut String, sh: &Sh, offset: usize, next: usize, op: &Op) {
             );
             wln!("code.ip = {next};");
         }
-        Op::Jump { target } => wln!("code.ip = {};", tgt(target)),
+        Op::Jump { target } => wln!("{}", tail(tgt(target))),
         Op::JumpIf {
             cond,
             target,
             is_true,
         } => {
             wln!(
-                "code.ip = if rd(regs, {}) == Val::Bool({is_true}) {{ {} }} else {{ {next} }};",
+                "if rd(regs, {}) == Val::Bool({is_true}) {{ {} }} else {{ {} }}",
                 reg(*cond),
-                tgt(target)
+                tail(tgt(target)),
+                tail(next)
             );
         }
         Op::ForNext { idx, bound, target } => {
@@ -968,8 +1321,9 @@ fn emit_op(w: &mut String, sh: &Sh, offset: usize, next: usize, op: &Op) {
                 wln!("wr(regs, {}, Val::Int(i));", reg(*idx));
             }
             wln!(
-                "code.ip = if i < {b} {{ {} }} else {{ {next} }};",
-                tgt(target)
+                "if i < {b} {{ {} }} else {{ {} }}",
+                tail(tgt(target)),
+                tail(next)
             );
         }
         Op::Switch {
@@ -1023,22 +1377,14 @@ fn emit_op(w: &mut String, sh: &Sh, offset: usize, next: usize, op: &Op) {
             wln!("        (d.function, d.captures.as_slice())");
             wln!("    }}");
             wln!("}};");
-            wln!("let mut args = SmallVec::<[Val; 8]>::new();");
-            for a in args {
-                wln!("args.push(rd(regs, {}));", reg(*a));
-            }
             // `enter_call` saves `code.ip` as the caller's resume slot — in the
             // interpreter it's already past this op's operands by then, so the
             // specialized arm must advance it before either path.
             wln!("code.ip = {next}; *op_ip = {offset};");
-            emit_call_fast(&mut s, *dst, "cb", "captures", "target", sh);
+            emit_call_fast(&mut s, *dst, "cb", "captures", "target", args, sh);
         }
         Op::CallDirect { dst, body, args } => {
             let callee = format!("BodyId::from({}u32)", body.index());
-            wln!("let mut args = SmallVec::<[Val; 8]>::new();");
-            for a in args {
-                wln!("args.push(rd(regs, {}));", reg(*a));
-            }
             wln!("code.ip = {next}; *op_ip = {offset};");
             emit_call_fast(
                 &mut s,
@@ -1046,6 +1392,7 @@ fn emit_op(w: &mut String, sh: &Sh, offset: usize, next: usize, op: &Op) {
                 &callee,
                 "&[]",
                 &format!("CallTarget::Fn({callee})"),
+                args,
                 sh,
             );
         }
@@ -1529,6 +1876,7 @@ fn emit_op(w: &mut String, sh: &Sh, offset: usize, next: usize, op: &Op) {
             "Val::Int",
             "<",
             "LessThan",
+            tail,
         ),
         Op::BIntLe {
             target,
@@ -1548,6 +1896,7 @@ fn emit_op(w: &mut String, sh: &Sh, offset: usize, next: usize, op: &Op) {
             "Val::Int",
             "<=",
             "LessEqual",
+            tail,
         ),
         Op::BIntGt {
             target,
@@ -1567,6 +1916,7 @@ fn emit_op(w: &mut String, sh: &Sh, offset: usize, next: usize, op: &Op) {
             "Val::Int",
             ">",
             "GreaterThan",
+            tail,
         ),
         Op::BIntGe {
             target,
@@ -1586,6 +1936,7 @@ fn emit_op(w: &mut String, sh: &Sh, offset: usize, next: usize, op: &Op) {
             "Val::Int",
             ">=",
             "GreaterEqual",
+            tail,
         ),
         Op::BIntEq {
             target,
@@ -1605,6 +1956,7 @@ fn emit_op(w: &mut String, sh: &Sh, offset: usize, next: usize, op: &Op) {
             "Val::Int",
             "==",
             "Identity",
+            tail,
         ),
         Op::BIntNe {
             target,
@@ -1624,6 +1976,7 @@ fn emit_op(w: &mut String, sh: &Sh, offset: usize, next: usize, op: &Op) {
             "Val::Int",
             "!=",
             "NotEqual",
+            tail,
         ),
         Op::BIntLtImm {
             target,
@@ -1643,6 +1996,7 @@ fn emit_op(w: &mut String, sh: &Sh, offset: usize, next: usize, op: &Op) {
             "Val::Int",
             "<",
             "LessThan",
+            tail,
         ),
         Op::BIntLeImm {
             target,
@@ -1662,6 +2016,7 @@ fn emit_op(w: &mut String, sh: &Sh, offset: usize, next: usize, op: &Op) {
             "Val::Int",
             "<=",
             "LessEqual",
+            tail,
         ),
         Op::BIntGtImm {
             target,
@@ -1681,6 +2036,7 @@ fn emit_op(w: &mut String, sh: &Sh, offset: usize, next: usize, op: &Op) {
             "Val::Int",
             ">",
             "GreaterThan",
+            tail,
         ),
         Op::BIntGeImm {
             target,
@@ -1700,6 +2056,7 @@ fn emit_op(w: &mut String, sh: &Sh, offset: usize, next: usize, op: &Op) {
             "Val::Int",
             ">=",
             "GreaterEqual",
+            tail,
         ),
         Op::BIntEqImm {
             target,
@@ -1719,6 +2076,7 @@ fn emit_op(w: &mut String, sh: &Sh, offset: usize, next: usize, op: &Op) {
             "Val::Int",
             "==",
             "Identity",
+            tail,
         ),
         Op::BIntNeImm {
             target,
@@ -1738,6 +2096,7 @@ fn emit_op(w: &mut String, sh: &Sh, offset: usize, next: usize, op: &Op) {
             "Val::Int",
             "!=",
             "NotEqual",
+            tail,
         ),
         Op::BFloatLt {
             target,
@@ -1757,6 +2116,7 @@ fn emit_op(w: &mut String, sh: &Sh, offset: usize, next: usize, op: &Op) {
             "Val::Float",
             "<",
             "LessThan",
+            tail,
         ),
         Op::BFloatLe {
             target,
@@ -1776,6 +2136,7 @@ fn emit_op(w: &mut String, sh: &Sh, offset: usize, next: usize, op: &Op) {
             "Val::Float",
             "<=",
             "LessEqual",
+            tail,
         ),
         Op::BFloatGt {
             target,
@@ -1795,6 +2156,7 @@ fn emit_op(w: &mut String, sh: &Sh, offset: usize, next: usize, op: &Op) {
             "Val::Float",
             ">",
             "GreaterThan",
+            tail,
         ),
         Op::BFloatGe {
             target,
@@ -1814,6 +2176,7 @@ fn emit_op(w: &mut String, sh: &Sh, offset: usize, next: usize, op: &Op) {
             "Val::Float",
             ">=",
             "GreaterEqual",
+            tail,
         ),
         Op::BFloatEq {
             target,
@@ -1833,6 +2196,7 @@ fn emit_op(w: &mut String, sh: &Sh, offset: usize, next: usize, op: &Op) {
             "Val::Float",
             "==",
             "Identity",
+            tail,
         ),
         Op::BFloatNe {
             target,
@@ -1852,6 +2216,7 @@ fn emit_op(w: &mut String, sh: &Sh, offset: usize, next: usize, op: &Op) {
             "Val::Float",
             "!=",
             "NotEqual",
+            tail,
         ),
         Op::BFloatLtImm {
             target,
@@ -1871,6 +2236,7 @@ fn emit_op(w: &mut String, sh: &Sh, offset: usize, next: usize, op: &Op) {
             "Val::Float",
             "<",
             "LessThan",
+            tail,
         ),
         Op::BFloatLeImm {
             target,
@@ -1890,6 +2256,7 @@ fn emit_op(w: &mut String, sh: &Sh, offset: usize, next: usize, op: &Op) {
             "Val::Float",
             "<=",
             "LessEqual",
+            tail,
         ),
         Op::BFloatGtImm {
             target,
@@ -1909,6 +2276,7 @@ fn emit_op(w: &mut String, sh: &Sh, offset: usize, next: usize, op: &Op) {
             "Val::Float",
             ">",
             "GreaterThan",
+            tail,
         ),
         Op::BFloatGeImm {
             target,
@@ -1928,6 +2296,7 @@ fn emit_op(w: &mut String, sh: &Sh, offset: usize, next: usize, op: &Op) {
             "Val::Float",
             ">=",
             "GreaterEqual",
+            tail,
         ),
         Op::BFloatEqImm {
             target,
@@ -1947,6 +2316,7 @@ fn emit_op(w: &mut String, sh: &Sh, offset: usize, next: usize, op: &Op) {
             "Val::Float",
             "==",
             "Identity",
+            tail,
         ),
         Op::BFloatNeImm {
             target,
@@ -1966,6 +2336,7 @@ fn emit_op(w: &mut String, sh: &Sh, offset: usize, next: usize, op: &Op) {
             "Val::Float",
             "!=",
             "NotEqual",
+            tail,
         ),
         Op::AddFloatImm { dst, left, val } => {
             emit_float_arith_imm(&mut s, sh, offset, *dst, *left, *val, next, "+", "Add")
@@ -2022,9 +2393,7 @@ fn emit_op(w: &mut String, sh: &Sh, offset: usize, next: usize, op: &Op) {
             &mut s, sh, offset, *dst, *left, *val, next, "!=", "NotEqual",
         ),
     }
-    let _ = writeln!(w, "            {offset} => {{");
     let _ = write!(w, "{s}");
-    let _ = writeln!(w, "            }}");
 }
 
 fn emit_bool(s: &mut String, dst: Reg, left: Reg, right: Reg, next: usize, op: &str) {
@@ -2301,6 +2670,7 @@ fn emit_branch(
     variant: &str,
     op: &str,
     binop: &str,
+    tail: &dyn Fn(usize) -> String,
 ) {
     let t = tgt(target);
     let int = variant == "Val::Int";
@@ -2340,6 +2710,8 @@ fn emit_branch(
     let _ = writeln!(s, "let hit = {hit};");
     let _ = writeln!(
         s,
-        "code.ip = if hit == {is_true} {{ {t} }} else {{ {next} }};"
+        "if hit == {is_true} {{ {} }} else {{ {} }}",
+        tail(t),
+        tail(next)
     );
 }

@@ -1286,6 +1286,52 @@ pub fn enter_call<'gc>(
     Ok(())
 }
 
+/// `enter_call` for generated bodies: args are read straight out of the
+/// caller's register window (indices stay valid across the `resize` —
+/// the Vec may move but the slots don't), skipping the `SmallVec` a
+/// `Flow::Call` would need to carry. Same arity check, same copy order.
+#[doc(hidden)]
+pub fn enter_call_regs<'gc>(
+    thread: &mut ThreadState<'gc>,
+    code: &mut Decoder,
+    chunks: &IdVec<BodyId, Chunk>,
+    body: BodyId,
+    dst: Reg,
+    arg_regs: &[Reg],
+    captures: &[Val<'gc>],
+) -> Result<(), RtErr> {
+    let chunk = &chunks[body];
+    if arg_regs.len() != chunk.args as usize {
+        return Err(RtErr::WrongArity {
+            wanted: chunk.args as usize,
+            got: arg_regs.len(),
+        });
+    }
+    debug_assert_eq!(captures.len(), chunk.captures.len());
+    let caller_base = thread.frames.last().unwrap().base;
+    let new_base = thread.regs.len();
+    thread
+        .regs
+        .resize(new_base + chunk.regs as usize, Val::Null);
+    // the caller's window is below `new_base`, so each read is still a live
+    // slot even after the grow
+    for (param_reg, &arg) in chunk.params.iter().zip(arg_regs) {
+        thread.regs[new_base + param_reg.index()] = thread.regs[caller_base + arg.index()];
+    }
+    for (cap_reg, &cap) in chunk.captures.iter().zip(captures) {
+        thread.regs[new_base + cap_reg.index()] = cap;
+    }
+    thread.frames.last_mut().unwrap().ip = code.ip;
+    thread.frames.push(Frame {
+        chunk: body,
+        ip: chunk.offset,
+        return_reg: dst.index() as u32,
+        base: new_base,
+    });
+    code.ip = chunk.offset;
+    Ok(())
+}
+
 /// The callee of a dynamic call wasn't a fn or a closure. Cold so the `Call` arm's shared frame
 /// doesn't pay for the capture.
 #[cold]
