@@ -20,3 +20,4 @@ cranelift-frontend = "0.135.2"
 cranelift-jit = "0.135.2"
 cranelift-module = "0.135.2"
 cranelift-native = "0.135.2"
+gc-arena.workspace = true

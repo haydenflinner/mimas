@@ -309,3 +309,55 @@ Measured (`bc-bench` bc lane, min-of-5, vs `e5b6214` binary): fib_rec
 714→534ms (−25%), mandelbrot 90→54ms (−40%), prime_numbers ~202ms flat,
 fib_iter ~56ms flat, physics ~268→280ms (+4.5%, regalloc noise). rustgen
 `fib_rec` is ~2.2ms — still ~245x ahead.
+
+## JIT round-4 runtime specialization — branch `jit-spec`
+
+Observe the live VM, recompile with what was seen, reinstall — no VM
+surgery: `jit::JitSession::observe(&mut vm, &program)` installs one
+profiling `BodyFn` shim per body through the ordinary `install_bc` table
+(each dispatch runs the interpreter's own `step_at`, so observation costs
+interpreter speed, not correctness); `session.facts()` snapshots a `Facts`
+struct; `session.specialize` recompiles via `jit::compile_with` and swaps
+the bodies in mid-run.
+
+- **`Facts`/`BodyFacts`** (`crates/jit/src/lib.rs`): per-body `entry[r]`
+  merged `Obs` (tag + stable GC payload ptr), `calls` (call-site resume ip
+  → the one callee `BodyId` ever seen), and `sites[ip]` (the merged
+  *receiver operand* of each `GetIndex`/`GetField` — sees mid-body values
+  `entry` can't, e.g. a global `LoadEntry`'d config dict). `Obs` merges
+  decay to `Mixed`/`ptr=0` on disagreement, so polymorphism degrades
+  gracefully.
+- **Forced entry shadows**: an `entry` tag of `Int`/`Float` puts the reg
+  in the scalar-shadow set unconditionally; the entry probe's ok-flag is
+  the runtime guard and every write site refreshes or clears the shadow,
+  so a wrong observation only ever deopts through `estep` — never
+  miscomputes (`spec.rs::wrong_entry_facts_deopt_not_break` feeds a lying
+  `Float` claim at an `Int` param and still gets 42).
+- **Monomorphic call ICs** (`emit_call_ic`): `Op::Call` sites with a single
+  observed callee emit two guard arms — `Val::Fn` tag + body-id compare,
+  `Val::Closure` tag + guarded `cl_func` deref + `captures.len` match —
+  each routing through `call_gates`/`inline_enter_run` (the refactored
+  `emit_call_direct_inline` core). Any miss runs `mj_call_dyn`, which
+  reproduces `not_callable`/`WrongArity`/`Flow::Call` verbatim.
+- **Frozen-constant baking**: `Facts::frozen` maps a `Gc::as_ptr` payload
+  address to `{kind, unguarded}` — a host promise of immutability for the
+  bodies' install lifetime (break it and you get stale reads, not
+  crashes). `Dict` bakes entries into a key-pointer compare chain (cap 32,
+  `Str` equality is pointer equality); `Array`/`Seq`/`Instance` fold to a
+  compile-time `(base, len)` view; `GetField` bakes `fields[slot]` to an
+  immediate `Val` when it's a scalar/primitive. Every site still
+  tag+pointer-guards `regs[r]` unless `unguarded` (honored only for regs
+  never re-seated in the body).
+- Bench (`jit-test --example specbench`, release, M-series arm64 —
+  `run(500_000)` where `tick` reads `CFG["rate"]`/`["scale"]`/`["bias"]`
+  per call): interp 127.5ms → jit generic 95.7ms (1.33x) → jit + facts
+  **32.9ms (2.91x vs generic, 3.87x vs interp)** — frozen-dict reads turn
+  ~50% of the loop body's runtime constant traffic into immediates.
+- Tests: `jit-test/tests/spec.rs` — IC hit/reseat-miss, polymorphic site
+  staying generic, frozen config bake from a `LoadEntry`'d global, wrong
+  facts deopting, `specialize_now` parity.
+
+Host-facing quirk to know: `Vm::call` uses entry reg 0 as its return
+scratch and restores it afterwards, so a callee's `StoreEntry` to global
+slot 0 inside an injected call is silently restored away — keep mutable
+globals out of slot 0 (see `call_ic_hit_and_miss`'s `pad`).

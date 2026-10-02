@@ -25,7 +25,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::H;
+use crate::{BodyFacts, Frozen, FrozenKind, H, Obs, ObsTag};
 use compile::{AccessKind, BlockTarget, Constant, Op, Program, Reg};
 use cranelift_codegen::Context;
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
@@ -71,9 +71,13 @@ enum W {
 
 /// bcgen's `analyze`, verbatim: the set of registers eligible for an int/float
 /// SSA shadow — every writer is that scalar kind or a `Copy` of a member.
+/// `written` records every register any op writes — entry-observed container
+/// pointers (for frozen-constant lookups) are only trusted on regs that are
+/// never re-seated.
 struct Sh {
     int: HashSet<u32>,
     float: HashSet<u32>,
+    written: HashSet<u32>,
 }
 
 fn analyze(ops: &[(usize, Op)], nregs: u32) -> Sh {
@@ -314,7 +318,11 @@ fn analyze(ops: &[(usize, Op)], nregs: u32) -> Sh {
             break;
         }
     }
-    Sh { int, float }
+    Sh {
+        int,
+        float,
+        written: writes.keys().copied().collect(),
+    }
 }
 
 /// Immutable body-wide values: the `BodyFn` params plus pointers hoisted once
@@ -381,6 +389,13 @@ struct Ex {
     eend: Block,
 }
 
+/// Per-body specialization context handed to [`emit_body`] — the slice of
+/// `crate::Facts` that applies to this chunk plus the shared frozen table.
+pub(crate) struct BodySpec<'a> {
+    pub facts: &'a BodyFacts,
+    pub frozen: &'a HashMap<usize, Frozen>,
+}
+
 struct Em<'a> {
     fb: FunctionBuilder<'a>,
     hrefs: Vec<FuncRef>,
@@ -393,6 +408,13 @@ struct Em<'a> {
     /// `Decoder` field offsets, `Vec` header order. Emitted code reads and
     /// writes these inline instead of FFI-ing per access.
     lyt: Layout,
+    /// Specialization context for this body (empty for `compile`).
+    spec: &'a BodySpec<'a>,
+    /// `regs[r]`'s entry observation — every reg that held one stable GC
+    /// payload at entry. Written regs are included: the emitted
+    /// payload-pointer guard catches a reseat, so `known` is only ever a
+    /// hint for the frozen-table lookup, never a proof.
+    known: HashMap<u32, Obs>,
     /// The whole program — `CallDirect` needs the callee's `Chunk` (offset,
     /// regs, param mapping) to emit the inline frame push.
     prog: &'a Program,
@@ -746,20 +768,47 @@ impl Em<'_> {
     /// Helper-op shape: inline shadow writeback, then stores `code.ip`/
     /// `*op_ip`, calls the `u8` helper, then `1`→`eret` / `0`→fallthrough.
     /// `args` are built by the caller before this runs — the writeback blocks
-    /// are all dominated by the current block, so they stay usable.
-    fn helper_op(&mut self, i: usize, off: usize, next: usize, h: H, args: &[Value]) {
+    /// are all dominated by the current block, so they stay usable. `dst`
+    /// names the op's destination register when it has one — a forced
+    /// shadow must be re-derived after the helper's window write.
+    fn helper_op(
+        &mut self,
+        i: usize,
+        off: usize,
+        next: usize,
+        h: H,
+        args: &[Value],
+        dst: Option<u32>,
+    ) {
         self.flush_seq();
         self.mark_op(off, next);
         let k = self.hcall(h, args).unwrap();
+        let post = self.fb.create_block();
+        self.fb.ins().brif(k, self.ex.eret, &[], post, &[]);
+        self.fb.switch_to_block(post);
+        if let Some(d) = dst {
+            self.refresh_shadow(d);
+        }
         let nb = self.next_blk(i);
-        self.fb.ins().brif(k, self.ex.eret, &[], nb, &[]);
+        self.fb.ins().jump(nb, &[]);
     }
 
     /// Same but the helper returns void — always continues.
-    fn helper_op_v(&mut self, i: usize, off: usize, next: usize, h: H, args: &[Value]) {
+    fn helper_op_v(
+        &mut self,
+        i: usize,
+        off: usize,
+        next: usize,
+        h: H,
+        args: &[Value],
+        dst: Option<u32>,
+    ) {
         self.flush_seq();
         self.mark_op(off, next);
         self.hcall(h, args);
+        if let Some(d) = dst {
+            self.refresh_shadow(d);
+        }
         {
             let nb = self.next_blk(i);
             self.fb.ins().jump(nb, &[]);
@@ -971,6 +1020,7 @@ pub(crate) fn emit_body(
     lyt: &Layout,
     fbc: &mut FunctionBuilderContext,
     ctx: &mut Context,
+    spec: &BodySpec<'_>,
 ) -> ModuleResult<()> {
     let body_id = compile::BodyId::from(body as u32);
     let ops = program.ops(body_id);
@@ -985,7 +1035,38 @@ pub(crate) fn emit_body(
         .min()
         .unwrap_or(program.bytes.len());
     let span = end - chunk_off;
-    let sh = analyze(&ops, chunk.regs as u32);
+    let mut sh = analyze(&ops, chunk.regs as u32);
+    // Facts-forced shadows: a reg observed `Int`/`Float` on *every* body
+    // entry joins the shadow set even though `analyze` couldn't prove its
+    // writers — the entry probe still loads the real tag (`ok` = guard), and
+    // every write site refreshes or clears the shadow, so a wrong guess can
+    // only ever deopt, never miscompute.
+    let nregs = chunk.regs as usize;
+    for (r, obs) in spec.facts.entry.iter().enumerate().take(nregs) {
+        match obs.tag {
+            ObsTag::Int => {
+                sh.int.insert(r as u32);
+            }
+            ObsTag::Float => {
+                sh.float.insert(r as u32);
+            }
+            _ => {}
+        }
+    }
+    // Regs that always held the *same* GC pointer at entry — the
+    // frozen-table lookup key for baked reads. Written regs are included:
+    // the runtime payload-pointer guard catches a reseat, so guarded baked
+    // reads stay exact (`unguarded` additionally requires `!sh.written` —
+    // `Em::frozen_of` decides).
+    let known: HashMap<u32, Obs> = (0..nregs)
+        .filter(|&r| {
+            spec.facts
+                .entry
+                .get(r)
+                .is_some_and(|o| o.ptr != 0)
+        })
+        .map(|r| (r as u32, spec.facts.entry[r]))
+        .collect();
 
     // ip2idx blob: u32 dense index per byte of this chunk's span, MAX elsewhere
     let map_data = {
@@ -1010,20 +1091,22 @@ pub(crate) fn emit_body(
         .collect();
     let bodies_gv = module.declare_data_in_func(bodies_data, &mut ctx.func);
     let map_gv = module.declare_data_in_func(map_data, &mut ctx.func);
-    // `CallDirect`'s inline fast path calls the callee's native body directly —
-    // one FuncRef per distinct target.
+    // `CallDirect`'s inline fast path and the `Call` IC both call the
+    // callee's native body directly — one FuncRef per distinct target.
     let call_refs: HashMap<u32, FuncRef> = ops
         .iter()
         .filter_map(|(_, op)| match op {
-            Op::CallDirect { body, .. } => Some(*body),
+            Op::CallDirect { body, .. } => Some(body.index() as u32),
             _ => None,
         })
+        .chain(spec.facts.calls.values().copied())
         .collect::<HashSet<_>>()
         .into_iter()
+        .filter(|&b| (b as usize) < body_ids.len())
         .map(|b| {
             (
-                b.index() as u32,
-                module.declare_func_in_func(body_ids[b.index()], &mut ctx.func),
+                b,
+                module.declare_func_in_func(body_ids[b as usize], &mut ctx.func),
             )
         })
         .collect();
@@ -1115,6 +1198,8 @@ pub(crate) fn emit_body(
         sh: &sh,
         ops: &ops,
         lyt: *lyt,
+        spec,
+        known,
         prog: program,
         call_refs,
         blocks,
@@ -1328,7 +1413,23 @@ pub(crate) fn emit_body(
             ],
         )
         .unwrap();
-    em.fb.ins().brif(k, eret, &[], dispatch, &[]);
+    let estep_post = em.fb.create_block();
+    em.fb.ins().brif(k, eret, &[], estep_post, &[]);
+    // `step` ran a whole op in the window — it may have written ANY reg,
+    // shadowed or not, so resync every shadow before dispatching the next
+    // op. (Facts-forced shadows make this reachable for almost any reg.)
+    em.fb.switch_to_block(estep_post);
+    let refresh: Vec<u32> = em
+        .v
+        .int
+        .keys()
+        .chain(em.v.float.keys())
+        .copied()
+        .collect();
+    for r in refresh {
+        em.refresh_shadow(r);
+    }
+    em.fb.ins().jump(dispatch, &[]);
 
     em.fb.switch_to_block(eerr);
     em.settle_seq();
@@ -1470,6 +1571,7 @@ impl Em<'_> {
                     let regs = self.regs();
                     let a = self.vaddr(regs, dst.index() as u32);
                     self.st_bool(a, v);
+                    self.refresh_shadow(dst.index() as u32);
                     {
                         let nb = self.next_blk(i);
                         self.fb.ins().jump(nb, &[]);
@@ -1479,6 +1581,7 @@ impl Em<'_> {
                     let regs = self.regs();
                     let a = self.vaddr(regs, dst.index() as u32);
                     self.st_null(a);
+                    self.refresh_shadow(dst.index() as u32);
                     {
                         let nb = self.next_blk(i);
                         self.fb.ins().jump(nb, &[]);
@@ -1496,6 +1599,7 @@ impl Em<'_> {
                         next,
                         H::LoadConstStr,
                         &[regs, d, id, self.env.ctx0, self.env.ctx1, self.env.strs],
+                        Some(dst.index() as u32),
                     );
                 }
                 Constant::Array(_) => self.estep(),
@@ -1505,6 +1609,7 @@ impl Em<'_> {
                 let a = self.vaddr(regs, dst.index() as u32);
                 let b = self.iconst32(body.index() as i64);
                 self.st_fn(a, b);
+                self.refresh_shadow(dst.index() as u32);
                 {
                     let nb = self.next_blk(i);
                     self.fb.ins().jump(nb, &[]);
@@ -1521,6 +1626,7 @@ impl Em<'_> {
                     .iadd_imm_s(tb, slot.index() as i64 * self.lyt.val_size as i64);
                 let d = self.vaddr(regs, dst.index() as u32);
                 self.cpy_val(d, vp);
+                self.refresh_shadow(dst.index() as u32);
                 {
                     let nb = self.next_blk(i);
                     self.fb.ins().jump(nb, &[]);
@@ -1536,6 +1642,9 @@ impl Em<'_> {
                     .ins()
                     .iadd_imm_s(tb, slot.index() as i64 * self.lyt.val_size as i64);
                 self.cpy_val(d, vp);
+                // for the entry body itself `regs` *is* the entry frame —
+                // resync `slot`'s shadow (a reload no-op otherwise).
+                self.refresh_shadow(slot.index() as u32);
                 {
                     let nb = self.next_blk(i);
                     self.fb.ins().jump(nb, &[]);
@@ -2036,6 +2145,7 @@ impl Em<'_> {
                     next,
                     H::NewArray,
                     &[regs, d, self.env.ctx0, self.env.ctx1],
+                    Some(dst.index() as u32),
                 );
             }
             Op::NewDict { dst } => {
@@ -2046,6 +2156,7 @@ impl Em<'_> {
                     next,
                     H::NewDict,
                     &[regs, d, self.env.ctx0, self.env.ctx1],
+                    Some(dst.index() as u32),
                 );
             }
             Op::NewInstance { dst, adt, fields } => {
@@ -2062,6 +2173,7 @@ impl Em<'_> {
                     next,
                     H::NewInstance,
                     &[regs, d, a, fp, n, self.env.ctx0, self.env.ctx1],
+                    Some(dst.index() as u32),
                 );
             }
             Op::NewClosure {
@@ -2082,6 +2194,7 @@ impl Em<'_> {
                     next,
                     H::NewClosure,
                     &[regs, d, b, cp, n, self.env.ctx0, self.env.ctx1],
+                    Some(dst.index() as u32),
                 );
             }
             Op::Push { array, value } => {
@@ -2096,6 +2209,7 @@ impl Em<'_> {
                     next,
                     H::Push,
                     &[regs, a, v, self.env.ctx0, self.env.ctx1],
+                    None,
                 );
             }
             Op::Insert { dict, key, value } => {
@@ -2111,6 +2225,7 @@ impl Em<'_> {
                     next,
                     H::Insert,
                     &[regs, d, k, v, self.env.ctx0, self.env.ctx1, self.env.strs],
+                    None,
                 );
             }
             Op::SetIndex { set, index, value } => {
@@ -2152,7 +2267,14 @@ impl Em<'_> {
                     self.iconst(haystack.index() as i64),
                     self.iconst8(*condition as i64),
                 );
-                self.helper_op_v(i, off, next, H::ContainsOp, &[regs, d, n, h, c]);
+                self.helper_op_v(
+                    i,
+                    off,
+                    next,
+                    H::ContainsOp,
+                    &[regs, d, n, h, c],
+                    Some(dst.index() as u32),
+                );
             }
             Op::IsInstance { dst, src, adt } => {
                 let (regs, d, s, a) = (
@@ -2161,7 +2283,14 @@ impl Em<'_> {
                     self.iconst(src.index() as i64),
                     self.iconst32(adt.index() as i64),
                 );
-                self.helper_op_v(i, off, next, H::IsInstance, &[regs, d, s, a]);
+                self.helper_op_v(
+                    i,
+                    off,
+                    next,
+                    H::IsInstance,
+                    &[regs, d, s, a],
+                    Some(dst.index() as u32),
+                );
             }
             Op::IsRaised { dst, src } => {
                 let (regs, d, s) = (
@@ -2169,7 +2298,14 @@ impl Em<'_> {
                     self.iconst(dst.index() as i64),
                     self.iconst(src.index() as i64),
                 );
-                self.helper_op_v(i, off, next, H::IsRaised, &[regs, d, s]);
+                self.helper_op_v(
+                    i,
+                    off,
+                    next,
+                    H::IsRaised,
+                    &[regs, d, s],
+                    Some(dst.index() as u32),
+                );
             }
             Op::UnwrapRaised { dst, src } => {
                 let (regs, d, s) = (
@@ -2177,7 +2313,14 @@ impl Em<'_> {
                     self.iconst(dst.index() as i64),
                     self.iconst(src.index() as i64),
                 );
-                self.helper_op_v(i, off, next, H::UnwrapRaised, &[regs, d, s]);
+                self.helper_op_v(
+                    i,
+                    off,
+                    next,
+                    H::UnwrapRaised,
+                    &[regs, d, s],
+                    Some(dst.index() as u32),
+                );
             }
             Op::Unwrap { dst, src } => {
                 let (regs, d, s) = (
@@ -2185,7 +2328,14 @@ impl Em<'_> {
                     self.iconst(dst.index() as i64),
                     self.iconst(src.index() as i64),
                 );
-                self.helper_op(i, off, next, H::Unwrap, &[regs, d, s, self.env.out]);
+                self.helper_op(
+                    i,
+                    off,
+                    next,
+                    H::Unwrap,
+                    &[regs, d, s, self.env.out],
+                    Some(dst.index() as u32),
+                );
             }
             Op::UnwrapUnit { dst, src } => {
                 let (regs, d, s) = (
@@ -2193,7 +2343,14 @@ impl Em<'_> {
                     self.iconst(dst.index() as i64),
                     self.iconst(src.index() as i64),
                 );
-                self.helper_op(i, off, next, H::UnwrapUnit, &[regs, d, s, self.env.out]);
+                self.helper_op(
+                    i,
+                    off,
+                    next,
+                    H::UnwrapUnit,
+                    &[regs, d, s, self.env.out],
+                    Some(dst.index() as u32),
+                );
             }
             Op::Len { dst, src } => {
                 self.flush_seq();
@@ -2233,6 +2390,7 @@ impl Em<'_> {
                     next,
                     H::Bin,
                     &[regs, d, l, o, r, self.env.ctx0, self.env.ctx1, self.env.out],
+                    Some(dst.index() as u32),
                 );
             }
             Op::Unary { dst, op, src } => {
@@ -2248,6 +2406,7 @@ impl Em<'_> {
                     next,
                     H::Unary,
                     &[regs, d, o, s, self.env.ctx0, self.env.ctx1, self.env.out],
+                    Some(dst.index() as u32),
                 );
             }
             Op::CallNative { dst, id, args } => {
@@ -2275,6 +2434,7 @@ impl Em<'_> {
                         self.env.ctx1,
                         self.env.out,
                     ],
+                    Some(dst.index() as u32),
                 );
             }
             Op::CallDirect { dst, body, args } => {
@@ -2335,6 +2495,8 @@ impl Em<'_> {
         let cc = if eq { IntCC::Equal } else { IntCC::NotEqual };
         let c = self.fb.ins().icmp(cc, l, r);
         self.wr_bool_dst(dst.index() as u32, c);
+        // a forced shadow on `dst` saw `Bool` — resync it
+        self.refresh_shadow(dst.index() as u32);
         {
             let nb = self.next_blk(i);
             self.fb.ins().jump(nb, &[]);
@@ -2479,8 +2641,12 @@ impl Em<'_> {
         );
         // 0 → wrote regs[dst]; 1 → both-Str fast path missed → `step`
         let k = self.hcall(H::BinStr, &[regs, d, l, r, e]).unwrap();
+        let post = self.fb.create_block();
+        self.fb.ins().brif(k, self.ex.estep, &[], post, &[]);
+        self.fb.switch_to_block(post);
+        self.refresh_shadow(dst.index() as u32);
         let nb = self.next_blk(i);
-        self.fb.ins().brif(k, self.ex.estep, &[], nb, &[]);
+        self.fb.ins().jump(nb, &[]);
     }
 
     /// `B*` register/imm branch ops: `hit = a cc b`, then
@@ -2681,6 +2847,268 @@ impl Em<'_> {
         self.fb.ins().jump(nb, &[]);
     }
 
+    /// The `ArrayStore` discriminant's CLIF type (its probed byte width).
+    fn asty(&self) -> ir::Type {
+        match self.lyt.as_tsz {
+            1 => I8,
+            2 => types::I16,
+            4 => I32,
+            8 => I64,
+            d => unreachable!("bad ArrayStore tag width {d}"),
+        }
+    }
+
+    /// An `ArrayStore` discriminant constant at the probed width.
+    fn aconst(&mut self, t: u64) -> Value {
+        let ty = self.asty();
+        self.fb.ins().iconst(ty, t as i64)
+    }
+
+    /// `*dst = data[slot]` for a primitive typed-array store: the raw
+    /// `i64`/`f64` element becomes a `Val::Int`/`Val::Float` — the tag is
+    /// statically known, so `dst`'s DynCheck shadows get a direct answer
+    /// instead of a re-probe. A miss routes to `slow`, where the helper
+    /// reproduces bounds/type behavior verbatim.
+    #[allow(clippy::too_many_arguments)]
+    fn read_elem_prim(
+        &mut self,
+        i: usize,
+        dst: Reg,
+        slot: Value,
+        len: Value,
+        data: Value,
+        pre: Value,
+        is_int: bool,
+        slow: Block,
+    ) {
+        let inb = self
+            .fb
+            .ins()
+            .icmp(IntCC::UnsignedLessThan, slot, len);
+        let k = self.fb.ins().band(pre, inb);
+        let good = self.fb.create_block();
+        self.fb.ins().brif(k, good, &[], slow, &[]);
+        self.fb.switch_to_block(good);
+        let off = self.fb.ins().ishl_imm_s(slot, 3);
+        let ea = self.fb.ins().iadd(data, off);
+        let v = self
+            .fb
+            .ins()
+            .load(if is_int { I64 } else { F64 }, tf(), ea, 0);
+        let d = dst.index() as u32;
+        let mut covered = false;
+        if is_int {
+            if let Some(&(sv, ok)) = self.v.int.get(&d) {
+                self.fb.def_var(sv, v);
+                let one = self.iconst8(1);
+                self.fb.def_var(ok, one);
+                covered = true;
+            }
+            if let Some(&(_, ok)) = self.v.float.get(&d) {
+                let z = self.iconst8(0);
+                self.fb.def_var(ok, z);
+            }
+        } else {
+            if let Some(&(sv, ok)) = self.v.float.get(&d) {
+                self.fb.def_var(sv, v);
+                let one = self.iconst8(1);
+                self.fb.def_var(ok, one);
+                covered = true;
+            }
+            if let Some(&(_, ok)) = self.v.int.get(&d) {
+                let z = self.iconst8(0);
+                self.fb.def_var(ok, z);
+            }
+        }
+        if !covered {
+            let regs = self.regs();
+            let dd = self.vaddr(regs, d);
+            if is_int {
+                self.st_int(dd, v);
+            } else {
+                self.st_float(dd, v);
+            }
+        }
+        let nb = self.next_blk(i);
+        self.fb.ins().jump(nb, &[]);
+    }
+
+    /// `data[slot] = v` for a primitive typed-array store — a raw 8-byte
+    /// store under `pre && slot < len`; a miss runs the helper (demotion
+    /// and bounds behavior live there).
+    fn write_elem_prim(
+        &mut self,
+        i: usize,
+        slot: Value,
+        len: Value,
+        data: Value,
+        v: Value,
+        pre: Value,
+        slow: Block,
+    ) {
+        let inb = self
+            .fb
+            .ins()
+            .icmp(IntCC::UnsignedLessThan, slot, len);
+        let k = self.fb.ins().band(pre, inb);
+        let good = self.fb.create_block();
+        self.fb.ins().brif(k, good, &[], slow, &[]);
+        self.fb.switch_to_block(good);
+        let off = self.fb.ins().ishl_imm_s(slot, 3);
+        let ea = self.fb.ins().iadd(data, off);
+        self.fb.ins().store(tf(), v, ea, 0);
+        let nb = self.next_blk(i);
+        self.fb.ins().jump(nb, &[]);
+    }
+
+    /// After `regs[r]` was established to be a typed array (`st` holds its
+    /// already-loaded discriminant): load the `Seq` Gc, check the shared
+    /// borrow flag, load the `ArrayStore` tag, and split `Ints`/`Floats`
+    /// reads into the raw-load tails. Anything else — `Empty`, `Vals`,
+    /// contended flag — lands in `slow`.
+    #[allow(clippy::too_many_arguments)]
+    fn seq_read_chain(
+        &mut self,
+        i: usize,
+        dst: Reg,
+        slot: Value,
+        gc: Value,
+        is_int_store: bool,
+        store_off: usize,
+        fok: Value,
+        slow: Block,
+    ) {
+        let vp = self.fb.ins().load(
+            I64,
+            tf(),
+            gc,
+            (self.lyt.rl_seq + store_off + self.lyt.vec_ptr) as i32,
+        );
+        let vl = self.fb.ins().load(
+            I64,
+            tf(),
+            gc,
+            (self.lyt.rl_seq + store_off + self.lyt.vec_len) as i32,
+        );
+        self.read_elem_prim(i, dst, slot, vl, vp, fok, is_int_store, slow);
+    }
+
+    /// The shared dispatch for a confirmed `Val::IntArray`/`Val::FloatArray`
+    /// read: `gc` = the `Seq` payload. Loads `ArrayStore`'s tag once and
+    /// fans out `Ints` → i64 read, `Floats` → f64 read, else `slow`.
+    #[allow(clippy::too_many_arguments)]
+    fn seq_read(&mut self, i: usize, dst: Reg, slot: Value, gc: Value, slow: Block) {
+        let fok = self.borrow_ok(gc, self.lyt.rl_flag_s, false);
+        let aty = self.asty();
+        let stag = self
+            .fb
+            .ins()
+            .load(aty, tf(), gc, (self.lyt.rl_seq + self.lyt.as_tag) as i32);
+        let wi = self.aconst(self.lyt.as_ints);
+        let isints = self.fb.ins().icmp(IntCC::Equal, stag, wi);
+        let intsb = self.fb.create_block();
+        let noti = self.fb.create_block();
+        self.fb.ins().brif(isints, intsb, &[], noti, &[]);
+        self.fb.switch_to_block(intsb);
+        self.seq_read_chain(i, dst, slot, gc, true, self.lyt.as_ints_vec, fok, slow);
+        self.fb.switch_to_block(noti);
+        let wf = self.aconst(self.lyt.as_floats);
+        let isflts = self.fb.ins().icmp(IntCC::Equal, stag, wf);
+        let fltsb = self.fb.create_block();
+        self.fb.ins().brif(isflts, fltsb, &[], slow, &[]);
+        self.fb.switch_to_block(fltsb);
+        self.seq_read_chain(i, dst, slot, gc, false, self.lyt.as_floats_vec, fok, slow);
+    }
+
+    /// The shared dispatch for a `Val::IntArray`/`Val::FloatArray` write:
+    /// `Ints` accepts `Val::Int`, `Floats` accepts `Val::Float`, everything
+    /// else — demotion, `Empty`, `Vals`, contended flag — lands in `slow`
+    /// where `set_index`/`set_field` run their demote semantics.
+    #[allow(clippy::too_many_arguments)]
+    fn seq_write(
+        &mut self,
+        i: usize,
+        slot: Value,
+        gc: Value,
+        va: Value,
+        slow: Block,
+    ) {
+        let fok = self.borrow_ok(gc, self.lyt.rl_flag_s, true);
+        let aty = self.asty();
+        let stag = self
+            .fb
+            .ins()
+            .load(aty, tf(), gc, (self.lyt.rl_seq + self.lyt.as_tag) as i32);
+        let vt = self.ld_tag(va);
+        let wi = self.aconst(self.lyt.as_ints);
+        let isints = self.fb.ins().icmp(IntCC::Equal, stag, wi);
+        let intsb = self.fb.create_block();
+        let noti = self.fb.create_block();
+        self.fb.ins().brif(isints, intsb, &[], noti, &[]);
+        self.fb.switch_to_block(intsb);
+        {
+            let want = self.tconst(self.lyt.t_int);
+            let vis = self.fb.ins().icmp(IntCC::Equal, vt, want);
+            let pre = self.fb.ins().band(fok, vis);
+            let vp = self.fb.ins().load(
+                I64,
+                tf(),
+                gc,
+                (self.lyt.rl_seq + self.lyt.as_ints_vec + self.lyt.vec_ptr) as i32,
+            );
+            let vl = self.fb.ins().load(
+                I64,
+                tf(),
+                gc,
+                (self.lyt.rl_seq + self.lyt.as_ints_vec + self.lyt.vec_len) as i32,
+            );
+            let xv = self
+                .fb
+                .ins()
+                .load(I64, tf(), va, self.lyt.val_pay as i32);
+            self.write_elem_prim(i, slot, vl, vp, xv, pre, slow);
+        }
+        self.fb.switch_to_block(noti);
+        let wf = self.aconst(self.lyt.as_floats);
+        let isflts = self.fb.ins().icmp(IntCC::Equal, stag, wf);
+        let fltsb = self.fb.create_block();
+        self.fb.ins().brif(isflts, fltsb, &[], slow, &[]);
+        self.fb.switch_to_block(fltsb);
+        {
+            let want = self.tconst(self.lyt.t_float);
+            let vis = self.fb.ins().icmp(IntCC::Equal, vt, want);
+            let pre = self.fb.ins().band(fok, vis);
+            let vp = self.fb.ins().load(
+                I64,
+                tf(),
+                gc,
+                (self.lyt.rl_seq + self.lyt.as_floats_vec + self.lyt.vec_ptr) as i32,
+            );
+            let vl = self.fb.ins().load(
+                I64,
+                tf(),
+                gc,
+                (self.lyt.rl_seq + self.lyt.as_floats_vec + self.lyt.vec_len) as i32,
+            );
+            let xv = self
+                .fb
+                .ins()
+                .load(F64, tf(), va, self.lyt.val_pay as i32);
+            self.write_elem_prim(i, slot, vl, vp, xv, pre, slow);
+        }
+    }
+
+    /// Branch to `seqb` when `st` (an already-loaded `Val` discriminant) is
+    /// one of the two typed-array tags; `miss` otherwise.
+    fn is_seq_tag(&mut self, st: Value, seqb: Block, miss: Block) {
+        let wi = self.tconst(self.lyt.t_intarray);
+        let a = self.fb.ins().icmp(IntCC::Equal, st, wi);
+        let wf = self.tconst(self.lyt.t_floatarray);
+        let b = self.fb.ins().icmp(IntCC::Equal, st, wf);
+        let k = self.fb.ins().bor(a, b);
+        self.fb.ins().brif(k, seqb, &[], miss, &[]);
+    }
+
     /// `(len, data)` of an `Instance`'s `Fields` at `fp`, restricted to the
     /// `Inline` variant: returns the `(len, data, isinl)` triple so callers
     /// fold the tag check into the access `brif`; `Spilled` therefore routes
@@ -2733,6 +3161,31 @@ impl Em<'_> {
                 dst,
             );
         }
+        // Frozen receiver: a `Dict` bakes its entries into a key-pointer
+        // compare chain; `Array`/`Seq`/`Instance` fold to a compile-time
+        // `(base, len)` view. Both pointer-guard `regs[set]` (unless
+        // `unguarded`) and fall into the generic dispatch on any miss.
+        if let Some((obs, fr)) = self.site_frozen(off, set.index() as u32) {
+            match fr.kind {
+                FrozenKind::Dict => {
+                    let entries = Self::frozen_dict(obs.ptr);
+                    // a chain longer than this pays more branches than the
+                    // hash lookup it replaces — stay generic
+                    if entries.len() <= 32 {
+                        let gfall = self.fb.create_block();
+                        self.fb.set_cold_block(gfall);
+                        self.emit_frozen_dict_get(i, dst, set, index, obs, &fr, entries, gfall);
+                    }
+                }
+                _ => {
+                    if let Some(view) = Self::frozen_view(&fr, obs.ptr) {
+                        let gfall = self.fb.create_block();
+                        self.fb.set_cold_block(gfall);
+                        self.emit_frozen_view_get(i, dst, set, index, obs, &fr, view, gfall);
+                    }
+                }
+            }
+        }
         // No `flush_seq`/`mark_op` on the fast path: the only `regs` slot read
         // here is `set` (materialized by `val_ptr`), `estep` marks from
         // `cur_ip` and re-flushes, and the `slow` helper re-marks anyway.
@@ -2746,7 +3199,19 @@ impl Em<'_> {
         let tarr = self.tconst(self.lyt.t_array);
         let isarr = self.fb.ins().icmp(IntCC::Equal, st, tarr);
         let arrb = self.fb.create_block();
-        self.fb.ins().brif(isarr, arrb, &[], slow, &[]);
+        let notarr = self.fb.create_block();
+        self.fb.ins().brif(isarr, arrb, &[], notarr, &[]);
+        // ---- receiver is IntArray/FloatArray: raw store element ----
+        self.fb.switch_to_block(notarr);
+        let seqb = self.fb.create_block();
+        self.is_seq_tag(st, seqb, slow);
+        self.fb.switch_to_block(seqb);
+        let gc = self
+            .fb
+            .ins()
+            .load(I64, tf(), sa, self.lyt.seq_pay as i32);
+        self.seq_read(i, dst, iv, gc, slow);
+        // ---- receiver is Array ----
         self.fb.switch_to_block(arrb);
         let gc = self
             .fb
@@ -2794,7 +3259,20 @@ impl Em<'_> {
         let tarr = self.tconst(self.lyt.t_array);
         let isarr = self.fb.ins().icmp(IntCC::Equal, st, tarr);
         let arrb = self.fb.create_block();
-        self.fb.ins().brif(isarr, arrb, &[], slow, &[]);
+        let notarr = self.fb.create_block();
+        self.fb.ins().brif(isarr, arrb, &[], notarr, &[]);
+        // ---- receiver is IntArray/FloatArray: raw primitive store ----
+        self.fb.switch_to_block(notarr);
+        let seqb = self.fb.create_block();
+        self.is_seq_tag(st, seqb, slow);
+        self.fb.switch_to_block(seqb);
+        let gc = self
+            .fb
+            .ins()
+            .load(I64, tf(), sa, self.lyt.seq_pay as i32);
+        let va = self.val_ptr(value.index() as u32);
+        self.seq_write(i, iv, gc, va, slow);
+        // ---- receiver is Array ----
         self.fb.switch_to_block(arrb);
         let gc = self
             .fb
@@ -2829,6 +3307,7 @@ impl Em<'_> {
             next,
             H::SetIndex,
             &[regs, s, ii, v, self.env.ctx0, self.env.ctx1, self.env.out],
+            None,
         );
     }
 
@@ -2862,6 +3341,22 @@ impl Em<'_> {
                 dst,
             );
         }
+        // Frozen receiver: `fields[slot]`/`store[slot]` resolved at compile
+        // time — a pointer guard (unless `unguarded`) then constant stores.
+        // A non-bakeable value keeps the whole site generic.
+        if let Some((obs, fr)) = self.site_frozen(off, src.index() as u32) {
+            let b = Self::frozen_slot(&fr, obs.ptr, slot as usize)
+                .and_then(|v| self.bake_of(v));
+            if let Some(b) = b {
+                let gfall = self.fb.create_block();
+                self.fb.set_cold_block(gfall);
+                let hit = self.fb.create_block();
+                self.emit_frozen_guard(src.index() as u32, obs, &fr, hit, gfall);
+                self.fb.switch_to_block(hit);
+                self.st_baked(i, dst, b);
+                self.fb.switch_to_block(gfall);
+            }
+        }
         // selective materialization instead of `flush_seq` — see
         // `emit_get_index`
         let slow = self.fb.create_block();
@@ -2878,7 +3373,19 @@ impl Em<'_> {
         let tarr = self.tconst(self.lyt.t_array);
         let isarr = self.fb.ins().icmp(IntCC::Equal, rt, tarr);
         let arrb = self.fb.create_block();
-        self.fb.ins().brif(isarr, arrb, &[], slow, &[]);
+        let notarr = self.fb.create_block();
+        self.fb.ins().brif(isarr, arrb, &[], notarr, &[]);
+        // ---- receiver is IntArray/FloatArray: `a.0.borrow().at(slot)` ----
+        self.fb.switch_to_block(notarr);
+        let seqb = self.fb.create_block();
+        self.is_seq_tag(rt, seqb, slow);
+        self.fb.switch_to_block(seqb);
+        let gc = self
+            .fb
+            .ins()
+            .load(I64, tf(), ra, self.lyt.seq_pay as i32);
+        let sv = self.iconst(slot as i64);
+        self.seq_read(i, dst, sv, gc, slow);
         self.fb.switch_to_block(arrb);
         let gc = self
             .fb
@@ -2954,7 +3461,19 @@ impl Em<'_> {
         let tarr = self.tconst(self.lyt.t_array);
         let isarr = self.fb.ins().icmp(IntCC::Equal, rt, tarr);
         let arrb = self.fb.create_block();
-        self.fb.ins().brif(isarr, arrb, &[], slow, &[]);
+        let notarr = self.fb.create_block();
+        self.fb.ins().brif(isarr, arrb, &[], notarr, &[]);
+        // ---- receiver is IntArray/FloatArray: demoting write ----
+        self.fb.switch_to_block(notarr);
+        let seqb = self.fb.create_block();
+        self.is_seq_tag(rt, seqb, slow);
+        self.fb.switch_to_block(seqb);
+        let gc = self
+            .fb
+            .ins()
+            .load(I64, tf(), ra, self.lyt.seq_pay as i32);
+        let sv = self.iconst(slot as i64);
+        self.seq_write(i, sv, gc, va, slow);
         self.fb.switch_to_block(arrb);
         let gc = self
             .fb
@@ -3002,6 +3521,7 @@ impl Em<'_> {
             next,
             H::SetField,
             &[regs, r, sl, v, self.env.ctx0, self.env.ctx1, self.env.out],
+            None,
         );
     }
 
@@ -3217,8 +3737,6 @@ impl Em<'_> {
         args: &[Reg],
         cchunk: &compile::Chunk,
     ) {
-        let vs = self.lyt.val_size as i64;
-        let fsz = self.lyt.frame_size as i64;
         self.flush_seq();
         // `code.ip = next; *op_ip = off` — on the fast path `code.ip` gets
         // overwritten with the callee offset below, but `*op_ip` locates this
@@ -3227,40 +3745,8 @@ impl Em<'_> {
         self.settle_seq();
 
         // Runtime gates, all checked in the pre-branch block so the fast
-        // block can reuse the loaded Vec headers:
-        //   frames.len() < INLINE_CALL_DEPTH    (else Flow::Call to driver)
-        //   regs.cap - regs.len >= callee.regs  (else Vec grow → shim)
-        //   frames.len() < frames.cap           (ditto for the push)
-        let flen = self.frames_len();
-        let dcap = self.iconst(INLINE_CALL_DEPTH as i64);
-        let depth_ok = self.fb.ins().icmp(IntCC::UnsignedLessThan, flen, dcap);
-        let rlen = self.fb.ins().load(
-            I64,
-            tf(),
-            self.env.thread,
-            (self.lyt.regs_off + self.lyt.vec_len) as i32,
-        );
-        let rcap = self.fb.ins().load(
-            I64,
-            tf(),
-            self.env.thread,
-            (self.lyt.regs_off + self.lyt.vec_cap) as i32,
-        );
-        let slack = self.fb.ins().isub(rcap, rlen);
-        let need = self.iconst(cchunk.regs as i64);
-        let regs_ok = self
-            .fb
-            .ins()
-            .icmp(IntCC::UnsignedGreaterThanOrEqual, slack, need);
-        let fcap = self.fb.ins().load(
-            I64,
-            tf(),
-            self.env.thread,
-            (self.lyt.frames_off + self.lyt.vec_cap) as i32,
-        );
-        let frames_ok = self.fb.ins().icmp(IntCC::UnsignedLessThan, flen, fcap);
-        let ok01 = self.fb.ins().band(depth_ok, regs_ok);
-        let ok = self.fb.ins().band(ok01, frames_ok);
+        // block can reuse the loaded Vec headers.
+        let (ok, rlen, flen) = self.call_gates(cchunk);
         let fast = self.fb.create_block();
         let slow = self.fb.create_block();
         self.fb.set_cold_block(slow);
@@ -3300,6 +3786,72 @@ impl Em<'_> {
 
         // ---- fast: enter_call_regs inline ----
         self.fb.switch_to_block(fast);
+        self.inline_enter_run(i, next, dst, args, body, cchunk, rlen, flen, None);
+    }
+
+    /// The runtime gates every inlined call needs, checked in the current
+    /// block so the fast block can reuse the loaded Vec headers:
+    ///   frames.len() < INLINE_CALL_DEPTH    (else Flow::Call to driver)
+    ///   regs.cap - regs.len >= callee.regs  (else Vec grow → shim)
+    ///   frames.len() < frames.cap           (ditto for the push)
+    /// Returns `(ok, regs.len, frames.len)` — the latter two feed the
+    /// window math in [`Em::inline_enter_run`].
+    fn call_gates(&mut self, cchunk: &compile::Chunk) -> (Value, Value, Value) {
+        let flen = self.frames_len();
+        let dcap = self.iconst(INLINE_CALL_DEPTH as i64);
+        let depth_ok = self.fb.ins().icmp(IntCC::UnsignedLessThan, flen, dcap);
+        let rlen = self.fb.ins().load(
+            I64,
+            tf(),
+            self.env.thread,
+            (self.lyt.regs_off + self.lyt.vec_len) as i32,
+        );
+        let rcap = self.fb.ins().load(
+            I64,
+            tf(),
+            self.env.thread,
+            (self.lyt.regs_off + self.lyt.vec_cap) as i32,
+        );
+        let slack = self.fb.ins().isub(rcap, rlen);
+        let need = self.iconst(cchunk.regs as i64);
+        let regs_ok = self
+            .fb
+            .ins()
+            .icmp(IntCC::UnsignedGreaterThanOrEqual, slack, need);
+        let fcap = self.fb.ins().load(
+            I64,
+            tf(),
+            self.env.thread,
+            (self.lyt.frames_off + self.lyt.vec_cap) as i32,
+        );
+        let frames_ok = self.fb.ins().icmp(IntCC::UnsignedLessThan, flen, fcap);
+        let ok01 = self.fb.ins().band(depth_ok, regs_ok);
+        let ok = self.fb.ins().band(ok01, frames_ok);
+        (ok, rlen, flen)
+    }
+
+    /// The shared fast path of `CallDirect` and the `Call` IC: push the
+    /// callee window inline (`enter_call_regs`' shape), call the native
+    /// body directly, and inline the driver's `Flow::Return` pop.
+    /// `rlen`/`flen` are the `call_gates` loads; `capsp` is the callee
+    /// `Gc<ClosureData>` pointer to copy `cchunk.captures` out of (`None`
+    /// for `Val::Fn` targets — the interpreter leaves capture regs `Null`
+    /// there too, `zip`ping an empty slice).
+    #[allow(clippy::too_many_arguments)]
+    fn inline_enter_run(
+        &mut self,
+        i: usize,
+        next: usize,
+        dst: Reg,
+        args: &[Reg],
+        body: compile::BodyId,
+        cchunk: &compile::Chunk,
+        rlen: Value,
+        flen: Value,
+        capsp: Option<Value>,
+    ) {
+        let vs = self.lyt.val_size as i64;
+        let fsz = self.lyt.frame_size as i64;
         let rp0 = self.fb.ins().load(
             I64,
             tf(),
@@ -3333,6 +3885,20 @@ impl Em<'_> {
             let s = self.vaddr(caller, args[i].index() as u32);
             let d = self.vaddr(nwin, pr.index() as u32);
             self.cpy_val(d, s);
+        }
+        // capture copies — only on a `Val::Closure` IC hit: the guard has
+        // already verified `captures.len() == cchunk.captures.len()`.
+        if let Some(cp) = capsp {
+            let cvec = self.fb.ins().iadd_imm_s(cp, self.lyt.cl_caps as i64);
+            let cdata = self
+                .fb
+                .ins()
+                .load(I64, tf(), cvec, self.lyt.vec_ptr as i32);
+            for (i, &cr) in cchunk.captures.iter().enumerate() {
+                let s = self.fb.ins().iadd_imm_s(cdata, i as i64 * vs);
+                let d = self.vaddr(nwin, cr.index() as u32);
+                self.cpy_val(d, s);
+            }
         }
         // caller frame's saved ip = resume offset (what `code.ip` held)
         let fptr = self.fb.ins().load(
@@ -3468,6 +4034,9 @@ impl Em<'_> {
 
     /// `Call` — one `mj_call_dyn` hop: callee resolution (incl. the
     /// `CallTarget::Value` signature check), depth cap, enter/run/pop.
+    /// With a monomorphic fact (`facts.calls[next]`), an inline cache is
+    /// emitted instead: guard callee → inline enter/call → `mj_call_dyn`
+    /// on a miss.
     fn emit_call(
         &mut self,
         i: usize,
@@ -3477,6 +4046,19 @@ impl Em<'_> {
         callee: Reg,
         args: &[Reg],
     ) {
+        // Monomorphic inline cache: the profiler saw exactly one callee
+        // body at this site. Gate compile-time: a static arity miss or an
+        // oversized callee frame keeps the megashim (`WrongArity` /
+        // `Flow::Call` semantics stay helper-side).
+        if let Some(&tb) = self.spec.facts.calls.get(&next) {
+            if (tb as usize) < self.prog.chunks.len() {
+                let cbody = compile::BodyId::from(tb);
+                let cchunk = &self.prog.chunks[cbody];
+                if args.len() == cchunk.args as usize && (cchunk.regs as usize) <= 64 {
+                    return self.emit_call_ic(i, off, next, dst, callee, args, cbody, cchunk);
+                }
+            }
+        }
         // Flush first — the shim reads the callee Val and arg slots out of
         // the window. `code.ip = next; *op_ip = off` before the call: a
         // `not_callable` error locates via `op_ip` exactly like the
@@ -3518,6 +4100,142 @@ impl Em<'_> {
         self.post_call(i, dst, rp);
     }
 
+    /// The `Call` monomorphic inline cache — see [`Em::emit_call`]. The
+    /// guard resolves the callee exactly like `call_target`:
+    /// `Val::Fn(b)` hits on `b == body`; `Val::Closure(c)` dereferences
+    /// `ClosureData.function` (and `captures.len` when the callee chunk
+    /// takes captures). Anything else — including a megamorphic site or a
+    /// `Val::Fn` whose signature the observed entry never exercised —
+    /// falls to `mj_call_dyn`, which reproduces the interpreter's
+    /// `not_callable`/`WrongArity`/`Flow::Call` behavior verbatim.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_call_ic(
+        &mut self,
+        i: usize,
+        off: usize,
+        next: usize,
+        dst: Reg,
+        callee: Reg,
+        args: &[Reg],
+        body: compile::BodyId,
+        cchunk: &compile::Chunk,
+    ) {
+        self.flush_seq();
+        self.mark_op(off, next);
+        self.settle_seq();
+        let ap = self.reg_list_slot(args);
+
+        let ca = self.val_ptr(callee.index() as u32);
+        let ctag = self.ld_tag(ca);
+        let want = self.iconst(body.index() as i64);
+        // Val::Fn arm: tag + the inline u32 body payload. `call_target`
+        // additionally rejects a `Val::Fn` whose body has no signature —
+        // `signatures[body]` is a compile-time constant, so a `None` there
+        // sends every Fn-valued callee straight to the shim (which raises
+        // `not_callable` exactly like the interpreter).
+        let fn_legal = self
+            .prog
+            .signatures
+            .get(body)
+            .map(|s| s.is_some())
+            .unwrap_or(false);
+        let gate_fn = self.fb.create_block();
+        let cl_chk = self.fb.create_block();
+        let slow = self.fb.create_block();
+        self.fb.set_cold_block(slow);
+        if fn_legal {
+            let tfn = self.tconst(self.lyt.t_fn);
+            let is_fn = self.fb.ins().icmp(IntCC::Equal, ctag, tfn);
+            let fb32 = self.fb.ins().load(I32, tf(), ca, self.lyt.fn_pay as i32);
+            let fb = self.fb.ins().uextend(I64, fb32);
+            let fn_eq = self.fb.ins().icmp(IntCC::Equal, fb, want);
+            let fn_hit = self.fb.ins().band(is_fn, fn_eq);
+            self.fb.ins().brif(fn_hit, gate_fn, &[], cl_chk, &[]);
+        } else {
+            self.fb.ins().jump(cl_chk, &[]);
+        }
+
+        // Val::Closure arm: tag first, then the guarded deref.
+        self.fb.switch_to_block(cl_chk);
+        let tcl = self.tconst(self.lyt.t_closure);
+        let is_cl = self.fb.ins().icmp(IntCC::Equal, ctag, tcl);
+        let cl_load = self.fb.create_block();
+        self.fb.ins().brif(is_cl, cl_load, &[], slow, &[]);
+        self.fb.switch_to_block(cl_load);
+        let clp = self.fb.ins().load(I64, tf(), ca, self.lyt.cl_pay as i32);
+        let cb32 = self
+            .fb
+            .ins()
+            .load(I32, tf(), clp, self.lyt.cl_func as i32);
+        let cb = self.fb.ins().uextend(I64, cb32);
+        let cl_eq = self.fb.ins().icmp(IntCC::Equal, cb, want);
+        // a captures-carrying callee also needs `captures.len` to match —
+        // `enter_call` only debug-asserts it, so a mismatch must take the
+        // helper (its `zip` truncates instead of reading OOB).
+        let cl_hit = if cchunk.captures.is_empty() {
+            cl_eq
+        } else {
+            let cvec = self.fb.ins().iadd_imm_s(clp, self.lyt.cl_caps as i64);
+            let clen = self
+                .fb
+                .ins()
+                .load(I64, tf(), cvec, self.lyt.vec_len as i32);
+            let cn = self.iconst(cchunk.captures.len() as i64);
+            let len_eq = self.fb.ins().icmp(IntCC::Equal, clen, cn);
+            self.fb.ins().band(cl_eq, len_eq)
+        };
+        let gate_cl = self.fb.create_block();
+        self.fb.ins().brif(cl_hit, gate_cl, &[], slow, &[]);
+
+        // ---- slow: the verbatim dynamic-call megashim ----
+        self.fb.switch_to_block(slow);
+        let (regs, c, d, n) = (
+            self.regs(),
+            self.iconst(callee.index() as i64),
+            self.iconst(dst.index() as i64),
+            self.iconst(args.len() as i64),
+        );
+        let rp = self
+            .hcall(
+                H::CallDyn,
+                &[
+                    self.env.thread,
+                    self.env.code,
+                    self.env.chunks,
+                    self.env.sigs,
+                    regs,
+                    c,
+                    d,
+                    ap,
+                    n,
+                    self.env.bodies_tbl,
+                    self.env.ctx0,
+                    self.env.ctx1,
+                    self.env.strs,
+                    self.env.fuel_p,
+                    self.env.opip_p,
+                    self.env.out,
+                ],
+            )
+            .unwrap();
+        self.post_call(i, dst, rp);
+
+        // ---- fast arms: own gates, shared inline enter/run/pop ----
+        self.fb.switch_to_block(gate_fn);
+        let (ok, rlen, flen) = self.call_gates(cchunk);
+        let run_fn = self.fb.create_block();
+        self.fb.ins().brif(ok, run_fn, &[], slow, &[]);
+        self.fb.switch_to_block(run_fn);
+        self.inline_enter_run(i, next, dst, args, body, cchunk, rlen, flen, None);
+
+        self.fb.switch_to_block(gate_cl);
+        let (ok2, rlen2, flen2) = self.call_gates(cchunk);
+        let run_cl = self.fb.create_block();
+        self.fb.ins().brif(ok2, run_cl, &[], slow, &[]);
+        self.fb.switch_to_block(run_cl);
+        self.inline_enter_run(i, next, dst, args, body, cchunk, rlen2, flen2, Some(clp));
+    }
+
     /// After an inlined callee returns through the megashim: null means
     /// propagate `out` verbatim (`eret`); otherwise the returned pointer is
     /// the caller's rebuilt window — re-pin it, re-arm the quota (the callee
@@ -3535,12 +4253,20 @@ impl Em<'_> {
     }
 
     /// Post-call tail: `regs[dst]` now holds the callee's return value —
-    /// refresh its scalar shadow (if any) and resume at the next op.
+    /// refresh its scalar shadow(s) (a reg can sit in both maps) and resume
+    /// at the next op.
     fn dst_refresh(&mut self, i: usize, dst: Reg, regs2: Value) {
         let d = dst.index() as u32;
-        if let Some(&(sv, ok)) = self.v.int.get(&d) {
+        let t = self
+            .v
+            .int
+            .contains_key(&d)
+            .then(|| {
+                let a = self.vaddr(regs2, d);
+                self.ld_tag(a)
+            });
+        if let (Some(&(sv, ok)), Some(t)) = (self.v.int.get(&d), t) {
             let a = self.vaddr(regs2, d);
-            let t = self.ld_tag(a);
             let want = self.tconst(self.lyt.t_int);
             let k = self.fb.ins().icmp(IntCC::Equal, t, want);
             let v = self.fb.ins().load(I64, tf(), a, self.lyt.val_pay as i32);
@@ -3548,9 +4274,13 @@ impl Em<'_> {
             let sv0 = self.fb.ins().select(k, v, z);
             self.fb.def_var(sv, sv0);
             self.fb.def_var(ok, k);
-        } else if let Some(&(sv, ok)) = self.v.float.get(&d) {
+        }
+        if let Some(&(sv, ok)) = self.v.float.get(&d) {
             let a = self.vaddr(regs2, d);
-            let t = self.ld_tag(a);
+            let t = match t {
+                Some(t) => t,
+                None => self.ld_tag(a),
+            };
             let want = self.tconst(self.lyt.t_float);
             let k = self.fb.ins().icmp(IntCC::Equal, t, want);
             let v = self.fb.ins().load(F64, tf(), a, self.lyt.val_pay as i32);
@@ -3564,6 +4294,408 @@ impl Em<'_> {
             self.fb.ins().jump(nb, &[]);
         }
     }
+
+    // ---- frozen-container constant baking (`Facts::frozen`) ----
+    //
+    // `known` names regs that held one stable GC payload at every entry and
+    // are never re-seated; when the host declares that payload frozen the
+    // container's contents are compile-time readable. Every baked site still
+    // verifies `regs[r]` is that same object — tag + payload pointer —
+    // unless the host opted out with `unguarded` (see `Frozen`).
+
+    /// `(obs, frozen)` for the receiver reg `r` of the op at byte offset
+    /// `off` — the site-observed payload first (the reg's value *at this
+    /// op*, which catches globals `LoadEntry`'d mid-body that `entry` facts
+    /// never see), then the `known` entry fallback for hand-built facts.
+    /// The payload-pointer guard stays on unless the host set `unguarded`
+    /// *and* the reg is never re-seated — see [`Frozen`].
+    fn site_frozen(&self, off: usize, r: u32) -> Option<(Obs, Frozen)> {
+        if let Some(o) = self.spec.facts.sites.get(&off) {
+            if o.ptr != 0 {
+                if let Some(f) = self.spec.frozen.get(&o.ptr) {
+                    let mut f = *f;
+                    if f.unguarded && self.sh.written.contains(&r) {
+                        f.unguarded = false;
+                    }
+                    return Some((*o, f));
+                }
+            }
+        }
+        self.frozen_of(r)
+    }
+
+    /// `(obs, frozen)` for reg `r`, when it held one stable GC payload at
+    /// every entry and the host froze that payload. `unguarded` freezes are
+    /// honored only for regs never re-seated — a written reg's slot no
+    /// longer provably holds the entry value, so it always pays the pointer
+    /// guard.
+    fn frozen_of(&self, r: u32) -> Option<(Obs, Frozen)> {
+        let o = *self.known.get(&r)?;
+        let mut f = *self.spec.frozen.get(&o.ptr)?;
+        if f.unguarded && self.sh.written.contains(&r) {
+            f.unguarded = false;
+        }
+        Some((o, f))
+    }
+
+    /// `(tag, payload offset)` `regs[r]` must satisfy for `fr` to apply to
+    /// `obs`'s register — `None` means tag/kind disagree and the site stays
+    /// generic (a freeze declared for the wrong kind of object).
+    fn kind_guard(&self, obs: Obs, fr: &Frozen) -> Option<(u64, usize)> {
+        let t = match (fr.kind, obs.tag) {
+            (FrozenKind::Array, ObsTag::Array) => self.lyt.t_array,
+            (FrozenKind::Seq, ObsTag::IntArray) => self.lyt.t_intarray,
+            (FrozenKind::Seq, ObsTag::FloatArray) => self.lyt.t_floatarray,
+            (FrozenKind::Dict, ObsTag::Dict) => self.lyt.t_dict,
+            (FrozenKind::Instance, ObsTag::Instance) => self.lyt.t_instance,
+            _ => return None,
+        };
+        let po = match fr.kind {
+            FrozenKind::Array => self.lyt.arr_pay,
+            FrozenKind::Seq => self.lyt.seq_pay,
+            FrozenKind::Dict => self.lyt.dict_pay,
+            FrozenKind::Instance => self.lyt.inst_pay,
+        };
+        Some((t, po))
+    }
+
+    /// Compile-time `container[slot]` inside a frozen root.
+    ///
+    /// SAFETY per the `Frozen` contract: `ptr` names a live, rooted arena
+    /// object and the arena is mapped — gc-arena doesn't move objects, so
+    /// the raw deref is a plain read. `'static` is the contract's way of
+    /// saying "alive for the whole compile+install".
+    fn frozen_slot(fr: &Frozen, ptr: usize, slot: usize) -> Option<vm::Val<'static>> {
+        unsafe {
+            match fr.kind {
+                FrozenKind::Array => {
+                    let rl = &*(ptr as *const gc_arena::RefLock<Vec<vm::Val<'static>>>);
+                    rl.borrow().get(slot).copied()
+                }
+                FrozenKind::Seq => {
+                    let rl = &*(ptr as *const gc_arena::RefLock<vm::ArrayStore<'static>>);
+                    rl.borrow().get(slot)
+                }
+                FrozenKind::Instance => {
+                    let rl = &*(ptr as *const gc_arena::RefLock<vm::InstanceData<'static>>);
+                    let d = rl.borrow();
+                    if slot >= d.fields.len() {
+                        return None;
+                    }
+                    Some(d.fields[slot])
+                }
+                FrozenKind::Dict => None,
+            }
+        }
+    }
+
+    /// A frozen container's element storage flattened to a compile-time
+    /// `(base, len, kind)` view for `GetIndex` — the contract's "no
+    /// mutation" promise keeps `base`/`len` stable.
+    fn frozen_view(fr: &Frozen, ptr: usize) -> Option<View> {
+        use vm::ArrayStore;
+        unsafe {
+            match fr.kind {
+                FrozenKind::Array => {
+                    let rl = &*(ptr as *const gc_arena::RefLock<Vec<vm::Val<'static>>>);
+                    let v = rl.borrow();
+                    Some(View {
+                        base: v.as_ptr() as usize,
+                        len: v.len(),
+                        kind: VKind::Vals,
+                    })
+                }
+                FrozenKind::Seq => {
+                    let rl = &*(ptr as *const gc_arena::RefLock<ArrayStore<'static>>);
+                    let s = rl.borrow();
+                    match &*s {
+                        ArrayStore::Ints(v) => Some(View {
+                            base: v.as_ptr() as usize,
+                            len: v.len(),
+                            kind: VKind::Ints,
+                        }),
+                        ArrayStore::Floats(v) => Some(View {
+                            base: v.as_ptr() as usize,
+                            len: v.len(),
+                            kind: VKind::Floats,
+                        }),
+                        ArrayStore::Vals(a) => {
+                            let v = a.0.borrow();
+                            Some(View {
+                                base: v.as_ptr() as usize,
+                                len: v.len(),
+                                kind: VKind::Vals,
+                            })
+                        }
+                        ArrayStore::Empty => None,
+                    }
+                }
+                FrozenKind::Instance => {
+                    let rl = &*(ptr as *const gc_arena::RefLock<vm::InstanceData<'static>>);
+                    let d = rl.borrow();
+                    match &d.fields {
+                        vm::Fields::Inline { len, data } => Some(View {
+                            base: data.as_ptr() as usize,
+                            len: *len as usize,
+                            kind: VKind::Vals,
+                        }),
+                        vm::Fields::Spilled(v) => Some(View {
+                            base: v.as_ptr() as usize,
+                            len: v.len(),
+                            kind: VKind::Vals,
+                        }),
+                    }
+                }
+                FrozenKind::Dict => None,
+            }
+        }
+    }
+
+    /// A frozen dict's `(key payload, value)` pairs — `Str` equality IS the
+    /// `Gc` pointer, so a baked lookup compares key pointers.
+    fn frozen_dict(ptr: usize) -> Vec<(usize, vm::Val<'static>)> {
+        unsafe {
+            let rl = &*(ptr as *const gc_arena::RefLock<vm::DictMap<'static>>);
+            let d = rl.borrow();
+            d.iter()
+                .map(|(k, v)| (vm::bc::Gc::as_ptr(k.0) as usize, *v))
+                .collect()
+        }
+    }
+
+    /// `v` as an emitted constant, or `None` for variants we can't bake
+    /// (`Raised`, feature payloads). GC-carrying values bake as their `Gc`
+    /// pointer — transitively rooted through the frozen object per the
+    /// contract.
+    fn bake_of(&self, v: vm::Val) -> Option<Baked> {
+        use vm::bc::Gc;
+        Some(match v {
+            vm::Val::Null => Baked::Null,
+            vm::Val::Bool(b) => Baked::Bool(b),
+            vm::Val::Int(x) => Baked::Int(x),
+            vm::Val::Float(x) => Baked::Float(x),
+            vm::Val::Fn(b) => Baked::Fn(b.index() as u32),
+            vm::Val::Str(s) => Baked::Gc(self.lyt.t_str, self.lyt.str_pay, Gc::as_ptr(s.0) as usize),
+            vm::Val::Array(a) => {
+                Baked::Gc(self.lyt.t_array, self.lyt.arr_pay, Gc::as_ptr(a.0) as usize)
+            }
+            vm::Val::IntArray(s) => Baked::Gc(
+                self.lyt.t_intarray,
+                self.lyt.seq_pay,
+                Gc::as_ptr(s.0) as usize,
+            ),
+            vm::Val::FloatArray(s) => Baked::Gc(
+                self.lyt.t_floatarray,
+                self.lyt.seq_pay,
+                Gc::as_ptr(s.0) as usize,
+            ),
+            vm::Val::Dict(d) => {
+                Baked::Gc(self.lyt.t_dict, self.lyt.dict_pay, Gc::as_ptr(d.0) as usize)
+            }
+            vm::Val::Instance(i) => Baked::Gc(
+                self.lyt.t_instance,
+                self.lyt.inst_pay,
+                Gc::as_ptr(i.0) as usize,
+            ),
+            vm::Val::Closure(c) => {
+                Baked::Gc(self.lyt.t_closure, self.lyt.cl_pay, Gc::as_ptr(c.0) as usize)
+            }
+            _ => return None,
+        })
+    }
+
+    /// `regs[dst] = <baked>` — tag + payload constant stores — then shadow
+    /// resync and fall through to the next op.
+    fn st_baked(&mut self, i: usize, dst: Reg, b: Baked) {
+        let regs = self.regs();
+        let a = self.vaddr(regs, dst.index() as u32);
+        match b {
+            Baked::Null => self.st_null(a),
+            Baked::Bool(v) => {
+                let v = self.iconst8(v as i64);
+                self.st_bool(a, v);
+            }
+            Baked::Int(v) => {
+                let v = self.iconst(v);
+                self.st_int(a, v);
+            }
+            Baked::Float(v) => {
+                let v = self.fb.ins().f64const(v);
+                self.st_float(a, v);
+            }
+            Baked::Fn(b) => {
+                let v = self.iconst32(b as i64);
+                self.st_fn(a, v);
+            }
+            Baked::Gc(tag, pay, p) => {
+                let t = self.tconst(tag);
+                self.fb.ins().store(tf(), t, a, self.lyt.val_tag as i32);
+                let pv = self.iconst(p as i64);
+                self.fb.ins().store(tf(), pv, a, pay as i32);
+            }
+        }
+        self.refresh_shadow(dst.index() as u32);
+        {
+            let nb = self.next_blk(i);
+            self.fb.ins().jump(nb, &[]);
+        }
+    }
+
+    /// Emit `regs[r]` tag+payload check against `obs`'s frozen identity →
+    /// `hit`, else `miss`. `fr.unguarded` trusts the entry observation and
+    /// jumps straight to `hit`; a tag/kind that can't be guarded goes to
+    /// `miss` (site stays generic).
+    fn emit_frozen_guard(&mut self, r: u32, obs: Obs, fr: &Frozen, hit: Block, miss: Block) {
+        if fr.unguarded {
+            self.fb.ins().jump(hit, &[]);
+            return;
+        }
+        let Some((wt, po)) = self.kind_guard(obs, fr) else {
+            self.fb.ins().jump(miss, &[]);
+            return;
+        };
+        let sa = self.val_ptr(r);
+        let st = self.ld_tag(sa);
+        let wt = self.tconst(wt);
+        let istag = self.fb.ins().icmp(IntCC::Equal, st, wt);
+        let gc = self.fb.ins().load(I64, tf(), sa, po as i32);
+        let want = self.iconst(obs.ptr as i64);
+        let isptr = self.fb.ins().icmp(IntCC::Equal, gc, want);
+        let ok = self.fb.ins().band(istag, isptr);
+        self.fb.ins().brif(ok, hit, &[], miss, &[]);
+    }
+
+    /// `GetIndex` on a frozen `Array`/`Seq`/`Instance`: the element store
+    /// flattened at compile time, so the read is bounds-check + load with
+    /// the header loads and `RefLock`/`ArrayStore` dispatch all folded away.
+    fn emit_frozen_view_get(
+        &mut self,
+        i: usize,
+        dst: Reg,
+        set: Reg,
+        index: Reg,
+        obs: Obs,
+        fr: &Frozen,
+        view: View,
+        gfall: Block,
+    ) {
+        let vb = self.fb.create_block();
+        self.emit_frozen_guard(set.index() as u32, obs, fr, vb, gfall);
+        self.fb.switch_to_block(vb);
+        let iv = self.int_opnd(index.index() as u32);
+        let len = self.iconst(view.len as i64);
+        let inb = self.fb.ins().icmp(IntCC::UnsignedLessThan, iv, len);
+        let rd = self.fb.create_block();
+        self.fb.ins().brif(inb, rd, &[], gfall, &[]);
+        self.fb.switch_to_block(rd);
+        let regs = self.regs();
+        let da = self.vaddr(regs, dst.index() as u32);
+        let base = self.iconst(view.base as i64);
+        match view.kind {
+            VKind::Vals => {
+                let off = self.fb.ins().imul_imm_s(iv, self.lyt.val_size as i64);
+                let sa = self.fb.ins().iadd(base, off);
+                self.cpy_val(da, sa);
+            }
+            VKind::Ints => {
+                let off = self.fb.ins().imul_imm_s(iv, 8);
+                let sa = self.fb.ins().iadd(base, off);
+                let x = self.fb.ins().load(I64, tf(), sa, 0);
+                self.st_int(da, x);
+            }
+            VKind::Floats => {
+                let off = self.fb.ins().imul_imm_s(iv, 8);
+                let sa = self.fb.ins().iadd(base, off);
+                let x = self.fb.ins().load(F64, tf(), sa, 0);
+                self.st_float(da, x);
+            }
+        }
+        self.refresh_shadow(dst.index() as u32);
+        {
+            let nb = self.next_blk(i);
+            self.fb.ins().jump(nb, &[]);
+        }
+        self.fb.switch_to_block(gfall);
+    }
+
+    /// `GetIndex` on a frozen `Dict` with a `Str` key — a pointer-compare
+    /// chain over the compile-time-read entries; a key not in the dict
+    /// writes `Null` (the interpreter's `unwrap_or(Val::Null)`), a non-`Str`
+    /// key or an unbakeable value goes generic.
+    fn emit_frozen_dict_get(
+        &mut self,
+        i: usize,
+        dst: Reg,
+        set: Reg,
+        index: Reg,
+        obs: Obs,
+        fr: &Frozen,
+        entries: Vec<(usize, vm::Val<'static>)>,
+        gfall: Block,
+    ) {
+        let strb = self.fb.create_block();
+        self.emit_frozen_guard(set.index() as u32, obs, fr, strb, gfall);
+        self.fb.switch_to_block(strb);
+        let ka = self.val_ptr(index.index() as u32);
+        let kt = self.ld_tag(ka);
+        let tstr = self.tconst(self.lyt.t_str);
+        let isstr = self.fb.ins().icmp(IntCC::Equal, kt, tstr);
+        let cmpb = self.fb.create_block();
+        self.fb.ins().brif(isstr, cmpb, &[], gfall, &[]);
+        self.fb.switch_to_block(cmpb);
+        let kp = self
+            .fb
+            .ins()
+            .load(I64, tf(), ka, self.lyt.str_pay as i32);
+        for (kptr, v) in &entries {
+            let kv = self.iconst(*kptr as i64);
+            let eq = self.fb.ins().icmp(IntCC::Equal, kp, kv);
+            let hb = self.fb.create_block();
+            let eb = self.fb.create_block();
+            self.fb.ins().brif(eq, hb, &[], eb, &[]);
+            self.fb.switch_to_block(hb);
+            match self.bake_of(*v) {
+                Some(b) => self.st_baked(i, dst, b),
+                None => {
+                    self.fb.ins().jump(gfall, &[]);
+                }
+            }
+            self.fb.switch_to_block(eb);
+        }
+        // key absent → Null (dict get's `unwrap_or(Val::Null)`)
+        self.st_baked(i, dst, Baked::Null);
+        self.fb.switch_to_block(gfall);
+    }
+}
+
+/// A `Val` resolved to a constant at compile time (a frozen-container
+/// bake) — emitted as tag+payload stores, no runtime deref.
+#[derive(Clone, Copy)]
+enum Baked {
+    Null,
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    /// `Val::Fn`'s body index.
+    Fn(u32),
+    /// GC-carrying value — `Val` tag + payload offset + the `Gc` payload
+    /// address; rooted transitively through the frozen object.
+    Gc(u64, usize, usize),
+}
+
+/// A frozen container's element storage (see [`Em::frozen_view`]).
+#[derive(Clone, Copy)]
+struct View {
+    base: usize,
+    len: usize,
+    kind: VKind,
+}
+
+#[derive(Clone, Copy)]
+enum VKind {
+    Vals,
+    Ints,
+    Floats,
 }
 
 #[derive(Clone, Copy)]

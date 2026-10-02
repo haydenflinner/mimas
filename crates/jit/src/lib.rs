@@ -23,6 +23,7 @@
 //! coverage is always total.
 
 mod emit;
+mod session;
 
 use compile::Program;
 use cranelift_codegen::ir::{AbiParam, types};
@@ -59,6 +60,135 @@ impl std::fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+// ---- runtime facts & specialization ----
+
+use std::collections::HashMap;
+
+pub use session::JitSession;
+
+/// The `Val` discriminant the profiler (or the host) saw in a register at
+/// body entry — one entry per tag. `Mixed` = more than one tag was seen;
+/// `Unknown` = never observed (never entered).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum ObsTag {
+    /// No observation recorded — treated like `Mixed` (no speculation).
+    #[default]
+    Unknown,
+    Null,
+    Bool,
+    Int,
+    Float,
+    Fn,
+    Str,
+    Array,
+    /// `Val::IntArray`/`Val::FloatArray` — the typed-array tags.
+    IntArray,
+    /// See `IntArray`.
+    FloatArray,
+    Dict,
+    Instance,
+    Closure,
+    /// Anything else (`Raised`, feature-gated payloads, ...).
+    Other,
+    /// More than one tag observed — no specialization.
+    Mixed,
+}
+
+/// What one register held on every observed body entry: a merged tag plus,
+/// when every observation carried the *same* GC payload, that payload's
+/// address (`Gc::as_ptr()` — used to key [`Facts::frozen`] lookups; `0` =
+/// "not one stable pointer").
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Obs {
+    /// Merged tag — `Mixed` when more than one was seen.
+    pub tag: ObsTag,
+    /// The one GC payload address observed, else `0`.
+    pub ptr: usize,
+}
+
+/// Specialization facts for one chunk of the program.
+#[derive(Clone, Debug, Default)]
+pub struct BodyFacts {
+    /// `entry[r]` — the merged observation for register `r` at body entry.
+    /// `Int`/`Float` entries force the register into the scalar-shadow set:
+    /// emitted code then assumes the tag until a runtime guard says
+    /// otherwise, deopting through `step` on a mismatch. Container tags
+    /// (`Dict`, `Array`, `IntArray`, `FloatArray`, `Instance`, ...) record
+    /// the GC pointer for [`Facts::frozen`] lookups.
+    pub entry: Vec<Obs>,
+    /// Monomorphic dynamic-call sites: the caller-frame resume offset (the
+    /// `code.ip` the interpreter saved — i.e. the byte offset of the op
+    /// *after* the `Op::Call`) → the one `BodyId` index ever observed as the
+    /// `Val::Fn`/`Val::Closure` target. The emitter guards the callee's
+    /// stored body index and calls it directly; misses run `mj_call_dyn`.
+    pub calls: HashMap<usize, u32>,
+    /// `sites[ip]` — the merged observation of the *receiver operand* of the
+    /// `GetIndex`/`GetField` op at byte offset `ip`. Unlike `entry` this
+    /// sees mid-body values, so a global `LoadEntry`'d into a reg every call
+    /// still yields the container's stable payload pointer — the key
+    /// [`Facts::frozen`] bakes on.
+    pub sites: HashMap<usize, Obs>,
+}
+
+/// A GC-rooted container the host declares immutable for the lifetime of the
+/// specialized bodies — reads from it may be constant-folded at compile time.
+///
+/// # ⚠️ THE FROZEN CONTRACT — READ THIS ⚠️
+///
+/// Marking an object frozen is a promise that **nothing mutates it** — no
+/// `SetIndex`/`SetField`/`Push`/`Insert` from script, no `borrow_mut` from a
+/// native, for the entire time the specialized bodies are installed and may
+/// run. Breaking the promise makes baked reads return stale values — silent
+/// wrong answers, not crashes.
+///
+/// The pointer (`Gc::as_ptr` of the `RefLock`-holding cell) is embedded in
+/// generated code. The object must therefore outlive the [`Jit`]: keep its
+/// arena alive and make sure it is a real GC root — a frozen address whose
+/// object is collected and reused would alias a *different* container and
+/// bake lies. In practice: freeze objects reachable from the program's own
+/// globals/frame (`Gc` is a root through the arena) while the `Vm` lives.
+#[derive(Clone, Copy, Debug)]
+pub struct Frozen {
+    /// What the payload address points at — selects which accessor bakes.
+    pub kind: FrozenKind,
+    /// `false` (default): every baked read still verifies the receiver's
+    /// payload pointer at runtime — always correct, just cheaper than the
+    /// general path. `true` additionally skips that check — the host is
+    /// asserting the register provably holds this object at the site (e.g.
+    /// an entry fact), which is only sound under the frozen contract above.
+    pub unguarded: bool,
+}
+
+/// Which container type a [`Frozen`] address names.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FrozenKind {
+    /// `Val::Array`'s `Gc<RefLock<Vec<Val>>>` payload.
+    Array,
+    /// `Val::IntArray`/`Val::FloatArray`'s `Gc<RefLock<ArrayStore>>` payload.
+    Seq,
+    /// `Val::Dict`'s `Gc<RefLock<DictMap<Val>>>` payload.
+    Dict,
+    /// `Val::Instance`'s `Gc<RefLock<InstanceData>>` payload.
+    Instance,
+}
+
+/// Runtime specialization facts for [`compile_with`] — produced by
+/// [`JitSession`]'s observation shims or built by hand.
+///
+/// Every fact is *guarded*: emitted code checks the speculation at runtime
+/// and falls back to the interpreter's own semantics on a mismatch, so wrong
+/// facts cost speed, never correctness — except [`Facts::frozen`], which is
+/// a host contract (see [`Frozen`]).
+#[derive(Clone, Debug, Default)]
+pub struct Facts {
+    /// `bodies[b]` — facts for `BodyId` `b`. Missing bodies get no
+    /// specialization.
+    pub bodies: Vec<BodyFacts>,
+    /// Frozen GC roots the host guarantees immutable — keyed by
+    /// `Gc::as_ptr` address. See [`Frozen`] for the contract.
+    pub frozen: HashMap<usize, Frozen>,
+}
 
 impl From<cranelift_module::ModuleError> for Error {
     fn from(e: cranelift_module::ModuleError) -> Self {
@@ -290,6 +420,26 @@ impl H {
 /// Compile every chunk of `program` to native code. The returned [`Jit`] owns
 /// the code memory — keep it alive for as long as the bodies are installed.
 pub fn compile(program: &Program) -> Result<Jit, Error> {
+    compile_with(program, &Facts::default())
+}
+
+/// [`compile`](Self::compile) specialized by runtime [`Facts`]:
+///
+/// - `bodies[b].entry[r]` observed `Int`/`Float` on every entry → the
+///   register joins the scalar-shadow set; entry probes the tag once and
+///   reads deopt through `step` on a mismatch.
+/// - `bodies[b].calls` → a monomorphic inline cache on that `Op::Call` site:
+///   the callee's stored body index is checked and the body called directly;
+///   a miss runs `mj_call_dyn`.
+/// - `frozen` container addresses known from `entry` observations (or hit
+///   via an `unguarded` declaration) let `GetField`/`GetIndex` bake the
+///   resolved value — `Int`/`Float`/`Bool`/`Null`/`Fn` only — as an
+///   immediate, pointer-guarded unless `unguarded`.
+///
+/// Facts carry no lifetimes — the addresses in them must stay live and
+/// truthful for as long as the returned [`Jit`] is installed (see
+/// [`Frozen`]).
+pub fn compile_with(program: &Program, facts: &Facts) -> Result<Jit, Error> {
     debug_assert_eq!(
         SPECS.len(),
         H::CallDyn as usize + 1,
@@ -365,7 +515,13 @@ pub fn compile(program: &Program) -> Result<Jit, Error> {
     // Probed layouts (`Val` tag/payload, `ThreadState`/`Frame`/`Decoder`
     // fields, `Vec` header order) — emitted code reads/writes these inline.
     let lyt = jit::layout();
+    let empty_bf = BodyFacts::default();
     for body in 0..nbodies {
+        let bfacts = facts.bodies.get(body).unwrap_or(&empty_bf);
+        let spec = emit::BodySpec {
+            facts: bfacts,
+            frozen: &facts.frozen,
+        };
         // emit_body defines the function itself (so it can map verifier
         // errors to the offending chunk's CLIF).
         emit::emit_body(
@@ -379,6 +535,7 @@ pub fn compile(program: &Program) -> Result<Jit, Error> {
             &lyt,
             &mut fbc,
             &mut ctx,
+            &spec,
         )?;
     }
     module.finalize_definitions()?;
