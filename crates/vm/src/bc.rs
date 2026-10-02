@@ -19,7 +19,16 @@ use crate::vm::step_one;
 /// `Flow::Call` for the driver. Above it, the interpreter-side stack is
 /// unbounded but the real Rust stack is not — inline calls stop here and every
 /// deeper frame rides the heap-side `Flow::Call` path as before.
+///
+/// The cap is purely a host-stack/perf knob — inline and driver-dispatched
+/// calls are semantically identical — so debug builds run a smaller one:
+/// unoptimized body frames are several times fatter and callers (like the
+/// test harness) may run on small thread stacks.
+#[cfg(not(debug_assertions))]
 pub const INLINE_CALL_DEPTH: usize = 256;
+/// See the non-debug const above.
+#[cfg(debug_assertions)]
+pub const INLINE_CALL_DEPTH: usize = 96;
 
 /// One bcgen-specialized body — a chunk-local `step_one`. The driver invokes it
 /// with `code.ip` at the body's next unexecuted op and the body's frame on top
@@ -132,7 +141,7 @@ pub use crate::{
     CallTarget, Closure, Ctx, DebugInfo, DictMap, Fields, Flow, Frame, INLINE_FIELDS, Native,
     RtErr, RtResult, ThreadState, Val, bin, bin_cold, bin_cold_imm_float, bin_cold_imm_int,
     branch_cold, branch_cold_imm_float, branch_cold_imm_int, constant_to_val, contains, enter_call,
-    get_index, not_callable, set_index, unary,
+    enter_call_regs, get_index, not_callable, set_index, unary,
 };
 pub use api::NativeId;
 pub use compile::{
