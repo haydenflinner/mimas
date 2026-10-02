@@ -90,6 +90,7 @@ pub fn emit(program: &Program, vm: &str) -> String {
 enum W {
     Int,
     Float,
+    Bool,
     /// The written value copies another register — inherits its class.
     Copy(u32),
     /// Anything else: the register isn't eligible for a scalar shadow.
@@ -105,6 +106,7 @@ enum W {
 struct Sh {
     int: HashSet<u32>,
     float: HashSet<u32>,
+    bools: HashSet<u32>,
 }
 
 impl Sh {
@@ -118,6 +120,12 @@ impl Sh {
         self.float
             .contains(&(r.index() as u32))
             .then(|| format!("r{}f", r.index()))
+    }
+    /// The shadow local's name if `r` is bool-shadowed.
+    fn bool(&self, r: Reg) -> Option<String> {
+        self.bools
+            .contains(&(r.index() as u32))
+            .then(|| format!("r{}b", r.index()))
     }
     /// Read `r` as a `Val` — from the live shadow (regs may lag under deferred
     /// writeback), else the authoritative slot. Emitted parenthesized so it's
@@ -134,19 +142,27 @@ impl Sh {
                 "(if r{i}ok {{ Val::Float({v}) }} else {{ rd(regs, {}) }})",
                 reg(r)
             )
+        } else if let Some(v) = self.bool(r) {
+            format!(
+                "(if r{i}ok {{ Val::Bool({v}) }} else {{ rd(regs, {}) }})",
+                reg(r)
+            )
         } else {
             format!("rd(regs, {})", reg(r))
         }
     }
 
-    /// Scalar-write under deferred writeback: `valexpr` is a bare `i64`/`f64`.
-    /// A shadowed register updates only the local + flag — `regs` is synced
-    /// lazily by `flush!()` at body exits and call boundaries; an unshadowed
-    /// register writes the tagged `Val` through as before.
+    /// Scalar-write under deferred writeback: `valexpr` is a bare
+    /// `i64`/`f64`/`bool`. A shadowed register updates only the local + flag —
+    /// `regs` is synced lazily by `flush!()` at body exits and call
+    /// boundaries; an unshadowed register writes the tagged `Val` through as
+    /// before.
     fn wr_shadow(&self, s: &mut String, r: Reg, kind: &str, valexpr: &str) {
         if let Some(v) = self.int(r) {
             let _ = writeln!(s, "{v} = {valexpr}; r{idx}ok = true;", idx = r.index());
         } else if let Some(v) = self.float(r) {
+            let _ = writeln!(s, "{v} = {valexpr}; r{idx}ok = true;", idx = r.index());
+        } else if let Some(v) = self.bool(r) {
             let _ = writeln!(s, "{v} = {valexpr}; r{idx}ok = true;", idx = r.index());
         } else {
             let _ = writeln!(s, "wr(regs, {}, Val::{kind}({valexpr}));", reg(r));
@@ -171,6 +187,13 @@ impl Sh {
                 reg(r),
                 i = r.index()
             );
+        } else if self.bool(r).is_some() {
+            let _ = writeln!(
+                s,
+                "match ({valexpr}) {{ Val::Bool(x) => {{ r{i}b = x; r{i}ok = true; }}, v => {{ r{i}ok = false; wr(regs, {}, v) }} }};",
+                reg(r),
+                i = r.index()
+            );
         } else {
             let _ = writeln!(s, "wr(regs, {}, ({valexpr}));", reg(r));
         }
@@ -192,6 +215,12 @@ impl Sh {
                 "if r{r}ok {{ wr(regs, Reg::from({r}u32), Val::Float(r{r}f)); }}"
             );
         }
+        for &r in &self.bools {
+            let _ = writeln!(
+                s,
+                "if r{r}ok {{ wr(regs, Reg::from({r}u32), Val::Bool(r{r}b)); }}"
+            );
+        }
     }
 }
 
@@ -203,11 +232,15 @@ fn analyze(ops: &[(usize, Op)], nregs: u32) -> Sh {
     let mut put = |r: Reg, w: W| writes.entry(r.index() as u32).or_default().push(w);
     let mut int_reads: HashSet<u32> = HashSet::new();
     let mut float_reads: HashSet<u32> = HashSet::new();
+    let mut bool_reads: HashSet<u32> = HashSet::new();
     let mut iread = |r: Reg| {
         int_reads.insert(r.index() as u32);
     };
     let mut fread = |r: Reg| {
         float_reads.insert(r.index() as u32);
+    };
+    let mut bread = |r: Reg| {
+        bool_reads.insert(r.index() as u32);
     };
     for (_, op) in ops {
         match op {
@@ -217,14 +250,19 @@ fn analyze(ops: &[(usize, Op)], nregs: u32) -> Sh {
                 match constant {
                     Constant::Int(_) => W::Int,
                     Constant::Float(_) => W::Float,
+                    Constant::Bool(_) => W::Bool,
                     _ => W::Dyn,
                 },
             ),
             Op::AddInt { dst, left, right }
             | Op::SubInt { dst, left, right }
             | Op::MultInt { dst, left, right }
-            | Op::ModInt { dst, left, right }
-            | Op::IntLt { dst, left, right }
+            | Op::ModInt { dst, left, right } => {
+                iread(*left);
+                iread(*right);
+                put(*dst, W::Int);
+            }
+            Op::IntLt { dst, left, right }
             | Op::IntLe { dst, left, right }
             | Op::IntGt { dst, left, right }
             | Op::IntGe { dst, left, right }
@@ -232,20 +270,7 @@ fn analyze(ops: &[(usize, Op)], nregs: u32) -> Sh {
             | Op::IntNe { dst, left, right } => {
                 iread(*left);
                 iread(*right);
-                put(
-                    *dst,
-                    if matches!(
-                        op,
-                        Op::AddInt { .. }
-                            | Op::SubInt { .. }
-                            | Op::MultInt { .. }
-                            | Op::ModInt { .. }
-                    ) {
-                        W::Int
-                    } else {
-                        W::Dyn
-                    },
-                );
+                put(*dst, W::Bool);
             }
             Op::AddIntImm { dst, left, .. }
             | Op::SubIntImm { dst, left, .. }
@@ -261,7 +286,7 @@ fn analyze(ops: &[(usize, Op)], nregs: u32) -> Sh {
             | Op::IntEqImm { dst, left, .. }
             | Op::IntNeImm { dst, left, .. } => {
                 iread(*left);
-                put(*dst, W::Dyn);
+                put(*dst, W::Bool);
             }
             Op::AddFloat { dst, left, right }
             | Op::SubFloat { dst, left, right }
@@ -279,7 +304,7 @@ fn analyze(ops: &[(usize, Op)], nregs: u32) -> Sh {
             | Op::FloatNe { dst, left, right } => {
                 fread(*left);
                 fread(*right);
-                put(*dst, W::Dyn);
+                put(*dst, W::Bool);
             }
             Op::AddFloatImm { dst, left, .. }
             | Op::SubFloatImm { dst, left, .. }
@@ -295,7 +320,7 @@ fn analyze(ops: &[(usize, Op)], nregs: u32) -> Sh {
             | Op::FloatEqImm { dst, left, .. }
             | Op::FloatNeImm { dst, left, .. } => {
                 fread(*left);
-                put(*dst, W::Dyn);
+                put(*dst, W::Bool);
             }
             Op::Len { dst, .. } => put(*dst, W::Int),
             Op::ToFloat { dst, src } => {
@@ -341,21 +366,30 @@ fn analyze(ops: &[(usize, Op)], nregs: u32) -> Sh {
             | Op::BFloatGeImm { left, .. }
             | Op::BFloatEqImm { left, .. }
             | Op::BFloatNeImm { left, .. } => fread(*left),
+            // Bool producers — the shadow keeps them as native `bool`.
+            Op::BoolEq {
+                dst, left, right, ..
+            }
+            | Op::BoolNe {
+                dst, left, right, ..
+            } => {
+                bread(*left);
+                bread(*right);
+                put(*dst, W::Bool);
+            }
+            Op::StrEq { dst, .. }
+            | Op::StrNe { dst, .. }
+            | Op::In { dst, .. }
+            | Op::IsInstance { dst, .. }
+            | Op::IsRaised { dst, .. } => put(*dst, W::Bool),
             // every other op that carries a dst writes a dynamically-typed
-            // value (bools, strings, calls, collections, ...)
+            // value (strings, calls, collections, ...)
             Op::GetField { dst, .. }
             | Op::GetIndex { dst, .. }
             | Op::LoadBody { dst, .. }
             | Op::LoadEntry { dst, .. }
-            | Op::BoolEq { dst, .. }
-            | Op::BoolNe { dst, .. }
-            | Op::StrEq { dst, .. }
-            | Op::StrNe { dst, .. }
             | Op::Bin { dst, .. }
             | Op::Unary { dst, .. }
-            | Op::In { dst, .. }
-            | Op::IsInstance { dst, .. }
-            | Op::IsRaised { dst, .. }
             | Op::UnwrapRaised { dst, .. }
             | Op::Unwrap { dst, .. }
             | Op::UnwrapUnit { dst, .. }
@@ -367,9 +401,11 @@ fn analyze(ops: &[(usize, Op)], nregs: u32) -> Sh {
             | Op::Call { dst, .. }
             | Op::CallDirect { dst, .. }
             | Op::CallNative { dst, .. } => put(*dst, W::Dyn),
+            Op::JumpIf { cond, .. } => {
+                bread(*cond);
+            }
             // no register destination
             Op::Jump { .. }
-            | Op::JumpIf { .. }
             | Op::Switch { .. }
             | Op::Push { .. }
             | Op::Insert { .. }
@@ -384,26 +420,34 @@ fn analyze(ops: &[(usize, Op)], nregs: u32) -> Sh {
 
     let mut int: HashSet<u32> = HashSet::new();
     let mut float: HashSet<u32> = HashSet::new();
+    let mut bools: HashSet<u32> = HashSet::new();
     // Phase 1: never-written registers (params, scratch) — the only writers
     // can't pin a class, so the *reads* decide. An unwritten reg shadowed as
     // int that actually holds a float at runtime bails to `step` at body
-    // entry, so at most one of the two sets claims it.
+    // entry, so at most one of the three sets claims it.
     for r in 0..nregs {
         if writes.contains_key(&r) {
             continue;
         }
-        match (int_reads.contains(&r), float_reads.contains(&r)) {
-            (true, false) => {
+        match (
+            int_reads.contains(&r),
+            float_reads.contains(&r),
+            bool_reads.contains(&r),
+        ) {
+            (true, false, false) => {
                 int.insert(r);
             }
-            (false, true) => {
+            (false, true, false) => {
                 float.insert(r);
+            }
+            (false, false, true) => {
+                bools.insert(r);
             }
             _ => {}
         }
     }
     // Phase 2 fixpoint: a written reg shadows as int iff every writer produces
-    // Int or Copies an int-set member (likewise float).
+    // Int or Copies an int-set member (likewise float/bool).
     loop {
         let mut changed = false;
         for (&r, ws) in &writes {
@@ -415,6 +459,11 @@ fn analyze(ops: &[(usize, Op)], nregs: u32) -> Sh {
             let ok_f = ws.iter().all(|w| match w {
                 W::Float => true,
                 W::Copy(src) => float.contains(src),
+                _ => false,
+            });
+            let ok_b = ws.iter().all(|w| match w {
+                W::Bool => true,
+                W::Copy(src) => bools.contains(src),
                 _ => false,
             });
             if ok_i != int.contains(&r) {
@@ -433,12 +482,20 @@ fn analyze(ops: &[(usize, Op)], nregs: u32) -> Sh {
                 }
                 changed = true;
             }
+            if ok_b != bools.contains(&r) {
+                if ok_b {
+                    bools.insert(r);
+                } else {
+                    bools.remove(&r);
+                }
+                changed = true;
+            }
         }
         if !changed {
             break;
         }
     }
-    Sh { int, float }
+    Sh { int, float, bools }
 }
 
 fn emit_body(w: &mut String, program: &Program, body: usize) {
@@ -490,6 +547,15 @@ fn emit_body(w: &mut String, program: &Program, body: usize) {
             "    let (mut r{r}f, mut r{r}ok) = match rd(regs, Reg::from({r}u32)) {{\n\
              \x20       Val::Float(v) => (v, true),\n\
              \x20       _ => (0.0f64, false),\n\
+             \x20   }};"
+        );
+    }
+    for &r in &sh.bools {
+        let _ = writeln!(
+            w,
+            "    let (mut r{r}b, mut r{r}ok) = match rd(regs, Reg::from({r}u32)) {{\n\
+             \x20       Val::Bool(v) => (v, true),\n\
+             \x20       _ => (false, false),\n\
              \x20   }};"
         );
     }
@@ -579,7 +645,6 @@ fn emit_body(w: &mut String, program: &Program, body: usize) {
         }
         i
     };
-    let tail_norm = |t: usize| format!("code.ip = {t};");
     for i in 0..n_ops {
         let head = ops[i].0;
         let seq: Vec<usize> = if leader(i) {
@@ -588,46 +653,117 @@ fn emit_body(w: &mut String, program: &Program, body: usize) {
             vec![i]
         };
         let term = *seq.last().unwrap();
-        // Loop-wrap: if the block's terminator can branch back to `head`,
-        // emit the whole arm as a Rust `loop` so the back-edge is a direct
-        // `continue` — no `match` re-dispatch. Also covers the `while`
-        // shape: head block ends in a conditional whose taken target is a
-        // block that jumps back to `head`.
-        let mut extra: Vec<usize> = vec![];
-        let mut fall_t = usize::MAX; // a taken edge of `term` that falls into `extra`
-        let mut wrap = !matches!(ops[term].1, Op::Switch { .. })
+        // Loop-wrap: emit a set of blocks as a Rust `loop` so a back-edge is
+        // a direct `continue` — no `match` re-dispatch. The region needn't
+        // be contiguous — a `for`/`while` body's `if` stays outside and its
+        // edge becomes a `code.ip = t; break;` exit. Region discovery is a
+        // bounded DFS over terminator edges: while the last block can't
+        // branch to `head`, append the block at a continuation edge —
+        // explicit jump target first (a `for`'s "stay in the loop" side),
+        // then the conditional's implicit fallthrough — backtracking when a
+        // path dead-ends or produces an invalid interior edge. Covers plain
+        // loops, `while A && B` short-circuits, and multi-JumpIf conditions.
+        let mut region: Vec<usize> = seq.clone();
+        // A region can be emitted as a `loop` iff every terminator's edges
+        // land on `head` (`continue`), the next *emitted* op
+        // (fallthrough-position — the conditional's other side runs it
+        // straight on), or a byte offset outside the region entirely (exit).
+        // `Switch` is rejected on sight — its arms write `code.ip` directly
+        // instead of going through `tail`, so a `continue`/`break` edge
+        // couldn't be expressed anyway.
+        let validate = |region: &[usize]| {
+            let roff: HashSet<usize> = region.iter().map(|&j| ops[j].0).collect();
+            // Interior edges must land on `head`, the next emitted op, or
+            // outside the region.
+            let interior_ok = region.iter().enumerate().all(|(k, &j)| {
+                if fallthrough(&ops[j].1) {
+                    return true;
+                }
+                if matches!(ops[j].1, Op::Switch { .. }) {
+                    return false;
+                }
+                let enext = region.get(k + 1).map(|&m| ops[m].0);
+                edge_targets(&ops[j].1)
+                    .iter()
+                    .all(|&t| t == head || Some(t) == enext || !roff.contains(&t))
+            });
+            interior_ok
+        };
+        let mut wrap = validate(&region)
             && edge_targets(&ops[term].1).contains(&head);
-        if !wrap && let Some(tk) = cond_target(&ops[term].1) {
-            if let Some(&m) = off_idx.get(&tk)
-                && m > term
-                && !matches!(ops[chain_end(m)].1, Op::Switch { .. })
-                && edge_targets(&ops[chain_end(m)].1).contains(&head)
-            {
-                wrap = true;
-                extra = (m..=chain_end(m)).collect();
-                fall_t = tk;
+        if !wrap {
+            // `reach`: op indices whose block can get back to `head` — the
+            // only edges worth chasing. A block joins when its terminator
+            // targets `head` or another reachable op; every op index of a
+            // reachable block is marked since a jump may land mid-block.
+            let wend = (i + 64).min(n_ops);
+            let mut reach: HashSet<usize> = HashSet::new();
+            loop {
+                let mut grew = false;
+                let mut b = i;
+                while b < wend {
+                    let e = chain_end(b);
+                    let edges = edge_targets(&ops[e].1);
+                    let mut hits = edges.iter().any(|t| {
+                        *t == head || off_idx.get(t).is_some_and(|m| reach.contains(m))
+                    });
+                    // a conditional's implicit not-taken edge continues to
+                    // the next block — `e + 1` is a block start
+                    if !hits
+                        && !edges.is_empty()
+                        && !matches!(ops[e].1, Op::Jump { .. } | Op::Switch { .. })
+                    {
+                        hits = reach.contains(&(e + 1));
+                    }
+                    if hits {
+                        grew |= (b..=e).any(|j| reach.insert(j));
+                    }
+                    b = e + 1;
+                }
+                if !grew {
+                    break;
+                }
             }
+            wrap = grow_region(
+                &ops,
+                head,
+                &mut region,
+                &reach,
+                &off_idx,
+                &chain_end,
+                &validate,
+            );
         }
-        // Emits one run of ops (`seq`, then `extra`): `gates` toggles the
-        // per-op `gateq!()`/`gatep!()` bookkeeping; when off (the fast path),
-        // `restock` is the whole region's op count and the exit paths hand
-        // back the ops that never ran — `bcn` was pre-paid `bcn -= len`, so
-        // an op at region position `pos0 + k` restocks `len-1-(pos0+k)`
-        // before `settle!()` computes `spent`. Keeps the interpreter's
-        // decrement-before-run accounting exact on error/bail exits.
+        // Emits one run of ops: `gates` toggles the per-op `gateq!()`/
+        // `gatep!()` bookkeeping; when off (the fast path), `restock` is the
+        // whole region's op count and the exit paths hand back the ops that
+        // never ran — `bcn` was pre-paid `bcn -= len`, so an op at region
+        // position `k` restocks `len-1-k` before `settle!()` computes
+        // `spent`. Keeps the interpreter's decrement-before-run accounting
+        // exact on error/bail exits.
+        //
+        // `term_tail(region_pos, fallthrough_off, target)` renders a branch
+        // edge: only terminator ops ever call `tail`, so one closure covers
+        // every op in the run — mid-region ops never invoke it.
         let emit_ops = |w: &mut String,
                         idxs: &[usize],
                         gates: bool,
                         restock: usize,
-                        pos0: usize,
-                        term_tail: &dyn Fn(usize) -> String| {
+                        term_tail: &dyn Fn(usize, usize, usize) -> String| {
             if idxs.is_empty() {
                 return;
             }
-            let last = *idxs.last().unwrap();
             for (k, &j) in idxs.iter().enumerate() {
                 let (off, op) = &ops[j];
+                // `next` is the byte offset `code.ip` holds once this op has
+                // been decoded — bookkeeping for bails, NOT a fallthrough
+                // check. `enext` is the next op *emitted* in this run; in a
+                // sparse loop region the two differ.
                 let next = ops.get(j + 1).map(|(o, _)| *o).unwrap_or(usize::MAX);
+                let enext = idxs
+                    .get(k + 1)
+                    .map(|&m| ops[m].0)
+                    .unwrap_or(usize::MAX);
                 if gates {
                     w.push_str(if j > 0 && may_pause(&ops[j - 1].1) {
                         "            gatep!();\n"
@@ -636,54 +772,49 @@ fn emit_body(w: &mut String, program: &Program, body: usize) {
                     });
                 }
                 let mut arm = String::new();
-                let t: &dyn Fn(usize) -> String = if j == last {
-                    term_tail
-                } else {
-                    &tail_norm
-                };
-                emit_op(&mut arm, &sh, *off, next, op, t);
+                let t = |x: usize| term_tail(k, enext, x);
+                emit_op(&mut arm, &sh, *off, next, op, &t);
                 w.push_str(&defer(&arm, &sh, if gates {
                     0
                 } else {
-                    (restock - 1 - (pos0 + k)) as u64
+                    (restock - 1 - k) as u64
                 }));
             }
         };
         if wrap {
-            let region: Vec<usize> = seq.iter().chain(extra.iter()).copied().collect();
             let pure = region.iter().all(|&j| !may_pause(&ops[j].1));
             let blen = region.len();
-            // terminator tails: an edge to `head` is `continue`, `term`'s
-            // `fall_t` edge falls into the inlined `extra` block, anything
-            // else exits the loop and re-dispatches on `code.ip`.
-            let tail_head = |t: usize| {
-                if t == fall_t {
-                    String::new()
-                } else if t == head {
-                    "continue;".to_string()
-                } else {
-                    format!("code.ip = {t}; break;")
-                }
-            };
-            // Same shape for the pre-paid fast path, except an exit edge at
-            // `term` skips the whole `extra` block — hand those ops back or
-            // the counters would charge for ops that never ran.
-            let tail_head_fast = |t: usize| {
-                if t == fall_t {
-                    String::new()
-                } else if t == head {
-                    "continue;".to_string()
-                } else if extra.is_empty() {
-                    format!("code.ip = {t}; break;")
-                } else {
-                    format!("code.ip = {t}; bcn += {}u64; break;", extra.len())
-                }
-            };
-            let tail_loop = |t: usize| {
+            // terminator tails: an edge to `head` is `continue`, an edge to
+            // the op right after the terminator is a plain fallthrough
+            // (`code.ip` must still advance so mid-block bails decode the
+            // right op), anything else exits the loop and re-dispatches. The
+            // region's last op has no next op inside — every non-`head` edge
+            // exits.
+            let tail_gated = |k: usize, next: usize, t: usize| {
                 if t == head {
                     "continue;".to_string()
+                } else if t == next && k + 1 < blen {
+                    format!("code.ip = {next};")
                 } else {
                     format!("code.ip = {t}; break;")
+                }
+            };
+            // Same shape for the pre-paid fast path, except a `continue` or
+            // exit at region position `k` skips the ops after it — hand
+            // them back or the counters would charge for ops that never
+            // ran.
+            let tail_fast = |k: usize, next: usize, t: usize| {
+                let back = if blen - 1 - k > 0 {
+                    format!("bcn += {}u64; ", blen - 1 - k)
+                } else {
+                    String::new()
+                };
+                if t == head {
+                    format!("{back}continue;")
+                } else if t == next && k + 1 < blen {
+                    format!("code.ip = {next};")
+                } else {
+                    format!("code.ip = {t}; {back}break;")
                 }
             };
             let _ = writeln!(w, "            {head} => {{");
@@ -703,21 +834,20 @@ fn emit_body(w: &mut String, program: &Program, body: usize) {
                     w,
                     "            if bcn >= {blen}u64 {{ bcn -= {blen}u64;"
                 );
-                emit_ops(w, &seq, false, blen, 0, &tail_head_fast);
-                emit_ops(w, &extra, false, blen, seq.len(), &tail_loop);
+                emit_ops(w, &region, false, blen, &tail_fast);
                 let _ = writeln!(w, "            }} else {{");
-                emit_ops(w, &seq, true, blen, 0, &tail_head);
-                emit_ops(w, &extra, true, blen, seq.len(), &tail_loop);
+                emit_ops(w, &region, true, blen, &tail_gated);
                 let _ = writeln!(w, "            }}");
             } else {
-                emit_ops(w, &seq, true, blen, 0, &tail_head);
-                emit_ops(w, &extra, true, blen, seq.len(), &tail_loop);
+                emit_ops(w, &region, true, blen, &tail_gated);
             }
             let _ = writeln!(w, "            }}");
             let _ = writeln!(w, "            }}");
         } else {
             let _ = writeln!(w, "            {head} => {{");
-            emit_ops(w, &seq, true, 0, 0, &tail_norm);
+            emit_ops(w, &seq, true, 0, &|_k, _n, t| {
+                format!("code.ip = {t};")
+            });
             let _ = writeln!(w, "            }}");
         }
     }
@@ -856,12 +986,56 @@ fn edge_targets(op: &Op) -> Vec<usize> {
     }
 }
 
-/// The taken edge of a two-edge conditional terminator — `None` for
-/// unconditional (Jump), multi-edge (Switch), or non-branching ops.
-fn cond_target(op: &Op) -> Option<usize> {
-    edge_targets(op).into_iter().next().filter(|_| {
-        !matches!(op, Op::Jump { .. } | Op::Switch { .. })
-    })
+/// DFS continuation of loop-wrap region growth (see `emit_body`): appends
+/// whole blocks at continuation edges until the region's last terminator can
+/// branch to `head` *and* `validate` accepts — backtracking on dead ends.
+/// Returns whether `region` ended up a wrappable loop.
+fn grow_region(
+    ops: &[(usize, Op)],
+    head: usize,
+    region: &mut Vec<usize>,
+    reach: &HashSet<usize>,
+    off_idx: &HashMap<usize, usize>,
+    chain_end: &dyn Fn(usize) -> usize,
+    validate: &dyn Fn(&[usize]) -> bool,
+) -> bool {
+    let last = *region.last().unwrap();
+    let term = &ops[last].1;
+    if !matches!(term, Op::Switch { .. }) && edge_targets(term).contains(&head) && validate(region)
+    {
+        return true;
+    }
+    if region.len() > 32 {
+        return false;
+    }
+    // Continuation candidates: explicit jump targets first — a `for`/`while`
+    // "stay in the loop" edge — then a conditional's implicit not-taken edge
+    // (the op right after it; `Jump`/`Switch` have none).
+    let mut cands = edge_targets(term);
+    if !matches!(term, Op::Jump { .. } | Op::Switch { .. })
+        && !cands.is_empty()
+        && let Some(&(o, _)) = ops.get(last + 1)
+    {
+        cands.push(o);
+    }
+    for t in cands {
+        let Some(&m) = off_idx.get(&t) else {
+            continue;
+        };
+        // keep the region ascending — a backward edge other than `head` is a
+        // mid-region landing the tails can't express
+        if m <= last || !reach.contains(&m) {
+            continue;
+        }
+        let e = chain_end(m);
+        let extra = e + 1 - m;
+        region.extend(m..=e);
+        if grow_region(ops, head, region, reach, off_idx, chain_end, validate) {
+            return true;
+        }
+        region.truncate(region.len() - extra);
+    }
+    false
 }
 
 /// Post-processes one emitted op arm for deferred writeback:
@@ -902,6 +1076,13 @@ fn defer(arm: &str, sh: &Sh, restock: u64) -> String {
         out = out.replace(
             &plain,
             &format!("(if r{r}ok {{ Val::Float(r{r}f) }} else {{ {plain} }})"),
+        );
+    }
+    for &r in &sh.bools {
+        let plain = format!("rd(regs, Reg::from({r}u32))");
+        out = out.replace(
+            &plain,
+            &format!("(if r{r}ok {{ Val::Bool(r{r}b) }} else {{ {plain} }})"),
         );
     }
     out
@@ -1126,6 +1307,14 @@ fn emit_op(
                     didx = dst.index(),
                     sidx = src.index()
                 );
+            } else if let (Some(d), Some(sv)) = (sh.bool(*dst), sh.bool(*src)) {
+                wln!(
+                    "{d} = {sv}; r{didx}ok = r{sidx}ok; if !r{didx}ok {{ wr(regs, {}, rd(regs, {})) }} code.ip = {next};",
+                    reg(*dst),
+                    reg(*src),
+                    didx = dst.index(),
+                    sidx = src.index()
+                );
             } else {
                 sh.wr_val(&mut s, *dst, &sh.rdv(*src));
                 wln!("code.ip = {next};");
@@ -1199,13 +1388,24 @@ fn emit_op(
             wln!("code.ip = {next};");
         }
         Op::SetIndex { set, index, value } => {
+            // `(Array, Int)` is the hot shape — bounds-check inline, store
+            // straight into the borrowed vec; everything else keeps the
+            // generic helper (identical `pos` error contract).
+            let se = sh.rdv(*set);
+            let ie = sh.rdv(*index);
+            let ve = sh.rdv(*value);
             wln!("*op_ip = {offset};");
+            wln!("match ({se}, {ie}) {{");
+            wln!("    (Val::Array(a), Val::Int(i)) => {{");
+            wln!("        let Ok(u) = usize::try_from(i) else {{ return Err(RtErr::IndexOutOfBounds) }};");
+            wln!("        let mut arr = a.0.borrow_mut(&ctx);");
+            wln!("        if u >= arr.len() {{ return Err(RtErr::IndexOutOfBounds) }};");
+            wln!("        arr[u] = {ve};");
+            wln!("    }},");
             wln!(
-                "if let Err(e) = set_index(ctx, rd(regs, {}), rd(regs, {}), rd(regs, {})) {{ return Err(e) }};",
-                reg(*set),
-                reg(*index),
-                reg(*value)
+                "    (sv, iv) => {{ if let Err(e) = set_index(ctx, sv, iv, {ve}) {{ return Err(e) }} }},"
             );
+            wln!("}}");
             wln!("code.ip = {next};");
         }
         Op::GetIndex {
@@ -1214,13 +1414,21 @@ fn emit_op(
             index,
             kind,
         } => {
+            let se = sh.rdv(*set);
+            let ie = sh.rdv(*index);
             wln!("*op_ip = {offset};");
+            wln!("let v = match ({se}, {ie}) {{");
+            wln!("    (Val::Array(a), Val::Int(i)) => {{");
+            wln!("        let Ok(u) = usize::try_from(i) else {{ return Err(RtErr::IndexOutOfBounds) }};");
+            wln!("        let arr = a.0.borrow();");
+            wln!("        if u >= arr.len() {{ return Err(RtErr::IndexOutOfBounds) }};");
+            wln!("        arr[u]");
+            wln!("    }},");
             wln!(
-                "let v = match get_index(ctx, rd(regs, {}), rd(regs, {}), {}) {{ Ok(v) => v, Err(e) => {{ return Err(e) }} }};",
-                reg(*set),
-                reg(*index),
+                "    (sv, iv) => match get_index(ctx, sv, iv, {}) {{ Ok(v) => v, Err(e) => {{ return Err(e) }} }},",
                 access_kind(*kind)
             );
+            wln!("}};");
             wln!("wr(regs, {}, v); code.ip = {next};", reg(*dst));
         }
         Op::GetField {
@@ -1264,31 +1472,39 @@ fn emit_op(
             wln!("}}");
             wln!("code.ip = {next};");
         }
-        Op::LoadConst { dst, constant } => match (sh.int(*dst), sh.float(*dst)) {
-            (Some(d), _) if matches!(constant, Constant::Int(_)) => {
-                let Constant::Int(v) = constant else {
-                    unreachable!()
-                };
-                wln!("{d} = {v}i64; r{}ok = true; code.ip = {next};", dst.index(),);
+        Op::LoadConst { dst, constant } => {
+            match (sh.int(*dst), sh.float(*dst), sh.bool(*dst)) {
+                (Some(d), _, _) if matches!(constant, Constant::Int(_)) => {
+                    let Constant::Int(v) = constant else {
+                        unreachable!()
+                    };
+                    wln!("{d} = {v}i64; r{}ok = true; code.ip = {next};", dst.index(),);
+                }
+                (_, Some(d), _) if matches!(constant, Constant::Float(_)) => {
+                    let Constant::Float(v) = constant else {
+                        unreachable!()
+                    };
+                    wln!(
+                        "{d} = f64::from_bits({}u64); r{}ok = true; code.ip = {next};",
+                        v.to_bits(),
+                        dst.index(),
+                    );
+                }
+                (_, _, Some(d)) if matches!(constant, Constant::Bool(_)) => {
+                    let Constant::Bool(v) = constant else {
+                        unreachable!()
+                    };
+                    wln!("{d} = {v}; r{}ok = true; code.ip = {next};", dst.index(),);
+                }
+                _ => {
+                    wln!(
+                        "wr(regs, {}, constant_to_val({}, ctx, strs)); code.ip = {next};",
+                        reg(*dst),
+                        konst(constant)
+                    );
+                }
             }
-            (_, Some(d)) if matches!(constant, Constant::Float(_)) => {
-                let Constant::Float(v) = constant else {
-                    unreachable!()
-                };
-                wln!(
-                    "{d} = f64::from_bits({}u64); r{}ok = true; code.ip = {next};",
-                    v.to_bits(),
-                    dst.index(),
-                );
-            }
-            _ => {
-                wln!(
-                    "wr(regs, {}, constant_to_val({}, ctx, strs)); code.ip = {next};",
-                    reg(*dst),
-                    konst(constant)
-                );
-            }
-        },
+        }
         Op::LoadBody { dst, body } => {
             wln!(
                 "wr(regs, {}, Val::Fn(BodyId::from({}u32))); code.ip = {next};",
@@ -1319,12 +1535,17 @@ fn emit_op(
             target,
             is_true,
         } => {
-            wln!(
-                "if rd(regs, {}) == Val::Bool({is_true}) {{ {} }} else {{ {} }}",
-                reg(*cond),
-                tail(tgt(target)),
-                tail(next)
-            );
+            // flag-clear still takes the authoritative slot — same predicate
+            // the interpreter computes, just off the shadow when it can.
+            let c = match sh.bool(*cond) {
+                Some(v) => format!(
+                    "if r{ci}ok {{ {v} == {is_true} }} else {{ rd(regs, {}) == Val::Bool({is_true}) }}",
+                    reg(*cond),
+                    ci = cond.index()
+                ),
+                None => format!("rd(regs, {}) == Val::Bool({is_true})", reg(*cond)),
+            };
+            wln!("if {c} {{ {} }} else {{ {} }}", tail(tgt(target)), tail(next));
         }
         Op::ForNext { idx, bound, target } => {
             // shadowed-but-flag-clear falls back to `step`, whose arm hits the
@@ -1464,11 +1685,13 @@ fn emit_op(
             wln!("return Ok(Flow::Return(Val::Raised(err)));");
         }
         Op::IsRaised { dst, src } => {
-            wln!(
-                "wr(regs, {}, Val::Bool(matches!(rd(regs, {}), Val::Raised(_)))); code.ip = {next};",
-                reg(*dst),
-                reg(*src)
+            sh.wr_shadow(
+                &mut s,
+                *dst,
+                "Bool",
+                &format!("matches!({}, Val::Raised(_))", sh.rdv(*src)),
             );
+            wln!("code.ip = {next};");
         }
         Op::UnwrapRaised { dst, src } => {
             wln!(
@@ -1576,7 +1799,8 @@ fn emit_op(
                 reg(*needle),
                 reg(*haystack)
             );
-            wln!("wr(regs, {}, v); code.ip = {next};", reg(*dst));
+            sh.wr_val(&mut s, *dst, "v");
+            wln!("code.ip = {next};");
         }
         Op::IsInstance { dst, src, adt } => {
             wln!(
@@ -1584,7 +1808,8 @@ fn emit_op(
                 reg(*src),
                 adt.index()
             );
-            wln!("wr(regs, {}, Val::Bool(m)); code.ip = {next};", reg(*dst));
+            sh.wr_shadow(&mut s, *dst, "Bool", "m");
+            wln!("code.ip = {next};");
         }
         Op::Format { dst, parts } => {
             wln!("let mut text = String::with_capacity(32);");
@@ -1623,14 +1848,35 @@ fn emit_op(
         }
         Op::Unary { dst, op, src } => {
             wln!("*op_ip = {offset};");
-            wln!(
-                "let v = match unary(rd(regs, {}), ctx, UnaryOp::{op:?}) {{ Ok(v) => v, Err(e) => {{ return Err(e) }} }};",
-                reg(*src)
-            );
-            wln!("wr(regs, {}, v); code.ip = {next};", reg(*dst));
+            if matches!(op, compile::UnaryOp::Not) {
+                // `!b` is the common shape — anything else keeps the generic
+                // helper (Neg on Int/Float, array ops, errors).
+                let se = sh.rdv(*src);
+                wln!("match {se} {{");
+                wln!("    Val::Bool(b) => {{");
+                sh.wr_shadow(&mut s, *dst, "Bool", "!b");
+                wln!("    }},");
+                wln!(
+                    "    v => {{ let v = match unary(v, ctx, UnaryOp::Not) {{ Ok(v) => v, Err(e) => {{ return Err(e) }} }};"
+                );
+                sh.wr_val(&mut s, *dst, "v");
+                wln!("    }},");
+                wln!("}}");
+            } else {
+                wln!(
+                    "let v = match unary(rd(regs, {}), ctx, UnaryOp::{op:?}) {{ Ok(v) => v, Err(e) => {{ return Err(e) }} }};",
+                    reg(*src)
+                );
+                sh.wr_val(&mut s, *dst, "v");
+            }
+            wln!("code.ip = {next};");
         }
-        Op::BoolEq { dst, left, right } => emit_bool(&mut s, *dst, *left, *right, next, "=="),
-        Op::BoolNe { dst, left, right } => emit_bool(&mut s, *dst, *left, *right, next, "!="),
+        Op::BoolEq { dst, left, right } => {
+            emit_bool(&mut s, sh, *dst, *left, *right, next, "==")
+        }
+        Op::BoolNe { dst, left, right } => {
+            emit_bool(&mut s, sh, *dst, *left, *right, next, "!=")
+        }
         Op::AddInt { dst, left, right } => emit_int_arith(
             &mut s,
             sh,
@@ -1784,10 +2030,10 @@ fn emit_op(
             &mut s, sh, offset, *dst, *left, *right, next, "!=", "NotEqual",
         ),
         Op::StrEq { dst, left, right } => {
-            emit_str_eval(&mut s, offset, *dst, *left, *right, next, "==", "Identity")
+            emit_str_eval(&mut s, sh, offset, *dst, *left, *right, next, "==", "Identity")
         }
         Op::StrNe { dst, left, right } => {
-            emit_str_eval(&mut s, offset, *dst, *left, *right, next, "!=", "NotEqual")
+            emit_str_eval(&mut s, sh, offset, *dst, *left, *right, next, "!=", "NotEqual")
         }
         Op::AddIntImm { dst, left, val } => emit_int_arith_imm(
             &mut s,
@@ -2427,17 +2673,17 @@ fn emit_op(
     let _ = write!(w, "{s}");
 }
 
-fn emit_bool(s: &mut String, dst: Reg, left: Reg, right: Reg, next: usize, op: &str) {
+fn emit_bool(s: &mut String, sh: &Sh, dst: Reg, left: Reg, right: Reg, next: usize, op: &str) {
     let name = if op == "==" { "eq" } else { "ne" };
+    let l = sh.rdv(left);
+    let r = sh.rdv(right);
     let _ = writeln!(
         s,
-        "let Val::Bool(l) = rd(regs, {}) else {{ unreachable!(\"illegal bool {name} op\") }};\n\
-         let Val::Bool(r) = rd(regs, {}) else {{ unreachable!(\"illegal bool {name} op\") }};\n\
-         wr(regs, {}, Val::Bool(l {op} r)); code.ip = {next};",
-        reg(left),
-        reg(right),
-        reg(dst),
+        "let Val::Bool(l) = {l} else {{ unreachable!(\"illegal bool {name} op\") }};\n\
+         let Val::Bool(r) = {r} else {{ unreachable!(\"illegal bool {name} op\") }};",
     );
+    sh.wr_shadow(s, dst, "Bool", &format!("l {op} r"));
+    let _ = writeln!(s, "code.ip = {next};");
 }
 
 // Below, the emit_* fns write the arm's *contents* into `s` and `emit_op` wraps
@@ -2494,11 +2740,8 @@ fn emit_int_eval(
     );
     let a = int_opnd(sh, left, next, off, &cold);
     let b = int_opnd(sh, right, next, off, &cold);
-    let _ = writeln!(
-        s,
-        "wr(regs, {}, Val::Bool({a} {op} {b})); code.ip = {next};",
-        reg(dst)
-    );
+    sh.wr_shadow(s, dst, "Bool", &format!("{a} {op} {b}"));
+    let _ = writeln!(s, "code.ip = {next};");
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2545,15 +2788,13 @@ fn emit_float_eval(
     );
     let a = float_opnd(sh, left, next, off, &cold);
     let b = float_opnd(sh, right, next, off, &cold);
-    let _ = writeln!(
-        s,
-        "wr(regs, {}, Val::Bool({a} {op} {b})); code.ip = {next};",
-        reg(dst)
-    );
+    sh.wr_shadow(s, dst, "Bool", &format!("{a} {op} {b}"));
+    let _ = writeln!(s, "code.ip = {next};");
 }
 
 fn emit_str_eval(
     s: &mut String,
+    sh: &Sh,
     off: usize,
     dst: Reg,
     left: Reg,
@@ -2571,12 +2812,16 @@ fn emit_str_eval(
     let _ = writeln!(
         s,
         "match (rd(regs, {l}), rd(regs, {r})) {{\n\
-         (Val::Str(a), Val::Str(b)) => {{ wr(regs, {d}, Val::Bool(a {op} b)); code.ip = {next}; }}\n\
-         _ => {{ code.ip = {next}; *op_ip = {off}; {cold} }}\n\
-         }}",
+         (Val::Str(a), Val::Str(b)) => {{",
         l = reg(left),
         r = reg(right),
-        d = reg(dst),
+    );
+    sh.wr_shadow(s, dst, "Bool", &format!("a {op} b"));
+    let _ = writeln!(
+        s,
+        "code.ip = {next}; }}\n\
+         _ => {{ code.ip = {next}; *op_ip = {off}; {cold} }}\n\
+         }}",
     );
 }
 
@@ -2624,11 +2869,8 @@ fn emit_int_eval_imm(
         reg(left)
     );
     let a = int_opnd(sh, left, next, off, &cold);
-    let _ = writeln!(
-        s,
-        "wr(regs, {}, Val::Bool({a} {op} {val}i64)); code.ip = {next};",
-        reg(dst)
-    );
+    sh.wr_shadow(s, dst, "Bool", &format!("{a} {op} {val}i64"));
+    let _ = writeln!(s, "code.ip = {next};");
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2676,11 +2918,13 @@ fn emit_float_eval_imm(
         reg(left)
     );
     let a = float_opnd(sh, left, next, off, &cold);
-    let _ = writeln!(
+    sh.wr_shadow(
         s,
-        "wr(regs, {}, Val::Bool({a} {op} f64::from_bits({val}i64 as u64))); code.ip = {next};",
-        reg(dst)
+        dst,
+        "Bool",
+        &format!("{a} {op} f64::from_bits({val}i64 as u64)"),
     );
+    let _ = writeln!(s, "code.ip = {next};");
 }
 
 /// The `B*` branch family — `right` for the register variant, `imm` for the
