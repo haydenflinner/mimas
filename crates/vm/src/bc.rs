@@ -550,6 +550,18 @@ pub mod jit {
         pub as_ints_vec: usize,
         /// Byte offset of the `Vec<f64>` inside `ArrayStore::Floats`.
         pub as_floats_vec: usize,
+        /// Discriminant for `Val::Closure` — monomorphic dynamic-call
+        /// caches branch on it to reach `ClosureData`.
+        pub t_closure: u64,
+        /// Byte offset of the `Gc` payload inside `Val::Closure` — a
+        /// pointer to `ClosureData` (no `RefLock`).
+        pub cl_pay: usize,
+        /// `offset_of!(ClosureData, function)` — the `BodyId` (u32) the
+        /// monomorphic call IC compares against.
+        pub cl_func: usize,
+        /// `offset_of!(ClosureData, captures)` — a `Vec<Val>` header
+        /// (`vec_ptr`/`vec_len` apply) for the IC's capture copy.
+        pub cl_caps: usize,
     }
 
     /// Probe this build's layouts — see [`Layout`]. Called once per
@@ -897,8 +909,10 @@ pub mod jit {
             as_floats,
             as_ints_vec,
             as_floats_vec,
+            t_closure,
+            cl_pay,
         ) = gc_arena::arena::rootless_mutate(|mc| {
-            use crate::val::{ArrayStore, Dict, DictMap, Seq};
+            use crate::val::{ArrayStore, Closure, ClosureData, Dict, DictMap, Seq};
             let dg: Dict = Dict(Gc::new(mc, gc_arena::RefLock::new(DictMap::new())));
             let di = Val::Dict(dg);
             let si = Seq(Gc::new(
@@ -1054,6 +1068,17 @@ pub mod jit {
                 }
                 _ => unreachable!(),
             };
+            // `Val::Closure` — a plain `Gc<ClosureData>` payload; the call
+            // IC guards tag + `ClosureData.function` then copies `captures`.
+            let cv = Closure(Gc::new(
+                mc,
+                ClosureData {
+                    function: BodyId::ZERO,
+                    captures: vec![Val::Int(9)],
+                },
+            ));
+            let t_closure = tagv(&bytes(&Val::Closure(cv)));
+            let cl_pay = pay_of(&Val::Closure(cv), Gc::as_ptr(cv.0) as usize);
             (
                 t_intarray,
                 t_floatarray,
@@ -1069,6 +1094,8 @@ pub mod jit {
                 as_floats,
                 as_ints_vec,
                 as_floats_vec,
+                t_closure,
+                cl_pay,
             )
         });
         // sanity: Gc-variant tags differ from everything else probed
@@ -1082,6 +1109,8 @@ pub mod jit {
             (t_array, t_str, "array/str"),
             (t_instance, t_str, "instance/str"),
             (t_instance, t_null, "instance/null"),
+            (t_closure, t_fn, "closure/fn"),
+            (t_closure, t_int, "closure/int"),
         ] {
             assert_ne!(a, b, "indistinguishable Val tags: {name}");
         }
@@ -1313,6 +1342,10 @@ pub mod jit {
             as_floats,
             as_ints_vec,
             as_floats_vec,
+            t_closure,
+            cl_pay,
+            cl_func: offset_of!(crate::val::ClosureData, function),
+            cl_caps: offset_of!(crate::val::ClosureData, captures),
         }
     }
 

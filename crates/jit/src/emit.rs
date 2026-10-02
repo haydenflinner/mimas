@@ -3690,8 +3690,6 @@ impl Em<'_> {
         args: &[Reg],
         cchunk: &compile::Chunk,
     ) {
-        let vs = self.lyt.val_size as i64;
-        let fsz = self.lyt.frame_size as i64;
         self.flush_seq();
         // `code.ip = next; *op_ip = off` — on the fast path `code.ip` gets
         // overwritten with the callee offset below, but `*op_ip` locates this
@@ -3700,40 +3698,8 @@ impl Em<'_> {
         self.settle_seq();
 
         // Runtime gates, all checked in the pre-branch block so the fast
-        // block can reuse the loaded Vec headers:
-        //   frames.len() < INLINE_CALL_DEPTH    (else Flow::Call to driver)
-        //   regs.cap - regs.len >= callee.regs  (else Vec grow → shim)
-        //   frames.len() < frames.cap           (ditto for the push)
-        let flen = self.frames_len();
-        let dcap = self.iconst(INLINE_CALL_DEPTH as i64);
-        let depth_ok = self.fb.ins().icmp(IntCC::UnsignedLessThan, flen, dcap);
-        let rlen = self.fb.ins().load(
-            I64,
-            tf(),
-            self.env.thread,
-            (self.lyt.regs_off + self.lyt.vec_len) as i32,
-        );
-        let rcap = self.fb.ins().load(
-            I64,
-            tf(),
-            self.env.thread,
-            (self.lyt.regs_off + self.lyt.vec_cap) as i32,
-        );
-        let slack = self.fb.ins().isub(rcap, rlen);
-        let need = self.iconst(cchunk.regs as i64);
-        let regs_ok = self
-            .fb
-            .ins()
-            .icmp(IntCC::UnsignedGreaterThanOrEqual, slack, need);
-        let fcap = self.fb.ins().load(
-            I64,
-            tf(),
-            self.env.thread,
-            (self.lyt.frames_off + self.lyt.vec_cap) as i32,
-        );
-        let frames_ok = self.fb.ins().icmp(IntCC::UnsignedLessThan, flen, fcap);
-        let ok01 = self.fb.ins().band(depth_ok, regs_ok);
-        let ok = self.fb.ins().band(ok01, frames_ok);
+        // block can reuse the loaded Vec headers.
+        let (ok, rlen, flen) = self.call_gates(cchunk);
         let fast = self.fb.create_block();
         let slow = self.fb.create_block();
         self.fb.set_cold_block(slow);
@@ -3773,6 +3739,72 @@ impl Em<'_> {
 
         // ---- fast: enter_call_regs inline ----
         self.fb.switch_to_block(fast);
+        self.inline_enter_run(i, next, dst, args, body, cchunk, rlen, flen, None);
+    }
+
+    /// The runtime gates every inlined call needs, checked in the current
+    /// block so the fast block can reuse the loaded Vec headers:
+    ///   frames.len() < INLINE_CALL_DEPTH    (else Flow::Call to driver)
+    ///   regs.cap - regs.len >= callee.regs  (else Vec grow → shim)
+    ///   frames.len() < frames.cap           (ditto for the push)
+    /// Returns `(ok, regs.len, frames.len)` — the latter two feed the
+    /// window math in [`Em::inline_enter_run`].
+    fn call_gates(&mut self, cchunk: &compile::Chunk) -> (Value, Value, Value) {
+        let flen = self.frames_len();
+        let dcap = self.iconst(INLINE_CALL_DEPTH as i64);
+        let depth_ok = self.fb.ins().icmp(IntCC::UnsignedLessThan, flen, dcap);
+        let rlen = self.fb.ins().load(
+            I64,
+            tf(),
+            self.env.thread,
+            (self.lyt.regs_off + self.lyt.vec_len) as i32,
+        );
+        let rcap = self.fb.ins().load(
+            I64,
+            tf(),
+            self.env.thread,
+            (self.lyt.regs_off + self.lyt.vec_cap) as i32,
+        );
+        let slack = self.fb.ins().isub(rcap, rlen);
+        let need = self.iconst(cchunk.regs as i64);
+        let regs_ok = self
+            .fb
+            .ins()
+            .icmp(IntCC::UnsignedGreaterThanOrEqual, slack, need);
+        let fcap = self.fb.ins().load(
+            I64,
+            tf(),
+            self.env.thread,
+            (self.lyt.frames_off + self.lyt.vec_cap) as i32,
+        );
+        let frames_ok = self.fb.ins().icmp(IntCC::UnsignedLessThan, flen, fcap);
+        let ok01 = self.fb.ins().band(depth_ok, regs_ok);
+        let ok = self.fb.ins().band(ok01, frames_ok);
+        (ok, rlen, flen)
+    }
+
+    /// The shared fast path of `CallDirect` and the `Call` IC: push the
+    /// callee window inline (`enter_call_regs`' shape), call the native
+    /// body directly, and inline the driver's `Flow::Return` pop.
+    /// `rlen`/`flen` are the `call_gates` loads; `capsp` is the callee
+    /// `Gc<ClosureData>` pointer to copy `cchunk.captures` out of (`None`
+    /// for `Val::Fn` targets — the interpreter leaves capture regs `Null`
+    /// there too, `zip`ping an empty slice).
+    #[allow(clippy::too_many_arguments)]
+    fn inline_enter_run(
+        &mut self,
+        i: usize,
+        next: usize,
+        dst: Reg,
+        args: &[Reg],
+        body: compile::BodyId,
+        cchunk: &compile::Chunk,
+        rlen: Value,
+        flen: Value,
+        capsp: Option<Value>,
+    ) {
+        let vs = self.lyt.val_size as i64;
+        let fsz = self.lyt.frame_size as i64;
         let rp0 = self.fb.ins().load(
             I64,
             tf(),
@@ -3806,6 +3838,20 @@ impl Em<'_> {
             let s = self.vaddr(caller, args[i].index() as u32);
             let d = self.vaddr(nwin, pr.index() as u32);
             self.cpy_val(d, s);
+        }
+        // capture copies — only on a `Val::Closure` IC hit: the guard has
+        // already verified `captures.len() == cchunk.captures.len()`.
+        if let Some(cp) = capsp {
+            let cvec = self.fb.ins().iadd_imm_s(cp, self.lyt.cl_caps as i64);
+            let cdata = self
+                .fb
+                .ins()
+                .load(I64, tf(), cvec, self.lyt.vec_ptr as i32);
+            for (i, &cr) in cchunk.captures.iter().enumerate() {
+                let s = self.fb.ins().iadd_imm_s(cdata, i as i64 * vs);
+                let d = self.vaddr(nwin, cr.index() as u32);
+                self.cpy_val(d, s);
+            }
         }
         // caller frame's saved ip = resume offset (what `code.ip` held)
         let fptr = self.fb.ins().load(
@@ -3941,6 +3987,9 @@ impl Em<'_> {
 
     /// `Call` — one `mj_call_dyn` hop: callee resolution (incl. the
     /// `CallTarget::Value` signature check), depth cap, enter/run/pop.
+    /// With a monomorphic fact (`facts.calls[next]`), an inline cache is
+    /// emitted instead: guard callee → inline enter/call → `mj_call_dyn`
+    /// on a miss.
     fn emit_call(
         &mut self,
         i: usize,
@@ -3950,6 +3999,19 @@ impl Em<'_> {
         callee: Reg,
         args: &[Reg],
     ) {
+        // Monomorphic inline cache: the profiler saw exactly one callee
+        // body at this site. Gate compile-time: a static arity miss or an
+        // oversized callee frame keeps the megashim (`WrongArity` /
+        // `Flow::Call` semantics stay helper-side).
+        if let Some(&tb) = self.spec.facts.calls.get(&next) {
+            if (tb as usize) < self.prog.chunks.len() {
+                let cbody = compile::BodyId::from(tb);
+                let cchunk = &self.prog.chunks[cbody];
+                if args.len() == cchunk.args as usize && (cchunk.regs as usize) <= 64 {
+                    return self.emit_call_ic(i, off, next, dst, callee, args, cbody, cchunk);
+                }
+            }
+        }
         // Flush first — the shim reads the callee Val and arg slots out of
         // the window. `code.ip = next; *op_ip = off` before the call: a
         // `not_callable` error locates via `op_ip` exactly like the
@@ -3989,6 +4051,142 @@ impl Em<'_> {
             )
             .unwrap();
         self.post_call(i, dst, rp);
+    }
+
+    /// The `Call` monomorphic inline cache — see [`Em::emit_call`]. The
+    /// guard resolves the callee exactly like `call_target`:
+    /// `Val::Fn(b)` hits on `b == body`; `Val::Closure(c)` dereferences
+    /// `ClosureData.function` (and `captures.len` when the callee chunk
+    /// takes captures). Anything else — including a megamorphic site or a
+    /// `Val::Fn` whose signature the observed entry never exercised —
+    /// falls to `mj_call_dyn`, which reproduces the interpreter's
+    /// `not_callable`/`WrongArity`/`Flow::Call` behavior verbatim.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_call_ic(
+        &mut self,
+        i: usize,
+        off: usize,
+        next: usize,
+        dst: Reg,
+        callee: Reg,
+        args: &[Reg],
+        body: compile::BodyId,
+        cchunk: &compile::Chunk,
+    ) {
+        self.flush_seq();
+        self.mark_op(off, next);
+        self.settle_seq();
+        let ap = self.reg_list_slot(args);
+
+        let ca = self.val_ptr(callee.index() as u32);
+        let ctag = self.ld_tag(ca);
+        let want = self.iconst(body.index() as i64);
+        // Val::Fn arm: tag + the inline u32 body payload. `call_target`
+        // additionally rejects a `Val::Fn` whose body has no signature —
+        // `signatures[body]` is a compile-time constant, so a `None` there
+        // sends every Fn-valued callee straight to the shim (which raises
+        // `not_callable` exactly like the interpreter).
+        let fn_legal = self
+            .prog
+            .signatures
+            .get(body)
+            .map(|s| s.is_some())
+            .unwrap_or(false);
+        let gate_fn = self.fb.create_block();
+        let cl_chk = self.fb.create_block();
+        let slow = self.fb.create_block();
+        self.fb.set_cold_block(slow);
+        if fn_legal {
+            let tfn = self.tconst(self.lyt.t_fn);
+            let is_fn = self.fb.ins().icmp(IntCC::Equal, ctag, tfn);
+            let fb32 = self.fb.ins().load(I32, tf(), ca, self.lyt.fn_pay as i32);
+            let fb = self.fb.ins().uextend(I64, fb32);
+            let fn_eq = self.fb.ins().icmp(IntCC::Equal, fb, want);
+            let fn_hit = self.fb.ins().band(is_fn, fn_eq);
+            self.fb.ins().brif(fn_hit, gate_fn, &[], cl_chk, &[]);
+        } else {
+            self.fb.ins().jump(cl_chk, &[]);
+        }
+
+        // Val::Closure arm: tag first, then the guarded deref.
+        self.fb.switch_to_block(cl_chk);
+        let tcl = self.tconst(self.lyt.t_closure);
+        let is_cl = self.fb.ins().icmp(IntCC::Equal, ctag, tcl);
+        let cl_load = self.fb.create_block();
+        self.fb.ins().brif(is_cl, cl_load, &[], slow, &[]);
+        self.fb.switch_to_block(cl_load);
+        let clp = self.fb.ins().load(I64, tf(), ca, self.lyt.cl_pay as i32);
+        let cb32 = self
+            .fb
+            .ins()
+            .load(I32, tf(), clp, self.lyt.cl_func as i32);
+        let cb = self.fb.ins().uextend(I64, cb32);
+        let cl_eq = self.fb.ins().icmp(IntCC::Equal, cb, want);
+        // a captures-carrying callee also needs `captures.len` to match —
+        // `enter_call` only debug-asserts it, so a mismatch must take the
+        // helper (its `zip` truncates instead of reading OOB).
+        let cl_hit = if cchunk.captures.is_empty() {
+            cl_eq
+        } else {
+            let cvec = self.fb.ins().iadd_imm_s(clp, self.lyt.cl_caps as i64);
+            let clen = self
+                .fb
+                .ins()
+                .load(I64, tf(), cvec, self.lyt.vec_len as i32);
+            let cn = self.iconst(cchunk.captures.len() as i64);
+            let len_eq = self.fb.ins().icmp(IntCC::Equal, clen, cn);
+            self.fb.ins().band(cl_eq, len_eq)
+        };
+        let gate_cl = self.fb.create_block();
+        self.fb.ins().brif(cl_hit, gate_cl, &[], slow, &[]);
+
+        // ---- slow: the verbatim dynamic-call megashim ----
+        self.fb.switch_to_block(slow);
+        let (regs, c, d, n) = (
+            self.regs(),
+            self.iconst(callee.index() as i64),
+            self.iconst(dst.index() as i64),
+            self.iconst(args.len() as i64),
+        );
+        let rp = self
+            .hcall(
+                H::CallDyn,
+                &[
+                    self.env.thread,
+                    self.env.code,
+                    self.env.chunks,
+                    self.env.sigs,
+                    regs,
+                    c,
+                    d,
+                    ap,
+                    n,
+                    self.env.bodies_tbl,
+                    self.env.ctx0,
+                    self.env.ctx1,
+                    self.env.strs,
+                    self.env.fuel_p,
+                    self.env.opip_p,
+                    self.env.out,
+                ],
+            )
+            .unwrap();
+        self.post_call(i, dst, rp);
+
+        // ---- fast arms: own gates, shared inline enter/run/pop ----
+        self.fb.switch_to_block(gate_fn);
+        let (ok, rlen, flen) = self.call_gates(cchunk);
+        let run_fn = self.fb.create_block();
+        self.fb.ins().brif(ok, run_fn, &[], slow, &[]);
+        self.fb.switch_to_block(run_fn);
+        self.inline_enter_run(i, next, dst, args, body, cchunk, rlen, flen, None);
+
+        self.fb.switch_to_block(gate_cl);
+        let (ok2, rlen2, flen2) = self.call_gates(cchunk);
+        let run_cl = self.fb.create_block();
+        self.fb.ins().brif(ok2, run_cl, &[], slow, &[]);
+        self.fb.switch_to_block(run_cl);
+        self.inline_enter_run(i, next, dst, args, body, cchunk, rlen2, flen2, Some(clp));
     }
 
     /// After an inlined callee returns through the megashim: null means
