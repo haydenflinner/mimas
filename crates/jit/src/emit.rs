@@ -26,7 +26,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::H;
-use compile::{BlockTarget, Constant, Op, Program, Reg};
+use compile::{AccessKind, BlockTarget, Constant, Op, Program, Reg};
 use cranelift_codegen::Context;
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::{
@@ -36,7 +36,7 @@ use cranelift_codegen::ir::{
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::JITModule;
 use cranelift_module::{DataDescription, DataId, FuncId, Module, ModuleResult};
-use vm::bc::jit::Layout;
+use vm::bc::{INLINE_CALL_DEPTH, jit::Layout};
 
 const I64: ir::Type = types::I64;
 const I32: ir::Type = types::I32;
@@ -60,6 +60,12 @@ enum W {
     Int,
     Float,
     Copy(u32),
+    /// `GetIndex`/`GetField` writes a dynamically-typed value, but the JIT
+    /// probes the loaded element's tag and refreshes the shadow `(sv, ok)`
+    /// pair — so the write is compatible with either scalar shadow *if* the
+    /// reg is actually read as that scalar (the read-set gate keeps purely
+    /// dynamic dsts like `balls[i]`'s Instance out of the shadow sets).
+    DynCheck,
     Dyn,
 }
 
@@ -213,10 +219,13 @@ fn analyze(ops: &[(usize, Op)], nregs: u32) -> Sh {
             | Op::BFloatGeImm { left, .. }
             | Op::BFloatEqImm { left, .. }
             | Op::BFloatNeImm { left, .. } => fread(*left),
+            // container reads produce a dynamically-typed value, but the
+            // inline emitters refresh the scalar shadow themselves (`DynCheck`)
+            Op::GetField { dst, .. } | Op::GetIndex { dst, .. } => {
+                put(*dst, W::DynCheck);
+            }
             // every other op that carries a dst writes a dynamically-typed value
-            Op::GetField { dst, .. }
-            | Op::GetIndex { dst, .. }
-            | Op::LoadBody { dst, .. }
+            Op::LoadBody { dst, .. }
             | Op::LoadEntry { dst, .. }
             | Op::BoolEq { dst, .. }
             | Op::BoolNe { dst, .. }
@@ -271,16 +280,19 @@ fn analyze(ops: &[(usize, Op)], nregs: u32) -> Sh {
     loop {
         let mut changed = false;
         for (&r, ws) in &writes {
+            // a DynCheck write only carries a shadow if `r` is genuinely read
+            // as that scalar — otherwise `(sv, ok)` would be pure overhead
+            let has_chk = ws.iter().any(|w| matches!(w, W::DynCheck));
             let ok_i = ws.iter().all(|w| match w {
-                W::Int => true,
+                W::Int | W::DynCheck => true,
                 W::Copy(src) => int.contains(src),
                 _ => false,
-            });
+            }) && (!has_chk || int_reads.contains(&r));
             let ok_f = ws.iter().all(|w| match w {
-                W::Float => true,
+                W::Float | W::DynCheck => true,
                 W::Copy(src) => float.contains(src),
                 _ => false,
-            });
+            }) && (!has_chk || float_reads.contains(&r));
             if ok_i != int.contains(&r) {
                 if ok_i {
                     int.insert(r);
@@ -381,6 +393,12 @@ struct Em<'a> {
     /// `Decoder` field offsets, `Vec` header order. Emitted code reads and
     /// writes these inline instead of FFI-ing per access.
     lyt: Layout,
+    /// The whole program — `CallDirect` needs the callee's `Chunk` (offset,
+    /// regs, param mapping) to emit the inline frame push.
+    prog: &'a Program,
+    /// `FuncRef`s for `CallDirect` targets, so the fast path is a direct
+    /// native `call`, not an FFI hop.
+    call_refs: HashMap<u32, FuncRef>,
     blocks: Vec<Block>,
     off2idx: HashMap<usize, usize>,
     slot_i: StackSlot,
@@ -748,6 +766,56 @@ impl Em<'_> {
         }
     }
 
+    /// After a helper wrote `regs[r]` behind the shadow's back (a container
+    /// read's slow path), re-derive the `DynCheck` `(sv, ok)` pair from the
+    /// authoritative slot — `ok` tracks the loaded tag exactly like the
+    /// inline `read_elem` refresh.
+    fn refresh_shadow(&mut self, r: u32) {
+        if !self.v.int.contains_key(&r) && !self.v.float.contains_key(&r) {
+            return;
+        }
+        let regs = self.regs();
+        let a = self.vaddr(regs, r);
+        let t = self.ld_tag(a);
+        if let Some(&(sv, ok)) = self.v.int.get(&r) {
+            let want = self.tconst(self.lyt.t_int);
+            let k = self.fb.ins().icmp(IntCC::Equal, t, want);
+            let pv = self.fb.ins().load(I64, tf(), a, self.lyt.val_pay as i32);
+            self.fb.def_var(sv, pv);
+            self.fb.def_var(ok, k);
+        }
+        if let Some(&(sv, ok)) = self.v.float.get(&r) {
+            let want = self.tconst(self.lyt.t_float);
+            let k = self.fb.ins().icmp(IntCC::Equal, t, want);
+            let pv = self.fb.ins().load(F64, tf(), a, self.lyt.val_pay as i32);
+            self.fb.def_var(sv, pv);
+            self.fb.def_var(ok, k);
+        }
+    }
+
+    /// `helper_op` + a post-call [`Em::refresh_shadow`] on `dst` — every
+    /// `GetIndex`/`GetField` helper invocation (slow tails AND `Option`-kind
+    /// ops) must go through this so a `DynCheck`-shadowed dst stays coherent.
+    fn helper_op_read(
+        &mut self,
+        i: usize,
+        off: usize,
+        next: usize,
+        h: H,
+        args: &[Value],
+        dst: Reg,
+    ) {
+        self.flush_seq();
+        self.mark_op(off, next);
+        let k = self.hcall(h, args).unwrap();
+        let post = self.fb.create_block();
+        self.fb.ins().brif(k, self.ex.eret, &[], post, &[]);
+        self.fb.switch_to_block(post);
+        self.refresh_shadow(dst.index() as u32);
+        let nb = self.next_blk(i);
+        self.fb.ins().jump(nb, &[]);
+    }
+
     /// A `u32` register-index list (call args / field regs / captures) spilled
     /// to a stack slot; returns the slot address for the helper.
     fn reg_list_slot(&mut self, regs_idx: &[Reg]) -> Value {
@@ -942,6 +1010,23 @@ pub(crate) fn emit_body(
         .collect();
     let bodies_gv = module.declare_data_in_func(bodies_data, &mut ctx.func);
     let map_gv = module.declare_data_in_func(map_data, &mut ctx.func);
+    // `CallDirect`'s inline fast path calls the callee's native body directly —
+    // one FuncRef per distinct target.
+    let call_refs: HashMap<u32, FuncRef> = ops
+        .iter()
+        .filter_map(|(_, op)| match op {
+            Op::CallDirect { body, .. } => Some(*body),
+            _ => None,
+        })
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .map(|b| {
+            (
+                b.index() as u32,
+                module.declare_func_in_func(body_ids[b.index()], &mut ctx.func),
+            )
+        })
+        .collect();
 
     let mut fb = FunctionBuilder::new(&mut ctx.func, fbc);
 
@@ -1030,6 +1115,8 @@ pub(crate) fn emit_body(
         sh: &sh,
         ops: &ops,
         lyt: *lyt,
+        prog: program,
+        call_refs,
         blocks,
         off2idx,
         slot_i: StackSlot::from_u32(0),
@@ -1045,12 +1132,15 @@ pub(crate) fn emit_body(
     em.slot_b = mk_slot(&mut em.fb, 8);
     em.slot_c = mk_slot(&mut em.fb, 24);
 
-    // hoist environment pointers. `paused` still goes through the FFI helper
-    // (it lives behind `ctx` → `Gc` → `State`, too deep to probe); everything
-    // else — `&code.ip`, `&thread.ops_left`, the top frame's `base`, the
-    // `regs` buffer — is a handful of loads over the probed layout. `nregs`
-    // is the chunk's own `regs` field: a compile-time constant.
-    let paused_p = em.hcall(H::PausedPtr, &[em.env.ctx0, em.env.ctx1]).unwrap();
+    // hoist environment pointers — `&state.paused` is one add off `Ctx`'s
+    // second word now that `State`'s layout is probed; everything else —
+    // `&code.ip`, `&thread.ops_left`, the top frame's `base`, the `regs`
+    // buffer — is a handful of loads over the probed layout. `nregs` is the
+    // chunk's own `regs` field: a compile-time constant.
+    let paused_p = em
+        .fb
+        .ins()
+        .iadd_imm_s(em.env.ctx1, lyt.state_paused as i64);
     let opsleft_p = em
         .fb
         .ins()
@@ -2024,19 +2114,7 @@ impl Em<'_> {
                 );
             }
             Op::SetIndex { set, index, value } => {
-                let (regs, s, ii, v) = (
-                    self.regs(),
-                    self.iconst(set.index() as i64),
-                    self.iconst(index.index() as i64),
-                    self.iconst(value.index() as i64),
-                );
-                self.helper_op(
-                    i,
-                    off,
-                    next,
-                    H::SetIndex,
-                    &[regs, s, ii, v, self.env.ctx0, self.env.ctx1, self.env.out],
-                );
+                self.emit_set_index(i, off, next, *set, *index, *value);
             }
             Op::GetIndex {
                 dst,
@@ -2044,29 +2122,7 @@ impl Em<'_> {
                 index,
                 kind,
             } => {
-                let (regs, d, s, ii, kk) = (
-                    self.regs(),
-                    self.iconst(dst.index() as i64),
-                    self.iconst(set.index() as i64),
-                    self.iconst(index.index() as i64),
-                    self.iconst8(*kind as i64),
-                );
-                self.helper_op(
-                    i,
-                    off,
-                    next,
-                    H::GetIndex,
-                    &[
-                        regs,
-                        d,
-                        s,
-                        ii,
-                        kk,
-                        self.env.ctx0,
-                        self.env.ctx1,
-                        self.env.out,
-                    ],
-                );
+                self.emit_get_index(i, off, next, *dst, *set, *index, *kind);
             }
             Op::GetField {
                 dst,
@@ -2074,39 +2130,14 @@ impl Em<'_> {
                 slot,
                 kind,
             } => {
-                let (regs, d, s, sl, kk) = (
-                    self.regs(),
-                    self.iconst(dst.index() as i64),
-                    self.iconst(src.index() as i64),
-                    self.iconst(*slot as i64),
-                    self.iconst8(*kind as i64),
-                );
-                self.helper_op(
-                    i,
-                    off,
-                    next,
-                    H::GetField,
-                    &[regs, d, s, sl, kk, self.env.out],
-                );
+                self.emit_get_field(i, off, next, *dst, *src, *slot, *kind);
             }
             Op::SetField {
                 receiver,
                 slot,
                 value,
             } => {
-                let (regs, r, sl, v) = (
-                    self.regs(),
-                    self.iconst(receiver.index() as i64),
-                    self.iconst(*slot as i64),
-                    self.iconst(value.index() as i64),
-                );
-                self.helper_op(
-                    i,
-                    off,
-                    next,
-                    H::SetField,
-                    &[regs, r, sl, v, self.env.ctx0, self.env.ctx1, self.env.out],
-                );
+                self.emit_set_field(i, off, next, *receiver, *slot, *value);
             }
             Op::In {
                 dst,
@@ -2496,6 +2527,484 @@ impl Em<'_> {
         self.fb.ins().brif(hit, t, &[], f, &[]);
     }
 
+    // ---- typed container access (the physics path) ----
+    //
+    // `(Array, Int)` index and `Instance`/`Array` field ops inline over the
+    // probed layout instead of FFI-ing a helper. Every fast-path miss —
+    // wrong tags, borrow-flag contention, out-of-bounds (the interpreter's
+    // own indexing panics), Gc-carrying writes (the write barrier `borrow_mut`
+    // performs) — routes to the same helper the op used before, so nothing
+    // observable changes: the helpers hold the verbatim arm.
+    //
+    // Barrier rule: a `Val` store may adopt a `Gc` pointer, which requires
+    // `Gc::write`'s backward barrier — that's what `borrow_mut(&ctx)` does
+    // behind the helper. The inline store is only reached when the value's
+    // tag is Null/Bool/Int/Float/Fn — non-Gc payloads adopt nothing, so the
+    // barrier is a no-op for them and may be skipped.
+
+    /// `regs[r]`'s discriminant widened to i64 for mask arithmetic.
+    fn ld_tag64(&mut self, a: Value) -> Value {
+        let t = self.ld_tag(a);
+        if self.lyt.tag_size < 8 {
+            self.fb.ins().uextend(I64, t)
+        } else {
+            t
+        }
+    }
+
+    /// `tag` (i64) names a non-Gc `Val` variant → the value adopts nothing and
+    /// a container write may skip `Gc::write`'s barrier.
+    fn is_non_gc_tag(&mut self, t64: Value) -> Value {
+        let mask: u64 = [self.lyt.t_null, self.lyt.t_bool, self.lyt.t_int, self.lyt.t_float, self
+            .lyt
+            .t_fn]
+            .iter()
+            .map(|t| {
+                assert!(*t < 64, "Val discriminant exceeds mask domain");
+                1u64 << t
+            })
+            .sum();
+        let m = self.iconst(mask as i64);
+        let one = self.iconst(1);
+        let bit = self.fb.ins().ishl(one, t64);
+        let hit = self.fb.ins().band(bit, m);
+        // guard the shift domain: a tag >= 64 can't be a real discriminant,
+        // but a masked-out answer must be *certain*, not just plausible
+        let inr = self
+            .fb
+            .ins()
+            .icmp_imm_u(IntCC::UnsignedLessThan, t64, 64);
+        let nz = self.fb.ins().icmp_imm_u(IntCC::NotEqual, hit, 0);
+        self.fb.ins().band(nz, inr)
+    }
+
+    /// Load a container's `RefCell` borrow flag; returns the `flag passes`
+    /// condition (`mutable` picks `borrow_mut`'s flag==0 precondition, reads
+    /// `borrow()`'s flag>=0). Folded into the elem-access `brif` — a failed
+    /// flag routes to `slow`, where the helper's own `borrow`/`borrow_mut`
+    /// reproduces the panic.
+    fn borrow_ok(&mut self, gc: Value, flag_off: usize, mutable: bool) -> Value {
+        let flag = self.fb.ins().load(I64, tf(), gc, flag_off as i32);
+        let z = self.iconst(0);
+        let cc = if mutable {
+            IntCC::Equal
+        } else {
+            IntCC::SignedGreaterThanOrEqual
+        };
+        self.fb.ins().icmp(cc, flag, z)
+    }
+
+    /// `*dst = data[slot]` under `pre && slot < len` — the shared tail of the
+    /// container reads. A miss → `slow` (the helper/indexing panic lives
+    /// there). `pre` carries the borrow-flag (and Fields-tag / non-Gc)
+    /// checks, folded into the same `brif` so the fast path is one branch.
+    /// Also refreshes `dst`'s scalar shadows: `GetField`/`GetIndex` dsts are
+    /// `W::DynCheck`-eligible, so a hit keeps float temps in registers.
+    #[allow(clippy::too_many_arguments)]
+    fn read_elem(
+        &mut self,
+        i: usize,
+        dst: Reg,
+        slot: Value,
+        len: Value,
+        data: Value,
+        pre: Value,
+        slow: Block,
+    ) {
+        let inb = self
+            .fb
+            .ins()
+            .icmp(IntCC::UnsignedLessThan, slot, len);
+        let k = self.fb.ins().band(pre, inb);
+        let good = self.fb.create_block();
+        self.fb.ins().brif(k, good, &[], slow, &[]);
+        self.fb.switch_to_block(good);
+        let off = self
+            .fb
+            .ins()
+            .imul_imm_s(slot, self.lyt.val_size as i64);
+        let sa = self.fb.ins().iadd(data, off);
+        let d = dst.index() as u32;
+        if self.v.int.contains_key(&d) || self.v.float.contains_key(&d) {
+            // DynCheck shadow refresh: tag-probe the loaded elem, keep the
+            // payload in `sv` + `ok` for downstream scalar ops.
+            let t = self.ld_tag(sa);
+            if let Some(&(sv, ok)) = self.v.int.get(&d) {
+                let want = self.tconst(self.lyt.t_int);
+                let k = self.fb.ins().icmp(IntCC::Equal, t, want);
+                let pv = self.fb.ins().load(I64, tf(), sa, self.lyt.val_pay as i32);
+                self.fb.def_var(sv, pv);
+                self.fb.def_var(ok, k);
+            }
+            if let Some(&(sv, ok)) = self.v.float.get(&d) {
+                let want = self.tconst(self.lyt.t_float);
+                let k = self.fb.ins().icmp(IntCC::Equal, t, want);
+                let pv = self.fb.ins().load(F64, tf(), sa, self.lyt.val_pay as i32);
+                self.fb.def_var(sv, pv);
+                self.fb.def_var(ok, k);
+            }
+        }
+        let regs = self.regs();
+        let dd = self.vaddr(regs, d);
+        self.cpy_val(dd, sa);
+        let nb = self.next_blk(i);
+        self.fb.ins().jump(nb, &[]);
+    }
+
+    /// `data[slot] = *srcv` under `pre && slot < len` — the shared tail of the
+    /// container writes.
+    fn write_elem(
+        &mut self,
+        i: usize,
+        slot: Value,
+        len: Value,
+        data: Value,
+        srcv: Value,
+        pre: Value,
+        slow: Block,
+    ) {
+        let inb = self
+            .fb
+            .ins()
+            .icmp(IntCC::UnsignedLessThan, slot, len);
+        let k = self.fb.ins().band(pre, inb);
+        let good = self.fb.create_block();
+        self.fb.ins().brif(k, good, &[], slow, &[]);
+        self.fb.switch_to_block(good);
+        let off = self
+            .fb
+            .ins()
+            .imul_imm_s(slot, self.lyt.val_size as i64);
+        let sa = self.fb.ins().iadd(data, off);
+        self.cpy_val(sa, srcv);
+        let nb = self.next_blk(i);
+        self.fb.ins().jump(nb, &[]);
+    }
+
+    /// `(len, data)` of an `Instance`'s `Fields` at `fp`, restricted to the
+    /// `Inline` variant: returns the `(len, data, isinl)` triple so callers
+    /// fold the tag check into the access `brif`; `Spilled` therefore routes
+    /// to `slow`, where the helper's `Fields` `Index` covers it identically.
+    /// The `len` byte sits inside the enum's allocation either way, so the
+    /// unconditional load is safe.
+    fn fields_inline(&mut self, fp: Value) -> (Value, Value, Value) {
+        let fty = match self.lyt.fld_tsz {
+            1 => I8,
+            2 => types::I16,
+            4 => I32,
+            8 => I64,
+            d => unreachable!("bad Fields tag width {d}"),
+        };
+        let ftag = self.fb.ins().load(fty, tf(), fp, self.lyt.fld_tag as i32);
+        let want = self.fb.ins().iconst(fty, self.lyt.fld_inline as i64);
+        let isinl = self.fb.ins().icmp(IntCC::Equal, ftag, want);
+        let l8 = self.fb.ins().load(I8, tf(), fp, self.lyt.fld_len as i32);
+        let len = self.fb.ins().uextend(I64, l8);
+        let data = self.fb.ins().iadd_imm_s(fp, self.lyt.fld_data as i64);
+        (len, data, isinl)
+    }
+
+    /// `Op::GetIndex` — inline `(Array, Int)`; `kind == Option` and every
+    /// miss go through the `mj_get_index` helper.
+    fn emit_get_index(
+        &mut self,
+        i: usize,
+        off: usize,
+        next: usize,
+        dst: Reg,
+        set: Reg,
+        index: Reg,
+        kind: AccessKind,
+    ) {
+        if kind != AccessKind::Direct {
+            let (regs, d, s, ii, kk) = (
+                self.regs(),
+                self.iconst(dst.index() as i64),
+                self.iconst(set.index() as i64),
+                self.iconst(index.index() as i64),
+                self.iconst8(kind as i64),
+            );
+            return self.helper_op_read(
+                i,
+                off,
+                next,
+                H::GetIndex,
+                &[regs, d, s, ii, kk, self.env.ctx0, self.env.ctx1, self.env.out],
+                dst,
+            );
+        }
+        // No `flush_seq`/`mark_op` on the fast path: the only `regs` slot read
+        // here is `set` (materialized by `val_ptr`), `estep` marks from
+        // `cur_ip` and re-flushes, and the `slow` helper re-marks anyway.
+        let slow = self.fb.create_block();
+        self.fb.set_cold_block(slow);
+        // index must be Int — a shadow/tag miss runs the op under `step`,
+        // which reaches the same `get_index` arm
+        let iv = self.int_opnd(index.index() as u32);
+        let sa = self.val_ptr(set.index() as u32);
+        let st = self.ld_tag(sa);
+        let tarr = self.tconst(self.lyt.t_array);
+        let isarr = self.fb.ins().icmp(IntCC::Equal, st, tarr);
+        let arrb = self.fb.create_block();
+        self.fb.ins().brif(isarr, arrb, &[], slow, &[]);
+        self.fb.switch_to_block(arrb);
+        let gc = self
+            .fb
+            .ins()
+            .load(I64, tf(), sa, self.lyt.arr_pay as i32);
+        let fok = self.borrow_ok(gc, self.lyt.rl_flag, false);
+        let vp = self
+            .fb
+            .ins()
+            .load(I64, tf(), gc, (self.lyt.rl_vec + self.lyt.vec_ptr) as i32);
+        let vl = self
+            .fb
+            .ins()
+            .load(I64, tf(), gc, (self.lyt.rl_vec + self.lyt.vec_len) as i32);
+        self.read_elem(i, dst, iv, vl, vp, fok, slow);
+        // ---- slow: verbatim helper + DynCheck shadow refresh ----
+        self.fb.switch_to_block(slow);
+        let (regs, d, s, ii) = (
+            self.regs(),
+            self.iconst(dst.index() as i64),
+            self.iconst(set.index() as i64),
+            self.iconst(index.index() as i64),
+        );
+        let kk = self.iconst8(kind as i64);
+        self.helper_op_read(
+            i,
+            off,
+            next,
+            H::GetIndex,
+            &[regs, d, s, ii, kk, self.env.ctx0, self.env.ctx1, self.env.out],
+            dst,
+        );
+    }
+
+    /// `Op::SetIndex` — inline `(Array, Int, non-Gc)`; everything else goes
+    /// through the `mj_set_index` helper (which carries the write barrier).
+    fn emit_set_index(&mut self, i: usize, off: usize, next: usize, set: Reg, index: Reg, value: Reg) {
+        // selective materialization instead of `flush_seq` — see
+        // `emit_get_index`.
+        let slow = self.fb.create_block();
+        self.fb.set_cold_block(slow);
+        let iv = self.int_opnd(index.index() as u32);
+        let sa = self.val_ptr(set.index() as u32);
+        let st = self.ld_tag(sa);
+        let tarr = self.tconst(self.lyt.t_array);
+        let isarr = self.fb.ins().icmp(IntCC::Equal, st, tarr);
+        let arrb = self.fb.create_block();
+        self.fb.ins().brif(isarr, arrb, &[], slow, &[]);
+        self.fb.switch_to_block(arrb);
+        let gc = self
+            .fb
+            .ins()
+            .load(I64, tf(), sa, self.lyt.arr_pay as i32);
+        let fok = self.borrow_ok(gc, self.lyt.rl_flag, true);
+        // value must adopt no Gc pointer → the write barrier is a no-op
+        let va = self.val_ptr(value.index() as u32);
+        let vt = self.ld_tag64(va);
+        let ngc = self.is_non_gc_tag(vt);
+        let pre = self.fb.ins().band(fok, ngc);
+        let vp = self
+            .fb
+            .ins()
+            .load(I64, tf(), gc, (self.lyt.rl_vec + self.lyt.vec_ptr) as i32);
+        let vl = self
+            .fb
+            .ins()
+            .load(I64, tf(), gc, (self.lyt.rl_vec + self.lyt.vec_len) as i32);
+        self.write_elem(i, iv, vl, vp, va, pre, slow);
+        // ---- slow: verbatim helper ----
+        self.fb.switch_to_block(slow);
+        let (regs, s, ii, v) = (
+            self.regs(),
+            self.iconst(set.index() as i64),
+            self.iconst(index.index() as i64),
+            self.iconst(value.index() as i64),
+        );
+        self.helper_op(
+            i,
+            off,
+            next,
+            H::SetIndex,
+            &[regs, s, ii, v, self.env.ctx0, self.env.ctx1, self.env.out],
+        );
+    }
+
+    /// `Op::GetField` — inline `Instance`/`Array` receivers at `kind ==
+    /// Direct`; `Option` and misses go through the `mj_get_field` helper.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_get_field(
+        &mut self,
+        i: usize,
+        off: usize,
+        next: usize,
+        dst: Reg,
+        src: Reg,
+        slot: u32,
+        kind: AccessKind,
+    ) {
+        if kind != AccessKind::Direct {
+            let (regs, d, s, sl, kk) = (
+                self.regs(),
+                self.iconst(dst.index() as i64),
+                self.iconst(src.index() as i64),
+                self.iconst(slot as i64),
+                self.iconst8(kind as i64),
+            );
+            return self.helper_op_read(
+                i,
+                off,
+                next,
+                H::GetField,
+                &[regs, d, s, sl, kk, self.env.out],
+                dst,
+            );
+        }
+        // selective materialization instead of `flush_seq` — see
+        // `emit_get_index`
+        let slow = self.fb.create_block();
+        self.fb.set_cold_block(slow);
+        let ra = self.val_ptr(src.index() as u32);
+        let rt = self.ld_tag(ra);
+        let tinst = self.tconst(self.lyt.t_instance);
+        let isinst = self.fb.ins().icmp(IntCC::Equal, rt, tinst);
+        let instb = self.fb.create_block();
+        let noti = self.fb.create_block();
+        self.fb.ins().brif(isinst, instb, &[], noti, &[]);
+        // ---- receiver is Array: `a.0.borrow()[slot]` ----
+        self.fb.switch_to_block(noti);
+        let tarr = self.tconst(self.lyt.t_array);
+        let isarr = self.fb.ins().icmp(IntCC::Equal, rt, tarr);
+        let arrb = self.fb.create_block();
+        self.fb.ins().brif(isarr, arrb, &[], slow, &[]);
+        self.fb.switch_to_block(arrb);
+        let gc = self
+            .fb
+            .ins()
+            .load(I64, tf(), ra, self.lyt.arr_pay as i32);
+        let fok = self.borrow_ok(gc, self.lyt.rl_flag, false);
+        let vp = self
+            .fb
+            .ins()
+            .load(I64, tf(), gc, (self.lyt.rl_vec + self.lyt.vec_ptr) as i32);
+        let vl = self
+            .fb
+            .ins()
+            .load(I64, tf(), gc, (self.lyt.rl_vec + self.lyt.vec_len) as i32);
+        let sv = self.iconst(slot as i64);
+        self.read_elem(i, dst, sv, vl, vp, fok, slow);
+        // ---- receiver is Instance: `i.0.borrow().fields[slot]` ----
+        // (`Fields::Spilled` goes to `slow` — the helper's `Index` covers it.)
+        self.fb.switch_to_block(instb);
+        let gc = self
+            .fb
+            .ins()
+            .load(I64, tf(), ra, self.lyt.inst_pay as i32);
+        let fok = self.borrow_ok(gc, self.lyt.rl_flag_i, false);
+        let fp = self
+            .fb
+            .ins()
+            .iadd_imm_s(gc, (self.lyt.rl_inst + self.lyt.id_fields) as i64);
+        let (len, data, isinl) = self.fields_inline(fp);
+        let pre = self.fb.ins().band(fok, isinl);
+        let sv = self.iconst(slot as i64);
+        self.read_elem(i, dst, sv, len, data, pre, slow);
+        // ---- slow: verbatim helper + DynCheck shadow refresh ----
+        self.fb.switch_to_block(slow);
+        let (regs, d, s, sl, kk) = (
+            self.regs(),
+            self.iconst(dst.index() as i64),
+            self.iconst(src.index() as i64),
+            self.iconst(slot as i64),
+            self.iconst8(kind as i64),
+        );
+        self.helper_op_read(
+            i,
+            off,
+            next,
+            H::GetField,
+            &[regs, d, s, sl, kk, self.env.out],
+            dst,
+        );
+    }
+
+    /// `Op::SetField` — inline `Instance`/`Array` receivers storing non-Gc
+    /// values; misses and Gc-carrying values go through `mj_set_field`.
+    fn emit_set_field(&mut self, i: usize, off: usize, next: usize, receiver: Reg, slot: u32, value: Reg) {
+        // selective materialization instead of `flush_seq` — see
+        // `emit_get_index`
+        let slow = self.fb.create_block();
+        self.fb.set_cold_block(slow);
+        let ra = self.val_ptr(receiver.index() as u32);
+        let rt = self.ld_tag(ra);
+        // the value's tag decides whether the write needs the GC barrier —
+        // checked once here, in the dominating block
+        let va = self.val_ptr(value.index() as u32);
+        let vt = self.ld_tag64(va);
+        let ngc = self.is_non_gc_tag(vt);
+        let tinst = self.tconst(self.lyt.t_instance);
+        let isinst = self.fb.ins().icmp(IntCC::Equal, rt, tinst);
+        let instb = self.fb.create_block();
+        let noti = self.fb.create_block();
+        self.fb.ins().brif(isinst, instb, &[], noti, &[]);
+        // ---- receiver is Array: `a.0.borrow_mut(&ctx)[slot] = v` ----
+        self.fb.switch_to_block(noti);
+        let tarr = self.tconst(self.lyt.t_array);
+        let isarr = self.fb.ins().icmp(IntCC::Equal, rt, tarr);
+        let arrb = self.fb.create_block();
+        self.fb.ins().brif(isarr, arrb, &[], slow, &[]);
+        self.fb.switch_to_block(arrb);
+        let gc = self
+            .fb
+            .ins()
+            .load(I64, tf(), ra, self.lyt.arr_pay as i32);
+        let fok = self.borrow_ok(gc, self.lyt.rl_flag, true);
+        let pre = self.fb.ins().band(fok, ngc);
+        let vp = self
+            .fb
+            .ins()
+            .load(I64, tf(), gc, (self.lyt.rl_vec + self.lyt.vec_ptr) as i32);
+        let vl = self
+            .fb
+            .ins()
+            .load(I64, tf(), gc, (self.lyt.rl_vec + self.lyt.vec_len) as i32);
+        let sv = self.iconst(slot as i64);
+        self.write_elem(i, sv, vl, vp, va, pre, slow);
+        // ---- receiver is Instance: `i.0.borrow_mut(&ctx).fields[slot] = v` ----
+        self.fb.switch_to_block(instb);
+        let gc = self
+            .fb
+            .ins()
+            .load(I64, tf(), ra, self.lyt.inst_pay as i32);
+        let fok = self.borrow_ok(gc, self.lyt.rl_flag_i, true);
+        let fp = self
+            .fb
+            .ins()
+            .iadd_imm_s(gc, (self.lyt.rl_inst + self.lyt.id_fields) as i64);
+        let (len, data, isinl) = self.fields_inline(fp);
+        let pre = self.fb.ins().band(fok, ngc);
+        let pre = self.fb.ins().band(pre, isinl);
+        let sv = self.iconst(slot as i64);
+        self.write_elem(i, sv, len, data, va, pre, slow);
+        // ---- slow: verbatim helper ----
+        self.fb.switch_to_block(slow);
+        let (regs, r, sl, v) = (
+            self.regs(),
+            self.iconst(receiver.index() as i64),
+            self.iconst(slot as i64),
+            self.iconst(value.index() as i64),
+        );
+        self.helper_op(
+            i,
+            off,
+            next,
+            H::SetField,
+            &[regs, r, sl, v, self.env.ctx0, self.env.ctx1, self.env.out],
+        );
+    }
+
     /// `Move` — bcgen's flag-propagating copy for same-kind shadow pairs, the
     /// `wr_val` shape for mixed, a plain copy otherwise.
     fn emit_move(&mut self, dst: Reg, src: Reg) {
@@ -2627,10 +3136,14 @@ impl Em<'_> {
         self.fb.switch_to_block(done);
     }
 
-    /// `CallDirect` — one `mj_call_body` hop: the shim runs the depth-cap
-    /// check, the `enter_call_regs` frame push, the callee body call, and
-    /// the `Flow::Return` pop — returning the rebuilt window pointer (or null
-    /// to propagate `out`).
+    /// `CallDirect`. Fast path (inline, no FFI): depth below
+    /// `INLINE_CALL_DEPTH`, `thread.regs`/`thread.frames` capacity already
+    /// sufficient, static arity match — then the `enter_call_regs` frame push
+    /// is emitted inline over the probed layout, the callee runs as a direct
+    /// native `call`, and `mj_pop_return` runs the driver's `Flow::Return`
+    /// handling. Anything slower — capacity growth, depth cap (which must
+    /// produce `Flow::Call`), or a malformed arity — routes to the
+    /// `mj_call_body` megashim, unchanged.
     fn emit_call_direct(
         &mut self,
         i: usize,
@@ -2640,6 +3153,18 @@ impl Em<'_> {
         body: compile::BodyId,
         args: &[Reg],
     ) {
+        let cchunk = &self.prog.chunks[body];
+        // Compile-time gates: a static arity miss and a callee with captures
+        // (only ever entered through `Val::Closure`) keep the megashim, which
+        // reports `WrongArity` / hits the captures debug_assert exactly like
+        // before. Large frames take the shim too — the unrolled Null fill
+        // isn't worth it there.
+        let fast_ok = args.len() == cchunk.args as usize
+            && cchunk.captures.is_empty()
+            && (cchunk.regs as usize) <= 64;
+        if fast_ok {
+            return self.emit_call_direct_inline(i, off, next, dst, body, args, cchunk);
+        }
         let ap = self.reg_list_slot(args);
         let nargs = args.len();
         self.flush_seq();
@@ -2678,6 +3203,267 @@ impl Em<'_> {
             )
             .unwrap();
         self.post_call(i, dst, rp);
+    }
+
+    /// The inline `CallDirect` fast path — see [`Em::emit_call_direct`].
+    #[allow(clippy::too_many_arguments)]
+    fn emit_call_direct_inline(
+        &mut self,
+        i: usize,
+        off: usize,
+        next: usize,
+        dst: Reg,
+        body: compile::BodyId,
+        args: &[Reg],
+        cchunk: &compile::Chunk,
+    ) {
+        let vs = self.lyt.val_size as i64;
+        let fsz = self.lyt.frame_size as i64;
+        self.flush_seq();
+        // `code.ip = next; *op_ip = off` — on the fast path `code.ip` gets
+        // overwritten with the callee offset below, but `*op_ip` locates this
+        // op for any propagated error, and the slow path needs both.
+        self.mark_op(off, next);
+        self.settle_seq();
+
+        // Runtime gates, all checked in the pre-branch block so the fast
+        // block can reuse the loaded Vec headers:
+        //   frames.len() < INLINE_CALL_DEPTH    (else Flow::Call to driver)
+        //   regs.cap - regs.len >= callee.regs  (else Vec grow → shim)
+        //   frames.len() < frames.cap           (ditto for the push)
+        let flen = self.frames_len();
+        let dcap = self.iconst(INLINE_CALL_DEPTH as i64);
+        let depth_ok = self.fb.ins().icmp(IntCC::UnsignedLessThan, flen, dcap);
+        let rlen = self.fb.ins().load(
+            I64,
+            tf(),
+            self.env.thread,
+            (self.lyt.regs_off + self.lyt.vec_len) as i32,
+        );
+        let rcap = self.fb.ins().load(
+            I64,
+            tf(),
+            self.env.thread,
+            (self.lyt.regs_off + self.lyt.vec_cap) as i32,
+        );
+        let slack = self.fb.ins().isub(rcap, rlen);
+        let need = self.iconst(cchunk.regs as i64);
+        let regs_ok = self
+            .fb
+            .ins()
+            .icmp(IntCC::UnsignedGreaterThanOrEqual, slack, need);
+        let fcap = self.fb.ins().load(
+            I64,
+            tf(),
+            self.env.thread,
+            (self.lyt.frames_off + self.lyt.vec_cap) as i32,
+        );
+        let frames_ok = self.fb.ins().icmp(IntCC::UnsignedLessThan, flen, fcap);
+        let ok01 = self.fb.ins().band(depth_ok, regs_ok);
+        let ok = self.fb.ins().band(ok01, frames_ok);
+        let fast = self.fb.create_block();
+        let slow = self.fb.create_block();
+        self.fb.set_cold_block(slow);
+        self.fb.ins().brif(ok, fast, &[], slow, &[]);
+
+        // ---- slow: the megashim handles Flow::Call-at-cap, grows, errors ----
+        self.fb.switch_to_block(slow);
+        let ap = self.reg_list_slot(args);
+        let (b, d, n) = (
+            self.iconst(body.index() as i64),
+            self.iconst(dst.index() as i64),
+            self.iconst(args.len() as i64),
+        );
+        let rp = self
+            .hcall(
+                H::CallBody,
+                &[
+                    self.env.thread,
+                    self.env.code,
+                    self.env.chunks,
+                    self.env.bodies_tbl,
+                    b,
+                    d,
+                    ap,
+                    n,
+                    self.env.ctx0,
+                    self.env.ctx1,
+                    self.env.strs,
+                    self.env.sigs,
+                    self.env.fuel_p,
+                    self.env.opip_p,
+                    self.env.out,
+                ],
+            )
+            .unwrap();
+        self.post_call(i, dst, rp);
+
+        // ---- fast: enter_call_regs inline ----
+        self.fb.switch_to_block(fast);
+        let rp0 = self.fb.ins().load(
+            I64,
+            tf(),
+            self.env.thread,
+            (self.lyt.regs_off + self.lyt.vec_ptr) as i32,
+        );
+        // new_base = old regs.len (loaded above as `rlen`)
+        let nboff = self.fb.ins().imul_imm_s(rlen, vs);
+        let nwin = self.fb.ins().iadd(rp0, nboff); // callee window base
+        // resize fill: `Val::Null` — only the tag byte is ever read
+        let tnull = self.tconst(self.lyt.t_null);
+        for k in 0..cchunk.regs as i32 {
+            let a = self
+                .fb
+                .ins()
+                .iadd_imm_s(nwin, k as i64 * vs + self.lyt.val_tag as i64);
+            self.fb.ins().store(tf(), tnull, a, 0);
+        }
+        let nlen = self.fb.ins().iadd_imm_s(rlen, cchunk.regs as i64);
+        self.fb.ins().store(
+            tf(),
+            nlen,
+            self.env.thread,
+            (self.lyt.regs_off + self.lyt.vec_len) as i32,
+        );
+        // arg copies: `regs[new_base + param] = regs[caller_base + arg]` —
+        // both indices are compile-time constants; the caller window is
+        // `v.regs` (unmoved — capacity was checked).
+        let caller = self.regs();
+        for (i, &pr) in cchunk.params.iter().enumerate() {
+            let s = self.vaddr(caller, args[i].index() as u32);
+            let d = self.vaddr(nwin, pr.index() as u32);
+            self.cpy_val(d, s);
+        }
+        // caller frame's saved ip = resume offset (what `code.ip` held)
+        let fptr = self.fb.ins().load(
+            I64,
+            tf(),
+            self.env.thread,
+            (self.lyt.frames_off + self.lyt.vec_ptr) as i32,
+        );
+        let fm1 = self.fb.ins().iadd_imm_s(flen, -1);
+        let cfo = self.fb.ins().imul_imm_s(fm1, fsz);
+        let cf = self.fb.ins().iadd(fptr, cfo);
+        let nxt = self.iconst(next as i64);
+        self.fb.ins().store(tf(), nxt, cf, self.lyt.frame_ip as i32);
+        // push the callee frame
+        let nfo = self.fb.ins().imul_imm_s(flen, fsz);
+        let nf = self.fb.ins().iadd(fptr, nfo);
+        let bi = self.iconst32(body.index() as i64);
+        self.fb.ins().store(tf(), bi, nf, self.lyt.frame_chunk as i32);
+        let cip = self.iconst(cchunk.offset as i64);
+        self.fb.ins().store(tf(), cip, nf, self.lyt.frame_ip as i32);
+        let rr = self.iconst32(dst.index() as i64);
+        self.fb.ins().store(tf(), rr, nf, self.lyt.frame_ret as i32);
+        self.fb.ins().store(tf(), rlen, nf, self.lyt.frame_base as i32);
+        let nfl = self.fb.ins().iadd_imm_s(flen, 1);
+        self.fb.ins().store(
+            tf(),
+            nfl,
+            self.env.thread,
+            (self.lyt.frames_off + self.lyt.vec_len) as i32,
+        );
+        // code.ip = callee chunk offset
+        self.store_ip(cip);
+        // the call itself — a direct native call, same `out` slot
+        let fref = self.call_refs[&(body.index() as u32)];
+        self.fb.ins().call(
+            fref,
+            &[
+                self.env.thread,
+                self.env.code,
+                self.env.ctx0,
+                self.env.ctx1,
+                self.env.strs,
+                self.env.chunks,
+                self.env.sigs,
+                self.env.fuel_p,
+                self.env.opip_p,
+                self.env.out,
+            ],
+        );
+        // driver's `Flow::Return` pop, inlined over the probed
+        // `RtResult<Flow>`/Frame layout: `*out == Ok(Flow::Return(v))` → pop
+        // the callee frame, truncate `regs`, restore the caller's saved ip,
+        // write `v` into the `return_reg` slot; anything else propagates
+        // `out` verbatim through `eret` (what `mj_pop_return`'s non-2 tags
+        // did).
+        let oty = match self.lyt.out_tsz {
+            1 => I8,
+            2 => types::I16,
+            4 => I32,
+            8 => I64,
+            d => unreachable!("bad out tag width {d}"),
+        };
+        let otag = self
+            .fb
+            .ins()
+            .load(oty, tf(), self.env.out, self.lyt.out_tag as i32);
+        let orwant = self.fb.ins().iconst(oty, self.lyt.out_ret as i64);
+        let isret = self.fb.ins().icmp(IntCC::Equal, otag, orwant);
+        let resumed = self.fb.create_block();
+        self.fb.ins().brif(isret, resumed, &[], self.ex.eret, &[]);
+        self.fb.switch_to_block(resumed);
+        // popped = frames[flen-1]; frames.len -= 1; regs.len = popped.base
+        let flen2 = self.frames_len();
+        let fptr2 = self.fb.ins().load(
+            I64,
+            tf(),
+            self.env.thread,
+            (self.lyt.frames_off + self.lyt.vec_ptr) as i32,
+        );
+        let fm2 = self.fb.ins().iadd_imm_s(flen2, -1);
+        let pfo = self.fb.ins().imul_imm_s(fm2, fsz);
+        let pf = self.fb.ins().iadd(fptr2, pfo);
+        let pbase = self.fb.ins().load(I64, tf(), pf, self.lyt.frame_base as i32);
+        let pret32 = self
+            .fb
+            .ins()
+            .load(I32, tf(), pf, self.lyt.frame_ret as i32);
+        let pret = self.fb.ins().uextend(I64, pret32);
+        self.fb.ins().store(
+            tf(),
+            fm2,
+            self.env.thread,
+            (self.lyt.frames_off + self.lyt.vec_len) as i32,
+        );
+        self.fb.ins().store(
+            tf(),
+            pbase,
+            self.env.thread,
+            (self.lyt.regs_off + self.lyt.vec_len) as i32,
+        );
+        // caller = frames[flen-2]; code.ip = caller.ip
+        let fm3 = self.fb.ins().iadd_imm_s(flen2, -2);
+        let cfo2 = self.fb.ins().imul_imm_s(fm3, fsz);
+        let cf2 = self.fb.ins().iadd(fptr2, cfo2);
+        let cip2 = self.fb.ins().load(I64, tf(), cf2, self.lyt.frame_ip as i32);
+        self.store_ip(cip2);
+        let cbase = self
+            .fb
+            .ins()
+            .load(I64, tf(), cf2, self.lyt.frame_base as i32);
+        // `thread.regs` may have moved under the callee — rebuild the window
+        // and write the return value into `caller_base + return_reg`
+        let rp2 = self.fb.ins().load(
+            I64,
+            tf(),
+            self.env.thread,
+            (self.lyt.regs_off + self.lyt.vec_ptr) as i32,
+        );
+        let widx = self.fb.ins().iadd(cbase, pret);
+        let woff = self.fb.ins().imul_imm_s(widx, vs);
+        let daddr = self.fb.ins().iadd(rp2, woff);
+        let retp = self
+            .fb
+            .ins()
+            .iadd_imm_s(self.env.out, self.lyt.out_ret_pay as i64);
+        self.cpy_val(daddr, retp);
+        let boff2 = self.fb.ins().imul_imm_s(cbase, vs);
+        let regs2 = self.fb.ins().iadd(rp2, boff2);
+        self.fb.def_var(self.v.regs, regs2);
+        self.rearm_seq();
+        self.dst_refresh(i, dst, regs2);
     }
 
     /// `Call` — one `mj_call_dyn` hop: callee resolution (incl. the
@@ -2745,7 +3531,12 @@ impl Em<'_> {
         self.fb.switch_to_block(resumed);
         self.rearm_seq();
         self.fb.def_var(self.v.regs, rp);
-        let regs2 = rp;
+        self.dst_refresh(i, dst, rp);
+    }
+
+    /// Post-call tail: `regs[dst]` now holds the callee's return value —
+    /// refresh its scalar shadow (if any) and resume at the next op.
+    fn dst_refresh(&mut self, i: usize, dst: Reg, regs2: Value) {
         let d = dst.index() as u32;
         if let Some(&(sv, ok)) = self.v.int.get(&d) {
             let a = self.vaddr(regs2, d);

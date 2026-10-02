@@ -378,11 +378,85 @@ pub mod jit {
         pub frame_base: usize,
         /// `offset_of!(Decoder, ip)`.
         pub code_ip: usize,
+        /// Byte offset of `cap` inside a `Vec<T>` header — the fast-path
+        /// frame push / window grow checks capacity inline and defers to
+        /// `Flow::Call` (the driver's own `enter_call`) on a miss.
+        pub vec_cap: usize,
+        /// `offset_of!(Frame, chunk)` — a `BodyId` (u32) field.
+        pub frame_chunk: usize,
+        /// `offset_of!(Frame, ip)` — the `usize` resume offset.
+        pub frame_ip: usize,
+        /// `offset_of!(Frame, return_reg)` — a `u32`.
+        pub frame_ret: usize,
+        /// `offset_of!(State, paused)` — the pause cell sits directly inside
+        /// `State`, reachable from `Ctx`'s second word with a single add —
+        /// no FFI hop per body entry.
+        pub state_paused: usize,
+        /// Discriminant values for the Gc-carrying `Val` variants inlined
+        /// by typed container access (tag + payload writes stay
+        /// helper-side, but reads of the tag are inline).
+        pub t_str: u64,
+        /// Discriminant for `Val::Array`.
+        pub t_array: u64,
+        /// Discriminant for `Val::Instance`.
+        pub t_instance: u64,
+        /// Byte offset of the `Gc` payload inside `Val::Array` — the pointer
+        /// is a plain machine pointer to the `RefLock<Vec<Val>>`.
+        pub arr_pay: usize,
+        /// Byte offset of the `Gc` payload inside `Val::Instance`
+        /// (`RefLock<InstanceData>`).
+        pub inst_pay: usize,
+        /// Offset of the `Vec<Val>` inside `RefLock<Vec<Val>>` — `Gc` points
+        /// straight at the `RefLock`, so `gc + rl_vec` is the Vec header
+        /// (probe fields `vec_ptr`/`vec_len`/`vec_cap` apply inside it).
+        pub rl_vec: usize,
+        /// Offset of the `RefCell` borrow flag (`isize`, `0` unborrowed,
+        /// `>0` shared, `<0` mutable) inside `RefLock<Vec<Val>>`. JIT code
+        /// may read through the lock; a live mutable borrow is impossible
+        /// at an op boundary, so a negative flag routes to `step` (which
+        /// panics identically to the interpreter's `borrow()`).
+        pub rl_flag: usize,
+        /// `offset_of!(InstanceData, struct_id)` — `u32`.
+        pub id_sid: usize,
+        /// `offset_of!(InstanceData, fields)` — the `Fields` enum.
+        pub id_fields: usize,
+        /// `offset_of!(RefLock<InstanceData>'s inner InstanceData)` — the
+        /// `Gc` payload of `Val::Instance` points at the RefLock.
+        pub rl_inst: usize,
+        /// The `RefCell` borrow flag's offset inside `RefLock<InstanceData>`
+        /// — probed separately from `rl_flag`; rustc is free to order the
+        /// `RefCell`'s fields differently per `T`.
+        pub rl_flag_i: usize,
+        /// `Fields` discriminant offset/width and the tag value selecting
+        /// `Fields::Inline` (`Spilled` is the only other variant).
+        pub fld_tag: usize,
+        /// Discriminant width in bytes for `Fields` (see `fld_tag`).
+        pub fld_tsz: usize,
+        /// Discriminant value of `Fields::Inline`.
+        pub fld_inline: u64,
+        /// Byte offset of the `len: u8` field inside `Fields::Inline`.
+        pub fld_len: usize,
+        /// Byte offset of the `data: [Val; INLINE_FIELDS]` inside
+        /// `Fields::Inline`.
+        pub fld_data: usize,
+        /// Byte offset of the `Vec<Val>` inside `Fields::Spilled`.
+        pub fld_spilled: usize,
+        /// Byte offset/width of the discriminant inside `RtResult<Flow>`
+        /// that selects `Ok(Flow::Return(_))` from every other outcome —
+        /// the inlined-call tail classifies `*out` without an FFI hop.
+        pub out_tag: usize,
+        /// Width in bytes of that discriminant (see `out_tag`).
+        pub out_tsz: usize,
+        /// The `Ok(Flow::Return(_))` discriminant value.
+        pub out_ret: u64,
+        /// Byte offset of the returned `Val` inside `Ok(Flow::Return(..))`.
+        pub out_ret_pay: usize,
     }
 
     /// Probe this build's layouts — see [`Layout`]. Called once per
     /// `mimas_jit::compile`, not from emitted code.
     pub fn layout() -> Layout {
+        use crate::val::InstanceData;
         use std::mem::{offset_of, size_of};
 
         const N: usize = size_of::<Val<'static>>();
@@ -392,17 +466,13 @@ pub mod jit {
         // Raw bytes of a live `Val`. Uninit padding may hold garbage, so
         // nothing is *assumed* from these bytes — every derived offset is
         // verified by a `bake` round-trip through rustc's own decode below.
-        let bytes = |v: &Val<'static>| -> [u8; N] {
+        fn bytes<'g>(v: &Val<'g>) -> [u8; N] {
             let mut b = [0u8; N];
             unsafe {
-                std::ptr::copy_nonoverlapping(
-                    v as *const Val<'static> as *const u8,
-                    b.as_mut_ptr(),
-                    N,
-                );
+                std::ptr::copy_nonoverlapping(v as *const Val<'g> as *const u8, b.as_mut_ptr(), N);
             }
             b
-        };
+        }
         // Decoded probe result. `Bad` = byte pattern whose discriminant
         // matches no probed variant — how corrupt encodings surface.
         #[derive(PartialEq)]
@@ -609,6 +679,289 @@ pub mod jit {
             vec_ptr != vec_len && vec_len != vec_cap && vec_ptr != vec_cap,
             "Vec header words not distinct: ptr={vec_ptr} len={vec_len} cap={vec_cap}"
         );
+        assert_eq!(size_of::<BodyId>(), 4, "Frame.chunk assumed u32");
+        assert_eq!(size_of::<bool>(), 1);
+        // Gc-carrying variants and the containers behind them — probed on
+        // live arena objects, not assumed. `Gc` is a plain pointer to T, so
+        // `Val::Array`'s payload IS the `RefLock<Vec<Val>>` address.
+        let (t_str, t_array, t_instance, arr_pay, inst_pay, rl_vec, rl_flag, rl_inst, rl_flag_i) =
+            gc_arena::arena::rootless_mutate(|mc| {
+                use crate::val::{Array, Instance, InstanceData, SharedStr, Str};
+                let s = Str(Gc::new(mc, SharedStr::from("p")));
+                let a = Array(Gc::new(
+                    mc,
+                    gc_arena::RefLock::new(vec![Val::Int(11), Val::Int(22)]),
+                ));
+                let i = Instance(Gc::new(
+                    mc,
+                    gc_arena::RefLock::new(InstanceData {
+                        struct_id: 7,
+                        fields: Fields::Inline {
+                            len: 1,
+                            data: [Val::Int(5), Val::Null, Val::Null, Val::Null],
+                        },
+                    }),
+                ));
+                let t_str = tagv(&bytes(&Val::Str(s)));
+                let t_array = tagv(&bytes(&Val::Array(a)));
+                let t_instance = tagv(&bytes(&Val::Instance(i)));
+                // payload offset: the variant's Gc pointer is the only
+                // machine word in the encoding holding its address
+                let pay_of = |v: &Val<'_>, p: usize| -> usize {
+                    let b = bytes(v);
+                    let want = p.to_ne_bytes();
+                    let mut found = None;
+                    for off in 0..=vsz - 8 {
+                        if b[off..off + 8] == want {
+                            assert!(found.is_none(), "ambiguous gc payload offset");
+                            found = Some(off);
+                        }
+                    }
+                    found.expect("gc payload not found in Val")
+                };
+                let arr_pay = pay_of(&Val::Array(a), Gc::as_ptr(a.0) as usize);
+                let inst_pay = pay_of(&Val::Instance(i), Gc::as_ptr(i.0) as usize);
+                // RefLock<T> = repr(transparent) RefCell<T>; `as_ptr` hands
+                // the inner T's address directly.
+                let rl: &gc_arena::RefLock<Vec<Val>> = &*a.0;
+                let rl_vec = rl.as_ptr() as usize - rl as *const _ as usize;
+                let rli: &gc_arena::RefLock<InstanceData> = &*i.0;
+                let rl_inst = rli.as_ptr() as usize - rli as *const _ as usize;
+                // borrow flag: the word that goes 0 → nonzero on `borrow()`.
+                let nwords = size_of::<gc_arena::RefLock<Vec<Val>>>() / 8;
+                let words = |p: *const u8| -> Vec<i64> {
+                    (0..nwords)
+                        .map(|w| unsafe { p.add(w * 8).cast::<i64>().read_unaligned() })
+                        .collect()
+                };
+                let rlb = rl as *const _ as *const u8;
+                let before = words(rlb);
+                let during = {
+                    let r = rl.borrow();
+                    let w = words(rlb);
+                    drop(r);
+                    w
+                };
+                let mut flag = None;
+                for w in 0..nwords {
+                    if before[w] == 0 && during[w] == 1 {
+                        // one shared borrow: flag == 1; mut borrow is -1
+                        assert!(flag.is_none(), "ambiguous borrow flag word");
+                        flag = Some(w * 8);
+                    }
+                }
+                let rl_flag = flag.expect("RefCell borrow flag not found");
+                // same flag probe for `RefLock<InstanceData>` — `RefCell`'s
+                // field order is rustc's to choose per T
+                let nwords_i = size_of::<gc_arena::RefLock<InstanceData>>() / 8;
+                let rlib = rli as *const _ as *const u8;
+                let words_i = |p: *const u8| -> Vec<i64> {
+                    (0..nwords_i)
+                        .map(|w| unsafe { p.add(w * 8).cast::<i64>().read_unaligned() })
+                        .collect()
+                };
+                let before_i = words_i(rlib);
+                let during_i = {
+                    let r = rli.borrow();
+                    let w = words_i(rlib);
+                    drop(r);
+                    w
+                };
+                let mut flag_i = None;
+                for w in 0..nwords_i {
+                    if before_i[w] == 0 && during_i[w] == 1 {
+                        assert!(flag_i.is_none(), "ambiguous borrow flag word");
+                        flag_i = Some(w * 8);
+                    }
+                }
+                let rl_flag_i = flag_i.expect("RefCell borrow flag not found");
+                (
+                    t_str, t_array, t_instance, arr_pay, inst_pay, rl_vec, rl_flag, rl_inst,
+                    rl_flag_i,
+                )
+            });
+        // sanity: Gc-variant tags differ from everything else probed
+        for (a, b, name) in [
+            (t_array, t_int, "array/int"),
+            (t_array, t_float, "array/float"),
+            (t_array, t_bool, "array/bool"),
+            (t_array, t_null, "array/null"),
+            (t_array, t_fn, "array/fn"),
+            (t_array, t_instance, "array/instance"),
+            (t_array, t_str, "array/str"),
+            (t_instance, t_str, "instance/str"),
+            (t_instance, t_null, "instance/null"),
+        ] {
+            assert_ne!(a, b, "indistinguishable Val tags: {name}");
+        }
+        // `Fields` — tag position/width by Inline↔Spilled rewrite; the inner
+        // field offsets by direct address arithmetic on each variant.
+        const FSZ: usize = size_of::<Fields<'static>>();
+        let fbytes = |f: &Fields<'static>| -> [u8; FSZ] {
+            let mut b = [0u8; FSZ];
+            unsafe {
+                std::ptr::copy_nonoverlapping(f as *const _ as *const u8, b.as_mut_ptr(), FSZ);
+            }
+            b
+        };
+        let fi = Fields::Inline {
+            len: 2,
+            data: [Val::Int(9), Val::Null, Val::Null, Val::Null],
+        };
+        let fs = Fields::Spilled(vec![Val::Int(1)]);
+        let d_inline = std::mem::discriminant(&fi);
+        let d_spilled = std::mem::discriminant(&fs);
+        let (fi_b, fs_b) = (fbytes(&fi), fbytes(&fs));
+        let mut fld = None;
+        'fw: for w in [1usize, 2, 4, 8] {
+            if w > FSZ {
+                continue;
+            }
+            for p in 0..=FSZ - w {
+                if fi_b[p..p + w] == fs_b[p..p + w] {
+                    continue;
+                }
+                let mut raw = fi_b;
+                raw[p..p + w].copy_from_slice(&fs_b[p..p + w]);
+                let v: std::mem::ManuallyDrop<Fields<'static>> =
+                    unsafe { std::ptr::read_unaligned(raw.as_ptr().cast()) };
+                if std::mem::discriminant(&*v) == d_spilled {
+                    assert!(fld.is_none(), "ambiguous Fields tag positions");
+                    fld = Some((p, w));
+                }
+            }
+            if fld.is_some() {
+                break 'fw;
+            }
+        }
+        let (fld_tag, fld_tsz) = fld.expect("no discriminant found in Fields");
+        let fld_inline = {
+            let mut w = [0u8; 8];
+            w[..fld_tsz].copy_from_slice(&fi_b[fld_tag..fld_tag + fld_tsz]);
+            u64::from_le_bytes(w)
+        };
+        // the rewrite must identify Inline too (tags are total here)
+        {
+            let mut raw = fs_b;
+            raw[fld_tag..fld_tag + fld_tsz].copy_from_slice(&fi_b[fld_tag..fld_tag + fld_tsz]);
+            let v: std::mem::ManuallyDrop<Fields<'static>> =
+                unsafe { std::ptr::read_unaligned(raw.as_ptr().cast()) };
+            assert!(
+                std::mem::discriminant(&*v) == d_inline,
+                "Fields tag rewrite is not reversible"
+            );
+        }
+        let (fld_len, fld_data) = {
+            let faddr = &fi as *const _ as usize;
+            let Fields::Inline { len, data } = &fi else {
+                unreachable!()
+            };
+            (
+                len as *const u8 as usize - faddr,
+                data.as_ptr() as usize - faddr,
+            )
+        };
+        let fld_spilled = {
+            let faddr = &fs as *const _ as usize;
+            let Fields::Spilled(v) = &fs else {
+                unreachable!()
+            };
+            v as *const Vec<Val> as usize - faddr
+        };
+        // round-trip check: `data` addressing equals `as_slice` indexing
+        assert_eq!(
+            (((&fi as *const Fields) as usize + fld_data) as *const Val)
+                .align_offset(std::mem::align_of::<Val>()),
+            0,
+            "Fields::Inline.data is not Val-aligned"
+        );
+        // `RtResult<Flow>` — the `out` slot's layout. The probe works exactly
+        // like `Val`'s: rewrite a candidate tag window of an `Ok(Return)`'s
+        // encoding with the other outcomes' bytes and require the result to
+        // decode correctly (through `ManuallyDrop` — the enum can hold a
+        // `SmallVec` and must not be dropped from a fabricated bit pattern).
+        const OSZ: usize = size_of::<RtResult<Flow<'static>>>();
+        let obytes = |v: &RtResult<Flow<'static>>| -> [u8; OSZ] {
+            let mut b = [0u8; OSZ];
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    v as *const RtResult<Flow<'static>> as *const u8,
+                    b.as_mut_ptr(),
+                    OSZ,
+                );
+            }
+            b
+        };
+        let oret: RtResult<Flow> = Ok(Flow::Return(Val::Int(0)));
+        let onext: RtResult<Flow> = Ok(Flow::Next);
+        let oerr: RtResult<Flow> = Err(RtErr::DivByZero);
+        let ocall: RtResult<Flow> = Ok(Flow::Call {
+            target: CallTarget::Fn(BodyId::ZERO),
+            dst: Reg::from(0u32),
+            args: smallvec::SmallVec::new(),
+        });
+        let (oret_b, onext_b, oerr_b, ocall_b) =
+            (obytes(&oret), obytes(&onext), obytes(&oerr), obytes(&ocall));
+        let oclass = |raw: &[u8; OSZ]| -> u8 {
+            let v: std::mem::ManuallyDrop<RtResult<Flow<'static>>> =
+                unsafe { std::ptr::read_unaligned(raw.as_ptr().cast()) };
+            match &*v {
+                Ok(Flow::Next) => 0,
+                Ok(Flow::Call { .. }) => 1,
+                Ok(Flow::Return(_)) => 2,
+                Err(_) => 3,
+            }
+        };
+        let mut ofound = None;
+        'ow: for w in [1usize, 2, 4, 8] {
+            if w > OSZ {
+                continue;
+            }
+            for p in 0..=OSZ - w {
+                if oret_b[p..p + w] == onext_b[p..p + w]
+                    && oret_b[p..p + w] == oerr_b[p..p + w]
+                    && oret_b[p..p + w] == ocall_b[p..p + w]
+                {
+                    continue;
+                }
+                let mut raw = oret_b;
+                raw[p..p + w].copy_from_slice(&onext_b[p..p + w]);
+                if oclass(&raw) != 0 {
+                    continue;
+                }
+                let mut raw = oret_b;
+                raw[p..p + w].copy_from_slice(&oerr_b[p..p + w]);
+                if oclass(&raw) != 3 {
+                    continue;
+                }
+                let mut raw = oret_b;
+                raw[p..p + w].copy_from_slice(&ocall_b[p..p + w]);
+                if oclass(&raw) != 1 {
+                    continue;
+                }
+                // and the return tag written onto a Next must decode as Return
+                let mut raw = onext_b;
+                raw[p..p + w].copy_from_slice(&oret_b[p..p + w]);
+                if oclass(&raw) != 2 {
+                    continue;
+                }
+                assert!(ofound.is_none(), "ambiguous out tag positions");
+                ofound = Some((p, w));
+            }
+            if ofound.is_some() {
+                break 'ow;
+            }
+        }
+        let (out_tag, out_tsz) = ofound.expect("no discriminant found in RtResult<Flow>");
+        let out_ret = {
+            let mut w = [0u8; 8];
+            w[..out_tsz].copy_from_slice(&oret_b[out_tag..out_tag + out_tsz]);
+            u64::from_le_bytes(w)
+        };
+        let out_ret_pay = match &oret {
+            Ok(Flow::Return(v)) => v as *const Val as usize - &oret as *const _ as usize,
+            _ => unreachable!(),
+        };
         Layout {
             val_size: vsz,
             val_tag: tag,
@@ -629,6 +982,32 @@ pub mod jit {
             frame_size: size_of::<Frame>(),
             frame_base: offset_of!(Frame, base),
             code_ip: offset_of!(Decoder, ip),
+            vec_cap,
+            frame_chunk: offset_of!(Frame, chunk),
+            frame_ip: offset_of!(Frame, ip),
+            frame_ret: offset_of!(Frame, return_reg),
+            state_paused: offset_of!(State, paused),
+            t_str,
+            t_array,
+            t_instance,
+            arr_pay,
+            inst_pay,
+            rl_vec,
+            rl_flag,
+            id_sid: offset_of!(InstanceData, struct_id),
+            id_fields: offset_of!(InstanceData, fields),
+            rl_inst,
+            rl_flag_i,
+            fld_tag,
+            fld_tsz,
+            fld_inline,
+            fld_len,
+            fld_data,
+            fld_spilled,
+            out_tag,
+            out_tsz,
+            out_ret,
+            out_ret_pay,
         }
     }
 

@@ -16,3 +16,6 @@ name = "jit_test"
 vm = { package = "mimas-vm", path = "../vm", version = "0.2.0", default-features = false }
 jit = { package = "mimas-jit", path = "../jit" }
 compile = { package = "mimas-compile", path = "../compile" }
+
+[dev-dependencies]
+mimas = { path = "../mimas" }
