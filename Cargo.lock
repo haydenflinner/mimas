@@ -3515,6 +3515,7 @@ dependencies = [
 name = "mimas-jit-test"
 version = "0.2.0"
 dependencies = [
+ "mimas",
  "mimas-compile",
  "mimas-jit",
  "mimas-vm",
