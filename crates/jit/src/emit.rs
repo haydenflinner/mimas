@@ -25,7 +25,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::{BodyFacts, Frozen, H, ObsTag};
+use crate::{BodyFacts, Frozen, FrozenKind, H, Obs, ObsTag};
 use compile::{AccessKind, BlockTarget, Constant, Op, Program, Reg};
 use cranelift_codegen::Context;
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
@@ -410,9 +410,10 @@ struct Em<'a> {
     lyt: Layout,
     /// Specialization context for this body (empty for `compile`).
     spec: &'a BodySpec<'a>,
-    /// `regs[r]`'s observed GC payload pointer — only for regs never
-    /// re-seated (no writers), so the identity stays the entry value's.
-    known: HashMap<u32, usize>,
+    /// `regs[r]`'s entry observation — only for regs never re-seated (no
+    /// writers anywhere in the body), so the window slot provably still
+    /// holds the observed value; the frozen-table lookup key.
+    known: HashMap<u32, Obs>,
     /// The whole program — `CallDirect` needs the callee's `Chunk` (offset,
     /// regs, param mapping) to emit the inline frame push.
     prog: &'a Program,
@@ -1053,7 +1054,7 @@ pub(crate) fn emit_body(
     }
     // Regs that always held the *same* GC pointer at entry and are never
     // re-seated — the frozen-table lookup key for baked reads.
-    let known: HashMap<u32, usize> = (0..nregs)
+    let known: HashMap<u32, crate::Obs> = (0..nregs)
         .filter(|&r| {
             spec.facts
                 .entry
@@ -1061,7 +1062,7 @@ pub(crate) fn emit_body(
                 .is_some_and(|o| o.ptr != 0)
                 && !sh.written.contains(&(r as u32))
         })
-        .map(|r| (r as u32, spec.facts.entry[r].ptr))
+        .map(|r| (r as u32, spec.facts.entry[r]))
         .collect();
 
     // ip2idx blob: u32 dense index per byte of this chunk's span, MAX elsewhere
@@ -1087,20 +1088,22 @@ pub(crate) fn emit_body(
         .collect();
     let bodies_gv = module.declare_data_in_func(bodies_data, &mut ctx.func);
     let map_gv = module.declare_data_in_func(map_data, &mut ctx.func);
-    // `CallDirect`'s inline fast path calls the callee's native body directly —
-    // one FuncRef per distinct target.
+    // `CallDirect`'s inline fast path and the `Call` IC both call the
+    // callee's native body directly — one FuncRef per distinct target.
     let call_refs: HashMap<u32, FuncRef> = ops
         .iter()
         .filter_map(|(_, op)| match op {
-            Op::CallDirect { body, .. } => Some(*body),
+            Op::CallDirect { body, .. } => Some(body.index() as u32),
             _ => None,
         })
+        .chain(spec.facts.calls.values().copied())
         .collect::<HashSet<_>>()
         .into_iter()
+        .filter(|&b| (b as usize) < body_ids.len())
         .map(|b| {
             (
-                b.index() as u32,
-                module.declare_func_in_func(body_ids[b.index()], &mut ctx.func),
+                b,
+                module.declare_func_in_func(body_ids[b as usize], &mut ctx.func),
             )
         })
         .collect();
@@ -3155,6 +3158,31 @@ impl Em<'_> {
                 dst,
             );
         }
+        // Frozen receiver: a `Dict` bakes its entries into a key-pointer
+        // compare chain; `Array`/`Seq`/`Instance` fold to a compile-time
+        // `(base, len)` view. Both pointer-guard `regs[set]` (unless
+        // `unguarded`) and fall into the generic dispatch on any miss.
+        if let Some((obs, fr)) = self.frozen_of(set.index() as u32) {
+            match fr.kind {
+                FrozenKind::Dict => {
+                    let entries = Self::frozen_dict(obs.ptr);
+                    // a chain longer than this pays more branches than the
+                    // hash lookup it replaces — stay generic
+                    if entries.len() <= 32 {
+                        let gfall = self.fb.create_block();
+                        self.fb.set_cold_block(gfall);
+                        self.emit_frozen_dict_get(i, dst, set, index, obs, &fr, entries, gfall);
+                    }
+                }
+                _ => {
+                    if let Some(view) = Self::frozen_view(&fr, obs.ptr) {
+                        let gfall = self.fb.create_block();
+                        self.fb.set_cold_block(gfall);
+                        self.emit_frozen_view_get(i, dst, set, index, obs, &fr, view, gfall);
+                    }
+                }
+            }
+        }
         // No `flush_seq`/`mark_op` on the fast path: the only `regs` slot read
         // here is `set` (materialized by `val_ptr`), `estep` marks from
         // `cur_ip` and re-flushes, and the `slow` helper re-marks anyway.
@@ -3309,6 +3337,22 @@ impl Em<'_> {
                 &[regs, d, s, sl, kk, self.env.out],
                 dst,
             );
+        }
+        // Frozen receiver: `fields[slot]`/`store[slot]` resolved at compile
+        // time — a pointer guard (unless `unguarded`) then constant stores.
+        // A non-bakeable value keeps the whole site generic.
+        if let Some((obs, fr)) = self.frozen_of(src.index() as u32) {
+            let b = Self::frozen_slot(&fr, obs.ptr, slot as usize)
+                .and_then(|v| self.bake_of(v));
+            if let Some(b) = b {
+                let gfall = self.fb.create_block();
+                self.fb.set_cold_block(gfall);
+                let hit = self.fb.create_block();
+                self.emit_frozen_guard(src.index() as u32, obs, &fr, hit, gfall);
+                self.fb.switch_to_block(hit);
+                self.st_baked(i, dst, b);
+                self.fb.switch_to_block(gfall);
+            }
         }
         // selective materialization instead of `flush_seq` — see
         // `emit_get_index`
@@ -4247,6 +4291,380 @@ impl Em<'_> {
             self.fb.ins().jump(nb, &[]);
         }
     }
+
+    // ---- frozen-container constant baking (`Facts::frozen`) ----
+    //
+    // `known` names regs that held one stable GC payload at every entry and
+    // are never re-seated; when the host declares that payload frozen the
+    // container's contents are compile-time readable. Every baked site still
+    // verifies `regs[r]` is that same object — tag + payload pointer —
+    // unless the host opted out with `unguarded` (see `Frozen`).
+
+    /// `(obs, frozen)` for reg `r`, when it held one stable GC payload at
+    /// every entry, is never re-seated, and the host froze that payload.
+    fn frozen_of(&self, r: u32) -> Option<(Obs, Frozen)> {
+        let o = *self.known.get(&r)?;
+        self.spec.frozen.get(&o.ptr).map(|f| (o, *f))
+    }
+
+    /// `(tag, payload offset)` `regs[r]` must satisfy for `fr` to apply to
+    /// `obs`'s register — `None` means tag/kind disagree and the site stays
+    /// generic (a freeze declared for the wrong kind of object).
+    fn kind_guard(&self, obs: Obs, fr: &Frozen) -> Option<(u64, usize)> {
+        let t = match (fr.kind, obs.tag) {
+            (FrozenKind::Array, ObsTag::Array) => self.lyt.t_array,
+            (FrozenKind::Seq, ObsTag::IntArray) => self.lyt.t_intarray,
+            (FrozenKind::Seq, ObsTag::FloatArray) => self.lyt.t_floatarray,
+            (FrozenKind::Dict, ObsTag::Dict) => self.lyt.t_dict,
+            (FrozenKind::Instance, ObsTag::Instance) => self.lyt.t_instance,
+            _ => return None,
+        };
+        let po = match fr.kind {
+            FrozenKind::Array => self.lyt.arr_pay,
+            FrozenKind::Seq => self.lyt.seq_pay,
+            FrozenKind::Dict => self.lyt.dict_pay,
+            FrozenKind::Instance => self.lyt.inst_pay,
+        };
+        Some((t, po))
+    }
+
+    /// Compile-time `container[slot]` inside a frozen root.
+    ///
+    /// SAFETY per the `Frozen` contract: `ptr` names a live, rooted arena
+    /// object and the arena is mapped — gc-arena doesn't move objects, so
+    /// the raw deref is a plain read. `'static` is the contract's way of
+    /// saying "alive for the whole compile+install".
+    fn frozen_slot(fr: &Frozen, ptr: usize, slot: usize) -> Option<vm::Val<'static>> {
+        unsafe {
+            match fr.kind {
+                FrozenKind::Array => {
+                    let rl = &*(ptr as *const gc_arena::RefLock<Vec<vm::Val<'static>>>);
+                    rl.borrow().get(slot).copied()
+                }
+                FrozenKind::Seq => {
+                    let rl = &*(ptr as *const gc_arena::RefLock<vm::ArrayStore<'static>>);
+                    rl.borrow().get(slot)
+                }
+                FrozenKind::Instance => {
+                    let rl = &*(ptr as *const gc_arena::RefLock<vm::InstanceData<'static>>);
+                    let d = rl.borrow();
+                    if slot >= d.fields.len() {
+                        return None;
+                    }
+                    Some(d.fields[slot])
+                }
+                FrozenKind::Dict => None,
+            }
+        }
+    }
+
+    /// A frozen container's element storage flattened to a compile-time
+    /// `(base, len, kind)` view for `GetIndex` — the contract's "no
+    /// mutation" promise keeps `base`/`len` stable.
+    fn frozen_view(fr: &Frozen, ptr: usize) -> Option<View> {
+        use vm::ArrayStore;
+        unsafe {
+            match fr.kind {
+                FrozenKind::Array => {
+                    let rl = &*(ptr as *const gc_arena::RefLock<Vec<vm::Val<'static>>>);
+                    let v = rl.borrow();
+                    Some(View {
+                        base: v.as_ptr() as usize,
+                        len: v.len(),
+                        kind: VKind::Vals,
+                    })
+                }
+                FrozenKind::Seq => {
+                    let rl = &*(ptr as *const gc_arena::RefLock<ArrayStore<'static>>);
+                    let s = rl.borrow();
+                    match &*s {
+                        ArrayStore::Ints(v) => Some(View {
+                            base: v.as_ptr() as usize,
+                            len: v.len(),
+                            kind: VKind::Ints,
+                        }),
+                        ArrayStore::Floats(v) => Some(View {
+                            base: v.as_ptr() as usize,
+                            len: v.len(),
+                            kind: VKind::Floats,
+                        }),
+                        ArrayStore::Vals(a) => {
+                            let v = a.0.borrow();
+                            Some(View {
+                                base: v.as_ptr() as usize,
+                                len: v.len(),
+                                kind: VKind::Vals,
+                            })
+                        }
+                        ArrayStore::Empty => None,
+                    }
+                }
+                FrozenKind::Instance => {
+                    let rl = &*(ptr as *const gc_arena::RefLock<vm::InstanceData<'static>>);
+                    let d = rl.borrow();
+                    match &d.fields {
+                        vm::Fields::Inline { len, data } => Some(View {
+                            base: data.as_ptr() as usize,
+                            len: *len as usize,
+                            kind: VKind::Vals,
+                        }),
+                        vm::Fields::Spilled(v) => Some(View {
+                            base: v.as_ptr() as usize,
+                            len: v.len(),
+                            kind: VKind::Vals,
+                        }),
+                    }
+                }
+                FrozenKind::Dict => None,
+            }
+        }
+    }
+
+    /// A frozen dict's `(key payload, value)` pairs — `Str` equality IS the
+    /// `Gc` pointer, so a baked lookup compares key pointers.
+    fn frozen_dict(ptr: usize) -> Vec<(usize, vm::Val<'static>)> {
+        unsafe {
+            let rl = &*(ptr as *const gc_arena::RefLock<vm::DictMap<'static>>);
+            let d = rl.borrow();
+            d.iter()
+                .map(|(k, v)| (vm::bc::Gc::as_ptr(k.0) as usize, *v))
+                .collect()
+        }
+    }
+
+    /// `v` as an emitted constant, or `None` for variants we can't bake
+    /// (`Raised`, feature payloads). GC-carrying values bake as their `Gc`
+    /// pointer — transitively rooted through the frozen object per the
+    /// contract.
+    fn bake_of(&self, v: vm::Val) -> Option<Baked> {
+        use vm::bc::Gc;
+        Some(match v {
+            vm::Val::Null => Baked::Null,
+            vm::Val::Bool(b) => Baked::Bool(b),
+            vm::Val::Int(x) => Baked::Int(x),
+            vm::Val::Float(x) => Baked::Float(x),
+            vm::Val::Fn(b) => Baked::Fn(b.index() as u32),
+            vm::Val::Str(s) => Baked::Gc(self.lyt.t_str, self.lyt.str_pay, Gc::as_ptr(s.0) as usize),
+            vm::Val::Array(a) => {
+                Baked::Gc(self.lyt.t_array, self.lyt.arr_pay, Gc::as_ptr(a.0) as usize)
+            }
+            vm::Val::IntArray(s) => Baked::Gc(
+                self.lyt.t_intarray,
+                self.lyt.seq_pay,
+                Gc::as_ptr(s.0) as usize,
+            ),
+            vm::Val::FloatArray(s) => Baked::Gc(
+                self.lyt.t_floatarray,
+                self.lyt.seq_pay,
+                Gc::as_ptr(s.0) as usize,
+            ),
+            vm::Val::Dict(d) => {
+                Baked::Gc(self.lyt.t_dict, self.lyt.dict_pay, Gc::as_ptr(d.0) as usize)
+            }
+            vm::Val::Instance(i) => Baked::Gc(
+                self.lyt.t_instance,
+                self.lyt.inst_pay,
+                Gc::as_ptr(i.0) as usize,
+            ),
+            vm::Val::Closure(c) => {
+                Baked::Gc(self.lyt.t_closure, self.lyt.cl_pay, Gc::as_ptr(c.0) as usize)
+            }
+            _ => return None,
+        })
+    }
+
+    /// `regs[dst] = <baked>` — tag + payload constant stores — then shadow
+    /// resync and fall through to the next op.
+    fn st_baked(&mut self, i: usize, dst: Reg, b: Baked) {
+        let regs = self.regs();
+        let a = self.vaddr(regs, dst.index() as u32);
+        match b {
+            Baked::Null => self.st_null(a),
+            Baked::Bool(v) => {
+                let v = self.iconst8(v as i64);
+                self.st_bool(a, v);
+            }
+            Baked::Int(v) => {
+                let v = self.iconst(v);
+                self.st_int(a, v);
+            }
+            Baked::Float(v) => {
+                let v = self.fb.ins().f64const(v);
+                self.st_float(a, v);
+            }
+            Baked::Fn(b) => {
+                let v = self.iconst32(b as i64);
+                self.st_fn(a, v);
+            }
+            Baked::Gc(tag, pay, p) => {
+                let t = self.tconst(tag);
+                self.fb.ins().store(tf(), t, a, self.lyt.val_tag as i32);
+                let pv = self.iconst(p as i64);
+                self.fb.ins().store(tf(), pv, a, pay as i32);
+            }
+        }
+        self.refresh_shadow(dst.index() as u32);
+        {
+            let nb = self.next_blk(i);
+            self.fb.ins().jump(nb, &[]);
+        }
+    }
+
+    /// Emit `regs[r]` tag+payload check against `obs`'s frozen identity →
+    /// `hit`, else `miss`. `fr.unguarded` trusts the entry observation and
+    /// jumps straight to `hit`; a tag/kind that can't be guarded goes to
+    /// `miss` (site stays generic).
+    fn emit_frozen_guard(&mut self, r: u32, obs: Obs, fr: &Frozen, hit: Block, miss: Block) {
+        if fr.unguarded {
+            self.fb.ins().jump(hit, &[]);
+            return;
+        }
+        let Some((wt, po)) = self.kind_guard(obs, fr) else {
+            self.fb.ins().jump(miss, &[]);
+            return;
+        };
+        let sa = self.val_ptr(r);
+        let st = self.ld_tag(sa);
+        let wt = self.tconst(wt);
+        let istag = self.fb.ins().icmp(IntCC::Equal, st, wt);
+        let gc = self.fb.ins().load(I64, tf(), sa, po as i32);
+        let want = self.iconst(obs.ptr as i64);
+        let isptr = self.fb.ins().icmp(IntCC::Equal, gc, want);
+        let ok = self.fb.ins().band(istag, isptr);
+        self.fb.ins().brif(ok, hit, &[], miss, &[]);
+    }
+
+    /// `GetIndex` on a frozen `Array`/`Seq`/`Instance`: the element store
+    /// flattened at compile time, so the read is bounds-check + load with
+    /// the header loads and `RefLock`/`ArrayStore` dispatch all folded away.
+    fn emit_frozen_view_get(
+        &mut self,
+        i: usize,
+        dst: Reg,
+        set: Reg,
+        index: Reg,
+        obs: Obs,
+        fr: &Frozen,
+        view: View,
+        gfall: Block,
+    ) {
+        let vb = self.fb.create_block();
+        self.emit_frozen_guard(set.index() as u32, obs, fr, vb, gfall);
+        self.fb.switch_to_block(vb);
+        let iv = self.int_opnd(index.index() as u32);
+        let len = self.iconst(view.len as i64);
+        let inb = self.fb.ins().icmp(IntCC::UnsignedLessThan, iv, len);
+        let rd = self.fb.create_block();
+        self.fb.ins().brif(inb, rd, &[], gfall, &[]);
+        self.fb.switch_to_block(rd);
+        let regs = self.regs();
+        let da = self.vaddr(regs, dst.index() as u32);
+        let base = self.iconst(view.base as i64);
+        match view.kind {
+            VKind::Vals => {
+                let off = self.fb.ins().imul_imm_s(iv, self.lyt.val_size as i64);
+                let sa = self.fb.ins().iadd(base, off);
+                self.cpy_val(da, sa);
+            }
+            VKind::Ints => {
+                let off = self.fb.ins().imul_imm_s(iv, 8);
+                let sa = self.fb.ins().iadd(base, off);
+                let x = self.fb.ins().load(I64, tf(), sa, 0);
+                self.st_int(da, x);
+            }
+            VKind::Floats => {
+                let off = self.fb.ins().imul_imm_s(iv, 8);
+                let sa = self.fb.ins().iadd(base, off);
+                let x = self.fb.ins().load(F64, tf(), sa, 0);
+                self.st_float(da, x);
+            }
+        }
+        self.refresh_shadow(dst.index() as u32);
+        {
+            let nb = self.next_blk(i);
+            self.fb.ins().jump(nb, &[]);
+        }
+        self.fb.switch_to_block(gfall);
+    }
+
+    /// `GetIndex` on a frozen `Dict` with a `Str` key — a pointer-compare
+    /// chain over the compile-time-read entries; a key not in the dict
+    /// writes `Null` (the interpreter's `unwrap_or(Val::Null)`), a non-`Str`
+    /// key or an unbakeable value goes generic.
+    fn emit_frozen_dict_get(
+        &mut self,
+        i: usize,
+        dst: Reg,
+        set: Reg,
+        index: Reg,
+        obs: Obs,
+        fr: &Frozen,
+        entries: Vec<(usize, vm::Val<'static>)>,
+        gfall: Block,
+    ) {
+        let strb = self.fb.create_block();
+        self.emit_frozen_guard(set.index() as u32, obs, fr, strb, gfall);
+        self.fb.switch_to_block(strb);
+        let ka = self.val_ptr(index.index() as u32);
+        let kt = self.ld_tag(ka);
+        let tstr = self.tconst(self.lyt.t_str);
+        let isstr = self.fb.ins().icmp(IntCC::Equal, kt, tstr);
+        let cmpb = self.fb.create_block();
+        self.fb.ins().brif(isstr, cmpb, &[], gfall, &[]);
+        self.fb.switch_to_block(cmpb);
+        let kp = self
+            .fb
+            .ins()
+            .load(I64, tf(), ka, self.lyt.str_pay as i32);
+        for (kptr, v) in &entries {
+            let kv = self.iconst(*kptr as i64);
+            let eq = self.fb.ins().icmp(IntCC::Equal, kp, kv);
+            let hb = self.fb.create_block();
+            let eb = self.fb.create_block();
+            self.fb.ins().brif(eq, hb, &[], eb, &[]);
+            self.fb.switch_to_block(hb);
+            match self.bake_of(*v) {
+                Some(b) => self.st_baked(i, dst, b),
+                None => {
+                    self.fb.ins().jump(gfall, &[]);
+                }
+            }
+            self.fb.switch_to_block(eb);
+        }
+        // key absent → Null (dict get's `unwrap_or(Val::Null)`)
+        self.st_baked(i, dst, Baked::Null);
+        self.fb.switch_to_block(gfall);
+    }
+}
+
+/// A `Val` resolved to a constant at compile time (a frozen-container
+/// bake) — emitted as tag+payload stores, no runtime deref.
+#[derive(Clone, Copy)]
+enum Baked {
+    Null,
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    /// `Val::Fn`'s body index.
+    Fn(u32),
+    /// GC-carrying value — `Val` tag + payload offset + the `Gc` payload
+    /// address; rooted transitively through the frozen object.
+    Gc(u64, usize, usize),
+}
+
+/// A frozen container's element storage (see [`Em::frozen_view`]).
+#[derive(Clone, Copy)]
+struct View {
+    base: usize,
+    len: usize,
+    kind: VKind,
+}
+
+#[derive(Clone, Copy)]
+enum VKind {
+    Vals,
+    Ints,
+    Floats,
 }
 
 #[derive(Clone, Copy)]
