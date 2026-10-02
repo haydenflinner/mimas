@@ -421,6 +421,11 @@ struct Em<'a> {
     /// `FuncRef`s for `CallDirect` targets, so the fast path is a direct
     /// native `call`, not an FFI hop.
     call_refs: HashMap<u32, FuncRef>,
+    /// Lazily computed transitive "may this body observe the entry frame"
+    /// (`LoadEntry`/`StoreEntry` reachable through the call graph; a
+    /// dynamic `Op::Call`/`CallNative` callee is assumed to reach it).
+    /// Used to gate the pre-call `flush_seq` — see [`Em::call_flush`].
+    entry_use: Option<Vec<bool>>,
     blocks: Vec<Block>,
     off2idx: HashMap<usize, usize>,
     slot_i: StackSlot,
@@ -1197,6 +1202,7 @@ pub(crate) fn emit_body(
         known,
         prog: program,
         call_refs,
+        entry_use: None,
         blocks,
         off2idx,
         slot_i: StackSlot::from_u32(0),
@@ -1319,6 +1325,11 @@ pub(crate) fn emit_body(
         em.fb.def_var(sv, sv0);
         em.fb.def_var(ok, k);
     }
+    // NOTE: an entry fast-jump (`code.ip == ops[0].off` → blocks[0],
+    // skipping the table) was tried and dropped: the extra CFG edge
+    // perturbed Cranelift's global regalloc (float shadows moved q6 →
+    // q18/q24 + ~180 extra spills, mandelbrot jit 4.4x slower). The
+    // dispatch path stays unconditional.
     em.fb.ins().jump(dispatch, &[]);
 
     // ---- dispatch: code.ip → dense index → op block ----
@@ -1543,7 +1554,25 @@ impl Em<'_> {
                 self.root_flush(do_ret);
                 self.fb.switch_to_block(do_ret);
                 self.settle_seq();
-                self.hcall(H::OutReturn, &[self.env.out, vp]);
+                // `*out = Ok(Flow::Return(*vp))` inlined over the probed
+                // `RtResult<Flow>` layout — a discriminant store plus the
+                // 16-byte `Val` copy — instead of an FFI call per Return.
+                let oty = match self.lyt.out_tsz {
+                    1 => I8,
+                    2 => types::I16,
+                    4 => I32,
+                    8 => I64,
+                    d => unreachable!("bad out tag width {d}"),
+                };
+                let oret = self.fb.ins().iconst(oty, self.lyt.out_ret as i64);
+                self.fb
+                    .ins()
+                    .store(tf(), oret, self.env.out, self.lyt.out_tag as i32);
+                let dp = self
+                    .fb
+                    .ins()
+                    .iadd_imm_s(self.env.out, self.lyt.out_ret_pay as i64);
+                self.cpy_val(dp, vp);
                 self.fb.ins().return_(&[]);
             }
             Op::Panic {} => {
@@ -3877,7 +3906,8 @@ impl Em<'_> {
         args: &[Reg],
         cchunk: &compile::Chunk,
     ) {
-        self.flush_seq();
+        let mue = self.uses_entry(body.index() as u32);
+        self.call_flush(args, &[], mue);
         // `code.ip = next; *op_ip = off` — on the fast path `code.ip` gets
         // overwritten with the callee offset below, but `*op_ip` locates this
         // op for any propagated error, and the slow path needs both.
@@ -3893,7 +3923,11 @@ impl Em<'_> {
         self.fb.ins().brif(ok, fast, &[], slow, &[]);
 
         // ---- slow: the megashim handles Flow::Call-at-cap, grows, errors ----
+        // This path can suspend the frame (Flow::Call to the driver), so
+        // the window must be fully interpreter-coherent — every shadow,
+        // not just args.
         self.fb.switch_to_block(slow);
+        self.flush_seq();
         let ap = self.reg_list_slot(args);
         let (b, d, n) = (
             self.iconst(body.index() as i64),
@@ -3927,6 +3961,69 @@ impl Em<'_> {
         // ---- fast: enter_call_regs inline ----
         self.fb.switch_to_block(fast);
         self.inline_enter_run(i, next, dst, args, body, cchunk, rlen, flen, None);
+    }
+
+    /// Does running `b` ever observe the entry frame — directly via
+    /// `LoadEntry`/`StoreEntry`, or transitively through a callee?
+    fn uses_entry(&mut self, b: u32) -> bool {
+        if self.entry_use.is_none() {
+            let n = self.prog.chunks.len();
+            let mut u = vec![false; n];
+            let mut edges: Vec<Vec<u32>> = vec![Vec::new(); n];
+            let mut dyn_call = vec![false; n];
+            for b in 0..n {
+                for (_, op) in self.prog.ops(compile::BodyId::from(b as u32)) {
+                    match op {
+                        Op::LoadEntry { .. } | Op::StoreEntry { .. } => u[b] = true,
+                        Op::CallDirect { body, .. } => edges[b].push(body.index() as u32),
+                        Op::Call { .. } | Op::CallNative { .. } => dyn_call[b] = true,
+                        _ => {}
+                    }
+                }
+            }
+            let mut changed = true;
+            while changed {
+                changed = false;
+                for b in 0..n {
+                    if !u[b] && (dyn_call[b] || edges[b].iter().any(|&t| u[t as usize])) {
+                        u[b] = true;
+                        changed = true;
+                    }
+                }
+            }
+            self.entry_use = Some(u);
+        }
+        self.entry_use.as_ref().unwrap()[b as usize]
+    }
+
+    /// Pre-call window coherence for the *inline* path: `args` (and
+    /// `extra` operands like a dynamic `callee`) get `val_ptr`
+    /// materialization — every other shadow stays unwritten because a
+    /// suspended-frame invariant doesn't apply while the whole call runs
+    /// inside one body dispatch. The megashim/slow path must still
+    /// `flush_seq` outright (the driver may `step_one` either frame, and
+    /// a re-dispatched caller re-derives shadows from slots at entry —
+    /// a shadow-only value reads as the stale slot and `estep`/`step_one`
+    /// sees `Null` where an `Int` lived). Separately, a callee that can
+    /// reach `LoadEntry`/`StoreEntry` sees the entry frame's slots — when
+    /// THIS frame might be the entry frame (`frames.len == 1`) the full
+    /// flush is emitted behind that one-word check.
+    fn call_flush(&mut self, args: &[Reg], extra: &[Reg], may_use_entry: bool) {
+        for &a in args.iter().chain(extra) {
+            self.val_ptr(a.index() as u32);
+        }
+        if may_use_entry {
+            let flen = self.frames_len();
+            let one = self.iconst(1);
+            let is_entry = self.fb.ins().icmp(IntCC::Equal, flen, one);
+            let fb2 = self.fb.create_block();
+            let cont = self.fb.create_block();
+            self.fb.ins().brif(is_entry, fb2, &[], cont, &[]);
+            self.fb.switch_to_block(fb2);
+            self.flush_seq();
+            self.fb.ins().jump(cont, &[]);
+            self.fb.switch_to_block(cont);
+        }
     }
 
     /// The runtime gates every inlined call needs, checked in the current
@@ -4205,10 +4302,11 @@ impl Em<'_> {
                 }
             }
         }
-        // Flush first — the shim reads the callee Val and arg slots out of
-        // the window. `code.ip = next; *op_ip = off` before the call: a
-        // `not_callable` error locates via `op_ip` exactly like the
-        // interpreter's decoder-advanced arm.
+        // Flush first — this path is all-megashim: the shim reads the
+        // callee Val and arg slots, and the frame can suspend to the
+        // driver mid-call. `code.ip = next; *op_ip = off` before the
+        // call: a `not_callable` error locates via `op_ip` exactly like
+        // the interpreter's decoder-advanced arm.
         self.flush_seq();
         self.mark_op(off, next);
         self.settle_seq();
@@ -4266,7 +4364,8 @@ impl Em<'_> {
         body: compile::BodyId,
         cchunk: &compile::Chunk,
     ) {
-        self.flush_seq();
+        let mue = self.uses_entry(body.index() as u32);
+        self.call_flush(args, &[callee], mue);
         self.mark_op(off, next);
         self.settle_seq();
         let ap = self.reg_list_slot(args);
@@ -4333,8 +4432,10 @@ impl Em<'_> {
         let gate_cl = self.fb.create_block();
         self.fb.ins().brif(cl_hit, gate_cl, &[], slow, &[]);
 
-        // ---- slow: the verbatim dynamic-call megashim ----
+        // ---- slow: the verbatim dynamic-call megashim — suspends the
+        // frame to the driver, so the whole window must be coherent ----
         self.fb.switch_to_block(slow);
+        self.flush_seq();
         let (regs, c, d, n) = (
             self.regs(),
             self.iconst(callee.index() as i64),
