@@ -410,9 +410,10 @@ struct Em<'a> {
     lyt: Layout,
     /// Specialization context for this body (empty for `compile`).
     spec: &'a BodySpec<'a>,
-    /// `regs[r]`'s entry observation — only for regs never re-seated (no
-    /// writers anywhere in the body), so the window slot provably still
-    /// holds the observed value; the frozen-table lookup key.
+    /// `regs[r]`'s entry observation — every reg that held one stable GC
+    /// payload at entry. Written regs are included: the emitted
+    /// payload-pointer guard catches a reseat, so `known` is only ever a
+    /// hint for the frozen-table lookup, never a proof.
     known: HashMap<u32, Obs>,
     /// The whole program — `CallDirect` needs the callee's `Chunk` (offset,
     /// regs, param mapping) to emit the inline frame push.
@@ -1052,15 +1053,17 @@ pub(crate) fn emit_body(
             _ => {}
         }
     }
-    // Regs that always held the *same* GC pointer at entry and are never
-    // re-seated — the frozen-table lookup key for baked reads.
-    let known: HashMap<u32, crate::Obs> = (0..nregs)
+    // Regs that always held the *same* GC pointer at entry — the
+    // frozen-table lookup key for baked reads. Written regs are included:
+    // the runtime payload-pointer guard catches a reseat, so guarded baked
+    // reads stay exact (`unguarded` additionally requires `!sh.written` —
+    // `Em::frozen_of` decides).
+    let known: HashMap<u32, Obs> = (0..nregs)
         .filter(|&r| {
             spec.facts
                 .entry
                 .get(r)
                 .is_some_and(|o| o.ptr != 0)
-                && !sh.written.contains(&(r as u32))
         })
         .map(|r| (r as u32, spec.facts.entry[r]))
         .collect();
@@ -3162,7 +3165,7 @@ impl Em<'_> {
         // compare chain; `Array`/`Seq`/`Instance` fold to a compile-time
         // `(base, len)` view. Both pointer-guard `regs[set]` (unless
         // `unguarded`) and fall into the generic dispatch on any miss.
-        if let Some((obs, fr)) = self.frozen_of(set.index() as u32) {
+        if let Some((obs, fr)) = self.site_frozen(off, set.index() as u32) {
             match fr.kind {
                 FrozenKind::Dict => {
                     let entries = Self::frozen_dict(obs.ptr);
@@ -3341,7 +3344,7 @@ impl Em<'_> {
         // Frozen receiver: `fields[slot]`/`store[slot]` resolved at compile
         // time — a pointer guard (unless `unguarded`) then constant stores.
         // A non-bakeable value keeps the whole site generic.
-        if let Some((obs, fr)) = self.frozen_of(src.index() as u32) {
+        if let Some((obs, fr)) = self.site_frozen(off, src.index() as u32) {
             let b = Self::frozen_slot(&fr, obs.ptr, slot as usize)
                 .and_then(|v| self.bake_of(v));
             if let Some(b) = b {
@@ -4300,11 +4303,39 @@ impl Em<'_> {
     // verifies `regs[r]` is that same object — tag + payload pointer —
     // unless the host opted out with `unguarded` (see `Frozen`).
 
+    /// `(obs, frozen)` for the receiver reg `r` of the op at byte offset
+    /// `off` — the site-observed payload first (the reg's value *at this
+    /// op*, which catches globals `LoadEntry`'d mid-body that `entry` facts
+    /// never see), then the `known` entry fallback for hand-built facts.
+    /// The payload-pointer guard stays on unless the host set `unguarded`
+    /// *and* the reg is never re-seated — see [`Frozen`].
+    fn site_frozen(&self, off: usize, r: u32) -> Option<(Obs, Frozen)> {
+        if let Some(o) = self.spec.facts.sites.get(&off) {
+            if o.ptr != 0 {
+                if let Some(f) = self.spec.frozen.get(&o.ptr) {
+                    let mut f = *f;
+                    if f.unguarded && self.sh.written.contains(&r) {
+                        f.unguarded = false;
+                    }
+                    return Some((*o, f));
+                }
+            }
+        }
+        self.frozen_of(r)
+    }
+
     /// `(obs, frozen)` for reg `r`, when it held one stable GC payload at
-    /// every entry, is never re-seated, and the host froze that payload.
+    /// every entry and the host froze that payload. `unguarded` freezes are
+    /// honored only for regs never re-seated — a written reg's slot no
+    /// longer provably holds the entry value, so it always pays the pointer
+    /// guard.
     fn frozen_of(&self, r: u32) -> Option<(Obs, Frozen)> {
         let o = *self.known.get(&r)?;
-        self.spec.frozen.get(&o.ptr).map(|f| (o, *f))
+        let mut f = *self.spec.frozen.get(&o.ptr)?;
+        if f.unguarded && self.sh.written.contains(&r) {
+            f.unguarded = false;
+        }
+        Some((o, f))
     }
 
     /// `(tag, payload offset)` `regs[r]` must satisfy for `fr` to apply to

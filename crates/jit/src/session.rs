@@ -19,7 +19,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use compile::Program;
+use compile::{Decode, Op, Program};
 use vm::Vm;
 use vm::bc::jit::{frame_base, frame_nregs, regs_ptr, step_at};
 use vm::bc::{
@@ -61,12 +61,31 @@ fn gc_addr<T>(g: Gc<'_, T>) -> usize {
     Gc::as_ptr(g) as usize
 }
 
+/// Fold one observation into the merge: first sighting takes it, later
+/// disagreements decay `tag → Mixed` / `ptr → 0`.
+fn merge(mo: &mut RegObs, o: Obs) {
+    if !mo.seen {
+        *mo = RegObs { seen: true, obs: o };
+        return;
+    }
+    if mo.obs.tag != o.tag {
+        mo.obs.tag = ObsTag::Mixed;
+    }
+    if mo.obs.ptr != o.ptr {
+        mo.obs.ptr = 0;
+    }
+}
+
 /// Observation accumulator behind the profiling shims.
 struct Profile {
     /// `entry[b][r]` — merged register observation for body `b`.
     entry: Vec<HashMap<u32, RegObs>>,
     /// `(caller body, caller resume ip)` → `callee body` → hit count.
     calls: HashMap<(u32, usize), HashMap<u32, u32>>,
+    /// `(body, op ip)` → merged observation of a `GetIndex`/`GetField`'s
+    /// receiver operand — mid-body values `entry` never sees (a global
+    /// `LoadEntry`'d into a reg still lands here).
+    sites: HashMap<(u32, usize), RegObs>,
     /// Fresh-entry count per body.
     counts: Vec<u64>,
 }
@@ -76,6 +95,7 @@ impl Profile {
         Profile {
             entry: vec![HashMap::new(); nbodies],
             calls: HashMap::new(),
+            sites: HashMap::new(),
             counts: vec![0; nbodies],
         }
     }
@@ -104,17 +124,7 @@ impl Profile {
             let m = self.entry.get_mut(b).unwrap();
             for r in 0..n {
                 let o = classify(*regs.add(base + r));
-                let mo = m.entry(r as u32).or_default();
-                if !mo.seen {
-                    *mo = RegObs { seen: true, obs: o };
-                } else {
-                    if mo.obs.tag != o.tag {
-                        mo.obs.tag = ObsTag::Mixed;
-                    }
-                    if mo.obs.ptr != o.ptr {
-                        mo.obs.ptr = 0;
-                    }
-                }
+                merge(m.entry(r as u32).or_default(), o);
             }
             // the caller's saved ip names the `Op::Call` site that got us
             // here — `(caller.chunk, caller.ip)` is the compile-time `next`
@@ -129,6 +139,38 @@ impl Profile {
                     .and_modify(|c| *c += 1)
                     .or_insert(1);
             }
+        }
+    }
+
+    /// Record the receiver operand of the op about to run — `GetIndex`/
+    /// `GetField` sites feed `BodyFacts::sites`. Runs *before* `step_at` so
+    /// the window still holds the operand; the op is decoded out of a
+    /// scratch `Decoder` sharing `code.bytes` (moved out and back — decode
+    /// itself never touches the live `ip`).
+    ///
+    /// SAFETY: same contract as [`record`](Self::record).
+    unsafe fn record_site<'gc>(
+        &mut self,
+        t: *const ThreadState<'gc>,
+        code: *mut Decoder,
+    ) {
+        unsafe {
+            let ip = (*code).ip;
+            let mut dec = Decoder {
+                bytes: std::mem::take(&mut (*code).bytes),
+                ip,
+            };
+            let op = Op::decode(&mut dec);
+            (*code).bytes = dec.bytes;
+            let r = match op {
+                Op::GetIndex { set, .. } => set.index(),
+                Op::GetField { src, .. } => src.index(),
+                _ => return,
+            };
+            let top = (*t).frames.last().unwrap();
+            let regs = regs_ptr(t as *mut ThreadState<'gc>);
+            let o = classify(*regs.add(top.base + r));
+            merge(self.sites.entry((top.chunk.index() as u32, ip)).or_default(), o);
         }
     }
 }
@@ -164,13 +206,14 @@ unsafe extern "C" fn prof_body<'gc>(
         let top = (*thread).frames.last().unwrap();
         let chs: &IdVec<BodyId, Chunk> = &*chunks;
         let fresh = (*code).ip == chs[top.chunk].offset;
-        if fresh {
-            PROFILING.with(|p| {
-                if let Some(prof) = &mut *p.borrow_mut() {
+        PROFILING.with(|p| {
+            if let Some(prof) = &mut *p.borrow_mut() {
+                if fresh {
                     prof.record(thread, chunks);
                 }
-            });
-        }
+                prof.record_site(thread, code);
+            }
+        });
         // the driver's own accounting for a `step` dispatch: one op each
         // from `fuel` and `ops_left`.
         *fuel -= 1;
@@ -186,7 +229,6 @@ unsafe extern "C" fn prof_body<'gc>(
 /// Obtain with [`JitSession::observe`], run the workload, then
 /// [`specialize`](Self::specialize) to swap in facts-specialized bodies.
 pub struct JitSession {
-    nbodies: usize,
     /// The specialized install — kept alive here; installed bodies are
     /// borrowed code memory.
     jit: Option<Jit>,
@@ -211,7 +253,7 @@ impl JitSession {
             Ok(())
         })?;
         vm.install_bc(vec![Some(prof_body as BodyFn); nbodies]);
-        Ok(JitSession { nbodies, jit: None })
+        Ok(JitSession { jit: None })
     }
 
     /// How many fresh entries body `b` has seen — for "recompile after N
@@ -251,6 +293,7 @@ impl JitSession {
                         f.bodies.push(BodyFacts {
                             entry,
                             calls: HashMap::new(),
+                            sites: HashMap::new(),
                         });
                         let _ = b;
                     }
@@ -260,6 +303,13 @@ impl JitSession {
                                 if let Some(bf) = f.bodies.get_mut(cb as usize) {
                                     bf.calls.insert(ip, callee);
                                 }
+                            }
+                        }
+                    }
+                    for (&(b, ip), ro) in &prof.sites {
+                        if ro.seen {
+                            if let Some(bf) = f.bodies.get_mut(b as usize) {
+                                bf.sites.insert(ip, ro.obs);
                             }
                         }
                     }

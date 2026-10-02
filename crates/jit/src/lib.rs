@@ -123,6 +123,12 @@ pub struct BodyFacts {
     /// `Val::Fn`/`Val::Closure` target. The emitter guards the callee's
     /// stored body index and calls it directly; misses run `mj_call_dyn`.
     pub calls: HashMap<usize, u32>,
+    /// `sites[ip]` — the merged observation of the *receiver operand* of the
+    /// `GetIndex`/`GetField` op at byte offset `ip`. Unlike `entry` this
+    /// sees mid-body values, so a global `LoadEntry`'d into a reg every call
+    /// still yields the container's stable payload pointer — the key
+    /// [`Facts::frozen`] bakes on.
+    pub sites: HashMap<usize, Obs>,
 }
 
 /// A GC-rooted container the host declares immutable for the lifetime of the
