@@ -145,16 +145,32 @@ fn bench(name: &str, bodies: fn() -> Vec<Option<mimas::vm::bc::BodyFn>>, rust_fn
             rust_best = rust_best.min(run_rust(rust_fn));
         }
     }
+    // Unselected lanes stay `Duration::MAX` — show them as `-` rather than a
+    // garbage ratio (MAX as f64 prints 18446744073709551616.000s).
+    let dur = |d: Duration| {
+        if d == Duration::MAX {
+            "-".to_string()
+        } else {
+            format!("{d:>9.3?}")
+        }
+    };
+    let ratio = |a: Duration, b: Duration| {
+        if a == Duration::MAX || b == Duration::MAX {
+            "-".to_string()
+        } else {
+            format!("x{:.2}", a.as_secs_f64() / b.as_secs_f64())
+        }
+    };
     println!(
-        "{name:>14}  vm {:>9.3?}  bc {:>9.3?} (x{:.2})  jit {:>9.3?} (x{:.2}, compile {:>9.3?})  rust {:>9.3?} (x{:.2} vs bc)",
-        vm_best,
-        bc_best,
-        vm_best.as_secs_f64() / bc_best.as_secs_f64(),
-        jit_best,
-        vm_best.as_secs_f64() / jit_best.as_secs_f64(),
-        jit_compile,
-        rust_best,
-        bc_best.as_secs_f64() / rust_best.as_secs_f64(),
+        "{name:>14}  vm {}  bc {} ({})  jit {} ({}, compile {})  rust {} ({} vs bc)",
+        dur(vm_best),
+        dur(bc_best),
+        ratio(vm_best, bc_best),
+        dur(jit_best),
+        ratio(vm_best, jit_best),
+        dur(jit_compile),
+        dur(rust_best),
+        ratio(bc_best, rust_best),
     );
 }
 
