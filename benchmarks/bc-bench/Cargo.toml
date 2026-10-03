@@ -13,6 +13,7 @@ jit = { package = "mimas-jit", path = "../../crates/jit" }
 [build-dependencies]
 mimas = { path = "../../crates/mimas" }
 bcgen = { package = "mimas-bcgen", path = "../../crates/bcgen" }
+rustgen = { path = "../../../host/rustgen" }
 
 [profile.release]
 lto = "thin"

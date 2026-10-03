@@ -353,6 +353,7 @@ fn to_str(n: f64) -> String {
 ///     print("a one in four chance");
 /// }
 /// ```
+#[effects(rng)]
 fn random<'gc>(ctx: Ctx<'gc>, len: f64) -> Result<f64, RtErr> {
     if len.is_nan() || len <= 0.0 {
         return Err(RtErr::InvalidArgument("random requires len > 0".into()));

@@ -11,6 +11,7 @@ use shared::{FileId, IdVec, Location, PactId, ParamId, TyNames};
 use crate::{
     Solver,
     components::{Adt, AdtFlags, AdtId, DecId, DecKind, Ty, TyExt, Variant, Vis},
+    grades::UseInfo,
 };
 
 pub struct Resolutions {
@@ -22,6 +23,23 @@ pub struct Resolutions {
     /// `px` param is `Any` in `node_dims` but `px` here.
     pub want_dims: IndexMap<NodeId, shared::units::Dim>,
     pub node_decs: IndexMap<NodeId, DecId>,
+    /// Read/write site counts per declaration -- the `{0,1,ω}` usage grades the
+    /// lint suite is built on (`Use::Never` is what "unused" warnings report on).
+    pub dec_uses: IndexMap<DecId, UseInfo>,
+    /// Inferred effect set per `fn` dec: the union of what its body can do, seeded by
+    /// `#[effects]` declarations on natives. `Fx::unknown()`-flagged sets carry
+    /// `Fx::UNAUDITED` -- something in the call chain couldn't be graded.
+    pub fn_effects: IndexMap<DecId, shared::Fx>,
+    /// Effect set of each file's top-level statements, keyed by the ast's name. Hosts
+    /// running peer pages gate on this: `fx.fits(granted)` or the code doesn't eval.
+    pub script_effects: IndexMap<String, shared::Fx>,
+    /// Per top-level statement: `(file name, site, inferred fx)` in source order.
+    /// Spliced `use`-includes share one file name -- the site's byte span is what
+    /// attributes each statement back to the include that wrote it.
+    pub script_segments: Vec<(String, shared::Location, shared::Fx)>,
+    /// Non-fatal diagnostics from the grades pass's lint suite. The solve succeeded;
+    /// these are severity-warning reports for the host to render.
+    pub warnings: Vec<miette::Report>,
     pub decs: IdVec<DecId, ResolvedDecl>,
     pub adts: IdVec<AdtId, ResolvedAdt>,
     pub pact_names: IdVec<PactId, String>,
@@ -386,6 +404,11 @@ impl From<Solver> for Resolutions {
             node_dims: solver.node_dims,
             want_dims: solver.want_dims,
             node_decs: solver.node_decs,
+            dec_uses: solver.dec_uses,
+            fn_effects: solver.fn_effects,
+            script_effects: solver.script_effects,
+            script_segments: solver.script_segments,
+            warnings: solver.warnings,
             decs: resolved_decs,
             adts: resolved_adts,
             pact_names,
@@ -398,5 +421,36 @@ impl From<Solver> for Resolutions {
             root,
             sources: solver.sources,
         }
+    }
+}
+
+/// What the grades pass learned about a load, handed to hosts deciding whether
+/// to run the code at all -- mobile-code proof-carrying, half one: the page's
+/// `Fx` is a checked property before a single bytecode executes.
+pub struct GradeAudit {
+    /// Each file's inferred top-level effect set, keyed by the file name the
+    /// caller gave `load_files`. `UNAUDITED`-flagged sets contain calls the
+    /// inference couldn't grade (unannotated natives, pact dispatch, closure
+    /// callees) -- treat them as "could do anything" when gating.
+    pub script_effects: IndexMap<String, shared::Fx>,
+    /// Per top-level statement: `(file name, site, inferred fx)` in source
+    /// order -- a spliced `use`-closure attributes each include back to its
+    /// byte range, so per-page verdicts exist even though the program is one file.
+    pub script_segments: Vec<(String, shared::Location, shared::Fx)>,
+    /// Lint-suite diagnostics (unused bindings/params, dead stores). Severity
+    /// warning; the load succeeded -- the host renders or surfaces these.
+    pub warnings: Vec<miette::Report>,
+}
+
+impl GradeAudit {
+    /// Every file whose effect set escapes `allowed` -- the gate verdict.
+    /// `fits` is deliberate about `UNAUDITED`: an ungraded file fits only when
+    /// the host's grant also carries the flag.
+    pub fn violations(&self, allowed: shared::Fx) -> Vec<(&str, shared::Fx)> {
+        self.script_effects
+            .iter()
+            .filter(|(_, fx)| !fx.fits(allowed))
+            .map(|(name, fx)| (name.as_str(), *fx))
+            .collect()
     }
 }

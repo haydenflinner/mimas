@@ -38,6 +38,7 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
 /// `from_xlsx("products.xlsx")` reads the first sheet; `from_xlsx(path, "Sheet2")` picks one
 /// by name. Sheet names, missing files, and non-xlsx data all raise.
 #[native]
+#[effects(io)]
 fn from_xlsx<'gc>(ctx: Ctx<'gc>, path: &str, sheet: Option<&str>) -> Raisable<vm::DataFrame<'gc>> {
     read_xlsx(path, sheet).map(|d| ctx.new_dataframe(d)).into()
 }
@@ -262,6 +263,7 @@ fn cell_text(d: &calamine::Data) -> String {
 /// unless `sheet` says otherwise); `df.to_xlsx(path, "Data")` names it. Returns `true` on
 /// success like `std::fs::write`. Sheet-name violations and I/O errors raise.
 #[native]
+#[effects(io)]
 fn to_xlsx<'gc>(
     _ctx: Ctx<'gc>,
     df: vm::DataFrame<'gc>,

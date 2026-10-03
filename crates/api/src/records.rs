@@ -1,4 +1,4 @@
-use shared::{AdtId, Literal, Ty, units::Dim};
+use shared::{AdtId, Fx, Literal, Ty, units::Dim};
 
 /// A per-native literal checker, submitted via `vm::api::NativeValidator` and joined by Rust
 /// path (same mechanism as `NativeDoc`). The solver calls it when *every* call argument is a
@@ -28,6 +28,10 @@ pub struct ApiFunction<C> {
     pub return_ty: Option<Ty>,
     /// Dimension of the return value, when it measures something.
     pub return_dim: Option<Dim>,
+    /// The native's declared side-effect footprint, from a `#[effects(...)]` submission
+    /// joined like `doc`. `None` = nobody said — effect inference treats the call as
+    /// `Fx::unknown()` so gating peer code fails closed.
+    pub effects: Option<Fx>,
     pub doc: String,
     pub validate: Option<LitValidator>,
     pub src: Option<NativeSrc>,
@@ -51,6 +55,8 @@ pub struct ApiMethod<C> {
     /// same way `doc` is joined. The solver reads this to reject mutating a collection while
     /// a `for` loop is iterating it.
     pub mutates_recv: bool,
+    /// See [`ApiFunction::effects`] — `None` fails closed in effect inference.
+    pub effects: Option<Fx>,
     pub doc: String,
     pub validate: Option<LitValidator>,
     pub src: Option<NativeSrc>,

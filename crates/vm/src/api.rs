@@ -1,12 +1,11 @@
-use std::any::TypeId;
-use std::rc::Rc;
+use std::{any::TypeId, rc::Rc};
 
 use api::{
     AdtBinding, ApiAdt, ApiAdtKind, ApiConstant, ApiFunction, ApiMethod, ApiVariant, Intrinsic,
     Library, NativeId, Registry,
 };
 use compile::{BinOp, UnaryOp};
-use shared::{Literal, Ty};
+use shared::{Fx, Literal, Ty};
 
 use crate::{
     RtErr, RtResult, Val,
@@ -115,6 +114,21 @@ pub struct NativeSrc {
 
 inventory::collect!(NativeSrc);
 
+/// A native's declared side-effect footprint, submitted via [`inventory`] and keyed by the
+/// item's full Rust path exactly like [`NativeMutates`]. `#[effects(net, io)]` on a
+/// `#[native]`/`#[mimas]` fn emits this; the install path joins it onto
+/// [`ApiFunction::effects`]/[`ApiMethod::effects`]. `effects` packs [`shared::Fx`] bits.
+///
+/// Subject to the same link-pruning footgun as [`NativeMeta`]: a pruned submission degrades
+/// to `effects: None`, which inference reads as `Fx::unknown()` -- fails closed, never
+/// wrong.
+pub struct NativeEffects {
+    pub path: &'static str,
+    pub effects: u8,
+}
+
+inventory::collect!(NativeEffects);
+
 pub type NativeFnReg = for<'a, 'gc> fn(&mut Api<'a, 'gc>);
 
 pub struct Api<'a, 'gc> {
@@ -159,6 +173,13 @@ static VALIDATOR_BY_PATH: std::sync::LazyLock<
         .map(|v| (v.path, v.validate))
         .collect()
 });
+static EFFECTS_BY_PATH: std::sync::LazyLock<std::collections::HashMap<&'static str, Fx>> =
+    std::sync::LazyLock::new(|| {
+        inventory::iter::<NativeEffects>
+            .into_iter()
+            .map(|e| (e.path, Fx::from_bits_truncate(e.effects)))
+            .collect()
+    });
 
 /// Look up what `#[native]`/`#[mimas]` submitted for the fn at `path` (`type_name_of_val(&f)`)
 /// and pair `arity` slots with their declared names, dropping the `skip` leading ones the arity
@@ -197,6 +218,12 @@ fn mutates_recv(path: &str) -> bool {
 /// The literal-call validator for `path` if one was submitted -- see [`NativeValidator`].
 fn validator_for(path: &str) -> Option<api::LitValidator> {
     VALIDATOR_BY_PATH.get(path).copied()
+}
+
+/// The declared effect set for `path` if one was submitted -- see [`NativeEffects`]. `None`
+/// means unannotated: effect inference reads the call as `Fx::unknown()`.
+fn effects_for(path: &str) -> Option<Fx> {
+    EFFECTS_BY_PATH.get(path).copied()
 }
 
 impl<'a, 'gc> Api<'a, 'gc> {
@@ -422,6 +449,8 @@ impl<'a, 'gc> Api<'a, 'gc> {
             return_dim: None,
             takes_self: false,
             mutates_recv: false,
+            // described fns have no Rust path to join effects metadata on -- unaudited
+            effects: None,
             doc: String::new(),
             validate: None,
             src: None,
@@ -528,6 +557,8 @@ impl<'b, 'a, 'gc> ModuleApi<'b, 'a, 'gc> {
             parameters,
             return_ty: Some(return_ty),
             return_dim: None,
+            // described fns have no Rust path to join effects metadata on -- unaudited
+            effects: None,
             doc: String::new(),
             validate: None,
             src: None,
@@ -606,6 +637,7 @@ macro_rules! impl_into_fn {
                     param_names,
                     return_ty,
                     return_dim,
+                    effects: effects_for(std::any::type_name_of_val(&self)),
                     doc,
                     validate: validator_for(std::any::type_name_of_val(&self)),
                     src,
@@ -646,6 +678,7 @@ macro_rules! impl_into_fn {
                     return_dim,
                     takes_self: false,
                     mutates_recv: false,
+                    effects: effects_for(std::any::type_name_of_val(&self)),
                     doc,
                     validate: validator_for(std::any::type_name_of_val(&self)),
                     src,
@@ -713,6 +746,7 @@ macro_rules! impl_into_method {
                     return_dim,
                     takes_self: true,
                     mutates_recv: mutates_recv(std::any::type_name_of_val(&self)),
+                    effects: effects_for(std::any::type_name_of_val(&self)),
                     doc,
                     validate: validator_for(std::any::type_name_of_val(&self)),
                     src: src_for(std::any::type_name_of_val(&self)),

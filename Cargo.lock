@@ -4354,6 +4354,7 @@ dependencies = [
 name = "mimas-shared"
 version = "0.2.0"
 dependencies = [
+ "bitflags 1.3.2",
  "chompy",
  "indexmap 2.14.0",
  "itertools 0.10.5",

@@ -75,6 +75,7 @@ fn to_str<'gc>(n: i64) -> String {
 }
 
 #[native]
+#[effects(rng)]
 /// Returns a random `int` that is at least `0` and less than `len`. That makes
 /// `int::random(xs.len())` a random index into `xs`.
 ///

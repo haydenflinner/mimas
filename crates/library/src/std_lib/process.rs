@@ -24,6 +24,7 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
 /// let sorted = process::run("sort", [], "b\na\n")!;       // "a\nb\n"
 /// ```
 #[native]
+#[effects(io)]
 fn run<'gc>(cmd: &str, args: Vec<&str>, stdin: Option<&str>) -> Raisable<String> {
     let inner = || -> Result<String, String> {
         let mut command = std::process::Command::new(cmd);
@@ -80,6 +81,7 @@ fn run<'gc>(cmd: &str, args: Vec<&str>, stdin: Option<&str>) -> Raisable<String>
 /// }
 /// ```
 #[native]
+#[effects(io)]
 fn run_attached<'gc>(cmd: &str, args: Vec<&str>) -> Raisable<i64> {
     let inner = || -> Result<i64, String> {
         let status = std::process::Command::new(cmd)

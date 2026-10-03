@@ -136,6 +136,7 @@ enum DarklyLayer {
 /// region. Pixels live in a side map rather than on the tree because a `DarklyLayer` value
 /// can't hold one directly (see the comment on `DarklyLayer::Raster`'s `id` field).
 #[native]
+#[effects(io)]
 fn open<'gc>(
     ctx: Ctx<'gc>,
     path: &str,
