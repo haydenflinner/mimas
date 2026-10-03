@@ -33,6 +33,7 @@ use compile::{AccessKind, BlockTarget, Constant, Op, Program, UnaryOp};
 use cranelift_codegen::Context;
 use cranelift_codegen::entity::EntityRef;
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
+use cranelift_codegen::ir::StackSlot;
 use cranelift_codegen::ir::stackslot::{StackSlotData, StackSlotKind};
 use cranelift_codegen::ir::{
     self, AbiParam, Block, FuncRef, InstBuilder, MemFlagsData, Signature, Value, types,
@@ -600,9 +601,23 @@ struct Ne<'a, 'b> {
     /// `vptrm` is the stricter `flag == 0` level — a write hit requires
     /// it (a read commit at `flag >= 0` can't justify skipping the
     /// write-borrow check); write commits set both, so a `vptr` hit also
-    /// accepts write-verified objects.
-    vptr: Vec<(u32, Variable)>,
-    vptrm: Vec<(u32, Variable)>,
+    /// accepts write-verified objects. The pointers live in `vss`, a
+    /// stack slot array indexed by the `i32` entries here — keeping them
+    /// out of SSA vars is one load per check but spares the regalloc a
+    /// live-across-loops value per entry (big bodies already spill).
+    vptr: Vec<(u32, i32)>,
+    vptrm: Vec<(u32, i32)>,
+    vss: StackSlot,
+    /// Window-shadow vars: `pend[r]` mirrors the first two qwords of
+    /// `r`'s window slot — the tag lives in `q0`'s low byte, the
+    /// payload/`Gc` ptr in `q1` (the layout gate pins `val_tag == 0`,
+    /// `val_pay == 8` and every heap payload to offset 8). Only regs
+    /// written *exclusively* by element reads (`GetIndex`/`GetField`
+    /// dsts) or `Move` are tracked: those write through to the slot and
+    /// refresh the shadow, so reads tag-check `q0` and use `q1` without
+    /// touching the window at all. Helper-written dsts (a read's slow
+    /// path) reload the shadow.
+    pend: Vec<(u32, Variable, Variable)>,
     bcn: Variable,
     bcn0: Variable,
     etrip: Block,
@@ -740,9 +755,37 @@ impl<'a, 'b> Ne<'a, 'b> {
     /// window-backed regs load the slot's tag, check it against `k` (miss →
     /// suspend at op `i`, where the framed lane reads the real `Val`), then
     /// load the payload — `F64` for floats, `u8→i64` for bools, `i64` else.
+    /// `pend`-tracked regs run the same check on the shadow instead.
     fn rv(&mut self, i: usize, r: compile::Reg, k: NK) -> Value {
         if !self.wb(r.index()) {
             return self.fb.use_var(self.vars[r.index()]);
+        }
+        if let Some((v0, v1)) = self.pvars(r.index()) {
+            let q0 = self.fb.use_var(v0);
+            let t = self.q0_tag(q0);
+            let want = self.tconst(self.ktag(k));
+            let hit = self.fb.ins().icmp(IntCC::Equal, t, want);
+            let okb = self.fb.create_block();
+            let cpb = self.cp_block(i);
+            self.fb.ins().brif(hit, okb, &[], cpb, &[]);
+            self.fb.switch_to_block(okb);
+            return match k {
+                NK::Float => {
+                    let q1 = self.fb.use_var(v1);
+                    self.fb.ins().bitcast(F64, MemFlagsData::new(), q1)
+                }
+                NK::Bool => {
+                    let (w, sh) = if self.lyt.bool_pay < 8 {
+                        (q0, self.lyt.bool_pay as i64)
+                    } else {
+                        (self.fb.use_var(v1), self.lyt.bool_pay as i64 - 8)
+                    };
+                    let s = self.fb.ins().ushr_imm_s(w, sh * 8);
+                    self.fb.ins().band_imm_u(s, 0xff)
+                }
+                NK::Null => self.iconst(0),
+                _ => self.fb.use_var(v1),
+            };
         }
         let regs0 = self.fb.use_var(self.regs0.expect("windowed plan"));
         let roff = (r.index() as i64) * self.lyt.val_size as i64;
@@ -787,6 +830,12 @@ impl<'a, 'b> Ne<'a, 'b> {
                 _ => {
                     self.fb.ins().store(tfw(), v, a, self.lyt.val_pay as i32);
                 }
+            }
+            // A `pend` reg shouldn't be written this way (the scan only
+            // shadows element-read dsts), but reload it anyway so an
+            // analysis gap can't desync the shadow.
+            if self.pvars(r.index()).is_some() {
+                self.pend_reload(r);
             }
             return;
         }
@@ -936,6 +985,7 @@ impl<'a, 'b> Ne<'a, 'b> {
             cargs.push(self.rv(i, *a, NK::Int));
         }
         let fr = self.nrefs[&tb];
+        self.spill_pend();
         let inst = self.fb.ins().call(fr, &cargs);
         let st = self.fb.inst_results(inst)[0];
         let v = self.fb.inst_results(inst)[1];
@@ -1087,6 +1137,7 @@ impl<'a, 'b> Ne<'a, 'b> {
         self.fb
             .ins()
             .store(tfs(), o, cp, self.lyt.code_ip as i32);
+        self.spill_pend();
         let op = self.out_p();
         self.fb
             .ins()
@@ -1208,6 +1259,7 @@ impl<'a, 'b> Ne<'a, 'b> {
     }
 
     fn hcall(&mut self, h: H, args: &[Value]) -> Option<Value> {
+        self.spill_pend();
         let inst = self.fb.ins().call(self.hrefs[h as usize], args);
         self.fb.inst_results(inst).first().copied()
     }
@@ -1396,6 +1448,16 @@ impl<'a, 'b> Ne<'a, 'b> {
                 _ => None,
             };
         }
+        if let Some((v0, v1)) = self.pvars(r.index()) {
+            let q0 = self.fb.use_var(v0);
+            let t = self.q0_tag(q0);
+            let want = self.tconst(self.lyt.t_int);
+            let hit = self.fb.ins().icmp(IntCC::Equal, t, want);
+            let okb = self.fb.create_block();
+            self.fb.ins().brif(hit, okb, &[], slow, &[]);
+            self.fb.switch_to_block(okb);
+            return Some(self.fb.use_var(v1));
+        }
         let a = self.wslot(r);
         let tag = self.ld_tag(a);
         let want = self.tconst(self.lyt.t_int);
@@ -1410,12 +1472,13 @@ impl<'a, 'b> Ne<'a, 'b> {
     /// Mutable verifies also record `vptrm`.
     fn commit(&mut self, c: Option<Commit>) {
         let Some(c) = c else { return };
-        if let Some(&(_, gv)) = self.vptr.iter().find(|(r, _)| *r == c.reg) {
-            self.fb.def_var(gv, c.gc);
+        let ss = self.vss;
+        if let Some(&(_, off)) = self.vptr.iter().find(|(r, _)| *r == c.reg) {
+            self.fb.ins().stack_store(I64, c.gc, ss, off);
         }
         if c.mutable {
-            if let Some(&(_, gv)) = self.vptrm.iter().find(|(r, _)| *r == c.reg) {
-                self.fb.def_var(gv, c.gc);
+            if let Some(&(_, off)) = self.vptrm.iter().find(|(r, _)| *r == c.reg) {
+                self.fb.ins().stack_store(I64, c.gc, ss, off);
             }
         }
     }
@@ -1436,14 +1499,12 @@ impl<'a, 'b> Ne<'a, 'b> {
     /// `flag == 0` level. `None` when `r` is uncached.
     fn vhit(&mut self, r: compile::Reg, gc: Value, mutable: bool) -> Option<Value> {
         let reg = r.index() as u32;
-        let v = if mutable {
-            let &(_, v) = self.vptrm.iter().find(|(k, _)| *k == reg)?;
-            v
+        let off = if mutable {
+            self.vptrm.iter().find(|(k, _)| *k == reg)?.1
         } else {
-            let &(_, v) = self.vptr.iter().find(|(k, _)| *k == reg)?;
-            v
+            self.vptr.iter().find(|(k, _)| *k == reg)?.1
         };
-        let cv = self.fb.use_var(v);
+        let cv = self.fb.ins().stack_load(I64, I64, self.vss, off);
         Some(self.fb.ins().icmp(IntCC::Equal, gc, cv))
     }
 
@@ -1475,16 +1536,17 @@ impl<'a, 'b> Ne<'a, 'b> {
             return;
         }
         let z = self.iconst(0);
+        let ss = self.vss;
         for i in 0..self.vptr.len() {
-            let (r, v) = self.vptr[i];
+            let (r, off) = self.vptr[i];
             if r != keep {
-                self.fb.def_var(v, z);
+                self.fb.ins().stack_store(I64, z, ss, off);
             }
         }
         for i in 0..self.vptrm.len() {
-            let (r, v) = self.vptrm[i];
+            let (r, off) = self.vptrm[i];
             if r != keep {
-                self.fb.def_var(v, z);
+                self.fb.ins().stack_store(I64, z, ss, off);
             }
         }
     }
@@ -1498,6 +1560,12 @@ impl<'a, 'b> Ne<'a, 'b> {
                 self.iconst8(1)
             }
             _ => {
+                if let Some((v0, _)) = self.pvars(value.index()) {
+                    let q0 = self.fb.use_var(v0);
+                    let m = (1u64 << (self.lyt.tag_size * 8)) - 1;
+                    let t = self.fb.ins().band_imm_u(q0, m as i64);
+                    return self.is_non_gc_tag(t);
+                }
                 let va = self.wslot(value);
                 let vt = self.ld_tag64(va);
                 self.is_non_gc_tag(vt)
@@ -1505,15 +1573,117 @@ impl<'a, 'b> Ne<'a, 'b> {
         }
     }
 
-    /// `*da = *ea` — a `Val` copy for the receiver-cache hit path.
+    /// `(q0var, q1var)` of `r`'s window shadow, when `pend` tracks it.
+    fn pvars(&self, r: usize) -> Option<(Variable, Variable)> {
+        let reg = r as u32;
+        self.pend
+            .iter()
+            .find(|(k, ..)| *k == reg)
+            .map(|(_, a, b)| (*a, *b))
+    }
+
+    /// Bit `r` of the `wrote` mask — set by every shadow write so
+    /// [`spill_pend`](Self::spill_pend) syncs only regs written on this
+    /// dynamic path (an unwritten reg's slot still holds its arg/`Null`).
+    fn mark_wrote(&mut self, r: usize) {
+        if let Some(wv) = self.wrote {
+            let w = self.fb.use_var(wv);
+            let w2 = self.fb.ins().bor_imm_u(w, (1u64 << r) as i64);
+            self.fb.def_var(wv, w2);
+        }
+    }
+
+    /// Sync every written `pend` shadow to its window slot. Fast-path
+    /// writes update only the shadow, so this must run before any call
+    /// (helpers read operand slots, the GC traces `regs` for roots) and
+    /// before any exit to the framed lane. All sites are cold; the
+    /// `wrote` gate keeps unwritten regs' arg/`Null` slots untouched.
+    fn spill_pend(&mut self) {
+        if self.pend.is_empty() {
+            return;
+        }
+        let wv = self.wrote.expect("pend body has a wrote mask");
+        let regs0 = self.fb.use_var(self.regs0.expect("windowed"));
+        let vs = self.lyt.val_size as i64;
+        for j in 0..self.pend.len() {
+            let (r, v0, v1) = self.pend[j];
+            let w = self.fb.use_var(wv);
+            let hit = self.fb.ins().band_imm_u(w, (1u64 << r) as i64);
+            let spillb = self.fb.create_block();
+            let skipb = self.fb.create_block();
+            self.fb.ins().brif(hit, spillb, &[], skipb, &[]);
+            self.fb.switch_to_block(spillb);
+            let a = self.fb.ins().iadd_imm_s(regs0, (r as i64) * vs);
+            let q0 = self.fb.use_var(v0);
+            let q1 = self.fb.use_var(v1);
+            self.fb.ins().store(tfw(), q0, a, 0);
+            self.fb.ins().store(tfw(), q1, a, 8);
+            self.fb.ins().jump(skipb, &[]);
+            self.fb.switch_to_block(skipb);
+        }
+    }
+
+    /// The tag (tty-typed) held in `q0`, the window's first qword —
+    /// `pend` bodies pin `val_tag == 0`, so it's `q0`'s low bytes.
+    fn q0_tag(&mut self, q0: Value) -> Value {
+        if self.lyt.tag_size < 8 {
+            let ty = self.tty();
+            self.fb.ins().ireduce(ty, q0)
+        } else {
+            q0
+        }
+    }
+
+    /// A receiver's tag — the shadow when `r` is `pend`-tracked, else a
+    /// window-slot load.
+    fn prtag(&mut self, r: compile::Reg) -> Value {
+        if let Some((v0, _)) = self.pvars(r.index()) {
+            let q0 = self.fb.use_var(v0);
+            return self.q0_tag(q0);
+        }
+        let a = self.wslot(r);
+        self.ld_tag(a)
+    }
+
+    /// A receiver's `Gc` payload — the shadow's `q1` (the `*_pay`
+    /// offsets all equal `val_pay` under the `pend` gate), else a load.
+    fn pgc(&mut self, r: compile::Reg) -> Value {
+        if let Some((_, v1)) = self.pvars(r.index()) {
+            return self.fb.use_var(v1);
+        }
+        let a = self.wslot(r);
+        self.fb
+            .ins()
+            .load(I64, tfw(), a, self.lyt.val_pay as i32)
+    }
+
+    /// Refresh `dst`'s shadow after a window write whose qwords aren't
+    /// in hand — `q0`/`q1` reload from the slot.
+    fn pend_reload(&mut self, dst: compile::Reg) {
+        let Some((v0, v1)) = self.pvars(dst.index()) else {
+            return;
+        };
+        let a = self.wslot(dst);
+        let q0 = self.fb.ins().load(I64, tfw(), a, 0);
+        let q1 = self.fb.ins().load(I64, tfw(), a, 8);
+        self.fb.def_var(v0, q0);
+        self.fb.def_var(v1, q1);
+    }
+
+    /// `*da = *ea` — a `Val` copy for the receiver-cache hit path. A
+    /// `pend` dst's window store is skipped — the shadow is authoritative
+    /// and [`spill_pend`](Self::spill_pend) syncs it on cold exits.
     fn n_val_copy(&mut self, i: usize, da: Value, ea: Value, fwd: Option<compile::Reg>) {
+        let pv = fwd.and_then(|d| self.pvars(d.index()));
         let mut q = [None; 2];
         for w in (0..self.lyt.val_size).step_by(8) {
             let v = self.fb.ins().load(I64, tfel(), ea, w as i32);
             if w < 16 {
                 q[w / 8] = Some(v);
             }
-            self.fb.ins().store(tfw(), v, da, w as i32);
+            if pv.is_none() {
+                self.fb.ins().store(tfw(), v, da, w as i32);
+            }
         }
         self.forward_commit(fwd, q[0], q[1]);
         let nb = self.next(i);
@@ -1521,16 +1691,22 @@ impl<'a, 'b> Ne<'a, 'b> {
     }
 
     /// `dst` just received a fresh `Val` (`q0`/`q1` = its two qwords) —
-    /// if it's an instance with a clean borrow flag, pre-commit
-    /// `vptr[dst]` so following field ops on it hit without
-    /// re-verifying (the `other = balls[j]` shape). `fwd` is `Some`
-    /// only when `dst` has a cache entry.
+    /// refresh its `pend` shadow when tracked, and if it's an instance
+    /// with a clean borrow flag pre-commit `vptr[dst]` so following
+    /// field ops on it hit without re-verifying (the `other = balls[j]`
+    /// shape). `fwd` is `Some` only when `dst` has a cache or shadow
+    /// entry.
     fn forward_commit(&mut self, fwd: Option<compile::Reg>, q0: Option<Value>, q1: Option<Value>) {
         let (Some(dst), Some(q0), Some(q1)) = (fwd, q0, q1) else {
             return;
         };
+        if let Some((v0, v1)) = self.pvars(dst.index()) {
+            self.fb.def_var(v0, q0);
+            self.fb.def_var(v1, q1);
+            self.mark_wrote(dst.index());
+        }
         let reg = dst.index() as u32;
-        let Some(&(_, vv)) = self.vptr.iter().find(|(k, _)| *k == reg) else {
+        let Some(&(_, off)) = self.vptr.iter().find(|(k, _)| *k == reg) else {
             return;
         };
         let t = self.fb.ins().ireduce(I8, q0);
@@ -1542,22 +1718,31 @@ impl<'a, 'b> Ne<'a, 'b> {
         let skip = self.fb.create_block();
         self.fb.ins().brif(ok, cmt, &[], skip, &[]);
         self.fb.switch_to_block(cmt);
-        self.fb.def_var(vv, q1);
+        let vss = self.vss;
+        self.fb.ins().stack_store(I64, q1, vss, off);
         self.fb.ins().jump(skip, &[]);
         self.fb.switch_to_block(skip);
     }
 
-    /// `Some(dst)` when `dst` has a `vptr` entry — `forward_commit`
-    /// target filter.
+    /// `Some(dst)` when post-read work exists for `dst` — a `vptr`
+    /// forward-commit and/or a `pend` shadow refresh.
     fn fwd_dst(&self, dst: compile::Reg) -> Option<compile::Reg> {
         let reg = dst.index() as u32;
-        self.vptr.iter().any(|(k, _)| *k == reg).then_some(dst)
+        let has = self.vptr.iter().any(|(k, _)| *k == reg)
+            || self.pend.iter().any(|(k, ..)| *k == reg);
+        has.then_some(dst)
     }
 
     /// `*ea = *sa` — a `Val` store for the receiver-cache hit path.
-    fn n_val_store(&mut self, i: usize, sa: Value, ea: Value) {
+    /// A `pend`-tracked `vreg` supplies the shadow instead of the slot.
+    fn n_val_store(&mut self, i: usize, sa: Value, vreg: compile::Reg, ea: Value) {
+        let pv = self.pvars(vreg.index());
         for w in (0..self.lyt.val_size).step_by(8) {
-            let v = self.fb.ins().load(I64, tfw(), sa, w as i32);
+            let v = match (pv, w) {
+                (Some((v0, _)), 0) => self.fb.use_var(v0),
+                (Some((_, v1)), 8) => self.fb.use_var(v1),
+                _ => self.fb.ins().load(I64, tfw(), sa, w as i32),
+            };
             self.fb.ins().store(tfel(), v, ea, w as i32);
         }
         let nb = self.next(i);
@@ -1586,6 +1771,7 @@ impl<'a, 'b> Ne<'a, 'b> {
         self.fb.ins().brif(k, good, &[], slow, &[]);
         self.fb.switch_to_block(good);
         self.commit(com);
+        let pv = fwd.and_then(|d| self.pvars(d.index()));
         let vs = self.lyt.val_size as i64;
         let off = self.fb.ins().imul_imm_s(slot, vs);
         let ea = self.fb.ins().iadd(data, off);
@@ -1595,7 +1781,9 @@ impl<'a, 'b> Ne<'a, 'b> {
             if w < 16 {
                 q[w / 8] = Some(v);
             }
-            self.fb.ins().store(tfw(), v, da, w as i32);
+            if pv.is_none() {
+                self.fb.ins().store(tfw(), v, da, w as i32);
+            }
         }
         self.forward_commit(fwd, q[0], q[1]);
         let nb = self.next(i);
@@ -1603,7 +1791,8 @@ impl<'a, 'b> Ne<'a, 'b> {
     }
 
     /// `*da = Int|Float(data[slot])` — a raw `i64`/`f64` load boxed into
-    /// the dst's window slot under `pre && slot < len`.
+    /// the dst's window slot under `pre && slot < len`. `fwd` carries
+    /// `dst` for the `pend` shadow refresh (the boxed tag + payload).
     #[allow(clippy::too_many_arguments)]
     fn n_read_prim(
         &mut self,
@@ -1616,6 +1805,7 @@ impl<'a, 'b> Ne<'a, 'b> {
         is_int: bool,
         com: Option<Commit>,
         slow: Block,
+        fwd: Option<compile::Reg>,
     ) {
         let inb = self.fb.ins().icmp(IntCC::UnsignedLessThan, slot, len);
         let k = self.fb.ins().band(pre, inb);
@@ -1633,18 +1823,37 @@ impl<'a, 'b> Ne<'a, 'b> {
             self.lyt.t_float
         };
         let tv = self.tconst(tag);
-        self.fb.ins().store(tfw(), tv, da, self.lyt.val_tag as i32);
-        self.fb.ins().store(tfw(), v, da, self.lyt.val_pay as i32);
+        let pd = fwd.filter(|d| self.pvars(d.index()).is_some());
+        if pd.is_none() {
+            self.fb.ins().store(tfw(), tv, da, self.lyt.val_tag as i32);
+            self.fb.ins().store(tfw(), v, da, self.lyt.val_pay as i32);
+        }
+        if let Some((v0, v1)) = pd.and_then(|d| self.pvars(d.index())) {
+            // `q0`'s high bytes don't mirror the slot — only the tag byte
+            // and `q1` are ever consumed, and both are exact.
+            let q0 = self.fb.ins().uextend(I64, tv);
+            let q1 = if is_int {
+                v
+            } else {
+                self.fb.ins().bitcast(I64, MemFlagsData::new(), v)
+            };
+            self.fb.def_var(v0, q0);
+            self.fb.def_var(v1, q1);
+            if let Some(d) = pd {
+                self.mark_wrote(d.index());
+            }
+        }
         let nb = self.next(i);
         self.fb.ins().jump(nb, &[]);
     }
 
     /// `data[slot] = *sa` — a `Val` copy into the element store under
-    /// `pre && slot < len`.
+    /// `pre && slot < len`. A `pend`-tracked `vreg` supplies the shadow.
     fn n_write_elem(
         &mut self,
         i: usize,
         sa: Value,
+        vreg: compile::Reg,
         slot: Value,
         len: Value,
         data: Value,
@@ -1658,11 +1867,16 @@ impl<'a, 'b> Ne<'a, 'b> {
         self.fb.ins().brif(k, good, &[], slow, &[]);
         self.fb.switch_to_block(good);
         self.commit(com);
+        let pv = self.pvars(vreg.index());
         let vs = self.lyt.val_size as i64;
         let off = self.fb.ins().imul_imm_s(slot, vs);
         let ea = self.fb.ins().iadd(data, off);
         for w in (0..self.lyt.val_size).step_by(8) {
-            let v = self.fb.ins().load(I64, tfw(), sa, w as i32);
+            let v = match (pv, w) {
+                (Some((v0, _)), 0) => self.fb.use_var(v0),
+                (Some((_, v1)), 8) => self.fb.use_var(v1),
+                _ => self.fb.ins().load(I64, tfw(), sa, w as i32),
+            };
             self.fb.ins().store(tfel(), v, ea, w as i32);
         }
         let nb = self.next(i);
@@ -1735,7 +1949,7 @@ impl<'a, 'b> Ne<'a, 'b> {
                 gc,
                 (self.lyt.rl_seq + self.lyt.as_ints_vec + self.lyt.vec_len) as i32,
             );
-            self.n_read_prim(i, da, slot, vl, vp, fok, true, com, slow);
+            self.n_read_prim(i, da, slot, vl, vp, fok, true, com, slow, fwd);
         }
         self.fb.switch_to_block(noti);
         let wf = self.aconst(self.lyt.as_floats);
@@ -1757,7 +1971,7 @@ impl<'a, 'b> Ne<'a, 'b> {
                 gc,
                 (self.lyt.rl_seq + self.lyt.as_floats_vec + self.lyt.vec_len) as i32,
             );
-            self.n_read_prim(i, da, slot, vl, vp, fok, false, com, slow);
+            self.n_read_prim(i, da, slot, vl, vp, fok, false, com, slow, fwd);
         }
         self.fb.switch_to_block(notf);
         let wv = self.aconst(self.lyt.as_vals);
@@ -1780,13 +1994,15 @@ impl<'a, 'b> Ne<'a, 'b> {
     /// Typed-array write tail — `Ints`/`Floats` take the matching scalar,
     /// `Vals` takes a whole non-Gc `Val`; everything else → `slow` (see
     /// `emit::seq_write`). `fok` is the seq's write-borrow check — a
-    /// constant `1` on a verified-receiver hit.
+    /// constant `1` on a verified-receiver hit. `value` supplies the
+    /// stored `Val`'s tag (`va` is its window slot).
     fn n_seq_write(
         &mut self,
         i: usize,
         slot: Value,
         gc: Value,
         va: Value,
+        value: compile::Reg,
         fok: Value,
         com: Option<Commit>,
         slow: Block,
@@ -1796,7 +2012,7 @@ impl<'a, 'b> Ne<'a, 'b> {
             .fb
             .ins()
             .load(aty, tfhd(), gc, (self.lyt.rl_seq + self.lyt.as_tag) as i32);
-        let vt = self.ld_tag(va);
+        let vt = self.prtag(value);
         let wi = self.aconst(self.lyt.as_ints);
         let isints = self.fb.ins().icmp(IntCC::Equal, stag, wi);
         let intsb = self.fb.create_block();
@@ -1819,7 +2035,10 @@ impl<'a, 'b> Ne<'a, 'b> {
                 gc,
                 (self.lyt.rl_seq + self.lyt.as_ints_vec + self.lyt.vec_len) as i32,
             );
-            let xv = self.fb.ins().load(I64, tfw(), va, self.lyt.val_pay as i32);
+            let xv = match self.pvars(value.index()) {
+                Some((_, v1)) => self.fb.use_var(v1),
+                None => self.fb.ins().load(I64, tfw(), va, self.lyt.val_pay as i32),
+            };
             self.n_write_prim(i, xv, slot, vl, vp, pre, com, slow);
         }
         self.fb.switch_to_block(noti);
@@ -1845,7 +2064,13 @@ impl<'a, 'b> Ne<'a, 'b> {
                 gc,
                 (self.lyt.rl_seq + self.lyt.as_floats_vec + self.lyt.vec_len) as i32,
             );
-            let xv = self.fb.ins().load(F64, tfw(), va, self.lyt.val_pay as i32);
+            let xv = match self.pvars(value.index()) {
+                Some((_, v1)) => {
+                    let q = self.fb.use_var(v1);
+                    self.fb.ins().bitcast(F64, MemFlagsData::new(), q)
+                }
+                None => self.fb.ins().load(F64, tfw(), va, self.lyt.val_pay as i32),
+            };
             self.n_write_prim(i, xv, slot, vl, vp, pre, com, slow);
         }
         self.fb.switch_to_block(notf);
@@ -1860,7 +2085,11 @@ impl<'a, 'b> Ne<'a, 'b> {
                 .ins()
                 .load(I64, tfhd(), gc, (self.lyt.rl_seq + self.lyt.as_vals_arr) as i32);
             let fok2 = self.borrow_ok(arr, self.lyt.rl_flag, true);
-            let vt64 = self.ld_tag64(va);
+            let vt64 = if self.lyt.tag_size < 8 {
+                self.fb.ins().uextend(I64, vt)
+            } else {
+                vt
+            };
             let ngc = self.is_non_gc_tag(vt64);
             let pre = self.fb.ins().band(fok, fok2);
             let pre = self.fb.ins().band(pre, ngc);
@@ -1872,7 +2101,7 @@ impl<'a, 'b> Ne<'a, 'b> {
                 .fb
                 .ins()
                 .load(I64, tfhd(), arr, (self.lyt.rl_vec + self.lyt.vec_len) as i32);
-            self.n_write_elem(i, va, slot, vl, vp, pre, com, slow);
+            self.n_write_elem(i, va, value, slot, vl, vp, pre, com, slow);
         }
     }
 
@@ -1904,14 +2133,32 @@ impl<'a, 'b> Ne<'a, 'b> {
                     (true, true) => {
                         // Raw `Val` copy, slot → slot — every payload byte,
                         // not just the union slot: `Bool`/`Fn` payloads sit
-                        // outside `val_pay`.
+                        // outside `val_pay`. `pend` ends use their shadows:
+                        // a tracked src reads `q0`/`q1` (its window slot may
+                        // be stale), a tracked dst skips the store (the
+                        // `forward_commit` shadow def is authoritative).
                         let regs0 = self.fb.use_var(self.regs0.expect("windowed"));
                         let vs = self.lyt.val_size as i64;
                         let sa = self.fb.ins().iadd_imm_s(regs0, (s as i64) * vs);
                         let da = self.fb.ins().iadd_imm_s(regs0, (d as i64) * vs);
+                        let pvs = self.pvars(s);
+                        let pvd = self.pvars(d);
+                        let mut q = [None; 2];
                         for off in (0..vs).step_by(8) {
-                            let w = self.fb.ins().load(I64, tfw(), sa, off as i32);
-                            self.fb.ins().store(tfw(), w, da, off as i32);
+                            let w = match (pvs, off) {
+                                (Some((v0, _)), 0) => self.fb.use_var(v0),
+                                (Some((_, v1)), 8) => self.fb.use_var(v1),
+                                _ => self.fb.ins().load(I64, tfw(), sa, off as i32),
+                            };
+                            if off < 16 {
+                                q[(off / 8) as usize] = Some(w);
+                            }
+                            if pvd.is_none() {
+                                self.fb.ins().store(tfw(), w, da, off as i32);
+                            }
+                        }
+                        if let (Some(q0), Some(q1)) = (q[0], q[1]) {
+                            self.forward_commit(self.fwd_dst(dst), Some(q0), Some(q1));
                         }
                     }
                 }
@@ -2252,6 +2499,7 @@ impl<'a, 'b> Ne<'a, 'b> {
                         &[r0, d, s, ii, k8, c0, c1, op_],
                         &[set, index],
                     );
+                    self.pend_reload(dst);
                     let nb = self.next(i);
                     self.fb.ins().jump(nb, &[]);
                     return;
@@ -2262,8 +2510,7 @@ impl<'a, 'b> Ne<'a, 'b> {
                 let Some(iv) = self.iv_or_slow(index, slow) else {
                     unreachable!("iv_maybe")
                 };
-                let sa = self.wslot(set);
-                let st = self.ld_tag(sa);
+                let st = self.prtag(set);
                 let tarr = self.tconst(self.lyt.t_array);
                 let isarr = self.fb.ins().icmp(IntCC::Equal, st, tarr);
                 let arrb = self.fb.create_block();
@@ -2275,7 +2522,7 @@ impl<'a, 'b> Ne<'a, 'b> {
                 self.fb.switch_to_block(seqb);
                 {
                     let da = self.wslot(dst);
-                    let gc = self.fb.ins().load(I64, tfw(), sa, self.lyt.seq_pay as i32);
+                    let gc = self.pgc(set);
                     if let Some(h) = self.vhit(set, gc, false) {
                         // hit: same verified seq — borrow stands; `stag`
                         // is re-dispatched fresh so a slow-path demote
@@ -2294,7 +2541,7 @@ impl<'a, 'b> Ne<'a, 'b> {
                 self.fb.switch_to_block(arrb);
                 {
                     let da = self.wslot(dst);
-                    let gc = self.fb.ins().load(I64, tfw(), sa, self.lyt.arr_pay as i32);
+                    let gc = self.pgc(set);
                     if let Some(h) = self.vhit(set, gc, false) {
                         // hit: same verified array — borrow stands and the
                         // `Vec` spine comes from the commit cache.
@@ -2332,6 +2579,7 @@ impl<'a, 'b> Ne<'a, 'b> {
                 let (c0, c1) = self.ctx2();
                 let op_ = self.out_p();
                 self.hstatus(i, H::GetIndex, &[r0, d, s, ii, k8, c0, c1, op_], &[index]);
+                self.pend_reload(dst);
                 let nb = self.next(i);
                 self.fb.ins().jump(nb, &[]);
             }
@@ -2367,10 +2615,9 @@ impl<'a, 'b> Ne<'a, 'b> {
                 let Some(iv) = self.iv_or_slow(index, slow) else {
                     unreachable!("iv_maybe")
                 };
-                let sa = self.wslot(set);
                 let va = self.wslot(value);
                 let ngc = self.ngc(value);
-                let st = self.ld_tag(sa);
+                let st = self.prtag(set);
                 let tarr = self.tconst(self.lyt.t_array);
                 let isarr = self.fb.ins().icmp(IntCC::Equal, st, tarr);
                 let arrb = self.fb.create_block();
@@ -2381,22 +2628,22 @@ impl<'a, 'b> Ne<'a, 'b> {
                 self.is_seq_tag(st, seqb, slow);
                 self.fb.switch_to_block(seqb);
                 {
-                    let gc = self.fb.ins().load(I64, tfw(), sa, self.lyt.seq_pay as i32);
+                    let gc = self.pgc(set);
                     if let Some(h) = self.vhit(set, gc, true) {
                         let ver = self.fb.create_block();
                         let hitb = self.fb.create_block();
                         self.fb.ins().brif(h, hitb, &[], ver, &[]);
                         self.fb.switch_to_block(hitb);
                         let one = self.iconst8(1);
-                        self.n_seq_write(i, iv, gc, va, one, None, slow);
+                        self.n_seq_write(i, iv, gc, va, value, one, None, slow);
                         self.fb.switch_to_block(ver);
                     }
                     let fok = self.borrow_ok(gc, self.lyt.rl_flag_s, true);
-                    self.n_seq_write(i, iv, gc, va, fok, self.com(set, gc, true), slow);
+                    self.n_seq_write(i, iv, gc, va, value, fok, self.com(set, gc, true), slow);
                 }
                 self.fb.switch_to_block(arrb);
                 {
-                    let gc = self.fb.ins().load(I64, tfw(), sa, self.lyt.arr_pay as i32);
+                    let gc = self.pgc(set);
                     // a `vptrm` hit still needs the value's barrier check
                     if let Some(h) = self.vhit(set, gc, true) {
                         let ver = self.fb.create_block();
@@ -2404,7 +2651,7 @@ impl<'a, 'b> Ne<'a, 'b> {
                         self.fb.ins().brif(h, hitb, &[], ver, &[]);
                         self.fb.switch_to_block(hitb);
                         let (vp, vl) = self.vec_spine(gc);
-                        self.n_write_elem(i, va, iv, vl, vp, ngc, None, slow);
+                        self.n_write_elem(i, va, value, iv, vl, vp, ngc, None, slow);
                         self.fb.switch_to_block(ver);
                     }
                     let fok = self.borrow_ok(gc, self.lyt.rl_flag, true);
@@ -2413,6 +2660,7 @@ impl<'a, 'b> Ne<'a, 'b> {
                     self.n_write_elem(
                         i,
                         va,
+                        value,
                         iv,
                         vl,
                         vp,
@@ -2450,6 +2698,7 @@ impl<'a, 'b> Ne<'a, 'b> {
                     );
                     let op_ = self.out_p();
                     self.hstatus(i, H::GetField, &[r0, d, s, sl, k8, op_], &[src]);
+                    self.pend_reload(dst);
                     let nb = self.next(i);
                     self.fb.ins().jump(nb, &[]);
                     return;
@@ -2457,8 +2706,7 @@ impl<'a, 'b> Ne<'a, 'b> {
                 let slow = self.fb.create_block();
                 self.fb.set_cold_block(slow);
                 self.flush(src);
-                let ra = self.wslot(src);
-                let rt = self.ld_tag(ra);
+                let rt = self.prtag(src);
                 let tinst = self.tconst(self.lyt.t_instance);
                 let isinst = self.fb.ins().icmp(IntCC::Equal, rt, tinst);
                 let instb = self.fb.create_block();
@@ -2476,7 +2724,7 @@ impl<'a, 'b> Ne<'a, 'b> {
                 self.fb.switch_to_block(seqb);
                 {
                     let da = self.wslot(dst);
-                    let gc = self.fb.ins().load(I64, tfw(), ra, self.lyt.seq_pay as i32);
+                    let gc = self.pgc(src);
                     let sv = self.iconst(slot as i64);
                     if let Some(h) = self.vhit(src, gc, false) {
                         let ver = self.fb.create_block();
@@ -2493,7 +2741,7 @@ impl<'a, 'b> Ne<'a, 'b> {
                 self.fb.switch_to_block(arrb);
                 {
                     let da = self.wslot(dst);
-                    let gc = self.fb.ins().load(I64, tfw(), ra, self.lyt.arr_pay as i32);
+                    let gc = self.pgc(src);
                     let sv = self.iconst(slot as i64);
                     if let Some(h) = self.vhit(src, gc, false) {
                         let ver = self.fb.create_block();
@@ -2521,7 +2769,7 @@ impl<'a, 'b> Ne<'a, 'b> {
                 }
                 self.fb.switch_to_block(instb);
                 {
-                    let gc = self.fb.ins().load(I64, tfw(), ra, self.lyt.inst_pay as i32);
+                    let gc = self.pgc(src);
                     if let Some(h) = self.vhit(src, gc, false) {
                         // hit: same verified instance — borrow, `Fields::
                         // Inline` and `slot < len` all stand; the field is
@@ -2560,6 +2808,7 @@ impl<'a, 'b> Ne<'a, 'b> {
                 );
                 let op_ = self.out_p();
                 self.hstatus(i, H::GetField, &[r0, d, s, sl, k8, op_], &[]);
+                self.pend_reload(dst);
                 let nb = self.next(i);
                 self.fb.ins().jump(nb, &[]);
             }
@@ -2573,9 +2822,8 @@ impl<'a, 'b> Ne<'a, 'b> {
                 self.fb.set_cold_block(slow);
                 self.flush(receiver);
                 self.flush(value);
-                let ra = self.wslot(receiver);
                 let va = self.wslot(value);
-                let rt = self.ld_tag(ra);
+                let rt = self.prtag(receiver);
                 let ngc = self.ngc(value);
                 let tinst = self.tconst(self.lyt.t_instance);
                 let isinst = self.fb.ins().icmp(IntCC::Equal, rt, tinst);
@@ -2593,7 +2841,7 @@ impl<'a, 'b> Ne<'a, 'b> {
                 self.is_seq_tag(rt, seqb, slow);
                 self.fb.switch_to_block(seqb);
                 {
-                    let gc = self.fb.ins().load(I64, tfw(), ra, self.lyt.seq_pay as i32);
+                    let gc = self.pgc(receiver);
                     let sv = self.iconst(slot as i64);
                     if let Some(h) = self.vhit(receiver, gc, true) {
                         let ver = self.fb.create_block();
@@ -2601,15 +2849,15 @@ impl<'a, 'b> Ne<'a, 'b> {
                         self.fb.ins().brif(h, hitb, &[], ver, &[]);
                         self.fb.switch_to_block(hitb);
                         let one = self.iconst8(1);
-                        self.n_seq_write(i, sv, gc, va, one, None, slow);
+                        self.n_seq_write(i, sv, gc, va, value, one, None, slow);
                         self.fb.switch_to_block(ver);
                     }
                     let fok = self.borrow_ok(gc, self.lyt.rl_flag_s, true);
-                    self.n_seq_write(i, sv, gc, va, fok, self.com(receiver, gc, true), slow);
+                    self.n_seq_write(i, sv, gc, va, value, fok, self.com(receiver, gc, true), slow);
                 }
                 self.fb.switch_to_block(arrb);
                 {
-                    let gc = self.fb.ins().load(I64, tfw(), ra, self.lyt.arr_pay as i32);
+                    let gc = self.pgc(receiver);
                     let sv = self.iconst(slot as i64);
                     if let Some(h) = self.vhit(receiver, gc, true) {
                         let ver = self.fb.create_block();
@@ -2617,7 +2865,7 @@ impl<'a, 'b> Ne<'a, 'b> {
                         self.fb.ins().brif(h, hitb, &[], ver, &[]);
                         self.fb.switch_to_block(hitb);
                         let (vp, vl) = self.vec_spine(gc);
-                        self.n_write_elem(i, va, sv, vl, vp, ngc, None, slow);
+                        self.n_write_elem(i, va, value, sv, vl, vp, ngc, None, slow);
                         self.fb.switch_to_block(ver);
                     }
                     let fok = self.borrow_ok(gc, self.lyt.rl_flag, true);
@@ -2626,6 +2874,7 @@ impl<'a, 'b> Ne<'a, 'b> {
                     self.n_write_elem(
                         i,
                         va,
+                        value,
                         sv,
                         vl,
                         vp,
@@ -2636,7 +2885,7 @@ impl<'a, 'b> Ne<'a, 'b> {
                 }
                 self.fb.switch_to_block(instb);
                 {
-                    let gc = self.fb.ins().load(I64, tfw(), ra, self.lyt.inst_pay as i32);
+                    let gc = self.pgc(receiver);
                     if let Some(h) = self.vhit(receiver, gc, true) {
                         // hit + non-Gc value: one constant-offset store —
                         // borrow/inline/slot still stand (see `vptr`).
@@ -2650,7 +2899,7 @@ impl<'a, 'b> Ne<'a, 'b> {
                             (self.lyt.rl_inst + self.lyt.id_fields + self.lyt.fld_data) as i64
                                 + slot as i64 * self.lyt.val_size as i64,
                         );
-                        self.n_val_store(i, va, ea);
+                        self.n_val_store(i, va, value, ea);
                         self.fb.switch_to_block(ver);
                     }
                     let fok = self.borrow_ok(gc, self.lyt.rl_flag_i, true);
@@ -2662,7 +2911,7 @@ impl<'a, 'b> Ne<'a, 'b> {
                     let pre = self.fb.ins().band(fok, ngc);
                     let pre = self.fb.ins().band(pre, isinl);
                     let sv = self.iconst(slot as i64);
-                    self.n_write_elem(i, va, sv, len, data, pre, self.com(receiver, gc, true), slow);
+                    self.n_write_elem(i, va, value, sv, len, data, pre, self.com(receiver, gc, true), slow);
                 }
                 self.fb.switch_to_block(slow);
                 let r0 = self.fb.use_var(self.regs0.expect("windowed"));
@@ -3083,9 +3332,97 @@ pub(crate) fn emit_native_body(
             .map(|(r, _)| *r)
             .collect();
         recv.sort_unstable();
-        for r in recv.into_iter().take(8) {
-            vptr.push((r, fb.declare_var(I64)));
-            vptrm.push((r, fb.declare_var(I64)));
+        for (i, r) in recv.into_iter().take(8).enumerate() {
+            vptr.push((r, (i * 8) as i32));
+            vptrm.push((r, ((i + 8) * 8) as i32));
+        }
+    }
+    let vss = fb.create_sized_stack_slot(StackSlotData::new(
+        StackSlotKind::ExplicitSlot,
+        128,
+        0,
+    ));
+    // `pend` shadow vars (see `Ne::pend`): a reg is shadowed when every
+    // op that may write its window slot is an element read (`GetIndex`/
+    // `GetField`) or a `Move` — those refresh the shadow alongside the
+    // slot. `ForNext` writes `idx` in place (not a `dst`), and
+    // `StoreEntry` writes a runtime-indexed entry-frame slot that could
+    // land inside this window — it poisons the body's whole set.
+    // `LoadEntry` reads `regs[slot]` absolutely: when this body's window
+    // is the entry frame the slot could be a `pend` reg, so `slot` is
+    // marked unshadowable (its window must stay authoritative). Fast
+    // paths write only the shadow — `spill_pend` needs the `wrote` mask
+    // (`wrote.is_some()`), and `q0`/`q1` cover the slot only when
+    // `val_size == 16`. The layout gate pins the tag to `q0`'s low byte
+    // and every heap/`Val` payload to `q1`. Two vars per shadowed reg
+    // keep the set capped — the deepest-loop writers win the slots.
+    // Loop extents: every backward `ByteOffset` target opens an interval
+    // `(target, op offset]` — an op's loop depth is the count of intervals
+    // containing it.
+    let mut loops: Vec<(usize, usize)> = Vec::new();
+    for (off, op) in ops.iter() {
+        for t in op.targets() {
+            if let BlockTarget::ByteOffset(t) = t {
+                if t < *off {
+                    loops.push((t, *off));
+                }
+            }
+        }
+    }
+    let depth = |off: usize| loops.iter().filter(|(lo, hi)| off > *lo && off <= *hi).count();
+    let mut wset: HashMap<u32, bool> = HashMap::new();
+    let mut score: HashMap<u32, usize> = HashMap::new();
+    let mut poison = false;
+    for (off, op) in ops.iter() {
+        match op {
+            Op::ForNext { idx, .. } => {
+                wset.insert(idx.index() as u32, false);
+            }
+            Op::LoadEntry { dst, slot } => {
+                wset.insert(dst.index() as u32, false);
+                wset.insert(slot.index() as u32, false);
+            }
+            Op::StoreEntry { .. } => {
+                poison = true;
+            }
+            Op::GetIndex { dst, .. } | Op::GetField { dst, .. } | Op::Move { dst, .. } => {
+                let r = dst.index() as u32;
+                wset.entry(r).and_modify(|e| *e &= true).or_insert(true);
+                score
+                    .entry(r)
+                    .and_modify(|e| *e = (*e).max(depth(*off)))
+                    .or_insert(depth(*off));
+            }
+            _ => {
+                if let Some(r) = op.reg() {
+                    wset.insert(r.index() as u32, false);
+                }
+            }
+        }
+    }
+    let mut pend = Vec::new();
+    if plan.windowed
+        && !poison
+        && wrote.is_some()
+        && lyt.val_tag == 0
+        && lyt.val_pay == 8
+        && lyt.val_size == 16
+        && lyt.arr_pay == 8
+        && lyt.inst_pay == 8
+        && lyt.seq_pay == 8
+        && lyt.bool_pay < 16
+    {
+        let mut pr: Vec<u32> = wset
+            .iter()
+            .filter(|(_, ok)| **ok)
+            .map(|(r, _)| *r)
+            .collect();
+        pr.sort_unstable_by_key(|r| (std::cmp::Reverse(score.get(r).copied().unwrap_or(0)), *r));
+        for r in pr.into_iter().take(8) {
+            let ri = r as usize;
+            if plan.conflict[ri] || plan.kinds[ri].is_none() {
+                pend.push((r, fb.declare_var(I64), fb.declare_var(I64)));
+            }
         }
     }
     let off2idx: HashMap<usize, usize> =
@@ -3144,13 +3481,8 @@ pub(crate) fn emit_native_body(
     if let Some(wv) = wrote {
         fb.def_var(wv, zi);
     }
-    for i in 0..vptr.len() {
-        let v = vptr[i].1;
-        fb.def_var(v, zi);
-    }
-    for i in 0..vptrm.len() {
-        let v = vptrm[i].1;
-        fb.def_var(v, zi);
+    for i in 0..vptr.len() + vptrm.len() {
+        fb.ins().stack_store(I64, zi, vss, (i * 8) as i32);
     }
 
     let etrip = fb.create_block();
@@ -3180,6 +3512,8 @@ pub(crate) fn emit_native_body(
         wrote,
         vptr,
         vptrm,
+        vss,
+        pend,
         bcn,
         bcn0,
         etrip,
@@ -3219,6 +3553,17 @@ pub(crate) fn emit_native_body(
         let r0 = em.fb.ins().iadd(rp, boff);
         em.fb.def_var(regs0.expect("windowed"), r0);
     }
+    // `pend` shadows start as a `Null` `Val` — the window's init value
+    // for every non-param reg (params are var-backed, never shadowed).
+    // Constants, not loads: a shadow is then dead until its first write,
+    // so its live range stays inside the writing op's iteration instead
+    // of spanning the whole body.
+    for i in 0..em.pend.len() {
+        let (_, v0, v1) = em.pend[i];
+        let tn = em.fb.ins().iconst(I64, lyt.t_null as i64);
+        em.fb.def_var(v0, tn);
+        em.fb.def_var(v1, zi);
+    }
     let first = em.blocks[0];
     em.fb.ins().jump(first, &[]);
     em.fb.seal_block(entry);
@@ -3238,6 +3583,7 @@ pub(crate) fn emit_native_body(
 
     em.fb.switch_to_block(em.etrip);
     em.settle();
+    em.spill_pend();
     let s2 = em.fb.ins().iconst(I8, ST_RETRY);
     let zz = em.iconst(0);
     em.fb.ins().return_(&[s2, zz]);
@@ -3245,6 +3591,7 @@ pub(crate) fn emit_native_body(
     for (t, kind) in std::mem::take(&mut em.errs) {
         em.fb.switch_to_block(t);
         em.settle();
+        em.spill_pend();
         let k8 = em.fb.ins().iconst(I8, kind);
         let op = em.out_p();
         em.fb.ins().call(em.hrefs[H::OutErr as usize], &[op, k8]);
