@@ -292,11 +292,21 @@ pub(crate) fn effects_submission(
     fn_ident: &Ident,
     attrs: &mut Vec<syn::Attribute>,
 ) -> Result<Option<TokenStream2>, syn::Error> {
+    // `yield` is an effect name but a Rust keyword, so effect lists parse with
+    // `Ident::parse_any` and compare the unraw text.
+    struct EffectIdent(Ident);
+    impl syn::parse::Parse for EffectIdent {
+        fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+            use syn::ext::IdentExt;
+            Ok(Self(input.call(Ident::parse_any)?.unraw()))
+        }
+    }
     let Some(pos) = attrs.iter().position(|a| a.path().is_ident("effects")) else {
         return Ok(None);
     };
     let attr = attrs.remove(pos);
-    let names = attr.parse_args_with(Punctuated::<Ident, Token![,]>::parse_terminated)?;
+    let names = attr.parse_args_with(Punctuated::<EffectIdent, Token![,]>::parse_terminated)?;
+    let names = names.into_iter().map(|n| n.0);
     let mut bits: u8 = 0;
     for name in names {
         bits |= match name.to_string().as_str() {
