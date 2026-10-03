@@ -28,10 +28,11 @@ use std::collections::{HashMap, HashSet};
 use crate::{BodyFacts, Frozen, FrozenKind, H, Obs, ObsTag};
 use compile::{AccessKind, BlockTarget, Constant, Op, Program, Reg, UnaryOp};
 use cranelift_codegen::Context;
+use cranelift_codegen::entity::EntityRef;
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::{
-    self, Block, FuncRef, InstBuilder, JumpTableData, MemFlagsData, Signature, StackSlot,
-    StackSlotData, StackSlotKind, Value, types,
+    self, AliasRegion, Block, FuncRef, InstBuilder, JumpTableData, MemFlagsData, Signature,
+    StackSlot, StackSlotData, StackSlotKind, Value, types,
 };
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::JITModule;
@@ -57,6 +58,24 @@ const F64: ir::Type = types::F64;
 
 fn tf() -> MemFlagsData {
     MemFlagsData::trusted()
+}
+
+/// Alias regions for egraph alias analysis: the reg window (a `Vec<Val>`
+/// buffer), GC-object internals (instance fields, array buffers, borrow
+/// flags, dict/str/closure payloads), and VM state (the `ThreadState`
+/// fields, frame buffer, `*out` slot) are three disjoint address sets —
+/// marking them lets redundant heap loads dedupe across window stores and
+/// vice versa. Helper calls still observe all regions.
+fn tfw() -> MemFlagsData {
+    tf().with_alias_region(Some(AliasRegion::new(0)))
+}
+
+fn tfh() -> MemFlagsData {
+    tf().with_alias_region(Some(AliasRegion::new(1)))
+}
+
+fn tfs() -> MemFlagsData {
+    tf().with_alias_region(Some(AliasRegion::new(2)))
 }
 
 /// `RtErr` kind codes matching `jit::out_err`'s table.
@@ -586,7 +605,7 @@ impl Em<'_> {
         let __e_thread = self.thread();
         self.fb.ins().load(
             I64,
-            tf(),
+            tfs(),
             __e_thread,
             (self.lyt.frames_off + self.lyt.vec_len) as i32,
         )
@@ -663,10 +682,15 @@ impl Em<'_> {
         self.fb.def_var(self.v.ok_mask, n);
     }
 
-    /// `regs[r]`'s discriminant.
+    /// `regs[r]`'s discriminant (window slot).
     fn ld_tag(&mut self, a: Value) -> Value {
+        self.ld_tag_fl(a, tfw())
+    }
+
+    /// Tag byte of the `Val` at `a` under alias region `fl`.
+    fn ld_tag_fl(&mut self, a: Value, fl: MemFlagsData) -> Value {
         let ty = self.tag_ty();
-        self.fb.ins().load(ty, tf(), a, self.lyt.val_tag as i32)
+        self.fb.ins().load(ty, fl, a, self.lyt.val_tag as i32)
     }
 
     /// `regs[r]` as `Val::Int`: inline tag probe → payload load; a miss routes
@@ -679,7 +703,7 @@ impl Em<'_> {
         let hit = self.fb.ins().icmp(IntCC::Equal, t, want);
         self.fb.ins().brif(hit, good, &[], self.ex.estep, &[]);
         self.fb.switch_to_block(good);
-        self.fb.ins().load(I64, tf(), a, self.lyt.val_pay as i32)
+        self.fb.ins().load(I64, tfw(), a, self.lyt.val_pay as i32)
     }
 
     /// `regs[r]` as `Val::Float`.
@@ -691,50 +715,55 @@ impl Em<'_> {
         let hit = self.fb.ins().icmp(IntCC::Equal, t, want);
         self.fb.ins().brif(hit, good, &[], self.ex.estep, &[]);
         self.fb.switch_to_block(good);
-        self.fb.ins().load(F64, tf(), a, self.lyt.val_pay as i32)
+        self.fb.ins().load(F64, tfw(), a, self.lyt.val_pay as i32)
     }
 
     /// `*a = Val::Int(v)` — tag byte plus the 8-byte union slot.
     fn st_int(&mut self, a: Value, v: Value) {
         let t = self.tconst(self.lyt.t_int);
-        self.fb.ins().store(tf(), t, a, self.lyt.val_tag as i32);
-        self.fb.ins().store(tf(), v, a, self.lyt.val_pay as i32);
+        self.fb.ins().store(tfw(), t, a, self.lyt.val_tag as i32);
+        self.fb.ins().store(tfw(), v, a, self.lyt.val_pay as i32);
     }
 
     /// `*a = Val::Float(v)` (ditto, `f64` store).
     fn st_float(&mut self, a: Value, v: Value) {
         let t = self.tconst(self.lyt.t_float);
-        self.fb.ins().store(tf(), t, a, self.lyt.val_tag as i32);
-        self.fb.ins().store(tf(), v, a, self.lyt.val_pay as i32);
+        self.fb.ins().store(tfw(), t, a, self.lyt.val_tag as i32);
+        self.fb.ins().store(tfw(), v, a, self.lyt.val_pay as i32);
     }
 
     /// `*a = Val::Bool(v8)` — tag plus the `u8` union slot.
     fn st_bool(&mut self, a: Value, v8: Value) {
         let t = self.tconst(self.lyt.t_bool);
-        self.fb.ins().store(tf(), t, a, self.lyt.val_tag as i32);
-        self.fb.ins().store(tf(), v8, a, self.lyt.bool_pay as i32);
+        self.fb.ins().store(tfw(), t, a, self.lyt.val_tag as i32);
+        self.fb.ins().store(tfw(), v8, a, self.lyt.bool_pay as i32);
     }
 
     /// `*a = Val::Null` — only the tag byte is read for payload-less
     /// variants, so only it is written.
     fn st_null(&mut self, a: Value) {
         let t = self.tconst(self.lyt.t_null);
-        self.fb.ins().store(tf(), t, a, self.lyt.val_tag as i32);
+        self.fb.ins().store(tfw(), t, a, self.lyt.val_tag as i32);
     }
 
     /// `*a = Val::Fn(body)` — tag plus the `u32` index in the union slot.
     fn st_fn(&mut self, a: Value, body32: Value) {
         let t = self.tconst(self.lyt.t_fn);
-        self.fb.ins().store(tf(), t, a, self.lyt.val_tag as i32);
-        self.fb.ins().store(tf(), body32, a, self.lyt.fn_pay as i32);
+        self.fb.ins().store(tfw(), t, a, self.lyt.val_tag as i32);
+        self.fb.ins().store(tfw(), body32, a, self.lyt.fn_pay as i32);
     }
 
-    /// `val_size`-byte `Val` copy `*d = *s` (eight-byte chunks; the probe
-    /// asserts the stride is a multiple of 8).
+    /// `val_size`-byte `Val` copy `*d = *s`, both sides window slots
+    /// (eight-byte chunks; the probe asserts the stride is a multiple of 8).
     fn cpy_val(&mut self, d: Value, s: Value) {
+        self.cpy_val_fl(d, s, tfw(), tfw());
+    }
+
+    /// `cpy_val` with explicit alias regions for the destination and source.
+    fn cpy_val_fl(&mut self, d: Value, s: Value, fd: MemFlagsData, fs: MemFlagsData) {
         for k in 0..(self.lyt.val_size / 8) as i32 {
-            let w = self.fb.ins().load(I64, tf(), s, k * 8);
-            self.fb.ins().store(tf(), w, d, k * 8);
+            let w = self.fb.ins().load(I64, fs, s, k * 8);
+            self.fb.ins().store(fd, w, d, k * 8);
         }
     }
 
@@ -795,10 +824,10 @@ impl Em<'_> {
             let a = self.vaddr(regs, r);
             let old = self.ld_tag(a);
             let nt = self.fb.ins().select(okv, tint, old);
-            self.fb.ins().store(tf(), nt, a, self.lyt.val_tag as i32);
-            let oldp = self.fb.ins().load(I64, tf(), a, self.lyt.val_pay as i32);
+            self.fb.ins().store(tfw(), nt, a, self.lyt.val_tag as i32);
+            let oldp = self.fb.ins().load(I64, tfw(), a, self.lyt.val_pay as i32);
             let np = self.fb.ins().select(okv, v, oldp);
-            self.fb.ins().store(tf(), np, a, self.lyt.val_pay as i32);
+            self.fb.ins().store(tfw(), np, a, self.lyt.val_pay as i32);
         }
         let tflt = self.tconst(self.lyt.t_float);
         for r in floats {
@@ -809,23 +838,23 @@ impl Em<'_> {
             let a = self.vaddr(regs, r);
             let old = self.ld_tag(a);
             let nt = self.fb.ins().select(okv, tflt, old);
-            self.fb.ins().store(tf(), nt, a, self.lyt.val_tag as i32);
-            let oldp = self.fb.ins().load(F64, tf(), a, self.lyt.val_pay as i32);
+            self.fb.ins().store(tfw(), nt, a, self.lyt.val_tag as i32);
+            let oldp = self.fb.ins().load(F64, tfw(), a, self.lyt.val_pay as i32);
             let np = self.fb.ins().select(okv, v, oldp);
-            self.fb.ins().store(tf(), np, a, self.lyt.val_pay as i32);
+            self.fb.ins().store(tfw(), np, a, self.lyt.val_pay as i32);
         }
     }
 
     /// `code.ip = v` through the hoisted cell pointer.
     fn store_ip(&mut self, v: Value) {
         let __e_ip_p = self.ip_p();
-        self.fb.ins().store(tf(), v, __e_ip_p, 0);
+        self.fb.ins().store(tfs(), v, __e_ip_p, 0);
     }
 
     /// `*op_ip = v` through the hoisted cell pointer.
     fn store_opip(&mut self, v: Value) {
         let __e_opip_p = self.opip_p();
-        self.fb.ins().store(tf(), v, __e_opip_p, 0);
+        self.fb.ins().store(tfs(), v, __e_opip_p, 0);
     }
 
     /// `code.ip = next; *op_ip = off` — bcgen's pre-helper/pre-call idiom.
@@ -1014,14 +1043,14 @@ impl Em<'_> {
         if let Some(&(sv, bit)) = self.v.int.get(&r) {
             let want = self.tconst(self.lyt.t_int);
             let k = self.fb.ins().icmp(IntCC::Equal, t, want);
-            let pv = self.fb.ins().load(I64, tf(), a, self.lyt.val_pay as i32);
+            let pv = self.fb.ins().load(I64, tfw(), a, self.lyt.val_pay as i32);
             self.fb.def_var(sv, pv);
             self.ok_set(bit, k);
         }
         if let Some(&(sv, bit)) = self.v.float.get(&r) {
             let want = self.tconst(self.lyt.t_float);
             let k = self.fb.ins().icmp(IntCC::Equal, t, want);
-            let pv = self.fb.ins().load(F64, tf(), a, self.lyt.val_pay as i32);
+            let pv = self.fb.ins().load(F64, tfw(), a, self.lyt.val_pay as i32);
             self.fb.def_var(sv, pv);
             self.ok_set(bit, k);
         }
@@ -1096,15 +1125,15 @@ impl Em<'_> {
         let spent = self.fb.ins().isub(b0, b);
         self.fb.def_var(self.v.bcn0, b);
         let __e_fuel_p = self.fuel_p();
-        let f = self.fb.ins().load(I64, tf(), __e_fuel_p, 0);
+        let f = self.fb.ins().load(I64, tfs(), __e_fuel_p, 0);
         let f2 = self.fb.ins().isub(f, spent);
         let __e_fuel_p = self.fuel_p();
-        self.fb.ins().store(tf(), f2, __e_fuel_p, 0);
+        self.fb.ins().store(tfs(), f2, __e_fuel_p, 0);
         let __e_opsleft_p = self.opsleft_p();
-        let ol = self.fb.ins().load(I64, tf(), __e_opsleft_p, 0);
+        let ol = self.fb.ins().load(I64, tfs(), __e_opsleft_p, 0);
         let ol2 = self.fb.ins().isub(ol, spent);
         let __e_opsleft_p = self.opsleft_p();
-        self.fb.ins().store(tf(), ol2, __e_opsleft_p, 0);
+        self.fb.ins().store(tfs(), ol2, __e_opsleft_p, 0);
         (f2, ol2)
     }
 
@@ -1113,9 +1142,9 @@ impl Em<'_> {
     /// from the same counters through its own `bcn`).
     fn rearm_seq(&mut self) {
         let __e_fuel_p = self.fuel_p();
-        let f = self.fb.ins().load(I64, tf(), __e_fuel_p, 0);
+        let f = self.fb.ins().load(I64, tfs(), __e_fuel_p, 0);
         let __e_opsleft_p = self.opsleft_p();
-        let ol = self.fb.ins().load(I64, tf(), __e_opsleft_p, 0);
+        let ol = self.fb.ins().load(I64, tfs(), __e_opsleft_p, 0);
         let m = self.fb.ins().umin(f, ol);
         self.fb.def_var(self.v.bcn, m);
         self.fb.def_var(self.v.bcn0, m);
@@ -1135,7 +1164,7 @@ impl Em<'_> {
         self.fb.set_cold_block(tramp);
         if i > 0 && may_pause(&self.ops[i - 1].1) {
             let __e_paused_p = self.paused_p();
-            let p = self.fb.ins().load(I8, tf(), __e_paused_p, 0);
+            let p = self.fb.ins().load(I8, tfs(), __e_paused_p, 0);
             let g = self.fb.create_block();
             self.fb.ins().brif(p, tramp, &[], g, &[]);
             self.fb.switch_to_block(g);
@@ -1160,7 +1189,7 @@ impl Em<'_> {
         self.fb.switch_to_block(tramp);
         let (f, ol) = self.settle_seq();
         let __e_paused_p = self.paused_p();
-        let p = self.fb.ins().load(I8, tf(), __e_paused_p, 0);
+        let p = self.fb.ins().load(I8, tfs(), __e_paused_p, 0);
         let z = self.iconst(0);
         let fz = self.fb.ins().icmp(IntCC::Equal, f, z);
         let nx = self.fb.ins().bor(p, fz);
@@ -1312,6 +1341,20 @@ pub(crate) fn emit_body(
 
     let mut fb = FunctionBuilder::new(&mut ctx.func, fbc);
 
+    // declare the three alias regions used by `tfw`/`tfh`/`tfs`; pushed
+    // first so they land at indices 0/1/2 as the flags expect.
+    for (id, desc) in [
+        (0u32, "reg window"),
+        (1, "gc heap objects"),
+        (2, "vm state"),
+    ] {
+        let ar = fb.func.dfg.alias_regions.insert(ir::AliasRegionData {
+            user_id: id,
+            description: desc.into(),
+        });
+        debug_assert_eq!(ar.index(), id as usize);
+    }
+
     // ---- vars ----
     let v_regs = fb.declare_var(I64);
     let v_cur_ip = fb.declare_var(I64);
@@ -1429,7 +1472,7 @@ pub(crate) fn emit_body(
         let t = em.thread();
         em.fb.ins().load(
             I64,
-            tf(),
+            tfs(),
             t,
             (lyt.frames_off + lyt.vec_ptr) as i32,
         )
@@ -1438,7 +1481,7 @@ pub(crate) fn emit_body(
         let t = em.thread();
         em.fb.ins().load(
             I64,
-            tf(),
+            tfs(),
             t,
             (lyt.frames_off + lyt.vec_len) as i32,
         )
@@ -1446,11 +1489,11 @@ pub(crate) fn emit_body(
     let fm1 = em.fb.ins().iadd_imm_s(flen, -1);
     let foff = em.fb.ins().imul_imm_s(fm1, lyt.frame_size as i64);
     let faddr = em.fb.ins().iadd(fptr, foff);
-    let base = em.fb.ins().load(I64, tf(), faddr, lyt.frame_base as i32);
+    let base = em.fb.ins().load(I64, tfs(), faddr, lyt.frame_base as i32);
     // `thread.regs.as_mut_ptr()`
     let rp = {
         let t = em.thread();
-        em.fb.ins().load(I64, tf(), t, (lyt.regs_off + lyt.vec_ptr) as i32)
+        em.fb.ins().load(I64, tfs(), t, (lyt.regs_off + lyt.vec_ptr) as i32)
     };
     let boff = em.fb.ins().imul_imm_s(base, lyt.val_size as i64);
     let regs0 = em.fb.ins().iadd(rp, boff);
@@ -1492,7 +1535,7 @@ pub(crate) fn emit_body(
         let t = em.ld_tag(a);
         let want = em.tconst(lyt.t_int);
         let k = em.fb.ins().icmp(IntCC::Equal, t, want);
-        let v = em.fb.ins().load(I64, tf(), a, lyt.val_pay as i32);
+        let v = em.fb.ins().load(I64, tfw(), a, lyt.val_pay as i32);
         let sv0 = em.fb.ins().select(k, v, z64);
         em.fb.def_var(sv, sv0);
         em.ok_set(bit, k);
@@ -1513,7 +1556,7 @@ pub(crate) fn emit_body(
         let t = em.ld_tag(a);
         let want = em.tconst(lyt.t_float);
         let k = em.fb.ins().icmp(IntCC::Equal, t, want);
-        let v = em.fb.ins().load(F64, tf(), a, lyt.val_pay as i32);
+        let v = em.fb.ins().load(F64, tfw(), a, lyt.val_pay as i32);
         let sv0 = em.fb.ins().select(k, v, zf0);
         em.fb.def_var(sv, sv0);
         em.ok_set(bit, k);
@@ -1534,7 +1577,7 @@ pub(crate) fn emit_body(
         em.fb.ins().jump(estep_g, &[]);
     } else {
         let ip_p = em.ip_p();
-        let ip = em.fb.ins().load(I64, tf(), ip_p, 0);
+        let ip = em.fb.ins().load(I64, tfs(), ip_p, 0);
         let rel = em.fb.ins().iadd_imm_s(ip, -(chunk_off as i64));
         let spanc = em.iconst(span as i64);
         let inb = em.fb.ins().icmp(IntCC::UnsignedLessThan, rel, spanc);
@@ -1573,7 +1616,7 @@ pub(crate) fn emit_body(
     let g_tramp = em.fb.create_block();
     em.fb.set_cold_block(g_tramp);
     let __e_paused_p = em.paused_p();
-    let pv = em.fb.ins().load(I8, tf(), __e_paused_p, 0);
+    let pv = em.fb.ins().load(I8, tfs(), __e_paused_p, 0);
     em.fb.ins().brif(pv, g_tramp, &[], g_cont, &[]);
     em.fb.switch_to_block(g_cont);
     let g2 = em.fb.create_block();
@@ -1728,7 +1771,7 @@ impl Em<'_> {
                 let t = self.ld_tag(a);
                 let want = self.tconst(self.lyt.t_bool);
                 let tb2 = self.fb.ins().icmp(IntCC::Equal, t, want);
-                let pb = self.fb.ins().load(I8, tf(), a, self.lyt.bool_pay as i32);
+                let pb = self.fb.ins().load(I8, tfw(), a, self.lyt.bool_pay as i32);
                 let bv = self.iconst8(*is_true as i64);
                 let peq = self.fb.ins().icmp(IntCC::Equal, pb, bv);
                 let k = self.fb.ins().band(tb2, peq);
@@ -1766,13 +1809,13 @@ impl Em<'_> {
                 let __e_out = self.out();
                 self.fb
                     .ins()
-                    .store(tf(), oret, __e_out, self.lyt.out_tag as i32);
+                    .store(tfs(), oret, __e_out, self.lyt.out_tag as i32);
                 let __e_out = self.out();
                 let dp = self
                     .fb
                     .ins()
                     .iadd_imm_s(__e_out, self.lyt.out_ret_pay as i64);
-                self.cpy_val(dp, vp);
+                self.cpy_val_fl(dp, vp, tfs(), tfw());
                 self.fb.ins().return_(&[]);
             }
             Op::Panic {} => {
@@ -2778,7 +2821,7 @@ impl Em<'_> {
         let ok = self.fb.ins().icmp(IntCC::Equal, t, want);
         self.fb.ins().brif(ok, good, &[], self.ex.estep, &[]);
         self.fb.switch_to_block(good);
-        self.fb.ins().load(I8, tf(), a, self.lyt.bool_pay as i32)
+        self.fb.ins().load(I8, tfw(), a, self.lyt.bool_pay as i32)
     }
 
     fn emit_mod_int(&mut self, i: usize, dst: Reg, a: Value, b: Value) {
@@ -2837,7 +2880,7 @@ impl Em<'_> {
         self.fb.switch_to_block(intb);
         match op {
             UnaryOp::BitwiseNot | UnaryOp::Negative | UnaryOp::Positive => {
-                let x = self.fb.ins().load(I64, tf(), sa, self.lyt.val_pay as i32);
+                let x = self.fb.ins().load(I64, tfw(), sa, self.lyt.val_pay as i32);
                 let v = match op {
                     UnaryOp::BitwiseNot => self.fb.ins().bnot(x),
                     _ => {
@@ -2871,7 +2914,7 @@ impl Em<'_> {
                 let fltb = self.fb.create_block();
                 self.fb.ins().brif(isf, fltb, &[], slow, &[]);
                 self.fb.switch_to_block(fltb);
-                let x = self.fb.ins().load(F64, tf(), sa, self.lyt.val_pay as i32);
+                let x = self.fb.ins().load(F64, tfw(), sa, self.lyt.val_pay as i32);
                 let v = if op == UnaryOp::Negative {
                     self.fb.ins().fneg(x)
                 } else {
@@ -2887,7 +2930,7 @@ impl Em<'_> {
                 let boolb = self.fb.create_block();
                 self.fb.ins().brif(isb, boolb, &[], slow, &[]);
                 self.fb.switch_to_block(boolb);
-                let b = self.fb.ins().load(I8, tf(), sa, self.lyt.bool_pay as i32);
+                let b = self.fb.ins().load(I8, tfw(), sa, self.lyt.bool_pay as i32);
                 let z = self.iconst8(0);
                 let nb8 = self.fb.ins().icmp(IntCC::Equal, b, z);
                 self.wr_bool_dst(dst.index() as u32, nb8);
@@ -3110,7 +3153,7 @@ impl Em<'_> {
     /// flag routes to `slow`, where the helper's own `borrow`/`borrow_mut`
     /// reproduces the panic.
     fn borrow_ok(&mut self, gc: Value, flag_off: usize, mutable: bool) -> Value {
-        let flag = self.fb.ins().load(I64, tf(), gc, flag_off as i32);
+        let flag = self.fb.ins().load(I64, tfh(), gc, flag_off as i32);
         let z = self.iconst(0);
         let cc = if mutable {
             IntCC::Equal
@@ -3148,25 +3191,25 @@ impl Em<'_> {
         if self.v.int.contains_key(&d) || self.v.float.contains_key(&d) {
             // DynCheck shadow refresh: tag-probe the loaded elem, keep the
             // payload in `sv` + `ok` for downstream scalar ops.
-            let t = self.ld_tag(sa);
+            let t = self.ld_tag_fl(sa, tfh());
             if let Some(&(sv, bit)) = self.v.int.get(&d) {
                 let want = self.tconst(self.lyt.t_int);
                 let k = self.fb.ins().icmp(IntCC::Equal, t, want);
-                let pv = self.fb.ins().load(I64, tf(), sa, self.lyt.val_pay as i32);
+                let pv = self.fb.ins().load(I64, tfh(), sa, self.lyt.val_pay as i32);
                 self.fb.def_var(sv, pv);
                 self.ok_set(bit, k);
             }
             if let Some(&(sv, bit)) = self.v.float.get(&d) {
                 let want = self.tconst(self.lyt.t_float);
                 let k = self.fb.ins().icmp(IntCC::Equal, t, want);
-                let pv = self.fb.ins().load(F64, tf(), sa, self.lyt.val_pay as i32);
+                let pv = self.fb.ins().load(F64, tfh(), sa, self.lyt.val_pay as i32);
                 self.fb.def_var(sv, pv);
                 self.ok_set(bit, k);
             }
         }
         let regs = self.regs();
         let dd = self.vaddr(regs, d);
-        self.cpy_val(dd, sa);
+        self.cpy_val_fl(dd, sa, tfw(), tfh());
         let nb = self.next_blk(i);
         self.fb.ins().jump(nb, &[]);
     }
@@ -3190,7 +3233,7 @@ impl Em<'_> {
         self.fb.switch_to_block(good);
         let off = self.fb.ins().imul_imm_s(slot, self.lyt.val_size as i64);
         let sa = self.fb.ins().iadd(data, off);
-        self.cpy_val(sa, srcv);
+        self.cpy_val_fl(sa, srcv, tfh(), tfw());
         let nb = self.next_blk(i);
         self.fb.ins().jump(nb, &[]);
     }
@@ -3239,7 +3282,7 @@ impl Em<'_> {
         let v = self
             .fb
             .ins()
-            .load(if is_int { I64 } else { F64 }, tf(), ea, 0);
+            .load(if is_int { I64 } else { F64 }, tfh(), ea, 0);
         let d = dst.index() as u32;
         let mut covered = false;
         if is_int {
@@ -3294,7 +3337,7 @@ impl Em<'_> {
         self.fb.switch_to_block(good);
         let off = self.fb.ins().ishl_imm_s(slot, 3);
         let ea = self.fb.ins().iadd(data, off);
-        self.fb.ins().store(tf(), v, ea, 0);
+        self.fb.ins().store(tfh(), v, ea, 0);
         let nb = self.next_blk(i);
         self.fb.ins().jump(nb, &[]);
     }
@@ -3318,13 +3361,13 @@ impl Em<'_> {
     ) {
         let vp = self.fb.ins().load(
             I64,
-            tf(),
+            tfh(),
             gc,
             (self.lyt.rl_seq + store_off + self.lyt.vec_ptr) as i32,
         );
         let vl = self.fb.ins().load(
             I64,
-            tf(),
+            tfh(),
             gc,
             (self.lyt.rl_seq + store_off + self.lyt.vec_len) as i32,
         );
@@ -3341,7 +3384,7 @@ impl Em<'_> {
         let stag = self
             .fb
             .ins()
-            .load(aty, tf(), gc, (self.lyt.rl_seq + self.lyt.as_tag) as i32);
+            .load(aty, tfh(), gc, (self.lyt.rl_seq + self.lyt.as_tag) as i32);
         let wi = self.aconst(self.lyt.as_ints);
         let isints = self.fb.ins().icmp(IntCC::Equal, stag, wi);
         let intsb = self.fb.create_block();
@@ -3368,17 +3411,17 @@ impl Em<'_> {
         let arr = self
             .fb
             .ins()
-            .load(I64, tf(), gc, (self.lyt.rl_seq + self.lyt.as_vals_arr) as i32);
+            .load(I64, tfh(), gc, (self.lyt.rl_seq + self.lyt.as_vals_arr) as i32);
         let fok2 = self.borrow_ok(arr, self.lyt.rl_flag, false);
         let pre = self.fb.ins().band(fok, fok2);
         let vp = self
             .fb
             .ins()
-            .load(I64, tf(), arr, (self.lyt.rl_vec + self.lyt.vec_ptr) as i32);
+            .load(I64, tfh(), arr, (self.lyt.rl_vec + self.lyt.vec_ptr) as i32);
         let vl = self
             .fb
             .ins()
-            .load(I64, tf(), arr, (self.lyt.rl_vec + self.lyt.vec_len) as i32);
+            .load(I64, tfh(), arr, (self.lyt.rl_vec + self.lyt.vec_len) as i32);
         self.read_elem(i, dst, slot, vl, vp, pre, slow);
     }
 
@@ -3393,7 +3436,7 @@ impl Em<'_> {
         let stag = self
             .fb
             .ins()
-            .load(aty, tf(), gc, (self.lyt.rl_seq + self.lyt.as_tag) as i32);
+            .load(aty, tfh(), gc, (self.lyt.rl_seq + self.lyt.as_tag) as i32);
         let vt = self.ld_tag(va);
         let wi = self.aconst(self.lyt.as_ints);
         let isints = self.fb.ins().icmp(IntCC::Equal, stag, wi);
@@ -3407,17 +3450,17 @@ impl Em<'_> {
             let pre = self.fb.ins().band(fok, vis);
             let vp = self.fb.ins().load(
                 I64,
-                tf(),
+                tfh(),
                 gc,
                 (self.lyt.rl_seq + self.lyt.as_ints_vec + self.lyt.vec_ptr) as i32,
             );
             let vl = self.fb.ins().load(
                 I64,
-                tf(),
+                tfh(),
                 gc,
                 (self.lyt.rl_seq + self.lyt.as_ints_vec + self.lyt.vec_len) as i32,
             );
-            let xv = self.fb.ins().load(I64, tf(), va, self.lyt.val_pay as i32);
+            let xv = self.fb.ins().load(I64, tfw(), va, self.lyt.val_pay as i32);
             self.write_elem_prim(i, slot, vl, vp, xv, pre, slow);
         }
         self.fb.switch_to_block(noti);
@@ -3433,17 +3476,17 @@ impl Em<'_> {
             let pre = self.fb.ins().band(fok, vis);
             let vp = self.fb.ins().load(
                 I64,
-                tf(),
+                tfh(),
                 gc,
                 (self.lyt.rl_seq + self.lyt.as_floats_vec + self.lyt.vec_ptr) as i32,
             );
             let vl = self.fb.ins().load(
                 I64,
-                tf(),
+                tfh(),
                 gc,
                 (self.lyt.rl_seq + self.lyt.as_floats_vec + self.lyt.vec_len) as i32,
             );
-            let xv = self.fb.ins().load(F64, tf(), va, self.lyt.val_pay as i32);
+            let xv = self.fb.ins().load(F64, tfw(), va, self.lyt.val_pay as i32);
             self.write_elem_prim(i, slot, vl, vp, xv, pre, slow);
         }
         // ---- store is Vals: write a whole `Val` through the nested `Array`'s
@@ -3458,7 +3501,7 @@ impl Em<'_> {
             let arr = self
                 .fb
                 .ins()
-                .load(I64, tf(), gc, (self.lyt.rl_seq + self.lyt.as_vals_arr) as i32);
+                .load(I64, tfh(), gc, (self.lyt.rl_seq + self.lyt.as_vals_arr) as i32);
             let fok2 = self.borrow_ok(arr, self.lyt.rl_flag, true);
             let ngc = self.is_non_gc_tag(vt);
             let pre = self.fb.ins().band(fok, fok2);
@@ -3466,11 +3509,11 @@ impl Em<'_> {
             let vp = self
                 .fb
                 .ins()
-                .load(I64, tf(), arr, (self.lyt.rl_vec + self.lyt.vec_ptr) as i32);
+                .load(I64, tfh(), arr, (self.lyt.rl_vec + self.lyt.vec_ptr) as i32);
             let vl = self
                 .fb
                 .ins()
-                .load(I64, tf(), arr, (self.lyt.rl_vec + self.lyt.vec_len) as i32);
+                .load(I64, tfh(), arr, (self.lyt.rl_vec + self.lyt.vec_len) as i32);
             self.write_elem(i, slot, vl, vp, va, pre, slow);
         }
     }
@@ -3500,10 +3543,10 @@ impl Em<'_> {
             8 => I64,
             d => unreachable!("bad Fields tag width {d}"),
         };
-        let ftag = self.fb.ins().load(fty, tf(), fp, self.lyt.fld_tag as i32);
+        let ftag = self.fb.ins().load(fty, tfh(), fp, self.lyt.fld_tag as i32);
         let want = self.fb.ins().iconst(fty, self.lyt.fld_inline as i64);
         let isinl = self.fb.ins().icmp(IntCC::Equal, ftag, want);
-        let l8 = self.fb.ins().load(I8, tf(), fp, self.lyt.fld_len as i32);
+        let l8 = self.fb.ins().load(I8, tfh(), fp, self.lyt.fld_len as i32);
         let len = self.fb.ins().uextend(I64, l8);
         let data = self.fb.ins().iadd_imm_s(fp, self.lyt.fld_data as i64);
         (len, data, isinl)
@@ -3595,20 +3638,20 @@ impl Em<'_> {
         let seqb = self.fb.create_block();
         self.is_seq_tag(st, seqb, slow);
         self.fb.switch_to_block(seqb);
-        let gc = self.fb.ins().load(I64, tf(), sa, self.lyt.seq_pay as i32);
+        let gc = self.fb.ins().load(I64, tfw(), sa, self.lyt.seq_pay as i32);
         self.seq_read(i, dst, iv, gc, slow);
         // ---- receiver is Array ----
         self.fb.switch_to_block(arrb);
-        let gc = self.fb.ins().load(I64, tf(), sa, self.lyt.arr_pay as i32);
+        let gc = self.fb.ins().load(I64, tfw(), sa, self.lyt.arr_pay as i32);
         let fok = self.borrow_ok(gc, self.lyt.rl_flag, false);
         let vp = self
             .fb
             .ins()
-            .load(I64, tf(), gc, (self.lyt.rl_vec + self.lyt.vec_ptr) as i32);
+            .load(I64, tfh(), gc, (self.lyt.rl_vec + self.lyt.vec_ptr) as i32);
         let vl = self
             .fb
             .ins()
-            .load(I64, tf(), gc, (self.lyt.rl_vec + self.lyt.vec_len) as i32);
+            .load(I64, tfh(), gc, (self.lyt.rl_vec + self.lyt.vec_len) as i32);
         self.read_elem(i, dst, iv, vl, vp, fok, slow);
         // ---- slow: verbatim helper + DynCheck shadow refresh ----
         self.fb.switch_to_block(slow);
@@ -3669,12 +3712,12 @@ impl Em<'_> {
         let seqb = self.fb.create_block();
         self.is_seq_tag(st, seqb, slow);
         self.fb.switch_to_block(seqb);
-        let gc = self.fb.ins().load(I64, tf(), sa, self.lyt.seq_pay as i32);
+        let gc = self.fb.ins().load(I64, tfw(), sa, self.lyt.seq_pay as i32);
         let va = self.val_ptr(value.index() as u32);
         self.seq_write(i, iv, gc, va, slow);
         // ---- receiver is Array ----
         self.fb.switch_to_block(arrb);
-        let gc = self.fb.ins().load(I64, tf(), sa, self.lyt.arr_pay as i32);
+        let gc = self.fb.ins().load(I64, tfw(), sa, self.lyt.arr_pay as i32);
         let fok = self.borrow_ok(gc, self.lyt.rl_flag, true);
         // value must adopt no Gc pointer → the write barrier is a no-op
         let va = self.val_ptr(value.index() as u32);
@@ -3684,11 +3727,11 @@ impl Em<'_> {
         let vp = self
             .fb
             .ins()
-            .load(I64, tf(), gc, (self.lyt.rl_vec + self.lyt.vec_ptr) as i32);
+            .load(I64, tfh(), gc, (self.lyt.rl_vec + self.lyt.vec_ptr) as i32);
         let vl = self
             .fb
             .ins()
-            .load(I64, tf(), gc, (self.lyt.rl_vec + self.lyt.vec_len) as i32);
+            .load(I64, tfh(), gc, (self.lyt.rl_vec + self.lyt.vec_len) as i32);
         self.write_elem(i, iv, vl, vp, va, pre, slow);
         // ---- slow: verbatim helper ----
         self.fb.switch_to_block(slow);
@@ -3780,26 +3823,26 @@ impl Em<'_> {
         let seqb = self.fb.create_block();
         self.is_seq_tag(rt, seqb, slow);
         self.fb.switch_to_block(seqb);
-        let gc = self.fb.ins().load(I64, tf(), ra, self.lyt.seq_pay as i32);
+        let gc = self.fb.ins().load(I64, tfw(), ra, self.lyt.seq_pay as i32);
         let sv = self.iconst(slot as i64);
         self.seq_read(i, dst, sv, gc, slow);
         self.fb.switch_to_block(arrb);
-        let gc = self.fb.ins().load(I64, tf(), ra, self.lyt.arr_pay as i32);
+        let gc = self.fb.ins().load(I64, tfw(), ra, self.lyt.arr_pay as i32);
         let fok = self.borrow_ok(gc, self.lyt.rl_flag, false);
         let vp = self
             .fb
             .ins()
-            .load(I64, tf(), gc, (self.lyt.rl_vec + self.lyt.vec_ptr) as i32);
+            .load(I64, tfh(), gc, (self.lyt.rl_vec + self.lyt.vec_ptr) as i32);
         let vl = self
             .fb
             .ins()
-            .load(I64, tf(), gc, (self.lyt.rl_vec + self.lyt.vec_len) as i32);
+            .load(I64, tfh(), gc, (self.lyt.rl_vec + self.lyt.vec_len) as i32);
         let sv = self.iconst(slot as i64);
         self.read_elem(i, dst, sv, vl, vp, fok, slow);
         // ---- receiver is Instance: `i.0.borrow().fields[slot]` ----
         // (`Fields::Spilled` goes to `slow` — the helper's `Index` covers it.)
         self.fb.switch_to_block(instb);
-        let gc = self.fb.ins().load(I64, tf(), ra, self.lyt.inst_pay as i32);
+        let gc = self.fb.ins().load(I64, tfw(), ra, self.lyt.inst_pay as i32);
         let fok = self.borrow_ok(gc, self.lyt.rl_flag_i, false);
         let fp = self
             .fb
@@ -3868,26 +3911,26 @@ impl Em<'_> {
         let seqb = self.fb.create_block();
         self.is_seq_tag(rt, seqb, slow);
         self.fb.switch_to_block(seqb);
-        let gc = self.fb.ins().load(I64, tf(), ra, self.lyt.seq_pay as i32);
+        let gc = self.fb.ins().load(I64, tfw(), ra, self.lyt.seq_pay as i32);
         let sv = self.iconst(slot as i64);
         self.seq_write(i, sv, gc, va, slow);
         self.fb.switch_to_block(arrb);
-        let gc = self.fb.ins().load(I64, tf(), ra, self.lyt.arr_pay as i32);
+        let gc = self.fb.ins().load(I64, tfw(), ra, self.lyt.arr_pay as i32);
         let fok = self.borrow_ok(gc, self.lyt.rl_flag, true);
         let pre = self.fb.ins().band(fok, ngc);
         let vp = self
             .fb
             .ins()
-            .load(I64, tf(), gc, (self.lyt.rl_vec + self.lyt.vec_ptr) as i32);
+            .load(I64, tfh(), gc, (self.lyt.rl_vec + self.lyt.vec_ptr) as i32);
         let vl = self
             .fb
             .ins()
-            .load(I64, tf(), gc, (self.lyt.rl_vec + self.lyt.vec_len) as i32);
+            .load(I64, tfh(), gc, (self.lyt.rl_vec + self.lyt.vec_len) as i32);
         let sv = self.iconst(slot as i64);
         self.write_elem(i, sv, vl, vp, va, pre, slow);
         // ---- receiver is Instance: `i.0.borrow_mut(&ctx).fields[slot] = v` ----
         self.fb.switch_to_block(instb);
-        let gc = self.fb.ins().load(I64, tf(), ra, self.lyt.inst_pay as i32);
+        let gc = self.fb.ins().load(I64, tfw(), ra, self.lyt.inst_pay as i32);
         let fok = self.borrow_ok(gc, self.lyt.rl_flag_i, true);
         let fp = self
             .fb
@@ -4028,7 +4071,7 @@ impl Em<'_> {
         self.fb.switch_to_block(good);
         let v = self.fb.ins().load(
             if dst_is_int { I64 } else { F64 },
-            tf(),
+            tfw(),
             sa,
             self.lyt.val_pay as i32,
         );
@@ -4230,14 +4273,14 @@ impl Em<'_> {
         let __e_thread = self.thread();
         let rlen = self.fb.ins().load(
             I64,
-            tf(),
+            tfs(),
             __e_thread,
             (self.lyt.regs_off + self.lyt.vec_len) as i32,
         );
         let __e_thread = self.thread();
         let rcap = self.fb.ins().load(
             I64,
-            tf(),
+            tfs(),
             __e_thread,
             (self.lyt.regs_off + self.lyt.vec_cap) as i32,
         );
@@ -4250,7 +4293,7 @@ impl Em<'_> {
         let __e_thread = self.thread();
         let fcap = self.fb.ins().load(
             I64,
-            tf(),
+            tfs(),
             __e_thread,
             (self.lyt.frames_off + self.lyt.vec_cap) as i32,
         );
@@ -4285,7 +4328,7 @@ impl Em<'_> {
         let __e_thread = self.thread();
         let rp0 = self.fb.ins().load(
             I64,
-            tf(),
+            tfs(),
             __e_thread,
             (self.lyt.regs_off + self.lyt.vec_ptr) as i32,
         );
@@ -4301,12 +4344,12 @@ impl Em<'_> {
                 .fb
                 .ins()
                 .iadd_imm_s(nwin, k as i64 * vs + self.lyt.val_tag as i64);
-            self.fb.ins().store(tf(), tnull, a, 0);
+            self.fb.ins().store(tfw(), tnull, a, 0);
         }
         let nlen = self.fb.ins().iadd_imm_s(rlen, cchunk.regs as i64);
         let __e_thread = self.thread();
         self.fb.ins().store(
-            tf(),
+            tfs(),
             nlen,
             __e_thread,
             (self.lyt.regs_off + self.lyt.vec_len) as i32,
@@ -4324,18 +4367,18 @@ impl Em<'_> {
         // already verified `captures.len() == cchunk.captures.len()`.
         if let Some(cp) = capsp {
             let cvec = self.fb.ins().iadd_imm_s(cp, self.lyt.cl_caps as i64);
-            let cdata = self.fb.ins().load(I64, tf(), cvec, self.lyt.vec_ptr as i32);
+            let cdata = self.fb.ins().load(I64, tfh(), cvec, self.lyt.vec_ptr as i32);
             for (i, &cr) in cchunk.captures.iter().enumerate() {
                 let s = self.fb.ins().iadd_imm_s(cdata, i as i64 * vs);
                 let d = self.vaddr(nwin, cr.index() as u32);
-                self.cpy_val(d, s);
+                self.cpy_val_fl(d, s, tfw(), tfh());
             }
         }
         let __e_thread = self.thread();
         // caller frame's saved ip = resume offset (what `code.ip` held)
         let fptr = self.fb.ins().load(
             I64,
-            tf(),
+            tfs(),
             __e_thread,
             (self.lyt.frames_off + self.lyt.vec_ptr) as i32,
         );
@@ -4343,25 +4386,25 @@ impl Em<'_> {
         let cfo = self.fb.ins().imul_imm_s(fm1, fsz);
         let cf = self.fb.ins().iadd(fptr, cfo);
         let nxt = self.iconst(next as i64);
-        self.fb.ins().store(tf(), nxt, cf, self.lyt.frame_ip as i32);
+        self.fb.ins().store(tfs(), nxt, cf, self.lyt.frame_ip as i32);
         // push the callee frame
         let nfo = self.fb.ins().imul_imm_s(flen, fsz);
         let nf = self.fb.ins().iadd(fptr, nfo);
         let bi = self.iconst32(body.index() as i64);
         self.fb
             .ins()
-            .store(tf(), bi, nf, self.lyt.frame_chunk as i32);
+            .store(tfs(), bi, nf, self.lyt.frame_chunk as i32);
         let cip = self.iconst(cchunk.offset as i64);
-        self.fb.ins().store(tf(), cip, nf, self.lyt.frame_ip as i32);
+        self.fb.ins().store(tfs(), cip, nf, self.lyt.frame_ip as i32);
         let rr = self.iconst32(dst.index() as i64);
-        self.fb.ins().store(tf(), rr, nf, self.lyt.frame_ret as i32);
+        self.fb.ins().store(tfs(), rr, nf, self.lyt.frame_ret as i32);
         self.fb
             .ins()
-            .store(tf(), rlen, nf, self.lyt.frame_base as i32);
+            .store(tfs(), rlen, nf, self.lyt.frame_base as i32);
         let nfl = self.fb.ins().iadd_imm_s(flen, 1);
         let __e_thread = self.thread();
         self.fb.ins().store(
-            tf(),
+            tfs(),
             nfl,
             __e_thread,
             (self.lyt.frames_off + self.lyt.vec_len) as i32,
@@ -4390,7 +4433,7 @@ impl Em<'_> {
         let otag = self
             .fb
             .ins()
-            .load(oty, tf(), __e_out, self.lyt.out_tag as i32);
+            .load(oty, tfs(), __e_out, self.lyt.out_tag as i32);
         let orwant = self.fb.ins().iconst(oty, self.lyt.out_ret as i64);
         let isret = self.fb.ins().icmp(IntCC::Equal, otag, orwant);
         let resumed = self.fb.create_block();
@@ -4401,7 +4444,7 @@ impl Em<'_> {
         let __e_thread = self.thread();
         let fptr2 = self.fb.ins().load(
             I64,
-            tf(),
+            tfs(),
             __e_thread,
             (self.lyt.frames_off + self.lyt.vec_ptr) as i32,
         );
@@ -4411,19 +4454,19 @@ impl Em<'_> {
         let pbase = self
             .fb
             .ins()
-            .load(I64, tf(), pf, self.lyt.frame_base as i32);
-        let pret32 = self.fb.ins().load(I32, tf(), pf, self.lyt.frame_ret as i32);
+            .load(I64, tfs(), pf, self.lyt.frame_base as i32);
+        let pret32 = self.fb.ins().load(I32, tfs(), pf, self.lyt.frame_ret as i32);
         let pret = self.fb.ins().uextend(I64, pret32);
         let __e_thread = self.thread();
         self.fb.ins().store(
-            tf(),
+            tfs(),
             fm2,
             __e_thread,
             (self.lyt.frames_off + self.lyt.vec_len) as i32,
         );
         let __e_thread = self.thread();
         self.fb.ins().store(
-            tf(),
+            tfs(),
             pbase,
             __e_thread,
             (self.lyt.regs_off + self.lyt.vec_len) as i32,
@@ -4432,18 +4475,18 @@ impl Em<'_> {
         let fm3 = self.fb.ins().iadd_imm_s(flen2, -2);
         let cfo2 = self.fb.ins().imul_imm_s(fm3, fsz);
         let cf2 = self.fb.ins().iadd(fptr2, cfo2);
-        let cip2 = self.fb.ins().load(I64, tf(), cf2, self.lyt.frame_ip as i32);
+        let cip2 = self.fb.ins().load(I64, tfs(), cf2, self.lyt.frame_ip as i32);
         self.store_ip(cip2);
         let cbase = self
             .fb
             .ins()
-            .load(I64, tf(), cf2, self.lyt.frame_base as i32);
+            .load(I64, tfs(), cf2, self.lyt.frame_base as i32);
         let __e_thread = self.thread();
         // `thread.regs` may have moved under the callee — rebuild the window
         // and write the return value into `caller_base + return_reg`
         let rp2 = self.fb.ins().load(
             I64,
-            tf(),
+            tfs(),
             __e_thread,
             (self.lyt.regs_off + self.lyt.vec_ptr) as i32,
         );
@@ -4455,7 +4498,7 @@ impl Em<'_> {
             .fb
             .ins()
             .iadd_imm_s(__e_out, self.lyt.out_ret_pay as i64);
-        self.cpy_val(daddr, retp);
+        self.cpy_val_fl(daddr, retp, tfw(), tfs());
         let boff2 = self.fb.ins().imul_imm_s(cbase, vs);
         let regs2 = self.fb.ins().iadd(rp2, boff2);
         self.fb.def_var(self.v.regs, regs2);
@@ -4563,7 +4606,7 @@ impl Em<'_> {
         if fn_legal {
             let tfn = self.tconst(self.lyt.t_fn);
             let is_fn = self.fb.ins().icmp(IntCC::Equal, ctag, tfn);
-            let fb32 = self.fb.ins().load(I32, tf(), ca, self.lyt.fn_pay as i32);
+            let fb32 = self.fb.ins().load(I32, tfw(), ca, self.lyt.fn_pay as i32);
             let fb = self.fb.ins().uextend(I64, fb32);
             let fn_eq = self.fb.ins().icmp(IntCC::Equal, fb, want);
             let fn_hit = self.fb.ins().band(is_fn, fn_eq);
@@ -4579,8 +4622,8 @@ impl Em<'_> {
         let cl_load = self.fb.create_block();
         self.fb.ins().brif(is_cl, cl_load, &[], slow, &[]);
         self.fb.switch_to_block(cl_load);
-        let clp = self.fb.ins().load(I64, tf(), ca, self.lyt.cl_pay as i32);
-        let cb32 = self.fb.ins().load(I32, tf(), clp, self.lyt.cl_func as i32);
+        let clp = self.fb.ins().load(I64, tfw(), ca, self.lyt.cl_pay as i32);
+        let cb32 = self.fb.ins().load(I32, tfh(), clp, self.lyt.cl_func as i32);
         let cb = self.fb.ins().uextend(I64, cb32);
         let cl_eq = self.fb.ins().icmp(IntCC::Equal, cb, want);
         // a captures-carrying callee also needs `captures.len` to match —
@@ -4590,7 +4633,7 @@ impl Em<'_> {
             cl_eq
         } else {
             let cvec = self.fb.ins().iadd_imm_s(clp, self.lyt.cl_caps as i64);
-            let clen = self.fb.ins().load(I64, tf(), cvec, self.lyt.vec_len as i32);
+            let clen = self.fb.ins().load(I64, tfh(), cvec, self.lyt.vec_len as i32);
             let cn = self.iconst(cchunk.captures.len() as i64);
             let len_eq = self.fb.ins().icmp(IntCC::Equal, clen, cn);
             self.fb.ins().band(cl_eq, len_eq)
@@ -4662,7 +4705,7 @@ impl Em<'_> {
             let a = self.vaddr(regs2, d);
             let want = self.tconst(self.lyt.t_int);
             let k = self.fb.ins().icmp(IntCC::Equal, t, want);
-            let v = self.fb.ins().load(I64, tf(), a, self.lyt.val_pay as i32);
+            let v = self.fb.ins().load(I64, tfw(), a, self.lyt.val_pay as i32);
             let z = self.iconst(0);
             let sv0 = self.fb.ins().select(k, v, z);
             self.fb.def_var(sv, sv0);
@@ -4676,7 +4719,7 @@ impl Em<'_> {
             };
             let want = self.tconst(self.lyt.t_float);
             let k = self.fb.ins().icmp(IntCC::Equal, t, want);
-            let v = self.fb.ins().load(F64, tf(), a, self.lyt.val_pay as i32);
+            let v = self.fb.ins().load(F64, tfw(), a, self.lyt.val_pay as i32);
             let z = self.fb.ins().f64const(0.0);
             let sv0 = self.fb.ins().select(k, v, z);
             self.fb.def_var(sv, sv0);
@@ -4926,9 +4969,9 @@ impl Em<'_> {
             }
             Baked::Gc(tag, pay, p) => {
                 let t = self.tconst(tag);
-                self.fb.ins().store(tf(), t, a, self.lyt.val_tag as i32);
+                self.fb.ins().store(tfw(), t, a, self.lyt.val_tag as i32);
                 let pv = self.iconst(p as i64);
-                self.fb.ins().store(tf(), pv, a, pay as i32);
+                self.fb.ins().store(tfw(), pv, a, pay as i32);
             }
         }
         self.refresh_shadow(dst.index() as u32);
@@ -4955,7 +4998,7 @@ impl Em<'_> {
         let st = self.ld_tag(sa);
         let wt = self.tconst(wt);
         let istag = self.fb.ins().icmp(IntCC::Equal, st, wt);
-        let gc = self.fb.ins().load(I64, tf(), sa, po as i32);
+        let gc = self.fb.ins().load(I64, tfw(), sa, po as i32);
         let want = self.iconst(obs.ptr as i64);
         let isptr = self.fb.ins().icmp(IntCC::Equal, gc, want);
         let ok = self.fb.ins().band(istag, isptr);
@@ -4992,18 +5035,18 @@ impl Em<'_> {
             VKind::Vals => {
                 let off = self.fb.ins().imul_imm_s(iv, self.lyt.val_size as i64);
                 let sa = self.fb.ins().iadd(base, off);
-                self.cpy_val(da, sa);
+                self.cpy_val_fl(da, sa, tfw(), tfh());
             }
             VKind::Ints => {
                 let off = self.fb.ins().imul_imm_s(iv, 8);
                 let sa = self.fb.ins().iadd(base, off);
-                let x = self.fb.ins().load(I64, tf(), sa, 0);
+                let x = self.fb.ins().load(I64, tfh(), sa, 0);
                 self.st_int(da, x);
             }
             VKind::Floats => {
                 let off = self.fb.ins().imul_imm_s(iv, 8);
                 let sa = self.fb.ins().iadd(base, off);
-                let x = self.fb.ins().load(F64, tf(), sa, 0);
+                let x = self.fb.ins().load(F64, tfh(), sa, 0);
                 self.st_float(da, x);
             }
         }
@@ -5034,13 +5077,13 @@ impl Em<'_> {
         self.emit_frozen_guard(set.index() as u32, obs, fr, strb, gfall);
         self.fb.switch_to_block(strb);
         let ka = self.val_ptr(index.index() as u32);
-        let kt = self.ld_tag(ka);
+        let kt = self.ld_tag_fl(ka, tfh());
         let tstr = self.tconst(self.lyt.t_str);
         let isstr = self.fb.ins().icmp(IntCC::Equal, kt, tstr);
         let cmpb = self.fb.create_block();
         self.fb.ins().brif(isstr, cmpb, &[], gfall, &[]);
         self.fb.switch_to_block(cmpb);
-        let kp = self.fb.ins().load(I64, tf(), ka, self.lyt.str_pay as i32);
+        let kp = self.fb.ins().load(I64, tfh(), ka, self.lyt.str_pay as i32);
         for (kptr, v) in &entries {
             let kv = self.iconst(*kptr as i64);
             let eq = self.fb.ins().icmp(IntCC::Equal, kp, kv);
