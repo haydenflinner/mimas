@@ -13,6 +13,7 @@ name = "shared"
 path = "src/lib.rs"
 
 [dependencies]
+bitflags.workspace = true
 itertools.workspace = true
 mutants.workspace = true
 miette.workspace = true

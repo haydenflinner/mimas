@@ -11,6 +11,7 @@ use shared::{FileId, IdVec, Location, PactId, ParamId, TyNames};
 use crate::{
     Solver,
     components::{Adt, AdtFlags, AdtId, DecId, DecKind, Ty, TyExt, Variant, Vis},
+    grades::UseInfo,
 };
 
 pub struct Resolutions {
@@ -22,6 +23,19 @@ pub struct Resolutions {
     /// `px` param is `Any` in `node_dims` but `px` here.
     pub want_dims: IndexMap<NodeId, shared::units::Dim>,
     pub node_decs: IndexMap<NodeId, DecId>,
+    /// Read/write site counts per declaration -- the `{0,1,ω}` usage grades the
+    /// lint suite is built on (`Use::Never` is what "unused" warnings report on).
+    pub dec_uses: IndexMap<DecId, UseInfo>,
+    /// Inferred effect set per `fn` dec: the union of what its body can do, seeded by
+    /// `#[effects]` declarations on natives. `Fx::unknown()`-flagged sets carry
+    /// `Fx::UNAUDITED` -- something in the call chain couldn't be graded.
+    pub fn_effects: IndexMap<DecId, shared::Fx>,
+    /// Effect set of each file's top-level statements, keyed by the ast's name. Hosts
+    /// running peer pages gate on this: `fx.fits(granted)` or the code doesn't eval.
+    pub script_effects: IndexMap<String, shared::Fx>,
+    /// Non-fatal diagnostics from the grades pass's lint suite. The solve succeeded;
+    /// these are severity-warning reports for the host to render.
+    pub warnings: Vec<miette::Report>,
     pub decs: IdVec<DecId, ResolvedDecl>,
     pub adts: IdVec<AdtId, ResolvedAdt>,
     pub pact_names: IdVec<PactId, String>,
@@ -325,6 +339,10 @@ impl From<Solver> for Resolutions {
             node_dims: solver.node_dims,
             want_dims: solver.want_dims,
             node_decs: solver.node_decs,
+            dec_uses: solver.dec_uses,
+            fn_effects: solver.fn_effects,
+            script_effects: solver.script_effects,
+            warnings: solver.warnings,
             decs: resolved_decs,
             adts: resolved_adts,
             pact_names,

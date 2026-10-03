@@ -964,3 +964,48 @@ pub struct BadSchemaSpec {
     pub at: SourceSpan,
     pub msg: String,
 }
+
+// ---- grade-pass warnings (`grades.rs`) -- lints, not errors: they collect on
+// `Solver::warnings`/`Resolutions::warnings` and never fail a solve
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("unused variable `{name}`")]
+#[diagnostic(
+    severity(Warning),
+    help("prefix the name with `_` if the binding is intentional (`let _{name} = ...`)")
+)]
+pub struct UnusedBinding {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("`{name}` is bound here but never read")]
+    pub at: SourceSpan,
+    pub name: String,
+}
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("unused parameter `{name}`")]
+#[diagnostic(
+    severity(Warning),
+    help("prefix the name with `_` if the parameter is intentional")
+)]
+pub struct UnusedParam {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("`{name}` is declared but never read in the body")]
+    pub at: SourceSpan,
+    pub name: String,
+}
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("this store to `{name}` is never read")]
+#[diagnostic(
+    severity(Warning),
+    help("the value stored here is overwritten or goes out of scope before any read")
+)]
+pub struct DeadStore {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("this value is never used")]
+    pub at: SourceSpan,
+    pub name: String,
+}

@@ -18,6 +18,9 @@ pub struct Loaded {
     pub asts: Vec<Ast>,
     pub sources: HashMap<FileId, NamedSource<Arc<str>>>,
     pub errors: Vec<Error>,
+    /// Severity-warning diagnostics from the grades pass's lint suite -- the solve
+    /// succeeded, these are for the host to render (or gate page eval on).
+    pub warnings: Vec<miette::Report>,
     pub solver: Solver,
 }
 
@@ -46,11 +49,13 @@ pub fn load_files<'a>(
     {
         errors.push(error);
     }
+    let warnings = std::mem::take(&mut solver.warnings);
 
     Loaded {
         asts,
         sources,
         errors,
+        warnings,
         solver,
     }
 }

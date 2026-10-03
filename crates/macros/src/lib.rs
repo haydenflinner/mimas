@@ -20,7 +20,9 @@ use proc_macro::TokenStream;
 use proc_macro_crate::{FoundCrate, crate_name};
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::{DeriveInput, FnArg, Ident, Pat, parse_macro_input, parse_quote};
+use syn::{
+    DeriveInput, FnArg, Ident, Pat, Token, parse_macro_input, parse_quote, punctuated::Punctuated,
+};
 
 mod convert;
 mod derive;
@@ -34,6 +36,10 @@ mod register;
 pub fn native(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut input = parse_macro_input!(item as syn::ItemFn);
     let src = src_submission(&input.sig.ident, input.sig.ident.span());
+    let effects = match effects_submission(&input.sig.ident, &mut input.attrs) {
+        Ok(effects) => effects,
+        Err(e) => return e.to_compile_error().into(),
+    };
     match convert::expand_conversion(&mut input) {
         Ok((_, mutating)) => {
             // `submit!` expands to an unnamed const, which an `impl` block rejects -- the meta
@@ -47,7 +53,7 @@ pub fn native(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 input.block.stmts.insert(0, meta);
             }
             let mutates = mutates_submissions(&input.sig.ident, &mutating);
-            TokenStream::from(quote!(#input #src #mutates))
+            TokenStream::from(quote!(#input #src #mutates #effects))
         }
         Err(e) => e.to_compile_error().into(),
     }
@@ -113,6 +119,7 @@ fn expand_mimas(attr: TokenStream, item: TokenStream) -> Result<TokenStream2, sy
     match syn::parse::<syn::Item>(item)? {
         syn::Item::Fn(mut function) => {
             let src = src_submission(&function.sig.ident, function.sig.ident.span());
+            let effects = effects_submission(&function.sig.ident, &mut function.attrs)?;
             let (_, mutating) = convert::expand_conversion(&mut function)?;
             let meta = meta_submission(
                 &function.sig.ident,
@@ -124,7 +131,7 @@ fn expand_mimas(attr: TokenStream, item: TokenStream) -> Result<TokenStream2, sy
             }
             let mutates = mutates_submissions(&function.sig.ident, &mutating);
             let registration = register::fn_registration(&function.sig.ident, module.as_deref());
-            Ok(quote!(#function #registration #src #mutates))
+            Ok(quote!(#function #registration #src #mutates #effects))
         }
         // struct / enum: emit the same impls the derives would (so don't *also* `#[derive]`
         // them) plus the `add_adt` submission
@@ -272,6 +279,51 @@ pub(crate) fn src_submission(key_ident: &Ident, span: proc_macro2::Span) -> Toke
             }
         };
     }
+}
+
+/// Ships a fn's declared effect set to install time keyed by the item's full Rust path, for
+/// `vm::api::effects_for` to join onto the registered `ApiFunction`/`ApiMethod` (see
+/// `vm::api::NativeEffects`). The `#[effects(...)]` helper attribute is drained from `attrs`
+/// so it never reaches rustc. Effect names mirror `shared::Fx`: `doc`, `net`, `rng`,
+/// `yield`, `io`, `time`.
+///
+/// `#[effects]` with no list declares the pure set -- an explicit audit of "does nothing".
+pub(crate) fn effects_submission(
+    fn_ident: &Ident,
+    attrs: &mut Vec<syn::Attribute>,
+) -> Result<Option<TokenStream2>, syn::Error> {
+    let Some(pos) = attrs.iter().position(|a| a.path().is_ident("effects")) else {
+        return Ok(None);
+    };
+    let attr = attrs.remove(pos);
+    let names = attr.parse_args_with(Punctuated::<Ident, Token![,]>::parse_terminated)?;
+    let mut bits: u8 = 0;
+    for name in names {
+        bits |= match name.to_string().as_str() {
+            "doc" => 1 << 0,
+            "net" => 1 << 1,
+            "rng" => 1 << 2,
+            "yield" => 1 << 3,
+            "io" => 1 << 4,
+            "time" => 1 << 5,
+            _ => {
+                return Err(syn::Error::new_spanned(
+                    name,
+                    "unknown effect -- expected one of `doc`, `net`, `rng`, `yield`, `io`, `time`",
+                ));
+            }
+        };
+    }
+    let vm = vm_path();
+    let name = fn_ident.to_string();
+    Ok(Some(quote! {
+        #vm::inventory::submit! {
+            #vm::api::NativeEffects {
+                path: ::std::concat!(::std::module_path!(), "::", #name),
+                effects: #bits,
+            }
+        }
+    }))
 }
 
 /// Ships the indices of `&mut` params to install time keyed by the item's full Rust path, for
