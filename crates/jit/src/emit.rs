@@ -90,18 +90,20 @@ struct Sh {
     int: HashSet<u32>,
     float: HashSet<u32>,
     written: HashSet<u32>,
+    /// Scalar-read counts per reg (int+float merged) — `cap_shadows`' rank.
+    reads: HashMap<u32, u32>,
 }
 
 fn analyze(ops: &[(usize, Op)], nregs: u32) -> Sh {
     let mut writes: HashMap<u32, Vec<W>> = HashMap::new();
     let mut put = |r: Reg, w: W| writes.entry(r.index() as u32).or_default().push(w);
-    let mut int_reads: HashSet<u32> = HashSet::new();
-    let mut float_reads: HashSet<u32> = HashSet::new();
+    let mut int_reads: HashMap<u32, u32> = HashMap::new();
+    let mut float_reads: HashMap<u32, u32> = HashMap::new();
     let mut iread = |r: Reg| {
-        int_reads.insert(r.index() as u32);
+        *int_reads.entry(r.index() as u32).or_default() += 1;
     };
     let mut fread = |r: Reg| {
-        float_reads.insert(r.index() as u32);
+        *float_reads.entry(r.index() as u32).or_default() += 1;
     };
     for (_, op) in ops {
         match op {
@@ -281,7 +283,7 @@ fn analyze(ops: &[(usize, Op)], nregs: u32) -> Sh {
         if writes.contains_key(&r) {
             continue;
         }
-        match (int_reads.contains(&r), float_reads.contains(&r)) {
+        match (int_reads.contains_key(&r), float_reads.contains_key(&r)) {
             (true, false) => {
                 int.insert(r);
             }
@@ -297,16 +299,19 @@ fn analyze(ops: &[(usize, Op)], nregs: u32) -> Sh {
             // a DynCheck write only carries a shadow if `r` is genuinely read
             // as that scalar — otherwise `(sv, ok)` would be pure overhead
             let has_chk = ws.iter().any(|w| matches!(w, W::DynCheck));
+            let no_chk = std::env::var_os("MIMAS_NO_DYNCHECK_SHADOW").is_some();
             let ok_i = ws.iter().all(|w| match w {
-                W::Int | W::DynCheck => true,
+                W::Int => true,
+                W::DynCheck => !no_chk,
                 W::Copy(src) => int.contains(src),
                 _ => false,
-            }) && (!has_chk || int_reads.contains(&r));
+            }) && (!has_chk || int_reads.contains_key(&r));
             let ok_f = ws.iter().all(|w| match w {
-                W::Float | W::DynCheck => true,
+                W::Float => true,
+                W::DynCheck => !no_chk,
                 W::Copy(src) => float.contains(src),
                 _ => false,
-            }) && (!has_chk || float_reads.contains(&r));
+            }) && (!has_chk || float_reads.contains_key(&r));
             if ok_i != int.contains(&r) {
                 if ok_i {
                     int.insert(r);
@@ -332,6 +337,45 @@ fn analyze(ops: &[(usize, Op)], nregs: u32) -> Sh {
         int,
         float,
         written: writes.keys().copied().collect(),
+        reads: int_reads
+            .iter()
+            .chain(float_reads.iter())
+            .map(|(&r, &n)| (r, n))
+            .collect(),
+    }
+}
+
+/// Trim `sh` to the `cap` hottest regs by scalar-read count. Runs AFTER the
+/// facts merge in `emit_body` — observed-stable entry regs join `sh` there
+/// and would otherwise bypass the bound entirely. Each shadowed reg is a
+/// live frontend var Ion must place at every block join; when the set
+/// overflows the register file the joins become ldr/str permutations
+/// (~45% of physics' runtime at 27 shadows). A shadow only pays when its
+/// reg is register-resident — memory-transient regs (physics' DynCheck
+/// field loads) lose more in join traffic than they save in tag checks.
+/// The ok_mask's 64 bits are the hard bound; MIMAS_SHADOW_CAP tunes.
+fn cap_shadows(sh: &mut Sh) {
+    let cap: usize = std::env::var("MIMAS_SHADOW_CAP")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(10)
+        .min(64);
+    if sh.int.len() + sh.float.len() <= cap {
+        return;
+    }
+    let mut ranked: Vec<(u32, bool)> = sh
+        .int
+        .iter()
+        .map(|&r| (r, false))
+        .chain(sh.float.iter().map(|&r| (r, true)))
+        .collect();
+    ranked.sort_by_key(|(r, _)| std::cmp::Reverse(sh.reads.get(r).copied().unwrap_or(0)));
+    for (r, flt) in ranked.into_iter().skip(cap) {
+        if flt {
+            sh.float.remove(&r);
+        } else {
+            sh.int.remove(&r);
+        }
     }
 }
 
@@ -371,9 +415,17 @@ struct Vs {
     /// observable boundary. bcgen's `bcn`/`bcn0`, verbatim.
     bcn: Variable,
     bcn0: Variable,
-    /// Scalar shadows: `(value, ok)` vars per register.
-    int: HashMap<u32, (Variable, Variable)>,
-    float: HashMap<u32, (Variable, Variable)>,
+    /// Scalar shadows: `(value, bit)` per register — `bit` indexes `ok_mask`
+    /// (dense slot 0..63, NOT the reg index, so wide windows still fit).
+    /// One shared mask var instead of a per-reg `i8` keeps the live-var
+    /// count at joins near `shadows + ~6`: an `i8` per reg was ~half of all
+    /// spill-slot traffic on physics-scale bodies.
+    int: HashMap<u32, (Variable, u8)>,
+    float: HashMap<u32, (Variable, u8)>,
+    /// Bit `bit` set ⇔ the reg's shadow `sv` is authoritative for its window
+    /// slot. Single I64 — validity merges at block joins cost one phi for
+    /// the whole shadow set instead of one per reg.
+    ok_mask: Variable,
 }
 
 /// Shared exit/trampoline blocks.
@@ -564,6 +616,53 @@ impl Em<'_> {
         self.fb.ins().iconst(ty, t as i64)
     }
 
+    /// `ok(bit)` — nonzero I64 iff the reg's shadow is authoritative.
+    /// `brif`/`select`/`icmp` all take it directly.
+    fn ok_get(&mut self, bit: u8) -> Value {
+        let m = self.fb.use_var(self.v.ok_mask);
+        self.fb.ins().band_imm_u(m, 1i64 << bit)
+    }
+
+    /// `ok(bit) = k` for a runtime i8/i64 0/1 — `(m & ~bit) | (k << bit)`.
+    fn ok_set(&mut self, bit: u8, k: Value) {
+        let m = self.fb.use_var(self.v.ok_mask);
+        let k = if self.fb.func.dfg.value_type(k) == I64 {
+            k
+        } else {
+            self.fb.ins().uextend(I64, k)
+        };
+        let kb = self.fb.ins().ishl_imm_u(k, bit as i64);
+        let b = self.fb.ins().iconst(I64, 1i64 << bit);
+        let nb = self.fb.ins().band_not(m, b);
+        let n = self.fb.ins().bor(nb, kb);
+        self.fb.def_var(self.v.ok_mask, n);
+    }
+
+    /// `ok(bit) = CONST` — one `bor`/`band_not`, no shift.
+    fn ok_set_const(&mut self, bit: u8, on: bool) {
+        let m = self.fb.use_var(self.v.ok_mask);
+        let n = if on {
+            self.fb.ins().bor_imm_u(m, 1i64 << bit)
+        } else {
+            let b = self.fb.ins().iconst(I64, 1i64 << bit);
+            self.fb.ins().band_not(m, b)
+        };
+        self.fb.def_var(self.v.ok_mask, n);
+    }
+
+    /// `ok(dbit) = ok(sbit)` — the `Move` shadow transfer.
+    fn ok_copy(&mut self, sbit: u8, dbit: u8) {
+        let m = self.fb.use_var(self.v.ok_mask);
+        let sb = self.fb.ins().band_imm_u(m, 1i64 << sbit);
+        let z = self.fb.ins().iconst(I64, 0);
+        let on = self.fb.ins().icmp(IntCC::NotEqual, sb, z);
+        let db = self.fb.ins().iconst(I64, 1i64 << dbit);
+        let a0 = self.fb.ins().band_not(m, db);
+        let a1 = self.fb.ins().bor(a0, db);
+        let n = self.fb.ins().select(on, a1, a0);
+        self.fb.def_var(self.v.ok_mask, n);
+    }
+
     /// `regs[r]`'s discriminant.
     fn ld_tag(&mut self, a: Value) -> Value {
         let ty = self.tag_ty();
@@ -686,10 +785,12 @@ impl Em<'_> {
             return;
         }
         let regs = self.regs();
+        let zero = self.iconst(0);
         let tint = self.tconst(self.lyt.t_int);
         for r in ints {
-            let (sv, ok) = self.v.int[&r];
-            let okv = self.fb.use_var(ok);
+            let (sv, bit) = self.v.int[&r];
+            let okb = self.ok_get(bit);
+            let okv = self.fb.ins().icmp(IntCC::NotEqual, okb, zero);
             let v = self.fb.use_var(sv);
             let a = self.vaddr(regs, r);
             let old = self.ld_tag(a);
@@ -701,8 +802,9 @@ impl Em<'_> {
         }
         let tflt = self.tconst(self.lyt.t_float);
         for r in floats {
-            let (sv, ok) = self.v.float[&r];
-            let okv = self.fb.use_var(ok);
+            let (sv, bit) = self.v.float[&r];
+            let okb = self.ok_get(bit);
+            let okv = self.fb.ins().icmp(IntCC::NotEqual, okb, zero);
             let v = self.fb.use_var(sv);
             let a = self.vaddr(regs, r);
             let old = self.ld_tag(a);
@@ -760,9 +862,9 @@ impl Em<'_> {
     /// A miss routes to `estep`: `step` runs the op verbatim — the same
     /// outcome bcgen's `bin_cold`/`branch_cold` tail-calls produce.
     fn int_opnd(&mut self, r: u32) -> Value {
-        if let Some(&(sv, ok)) = self.v.int.get(&r) {
+        if let Some(&(sv, bit)) = self.v.int.get(&r) {
             let good = self.fb.create_block();
-            let okv = self.fb.use_var(ok);
+            let okv = self.ok_get(bit);
             self.fb.ins().brif(okv, good, &[], self.ex.estep, &[]);
             self.fb.switch_to_block(good);
             self.fb.use_var(sv)
@@ -773,9 +875,9 @@ impl Em<'_> {
     }
 
     fn float_opnd(&mut self, r: u32) -> Value {
-        if let Some(&(sv, ok)) = self.v.float.get(&r) {
+        if let Some(&(sv, bit)) = self.v.float.get(&r) {
             let good = self.fb.create_block();
-            let okv = self.fb.use_var(ok);
+            let okv = self.ok_get(bit);
             self.fb.ins().brif(okv, good, &[], self.ex.estep, &[]);
             self.fb.switch_to_block(good);
             self.fb.use_var(sv)
@@ -788,10 +890,9 @@ impl Em<'_> {
     /// Scalar write into `dst`: shadow-var update when shadowed, else an
     /// inline `Val` store.
     fn wr_int_dst(&mut self, d: u32, v: Value) {
-        if let Some(&(sv, ok)) = self.v.int.get(&d) {
+        if let Some(&(sv, bit)) = self.v.int.get(&d) {
             self.fb.def_var(sv, v);
-            let one = self.iconst8(1);
-            self.fb.def_var(ok, one);
+            self.ok_set_const(bit, true);
         } else {
             let regs = self.regs();
             let a = self.vaddr(regs, d);
@@ -800,10 +901,9 @@ impl Em<'_> {
     }
 
     fn wr_float_dst(&mut self, d: u32, v: Value) {
-        if let Some(&(sv, ok)) = self.v.float.get(&d) {
+        if let Some(&(sv, bit)) = self.v.float.get(&d) {
             self.fb.def_var(sv, v);
-            let one = self.iconst8(1);
-            self.fb.def_var(ok, one);
+            self.ok_set_const(bit, true);
         } else {
             let regs = self.regs();
             let a = self.vaddr(regs, d);
@@ -821,10 +921,10 @@ impl Em<'_> {
     /// A `*const Val` for reg `s`, materializing a live shadow first — after
     /// this `regs[s]` is authoritative for the read.
     fn val_ptr(&mut self, s: u32) -> Value {
-        if let Some(&(sv, ok)) = self.v.int.get(&s) {
+        if let Some(&(sv, bit)) = self.v.int.get(&s) {
             let c = self.fb.create_block();
             let m = self.fb.create_block();
-            let okv = self.fb.use_var(ok);
+            let okv = self.ok_get(bit);
             self.fb.ins().brif(okv, m, &[], c, &[]);
             self.fb.switch_to_block(m);
             let regs = self.regs();
@@ -833,10 +933,10 @@ impl Em<'_> {
             self.st_int(a, v);
             self.fb.ins().jump(c, &[]);
             self.fb.switch_to_block(c);
-        } else if let Some(&(sv, ok)) = self.v.float.get(&s) {
+        } else if let Some(&(sv, bit)) = self.v.float.get(&s) {
             let c = self.fb.create_block();
             let m = self.fb.create_block();
-            let okv = self.fb.use_var(ok);
+            let okv = self.ok_get(bit);
             self.fb.ins().brif(okv, m, &[], c, &[]);
             self.fb.switch_to_block(m);
             let regs = self.regs();
@@ -911,19 +1011,19 @@ impl Em<'_> {
         let regs = self.regs();
         let a = self.vaddr(regs, r);
         let t = self.ld_tag(a);
-        if let Some(&(sv, ok)) = self.v.int.get(&r) {
+        if let Some(&(sv, bit)) = self.v.int.get(&r) {
             let want = self.tconst(self.lyt.t_int);
             let k = self.fb.ins().icmp(IntCC::Equal, t, want);
             let pv = self.fb.ins().load(I64, tf(), a, self.lyt.val_pay as i32);
             self.fb.def_var(sv, pv);
-            self.fb.def_var(ok, k);
+            self.ok_set(bit, k);
         }
-        if let Some(&(sv, ok)) = self.v.float.get(&r) {
+        if let Some(&(sv, bit)) = self.v.float.get(&r) {
             let want = self.tconst(self.lyt.t_float);
             let k = self.fb.ins().icmp(IntCC::Equal, t, want);
             let pv = self.fb.ins().load(F64, tf(), a, self.lyt.val_pay as i32);
             self.fb.def_var(sv, pv);
-            self.fb.def_var(ok, k);
+            self.ok_set(bit, k);
         }
     }
 
@@ -1146,6 +1246,7 @@ pub(crate) fn emit_body(
             _ => {}
         }
     }
+    cap_shadows(&mut sh);
     // Regs that always held the *same* GC pointer at entry — the
     // frozen-table lookup key for baked reads. Written regs are included:
     // the runtime payload-pointer guard catches a reseat, so guarded baked
@@ -1155,6 +1256,16 @@ pub(crate) fn emit_body(
         .filter(|&r| spec.facts.entry.get(r).is_some_and(|o| o.ptr != 0))
         .map(|r| (r as u32, spec.facts.entry[r]))
         .collect();
+    if std::env::var_os("MIMAS_JIT_STATS").is_some() {
+        eprintln!(
+            "jit body@{chunk_off:#x}: ops={} nregs={} sh_int={} sh_float={} known={}",
+            ops.len(),
+            nregs,
+            sh.int.len(),
+            sh.float.len(),
+            known.len(),
+        );
+    }
 
     // ip2idx blob: u32 dense index per byte of this chunk's span, MAX elsewhere
     let map_data = {
@@ -1207,13 +1318,17 @@ pub(crate) fn emit_body(
     let v_ekind = fb.declare_var(I8);
     let v_bcn = fb.declare_var(I64);
     let v_bcn0 = fb.declare_var(I64);
+    let v_ok_mask = fb.declare_var(I64);
     let mut int_vars = HashMap::new();
     let mut float_vars = HashMap::new();
+    let mut bit = 0u8;
     for &r in &sh.int {
-        int_vars.insert(r, (fb.declare_var(I64), fb.declare_var(I8)));
+        int_vars.insert(r, (fb.declare_var(I64), bit));
+        bit += 1;
     }
     for &r in &sh.float {
-        float_vars.insert(r, (fb.declare_var(F64), fb.declare_var(I8)));
+        float_vars.insert(r, (fb.declare_var(F64), bit));
+        bit += 1;
     }
 
     // ---- blocks ----
@@ -1270,6 +1385,7 @@ pub(crate) fn emit_body(
             bcn0: v_bcn0,
             int: int_vars,
             float: float_vars,
+            ok_mask: v_ok_mask,
         },
         ex: Ex {
             dispatch,
@@ -1365,11 +1481,11 @@ pub(crate) fn emit_body(
         k.sort_unstable();
         k
     };
+    em.fb.def_var(v_ok_mask, z64);
     for r in int_keys {
-        let (sv, ok) = em.v.int[&r];
+        let (sv, bit) = em.v.int[&r];
         if !initd.contains(&r) {
             em.fb.def_var(sv, z64);
-            em.fb.def_var(ok, z8);
             continue;
         }
         let a = em.vaddr(regs0, r);
@@ -1379,7 +1495,7 @@ pub(crate) fn emit_body(
         let v = em.fb.ins().load(I64, tf(), a, lyt.val_pay as i32);
         let sv0 = em.fb.ins().select(k, v, z64);
         em.fb.def_var(sv, sv0);
-        em.fb.def_var(ok, k);
+        em.ok_set(bit, k);
     }
     let float_keys: Vec<u32> = {
         let mut k: Vec<u32> = em.v.float.keys().copied().collect();
@@ -1388,10 +1504,9 @@ pub(crate) fn emit_body(
     };
     let zf0 = em.fb.ins().f64const(0.0);
     for r in float_keys {
-        let (sv, ok) = em.v.float[&r];
+        let (sv, bit) = em.v.float[&r];
         if !initd.contains(&r) {
             em.fb.def_var(sv, zf0);
-            em.fb.def_var(ok, z8);
             continue;
         }
         let a = em.vaddr(regs0, r);
@@ -1401,7 +1516,7 @@ pub(crate) fn emit_body(
         let v = em.fb.ins().load(F64, tf(), a, lyt.val_pay as i32);
         let sv0 = em.fb.ins().select(k, v, zf0);
         em.fb.def_var(sv, sv0);
-        em.fb.def_var(ok, k);
+        em.ok_set(bit, k);
     }
     // NOTE: an entry fast-jump (`code.ip == ops[0].off` → blocks[0],
     // skipping the table) was tried and dropped: the extra CFG edge
@@ -2588,18 +2703,18 @@ impl Em<'_> {
     /// `Int`/`Float` — definitely not `Val::Bool(is_true)` — bcgen's defer
     /// rewrite makes the same read produce the scalar `Val`, so compare-false.
     fn mask_by_shadow(&mut self, r: Reg, k: Value) -> Value {
-        let ok = self
+        let bit = self
             .v
             .int
             .get(&(r.index() as u32))
             .map(|&(_, o)| o)
             .or_else(|| self.v.float.get(&(r.index() as u32)).map(|&(_, o)| o));
-        match ok {
+        match bit {
             None => k,
-            Some(ok) => {
-                let okv = self.fb.use_var(ok);
-                let z8 = self.iconst8(0);
-                let not = self.fb.ins().icmp(IntCC::Equal, okv, z8);
+            Some(bit) => {
+                let okv = self.ok_get(bit);
+                let z = self.iconst(0);
+                let not = self.fb.ins().icmp(IntCC::Equal, okv, z);
                 self.fb.ins().band(k, not)
             }
         }
@@ -2643,13 +2758,16 @@ impl Em<'_> {
 
     fn bool_opnd(&mut self, r: Reg) -> Value {
         let idx = r.index() as u32;
-        if let Some(&(_, ok)) = self.v.int.get(&idx).or_else(|| self.v.float.get(&idx)) {
+        if let Some(&(_, bit)) = self
+            .v
+            .int
+            .get(&idx)
+            .or_else(|| self.v.float.get(&idx))
+        {
             // a live scalar shadow means the reg is NOT a Bool → estep
-            let okv = self.fb.use_var(ok);
-            let z8 = self.iconst8(0);
-            let notok = self.fb.ins().icmp(IntCC::Equal, okv, z8);
+            let okv = self.ok_get(bit);
             let nb = self.fb.create_block();
-            self.fb.ins().brif(notok, nb, &[], self.ex.estep, &[]);
+            self.fb.ins().brif(okv, self.ex.estep, &[], nb, &[]);
             self.fb.switch_to_block(nb);
         }
         let good = self.fb.create_block();
@@ -3031,19 +3149,19 @@ impl Em<'_> {
             // DynCheck shadow refresh: tag-probe the loaded elem, keep the
             // payload in `sv` + `ok` for downstream scalar ops.
             let t = self.ld_tag(sa);
-            if let Some(&(sv, ok)) = self.v.int.get(&d) {
+            if let Some(&(sv, bit)) = self.v.int.get(&d) {
                 let want = self.tconst(self.lyt.t_int);
                 let k = self.fb.ins().icmp(IntCC::Equal, t, want);
                 let pv = self.fb.ins().load(I64, tf(), sa, self.lyt.val_pay as i32);
                 self.fb.def_var(sv, pv);
-                self.fb.def_var(ok, k);
+                self.ok_set(bit, k);
             }
-            if let Some(&(sv, ok)) = self.v.float.get(&d) {
+            if let Some(&(sv, bit)) = self.v.float.get(&d) {
                 let want = self.tconst(self.lyt.t_float);
                 let k = self.fb.ins().icmp(IntCC::Equal, t, want);
                 let pv = self.fb.ins().load(F64, tf(), sa, self.lyt.val_pay as i32);
                 self.fb.def_var(sv, pv);
-                self.fb.def_var(ok, k);
+                self.ok_set(bit, k);
             }
         }
         let regs = self.regs();
@@ -3125,26 +3243,22 @@ impl Em<'_> {
         let d = dst.index() as u32;
         let mut covered = false;
         if is_int {
-            if let Some(&(sv, ok)) = self.v.int.get(&d) {
+            if let Some(&(sv, bit)) = self.v.int.get(&d) {
                 self.fb.def_var(sv, v);
-                let one = self.iconst8(1);
-                self.fb.def_var(ok, one);
+                self.ok_set_const(bit, true);
                 covered = true;
             }
-            if let Some(&(_, ok)) = self.v.float.get(&d) {
-                let z = self.iconst8(0);
-                self.fb.def_var(ok, z);
+            if let Some(&(_, bit)) = self.v.float.get(&d) {
+                self.ok_set_const(bit, false);
             }
         } else {
-            if let Some(&(sv, ok)) = self.v.float.get(&d) {
+            if let Some(&(sv, bit)) = self.v.float.get(&d) {
                 self.fb.def_var(sv, v);
-                let one = self.iconst8(1);
-                self.fb.def_var(ok, one);
+                self.ok_set_const(bit, true);
                 covered = true;
             }
-            if let Some(&(_, ok)) = self.v.int.get(&d) {
-                let z = self.iconst8(0);
-                self.fb.def_var(ok, z);
+            if let Some(&(_, bit)) = self.v.int.get(&d) {
+                self.ok_set_const(bit, false);
             }
         }
         if !covered {
@@ -3816,15 +3930,14 @@ impl Em<'_> {
         let sf = self.v.float.get(&s).copied();
         if di.is_some() && si.is_some() {
             // `d = s; dok = sok; if !dok { wr(d, rd(s)) }`
-            let (dsv, dok) = di.unwrap();
-            let (ssv, sok) = si.unwrap();
+            let (dsv, dbit) = di.unwrap();
+            let (ssv, sbit) = si.unwrap();
             let v = self.fb.use_var(ssv);
-            let k = self.fb.use_var(sok);
             self.fb.def_var(dsv, v);
-            self.fb.def_var(dok, k);
+            self.ok_copy(sbit, dbit);
             let c = self.fb.create_block();
             let w = self.fb.create_block();
-            let dokv = self.fb.use_var(dok);
+            let dokv = self.ok_get(dbit);
             self.fb.ins().brif(dokv, c, &[], w, &[]);
             self.fb.switch_to_block(w);
             let regs = self.regs();
@@ -3834,15 +3947,14 @@ impl Em<'_> {
             self.fb.ins().jump(c, &[]);
             self.fb.switch_to_block(c);
         } else if df.is_some() && sf.is_some() {
-            let (dsv, dok) = df.unwrap();
-            let (ssv, sok) = sf.unwrap();
+            let (dsv, dbit) = df.unwrap();
+            let (ssv, sbit) = sf.unwrap();
             let v = self.fb.use_var(ssv);
-            let k = self.fb.use_var(sok);
             self.fb.def_var(dsv, v);
-            self.fb.def_var(dok, k);
+            self.ok_copy(sbit, dbit);
             let c = self.fb.create_block();
             let w = self.fb.create_block();
-            let dokv = self.fb.use_var(dok);
+            let dokv = self.ok_get(dbit);
             self.fb.ins().brif(dokv, c, &[], w, &[]);
             self.fb.switch_to_block(w);
             let regs = self.regs();
@@ -3873,18 +3985,18 @@ impl Em<'_> {
         &mut self,
         d: u32,
         s: u32,
-        dv: (Variable, Variable),
-        osrc: Option<(Variable, Variable)>,
+        dv: (Variable, u8),
+        osrc: Option<(Variable, u8)>,
         dst_is_int: bool,
     ) {
-        let (dsv, dok) = dv;
+        let (dsv, dbit) = dv;
         let miss = self.fb.create_block();
         let good = self.fb.create_block();
         let done = self.fb.create_block();
-        if let Some((ssv, sok)) = osrc {
+        if let Some((ssv, sbit)) = osrc {
             // src carries a live opposite-kind shadow → the Val is that scalar
             // → miss arm writes it through directly.
-            let okv = self.fb.use_var(sok);
+            let okv = self.ok_get(sbit);
             let genb = self.fb.create_block();
             let fmiss = self.fb.create_block();
             self.fb.ins().brif(okv, fmiss, &[], genb, &[]);
@@ -3897,8 +4009,7 @@ impl Em<'_> {
             } else {
                 self.st_int(dd, v);
             }
-            let z = self.iconst8(0);
-            self.fb.def_var(dok, z);
+            self.ok_set_const(dbit, false);
             self.fb.ins().jump(done, &[]);
             self.fb.switch_to_block(genb);
         }
@@ -3922,16 +4033,14 @@ impl Em<'_> {
             self.lyt.val_pay as i32,
         );
         self.fb.def_var(dsv, v);
-        let one = self.iconst8(1);
-        self.fb.def_var(dok, one);
+        self.ok_set_const(dbit, true);
         self.fb.ins().jump(done, &[]);
         self.fb.switch_to_block(miss);
         let regs = self.regs();
         let vp = self.vaddr(regs, s);
         let dd = self.vaddr(regs, d);
         self.cpy_val(dd, vp);
-        let z = self.iconst8(0);
-        self.fb.def_var(dok, z);
+        self.ok_set_const(dbit, false);
         self.fb.ins().jump(done, &[]);
         self.fb.switch_to_block(done);
     }
@@ -4549,7 +4658,7 @@ impl Em<'_> {
             let a = self.vaddr(regs2, d);
             self.ld_tag(a)
         });
-        if let (Some(&(sv, ok)), Some(t)) = (self.v.int.get(&d), t) {
+        if let (Some(&(sv, bit)), Some(t)) = (self.v.int.get(&d), t) {
             let a = self.vaddr(regs2, d);
             let want = self.tconst(self.lyt.t_int);
             let k = self.fb.ins().icmp(IntCC::Equal, t, want);
@@ -4557,9 +4666,9 @@ impl Em<'_> {
             let z = self.iconst(0);
             let sv0 = self.fb.ins().select(k, v, z);
             self.fb.def_var(sv, sv0);
-            self.fb.def_var(ok, k);
+            self.ok_set(bit, k);
         }
-        if let Some(&(sv, ok)) = self.v.float.get(&d) {
+        if let Some(&(sv, bit)) = self.v.float.get(&d) {
             let a = self.vaddr(regs2, d);
             let t = match t {
                 Some(t) => t,
@@ -4571,7 +4680,7 @@ impl Em<'_> {
             let z = self.fb.ins().f64const(0.0);
             let sv0 = self.fb.ins().select(k, v, z);
             self.fb.def_var(sv, sv0);
-            self.fb.def_var(ok, k);
+            self.ok_set(bit, k);
         }
         {
             let nb = self.next_blk(i);
