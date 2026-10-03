@@ -293,6 +293,36 @@ impl Variant {
             Variant::Struct(s) => s.fields.is_empty(),
         }
     }
+
+    /// The spelling that constructs this variant — `Name(<t>, ..)` for tuple
+    /// members, `Name { f = <t>, .. }` for named fields — for the constructor
+    /// suggestions ctor-mismatch errors carry. Member types show as `<ty>`
+    /// placeholders; field lists past five truncate.
+    pub(crate) fn ctor(&self, name: &str) -> String {
+        // a self-referencing member stores `Self` -- surface the concrete
+        // name instead (`List::Cons { tail = <Self?> }` -> `<List?>`)
+        let self_name = name.split("::").next().unwrap_or(name);
+        let ph = |ty: &Ty| format!("<{}>", ty.to_string().replace("Self", self_name));
+        match self {
+            Variant::Tuple(t) => format!(
+                "{name}({})",
+                t.members.iter().map(|m| ph(m)).join(", ")
+            ),
+            Variant::Struct(s) if s.fields.is_empty() => format!("{name} {{}}"),
+            Variant::Struct(s) => {
+                let mut shown = s
+                    .fields
+                    .iter()
+                    .take(5)
+                    .map(|(n, f)| format!("{n} = {}", ph(&f.ty)))
+                    .join(", ");
+                if s.fields.len() > 5 {
+                    shown.push_str(", …");
+                }
+                format!("{name} {{ {shown} }}")
+            }
+        }
+    }
 }
 
 #[mutants::skip]

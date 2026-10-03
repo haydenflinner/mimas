@@ -282,3 +282,75 @@ fn studio_units_are_dimension_checked() {
     rejected("let a: beat = 3s;", "declared type doesn't match");
     rejected("let a: Hz = 4b;", "declared type doesn't match");
 }
+
+// ---- `index`/`idx`: an `int` position into a collection -------------------
+// Its own dimension, so a quantity can never pass for one -- but unlike every
+// other unit it annotates as `int` (`xs[i]` needs one) and plain numbers
+// interconvert freely (`i += 1`, `i < xs.len()`, `f(i)` with a plain `3`).
+
+test_run!(
+    index_vars_behave_like_ints,
+    "let xs = [\"a\", \"b\", \"c\"]
+     let i: index = 1index
+     let j: index = 0
+     j += 1
+     struct Cur { i: index, xs: [str] }
+     let c = Cur { i = 2, xs = xs }",
+    "xs[i]" => "\"b\"",
+    "xs[0index]" => "\"a\"",
+    "xs[0idx]" => "\"a\"",
+    "c.xs[c.i]" => "\"c\"",
+    // plain ints step, compare and bind as indexes
+    "i + 1" => "2",
+    "j" => "1",
+    "i < xs.len()" => "true",
+    // index arithmetic keeps the dim; a ratio of indexes is a plain number
+    "(i * 2).to(\"idx\")" => "2",
+    "i / i" => "1",
+    // reading one back as a plain number
+    "i.to(\"index\")" => "1",
+);
+
+test_run!(
+    plain_numbers_convert_to_index,
+    "fn at(xs: [int], i: index) -> int { xs[i] }
+     let xs = [10, 20]
+     let i: index = 0",
+    "at(xs, 1)" => "20",
+    "at(xs, 0index)" => "10",
+    // `len()` is a plain int -- comparing against it is the point
+    "at(xs, xs.len() - 1)" => "20",
+    "if i == 0 { 1 } else { 0 }" => "1",
+);
+
+#[test]
+fn index_never_mixes_with_quantities() {
+    // a quantity literal isn't even an `int` -- the type check fires first
+    rejected("let i: index = 5kg;", "expected int but found float");
+    rejected("let i = 1index + 3px;", "cannot add");
+    // `2s` isn't even an int -- the type check fires before the dim one
+    rejected("let i: index = 0;\ni += 2s;", "expected int but found float");
+    rejected("let i = 1index == 3usd;", "cannot compare");
+    rejected("let i = [0index, 2m.to_int()];", "a list mixes");
+    rejected("let a: index = 5kW;", "expected int but found float");
+    rejected(
+        "fn f(i: index) -> int { i }\nlet a = f(3px);",
+        "expected int but found float",
+    );
+    // an int *quantity* passes the type check but is still not an index
+    rejected(
+        "fn f(i: index) -> int { i }\nlet a = f(3px.to_int());",
+        "argument `i` of `f`",
+    );
+    rejected("struct S { i: index }\nlet s = S { i = 2m };", "expected int but found float");
+    // an index can't flow into a quantity slot either
+    rejected("let i: index = 0;\nlet p: px = i;", "declared type doesn't match");
+}
+
+#[test]
+fn index_stays_int_or_nothing() {
+    // `index` annotates as `int`: a float rhs is a type error, not a dim one
+    rejected("let i: index = 1.5;", "expected int but found float");
+    // and a fractional literal can't pretend -- `xs[2.5index]` is a float key
+    rejected("let xs = [1];\nlet a = xs[2.5index];", "cannot be indexed");
+}

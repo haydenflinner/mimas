@@ -114,9 +114,13 @@ impl Solve for Access {
                     solver.note(right, ty.clone(), Some(dec));
                     Ok(ty)
                 } else {
+                    let ctor = variant
+                        .layout()
+                        .map(|l| format!("`{}`", variant.ctor(&solver.adts[l].name)));
                     Err(MissingTupleMembers {
                         src: solver.src(right.location()),
                         at: right.location().into(),
+                        ctor,
                     })?
                 };
             }
@@ -629,6 +633,16 @@ impl Solve for Call {
                     })
                 } else {
                     let variant = lock.variants.get(&right.lexeme).cloned();
+                    if variant.is_none()
+                        && right.lexeme == "default"
+                        && !lock.impls.contains_key(&right.lexeme)
+                    {
+                        // `S::default()` — every struct implicitly carries a
+                        // zero-arg constructor filling each member with its
+                        // type's default. A variant or impl member named
+                        // `default` shadows it.
+                        return default_ctor(self, id, right, adt, solver);
+                    }
                     if let Some(variant) = &variant {
                         solver.note(right, Ty::adt(adt), variant.dec());
                     }
@@ -637,12 +651,31 @@ impl Solve for Call {
             }
             ExprKind::Ident(ident) => match ident.query(solver)? {
                 Ty::Adt(aid, _) | Ty::Identity(aid, _) => {
-                    let (is_enum, name, singular) = {
+                    let (is_enum, name, singular, variants) = {
                         let adt = &solver.adts[aid];
+                        let variants = if adt.flags.contains(AdtFlags::IS_ENUM) {
+                            let shown = adt
+                                .variants
+                                .iter()
+                                .take(4)
+                                .map(|(n, v)| {
+                                    format!("`{}`", v.ctor(&format!("{}::{n}", adt.name)))
+                                })
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            if adt.variants.len() > 4 {
+                                format!("{shown}, …")
+                            } else {
+                                shown
+                            }
+                        } else {
+                            String::new()
+                        };
                         (
                             adt.flags.contains(AdtFlags::IS_ENUM),
                             adt.name.clone(),
                             adt.as_singular().cloned(),
+                            variants,
                         )
                     };
                     if is_enum {
@@ -650,6 +683,7 @@ impl Solve for Call {
                             src: solver.src(location),
                             at: location.into(),
                             name,
+                            variants,
                         })?
                     }
                     singular.map(|v| (aid, v, aid))
@@ -660,6 +694,10 @@ impl Solve for Call {
         };
 
         if let Some((layout, variant, adt)) = adt {
+            // the ctor spelling the mismatch errors suggest (`Stack(<int>)`,
+            // `List::Cons { head = <int> }`) -- computed while `variant` is
+            // still the enum; the arms destructure it
+            let ctor_spelling = variant.ctor(&solver.adts[layout].name);
             match variant {
                 Variant::Tuple(variant) => {
                     if let Some(named) = self.arguments.iter().find(|a| a.name.is_some()) {
@@ -692,10 +730,12 @@ impl Solve for Call {
                             (Some(_), None) => Err(ExtraTupleMembers {
                                 src: solver.src(location),
                                 at: location.into(),
+                                ctor: Some(format!("`{ctor_spelling}`")),
                             })?,
                             (None, Some(_)) => Err(MissingTupleMembers {
                                 src: solver.src(location),
                                 at: location.into(),
+                                ctor: Some(format!("`{ctor_spelling}`")),
                             })?,
                             _ => break,
                         }
@@ -708,6 +748,7 @@ impl Solve for Call {
                     src: solver.src(location),
                     at: location.into(),
                     ty: v.to_string(),
+                    ctor: format!("construct it with braces: `{ctor_spelling}`"),
                 })?,
             }
         } else {
@@ -1158,14 +1199,18 @@ fn plexpr_overload_ty(lhs: &Ty, rhs: &Ty, solver: &Solver) -> Option<Ty> {
 /// `tensor + tensor` / `tensor * 0.5` / `2 - tensor` -- the same kind of dynamic VM-level
 /// overload as `PlExpr`'s, resolved through the `Val::Tensor` arms of `bin()` (broadcast
 /// elementwise on the burn backend). Either operand being the native `Tensor` adt types the
-/// whole expr `Tensor`; anything that can't broadcast is a runtime error, same tradeoff as
-/// above. `==`/`!=` stay structural (`Val::eq`), and ordering ops stay compile-time-invalid --
-/// elementwise bool tensors aren't part of this surface.
+/// whole expr `Tensor`. In `Evaluation` that's arithmetic; in `Equality` the six comparisons
+/// are pervasive too (`t > 0` is the 0/1 mask, NumPy/Uiua-style -- `.all()`/`.any()` collapse
+/// it back to bool). The other side still has to be broadcastable -- numeric, tensor, or
+/// still-unresolved (`Vid`/`Param`) -- so `t == "x"` keeps its real error rather than typing
+/// a mask that can never run.
 fn tensor_overload_ty(lhs: &Ty, rhs: &Ty, solver: &Solver) -> Option<Ty> {
     let is_tensor = |ty: &Ty| matches!(ty, Ty::Adt(id, _) if solver.adts[*id].name == "Tensor");
-    if is_tensor(lhs) {
+    let broadcastable =
+        |ty: &Ty| matches!(ty, Ty::Int | Ty::Float | Ty::Vid(_) | Ty::Param(_)) || is_tensor(ty);
+    if is_tensor(lhs) && broadcastable(rhs) {
         Some(lhs.clone())
-    } else if is_tensor(rhs) {
+    } else if is_tensor(rhs) && broadcastable(lhs) {
         Some(rhs.clone())
     } else {
         None
@@ -1178,7 +1223,9 @@ impl Solve for Equality {
         let rhs = self.right.query(solver)?;
         let lhs_n = lhs.clone().normalized(solver);
         let rhs_n = rhs.clone().normalized(solver);
-        if let Some(ty) = plexpr_overload_ty(&lhs_n, &rhs_n, solver) {
+        if let Some(ty) = plexpr_overload_ty(&lhs_n, &rhs_n, solver)
+            .or_else(|| tensor_overload_ty(&lhs_n, &rhs_n, solver))
+        {
             return Ok(ty);
         }
         // `<` `<=` `>` `>=` on an adt with registered operator impls (`Api::add_bin_op`)
@@ -2419,5 +2466,141 @@ fn adt_from_type_path(left: &Expr, solver: &mut Solver) -> Result<AdtId> {
             at: left.location().into(),
             ty: ty.to_string(),
         })?,
+    }
+}
+
+/// `S::default()` — the implicit memberwise-default constructor every
+/// non-enum adt carries. No fn is minted: the call node lands in
+/// `default_ctors` and codegen emits the `NewInstance` itself.
+fn default_ctor(
+    call: &Call,
+    id: NodeId,
+    right: &Ident,
+    aid: AdtId,
+    solver: &mut Solver,
+) -> Result<Ty> {
+    let name = solver.adts[aid].name.clone();
+    if !call.arguments.is_empty() {
+        Err(NoDefault {
+            src: solver.src(right.location),
+            at: right.location.into(),
+            name: name.clone(),
+            reason: "it takes no arguments".into(),
+        })?
+    }
+    let ty = solver.instantiated_adt(aid);
+    let args = match &ty {
+        Ty::Adt(_, args) | Ty::Identity(_, args) => args.clone(),
+        _ => vec![],
+    };
+    check_defaultable(solver, &name, aid, &args, right.location, &mut vec![aid])?;
+    solver.default_ctors.insert(id, aid);
+    solver.shadow_expr_ty(call.left.id(), Ty::adt(aid), call.left.location())?;
+    Ok(ty.normalized(solver))
+}
+
+/// Every member of `aid` must admit a default value for `::default()` to
+/// exist. `call_name` names the type in errors (the call-site spelling,
+/// not a nested member's owner); `at` labels the `default` in the source.
+fn check_defaultable(
+    solver: &mut Solver,
+    call_name: &str,
+    aid: AdtId,
+    args: &[Ty],
+    at: Location,
+    visiting: &mut Vec<AdtId>,
+) -> Result<()> {
+    let adt = &solver.adts[aid];
+    if adt.flags.contains(AdtFlags::IS_ENUM) {
+        let name = adt.name.clone();
+        Err(NoDefault {
+            src: solver.src(at),
+            at: at.into(),
+            name: call_name.into(),
+            reason: format!("`{name}` is an enum -- a default can't pick a variant"),
+        })?
+    }
+    if adt
+        .flags
+        .intersects(AdtFlags::IS_MODULE | AdtFlags::IS_BUILTIN)
+    {
+        let name = adt.name.clone();
+        Err(NoDefault {
+            src: solver.src(at),
+            at: at.into(),
+            name: call_name.into(),
+            reason: format!("`{name}` is a built-in -- no memberwise default exists"),
+        })?
+    }
+    let members: Vec<(String, Location, Ty)> = match adt.as_singular() {
+        Some(Variant::Struct(v)) => v
+            .fields
+            .iter()
+            .map(|(n, f)| (n.clone(), f.declaration_location, f.ty.clone()))
+            .collect(),
+        Some(Variant::Tuple(v)) => v
+            .members
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (format!("member {i}"), at, t.clone()))
+            .collect(),
+        None => vec![],
+    };
+    for (member, loc, ty) in members {
+        let spec = solver.specialize(&ty, aid, args).normalized(solver);
+        check_member_defaultable(solver, call_name, spec, &member, loc, visiting)?;
+    }
+    Ok(())
+}
+
+/// One member's defaultability. Containers always default (`[]`, `~{}`,
+/// `null`) without ever materializing an element, so their inners aren't
+/// visited; a nested struct member recurses; anything opaque reports.
+fn check_member_defaultable(
+    solver: &mut Solver,
+    call_name: &str,
+    ty: Ty,
+    member: &str,
+    loc: Location,
+    visiting: &mut Vec<AdtId>,
+) -> Result<()> {
+    let fail = |solver: &Solver, reason: String| -> Error {
+        NoDefault {
+            src: solver.src(loc),
+            at: loc.into(),
+            name: call_name.into(),
+            reason,
+        }
+        .into()
+    };
+    match ty {
+        Ty::Unit | Ty::Null | Ty::Bool | Ty::Int | Ty::Float | Ty::Str => Ok(()),
+        Ty::Array(..) | Ty::Dict(_) | Ty::Option(_) => Ok(()),
+        Ty::Tuple(members) => {
+            for m in members {
+                check_member_defaultable(solver, call_name, m, member, loc, visiting)?;
+            }
+            Ok(())
+        }
+        Ty::Adt(inner, iargs) | Ty::Identity(inner, iargs) => {
+            if visiting.contains(&inner) {
+                Err(fail(
+                    solver,
+                    format!("`{member}` recurses through `{}` -- no default", solver.adts[inner].name),
+                ))?
+            }
+            visiting.push(inner);
+            let r = check_defaultable(solver, call_name, inner, &iargs, loc, visiting);
+            visiting.pop();
+            r
+        }
+        Ty::Param(_) | Ty::Vid(_) | Ty::Anon(_) => Err(fail(
+            solver,
+            format!("`{member}`'s type is generic -- write `default` in an `impl`"),
+        ))?,
+        other => Err(fail(
+            solver,
+            format!("`{member}: {other}` has no default value"),
+        ))?,
     }
 }

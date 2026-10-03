@@ -30,6 +30,10 @@ pub struct Resolutions {
     /// Exprs whose array lengths the solver couldn't prove against a `[T; n]`
     /// contract -- emit wraps each in a runtime dim check (see `lens.rs`).
     pub len_checks: IndexMap<NodeId, Vec<Option<usize>>>,
+    /// `S::default()` calls the solver blessed: call node → the struct's adt.
+    /// Emit lowers each to a `NewInstance` whose members are the types'
+    /// defaults instead of a call.
+    pub default_ctors: IndexMap<NodeId, AdtId>,
     /// The `__contract_fail` native's id, for contract-failure lowering at emit.
     /// `None` in embeddings that never installed the stdlib.
     pub contract_native: Option<NativeId>,
@@ -145,6 +149,9 @@ pub enum ResolvedDeclKind {
         takes_self: bool,
         /// Def site of the registered Rust fn for natives (`None` for user-defined items).
         src: Option<api::NativeSrc>,
+        /// The built-in's `///` docstring, harvested by `#[native]`/`#[mimas]`
+        /// (`Some` only when non-empty).
+        doc: Option<String>,
     },
     Constant(Literal),
     Variant {
@@ -159,6 +166,14 @@ pub struct ResolvedAdt {
     pub name: String,
     pub module: AdtId,
     pub fields: Vec<String>,
+    /// Declared member types in construction order (struct fields, tuple
+    /// members); `Ty::Param`s stand for the adt's own params, which a
+    /// `S::default()` lowering substitutes with the call site's args.
+    /// Empty for enums and modules.
+    pub member_tys: Vec<Ty>,
+    /// The adt's declared type params (`struct P<T>` → `[T]`), positionally
+    /// parallel to the `args` on a `Ty::Adt`/`Ty::Identity` instantiation.
+    pub type_params: Vec<ParamId>,
     pub implements: Vec<PactId>,
     pub methods: IndexMap<String, DecId>,
     pub dispatch_ids: Vec<AdtId>,
@@ -173,6 +188,21 @@ impl ResolvedAdt {
             }
             _ => Vec::new(),
         };
+
+        let member_tys = match (adt.variants.len(), adt.variants.values().next()) {
+            (1, Some(Variant::Struct(variant))) => variant
+                .fields
+                .values()
+                .map(|f| f.ty.clone().normalized(solver))
+                .collect(),
+            (1, Some(Variant::Tuple(variant))) => variant
+                .members
+                .iter()
+                .map(|m| m.clone().normalized(solver))
+                .collect(),
+            _ => Vec::new(),
+        };
+        let type_params = adt.type_params.iter().map(|(_, pid)| *pid).collect();
 
         let mut implements: Vec<PactId> = solver
             .pact_impls
@@ -204,6 +234,8 @@ impl ResolvedAdt {
             name: adt.name.clone(),
             module,
             fields,
+            member_tys,
+            type_params,
             implements,
             methods,
             dispatch_ids,
@@ -312,6 +344,10 @@ impl From<Solver> for Resolutions {
                         None => matches!(&ty, Ty::Fn(header) if header.is_method),
                     },
                     src: solver.dec_to_native.get(&id).and_then(|b| b.src),
+                    doc: solver
+                        .dec_to_native
+                        .get(&id)
+                        .and_then(|b| (!b.doc.is_empty()).then(|| b.doc.clone())),
                 },
                 DecKind::Constant(Some(lit)) => ResolvedDeclKind::Constant(lit),
                 DecKind::Constant(None) => panic!(
@@ -356,6 +392,7 @@ impl From<Solver> for Resolutions {
             module_paths: paths,
             closure_captures,
             len_checks: solver.len_checks,
+            default_ctors: solver.default_ctors,
             contract_native,
             panic_native,
             root,

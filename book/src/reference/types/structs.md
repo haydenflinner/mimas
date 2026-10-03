@@ -58,6 +58,23 @@ let won = p.is_winner();
 let won = Player::is_winner(p);
 ```
 
+## `Struct::default()`
+
+Every struct comes with a built-in `default` associated function -- no `impl` needed. It fills each field with that type's zero value: numbers `0`, strings `""`, `false`, empty lists and dicts, `null` options, and structs are defaulted recursively.
+
+```mimas
+struct Player {
+    name: str,
+    score: int,
+    badges: [str],
+}
+
+let p = Player::default();
+print(p);  // Player { "", 0, [] }
+```
+
+Works for tuple structs and field-free structs too. Declaring your own `default` in an `impl` block shadows the built-in one. Enums have no `default` -- there's no variant to pick -- and a field whose type can't be defaulted (like a bare generic parameter `T`) is a compile error at the call site.
+
 ## Reaching items through a value
 
 mimas has one deliberate split from Rust: dot access can *also* reach an associated item through a value, not just through the type name. This matters for [pacts](../pacts.md), where you have a value but not its concrete type name.

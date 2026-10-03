@@ -61,11 +61,38 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add_method(sqrt);
     api.add_method(abs);
     api.add_method(neg);
+    api.add_method(sin);
+    api.add_method(cos);
     api.add_method(powf);
     api.add_method(softmax);
     api.add_method(log_softmax);
     api.add_method(to_list);
     api.add_method(item);
+    // masks/indexing (Uiua-flavored: comparisons themselves are the pervasive
+    // `==`/`!=`/`<`/`>`/`<=`/`>=` operators, not methods)
+    api.add_method(slice);
+    api.add_method(select);
+    api.add_method(rows);
+    api.add_method(unfold);
+    api.add_method(argsort);
+    api.add_method(topk);
+    api.add_method(mask_fill);
+    api.add_method(mask_where);
+    api.add_method(nonzero);
+    api.add_method(all);
+    api.add_method(any);
+    // scan / order / tiling
+    api.add_method(cumsum);
+    api.add_method(cumprod);
+    api.add_method(reverse);
+    api.add_method(repeat);
+    api.add_method(expand);
+    api.add_method(sort);
+    api.add_method(floor);
+    api.add_method(ceil);
+    api.add_method(round);
+    api.add_method(sign);
+    api.add_method(erf);
 }
 
 /// Walk a nested mimas list into `(flat, dims)` for `from_flat`. Every row must
@@ -240,7 +267,10 @@ fn numel(t: vm::Tensor) -> i64 {
 /// `t.reshape([4, 8])` -- same elements, new shape; sizes must multiply out.
 #[native]
 fn reshape<'gc>(ctx: Ctx<'gc>, t: vm::Tensor<'gc>, shape: Vec<i64>) -> Raisable<vm::Tensor<'gc>> {
-    wrap(ctx, dims_of(&shape).and_then(|d| bt::reshape(t.inner(), &d)))
+    wrap(
+        ctx,
+        dims_of(&shape).and_then(|d| bt::reshape(t.inner(), &d)),
+    )
 }
 
 /// `t.t()` -- matrix transpose (swaps the last two dims).
@@ -252,7 +282,10 @@ fn t<'gc>(ctx: Ctx<'gc>, t: vm::Tensor<'gc>) -> Raisable<vm::Tensor<'gc>> {
 /// `t.swap_dims(0, 1)`.
 #[native]
 fn swap_dims<'gc>(ctx: Ctx<'gc>, t: vm::Tensor<'gc>, a: i64, b: i64) -> Raisable<vm::Tensor<'gc>> {
-    wrap(ctx, bt::swap_dims(t.inner(), a.max(0) as usize, b.max(0) as usize))
+    wrap(
+        ctx,
+        bt::swap_dims(t.inner(), a.max(0) as usize, b.max(0) as usize),
+    )
 }
 
 /// `t.permute([2, 0, 1])` -- rearrange dims into the given order.
@@ -386,6 +419,16 @@ fn neg<'gc>(ctx: Ctx<'gc>, t: vm::Tensor<'gc>) -> Raisable<vm::Tensor<'gc>> {
     wrap(ctx, bt::neg(t.inner()))
 }
 
+#[native]
+fn sin<'gc>(ctx: Ctx<'gc>, t: vm::Tensor<'gc>) -> Raisable<vm::Tensor<'gc>> {
+    wrap(ctx, bt::sin(t.inner()))
+}
+
+#[native]
+fn cos<'gc>(ctx: Ctx<'gc>, t: vm::Tensor<'gc>) -> Raisable<vm::Tensor<'gc>> {
+    wrap(ctx, bt::cos(t.inner()))
+}
+
 /// `t.powf(2)` -- elementwise power.
 #[native]
 fn powf<'gc>(ctx: Ctx<'gc>, t: vm::Tensor<'gc>, s: f64) -> Raisable<vm::Tensor<'gc>> {
@@ -417,6 +460,204 @@ fn log_softmax<'gc>(
 }
 
 // -- back to lists ------------------------------------------------------------------------
+
+// -- masks / indexing / scan ----------------------------------------------------------
+//
+// Comparisons aren't methods: `==`/`!=`/`<`/`>`/`<=`/`>=` are pervasive
+// operators on tensors (`t > 0` is a 0.0/1.0 float mask, `t == u` is
+// elementwise). These natives are the verbs masks feed.
+
+/// `t.slice(dim, lo, hi)` -- `t[..., lo..hi, ...]`.
+#[native]
+fn slice<'gc>(
+    ctx: Ctx<'gc>,
+    t: vm::Tensor<'gc>,
+    dim: i64,
+    lo: i64,
+    hi: i64,
+) -> Raisable<vm::Tensor<'gc>> {
+    wrap(
+        ctx,
+        bt::slice(
+            t.inner(),
+            dim.max(0) as usize,
+            lo.max(0) as usize,
+            hi.max(0) as usize,
+        ),
+    )
+}
+
+/// `t.select(dim, [i, j, ..])` -- gather positions along `dim` by index.
+#[native]
+fn select<'gc>(
+    ctx: Ctx<'gc>,
+    t: vm::Tensor<'gc>,
+    dim: i64,
+    idxs: Vec<i64>,
+) -> Raisable<vm::Tensor<'gc>> {
+    wrap(ctx, bt::select(t.inner(), dim.max(0) as usize, idxs))
+}
+
+/// `t.rows([i, j, ..])` -- `select(0, ..)`; `w.rows(tokens)` is an embedding
+/// lookup (and `eye(k)!.rows(labels)` is one-hot).
+#[native]
+fn rows<'gc>(ctx: Ctx<'gc>, t: vm::Tensor<'gc>, idxs: Vec<i64>) -> Raisable<vm::Tensor<'gc>> {
+    wrap(ctx, bt::select(t.inner(), 0, idxs))
+}
+
+/// `t.unfold(dim, size, step)` -- sliding windows along `dim` (Uiua `stencil`'s
+/// raw form); `[.., n, ..]` becomes `[.., n_windows, size, ..]`. Chain two dims
+/// and reshape for im2col-style conv.
+#[native]
+fn unfold<'gc>(
+    ctx: Ctx<'gc>,
+    t: vm::Tensor<'gc>,
+    dim: i64,
+    size: i64,
+    step: i64,
+) -> Raisable<vm::Tensor<'gc>> {
+    wrap(
+        ctx,
+        bt::unfold(
+            t.inner(),
+            dim.max(0) as usize,
+            size.max(0) as usize,
+            step.max(0) as usize,
+        ),
+    )
+}
+
+/// `t.argsort(dim, desc?)` -- flat list of the per-slice sort indices.
+#[native]
+fn argsort(t: vm::Tensor, dim: i64, desc: Option<bool>) -> Raisable<Vec<i64>> {
+    bt::argsort(&t.inner(), dim.max(0) as usize, desc.unwrap_or(false)).into()
+}
+
+/// `t.topk(k)` / `t.topk(k, dim)` -- `(values_tensor, flat_index_list)`.
+#[native]
+fn topk<'gc>(
+    ctx: Ctx<'gc>,
+    t: vm::Tensor<'gc>,
+    k: i64,
+    dim: Option<i64>,
+) -> Raisable<(vm::Tensor<'gc>, Vec<i64>)> {
+    let d = dim
+        .map(|d| d.max(0) as usize)
+        .unwrap_or_else(|| bt::rank(&t.inner()) - 1);
+    bt::topk(t.inner(), d, k.max(0) as usize)
+        .map(|(v, i)| (ctx.new_tensor(v), i))
+        .into()
+}
+
+/// `t.mask_fill(mask, v)` -- set `v` wherever `mask != 0`.
+#[native]
+fn mask_fill<'gc>(
+    ctx: Ctx<'gc>,
+    t: vm::Tensor<'gc>,
+    mask: vm::Tensor<'gc>,
+    v: f64,
+) -> Raisable<vm::Tensor<'gc>> {
+    wrap(ctx, bt::mask_fill(t.inner(), mask.inner(), v))
+}
+
+/// `t.mask_where(mask, src)` -- take `src`'s value wherever `mask != 0`.
+#[native]
+fn mask_where<'gc>(
+    ctx: Ctx<'gc>,
+    t: vm::Tensor<'gc>,
+    mask: vm::Tensor<'gc>,
+    src: vm::Tensor<'gc>,
+) -> Raisable<vm::Tensor<'gc>> {
+    wrap(ctx, bt::mask_where(t.inner(), mask.inner(), src.inner()))
+}
+
+/// `t.nonzero()` -- coordinates of nonzero cells, `[[i, j, ..]]` row-major.
+#[native]
+fn nonzero(t: vm::Tensor) -> Raisable<Vec<Vec<i64>>> {
+    bt::nonzero(&t.inner()).into()
+}
+
+/// `t.all()` / `t.any()` -- collapse a mask to a bool (nonzero = truthy).
+#[native]
+fn all(t: vm::Tensor) -> Raisable<bool> {
+    bt::all(&t.inner()).into()
+}
+
+#[native]
+fn any(t: vm::Tensor) -> Raisable<bool> {
+    bt::any(&t.inner()).into()
+}
+
+/// `t.cumsum(dim)` / `t.cumprod(dim)` -- cumulative scan along `dim`.
+#[native]
+fn cumsum<'gc>(ctx: Ctx<'gc>, t: vm::Tensor<'gc>, dim: i64) -> Raisable<vm::Tensor<'gc>> {
+    wrap(ctx, bt::cumsum(t.inner(), dim.max(0) as usize))
+}
+
+#[native]
+fn cumprod<'gc>(ctx: Ctx<'gc>, t: vm::Tensor<'gc>, dim: i64) -> Raisable<vm::Tensor<'gc>> {
+    wrap(ctx, bt::cumprod(t.inner(), dim.max(0) as usize))
+}
+
+/// `t.reverse(dim)` -- flip an axis.
+#[native]
+fn reverse<'gc>(ctx: Ctx<'gc>, t: vm::Tensor<'gc>, dim: i64) -> Raisable<vm::Tensor<'gc>> {
+    wrap(ctx, bt::reverse(t.inner(), dim.max(0) as usize))
+}
+
+/// `t.repeat(dim, n)` -- tile `dim` `n` times.
+#[native]
+fn repeat<'gc>(ctx: Ctx<'gc>, t: vm::Tensor<'gc>, dim: i64, n: i64) -> Raisable<vm::Tensor<'gc>> {
+    wrap(
+        ctx,
+        bt::repeat(t.inner(), dim.max(0) as usize, n.max(0) as usize),
+    )
+}
+
+/// `t.expand(shape)` -- broadcast size-1 dims out to `shape`.
+#[native]
+fn expand<'gc>(ctx: Ctx<'gc>, t: vm::Tensor<'gc>, shape: Vec<i64>) -> Raisable<vm::Tensor<'gc>> {
+    wrap(ctx, dims_of(&shape).and_then(|d| bt::expand(t.inner(), &d)))
+}
+
+/// `t.sort(dim)` / `t.sort(dim, true)` -- values sorted along `dim`.
+#[native]
+fn sort<'gc>(
+    ctx: Ctx<'gc>,
+    t: vm::Tensor<'gc>,
+    dim: i64,
+    desc: Option<bool>,
+) -> Raisable<vm::Tensor<'gc>> {
+    wrap(
+        ctx,
+        bt::sort(t.inner(), dim.max(0) as usize, desc.unwrap_or(false)),
+    )
+}
+
+#[native]
+fn floor<'gc>(ctx: Ctx<'gc>, t: vm::Tensor<'gc>) -> Raisable<vm::Tensor<'gc>> {
+    wrap(ctx, bt::floor(t.inner()))
+}
+
+#[native]
+fn ceil<'gc>(ctx: Ctx<'gc>, t: vm::Tensor<'gc>) -> Raisable<vm::Tensor<'gc>> {
+    wrap(ctx, bt::ceil(t.inner()))
+}
+
+#[native]
+fn round<'gc>(ctx: Ctx<'gc>, t: vm::Tensor<'gc>) -> Raisable<vm::Tensor<'gc>> {
+    wrap(ctx, bt::round(t.inner()))
+}
+
+#[native]
+fn sign<'gc>(ctx: Ctx<'gc>, t: vm::Tensor<'gc>) -> Raisable<vm::Tensor<'gc>> {
+    wrap(ctx, bt::sign(t.inner()))
+}
+
+#[native]
+fn erf<'gc>(ctx: Ctx<'gc>, t: vm::Tensor<'gc>) -> Raisable<vm::Tensor<'gc>> {
+    wrap(ctx, bt::erf(t.inner()))
+}
 
 /// `t.to_list()` -- back to nested mimas lists of floats. `Result<_, RtErr>`
 /// rather than `Raisable` because `Val`'s type is `Unknown`, which would eat

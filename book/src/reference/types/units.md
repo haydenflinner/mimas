@@ -32,7 +32,8 @@ If your program declares a type with the same name as a unit (a `struct W`, say)
 
 | Kind | Units |
 | :--- | :--- |
-| length | `m` `km` `cm` `mm` `inch` `ft` `mi` |
+| length | `m` `km` `cm` `mm` `inch` `ft` `mi` `mile` `miles` |
+| volume | `gal` `gallon` `gallons` (US liquid — `1gal` is `3.785L`), `L` `l` `liter` `liters` `litre` `litres` `mL` `ml` (`1L` is `0.001` m³) |
 | mass | `kg` `g` `mg` `lb` `tonne` |
 | time | `s` `ms` `us` `min` `h` `d` `wk` `yr` |
 | electricity | `A` `mA` `V` `kV` `C` |
@@ -45,9 +46,21 @@ If your program declares a type with the same name as a unit (a `struct W`, say)
 | music | `beat` `meas` `phrase` `bpm` `cpm` (`1meas` is 4 beats, `132bpm` is 2.2 beats per second) |
 | pitch | `st` `oct` (semitones; `1oct` is `12st`) |
 | data | `b` `bit` `B` `kB` `KiB` `MB` `MiB` `GB` `GiB` `TB` (`b` is **bit**, not beat; `B` is a byte) |
+| index | `idx` `index` (an `int` position into a collection — see below) |
 | plain numbers | `rad` `deg` `pct` `bp` `prob` `logit` (`90deg` is `1.5708`, `6pct` is `0.06`, `25bp` is `0.0025`; `prob`/`logit` are intent annotations like `rad`, scale 1) |
 
 Money, music, pitch, data and the graphics units are dimensions of their own: `usd` can't be added to `s`, `px` isn't a length, and `beat` converts to `s` only through a tempo (`4meas / 132bpm` is a time). The `music` stdlib's mini-notation abuses `b` for *beat* inside pattern strings (`"C2 1b"`) — the checker never sees those, and in real code `b` stays a bit.
+
+`index` (or `idx`) is the odd one out: it's the only unit that annotates as `int`, because a position into a collection has to be one — `xs[i]` takes it directly. It's still its own dimension, so an index can't mix with a quantity: `i + 3px` and `let p: px = i` are errors. But plain numbers convert freely, since stepping and bounds-checking are the whole point of an index: `i += 1`, `i < xs.len()`, and `f(3)` into an `i: index` parameter all just work.
+
+```mimas
+struct Cursor { xs: [str], i: index }
+
+let c = Cursor { xs = ["a", "b", "c"], i = 0 };
+c.i += 1;
+print(c.xs[c.i]);   // "b"
+print(c.i + 1px);   // compile error: cannot add index (idx) and pixels (px)
+```
 
 ## What the checker enforces
 

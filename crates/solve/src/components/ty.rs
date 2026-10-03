@@ -157,12 +157,17 @@ impl TyExt for Ty {
                 Ok(ty)
             }
             // a unit written where a type goes (`kW`, `usd`) is a float whose dimension the
-            // checker tracks -- unless the program declares a type by that name, which wins
+            // checker tracks -- unless the program declares a type by that name, which wins.
+            // `index` is the exception: indexes are ints, or `xs[i]` could never take one
             Annotation::Ty(ident)
                 if !names_a_type(solver, &ident)
                     && shared::units::lookup(&ident.lexeme).is_some() =>
             {
-                Ok(Ty::Float)
+                Ok(if shared::units::lookup(&ident.lexeme).unwrap().0 == shared::units::INDEX {
+                    Ty::Int
+                } else {
+                    Ty::Float
+                })
             }
             // `Pair<int, str>` (or `mod::Pair<int, str>`) applies a generic adt;
             // `Interval<kW>` is an `Interval` to the type checker -- the unit is the

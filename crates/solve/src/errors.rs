@@ -352,6 +352,8 @@ pub struct EnumNotConstructable {
     #[label("pick a variant of `{name}`")]
     pub at: SourceSpan,
     pub name: String,
+    #[help]
+    pub variants: String,
 }
 
 #[derive(Error, Debug, Diagnostic)]
@@ -362,6 +364,8 @@ pub struct ExpectedTupleStruct {
     #[label("'{ty}' cannot be constructed as a tuple struct")]
     pub at: SourceSpan,
     pub ty: String,
+    #[help]
+    pub ctor: String,
 }
 
 #[derive(Error, Debug, Diagnostic)]
@@ -372,6 +376,20 @@ pub struct FieldNotFound {
     #[label("no field or method named '{field_name}'")]
     pub at: SourceSpan,
     pub field_name: String,
+}
+
+/// `S::default()` where the adt or one of its members can't be
+/// defaulted. `at` is the member's declaration when a member is the
+/// problem, else the `default` at the call.
+#[derive(Error, Debug, Diagnostic)]
+#[error("`{name}::default()` can't be built")]
+pub struct NoDefault {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("{reason}")]
+    pub at: SourceSpan,
+    pub name: String,
+    pub reason: String,
 }
 
 #[derive(Error, Debug, Diagnostic)]
@@ -520,6 +538,10 @@ pub struct MissingTupleMembers {
     pub src: NamedSource<Arc<str>>,
     #[label("tuple is missing required members")]
     pub at: SourceSpan,
+    /// the ctor spelling when the arity mismatch is at a call site -- a
+    /// destructuring pattern has no ctor to suggest, so it stays `None`
+    #[help]
+    pub ctor: Option<String>,
 }
 
 #[derive(Error, Debug, Diagnostic)]
@@ -529,6 +551,8 @@ pub struct ExtraTupleMembers {
     pub src: NamedSource<Arc<str>>,
     #[label("tuple has more members than possible")]
     pub at: SourceSpan,
+    #[help]
+    pub ctor: Option<String>,
 }
 
 #[derive(Error, Debug, Diagnostic)]

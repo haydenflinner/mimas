@@ -22,8 +22,6 @@ mod std_lib {
     pub(crate) mod darkly;
     #[cfg(feature = "dataframe")]
     pub(crate) mod dataframe;
-    #[cfg(feature = "tensor")]
-    pub(crate) mod tensor;
     pub(crate) mod debug;
     pub(crate) mod fs;
     pub(crate) mod interval;
@@ -34,6 +32,8 @@ mod std_lib {
     pub(crate) mod parse;
     pub(crate) mod process;
     pub(crate) mod sys;
+    #[cfg(feature = "tensor")]
+    pub(crate) mod tensor;
     #[cfg(feature = "xlsx")]
     pub(crate) mod xlsx;
 }

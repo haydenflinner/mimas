@@ -16,9 +16,9 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use burn_backend::{
-    DType, FloatDType, IntDType, Shape, TensorData, TensorMetadata,
-    backend::ops::{ActivationOps, FloatTensorOps, IntTensorOps},
-    tensor::{Device, FloatTensor, IntTensor},
+    BoolDType, DType, FloatDType, IntDType, Shape, Slice, TensorData, TensorMetadata,
+    backend::ops::{ActivationOps, BoolTensorOps, FloatTensorOps, IntTensorOps},
+    tensor::{BoolTensor, Device, FloatTensor, IntTensor},
 };
 use burn_ndarray::NdArray;
 
@@ -134,7 +134,9 @@ fn scalar(v: f64) -> burn_backend::Scalar {
     burn_backend::Scalar::new(v, &DType::F32)
 }
 
-/// `t op t` -- broadcasting elementwise. `op` is a mimas `BinOp`.
+/// `t op t` -- broadcasting elementwise. `op` is a mimas `BinOp`; the six
+/// comparisons are pervasive too and return a 0.0/1.0 float mask (bool prims
+/// bridge back through int so masks stay arithmetically usable).
 pub fn bin(a: Prim, op: crate::BinOp, b: Prim) -> Result<Prim, String> {
     use crate::BinOp::*;
     guard(move || {
@@ -144,6 +146,12 @@ pub fn bin(a: Prim, op: crate::BinOp, b: Prim) -> Result<Prim, String> {
             Mult => B::float_mul(a, b),
             Div => B::float_div(a, b),
             Mod => B::float_remainder(a, b),
+            Identity => mask(B::float_equal(a, b, BOOL_DTYPE)),
+            NotEqual => mask(B::float_not_equal(a, b, BOOL_DTYPE)),
+            LessThan => mask(B::float_lower(a, b, BOOL_DTYPE)),
+            LessEqual => mask(B::float_lower_equal(a, b, BOOL_DTYPE)),
+            GreaterThan => mask(B::float_greater(a, b, BOOL_DTYPE)),
+            GreaterEqual => mask(B::float_greater_equal(a, b, BOOL_DTYPE)),
             _ => return Err("unsupported tensor operator".into()),
         })
     })?
@@ -160,13 +168,20 @@ pub fn bin_scalar(t: Prim, op: crate::BinOp, s: f64) -> Result<Prim, String> {
             Mult => B::float_mul_scalar(t, s),
             Div => B::float_div_scalar(t, s),
             Mod => B::float_remainder_scalar(t, s),
+            Identity => mask(B::float_equal_elem(t, s, BOOL_DTYPE)),
+            NotEqual => mask(B::float_not_equal_elem(t, s, BOOL_DTYPE)),
+            LessThan => mask(B::float_lower_elem(t, s, BOOL_DTYPE)),
+            LessEqual => mask(B::float_lower_equal_elem(t, s, BOOL_DTYPE)),
+            GreaterThan => mask(B::float_greater_elem(t, s, BOOL_DTYPE)),
+            GreaterEqual => mask(B::float_greater_equal_elem(t, s, BOOL_DTYPE)),
             _ => return Err("unsupported tensor-scalar operator".into()),
         })
     })?
 }
 
 /// `s op t` -- scalar on the left. No `*_scalar` reversal exists for `-`/`/`/`%`,
-/// so compose them (`s - t` = `(-t) + s`).
+/// so compose them (`s - t` = `(-t) + s`); comparisons flip operands
+/// (`s < t` ⇔ `t > s`).
 pub fn scalar_bin(s: f64, op: crate::BinOp, t: Prim) -> Result<Prim, String> {
     use crate::BinOp::*;
     match op {
@@ -174,6 +189,11 @@ pub fn scalar_bin(s: f64, op: crate::BinOp, t: Prim) -> Result<Prim, String> {
         Sub => bin_scalar(B::float_neg(t), Add, s),
         Div => bin_scalar(B::float_recip(t), Mult, s),
         Mod => Err("`scalar % tensor` is not supported".into()),
+        Identity | NotEqual => bin_scalar(t, op, s),
+        LessThan => bin_scalar(t, GreaterThan, s),
+        LessEqual => bin_scalar(t, GreaterEqual, s),
+        GreaterThan => bin_scalar(t, LessThan, s),
+        GreaterEqual => bin_scalar(t, LessEqual, s),
         _ => Err("unsupported scalar-tensor operator".into()),
     }
 }
@@ -246,7 +266,10 @@ pub fn permute(t: Prim, axes: &[usize]) -> Result<Prim, String> {
 pub fn unsqueeze(t: Prim, dim: usize) -> Result<Prim, String> {
     let mut d = dims(&t);
     if dim > d.len() {
-        return Err(format!("unsqueeze({dim}) out of bounds for rank {}", d.len()));
+        return Err(format!(
+            "unsqueeze({dim}) out of bounds for rank {}",
+            d.len()
+        ));
     }
     d.insert(dim, 1);
     reshape(t, &d)
@@ -373,6 +396,178 @@ pub fn powf(t: Prim, s: f64) -> Result<Prim, String> {
     guard(|| B::float_powf_scalar(t, scalar(s)))
 }
 
+// -- masks / indexing -----------------------------------------------------------
+
+const INT_DTYPE: IntDType = IntDType::I64;
+const BOOL_DTYPE: BoolDType = BoolDType::Native;
+
+/// bool prim -> 0.0/1.0 float mask (`bool -> int -> float`).
+fn mask(m: BoolTensor<B>) -> Prim {
+    B::int_into_float(B::bool_into_int(m, INT_DTYPE), FloatDType::F32)
+}
+
+/// A 0.0/1.0 float tensor as a bool prim, for `mask_fill`/`mask_where`.
+fn as_bool_mask(t: Prim) -> BoolTensor<B> {
+    B::float_not_equal_elem(t, scalar(0.0), BOOL_DTYPE)
+}
+
+/// Int indices as a backend tensor (for `select`/`gather`-style calls).
+fn int_prim(indices: Vec<i64>, dims: &[usize]) -> Result<IntPrim, String> {
+    guard(|| B::int_from_data(TensorData::new(indices, shape_of(dims)), &dev()))
+}
+
+fn int_to_list(t: &IntPrim) -> Result<Vec<i64>, String> {
+    let data = burn_backend::try_read_sync(B::int_into_data(t.clone()))
+        .ok_or("tensor read was not synchronous")?
+        .map_err(|e| e.to_string())?;
+    Ok(data.iter::<i64>().collect())
+}
+
+/// `t[lo..hi]` along `dim` -- the other dims come along whole.
+pub fn slice(t: Prim, dim: usize, lo: usize, hi: usize) -> Result<Prim, String> {
+    let d = dims(&t);
+    if dim >= d.len() || lo > hi || hi > d[dim] {
+        return Err(format!(
+            "slice({dim}, {lo}, {hi}) out of bounds for shape {d:?}"
+        ));
+    }
+    let mut ranges = vec![Slice::full(); d.len()];
+    ranges[dim] = Slice::new(lo as isize, Some(hi as isize), 1);
+    guard(|| B::float_slice(t, &ranges))
+}
+
+/// Rows/positions picked along `dim` by index list -- `w.select(0, tokens)` is
+/// an embedding lookup.
+pub fn select(t: Prim, dim: usize, idx: Vec<i64>) -> Result<Prim, String> {
+    let ip = int_prim(idx.clone(), &[idx.len()])?;
+    guard(|| B::float_select(t, dim, ip))
+}
+
+/// Uiua `stencil`'s raw form: unfold `dim` into `(windows, size)` -- the
+/// `float_unfold` view is `[pre..., n_windows, size, post...]`, so chaining two
+/// and reshaping is im2col for free.
+pub fn unfold(t: Prim, dim: usize, size: usize, step: usize) -> Result<Prim, String> {
+    if size == 0 || step == 0 {
+        return Err("unfold needs size > 0 and step > 0".into());
+    }
+    guard(|| B::float_unfold(t, dim, size, step))
+}
+
+/// Indices that sort along `dim` (per-slice; flat list for rank-1).
+pub fn argsort(t: &Prim, dim: usize, desc: bool) -> Result<Vec<i64>, String> {
+    let idx = guard(|| B::float_argsort(t.clone(), dim, desc, INT_DTYPE))?;
+    int_to_list(&idx)
+}
+
+/// `topk(dim, k)` -> `(values, flat indices)`. `float_argtopk` is
+/// `unimplemented!` on the NdArray backend, so this sorts with indices and
+/// slices the first `k` -- same complexity, one sort.
+pub fn topk(t: Prim, dim: usize, k: usize) -> Result<(Prim, Vec<i64>), String> {
+    check_dim(&t, dim)?;
+    let n = dims(&t)[dim];
+    if k == 0 || k > n {
+        return Err(format!("topk needs 0 < k <= {n}, got {k}"));
+    }
+    let (vals, idx) = guard(|| B::float_sort_with_indices(t, dim, true, INT_DTYPE))?;
+    let mut ranges = vec![Slice::full(); rank(&vals)];
+    ranges[dim] = Slice::new(0, Some(k as isize), 1);
+    let vals = guard(|| B::float_slice(vals, &ranges))?;
+    let idx = guard(|| B::int_slice(idx, &ranges))?;
+    Ok((vals, int_to_list(&idx)?))
+}
+
+/// `t.mask_fill(mask, v)` -- `v` wherever `mask != 0`.
+pub fn mask_fill(t: Prim, mask_t: Prim, v: f64) -> Result<Prim, String> {
+    let m = guard(|| as_bool_mask(mask_t))?;
+    guard(|| B::float_mask_fill(t, m, scalar(v)))
+}
+
+/// `t.mask_where(mask, src)` -- take `src` wherever `mask != 0`.
+pub fn mask_where(t: Prim, mask_t: Prim, src: Prim) -> Result<Prim, String> {
+    let m = guard(|| as_bool_mask(mask_t))?;
+    guard(|| B::float_mask_where(t, m, src))
+}
+
+/// Coordinates of nonzero cells, one `[i, j, ...]` per cell (row-major).
+pub fn nonzero(t: &Prim) -> Result<Vec<Vec<i64>>, String> {
+    let (vals, d) = to_flat(t)?;
+    let mut out = Vec::new();
+    for (i, &v) in vals.iter().enumerate() {
+        if v != 0.0 {
+            let mut rem = i;
+            let mut idx = vec![0i64; d.len()];
+            for ax in (0..d.len()).rev() {
+                idx[ax] = (rem % d[ax].max(1)) as i64;
+                rem /= d[ax].max(1);
+            }
+            out.push(idx);
+        }
+    }
+    Ok(out)
+}
+
+/// `t.all()`/`t.any()` -- collapse a mask (or any float tensor, nonzero =
+/// truthy) to a bool.
+pub fn all(t: &Prim) -> Result<bool, String> {
+    Ok(item(&min(t.clone())?)? != 0.0)
+}
+
+pub fn any(t: &Prim) -> Result<bool, String> {
+    Ok(item(&max(t.clone())?)? != 0.0)
+}
+
+// -- scan / order / tiling ---------------------------------------------------------
+
+unary!(floor, float_floor);
+unary!(ceil, float_ceil);
+unary!(round, float_round);
+unary!(sign, float_sign);
+unary!(erf, float_erf);
+
+/// `t.cumsum(dim)`/`cumprod` -- Uiua's `\` scan.
+pub fn cumsum(t: Prim, dim: usize) -> Result<Prim, String> {
+    check_dim(&t, dim)?;
+    guard(|| B::float_cumsum(t, dim))
+}
+
+pub fn cumprod(t: Prim, dim: usize) -> Result<Prim, String> {
+    check_dim(&t, dim)?;
+    guard(|| B::float_cumprod(t, dim))
+}
+
+/// `t.reverse(dim)` -- Uiua `⇌`/`float_flip`.
+pub fn reverse(t: Prim, dim: usize) -> Result<Prim, String> {
+    check_dim(&t, dim)?;
+    guard(|| B::float_flip(t, &[dim]))
+}
+
+/// `t.repeat(dim, n)` -- tile the whole dim `n` times.
+pub fn repeat(t: Prim, dim: usize, n: usize) -> Result<Prim, String> {
+    check_dim(&t, dim)?;
+    guard(|| B::float_repeat_dim(t, dim, n))
+}
+
+/// `t.expand(shape)` -- broadcast size-1 dims out to `shape` (no copy of
+/// semantics changes; the backend requires the target to be broadcastable).
+pub fn expand(t: Prim, dims: &[usize]) -> Result<Prim, String> {
+    guard(|| B::float_expand(t, shape_of(dims)))
+}
+
+/// `t.sort(dim, desc?)` -- values only; `argsort`/`topk` for indices.
+pub fn sort(t: Prim, dim: usize, desc: bool) -> Result<Prim, String> {
+    check_dim(&t, dim)?;
+    guard(|| B::float_sort(t, dim, desc))
+}
+
+fn check_dim(t: &Prim, dim: usize) -> Result<(), String> {
+    let r = rank(t);
+    if dim >= r {
+        Err(format!("dim {dim} out of bounds for rank {r}"))
+    } else {
+        Ok(())
+    }
+}
+
 // -- scalar extraction -------------------------------------------------------------
 
 /// `item()` -- pull the single element out of a numel-1 tensor of any rank.
@@ -401,10 +596,7 @@ pub fn render(t: &Prim) -> String {
             format!("tensor{d:?}([{}])", vals.join(", "))
         }
         Ok((vals, _)) => {
-            let head: Vec<String> = vals[..MAX_PREVIEW]
-                .iter()
-                .map(|v| format!("{v}"))
-                .collect();
+            let head: Vec<String> = vals[..MAX_PREVIEW].iter().map(|v| format!("{v}")).collect();
             format!("tensor{d:?}([{}, ...])", head.join(", "))
         }
         Err(_) => format!("tensor{d:?}"),

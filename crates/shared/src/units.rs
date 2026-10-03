@@ -13,11 +13,11 @@
 //! all mean the same watts.
 
 /// Number of base dimensions.
-pub const N: usize = 13;
+pub const N: usize = 14;
 
 /// The base dimensions, in [`Dim`] exponent order.
 pub const BASES: [&str; N] = [
-    "m", "kg", "s", "A", "K", "mol", "cd", "usd", "px", "frame", "beat", "st", "b",
+    "m", "kg", "s", "A", "K", "mol", "cd", "usd", "px", "frame", "beat", "st", "b", "index",
 ];
 
 /// An exponent per base dimension. All zeros is dimensionless.
@@ -178,31 +178,37 @@ const fn d(e: [i8; N]) -> Dim {
     Dim(e)
 }
 
-// exponents:        m  kg  s  A  K mol cd usd px frame beat st bit
-pub const LENGTH: Dim = d([1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const MASS: Dim = d([0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const TIME: Dim = d([0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const CURRENT: Dim = d([0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const TEMP: Dim = d([0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const AMOUNT: Dim = d([0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]);
-pub const LUMINOUS: Dim = d([0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0]);
-pub const MONEY: Dim = d([0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0]);
-pub const PIXELS: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0]);
-pub const FRAMES: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0]);
-pub const BEAT: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0]);
-pub const PITCH: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0]);
-pub const DATA: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
-pub const FREQ: Dim = d([0, 0, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const FORCE: Dim = d([1, 1, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const PRESSURE: Dim = d([-1, 1, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const ENERGY: Dim = d([2, 1, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const POWER: Dim = d([2, 1, -3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const CHARGE: Dim = d([0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const VOLTAGE: Dim = d([2, 1, -3, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+// exponents:        m  kg  s  A  K mol cd usd px frame beat st bit index
+pub const LENGTH: Dim = d([1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const MASS: Dim = d([0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const TIME: Dim = d([0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const CURRENT: Dim = d([0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const TEMP: Dim = d([0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const AMOUNT: Dim = d([0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const LUMINOUS: Dim = d([0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]);
+pub const MONEY: Dim = d([0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0]);
+pub const PIXELS: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0]);
+pub const FRAMES: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0]);
+pub const BEAT: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0]);
+pub const PITCH: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0]);
+pub const DATA: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0]);
+/// A position into a collection: `i: index` is an `int` that can't be mixed
+/// with any quantity (`i + 3px` is an error). Plain numbers convert freely
+/// (`i += 1`, `i < xs.len()`) -- the dimension exists to keep *measurements*
+/// out of index variables, not to make counting verbose.
+pub const INDEX: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+pub const FREQ: Dim = d([0, 0, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const FORCE: Dim = d([1, 1, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const PRESSURE: Dim = d([-1, 1, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const ENERGY: Dim = d([2, 1, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const POWER: Dim = d([2, 1, -3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const CHARGE: Dim = d([0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const VOLTAGE: Dim = d([2, 1, -3, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
 
 /// Dimension families, for error messages.
-const SI: [(&str, Dim); 20] = [
+const SI: [(&str, Dim); 22] = [
     ("length", LENGTH),
+    ("volume", LENGTH.powi(3)),
     ("mass", MASS),
     ("time", TIME),
     ("current", CURRENT),
@@ -222,10 +228,11 @@ const SI: [(&str, Dim); 20] = [
     ("power", POWER),
     ("charge", CHARGE),
     ("voltage", VOLTAGE),
+    ("index", INDEX),
 ];
 
 /// The coherent unit each family is kept in.
-const NAMED: [(&str, Dim, f64); 20] = [
+const NAMED: [(&str, Dim, f64); 21] = [
     ("m", LENGTH, 1.0),
     ("kg", MASS, 1.0),
     ("s", TIME, 1.0),
@@ -246,6 +253,7 @@ const NAMED: [(&str, Dim, f64); 20] = [
     ("W", POWER, 1.0),
     ("C", CHARGE, 1.0),
     ("V", VOLTAGE, 1.0),
+    ("idx", INDEX, 1.0),
 ];
 
 /// Every unit name: (dimension, scale to the coherent base unit).
@@ -260,6 +268,22 @@ pub fn lookup(name: &str) -> Option<(Dim, f64)> {
         "inch" => (LENGTH, 0.0254),
         "ft" => (LENGTH, 0.3048),
         "mi" => (LENGTH, 1609.344),
+        "mile" => (LENGTH, 1609.344),
+        "miles" => (LENGTH, 1609.344),
+        // volume is length³ — no base dim of its own; US liquid gallon,
+        // 231 in³ = 3.785_411_784e-3 m³
+        "gal" => (LENGTH.powi(3), 3.785_411_784e-3),
+        "gallon" => (LENGTH.powi(3), 3.785_411_784e-3),
+        "gallons" => (LENGTH.powi(3), 3.785_411_784e-3),
+        // litre: 1e-3 m³ — `L` and `l` are both the SI symbol
+        "L" => (LENGTH.powi(3), 1e-3),
+        "l" => (LENGTH.powi(3), 1e-3),
+        "liter" => (LENGTH.powi(3), 1e-3),
+        "liters" => (LENGTH.powi(3), 1e-3),
+        "litre" => (LENGTH.powi(3), 1e-3),
+        "litres" => (LENGTH.powi(3), 1e-3),
+        "mL" => (LENGTH.powi(3), 1e-6),
+        "ml" => (LENGTH.powi(3), 1e-6),
         // mass
         "kg" => (MASS, 1.0),
         "g" => (MASS, 1e-3),
@@ -305,6 +329,12 @@ pub fn lookup(name: &str) -> Option<(Dim, f64)> {
         "usd" => (MONEY, 1.0),
         "px" => (PIXELS, 1.0),
         "frame" => (FRAMES, 1.0),
+        // index: an `int` position into a collection. its own dimension so a
+        // quantity can never pass for one (`xs[i] + 3px` fails), but plain
+        // ints still interconvert (`i += 1`, `i < xs.len()`) -- see
+        // `index_plain` in the dims pass
+        "idx" => (INDEX, 1.0),
+        "index" => (INDEX, 1.0),
         // data: `b` is the bit — the base unit. Byte spellings follow IEC
         // (`B`=8b, `kB`=10³B, `KiB`=2¹⁰B). The music stdlib also abuses
         // `b` for beats in its mini-notation — although it is notation

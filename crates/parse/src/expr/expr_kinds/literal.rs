@@ -95,7 +95,16 @@ impl TryFrom<TokKind<'_>> for Literal {
             TokKind::Float(n) => Ok(Literal::Float(n)),
             // a quantity is a float in the coherent base unit; its dimension rides in the ast
             TokKind::Quantity(n, unit) => shared::units::parse(unit)
-                .map(|(_, scale)| Literal::Float(n * scale))
+                .map(|(dim, scale)| {
+                    // `index` is the one integer unit -- `3index` is an `int` so
+                    // `xs[3index]` typechecks; `3.5index` stays a float, and indexing
+                    // by it is a type error like any other float key
+                    if dim == shared::units::INDEX && (n * scale).fract() == 0.0 {
+                        Literal::Int((n * scale) as i64)
+                    } else {
+                        Literal::Float(n * scale)
+                    }
+                })
                 .ok_or(()),
             TokKind::Hex(n) => Ok(Literal::Hex(n.to_string())),
             _ => Err(()),

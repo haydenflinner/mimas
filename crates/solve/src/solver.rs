@@ -74,6 +74,10 @@ pub struct Solver {
     /// prove -- emit wraps each in a runtime dim check (see `lens.rs`).
     /// Surfaces on [`Resolutions::len_checks`](crate::Resolutions).
     pub(crate) len_checks: IndexMap<NodeId, Vec<Option<usize>>>,
+    /// `S::default()` calls the solver blessed: call node → the struct's adt.
+    /// Emit lowers each to a `NewInstance` with every member set to its
+    /// type's default rather than a call.
+    pub(crate) default_ctors: IndexMap<NodeId, AdtId>,
 
     pub(crate) control_flow: ControlFlow,
     pub(crate) ribs: Ribs,
@@ -125,6 +129,7 @@ impl Solver {
             want_dims: IndexMap::new(),
             field_dims: HashMap::new(),
             len_checks: IndexMap::new(),
+            default_ctors: IndexMap::new(),
             non_value: None,
             iter_guards: vec![],
             type_params: vec![],
@@ -502,10 +507,16 @@ impl Solver {
     ) -> Result<()> {
         if Ty::is_unit_annotation(annotation, self) {
             right.fulfill_ty(ty.clone(), self)?;
+            // `index` is the integer unit: an index that isn't an `int` can't index
+            // anything, so a float rhs gets the ordinary int mismatch
+            let integer_unit = matches!(annotation, Annotation::Ty(ident)
+                if shared::units::lookup(&ident.lexeme).is_some_and(|(d, _)| d == shared::units::INDEX));
             return match ty.clone().normalized(self) {
+                Ty::Int => Ok(()),
+                _ if integer_unit => right.fulfill_ty(Ty::Int, self),
                 // a numeric rhs stands (an int quantity is an `int` here); the dims
                 // pass owns the dimension check itself
-                Ty::Int | Ty::Float => Ok(()),
+                Ty::Float => Ok(()),
                 // anything else fails the annotation the ordinary way, at the rhs
                 _ => right.fulfill_ty(Ty::Float, self),
             };
@@ -588,10 +599,12 @@ impl Solver {
                 std::cmp::Ordering::Less => Err(MissingTupleMembers {
                     src: self.src(pat.location()),
                     at: pat.location().into(),
+                    ctor: None,
                 })?,
                 std::cmp::Ordering::Greater => Err(ExtraTupleMembers {
                     src: self.src(pat.location()),
                     at: pat.location().into(),
+                    ctor: None,
                 })?,
                 std::cmp::Ordering::Equal => pats
                     .iter()
@@ -858,6 +871,7 @@ impl Solver {
         native_id: NativeId,
         validate: Option<api::LitValidator>,
         src: Option<api::NativeSrc>,
+        doc: String,
     ) -> DecId {
         let sig = NativeFnSig {
             params,
@@ -891,6 +905,7 @@ impl Solver {
                 mutates_recv: false,
                 validate,
                 src,
+                doc,
             },
         );
         dec_id
@@ -1237,6 +1252,7 @@ impl Solver {
                         id,
                         f.validate,
                         f.src,
+                        f.doc.clone(),
                     );
                 }
                 // module-nested native fn
@@ -1269,6 +1285,7 @@ impl Solver {
                             mutates_recv: false,
                             validate: f.validate,
                             src: f.src,
+                            doc: f.doc.clone(),
                         },
                     );
                     self.adts[leaf].as_struct_mut().insert(
@@ -1319,6 +1336,7 @@ impl Solver {
                             mutates_recv: m.mutates_recv,
                             validate: m.validate,
                             src: m.src,
+                            doc: m.doc.clone(),
                         },
                     );
                     let field = Field {
@@ -1678,10 +1696,12 @@ impl Solver {
                 std::cmp::Ordering::Less => Err(MissingTupleMembers {
                     src: self.src(pat.location()),
                     at: pat.location().into(),
+                    ctor: None,
                 })?,
                 std::cmp::Ordering::Greater => Err(ExtraTupleMembers {
                     src: self.src(pat.location()),
                     at: pat.location().into(),
+                    ctor: None,
                 })?,
                 std::cmp::Ordering::Equal => idents
                     .iter()
@@ -2592,6 +2612,9 @@ pub(crate) struct NativeBinding {
     /// `vm::api::NativeSrc` submissions. Hosts use it to link a built-in's symbol menu to
     /// its source.
     pub src: Option<api::NativeSrc>,
+    /// The `///` docstring `#[native]`/`#[mimas]` harvested (`vm::api::NativeMeta`), so the
+    /// symbol menu can show a built-in's doc without leaving the page. Empty when none.
+    pub doc: String,
 }
 
 /// A collection an active `for` loop is iterating, expressed as the binding the iterator's

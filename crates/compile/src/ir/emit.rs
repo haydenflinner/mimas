@@ -10,10 +10,10 @@ use parse::{
     Unary, Unwrap, While,
     components::{Binding, Pat, PatKind},
 };
-use shared::{Located, PactId};
+use shared::{Located, PactId, ParamId};
 use solve::{
     ResolvedDeclKind,
-    components::{DecId, FnHeader, Ty},
+    components::{AdtId, DecId, FnHeader, Ty},
 };
 
 // per-kind worker -- mirrors `Solve`. source location is ambient on `Ir.current_loc`,
@@ -830,6 +830,12 @@ impl Emit for Call {
             // unreachable: the receiver's pact type guarantees one arm matches.
             ir.current().panic();
             merge_branches(ir, merge, branches)
+        }
+
+        // `S::default()` — the implicit memberwise-default constructor:
+        // no callee, no args, just a `NewInstance` of defaults.
+        if ir.resolutions.default_ctors.contains_key(&id) {
+            return default_instance(ir, id);
         }
 
         let callee_ty = ir.resolutions.node_tys.get(&self.left.id());
@@ -2131,4 +2137,89 @@ fn stmt_may_mutate_len(stmt: &Stmt, dict_iter: bool) -> bool {
         }
         _ => true,
     }
+}
+
+/// `S::default()` — implicit memberwise-default construction. The call's
+/// solved type carries the concrete instantiation (`Pair<int>`); member
+/// types are read off the adt's declaration with `Ty::Param`s swapped
+/// for those args. The solver already vetted every member for
+/// defaultability — a `None` here is an emit gap, not a user error.
+fn default_instance(ir: &mut Ir, call: NodeId) -> Option<InstId> {
+    let (adt, args) = match ir.resolutions.node_tys.get(&call) {
+        Some(Ty::Adt(adt, args)) | Some(Ty::Identity(adt, args)) => (*adt, args.clone()),
+        _ => (ir.resolutions.default_ctors[&call], Vec::new()),
+    };
+    default_adt(ir, adt, &args)
+}
+
+/// `NewInstance` of `adt` whose members are each type's default. `args`
+/// is the call's instantiation, substituted for the declared params.
+fn default_adt(ir: &mut Ir, adt: AdtId, args: &[Ty]) -> Option<InstId> {
+    let (member_tys, params) = {
+        let resolved = &ir.resolutions.adts[adt];
+        (resolved.member_tys.clone(), resolved.type_params.clone())
+    };
+    let mut insts = Vec::with_capacity(member_tys.len());
+    for member in &member_tys {
+        insts.push(default_inst(ir, &subst_params(member, &params, args))?);
+    }
+    Some(ir.current().new_instance(adt, insts))
+}
+
+/// A `Ty::Param` stands for the declaring adt's own param — swap it for
+/// the call site's arg (positionally); anything unmapped stays a param.
+fn subst_params(ty: &Ty, params: &[ParamId], args: &[Ty]) -> Ty {
+    match ty {
+        Ty::Param(pid) => params
+            .iter()
+            .position(|p| p == pid)
+            .and_then(|i| args.get(i).cloned())
+            .unwrap_or_else(|| ty.clone()),
+        Ty::Array(inner, len) => Ty::Array(Box::new(subst_params(inner, params, args)), *len),
+        Ty::Dict(inner) => Ty::Dict(Box::new(subst_params(inner, params, args))),
+        Ty::Option(inner) => Ty::Option(Box::new(subst_params(inner, params, args))),
+        Ty::Result(inner) => Ty::Result(Box::new(subst_params(inner, params, args))),
+        Ty::Tuple(members) => Ty::Tuple(
+            members
+                .iter()
+                .map(|m| subst_params(m, params, args))
+                .collect(),
+        ),
+        Ty::Adt(adt, tys) => Ty::Adt(
+            *adt,
+            tys.iter().map(|t| subst_params(t, params, args)).collect(),
+        ),
+        Ty::Identity(adt, tys) => Ty::Identity(
+            *adt,
+            tys.iter().map(|t| subst_params(t, params, args)).collect(),
+        ),
+        _ => ty.clone(),
+    }
+}
+
+/// One member's default value: `0`, `""`, `[]`, `~{}`, `null`, or a
+/// nested default instance.
+fn default_inst(ir: &mut Ir, ty: &Ty) -> Option<InstId> {
+    Some(match ty {
+        Ty::Unit | Ty::Null | Ty::Option(_) => ir.current().constant(Constant::Null),
+        Ty::Bool => ir.current().constant(Constant::Bool(false)),
+        Ty::Int => ir.current().constant(Constant::Int(0)),
+        Ty::Float => ir.current().constant(Constant::Float(0.0)),
+        Ty::Str => {
+            let s = ir.intern_str("");
+            ir.current().constant(Constant::Str(s))
+        }
+        Ty::Array(..) => ir.current().new_array(),
+        Ty::Dict(_) => ir.current().new_dict(),
+        Ty::Tuple(members) => {
+            let tuple = ir.current().new_array();
+            for member in members {
+                let v = default_inst(ir, member)?;
+                ir.current().push(tuple, v);
+            }
+            tuple
+        }
+        Ty::Adt(inner, iargs) | Ty::Identity(inner, iargs) => default_adt(ir, *inner, iargs)?,
+        _ => return None,
+    })
 }

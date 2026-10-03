@@ -234,6 +234,38 @@ macro_rules! define_opcode {
 }
 for_each_op!(define_opcode);
 
+// every `jump`/`jumptable` wire field as a `BlockTarget` — lets consumers find
+// branch targets without listing the target-bearing variants by hand.
+macro_rules! targets_push {
+    ($v:ident, $f:ident, jump) => {
+        $v.push($f.clone())
+    };
+    ($v:ident, $f:ident, jumptable) => {
+        $v.extend($f.iter().cloned())
+    };
+    ($v:ident, $f:ident, $k:ident) => {{
+        let _ = $f;
+    }};
+}
+
+macro_rules! define_op_targets {
+    ( $( $name:ident [ $( ($f:ident, $ty:ty, $w:ident) )* ]; )* ) => {
+        impl Op {
+            /// Every `BlockTarget` field, in declaration order.
+            pub fn targets(&self) -> Vec<BlockTarget> {
+                let mut v = Vec::new();
+                match self {
+                    $( Op::$name { $( $f ),* } => {
+                        $( targets_push!(v, $f, $w); )*
+                    } ),*
+                }
+                v
+            }
+        }
+    };
+}
+for_each_op!(define_op_targets);
+
 macro_rules! define_encode {
     ( $( $name:ident [ $( ($f:ident, $ty:ty, $w:ident) )* ]; )* ) => {
         pub(crate) fn encode(self, e: &mut Encoder) {

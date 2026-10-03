@@ -119,7 +119,7 @@ impl<'gc> PartialEq for Val<'gc> {
             // structural like Array: `tensor([[1]]) == tensor([[1]])`. bitwise-compare the
             // flat f32 payload (a DataFrame compares by content the same way).
             (Val::Tensor(a), Val::Tensor(b)) => {
-                Gc::ptr_eq(a.0, b.0) || crate::tensor::all_equal(&a.0 .0, &b.0 .0)
+                Gc::ptr_eq(a.0, b.0) || crate::tensor::all_equal(&a.0.0, &b.0.0)
             }
             _ => false,
         }
@@ -747,7 +747,7 @@ pub struct Tensor<'gc>(pub Gc<'gc, Static<crate::tensor::Prim>>);
 #[cfg(feature = "tensor")]
 impl std::fmt::Debug for Tensor<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Tensor{:?}", crate::tensor::dims(&self.0 .0))
+        write!(f, "Tensor{:?}", crate::tensor::dims(&self.0.0))
     }
 }
 
@@ -755,7 +755,7 @@ impl std::fmt::Debug for Tensor<'_> {
 impl<'gc> Tensor<'gc> {
     /// The backend primitive -- `Clone` is an `Arc` bump, so ops take it by value cheaply.
     pub fn inner(self) -> crate::tensor::Prim {
-        self.0 .0.clone()
+        self.0.0.clone()
     }
 }
 
@@ -1304,8 +1304,33 @@ pub fn bin<'gc>(this: Val<'gc>, ctx: Ctx<'gc>, other: Val<'gc>, op: BinOp) -> Rt
         (BinOp::GreaterEqual, Val::Str(a), Val::Str(b)) => Val::Bool(a.as_str() >= b.as_str()),
         (BinOp::Coalesce, Val::Null, other) => other,
         (BinOp::Coalesce, this, _) => this,
-        // `==` is structural on every type, arrays included (element-wise `==` returned a list
-        // where the checker promised a `bool`). Ordering and arithmetic still broadcast.
+        // `tensor + tensor` / `tensor * 0.5` / `2 - tensor` -- broadcasting elementwise via the
+        // burn ops layer; dim mismatches surface the backend's message as a Custom runtime error
+        // rather than unwinding (the ops are `catch_unwind`ed in `tensor::bin`). Tensor ops sit
+        // ABOVE the structural `==` catch-all on purpose: `t == u` is pervasive like NumPy/Uiua
+        // (elementwise 0/1 mask), while structural `Val::eq` still handles match/dict identity.
+        #[cfg(feature = "tensor")]
+        (op, Val::Tensor(a), Val::Tensor(b)) => Val::Tensor(
+            ctx.new_tensor(crate::tensor::bin(a.inner(), op, b.inner()).map_err(RtErr::Custom)?),
+        ),
+        #[cfg(feature = "tensor")]
+        (op, Val::Tensor(a), Val::Float(s)) => Val::Tensor(
+            ctx.new_tensor(crate::tensor::bin_scalar(a.inner(), op, s).map_err(RtErr::Custom)?),
+        ),
+        #[cfg(feature = "tensor")]
+        (op, Val::Tensor(a), Val::Int(s)) => Val::Tensor(ctx.new_tensor(
+            crate::tensor::bin_scalar(a.inner(), op, s as f64).map_err(RtErr::Custom)?,
+        )),
+        #[cfg(feature = "tensor")]
+        (op, Val::Float(s), Val::Tensor(b)) => Val::Tensor(
+            ctx.new_tensor(crate::tensor::scalar_bin(s, op, b.inner()).map_err(RtErr::Custom)?),
+        ),
+        #[cfg(feature = "tensor")]
+        (op, Val::Int(s), Val::Tensor(b)) => Val::Tensor(ctx.new_tensor(
+            crate::tensor::scalar_bin(s as f64, op, b.inner()).map_err(RtErr::Custom)?,
+        )),
+        // `==` is structural on every non-tensor type, arrays included (element-wise `==` returned
+        // a list where the checker promised a `bool`). Ordering and arithmetic still broadcast.
         (BinOp::Identity, left, right) => Val::Bool(left == right),
         (BinOp::NotEqual, left, right) => Val::Bool(left != right),
         (op, Val::Bool(a), Val::Bool(b)) => bool_bin(op, a, b)?,
@@ -1313,29 +1338,6 @@ pub fn bin<'gc>(this: Val<'gc>, ctx: Ctx<'gc>, other: Val<'gc>, op: BinOp) -> Rt
         (op, Val::Float(a), Val::Int(b)) => float_bin(op, a, b as f64)?,
         (op, Val::Int(a), Val::Float(b)) => float_bin(op, a as f64, b)?,
         (op, Val::Int(a), Val::Int(b)) => int_bin(op, a, b)?,
-        // `tensor + tensor` / `tensor * 0.5` / `2 - tensor` -- broadcasting elementwise via the
-        // burn ops layer; dim mismatches surface the backend's message as a Custom runtime error
-        // rather than unwinding (the ops are `catch_unwind`ed in `tensor::bin`).
-        #[cfg(feature = "tensor")]
-        (op, Val::Tensor(a), Val::Tensor(b)) => Val::Tensor(ctx.new_tensor(
-            crate::tensor::bin(a.inner(), op, b.inner()).map_err(RtErr::Custom)?,
-        )),
-        #[cfg(feature = "tensor")]
-        (op, Val::Tensor(a), Val::Float(s)) => Val::Tensor(ctx.new_tensor(
-            crate::tensor::bin_scalar(a.inner(), op, s).map_err(RtErr::Custom)?,
-        )),
-        #[cfg(feature = "tensor")]
-        (op, Val::Tensor(a), Val::Int(s)) => Val::Tensor(ctx.new_tensor(
-            crate::tensor::bin_scalar(a.inner(), op, s as f64).map_err(RtErr::Custom)?,
-        )),
-        #[cfg(feature = "tensor")]
-        (op, Val::Float(s), Val::Tensor(b)) => Val::Tensor(ctx.new_tensor(
-            crate::tensor::scalar_bin(s, op, b.inner()).map_err(RtErr::Custom)?,
-        )),
-        #[cfg(feature = "tensor")]
-        (op, Val::Int(s), Val::Tensor(b)) => Val::Tensor(ctx.new_tensor(
-            crate::tensor::scalar_bin(s as f64, op, b.inner()).map_err(RtErr::Custom)?,
-        )),
         // elementwise over any sequence pair — `IntArray`/`FloatArray` read
         // their elements boxed back into `Val`s, so a typed array broadcasts
         // exactly like the `Vec<Val>` it replaces.

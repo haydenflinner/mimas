@@ -82,3 +82,41 @@ test_fail!(
      a.next = b;
      print(a);"
 );
+
+// `S::default()` -- the implicit memberwise-default ctor every struct carries:
+// numbers 0, strs "", bools false, collections empty, options null, nested
+// structs defaulted recursively. an `impl` member named `default` shadows it.
+test_vm!(
+    default_ctor_all_member_kinds,
+    "struct Foo { a: int, f: float, s: str, ok: bool, xs: [int], m: ~{int}, t: (int, str), maybe: int? }",
+    "Foo::default()" => instance!(Foo {
+        a = Int(0), f = Float(0.0), s = str!(""), ok = Bool(false),
+        xs = array!(), m = dict!(~{}), t = array!(Int(0), str!("")), maybe = Null,
+    }),
+);
+
+test_vm!(
+    default_ctor_nested_struct,
+    "struct In { n: int }
+     struct Out { i: In, tag: str }",
+    "Out::default()" => instance!(Out { i = instance!(In { n = Int(0) }), tag = str!("") }),
+);
+
+test_vm!(
+    default_ctor_tuple_struct,
+    "struct W(int, str)",
+    "W::default()" => instance!(W { x = Int(0), y = str!("") }),
+);
+
+test_vm!(
+    default_ctor_impl_member_shadows,
+    "struct Foo { a: int }
+     impl Foo { fn default() -> Foo { Foo { a = 7 } } }",
+    "Foo::default().a" => Int(7),
+);
+
+// an enum can't pick its own variant; a generic member has no value to default
+// to; and the ctor takes no arguments.
+test_fail!(default_ctor_enum, "enum E { A, B } let e = E::default();");
+test_fail!(default_ctor_generic_member, "struct P<T> { x: T } let p = P::default();");
+test_fail!(default_ctor_with_args, "struct S { a: int } let s = S::default(1);");

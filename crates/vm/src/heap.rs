@@ -558,7 +558,7 @@ impl<'gc> Ctx<'gc> {
             }
             #[cfg(feature = "tensor")]
             Val::Tensor(t) => {
-                let _ = write!(out, "{}", crate::tensor::render(&t.0 .0));
+                let _ = write!(out, "{}", crate::tensor::render(&t.0.0));
             }
         }
         Ok(())

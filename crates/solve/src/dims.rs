@@ -62,10 +62,20 @@ impl D {
     }
 }
 
+/// An `index` and a plain number interconvert freely -- `i += 1`, `i <
+/// xs.len()`, `let i: index = 0` are the whole point of writing indexes
+/// down. What the dimension is for is keeping *quantities* out: `i + 3px`
+/// still clashes.
+fn index_plain(x: Dim, y: Dim) -> bool {
+    (x == units::INDEX && y.is_none()) || (y == units::INDEX && x.is_none())
+}
+
 /// Two known dimensions that differ; `None` when either is unknown or they agree.
 fn clash(a: &D, b: &D) -> Option<(Dim, Dim)> {
     match (a, b) {
-        (D::Q(x) | D::Iv(x), D::Q(y) | D::Iv(y)) if x != y => Some((*x, *y)),
+        (D::Q(x) | D::Iv(x), D::Q(y) | D::Iv(y)) if x != y && !index_plain(*x, *y) => {
+            Some((*x, *y))
+        }
         (D::Arr(x), D::Arr(y)) => clash(x, y),
         _ => None,
     }
@@ -75,6 +85,10 @@ fn clash(a: &D, b: &D) -> Option<(Dim, Dim)> {
 fn join(a: D, b: &D) -> D {
     match (&a, b) {
         (D::Q(x), D::Q(y)) | (D::Iv(x), D::Iv(y)) if x == y => a,
+        // `index` absorbs a plain operand, so `if .. { i } else { 0 }` stays an index
+        (D::Q(x), D::Q(y)) if index_plain(*x, *y) => {
+            D::Q(if x.is_none() { *y } else { *x })
+        }
         (D::Arr(x), D::Arr(y)) => D::Arr(Box::new(join((**x).clone(), y))),
         _ => D::Any,
     }
@@ -704,8 +718,10 @@ impl<'a> Pass<'a> {
 
     fn literal(&mut self, e: &'a Expr, l: &'a Literal) -> D {
         match l {
-            Literal::Float(_) => self.ast.quantity(e.id()).map_or(PLAIN, D::Q),
-            Literal::Int(_) => PLAIN,
+            Literal::Float(_) | Literal::Int(_) => {
+                // `3index` is the one int literal that carries a dimension
+                self.ast.quantity(e.id()).map_or(PLAIN, D::Q)
+            }
             Literal::Array(items) => {
                 let mut out: Option<D> = None;
                 for item in items {
