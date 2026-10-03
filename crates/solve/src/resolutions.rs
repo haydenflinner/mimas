@@ -353,3 +353,30 @@ impl From<Solver> for Resolutions {
         }
     }
 }
+
+/// What the grades pass learned about a load, handed to hosts deciding whether
+/// to run the code at all -- mobile-code proof-carrying, half one: the page's
+/// `Fx` is a checked property before a single bytecode executes.
+pub struct GradeAudit {
+    /// Each file's inferred top-level effect set, keyed by the file name the
+    /// caller gave `load_files`. `UNAUDITED`-flagged sets contain calls the
+    /// inference couldn't grade (unannotated natives, pact dispatch, closure
+    /// callees) -- treat them as "could do anything" when gating.
+    pub script_effects: IndexMap<String, shared::Fx>,
+    /// Lint-suite diagnostics (unused bindings/params, dead stores). Severity
+    /// warning; the load succeeded -- the host renders or surfaces these.
+    pub warnings: Vec<miette::Report>,
+}
+
+impl GradeAudit {
+    /// Every file whose effect set escapes `allowed` -- the gate verdict.
+    /// `fits` is deliberate about `UNAUDITED`: an ungraded file fits only when
+    /// the host's grant also carries the flag.
+    pub fn violations(&self, allowed: shared::Fx) -> Vec<(&str, shared::Fx)> {
+        self.script_effects
+            .iter()
+            .filter(|(_, fx)| !fx.fits(allowed))
+            .map(|(name, fx)| (name.as_str(), *fx))
+            .collect()
+    }
+}

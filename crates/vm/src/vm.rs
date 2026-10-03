@@ -2841,14 +2841,57 @@ impl Vm {
     where
         F: for<'gc> FnOnce(&mut crate::api::Api<'_, 'gc>),
     {
+        Self::compile_files_gated(files, install_lib, None)
+    }
+
+    /// `compile_files` with an effect gate: each file's inferred top-level
+    /// `Fx` must fit `allowed` or the program refuses to build — the file
+    /// never reaches codegen, let alone a frame. `None` skips the check
+    /// (the host trusted the sources already).
+    ///
+    /// This is the load-time half of safely running peer code: `Fx` is a
+    /// property of the loaded source, checked once here, before execution.
+    /// `UNAUDITED`-flagged sets fit only grants that also carry the flag.
+    pub fn compile_files_gated<F>(
+        files: &[(&str, &str)],
+        install_lib: F,
+        allowed: Option<shared::Fx>,
+    ) -> std::result::Result<Self, ExecuteError>
+    where
+        F: for<'gc> FnOnce(&mut crate::api::Api<'_, 'gc>),
+    {
         let mut vm = Self::new();
         let library = vm.install_library(install_lib);
-        let (program, sources) = Self::build_program(files, &library)?;
+        let (program, sources) = Self::build_program(files, &library, allowed)?;
 
         vm.load_program(program);
         vm.set_sources(sources);
         vm.registry = library.into_registry();
         Ok(vm)
+    }
+
+    /// Solve `files` and stop before codegen, returning only what the grades
+    /// pass computed: each file's inferred `Fx` plus the lint warnings. The
+    /// audit a host runs to *show* a peer page's effect footprint (ShareReview,
+    /// cap admission) without executing anything.
+    pub fn audit_files<F>(
+        files: &[(&str, &str)],
+        install_lib: F,
+    ) -> std::result::Result<solve::GradeAudit, ExecuteError>
+    where
+        F: for<'gc> FnOnce(&mut crate::api::Api<'_, 'gc>),
+    {
+        let mut probe = Self::new();
+        let library = probe.install_library(install_lib);
+        let mut loaded = solve::load_files(files.iter().copied(), &library);
+        if !loaded.errors.is_empty() {
+            return Err(loaded.errors.swap_remove(0).into());
+        }
+        let resolutions = solve::Resolutions::from(loaded.solver);
+        Ok(solve::GradeAudit {
+            script_effects: resolutions.script_effects,
+            warnings: loaded.warnings,
+        })
     }
 
     /// Compile `files` into a reusable `(Program, Sources)` pair —
@@ -2863,7 +2906,7 @@ impl Vm {
     {
         let mut probe = Self::new();
         let library = probe.install_library(install_lib);
-        Self::build_program(files, &library)
+        Self::build_program(files, &library, None)
     }
 
     /// Load a [`compile_parts`] program into this Vm — same post-load
@@ -2884,6 +2927,7 @@ impl Vm {
     fn build_program(
         files: &[(&str, &str)],
         library: &::api::Library<()>,
+        allowed: Option<shared::Fx>,
     ) -> std::result::Result<(Program, Sources), ExecuteError> {
         use solve::Resolutions;
 
@@ -2900,6 +2944,21 @@ impl Vm {
             .collect();
         let sources = loaded.sources;
         let resolutions = Resolutions::from(loaded.solver);
+        // The gate sits between solve and codegen: a file whose inferred
+        // effects escape `allowed` is refused before a single op is built.
+        if let Some(allowed) = allowed {
+            for (file, fx) in &resolutions.script_effects {
+                if !fx.fits(allowed) {
+                    let report: Error = solve::errors::FxGate {
+                        file: file.clone(),
+                        have: fx.to_string(),
+                        allowed: allowed.to_string(),
+                    }
+                    .into();
+                    return Err(report.into());
+                }
+            }
+        }
         // todo: there's zero reason to clone this here, im just trying to get a working version --
         // there's probably a much smoother way to get the intrinsics over here
         let mut ir = compile::Ir::new(

@@ -1009,3 +1009,17 @@ pub struct DeadStore {
     pub at: SourceSpan,
     pub name: String,
 }
+
+// ---- effect gate (`Vm::compile_files_gated`) -- a refusal, not a lint: the
+// file's inferred effects exceed what the host granted, so it never runs.
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("refused: `{file}` needs effects {have} beyond the granted {allowed}")]
+#[diagnostic(help(
+    "grant the missing effects, or remove the natives producing them from `{file}`"
+))]
+pub struct FxGate {
+    pub file: String,
+    pub have: String,
+    pub allowed: String,
+}
