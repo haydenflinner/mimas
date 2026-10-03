@@ -80,6 +80,10 @@ pub struct Solver {
     /// Effect set of each file's top-level statements, keyed by the ast's name. Script code
     /// isn't a dec, so page-eval effects surface here for a host to check against its caps.
     pub(crate) script_effects: IndexMap<String, shared::Fx>,
+    /// Per top-level statement: `(file name, site, inferred fx)` in source order. A host
+    /// that splices `use`-includes into one file maps each site back onto its include's
+    /// byte range -- how a peer page's contribution is attributed (and gated) separately.
+    pub(crate) script_segments: Vec<(String, shared::Location, shared::Fx)>,
     /// Non-fatal diagnostics (the lint suite). Solve succeeds; hosts decide how to show them.
     /// Surfaces on `Loaded::warnings` and `Resolutions::warnings`.
     pub(crate) warnings: Vec<miette::Report>,
@@ -136,6 +140,7 @@ impl Solver {
             dec_uses: IndexMap::new(),
             fn_effects: IndexMap::new(),
             script_effects: IndexMap::new(),
+            script_segments: Vec::new(),
             warnings: Vec::new(),
             non_value: None,
             iter_guards: vec![],

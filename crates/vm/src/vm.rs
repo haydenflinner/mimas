@@ -2890,6 +2890,7 @@ impl Vm {
         let resolutions = solve::Resolutions::from(loaded.solver);
         Ok(solve::GradeAudit {
             script_effects: resolutions.script_effects,
+            script_segments: resolutions.script_segments,
             warnings: loaded.warnings,
         })
     }

@@ -33,6 +33,10 @@ pub struct Resolutions {
     /// Effect set of each file's top-level statements, keyed by the ast's name. Hosts
     /// running peer pages gate on this: `fx.fits(granted)` or the code doesn't eval.
     pub script_effects: IndexMap<String, shared::Fx>,
+    /// Per top-level statement: `(file name, site, inferred fx)` in source order.
+    /// Spliced `use`-includes share one file name -- the site's byte span is what
+    /// attributes each statement back to the include that wrote it.
+    pub script_segments: Vec<(String, shared::Location, shared::Fx)>,
     /// Non-fatal diagnostics from the grades pass's lint suite. The solve succeeded;
     /// these are severity-warning reports for the host to render.
     pub warnings: Vec<miette::Report>,
@@ -342,6 +346,7 @@ impl From<Solver> for Resolutions {
             dec_uses: solver.dec_uses,
             fn_effects: solver.fn_effects,
             script_effects: solver.script_effects,
+            script_segments: solver.script_segments,
             warnings: solver.warnings,
             decs: resolved_decs,
             adts: resolved_adts,
@@ -363,6 +368,10 @@ pub struct GradeAudit {
     /// inference couldn't grade (unannotated natives, pact dispatch, closure
     /// callees) -- treat them as "could do anything" when gating.
     pub script_effects: IndexMap<String, shared::Fx>,
+    /// Per top-level statement: `(file name, site, inferred fx)` in source
+    /// order -- a spliced `use`-closure attributes each include back to its
+    /// byte range, so per-page verdicts exist even though the program is one file.
+    pub script_segments: Vec<(String, shared::Location, shared::Fx)>,
     /// Lint-suite diagnostics (unused bindings/params, dead stores). Severity
     /// warning; the load succeeded -- the host renders or surfaces these.
     pub warnings: Vec<miette::Report>,

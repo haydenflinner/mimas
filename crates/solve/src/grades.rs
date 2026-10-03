@@ -44,7 +44,7 @@ use parse::{
     components::{Pat, PatKind},
     stmt::AssignmentOp,
 };
-use shared::{Fx, Location};
+use shared::{Fx, Located, Location};
 
 use crate::{
     Solver,
@@ -89,11 +89,13 @@ enum Site {
     Param,
 }
 
-/// Who a call's effects attribute to: a named fn's dec, or the file's top-level statements
-/// (there is no script dec, so script-level calls keep their own slot).
+/// Who a call's effects attribute to: a named fn's dec, or one top-level
+/// statement's slot in `script_sites` (there is no script dec, and splitting
+/// per statement is what lets a host attribute a spliced page's effects back
+/// to the include that wrote them).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Caller {
-    Script,
+    Script(usize),
     Fn(DecId),
 }
 
@@ -212,8 +214,13 @@ struct Pass<'a> {
     /// Loop exit flows, innermost last (`break`/`continue` push into the top).
     breaks: Vec<Vec<Flow>>,
 
-    /// Caller stack: `[Script]` at file top level, `Fn(dec)` pushed inside `fn` items.
+    /// Caller stack: `[Script(stmt_idx)]` at file top level, `Fn(dec)` pushed
+    /// inside `fn` items. The script slot is re-assigned per top-level
+    /// statement (see `run`), so each statement's effect set lands separately.
     callers: Vec<Caller>,
+    /// Top-level statement sites, in source order -- `callers[0]`'s index into
+    /// this is the current script segment.
+    script_sites: Vec<Location>,
     /// Effects directly observed in each caller's own text.
     own_fx: HashMap<Caller, Fx>,
     /// caller -> user-fn callee decs (the fixpoint's edges).
@@ -232,7 +239,9 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) {
     // file A can call a fn in file B
     let mut edges: HashMap<DecId, HashSet<DecId>> = HashMap::new();
     let mut fn_fx: HashMap<DecId, Fx> = HashMap::new();
-    let mut script_fx: Vec<(String, Fx, HashSet<DecId>)> = Vec::new();
+    // per file: (name, [(stmt site, own fx, callee edges)]) -- folded into
+    // `script_effects`/`script_segments` after the fixpoint
+    let mut script_fx: Vec<(String, Vec<(Location, Fx, HashSet<DecId>)>)> = Vec::new();
 
     for ast in asts {
         let mut dec_by_site = HashMap::new();
@@ -255,24 +264,31 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) {
             flow: Flow::default(),
             retired: Vec::new(),
             breaks: Vec::new(),
-            callers: vec![Caller::Script],
+            callers: vec![Caller::Script(0)],
+            script_sites: Vec::new(),
             own_fx: HashMap::new(),
             edges: HashMap::new(),
             dec_by_site,
             pact_members: solver.pact_members.values().copied().collect(),
         };
         pass.push_scope();
-        pass.run(ast.stmts());
+        pass.run_top(ast.stmts());
         pass.pop_scope();
         pass.finish_lints();
 
-        let script_own = pass
-            .own_fx
-            .get(&Caller::Script)
-            .copied()
-            .unwrap_or(Fx::empty());
-        let script_calls = pass.edges.remove(&Caller::Script).unwrap_or_default();
-        script_fx.push((ast.name().to_string(), script_own, script_calls));
+        // one `(location, own, calls)` triple per top-level statement -- the
+        // segments a host maps back onto `use`-include byte ranges
+        let mut segments = Vec::with_capacity(pass.script_sites.len());
+        for (i, &site) in pass.script_sites.iter().enumerate() {
+            let own = pass
+                .own_fx
+                .get(&Caller::Script(i))
+                .copied()
+                .unwrap_or(Fx::empty());
+            let calls = pass.edges.remove(&Caller::Script(i)).unwrap_or_default();
+            segments.push((site, own, calls));
+        }
+        script_fx.push((ast.name().to_string(), segments));
         for (caller, fx) in pass.own_fx {
             if let Caller::Fn(d) = caller {
                 *fn_fx.entry(d).or_insert(Fx::empty()) |= fx;
@@ -320,12 +336,17 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) {
     for (caller, fx) in fn_fx {
         solver.fn_effects.insert(caller, fx);
     }
-    for (name, own, calls) in script_fx {
-        let fx = own
-            | calls.iter().fold(Fx::empty(), |acc, d| {
-                acc | solver.fn_effects.get(d).copied().unwrap_or(Fx::empty())
-            });
-        solver.script_effects.insert(name, fx);
+    for (name, segments) in script_fx {
+        let mut file_fx = Fx::empty();
+        for (site, own, calls) in segments {
+            let fx = own
+                | calls.iter().fold(Fx::empty(), |acc, d| {
+                    acc | solver.fn_effects.get(d).copied().unwrap_or(Fx::empty())
+                });
+            file_fx |= fx;
+            solver.script_segments.push((name.clone(), site, fx));
+        }
+        solver.script_effects.insert(name, file_fx);
     }
 }
 
@@ -337,7 +358,7 @@ impl<'a> Pass<'a> {
     }
 
     fn cur(&self) -> Caller {
-        *self.callers.last().unwrap_or(&Caller::Script)
+        *self.callers.last().unwrap_or(&Caller::Script(0))
     }
 
     /// `true` when `dec` was bound at or outside the innermost closure boundary -- pending
@@ -570,6 +591,18 @@ impl<'a> Pass<'a> {
         }
     }
 
+    /// The file's top-level statements: each gets its own script-caller slot so
+    /// its effect set lands as a segment a host can attribute back to a `use`
+    /// include (nested blocks just contribute to their statement's slot).
+    fn run_top(&mut self, stmts: &'a [Stmt]) {
+        for stmt in stmts {
+            let idx = self.script_sites.len();
+            self.script_sites.push(stmt.location());
+            self.callers[0] = Caller::Script(idx);
+            self.stmt(stmt);
+        }
+    }
+
     fn stmt(&mut self, stmt: &'a Stmt) {
         match stmt.kind() {
             StmtKind::Let(l) => {
@@ -641,7 +674,7 @@ impl<'a> Pass<'a> {
                             .dec_by_site
                             .get(&(name.location.file_id, name.location.span.start))
                             .copied();
-                        let caller = dec.map_or(Caller::Script, Caller::Fn);
+                        let caller = dec.map_or_else(|| self.cur(), Caller::Fn);
                         self.callers.push(caller);
                         self.own_fx.entry(caller).or_insert(Fx::empty());
                         self.in_fn(|s| {
@@ -691,7 +724,7 @@ impl<'a> Pass<'a> {
             .dec_by_site
             .get(&(f.name.location.file_id, f.name.location.span.start))
             .copied();
-        let caller = dec.map_or(Caller::Script, Caller::Fn);
+        let caller = dec.map_or_else(|| self.cur(), Caller::Fn);
         self.callers.push(caller);
         // an entry even when the body ends up pure -- `fn_effects` should answer for
         // every walked fn, not only effectful ones
