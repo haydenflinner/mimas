@@ -8,7 +8,7 @@ use syn::{
     visit_mut::VisitMut,
 };
 
-pub fn expand_impl(block: ItemImpl) -> Result<TokenStream2, syn::Error> {
+pub fn expand_impl(mut block: ItemImpl) -> Result<TokenStream2, syn::Error> {
     if let Some((_, path, _)) = &block.trait_ {
         return Err(syn::Error::new_spanned(
             path,
@@ -31,7 +31,7 @@ pub fn expand_impl(block: ItemImpl) -> Result<TokenStream2, syn::Error> {
 
     let mut out = TokenStream2::new();
     let mut adds = TokenStream2::new();
-    for item in &block.items {
+    for item in &mut block.items {
         match item {
             ImplItem::Fn(method) => {
                 let (mut shim, muts, add) = method_shim(&self_ident, method)?;
@@ -46,7 +46,10 @@ pub fn expand_impl(block: ItemImpl) -> Result<TokenStream2, syn::Error> {
                     shim.block.stmts.insert(0, meta);
                 }
                 let src = crate::src_submission(&shim.sig.ident, method.sig.ident.span());
-                out.extend(quote!(#shim #src #muts));
+                // `#[effects]` keys on the shim's path too -- install looks the registered
+                // fn (the shim) up, not the method's own name
+                let effects = crate::effects_submission(&shim.sig.ident, &mut method.attrs)?;
+                out.extend(quote!(#shim #src #muts #effects));
                 adds.extend(add);
             }
             ImplItem::Const(c) => {

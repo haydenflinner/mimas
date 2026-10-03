@@ -25,9 +25,9 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
 /// `from_parquet("products.parquet")` reads a parquet file into a `DataFrame`. Missing files
 /// and non-parquet data both raise.
 #[native]
+#[effects(io)]
 fn from_parquet<'gc>(ctx: Ctx<'gc>, path: &str) -> Raisable<vm::DataFrame<'gc>> {
-    use polars_io::parquet::read::ParquetReader;
-    use polars_io::prelude::SerReader;
+    use polars_io::{parquet::read::ParquetReader, prelude::SerReader};
     (|| {
         let f = std::fs::File::open(path).map_err(|e| format!("from_parquet: {path:?}: {e}"))?;
         ParquetReader::new(f)
@@ -41,6 +41,7 @@ fn from_parquet<'gc>(ctx: Ctx<'gc>, path: &str) -> Raisable<vm::DataFrame<'gc>> 
 /// `df.to_parquet("out.parquet")` writes the frame. Unwritable paths and dtypes parquet
 /// can't model raise.
 #[native]
+#[effects(io)]
 fn to_parquet<'gc>(ctx: Ctx<'gc>, df: vm::DataFrame<'gc>, path: &str) -> Raisable<bool> {
     use polars_io::parquet::write::ParquetWriter;
     (|| {

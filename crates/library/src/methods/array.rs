@@ -127,6 +127,7 @@ fn pop(arr: &mut Vec<anon::T<'gc>>) -> Option<anon::T<'gc>> {
 }
 
 #[native]
+#[effects(rng)]
 /// Puts the elements in a random order.
 ///
 /// ```mimas
@@ -189,6 +190,7 @@ fn flatten(arr: Vec<Vec<anon::T<'gc>>>) -> Vec<anon::T<'gc>> {
 }
 
 #[native]
+#[effects(rng)]
 /// Returns a random element, or `null` if the array is empty.
 ///
 /// ```mimas
