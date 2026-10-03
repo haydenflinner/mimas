@@ -508,6 +508,11 @@ pub fn compile_with(program: &Program, facts: &Facts) -> Result<Jit, Error> {
     // Frame/window ceremony. Declared before any emission so callers can
     // reference them.
     let native_kinds = emit_native::analyze(program);
+    let native_kinds = if std::env::var_os("MIMAS_NO_NATIVE").is_some() {
+        native_kinds.iter().map(|_| None).collect()
+    } else {
+        native_kinds
+    };
     let mut native_ids: Vec<Option<FuncId>> = Vec::with_capacity(nbodies);
     for (b, k) in native_kinds.iter().enumerate() {
         let id = match k {
@@ -523,20 +528,35 @@ pub fn compile_with(program: &Program, facts: &Facts) -> Result<Jit, Error> {
         native_ids.push(id);
     }
 
+    // `BodyFn`-ABI entry shims for the native-eligible bodies — a driver
+    // (or dynamic `Call`) that lands on one forwards straight into the
+    // frameless convention, falling back to the framed body on ST_RETRY.
+    let mut shim_ids: Vec<Option<FuncId>> = Vec::with_capacity(nbodies);
+    for id in &native_ids {
+        shim_ids.push(match id {
+            Some(_) => Some(module.declare_anonymous_function(&body_sig)?),
+            None => None,
+        });
+    }
+
     // `bodies` table: fn pointers for dynamic `Call` (the callee body index is
-    // only known at runtime), mirroring bcgen's `static BODIES`.
+    // only known at runtime), mirroring bcgen's `static BODIES`. Eligible
+    // bodies list their entry shim so dynamic calls take the frameless path
+    // too.
     let bodies_data = module.declare_anonymous_data(false, false)?;
     let mut dd = DataDescription::new();
     dd.define(vec![0u8; nbodies * 8].into());
     dd.set_align(8);
     for (i, id) in body_ids.iter().enumerate() {
-        let fref = module.declare_func_in_data(*id, &mut dd);
+        let fref = module.declare_func_in_data(shim_ids[i].unwrap_or(*id), &mut dd);
         dd.write_function_addr((i * 8) as u32, fref);
     }
     module.define_data(bodies_data, &dd)?;
 
     let mut fbc = cranelift_frontend::FunctionBuilderContext::new();
     let mut ctx = module.make_context();
+    let mut nsizes = Vec::with_capacity(nbodies);
+    let mut nbb_map = Vec::with_capacity(nbodies);
     // Probed layouts (`Val` tag/payload, `ThreadState`/`Frame`/`Decoder`
     // fields, `Vec` header order) — emitted code reads/writes these inline.
     let lyt = jit::layout();
@@ -573,15 +593,38 @@ pub fn compile_with(program: &Program, facts: &Facts) -> Result<Jit, Error> {
     }
     // Native (frameless) bodies — emitted after the framed ones; they only
     // reference each other and helpers.
-    for (body, kinds) in native_kinds.iter().enumerate() {
-        let Some(kinds) = kinds else { continue };
+    for (body, plan) in native_kinds.iter().enumerate() {
+        let Some(plan) = plan else { continue };
         emit_native::emit_native_body(
             &mut module,
             program,
             body,
             &helper_ids,
             &native_ids,
-            kinds,
+            plan,
+            &lyt,
+            &mut fbc,
+            &mut ctx,
+        )
+        .map_err(Error)?;
+        if dump_dir.is_some() {
+            let cc = ctx.compiled_code();
+            nsizes.push(cc.map(|c| c.buffer.data().len()).unwrap_or(0));
+            nbb_map.push(cc.map(|c| c.bb_starts.clone()).unwrap_or_default());
+        }
+    }
+    // Entry shims last — they reference both the framed and native FuncIds.
+    for (body, id) in shim_ids.iter().enumerate() {
+        let Some(id) = id else { continue };
+        let plan = native_kinds[body].as_ref().unwrap();
+        emit_native::emit_native_shim(
+            &mut module,
+            program,
+            body,
+            plan,
+            *id,
+            body_ids[body],
+            native_ids[body].unwrap(),
             &lyt,
             &mut fbc,
             &mut ctx,
@@ -595,11 +638,11 @@ pub fn compile_with(program: &Program, facts: &Facts) -> Result<Jit, Error> {
     // `<dir>/body_<i>.map`, and print its runtime address — for offline
     // disassembly + sample-PC correlation.
     if let Some(dir) = dump_dir {
+        let d = dir.to_string_lossy();
         for (i, id) in body_ids.iter().enumerate() {
             let p = module.get_finalized_function(*id);
             eprintln!("jit body {i} @ {p:p} size {}", sizes[i]);
             let bytes = unsafe { std::slice::from_raw_parts(p, sizes[i]) };
-            let d = dir.to_string_lossy();
             std::fs::write(format!("{d}/body_{i}.bin"), bytes).ok();
             let map = bb_map[i]
                 .iter()
@@ -609,12 +652,29 @@ pub fn compile_with(program: &Program, facts: &Facts) -> Result<Jit, Error> {
                 .join("\n");
             std::fs::write(format!("{d}/body_{i}.map"), map).ok();
         }
+        let mut n = 0usize;
+        for (i, id) in native_ids.iter().enumerate() {
+            let Some(id) = id else { continue };
+            let p = module.get_finalized_function(*id);
+            eprintln!("jit native body {i} @ {p:p} size {}", nsizes[n]);
+            let bytes = unsafe { std::slice::from_raw_parts(p, nsizes[n]) };
+            std::fs::write(format!("{d}/native_{i}.bin"), bytes).ok();
+            let map = nbb_map[n]
+                .iter()
+                .enumerate()
+                .map(|(b, o)| format!("block{b} 0x{o:x}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            std::fs::write(format!("{d}/native_{i}.map"), map).ok();
+            n += 1;
+        }
     }
 
     let bodies = body_ids
         .iter()
-        .map(|id| {
-            let p = module.get_finalized_function(*id);
+        .enumerate()
+        .map(|(i, id)| {
+            let p = module.get_finalized_function(shim_ids[i].unwrap_or(*id));
             debug_assert!(!p.is_null());
             // SAFETY: the emitted function implements exactly the extern "C"
             // BodyFn signature (`body_sig` above); the module outlives it via

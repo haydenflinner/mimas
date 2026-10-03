@@ -42,13 +42,13 @@ use vm::bc::{BodyEnv, INLINE_CALL_DEPTH, jit::Layout};
 /// `BodyEnv` field offsets — all fields are pointer-width under `repr(C)`,
 /// so `offset_of!` gives each word's byte position for the entry loads.
 pub(crate) const ENV_THREAD: i32 = std::mem::offset_of!(BodyEnv<'static>, thread) as i32;
-const ENV_CODE: i32 = std::mem::offset_of!(BodyEnv<'static>, code) as i32;
-const ENV_MC: i32 = std::mem::offset_of!(BodyEnv<'static>, mutation) as i32;
+pub(crate) const ENV_CODE: i32 = std::mem::offset_of!(BodyEnv<'static>, code) as i32;
+pub(crate) const ENV_MC: i32 = std::mem::offset_of!(BodyEnv<'static>, mutation) as i32;
 pub(crate) const ENV_ST: i32 = std::mem::offset_of!(BodyEnv<'static>, state) as i32;
-const ENV_STRS: i32 = std::mem::offset_of!(BodyEnv<'static>, strs) as i32;
+pub(crate) const ENV_STRS: i32 = std::mem::offset_of!(BodyEnv<'static>, strs) as i32;
 // `chunks`/`signatures` fields aren't loaded — no emitted site needs them.
 pub(crate) const ENV_FUEL: i32 = std::mem::offset_of!(BodyEnv<'static>, fuel) as i32;
-const ENV_OPIP: i32 = std::mem::offset_of!(BodyEnv<'static>, op_ip) as i32;
+pub(crate) const ENV_OPIP: i32 = std::mem::offset_of!(BodyEnv<'static>, op_ip) as i32;
 pub(crate) const ENV_OUT: i32 = std::mem::offset_of!(BodyEnv<'static>, out) as i32;
 
 const I64: ir::Type = types::I64;
@@ -444,6 +444,11 @@ struct Vs {
     /// observable boundary. bcgen's `bcn`/`bcn0`, verbatim.
     bcn: Variable,
     bcn0: Variable,
+    /// Ops in the current run *not yet dispatched* — a settle reads
+    /// `real = bcn + tail` so the charged-but-unrun ops after the current
+    /// op are refunded. Cold tramps def it per exit edge; inline settles
+    /// def `cur_tail`.
+    tail: Variable,
     /// Scalar shadows: `(value, bit)` per register — `bit` indexes `ok_mask`
     /// (dense slot 0..63, NOT the reg index, so wide windows still fit).
     /// One shared mask var instead of a per-reg `i8` keeps the live-var
@@ -522,6 +527,38 @@ struct Em<'a> {
     entry_use: Option<Vec<bool>>,
     blocks: Vec<Block>,
     off2idx: HashMap<usize, usize>,
+    /// Ops charged per gate: `run_len[i] > 0` at run heads (entry + branch
+    /// targets) — the quota check happens once per straight-line run instead
+    /// of per op, so an arithmetic inner loop carries no quota instrs.
+    run_len: Vec<usize>,
+    /// Index/byte-offset of the op currently being emitted — the cold exit
+    /// tramps def `cur_ip` from these instead of a per-op `mov` on the hot
+    /// path.
+    cur_op: usize,
+    cur_off: usize,
+    /// `run_end[i] - i - 1` for the op being emitted — the `tail` value for
+    /// its dispatched-op exit edges.
+    cur_tail: i64,
+    /// End index of each op's run: `run_end[i]` = index after the run's
+    /// last op (`run_len` gives the same count only at heads).
+    run_end: Vec<usize>,
+    /// Per-op cold tramp: `cur_ip = off; tail = _; →estep`. One per op,
+    /// shared by all its estep edges.
+    etramp: HashMap<usize, Block>,
+    /// Per-op cold tramp: `tail = _; →eret` for helper-status propagate
+    /// edges (the shared `eret` can't carry per-op constants).
+    rtramp: HashMap<usize, Block>,
+    /// Tramps to fill after the current op's semantics terminate the block:
+    /// `(block, off, tail)` → `cur_ip = off; tail = tail; →estep`.
+    epend: Vec<(Block, usize, i64)>,
+    /// `(block, tail)` → `tail = tail; →eret`.
+    rpend: Vec<(Block, i64)>,
+    /// `(tramp, tail, target)` → `bcn += tail; →target` — taken-branch
+    /// quota-refund edges created by [`Em::edge_blk`].
+    bpend: Vec<(Block, i64, Block)>,
+    /// `(tramp, cont, off, tail)` → `cur_ip = off; tail = tail; settle;
+    /// exits; rearm; →cont`.
+    gpend: Vec<(Block, Block, usize, i64)>,
     slot_i: StackSlot,
     slot_f: StackSlot,
     slot_b: StackSlot,
@@ -715,7 +752,8 @@ impl Em<'_> {
         let t = self.ld_tag(a);
         let want = self.tconst(self.lyt.t_int);
         let hit = self.fb.ins().icmp(IntCC::Equal, t, want);
-        self.fb.ins().brif(hit, good, &[], self.ex.estep, &[]);
+        let es = self.estep_blk();
+        self.fb.ins().brif(hit, good, &[], es, &[]);
         self.fb.switch_to_block(good);
         self.fb.ins().load(I64, tfw(), a, self.lyt.val_pay as i32)
     }
@@ -727,7 +765,8 @@ impl Em<'_> {
         let t = self.ld_tag(a);
         let want = self.tconst(self.lyt.t_float);
         let hit = self.fb.ins().icmp(IntCC::Equal, t, want);
-        self.fb.ins().brif(hit, good, &[], self.ex.estep, &[]);
+        let es = self.estep_blk();
+        self.fb.ins().brif(hit, good, &[], es, &[]);
         self.fb.switch_to_block(good);
         self.fb.ins().load(F64, tfw(), a, self.lyt.val_pay as i32)
     }
@@ -795,6 +834,21 @@ impl Em<'_> {
             panic!("unresolved BlockTarget in compiled program")
         };
         self.blocks[self.off2idx[o]]
+    }
+
+    /// Branch target with the quota refund: a taken edge out of op i skips
+    /// the rest of its run — `tail` ops the head charged but which never
+    /// run — so the edge pays `bcn += tail` back before landing. `tail == 0`
+    /// (the branch is its run's last op) → the bare target, no tramp.
+    /// Filled from `bpend` once the op's block is terminated.
+    fn edge_blk(&mut self, t: &BlockTarget) -> Block {
+        if self.cur_tail == 0 {
+            return self.tgt_blk(t);
+        }
+        let b = self.fb.create_block();
+        let tb = self.tgt_blk(t);
+        self.bpend.push((b, self.cur_tail, tb));
+        b
     }
 
     /// Successor block for fallthrough (`next` op, or `eend` off the end).
@@ -892,10 +946,15 @@ impl Em<'_> {
         b
     }
 
-    /// Fill a trampoline created by [`Em::err_tramp`]: `ekind = kind; →eerr`.
-    /// Switches to `t` (must be called when the current block is terminated).
+    /// Fill a trampoline created by [`Em::err_tramp`]: `cur_ip = off`,
+    /// `ekind = kind; →eerr`. Switches to `t` (must be called when the
+    /// current block is terminated).
     fn fill_err(&mut self, t: Block, kind: i64) {
         self.fb.switch_to_block(t);
+        let o = self.iconst(self.cur_off as i64);
+        self.fb.def_var(self.v.cur_ip, o);
+        let tl = self.iconst(self.cur_tail);
+        self.fb.def_var(self.v.tail, tl);
         let k = self.iconst8(kind);
         self.fb.def_var(self.v.ekind, k);
         self.fb.ins().jump(self.ex.eerr, &[]);
@@ -908,7 +967,8 @@ impl Em<'_> {
         if let Some(&(sv, bit)) = self.v.int.get(&r) {
             let good = self.fb.create_block();
             let okv = self.ok_get(bit);
-            self.fb.ins().brif(okv, good, &[], self.ex.estep, &[]);
+            let es = self.estep_blk();
+            self.fb.ins().brif(okv, good, &[], es, &[]);
             self.fb.switch_to_block(good);
             self.fb.use_var(sv)
         } else {
@@ -921,7 +981,8 @@ impl Em<'_> {
         if let Some(&(sv, bit)) = self.v.float.get(&r) {
             let good = self.fb.create_block();
             let okv = self.ok_get(bit);
-            self.fb.ins().brif(okv, good, &[], self.ex.estep, &[]);
+            let es = self.estep_blk();
+            self.fb.ins().brif(okv, good, &[], es, &[]);
             self.fb.switch_to_block(good);
             self.fb.use_var(sv)
         } else {
@@ -1022,7 +1083,8 @@ impl Em<'_> {
         self.mark_op(off, next);
         let k = self.hcall(h, args).unwrap();
         let post = self.fb.create_block();
-        self.fb.ins().brif(k, self.ex.eret, &[], post, &[]);
+        let rb = self.ret_blk();
+        self.fb.ins().brif(k, rb, &[], post, &[]);
         self.fb.switch_to_block(post);
         if let Some(d) = dst {
             self.refresh_shadow(d);
@@ -1096,7 +1158,8 @@ impl Em<'_> {
         self.mark_op(off, next);
         let k = self.hcall(h, args).unwrap();
         let post = self.fb.create_block();
-        self.fb.ins().brif(k, self.ex.eret, &[], post, &[]);
+        let rb = self.ret_blk();
+        self.fb.ins().brif(k, rb, &[], post, &[]);
         self.fb.switch_to_block(post);
         self.refresh_shadow(dst.index() as u32);
         let nb = self.next_blk(i);
@@ -1132,85 +1195,207 @@ impl Em<'_> {
         self.flush_jump(cont);
     }
 
-    /// `StepAt`-backed whole-op fallback: nothing is stored here — `estep`
-    /// itself writes `code.ip`/`*op_ip` from `cur_ip` and runs `step`.
+    /// `StepAt`-backed whole-op fallback: `estep` itself writes
+    /// `code.ip`/`*op_ip` from `cur_ip` and runs `step`, so the edge supplies
+    /// `cur_ip` through a per-op cold tramp (all the op's estep edges share
+    /// it — the shared exit can't carry per-op constants).
     fn estep(&mut self) {
-        self.fb.ins().jump(self.ex.estep, &[]);
+        let t = self.estep_blk();
+        self.fb.ins().jump(t, &[]);
+    }
+
+    /// The current op's cold estep tramp, creating it on first use. Filled
+    /// from `epend` once the op's semantics terminate the block.
+    fn estep_blk(&mut self) -> Block {
+        if let Some(&b) = self.etramp.get(&self.cur_op) {
+            return b;
+        }
+        let b = self.fb.create_block();
+        self.fb.set_cold_block(b);
+        self.etramp.insert(self.cur_op, b);
+        self.epend.push((b, self.cur_off, self.cur_tail));
+        b
+    }
+
+    /// The current op's cold eret tramp — `tail = cur_tail; →eret` —
+    /// shared by all its helper-status propagate edges.
+    fn ret_blk(&mut self) -> Block {
+        if let Some(&b) = self.rtramp.get(&self.cur_op) {
+            return b;
+        }
+        let b = self.fb.create_block();
+        self.fb.set_cold_block(b);
+        self.rtramp.insert(self.cur_op, b);
+        self.rpend.push((b, self.cur_tail));
+        b
+    }
+
+    /// Drain the pending cold tramps for the op just emitted — safe to fill
+    /// once `semantics` has terminated the block.
+    fn fill_pends(&mut self) {
+        for (b, off, tail) in std::mem::take(&mut self.epend) {
+            self.fb.switch_to_block(b);
+            let o = self.iconst(off as i64);
+            self.fb.def_var(self.v.cur_ip, o);
+            let t = self.iconst(tail);
+            self.fb.def_var(self.v.tail, t);
+            self.fb.ins().jump(self.ex.estep, &[]);
+        }
+        for (b, tail) in std::mem::take(&mut self.rpend) {
+            self.fb.switch_to_block(b);
+            let t = self.iconst(tail);
+            self.fb.def_var(self.v.tail, t);
+            self.fb.ins().jump(self.ex.eret, &[]);
+        }
+        for (b, tail, tgt) in std::mem::take(&mut self.bpend) {
+            self.fb.switch_to_block(b);
+            let bcn = self.fb.use_var(self.v.bcn);
+            let n = self.fb.ins().iadd_imm_s(bcn, tail);
+            self.fb.def_var(self.v.bcn, n);
+            self.fb.ins().jump(tgt, &[]);
+        }
+        for (t, c, off, tail) in std::mem::take(&mut self.gpend) {
+            self.fill_gate_tramp(t, c, off as i64, tail);
+        }
     }
 
     // ---- batched quota (`bcn`) plumbing — bcgen's settle!/gexit!/gateq! ----
 
-    /// `spent = bcn0 - bcn; bcn0 = bcn; *fuel -= spent; ops_left -= spent`.
-    /// Idempotent (a second settle charges 0), so exits can run it
-    /// unconditionally. Returns the post-settle `(fuel, ops_left)` values.
+    /// `real = bcn + tail; spent = bcn0 - real; bcn0 = real; counters -= spent`.
+    /// `tail` refunds the run's charged-but-undispatched ops so `spent` is
+    /// exactly the ops dispatched since the last settle — keeps `ops_left`
+    /// honest at every observable boundary (a stepped callee arms its own
+    /// `bcn` from it). Idempotent; `spent` clamps to `bcn0` so the thin
+    /// path can't wrap the `u64` counters. Returns post-settle
+    /// `(fuel, ops_left)`.
     fn settle_seq(&mut self) -> (Value, Value) {
         let b0 = self.fb.use_var(self.v.bcn0);
         let b = self.fb.use_var(self.v.bcn);
-        let spent = self.fb.ins().isub(b0, b);
-        self.fb.def_var(self.v.bcn0, b);
+        let t = self.fb.use_var(self.v.tail);
+        let real = self.fb.ins().iadd(b, t);
+        let spent = self.fb.ins().isub(b0, real);
+        let spent = self.fb.ins().umin(spent, b0);
+        self.fb.def_var(self.v.bcn0, real);
+        // `spent` can exceed what's actually left (the `bcn0 + tail` carry
+        // charges owed ops whose budget may no longer exist) — clamp each
+        // counter to its own remainder so `u64` never wraps upward.
         let __e_fuel_p = self.fuel_p();
         let f = self.fb.ins().load(I64, tfs(), __e_fuel_p, 0);
-        let f2 = self.fb.ins().isub(f, spent);
+        let sf = self.fb.ins().umin(spent, f);
+        let f2 = self.fb.ins().isub(f, sf);
         let __e_fuel_p = self.fuel_p();
         self.fb.ins().store(tfs(), f2, __e_fuel_p, 0);
         let __e_opsleft_p = self.opsleft_p();
         let ol = self.fb.ins().load(I64, tfs(), __e_opsleft_p, 0);
-        let ol2 = self.fb.ins().isub(ol, spent);
+        let so = self.fb.ins().umin(spent, ol);
+        let ol2 = self.fb.ins().isub(ol, so);
         let __e_opsleft_p = self.opsleft_p();
         self.fb.ins().store(tfs(), ol2, __e_opsleft_p, 0);
         (f2, ol2)
     }
 
-    /// `bcn = min(*fuel, ops_left); bcn0 = bcn` — armed at entry and re-armed
-    /// wherever quota was spent outside our count (an inlined callee draws
-    /// from the same counters through its own `bcn`).
+    /// `bcn = min(*fuel, ops_left); bcn0 = bcn + tail` — armed at entry and
+    /// re-armed wherever quota was spent outside our count (an inlined
+    /// callee draws from the same counters through its own `bcn`). `bcn0`
+    /// carries the `tail` refund forward so ops that run *after* a settle's
+    /// refund are still charged at the next settle — `bcn` itself is the
+    /// honest arm (the refunded ops' charge is owed, not owned).
     fn rearm_seq(&mut self) {
         let __e_fuel_p = self.fuel_p();
         let f = self.fb.ins().load(I64, tfs(), __e_fuel_p, 0);
         let __e_opsleft_p = self.opsleft_p();
         let ol = self.fb.ins().load(I64, tfs(), __e_opsleft_p, 0);
         let m = self.fb.ins().umin(f, ol);
+        // Cap the batch below `i64::MAX`: `fuel`/`ops_left` can hold
+        // `usize::MAX` (`Vm::call` passes it), which is `-1` as a signed
+        // `i64` — arming that raw would trip every `bcn` compare and wrap
+        // `bcn0 = bcn + tail`. A capped arm is equivalent: the gate tramp
+        // re-arms whenever the batch runs low, far before the real budget.
+        let cap = self.iconst(1 << 62);
+        let m = self.fb.ins().umin(m, cap);
         self.fb.def_var(self.v.bcn, m);
-        self.fb.def_var(self.v.bcn0, m);
+        let t = self.fb.use_var(self.v.tail);
+        let m0 = self.fb.ins().iadd(m, t);
+        self.fb.def_var(self.v.bcn0, m0);
     }
 
-    /// One op's quota gate — bcgen's `gateq!()`/`gatep!()`: `paused` is only
-    /// loaded when the static fallthrough predecessor can run foreign code
-    /// (`may_pause`); a `bcn == 0` trip (or the pause flag) routes to a
-    /// per-op cold trampoline running `gexit` — settle, then the driver's
-    /// ordered exit reasons, then re-arm and resume the op. Returns the
-    /// continuation block the op body emits into.
-    fn gate(&mut self, i: usize, off: usize) -> (Block, Block) {
-        let o = self.iconst(off as i64);
-        self.fb.def_var(self.v.cur_ip, o);
-        let cont = self.fb.create_block();
-        let tramp = self.fb.create_block();
-        self.fb.set_cold_block(tramp);
+    /// Settle inside op semantics — defs `tail = cur_tail` (the op is
+    /// dispatched, so only the run *after* it is refunded) then settles.
+    fn settle(&mut self) -> (Value, Value) {
+        let t = self.iconst(self.cur_tail);
+        self.fb.def_var(self.v.tail, t);
+        self.settle_seq()
+    }
+
+    /// Quota gates — bcgen's `gateq!()`/`gatep!()`, hoisted to run heads: a
+    /// `bcn < run_len` check once per straight-line run then a saturating
+    /// `bcn -= run_len` charge, so ops inside a run emit no quota code at
+    /// all. `paused` is still loaded when the static fallthrough predecessor
+    /// can run foreign code (`may_pause`). Every check routes to a cold
+    /// trampoline (`gpend`) that sets `cur_ip`, settles, runs the driver's
+    /// ordered exit reasons, re-arms and resumes. The saturating charge
+    /// keeps `spent <= armed` on the thin path (`bcn < run_len` after
+    /// re-arm), bounding budget overrun to one run instead of wrapping
+    /// `ops_left`.
+    fn gate(&mut self, i: usize, off: usize) {
         if i > 0 && may_pause(&self.ops[i - 1].1) {
+            let tramp = self.fb.create_block();
+            self.fb.set_cold_block(tramp);
+            let cont = self.fb.create_block();
             let __e_paused_p = self.paused_p();
             let p = self.fb.ins().load(I8, tfs(), __e_paused_p, 0);
-            let g = self.fb.create_block();
-            self.fb.ins().brif(p, tramp, &[], g, &[]);
-            self.fb.switch_to_block(g);
+            self.fb.ins().brif(p, tramp, &[], cont, &[]);
+            self.fb.switch_to_block(cont);
+            // The pause check precedes op i: undispatched = `run_end - i`,
+            // unless i is a head — then the run's charge hasn't been taken
+            // yet and `bcn` is already exact (`tail = 0`).
+            let tail = if self.run_len[i] > 0 {
+                0
+            } else {
+                (self.run_end[i] - i) as i64
+            };
+            self.gpend.push((tramp, cont, off, tail));
         }
-        let bcnv = self.fb.use_var(self.v.bcn);
-        let z = self.iconst(0);
-        let bz = self.fb.ins().icmp(IntCC::Equal, bcnv, z);
-        self.fb.ins().brif(bz, tramp, &[], cont, &[]);
-        self.fb.switch_to_block(cont);
-        // `use_var` again — the trampoline's re-arm path also lands here, so
-        // the decrement must read the merged value, not the pre-branch one.
-        let cur = self.fb.use_var(self.v.bcn);
-        let b1 = self.fb.ins().iadd_imm_s(cur, -1);
-        self.fb.def_var(self.v.bcn, b1);
-        (cont, tramp)
+        let l = self.run_len[i];
+        if l > 0 {
+            let tramp = self.fb.create_block();
+            self.fb.set_cold_block(tramp);
+            let cont = self.fb.create_block();
+            let lim = self.iconst(l as i64);
+            let b = self.fb.use_var(self.v.bcn);
+            let low = self.fb.ins().icmp(IntCC::UnsignedLessThan, b, lim);
+            self.fb.ins().brif(low, tramp, &[], cont, &[]);
+            self.fb.switch_to_block(cont);
+            let cur = self.fb.use_var(self.v.bcn);
+            let n = self.fb.ins().iadd_imm_s(cur, -(l as i64));
+            // `cont` also merges the gate-tramp's re-arm, which can leave
+            // `bcn < l` when the real budget is nearly out. Saturate to 0:
+            // `umin(n, cur)` would leave `bcn` pinned just under `l` and
+            // `spent` would read 0 at every subsequent settle — the budget
+            // would never drain and a `while true` loop would hang.
+            let under = self.fb.ins().icmp(IntCC::UnsignedLessThan, cur, lim);
+            let z2 = self.iconst(0);
+            let n = self.fb.ins().select(under, z2, n);
+            self.fb.def_var(self.v.bcn, n);
+            // The head tramp fires *before* the run's charge — `bcn` is
+            // already the ops-dispatched amount, so `tail = 0`.
+            self.gpend.push((tramp, cont, off, 0));
+        }
     }
 
-    /// Fill a gate trampoline (created by [`Em::gate`] or `estep_g`): settle,
-    /// then `paused || fuel == 0` → `enext`, `ops_left == 0` → `eoof`, else
-    /// re-arm and resume at `cont`. Call when the current block is terminated.
-    fn fill_gate_tramp(&mut self, tramp: Block, cont: Block) {
+    /// Fill a gate trampoline (created by [`Em::gate`] or `estep_g`):
+    /// `cur_ip = off` (skipped when `off < 0` — `estep_g`'s tramp keeps the
+    /// live resume ip), `tail = tail`, settle, then `paused || fuel == 0`
+    /// → `enext`, `ops_left == 0` → `eoof`, else re-arm and resume at
+    /// `cont`. Call when the current block is terminated.
+    fn fill_gate_tramp(&mut self, tramp: Block, cont: Block, off: i64, tail: i64) {
         self.fb.switch_to_block(tramp);
+        if off >= 0 {
+            let o = self.iconst(off);
+            self.fb.def_var(self.v.cur_ip, o);
+        }
+        let t = self.iconst(tail);
+        self.fb.def_var(self.v.tail, t);
         let (f, ol) = self.settle_seq();
         let __e_paused_p = self.paused_p();
         let p = self.fb.ins().load(I8, tfs(), __e_paused_p, 0);
@@ -1408,6 +1593,7 @@ pub(crate) fn emit_body(
     let v_ekind = fb.declare_var(I8);
     let v_bcn = fb.declare_var(I64);
     let v_bcn0 = fb.declare_var(I64);
+    let v_tail = fb.declare_var(I64);
     let v_ok_mask = fb.declare_var(I64);
     let mut int_vars = HashMap::new();
     let mut float_vars = HashMap::new();
@@ -1447,6 +1633,39 @@ pub(crate) fn emit_body(
     let off2idx: HashMap<usize, usize> =
         ops.iter().enumerate().map(|(i, (o, _))| (*o, i)).collect();
 
+    // Run heads for the batched-quota gate: op 0 plus every branch target
+    // (each loop iteration then crosses a gate, and ops between heads emit
+    // no quota code at all). `run_len[i]` = ops charged at head i.
+    let mut is_head = vec![false; ops.len()];
+    is_head[0] = true;
+    for (_, op) in ops.iter() {
+        for t in op.targets() {
+            if let BlockTarget::ByteOffset(o) = t {
+                if let Some(&j) = off2idx.get(&o) {
+                    is_head[j] = true;
+                }
+            }
+        }
+    }
+    let mut run_len = vec![0usize; ops.len()];
+    let mut next_head = ops.len();
+    for i in (0..ops.len()).rev() {
+        if is_head[i] {
+            run_len[i] = next_head - i;
+            next_head = i;
+        }
+    }
+    // `run_end[i]` = index just past i's run — the refund basis for every
+    // exit edge's `tail`.
+    let mut run_end = vec![0usize; ops.len()];
+    let mut head = 0;
+    for (i, e) in run_end.iter_mut().enumerate() {
+        if is_head[i] {
+            head = i;
+        }
+        *e = head + run_len[head];
+    }
+
     // ---- entry ----
     fb.append_block_params_for_function_params(entry);
     fb.switch_to_block(entry);
@@ -1472,6 +1691,7 @@ pub(crate) fn emit_body(
             ekind: v_ekind,
             bcn: v_bcn,
             bcn0: v_bcn0,
+            tail: v_tail,
             int: int_vars,
             float: float_vars,
             ok_mask: v_ok_mask,
@@ -1498,6 +1718,17 @@ pub(crate) fn emit_body(
         entry_use: None,
         blocks,
         off2idx,
+        run_len,
+        cur_op: 0,
+        cur_off: 0,
+        cur_tail: 0,
+        run_end,
+        etramp: HashMap::new(),
+        rtramp: HashMap::new(),
+        epend: Vec::new(),
+        rpend: Vec::new(),
+        bpend: Vec::new(),
+        gpend: Vec::new(),
         slot_i: StackSlot::from_u32(0),
         slot_f: StackSlot::from_u32(0),
         slot_b: StackSlot::from_u32(0),
@@ -1551,6 +1782,7 @@ pub(crate) fn emit_body(
     em.fb.def_var(v_regs, regs0);
     let z64 = em.iconst(0);
     em.fb.def_var(v_cur_ip, z64);
+    em.fb.def_var(v_tail, z64);
     let z8 = em.iconst8(0);
     em.fb.def_var(v_ekind, z8);
     // arm the batched quota: `bcn = min(*fuel, ops_left)` (bcgen's entry arm).
@@ -1676,8 +1908,12 @@ pub(crate) fn emit_body(
     let cur = em.fb.use_var(v_bcn);
     let b1 = em.fb.ins().iadd_imm_s(cur, -1);
     em.fb.def_var(v_bcn, b1);
+    // the stepped op was charged by the `-1` — nothing to refund.
+    let tz = em.iconst(0);
+    em.fb.def_var(v_tail, tz);
     em.fb.ins().jump(estep, &[]);
-    em.fill_gate_tramp(g_tramp, g2);
+    // `cur_ip` already holds the ip about to be stepped — keep it (-1).
+    em.fill_gate_tramp(g_tramp, g2, -1, 0);
 
     em.fb.switch_to_block(enext);
     em.settle_seq();
@@ -1782,16 +2018,20 @@ pub(crate) fn emit_body(
 }
 
 impl Em<'_> {
-    /// One op block: the driver's per-op bookkeeping as a batched-quota gate
-    /// (bcgen's `gateq!`/`gatep!`), then semantics.
+    /// One op block: the driver's bookkeeping as batched-quota gates at run
+    /// heads / post-`may_pause` points (bcgen's `gateq!`/`gatep!`), then
+    /// semantics. Cold tramps created along the way are filled after, once
+    /// the op's block is terminated.
     fn emit_op(&mut self, i: usize, off: usize, next: usize, op: &Op) {
         self.fb.switch_to_block(self.blocks[i]);
-        let (_cont, tramp) = self.gate(i, off);
+        self.cur_op = i;
+        self.cur_off = off;
+        self.cur_tail = (self.run_end[i] - i - 1) as i64;
+        self.gate(i, off);
         self.semantics(i, off, next, op);
-        // the gate's cold trampoline — `fill_gate_tramp` needs the current
-        // block terminated, which `semantics` guarantees (every arm ends in a
-        // branch or return).
-        self.fill_gate_tramp(tramp, _cont);
+        // the cold tramps — `fill_*` needs the current block terminated,
+        // which `semantics` guarantees (every arm ends in a branch or return).
+        self.fill_pends();
     }
 
     fn semantics(&mut self, i: usize, off: usize, next: usize, op: &Op) {
@@ -1804,7 +2044,7 @@ impl Em<'_> {
                 }
             }
             Op::Jump { target } => {
-                let t = self.tgt_blk(target);
+                let t = self.edge_blk(target);
                 self.fb.ins().jump(t, &[]);
             }
             Op::JumpIf {
@@ -1823,7 +2063,7 @@ impl Em<'_> {
                 let peq = self.fb.ins().icmp(IntCC::Equal, pb, bv);
                 let k = self.fb.ins().band(tb2, peq);
                 let hit = self.mask_by_shadow(*cond, k);
-                let (tb, fb) = (self.tgt_blk(target), self.next_blk(i));
+                let (tb, fb) = (self.edge_blk(target), self.next_blk(i));
                 self.fb.ins().brif(hit, tb, &[], fb, &[]);
             }
             Op::ForNext { idx, bound, target } => {
@@ -1832,7 +2072,7 @@ impl Em<'_> {
                 let i2 = self.fb.ins().iadd_imm_s(iv, 1);
                 self.wr_int_dst(idx.index() as u32, i2);
                 let hit = self.fb.ins().icmp(IntCC::SignedLessThan, i2, bv);
-                let (tb, fb) = (self.tgt_blk(target), self.next_blk(i));
+                let (tb, fb) = (self.edge_blk(target), self.next_blk(i));
                 self.fb.ins().brif(hit, tb, &[], fb, &[]);
             }
             Op::Switch { .. } | Op::Format { .. } => self.estep(),
@@ -1841,7 +2081,7 @@ impl Em<'_> {
                 let do_ret = self.fb.create_block();
                 self.root_flush(do_ret);
                 self.fb.switch_to_block(do_ret);
-                self.settle_seq();
+                self.settle();
                 // `*out = Ok(Flow::Return(*vp))` inlined over the probed
                 // `RtResult<Flow>` layout — a discriminant store plus the
                 // 16-byte `Val` copy — instead of an FFI call per Return.
@@ -1866,6 +2106,10 @@ impl Em<'_> {
                 self.fb.ins().return_(&[]);
             }
             Op::Panic {} => {
+                let o = self.iconst(off as i64);
+                self.fb.def_var(self.v.cur_ip, o);
+                let tl = self.iconst(self.cur_tail);
+                self.fb.def_var(self.v.tail, tl);
                 let k = self.iconst8(ERR_PANIC);
                 self.fb.def_var(self.v.ekind, k);
                 self.fb.ins().jump(self.ex.eerr, &[]);
@@ -1876,7 +2120,8 @@ impl Em<'_> {
                 let (regs, s) = (self.regs(), self.iconst(val.index() as i64));
                 let __e_out = self.out();
                 self.hcall(H::Raise, &[regs, s, __e_out]);
-                self.root_flush(self.ex.eret);
+                let rb = self.ret_blk();
+                self.root_flush(rb);
             }
             Op::LoadConst { dst, constant } => match constant {
                 Constant::Int(v) => {
@@ -2710,7 +2955,8 @@ impl Em<'_> {
                 let __e_out = self.out();
                 let k = self.hcall(H::Len, &[regs, s, v, __e_out]).unwrap();
                 let w = self.fb.create_block();
-                self.fb.ins().brif(k, self.ex.eret, &[], w, &[]);
+                let rb = self.ret_blk();
+                self.fb.ins().brif(k, rb, &[], w, &[]);
                 self.fb.switch_to_block(w);
                 let v = self.fb.ins().stack_load(I64, I64, self.slot_i, 0);
                 self.wr_int_dst(dst.index() as u32, v);
@@ -2857,7 +3103,8 @@ impl Em<'_> {
             // a live scalar shadow means the reg is NOT a Bool → estep
             let okv = self.ok_get(bit);
             let nb = self.fb.create_block();
-            self.fb.ins().brif(okv, self.ex.estep, &[], nb, &[]);
+            let es = self.estep_blk();
+            self.fb.ins().brif(okv, es, &[], nb, &[]);
             self.fb.switch_to_block(nb);
         }
         let good = self.fb.create_block();
@@ -2866,7 +3113,8 @@ impl Em<'_> {
         let t = self.ld_tag(a);
         let want = self.tconst(self.lyt.t_bool);
         let ok = self.fb.ins().icmp(IntCC::Equal, t, want);
-        self.fb.ins().brif(ok, good, &[], self.ex.estep, &[]);
+        let es = self.estep_blk();
+        self.fb.ins().brif(ok, good, &[], es, &[]);
         self.fb.switch_to_block(good);
         self.fb.ins().load(I8, tfw(), a, self.lyt.bool_pay as i32)
     }
@@ -2886,7 +3134,8 @@ impl Em<'_> {
         let bm1 = self.fb.ins().icmp(IntCC::Equal, b, c_m1);
         let bad = self.fb.ins().band(amin, bm1);
         let run2 = self.fb.create_block();
-        self.fb.ins().brif(bad, self.ex.estep, &[], run2, &[]);
+        let es = self.estep_blk();
+        self.fb.ins().brif(bad, es, &[], run2, &[]);
         self.fb.switch_to_block(run2);
         let v = self.fb.ins().srem(a, b);
         self.wr_int_dst(dst.index() as u32, v);
@@ -3091,7 +3340,8 @@ impl Em<'_> {
         // 0 → wrote regs[dst]; 1 → both-Str fast path missed → `step`
         let k = self.hcall(H::BinStr, &[regs, d, l, r, e]).unwrap();
         let post = self.fb.create_block();
-        self.fb.ins().brif(k, self.ex.estep, &[], post, &[]);
+        let es = self.estep_blk();
+        self.fb.ins().brif(k, es, &[], post, &[]);
         self.fb.switch_to_block(post);
         self.refresh_shadow(dst.index() as u32);
         let nb = self.next_blk(i);
@@ -3116,7 +3366,7 @@ impl Em<'_> {
             None => self.iconst(imm.unwrap()),
         };
         let hit = self.fb.ins().icmp(cc, a, b);
-        let (tb, nb) = (self.tgt_blk(target), self.next_blk(i));
+        let (tb, nb) = (self.edge_blk(target), self.next_blk(i));
         let (t, f) = if is_true { (tb, nb) } else { (nb, tb) };
         self.fb.ins().brif(hit, t, &[], f, &[]);
     }
@@ -3137,7 +3387,7 @@ impl Em<'_> {
             None => self.fb.ins().f64const(f64::from_bits(imm.unwrap() as u64)),
         };
         let hit = self.fb.ins().fcmp(cc, a, b);
-        let (tb, nb) = (self.tgt_blk(target), self.next_blk(i));
+        let (tb, nb) = (self.edge_blk(target), self.next_blk(i));
         let (t, f) = if is_true { (tb, nb) } else { (nb, tb) };
         self.fb.ins().brif(hit, t, &[], f, &[]);
     }
@@ -4173,7 +4423,7 @@ impl Em<'_> {
         self.mark_op(off, next);
         // the callee draws fuel/ops_left through its own `bcn` — charge our
         // spent ops first so its reads are exact
-        self.settle_seq();
+        self.settle();
         let (b, d, n) = (
             self.iconst(body.index() as i64),
             self.iconst(dst.index() as i64),
@@ -4215,7 +4465,7 @@ impl Em<'_> {
         // overwritten with the callee offset below, but `*op_ip` locates this
         // op for any propagated error, and the slow path needs both.
         self.mark_op(off, next);
-        self.settle_seq();
+        self.settle();
 
         // Runtime gates, all checked in the pre-branch block so the fast
         // block can reuse the loaded Vec headers.
@@ -4268,7 +4518,6 @@ impl Em<'_> {
         nf: FuncRef,
     ) {
         self.mark_op(off, next);
-        self.settle_seq();
         let mut cargs = Vec::with_capacity(2 + args.len());
         let ev = self.env.env;
         cargs.push(ev);
@@ -4282,10 +4531,9 @@ impl Em<'_> {
         let okb = self.fb.create_block();
         let s0 = self.fb.ins().iconst(I8, crate::emit_native::ST_OK);
         let is0 = self.fb.ins().icmp(IntCC::Equal, st, s0);
-        self.fb.ins().brif(is0, okb, &[], self.ex.estep, &[]);
+        let es = self.estep_blk();
+        self.fb.ins().brif(is0, okb, &[], es, &[]);
         self.fb.switch_to_block(okb);
-        // the callee settled what it spent — re-arm our batch
-        self.rearm_seq();
         self.wr_int_dst(dst.index() as u32, v);
         let nb = self.next_blk(i);
         self.fb.ins().jump(nb, &[]);
@@ -4300,7 +4548,8 @@ impl Em<'_> {
         if let Some(&(sv, bit)) = self.v.int.get(&r) {
             let good = self.fb.create_block();
             let okv = self.ok_get(bit);
-            self.fb.ins().brif(okv, good, &[], self.ex.estep, &[]);
+            let es = self.estep_blk();
+            self.fb.ins().brif(okv, good, &[], es, &[]);
             self.fb.switch_to_block(good);
             self.fb.use_var(sv)
         } else {
@@ -4310,7 +4559,8 @@ impl Em<'_> {
             let want = self.tconst(self.lyt.t_int);
             let hit = self.fb.ins().icmp(IntCC::Equal, t, want);
             let good = self.fb.create_block();
-            self.fb.ins().brif(hit, good, &[], self.ex.estep, &[]);
+            let es = self.estep_blk();
+            self.fb.ins().brif(hit, good, &[], es, &[]);
             self.fb.switch_to_block(good);
             self.fb.ins().load(I64, tfw(), a, self.lyt.val_pay as i32)
         }
@@ -4660,7 +4910,7 @@ impl Em<'_> {
         // the interpreter's decoder-advanced arm.
         self.flush_seq();
         self.mark_op(off, next);
-        self.settle_seq();
+        self.settle();
         let ap = self.reg_list_slot(args);
         let nargs = args.len();
         let (regs, c, d, n) = (
@@ -4702,7 +4952,7 @@ impl Em<'_> {
         let mue = self.uses_entry(body.index() as u32);
         self.call_flush(args, &[callee], mue);
         self.mark_op(off, next);
-        self.settle_seq();
+        self.settle();
         let ap = self.reg_list_slot(args);
 
         let ca = self.val_ptr(callee.index() as u32);
@@ -4805,7 +5055,8 @@ impl Em<'_> {
         let z = self.iconst(0);
         let isz = self.fb.ins().icmp(IntCC::Equal, rp, z);
         let resumed = self.fb.create_block();
-        self.fb.ins().brif(isz, self.ex.eret, &[], resumed, &[]);
+        let rb = self.ret_blk();
+        self.fb.ins().brif(isz, rb, &[], resumed, &[]);
         self.fb.switch_to_block(resumed);
         self.rearm_seq();
         self.fb.def_var(self.v.regs, rp);
