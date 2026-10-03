@@ -82,9 +82,15 @@ fn main() {
     assert_eq!(v1, v2);
     println!("run({n}) = {v0}   (froze {} dict site(s))", ptrs.len());
     println!("interp:      {:>9.1?}", d_interp);
-    println!("jit generic: {:>9.1?}   ({:.2}x vs interp)", d_jit, d_interp.as_secs_f64() / d_jit.as_secs_f64());
-    println!("jit + facts: {:>9.1?}   ({:.2}x vs generic, {:.2}x vs interp)",
+    println!(
+        "jit generic: {:>9.1?}   ({:.2}x vs interp)",
+        d_jit,
+        d_interp.as_secs_f64() / d_jit.as_secs_f64()
+    );
+    println!(
+        "jit + facts: {:>9.1?}   ({:.2}x vs generic, {:.2}x vs interp)",
         d_spec,
         d_jit.as_secs_f64() / d_spec.as_secs_f64(),
-        d_interp.as_secs_f64() / d_spec.as_secs_f64());
+        d_interp.as_secs_f64() / d_spec.as_secs_f64()
+    );
 }

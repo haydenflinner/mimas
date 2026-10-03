@@ -23,6 +23,7 @@
 //! coverage is always total.
 
 mod emit;
+mod emit_native;
 mod session;
 
 use compile::Program;
@@ -502,6 +503,26 @@ pub fn compile_with(program: &Program, facts: &Facts) -> Result<Jit, Error> {
         .map(|_| module.declare_anonymous_function(&body_sig))
         .collect::<Result<_, _>>()?;
 
+    // Frameless "native" decls for scalar-only bodies — `CallDirect` sites
+    // (framed or native) call these directly, skipping the whole
+    // Frame/window ceremony. Declared before any emission so callers can
+    // reference them.
+    let native_kinds = emit_native::analyze(program);
+    let mut native_ids: Vec<Option<FuncId>> = Vec::with_capacity(nbodies);
+    for (b, k) in native_kinds.iter().enumerate() {
+        let id = match k {
+            Some(_) => {
+                let nargs = program.chunks[compile::BodyId::from(b as u32)]
+                    .params
+                    .len();
+                let sig = emit_native::native_sig(&mut module, nargs);
+                Some(module.declare_anonymous_function(&sig)?)
+            }
+            None => None,
+        };
+        native_ids.push(id);
+    }
+
     // `bodies` table: fn pointers for dynamic `Call` (the callee body index is
     // only known at runtime), mirroring bcgen's `static BODIES`.
     let bodies_data = module.declare_anonymous_data(false, false)?;
@@ -537,6 +558,7 @@ pub fn compile_with(program: &Program, facts: &Facts) -> Result<Jit, Error> {
             &body_sig,
             &helper_ids,
             &body_ids,
+            &native_ids,
             bodies_data,
             &lyt,
             &mut fbc,
@@ -548,6 +570,23 @@ pub fn compile_with(program: &Program, facts: &Facts) -> Result<Jit, Error> {
             sizes.push(cc.map(|c| c.buffer.data().len()).unwrap_or(0));
             bb_map.push(cc.map(|c| c.bb_starts.clone()).unwrap_or_default());
         }
+    }
+    // Native (frameless) bodies — emitted after the framed ones; they only
+    // reference each other and helpers.
+    for (body, kinds) in native_kinds.iter().enumerate() {
+        let Some(kinds) = kinds else { continue };
+        emit_native::emit_native_body(
+            &mut module,
+            program,
+            body,
+            &helper_ids,
+            &native_ids,
+            kinds,
+            &lyt,
+            &mut fbc,
+            &mut ctx,
+        )
+        .map_err(Error)?;
     }
     module.finalize_definitions()?;
 

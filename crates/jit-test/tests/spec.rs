@@ -50,7 +50,11 @@ let TEST_VALUE = tick(5);
     }
     let facts = sess.facts();
     // the profiler saw `tick`'s `Op::Call` site, monomorphic on fadd
-    assert_eq!(facts.bodies[tick_b].calls.len(), 1, "one call site observed");
+    assert_eq!(
+        facts.bodies[tick_b].calls.len(),
+        1,
+        "one call site observed"
+    );
     sess.specialize(&mut vm, &program, &facts).unwrap();
 
     // IC hit: same answer through the inlined call
@@ -84,7 +88,10 @@ let TEST_VALUE = apply(false, 5);
         assert_eq!(vm.call::<i64>("apply", (true, 5i64)).unwrap(), 9);
     }
     let facts = sess.facts();
-    assert!(facts.bodies[apply_b].calls.is_empty(), "two callees → no IC");
+    assert!(
+        facts.bodies[apply_b].calls.is_empty(),
+        "two callees → no IC"
+    );
     sess.specialize(&mut vm, &program, &facts).unwrap();
 
     assert_eq!(vm.call::<i64>("apply", (false, 5i64)).unwrap(), 21);

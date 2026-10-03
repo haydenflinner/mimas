@@ -41,15 +41,15 @@ use vm::bc::{BodyEnv, INLINE_CALL_DEPTH, jit::Layout};
 
 /// `BodyEnv` field offsets — all fields are pointer-width under `repr(C)`,
 /// so `offset_of!` gives each word's byte position for the entry loads.
-const ENV_THREAD: i32 = std::mem::offset_of!(BodyEnv<'static>, thread) as i32;
+pub(crate) const ENV_THREAD: i32 = std::mem::offset_of!(BodyEnv<'static>, thread) as i32;
 const ENV_CODE: i32 = std::mem::offset_of!(BodyEnv<'static>, code) as i32;
 const ENV_MC: i32 = std::mem::offset_of!(BodyEnv<'static>, mutation) as i32;
-const ENV_ST: i32 = std::mem::offset_of!(BodyEnv<'static>, state) as i32;
+pub(crate) const ENV_ST: i32 = std::mem::offset_of!(BodyEnv<'static>, state) as i32;
 const ENV_STRS: i32 = std::mem::offset_of!(BodyEnv<'static>, strs) as i32;
 // `chunks`/`signatures` fields aren't loaded — no emitted site needs them.
-const ENV_FUEL: i32 = std::mem::offset_of!(BodyEnv<'static>, fuel) as i32;
+pub(crate) const ENV_FUEL: i32 = std::mem::offset_of!(BodyEnv<'static>, fuel) as i32;
 const ENV_OPIP: i32 = std::mem::offset_of!(BodyEnv<'static>, op_ip) as i32;
-const ENV_OUT: i32 = std::mem::offset_of!(BodyEnv<'static>, out) as i32;
+pub(crate) const ENV_OUT: i32 = std::mem::offset_of!(BodyEnv<'static>, out) as i32;
 
 const I64: ir::Type = types::I64;
 const I32: ir::Type = types::I32;
@@ -79,9 +79,9 @@ fn tfs() -> MemFlagsData {
 }
 
 /// `RtErr` kind codes matching `jit::out_err`'s table.
-const ERR_PANIC: i64 = 0; // MatchPanicReached
-const ERR_MOD0: i64 = 2; // ModByZero
-const ERR_OVFW: i64 = 7; // IntegerOverflow
+pub(crate) const ERR_PANIC: i64 = 0; // MatchPanicReached
+pub(crate) const ERR_MOD0: i64 = 2; // ModByZero
+pub(crate) const ERR_OVFW: i64 = 7; // IntegerOverflow
 const ERR_OOF: i64 = 10; // OutOfFuel
 
 /// Which scalar kind every writer of a register provably produces — bcgen's
@@ -501,6 +501,10 @@ struct Em<'a> {
     /// `FuncRef`s for `CallDirect` targets, so the fast path is a direct
     /// native `call`, not an FFI hop.
     call_refs: HashMap<u32, FuncRef>,
+    /// `FuncRef`s for *native* (frameless) `CallDirect` targets — see
+    /// `emit_native.rs`. A body present here runs without a `Frame`, with
+    /// args passed as raw `i64` Int payloads.
+    nrefs: HashMap<u32, FuncRef>,
     /// Lazily computed transitive "may this body observe the entry frame"
     /// (`LoadEntry`/`StoreEntry` reachable through the call graph; a
     /// dynamic `Op::Call`/`CallNative` callee is assumed to reach it).
@@ -1238,6 +1242,7 @@ pub(crate) fn emit_body(
     body_sig: &Signature,
     helper_ids: &[FuncId],
     body_ids: &[FuncId],
+    native_ids: &[Option<FuncId>],
     bodies_data: DataId,
     lyt: &Layout,
     fbc: &mut FunctionBuilderContext,
@@ -1295,6 +1300,11 @@ pub(crate) fn emit_body(
             known.len(),
         );
     }
+    if std::env::var_os("MIMAS_DUMP_OPS").is_some() {
+        for (o, op) in &ops {
+            eprintln!("  {o:5} {op:?}");
+        }
+    }
 
     // ip2idx blob: u32 dense index per byte of this chunk's span, MAX elsewhere
     let map_data = {
@@ -1336,6 +1346,21 @@ pub(crate) fn emit_body(
                 b,
                 module.declare_func_in_func(body_ids[b as usize], &mut ctx.func),
             )
+        })
+        .collect();
+    // Frameless callees this body can call directly at CallDirect sites —
+    // the flat `(env, depth, args…) -> (status, i64)` ABI.
+    let nrefs: HashMap<u32, FuncRef> = ops
+        .iter()
+        .filter_map(|(_, op)| match op {
+            Op::CallDirect { body, .. } => Some(body.index() as u32),
+            _ => None,
+        })
+        .filter_map(|b| {
+            native_ids
+                .get(b as usize)
+                .and_then(|id| *id)
+                .map(|id| (b, module.declare_func_in_func(id, &mut ctx.func)))
         })
         .collect();
 
@@ -1448,6 +1473,7 @@ pub(crate) fn emit_body(
         known,
         prog: program,
         call_refs,
+        nrefs,
         entry_use: None,
         blocks,
         off2idx,
@@ -4154,6 +4180,14 @@ impl Em<'_> {
         args: &[Reg],
         cchunk: &compile::Chunk,
     ) {
+        // Frameless callee: args marshal as raw Int payloads and the call is
+        // a bare `call` — no `Frame`, no window push. Any non-Int arg or a
+        // nonzero status (quota trip, pause, depth cap, propagated `*out`)
+        // deopts the whole op to `estep`, which re-runs it framed.
+        if let Some(&nf) = self.nrefs.get(&(body.index() as u32)) {
+            self.emit_ncall(i, off, next, dst, args, nf);
+            return;
+        }
         let mue = self.uses_entry(body.index() as u32);
         self.call_flush(args, &[], mue);
         // `code.ip = next; *op_ip = off` — on the fast path `code.ip` gets
@@ -4194,6 +4228,71 @@ impl Em<'_> {
         // ---- fast: enter_call_regs inline ----
         self.fb.switch_to_block(fast);
         self.inline_enter_run(i, next, dst, args, body, cchunk, rlen, flen, None);
+    }
+
+    /// Framed caller → frameless callee. `code.ip`/`op_ip` are marked and
+    /// the pending `bcn` spend settled first (the callee arms its own batch
+    /// from `fuel`/`ops_left`); every arg must read as `Int` or the op
+    /// deopts to `estep`. Status `0` writes the raw payload to `dst`;
+    /// anything else lands in `estep`, which re-runs the call framed —
+    /// errors propagate with their `*out` already written, quota/pause
+    /// trips re-enter through the driver's ordered exits.
+    fn emit_ncall(
+        &mut self,
+        i: usize,
+        off: usize,
+        next: usize,
+        dst: Reg,
+        args: &[Reg],
+        nf: FuncRef,
+    ) {
+        self.mark_op(off, next);
+        self.settle_seq();
+        let mut cargs = Vec::with_capacity(2 + args.len());
+        let ev = self.env.env;
+        cargs.push(ev);
+        cargs.push(self.iconst(0)); // native depth restarts per framed caller
+        for &a in args {
+            cargs.push(self.int_arg(a));
+        }
+        let inst = self.fb.ins().call(nf, &cargs);
+        let st = self.fb.inst_results(inst)[0];
+        let v = self.fb.inst_results(inst)[1];
+        let okb = self.fb.create_block();
+        let s0 = self.fb.ins().iconst(I8, crate::emit_native::ST_OK);
+        let is0 = self.fb.ins().icmp(IntCC::Equal, st, s0);
+        self.fb.ins().brif(is0, okb, &[], self.ex.estep, &[]);
+        self.fb.switch_to_block(okb);
+        // the callee settled what it spent — re-arm our batch
+        self.rearm_seq();
+        self.wr_int_dst(dst.index() as u32, v);
+        let nb = self.next_blk(i);
+        self.fb.ins().jump(nb, &[]);
+    }
+
+    /// `regs[r]` as a raw `i64` Int payload for a frameless call — the
+    /// shadow when valid, else a `tag == Int` window probe; a miss deopts
+    /// to `estep` rather than the call's slow path (the frameless callee
+    /// only accepts Int args).
+    fn int_arg(&mut self, r: Reg) -> Value {
+        let r = r.index() as u32;
+        if let Some(&(sv, bit)) = self.v.int.get(&r) {
+            let good = self.fb.create_block();
+            let okv = self.ok_get(bit);
+            self.fb.ins().brif(okv, good, &[], self.ex.estep, &[]);
+            self.fb.switch_to_block(good);
+            self.fb.use_var(sv)
+        } else {
+            let regs = self.regs();
+            let a = self.vaddr(regs, r);
+            let t = self.ld_tag(a);
+            let want = self.tconst(self.lyt.t_int);
+            let hit = self.fb.ins().icmp(IntCC::Equal, t, want);
+            let good = self.fb.create_block();
+            self.fb.ins().brif(hit, good, &[], self.ex.estep, &[]);
+            self.fb.switch_to_block(good);
+            self.fb.ins().load(I64, tfw(), a, self.lyt.val_pay as i32)
+        }
     }
 
     /// Does running `b` ever observe the entry frame — directly via
