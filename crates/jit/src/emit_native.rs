@@ -586,10 +586,37 @@ struct Ne<'a, 'b> {
     /// whose bit is set; unwritten regs keep their window value (arg or
     /// `Null`), matching semantics exactly.
     wrote: Option<Variable>,
+    /// Verified-receiver cache: `vptr[r]` holds the `Gc` pointer of the
+    /// object that most recently passed a fast-path access's full checks
+    /// (borrow flag, `Fields::Inline`, store kind). A later access on `r`
+    /// compares `regs[r].pay == vptr[r]` inside the kind's arm — a hit
+    /// proves same-object *and* same-kind (the tag check already ran, and
+    /// a heap ptr can't alias across types), so borrow/inline/len checks
+    /// verified before are still valid: they can only change under a
+    /// mutating/helper op, and every such op calls [`vclear`](Self::vclear)
+    /// first (aliased receivers included). Reg rewrites miss on the ptr
+    /// compare for free. Commits happen only in `good` blocks — a miss
+    /// that continues via the helper leaves the cache untouched.
+    /// `vptrm` is the stricter `flag == 0` level — a write hit requires
+    /// it (a read commit at `flag >= 0` can't justify skipping the
+    /// write-borrow check); write commits set both, so a `vptr` hit also
+    /// accepts write-verified objects.
+    vptr: Vec<(u32, Variable)>,
+    vptrm: Vec<(u32, Variable)>,
     bcn: Variable,
     bcn0: Variable,
     etrip: Block,
     errs: Vec<(Block, i64)>,
+}
+
+/// Extra fast-path args for the container helpers: on a hit the `Gc`
+/// payload is committed to `vptr[reg]` inside the `good` block.
+#[derive(Clone, Copy)]
+struct Commit {
+    reg: u32,
+    gc: Value,
+    /// `true` — the verify included `flag == 0`; also commit `vptrm`.
+    mutable: bool,
 }
 
 impl<'a, 'b> Ne<'a, 'b> {
@@ -892,6 +919,7 @@ impl<'a, 'b> Ne<'a, 'b> {
     /// eligible body can reach — a pending flag is observed at the driver
     /// loop or the framed ancestor's next `gatep`, coarser but sound.
     fn ncall(&mut self, i: usize, dst: compile::Reg, tb: u32, args: &[compile::Reg]) {
+        self.vclear();
         let d = self.depth;
         let d2 = self.fb.ins().iadd_imm_s(d, 1);
         let lim = self.iconst(NATIVE_DEPTH);
@@ -1378,9 +1406,168 @@ impl<'a, 'b> Ne<'a, 'b> {
         Some(self.fb.ins().load(I64, tfw(), a, self.lyt.val_pay as i32))
     }
 
+    /// Record `c.gc` as `vptr[c.reg]` — the receiver was fully verified.
+    /// Mutable verifies also record `vptrm`.
+    fn commit(&mut self, c: Option<Commit>) {
+        let Some(c) = c else { return };
+        if let Some(&(_, gv)) = self.vptr.iter().find(|(r, _)| *r == c.reg) {
+            self.fb.def_var(gv, c.gc);
+        }
+        if c.mutable {
+            if let Some(&(_, gv)) = self.vptrm.iter().find(|(r, _)| *r == c.reg) {
+                self.fb.def_var(gv, c.gc);
+            }
+        }
+    }
+
+    /// `Commit` for `r` when it has a `vptr` entry.
+    fn com(&self, r: compile::Reg, gc: Value, mutable: bool) -> Option<Commit> {
+        let reg = r.index() as u32;
+        self.vptr
+            .iter()
+            .any(|(k, ..)| *k == reg)
+            .then_some(Commit { reg, gc, mutable })
+    }
+
+    /// `Some(hit)` — `gc == vptr[r]` proves `r`'s receiver is the object
+    /// this body's fast path already verified (same ptr ⇒ same obj ⇒ the
+    /// commit came from a verify of *this* kind — a different-kind commit
+    /// can't ptr-equal under a different tag). `mutable` checks the
+    /// `flag == 0` level. `None` when `r` is uncached.
+    fn vhit(&mut self, r: compile::Reg, gc: Value, mutable: bool) -> Option<Value> {
+        let reg = r.index() as u32;
+        let v = if mutable {
+            let &(_, v) = self.vptrm.iter().find(|(k, _)| *k == reg)?;
+            v
+        } else {
+            let &(_, v) = self.vptr.iter().find(|(k, _)| *k == reg)?;
+            v
+        };
+        let cv = self.fb.use_var(v);
+        Some(self.fb.ins().icmp(IntCC::Equal, gc, cv))
+    }
+
+    /// `(vec-ptr, vec-len)` — the `Array`'s `Vec` spine.
+    fn vec_spine(&mut self, gc: Value) -> (Value, Value) {
+        let vp = self
+            .fb
+            .ins()
+            .load(I64, tfhd(), gc, (self.lyt.rl_vec + self.lyt.vec_ptr) as i32);
+        let vl = self
+            .fb
+            .ins()
+            .load(I64, tfhd(), gc, (self.lyt.rl_vec + self.lyt.vec_len) as i32);
+        (vp, vl)
+    }
+
+    /// Drop every `vptr`/`vptrm` entry — runs before ops that can call a
+    /// helper, native, or callee (instance-op impls and natives may
+    /// mutate or spill any reachable object, including aliased
+    /// receivers). `keep` spares one reg: `SetIndex`'s own receiver
+    /// entry survives — a `Vals` array can't respill through its own
+    /// `SetIndex`, and seq-kind commits are never hit-tested.
+    fn vclear(&mut self) {
+        self.vclear_except(u32::MAX)
+    }
+
+    fn vclear_except(&mut self, keep: u32) {
+        if self.vptr.is_empty() && self.vptrm.is_empty() {
+            return;
+        }
+        let z = self.iconst(0);
+        for i in 0..self.vptr.len() {
+            let (r, v) = self.vptr[i];
+            if r != keep {
+                self.fb.def_var(v, z);
+            }
+        }
+        for i in 0..self.vptrm.len() {
+            let (r, v) = self.vptrm[i];
+            if r != keep {
+                self.fb.def_var(v, z);
+            }
+        }
+    }
+
+    /// The `is_non_gc_tag` precondition for a stored value — statically
+    /// `true` for proven scalar kinds (a `LoadConst Bool` staying in a
+    /// var needs no window tag read at all).
+    fn ngc(&mut self, value: compile::Reg) -> Value {
+        match self.kinds[value.index()] {
+            Some(NK::Int) | Some(NK::Float) | Some(NK::Bool) | Some(NK::Null) => {
+                self.iconst8(1)
+            }
+            _ => {
+                let va = self.wslot(value);
+                let vt = self.ld_tag64(va);
+                self.is_non_gc_tag(vt)
+            }
+        }
+    }
+
+    /// `*da = *ea` — a `Val` copy for the receiver-cache hit path.
+    fn n_val_copy(&mut self, i: usize, da: Value, ea: Value, fwd: Option<compile::Reg>) {
+        let mut q = [None; 2];
+        for w in (0..self.lyt.val_size).step_by(8) {
+            let v = self.fb.ins().load(I64, tfel(), ea, w as i32);
+            if w < 16 {
+                q[w / 8] = Some(v);
+            }
+            self.fb.ins().store(tfw(), v, da, w as i32);
+        }
+        self.forward_commit(fwd, q[0], q[1]);
+        let nb = self.next(i);
+        self.fb.ins().jump(nb, &[]);
+    }
+
+    /// `dst` just received a fresh `Val` (`q0`/`q1` = its two qwords) —
+    /// if it's an instance with a clean borrow flag, pre-commit
+    /// `vptr[dst]` so following field ops on it hit without
+    /// re-verifying (the `other = balls[j]` shape). `fwd` is `Some`
+    /// only when `dst` has a cache entry.
+    fn forward_commit(&mut self, fwd: Option<compile::Reg>, q0: Option<Value>, q1: Option<Value>) {
+        let (Some(dst), Some(q0), Some(q1)) = (fwd, q0, q1) else {
+            return;
+        };
+        let reg = dst.index() as u32;
+        let Some(&(_, vv)) = self.vptr.iter().find(|(k, _)| *k == reg) else {
+            return;
+        };
+        let t = self.fb.ins().ireduce(I8, q0);
+        let ti = self.tconst(self.lyt.t_instance);
+        let isi = self.fb.ins().icmp(IntCC::Equal, t, ti);
+        let fok = self.borrow_ok(q1, self.lyt.rl_flag_i, false);
+        let ok = self.fb.ins().band(isi, fok);
+        let cmt = self.fb.create_block();
+        let skip = self.fb.create_block();
+        self.fb.ins().brif(ok, cmt, &[], skip, &[]);
+        self.fb.switch_to_block(cmt);
+        self.fb.def_var(vv, q1);
+        self.fb.ins().jump(skip, &[]);
+        self.fb.switch_to_block(skip);
+    }
+
+    /// `Some(dst)` when `dst` has a `vptr` entry — `forward_commit`
+    /// target filter.
+    fn fwd_dst(&self, dst: compile::Reg) -> Option<compile::Reg> {
+        let reg = dst.index() as u32;
+        self.vptr.iter().any(|(k, _)| *k == reg).then_some(dst)
+    }
+
+    /// `*ea = *sa` — a `Val` store for the receiver-cache hit path.
+    fn n_val_store(&mut self, i: usize, sa: Value, ea: Value) {
+        for w in (0..self.lyt.val_size).step_by(8) {
+            let v = self.fb.ins().load(I64, tfw(), sa, w as i32);
+            self.fb.ins().store(tfel(), v, ea, w as i32);
+        }
+        let nb = self.next(i);
+        self.fb.ins().jump(nb, &[]);
+    }
+
     /// `*da = data[slot]` — a full `Val` copy under `pre && slot < len`;
     /// a miss lands in `slow`. Native `emit::read_elem` analogue: `da` is
     /// the dst's *window* slot, so the copy lands where readers expect.
+    #[allow(clippy::too_many_arguments)]
     fn n_read_elem(
         &mut self,
         i: usize,
@@ -1389,20 +1576,28 @@ impl<'a, 'b> Ne<'a, 'b> {
         len: Value,
         data: Value,
         pre: Value,
+        com: Option<Commit>,
         slow: Block,
+        fwd: Option<compile::Reg>,
     ) {
         let inb = self.fb.ins().icmp(IntCC::UnsignedLessThan, slot, len);
         let k = self.fb.ins().band(pre, inb);
         let good = self.fb.create_block();
         self.fb.ins().brif(k, good, &[], slow, &[]);
         self.fb.switch_to_block(good);
+        self.commit(com);
         let vs = self.lyt.val_size as i64;
         let off = self.fb.ins().imul_imm_s(slot, vs);
         let ea = self.fb.ins().iadd(data, off);
+        let mut q = [None; 2];
         for w in (0..self.lyt.val_size).step_by(8) {
             let v = self.fb.ins().load(I64, tfel(), ea, w as i32);
+            if w < 16 {
+                q[w / 8] = Some(v);
+            }
             self.fb.ins().store(tfw(), v, da, w as i32);
         }
+        self.forward_commit(fwd, q[0], q[1]);
         let nb = self.next(i);
         self.fb.ins().jump(nb, &[]);
     }
@@ -1419,6 +1614,7 @@ impl<'a, 'b> Ne<'a, 'b> {
         data: Value,
         pre: Value,
         is_int: bool,
+        com: Option<Commit>,
         slow: Block,
     ) {
         let inb = self.fb.ins().icmp(IntCC::UnsignedLessThan, slot, len);
@@ -1426,6 +1622,7 @@ impl<'a, 'b> Ne<'a, 'b> {
         let good = self.fb.create_block();
         self.fb.ins().brif(k, good, &[], slow, &[]);
         self.fb.switch_to_block(good);
+        self.commit(com);
         let off = self.fb.ins().ishl_imm_s(slot, 3);
         let ea = self.fb.ins().iadd(data, off);
         let ty = if is_int { I64 } else { F64 };
@@ -1452,6 +1649,7 @@ impl<'a, 'b> Ne<'a, 'b> {
         len: Value,
         data: Value,
         pre: Value,
+        com: Option<Commit>,
         slow: Block,
     ) {
         let inb = self.fb.ins().icmp(IntCC::UnsignedLessThan, slot, len);
@@ -1459,6 +1657,7 @@ impl<'a, 'b> Ne<'a, 'b> {
         let good = self.fb.create_block();
         self.fb.ins().brif(k, good, &[], slow, &[]);
         self.fb.switch_to_block(good);
+        self.commit(com);
         let vs = self.lyt.val_size as i64;
         let off = self.fb.ins().imul_imm_s(slot, vs);
         let ea = self.fb.ins().iadd(data, off);
@@ -1472,6 +1671,7 @@ impl<'a, 'b> Ne<'a, 'b> {
 
     /// `data[slot] = v` — a raw `i64`/`f64` store under
     /// `pre && slot < len`.
+    #[allow(clippy::too_many_arguments)]
     fn n_write_prim(
         &mut self,
         i: usize,
@@ -1480,6 +1680,7 @@ impl<'a, 'b> Ne<'a, 'b> {
         len: Value,
         data: Value,
         pre: Value,
+        com: Option<Commit>,
         slow: Block,
     ) {
         let inb = self.fb.ins().icmp(IntCC::UnsignedLessThan, slot, len);
@@ -1487,6 +1688,7 @@ impl<'a, 'b> Ne<'a, 'b> {
         let good = self.fb.create_block();
         self.fb.ins().brif(k, good, &[], slow, &[]);
         self.fb.switch_to_block(good);
+        self.commit(com);
         let off = self.fb.ins().ishl_imm_s(slot, 3);
         let ea = self.fb.ins().iadd(data, off);
         self.fb.ins().store(tfel(), v, ea, 0);
@@ -1496,8 +1698,19 @@ impl<'a, 'b> Ne<'a, 'b> {
 
     /// Typed-array `GetIndex` tail — `gc` is the `Seq` payload (see
     /// `emit::seq_read`): `Ints`/`Floats`/`Vals` fan out per store kind.
-    fn n_seq_read(&mut self, i: usize, da: Value, slot: Value, gc: Value, slow: Block) {
-        let fok = self.borrow_ok(gc, self.lyt.rl_flag_s, false);
+    /// `fok` is the seq's borrow check — the caller passes a constant
+    /// `1` on a verified-receiver hit.
+    fn n_seq_read(
+        &mut self,
+        i: usize,
+        da: Value,
+        slot: Value,
+        gc: Value,
+        fok: Value,
+        com: Option<Commit>,
+        slow: Block,
+        fwd: Option<compile::Reg>,
+    ) {
         let aty = self.asty();
         let stag = self
             .fb
@@ -1522,7 +1735,7 @@ impl<'a, 'b> Ne<'a, 'b> {
                 gc,
                 (self.lyt.rl_seq + self.lyt.as_ints_vec + self.lyt.vec_len) as i32,
             );
-            self.n_read_prim(i, da, slot, vl, vp, fok, true, slow);
+            self.n_read_prim(i, da, slot, vl, vp, fok, true, com, slow);
         }
         self.fb.switch_to_block(noti);
         let wf = self.aconst(self.lyt.as_floats);
@@ -1544,7 +1757,7 @@ impl<'a, 'b> Ne<'a, 'b> {
                 gc,
                 (self.lyt.rl_seq + self.lyt.as_floats_vec + self.lyt.vec_len) as i32,
             );
-            self.n_read_prim(i, da, slot, vl, vp, fok, false, slow);
+            self.n_read_prim(i, da, slot, vl, vp, fok, false, com, slow);
         }
         self.fb.switch_to_block(notf);
         let wv = self.aconst(self.lyt.as_vals);
@@ -1559,23 +1772,25 @@ impl<'a, 'b> Ne<'a, 'b> {
                 .load(I64, tfhd(), gc, (self.lyt.rl_seq + self.lyt.as_vals_arr) as i32);
             let fok2 = self.borrow_ok(arr, self.lyt.rl_flag, false);
             let pre = self.fb.ins().band(fok, fok2);
-            let vp = self
-                .fb
-                .ins()
-                .load(I64, tfhd(), arr, (self.lyt.rl_vec + self.lyt.vec_ptr) as i32);
-            let vl = self
-                .fb
-                .ins()
-                .load(I64, tfhd(), arr, (self.lyt.rl_vec + self.lyt.vec_len) as i32);
-            self.n_read_elem(i, da, slot, vl, vp, pre, slow);
+            let (vp, vl) = self.vec_spine(arr);
+            self.n_read_elem(i, da, slot, vl, vp, pre, com, slow, fwd);
         }
     }
 
     /// Typed-array write tail — `Ints`/`Floats` take the matching scalar,
     /// `Vals` takes a whole non-Gc `Val`; everything else → `slow` (see
-    /// `emit::seq_write`).
-    fn n_seq_write(&mut self, i: usize, slot: Value, gc: Value, va: Value, slow: Block) {
-        let fok = self.borrow_ok(gc, self.lyt.rl_flag_s, true);
+    /// `emit::seq_write`). `fok` is the seq's write-borrow check — a
+    /// constant `1` on a verified-receiver hit.
+    fn n_seq_write(
+        &mut self,
+        i: usize,
+        slot: Value,
+        gc: Value,
+        va: Value,
+        fok: Value,
+        com: Option<Commit>,
+        slow: Block,
+    ) {
         let aty = self.asty();
         let stag = self
             .fb
@@ -1605,7 +1820,7 @@ impl<'a, 'b> Ne<'a, 'b> {
                 (self.lyt.rl_seq + self.lyt.as_ints_vec + self.lyt.vec_len) as i32,
             );
             let xv = self.fb.ins().load(I64, tfw(), va, self.lyt.val_pay as i32);
-            self.n_write_prim(i, xv, slot, vl, vp, pre, slow);
+            self.n_write_prim(i, xv, slot, vl, vp, pre, com, slow);
         }
         self.fb.switch_to_block(noti);
         let wf = self.aconst(self.lyt.as_floats);
@@ -1631,7 +1846,7 @@ impl<'a, 'b> Ne<'a, 'b> {
                 (self.lyt.rl_seq + self.lyt.as_floats_vec + self.lyt.vec_len) as i32,
             );
             let xv = self.fb.ins().load(F64, tfw(), va, self.lyt.val_pay as i32);
-            self.n_write_prim(i, xv, slot, vl, vp, pre, slow);
+            self.n_write_prim(i, xv, slot, vl, vp, pre, com, slow);
         }
         self.fb.switch_to_block(notf);
         let wv = self.aconst(self.lyt.as_vals);
@@ -1657,7 +1872,7 @@ impl<'a, 'b> Ne<'a, 'b> {
                 .fb
                 .ins()
                 .load(I64, tfhd(), arr, (self.lyt.rl_vec + self.lyt.vec_len) as i32);
-            self.n_write_elem(i, va, slot, vl, vp, pre, slow);
+            self.n_write_elem(i, va, slot, vl, vp, pre, com, slow);
         }
     }
 
@@ -2061,22 +2276,50 @@ impl<'a, 'b> Ne<'a, 'b> {
                 {
                     let da = self.wslot(dst);
                     let gc = self.fb.ins().load(I64, tfw(), sa, self.lyt.seq_pay as i32);
-                    self.n_seq_read(i, da, iv, gc, slow);
+                    if let Some(h) = self.vhit(set, gc, false) {
+                        // hit: same verified seq — borrow stands; `stag`
+                        // is re-dispatched fresh so a slow-path demote
+                        // simply reroutes to the new store kind.
+                        let ver = self.fb.create_block();
+                        let hitb = self.fb.create_block();
+                        self.fb.ins().brif(h, hitb, &[], ver, &[]);
+                        self.fb.switch_to_block(hitb);
+                        let one = self.iconst8(1);
+                        self.n_seq_read(i, da, iv, gc, one, None, slow, self.fwd_dst(dst));
+                        self.fb.switch_to_block(ver);
+                    }
+                    let fok = self.borrow_ok(gc, self.lyt.rl_flag_s, false);
+                    self.n_seq_read(i, da, iv, gc, fok, self.com(set, gc, false), slow, self.fwd_dst(dst));
                 }
                 self.fb.switch_to_block(arrb);
                 {
                     let da = self.wslot(dst);
                     let gc = self.fb.ins().load(I64, tfw(), sa, self.lyt.arr_pay as i32);
+                    if let Some(h) = self.vhit(set, gc, false) {
+                        // hit: same verified array — borrow stands and the
+                        // `Vec` spine comes from the commit cache.
+                        let ver = self.fb.create_block();
+                        let hitb = self.fb.create_block();
+                        self.fb.ins().brif(h, hitb, &[], ver, &[]);
+                        self.fb.switch_to_block(hitb);
+                        let (vp, vl) = self.vec_spine(gc);
+                        let one = self.iconst8(1);
+                        self.n_read_elem(i, da, iv, vl, vp, one, None, slow, self.fwd_dst(dst));
+                        self.fb.switch_to_block(ver);
+                    }
                     let fok = self.borrow_ok(gc, self.lyt.rl_flag, false);
-                    let vp = self
-                        .fb
-                        .ins()
-                        .load(I64, tfhd(), gc, (self.lyt.rl_vec + self.lyt.vec_ptr) as i32);
-                    let vl = self
-                        .fb
-                        .ins()
-                        .load(I64, tfhd(), gc, (self.lyt.rl_vec + self.lyt.vec_len) as i32);
-                    self.n_read_elem(i, da, iv, vl, vp, fok, slow);
+                    let (vp, vl) = self.vec_spine(gc);
+                    self.n_read_elem(
+                        i,
+                        da,
+                        iv,
+                        vl,
+                        vp,
+                        fok,
+                        self.com(set, gc, false),
+                        slow,
+                        self.fwd_dst(dst),
+                    );
                 }
                 self.fb.switch_to_block(slow);
                 let r0 = self.fb.use_var(self.regs0.expect("windowed"));
@@ -2097,6 +2340,7 @@ impl<'a, 'b> Ne<'a, 'b> {
                 index,
                 value,
             } => {
+                self.vclear_except(set.index() as u32);
                 if !self.iv_maybe(index) {
                     let r0 = self.fb.use_var(self.regs0.expect("windowed"));
                     let (s, ii, v) = (
@@ -2125,6 +2369,7 @@ impl<'a, 'b> Ne<'a, 'b> {
                 };
                 let sa = self.wslot(set);
                 let va = self.wslot(value);
+                let ngc = self.ngc(value);
                 let st = self.ld_tag(sa);
                 let tarr = self.tconst(self.lyt.t_array);
                 let isarr = self.fb.ins().icmp(IntCC::Equal, st, tarr);
@@ -2137,24 +2382,44 @@ impl<'a, 'b> Ne<'a, 'b> {
                 self.fb.switch_to_block(seqb);
                 {
                     let gc = self.fb.ins().load(I64, tfw(), sa, self.lyt.seq_pay as i32);
-                    self.n_seq_write(i, iv, gc, va, slow);
+                    if let Some(h) = self.vhit(set, gc, true) {
+                        let ver = self.fb.create_block();
+                        let hitb = self.fb.create_block();
+                        self.fb.ins().brif(h, hitb, &[], ver, &[]);
+                        self.fb.switch_to_block(hitb);
+                        let one = self.iconst8(1);
+                        self.n_seq_write(i, iv, gc, va, one, None, slow);
+                        self.fb.switch_to_block(ver);
+                    }
+                    let fok = self.borrow_ok(gc, self.lyt.rl_flag_s, true);
+                    self.n_seq_write(i, iv, gc, va, fok, self.com(set, gc, true), slow);
                 }
                 self.fb.switch_to_block(arrb);
                 {
                     let gc = self.fb.ins().load(I64, tfw(), sa, self.lyt.arr_pay as i32);
+                    // a `vptrm` hit still needs the value's barrier check
+                    if let Some(h) = self.vhit(set, gc, true) {
+                        let ver = self.fb.create_block();
+                        let hitb = self.fb.create_block();
+                        self.fb.ins().brif(h, hitb, &[], ver, &[]);
+                        self.fb.switch_to_block(hitb);
+                        let (vp, vl) = self.vec_spine(gc);
+                        self.n_write_elem(i, va, iv, vl, vp, ngc, None, slow);
+                        self.fb.switch_to_block(ver);
+                    }
                     let fok = self.borrow_ok(gc, self.lyt.rl_flag, true);
-                    let vt = self.ld_tag64(va);
-                    let ngc = self.is_non_gc_tag(vt);
                     let pre = self.fb.ins().band(fok, ngc);
-                    let vp = self
-                        .fb
-                        .ins()
-                        .load(I64, tfhd(), gc, (self.lyt.rl_vec + self.lyt.vec_ptr) as i32);
-                    let vl = self
-                        .fb
-                        .ins()
-                        .load(I64, tfhd(), gc, (self.lyt.rl_vec + self.lyt.vec_len) as i32);
-                    self.n_write_elem(i, va, iv, vl, vp, pre, slow);
+                    let (vp, vl) = self.vec_spine(gc);
+                    self.n_write_elem(
+                        i,
+                        va,
+                        iv,
+                        vl,
+                        vp,
+                        pre,
+                        self.com(set, gc, true),
+                        slow,
+                    );
                 }
                 self.fb.switch_to_block(slow);
                 let r0 = self.fb.use_var(self.regs0.expect("windowed"));
@@ -2213,28 +2478,68 @@ impl<'a, 'b> Ne<'a, 'b> {
                     let da = self.wslot(dst);
                     let gc = self.fb.ins().load(I64, tfw(), ra, self.lyt.seq_pay as i32);
                     let sv = self.iconst(slot as i64);
-                    self.n_seq_read(i, da, sv, gc, slow);
+                    if let Some(h) = self.vhit(src, gc, false) {
+                        let ver = self.fb.create_block();
+                        let hitb = self.fb.create_block();
+                        self.fb.ins().brif(h, hitb, &[], ver, &[]);
+                        self.fb.switch_to_block(hitb);
+                        let one = self.iconst8(1);
+                        self.n_seq_read(i, da, sv, gc, one, None, slow, self.fwd_dst(dst));
+                        self.fb.switch_to_block(ver);
+                    }
+                    let fok = self.borrow_ok(gc, self.lyt.rl_flag_s, false);
+                    self.n_seq_read(i, da, sv, gc, fok, self.com(src, gc, false), slow, self.fwd_dst(dst));
                 }
                 self.fb.switch_to_block(arrb);
                 {
                     let da = self.wslot(dst);
                     let gc = self.fb.ins().load(I64, tfw(), ra, self.lyt.arr_pay as i32);
-                    let fok = self.borrow_ok(gc, self.lyt.rl_flag, false);
-                    let vp = self
-                        .fb
-                        .ins()
-                        .load(I64, tfhd(), gc, (self.lyt.rl_vec + self.lyt.vec_ptr) as i32);
-                    let vl = self
-                        .fb
-                        .ins()
-                        .load(I64, tfhd(), gc, (self.lyt.rl_vec + self.lyt.vec_len) as i32);
                     let sv = self.iconst(slot as i64);
-                    self.n_read_elem(i, da, sv, vl, vp, fok, slow);
+                    if let Some(h) = self.vhit(src, gc, false) {
+                        let ver = self.fb.create_block();
+                        let hitb = self.fb.create_block();
+                        self.fb.ins().brif(h, hitb, &[], ver, &[]);
+                        self.fb.switch_to_block(hitb);
+                        let (vp, vl) = self.vec_spine(gc);
+                        let one = self.iconst8(1);
+                        self.n_read_elem(i, da, sv, vl, vp, one, None, slow, self.fwd_dst(dst));
+                        self.fb.switch_to_block(ver);
+                    }
+                    let fok = self.borrow_ok(gc, self.lyt.rl_flag, false);
+                    let (vp, vl) = self.vec_spine(gc);
+                    self.n_read_elem(
+                        i,
+                        da,
+                        sv,
+                        vl,
+                        vp,
+                        fok,
+                        self.com(src, gc, false),
+                        slow,
+                        self.fwd_dst(dst),
+                    );
                 }
                 self.fb.switch_to_block(instb);
                 {
-                    let da = self.wslot(dst);
                     let gc = self.fb.ins().load(I64, tfw(), ra, self.lyt.inst_pay as i32);
+                    if let Some(h) = self.vhit(src, gc, false) {
+                        // hit: same verified instance — borrow, `Fields::
+                        // Inline` and `slot < len` all stand; the field is
+                        // one constant-offset `Val` copy.
+                        let ver = self.fb.create_block();
+                        let hitb = self.fb.create_block();
+                        self.fb.ins().brif(h, hitb, &[], ver, &[]);
+                        self.fb.switch_to_block(hitb);
+                        let da = self.wslot(dst);
+                        let ea = self.fb.ins().iadd_imm_s(
+                            gc,
+                            (self.lyt.rl_inst + self.lyt.id_fields + self.lyt.fld_data) as i64
+                                + slot as i64 * self.lyt.val_size as i64,
+                        );
+                        self.n_val_copy(i, da, ea, self.fwd_dst(dst));
+                        self.fb.switch_to_block(ver);
+                    }
+                    let da = self.wslot(dst);
                     let fok = self.borrow_ok(gc, self.lyt.rl_flag_i, false);
                     let fp = self
                         .fb
@@ -2243,7 +2548,7 @@ impl<'a, 'b> Ne<'a, 'b> {
                     let (len, data, isinl) = self.fields_inline(fp);
                     let pre = self.fb.ins().band(fok, isinl);
                     let sv = self.iconst(slot as i64);
-                    self.n_read_elem(i, da, sv, len, data, pre, slow);
+                    self.n_read_elem(i, da, sv, len, data, pre, self.com(src, gc, false), slow, self.fwd_dst(dst));
                 }
                 self.fb.switch_to_block(slow);
                 let r0 = self.fb.use_var(self.regs0.expect("windowed"));
@@ -2263,6 +2568,7 @@ impl<'a, 'b> Ne<'a, 'b> {
                 slot,
                 value,
             } => {
+                self.vclear();
                 let slow = self.fb.create_block();
                 self.fb.set_cold_block(slow);
                 self.flush(receiver);
@@ -2270,8 +2576,7 @@ impl<'a, 'b> Ne<'a, 'b> {
                 let ra = self.wslot(receiver);
                 let va = self.wslot(value);
                 let rt = self.ld_tag(ra);
-                let vt = self.ld_tag64(va);
-                let ngc = self.is_non_gc_tag(vt);
+                let ngc = self.ngc(value);
                 let tinst = self.tconst(self.lyt.t_instance);
                 let isinst = self.fb.ins().icmp(IntCC::Equal, rt, tinst);
                 let instb = self.fb.create_block();
@@ -2290,27 +2595,64 @@ impl<'a, 'b> Ne<'a, 'b> {
                 {
                     let gc = self.fb.ins().load(I64, tfw(), ra, self.lyt.seq_pay as i32);
                     let sv = self.iconst(slot as i64);
-                    self.n_seq_write(i, sv, gc, va, slow);
+                    if let Some(h) = self.vhit(receiver, gc, true) {
+                        let ver = self.fb.create_block();
+                        let hitb = self.fb.create_block();
+                        self.fb.ins().brif(h, hitb, &[], ver, &[]);
+                        self.fb.switch_to_block(hitb);
+                        let one = self.iconst8(1);
+                        self.n_seq_write(i, sv, gc, va, one, None, slow);
+                        self.fb.switch_to_block(ver);
+                    }
+                    let fok = self.borrow_ok(gc, self.lyt.rl_flag_s, true);
+                    self.n_seq_write(i, sv, gc, va, fok, self.com(receiver, gc, true), slow);
                 }
                 self.fb.switch_to_block(arrb);
                 {
                     let gc = self.fb.ins().load(I64, tfw(), ra, self.lyt.arr_pay as i32);
+                    let sv = self.iconst(slot as i64);
+                    if let Some(h) = self.vhit(receiver, gc, true) {
+                        let ver = self.fb.create_block();
+                        let hitb = self.fb.create_block();
+                        self.fb.ins().brif(h, hitb, &[], ver, &[]);
+                        self.fb.switch_to_block(hitb);
+                        let (vp, vl) = self.vec_spine(gc);
+                        self.n_write_elem(i, va, sv, vl, vp, ngc, None, slow);
+                        self.fb.switch_to_block(ver);
+                    }
                     let fok = self.borrow_ok(gc, self.lyt.rl_flag, true);
                     let pre = self.fb.ins().band(fok, ngc);
-                    let vp = self
-                        .fb
-                        .ins()
-                        .load(I64, tfhd(), gc, (self.lyt.rl_vec + self.lyt.vec_ptr) as i32);
-                    let vl = self
-                        .fb
-                        .ins()
-                        .load(I64, tfhd(), gc, (self.lyt.rl_vec + self.lyt.vec_len) as i32);
-                    let sv = self.iconst(slot as i64);
-                    self.n_write_elem(i, va, sv, vl, vp, pre, slow);
+                    let (vp, vl) = self.vec_spine(gc);
+                    self.n_write_elem(
+                        i,
+                        va,
+                        sv,
+                        vl,
+                        vp,
+                        pre,
+                        self.com(receiver, gc, true),
+                        slow,
+                    );
                 }
                 self.fb.switch_to_block(instb);
                 {
                     let gc = self.fb.ins().load(I64, tfw(), ra, self.lyt.inst_pay as i32);
+                    if let Some(h) = self.vhit(receiver, gc, true) {
+                        // hit + non-Gc value: one constant-offset store —
+                        // borrow/inline/slot still stand (see `vptr`).
+                        let ver = self.fb.create_block();
+                        let k = self.fb.ins().band(h, ngc);
+                        let hitb = self.fb.create_block();
+                        self.fb.ins().brif(k, hitb, &[], ver, &[]);
+                        self.fb.switch_to_block(hitb);
+                        let ea = self.fb.ins().iadd_imm_s(
+                            gc,
+                            (self.lyt.rl_inst + self.lyt.id_fields + self.lyt.fld_data) as i64
+                                + slot as i64 * self.lyt.val_size as i64,
+                        );
+                        self.n_val_store(i, va, ea);
+                        self.fb.switch_to_block(ver);
+                    }
                     let fok = self.borrow_ok(gc, self.lyt.rl_flag_i, true);
                     let fp = self
                         .fb
@@ -2320,7 +2662,7 @@ impl<'a, 'b> Ne<'a, 'b> {
                     let pre = self.fb.ins().band(fok, ngc);
                     let pre = self.fb.ins().band(pre, isinl);
                     let sv = self.iconst(slot as i64);
-                    self.n_write_elem(i, va, sv, len, data, pre, slow);
+                    self.n_write_elem(i, va, sv, len, data, pre, self.com(receiver, gc, true), slow);
                 }
                 self.fb.switch_to_block(slow);
                 let r0 = self.fb.use_var(self.regs0.expect("windowed"));
@@ -2357,6 +2699,7 @@ impl<'a, 'b> Ne<'a, 'b> {
                 op,
                 right,
             } => {
+                self.vclear();
                 let r0 = self.fb.use_var(self.regs0.expect("windowed"));
                 let (d, l, o8, r) = (
                     self.iconst(dst.index() as i64),
@@ -2389,6 +2732,7 @@ impl<'a, 'b> Ne<'a, 'b> {
                     let nb2 = self.fb.ins().bxor(b, one);
                     self.dv(dst, nb2, NK::Bool);
                 } else {
+                    self.vclear();
                     let r0 = self.fb.use_var(self.regs0.expect("windowed"));
                     let (d, o8, s) = (
                         self.iconst(dst.index() as i64),
@@ -2404,6 +2748,7 @@ impl<'a, 'b> Ne<'a, 'b> {
                 self.fb.ins().jump(nb, &[]);
             }
             Op::Push { array, value } => {
+                self.vclear();
                 let r0 = self.fb.use_var(self.regs0.expect("windowed"));
                 let (a, v) = (
                     self.iconst(array.index() as i64),
@@ -2415,6 +2760,7 @@ impl<'a, 'b> Ne<'a, 'b> {
                 self.fb.ins().jump(nb, &[]);
             }
             Op::Insert { dict, key, value } => {
+                self.vclear();
                 let r0 = self.fb.use_var(self.regs0.expect("windowed"));
                 let (d, k, v) = (
                     self.iconst(dict.index() as i64),
@@ -2482,6 +2828,7 @@ impl<'a, 'b> Ne<'a, 'b> {
                 self.fb.ins().jump(nb, &[]);
             }
             Op::CallNative { dst, id, args } => {
+                self.vclear();
                 for &a in args.iter() {
                     self.flush(a);
                 }
@@ -2708,6 +3055,39 @@ pub(crate) fn emit_native_body(
     let regs0 = plan.windowed.then(|| fb.declare_var(I64));
 
     let ops = prog.ops(compile::BodyId::from(body as u32));
+    // Verified-receiver cache vars (see `Ne::vptr`): regs used as a
+    // container receiver at least twice get an entry. Every heap payload
+    // sits at the same union offset, or `vhit` couldn't compare payloads
+    // before dispatch — gate on the offsets agreeing.
+    let mut rcount: HashMap<u32, u32> = HashMap::new();
+    for (_, op) in ops.iter() {
+        let r = match op {
+            Op::GetIndex { set, .. } | Op::SetIndex { set, .. } => Some(*set),
+            Op::GetField { src, .. } => Some(*src),
+            Op::SetField { receiver, .. } => Some(*receiver),
+            _ => None,
+        };
+        if let Some(r) = r {
+            *rcount.entry(r.index() as u32).or_default() += 1;
+        }
+    }
+    let mut vptr = Vec::new();
+    let mut vptrm = Vec::new();
+    if plan.windowed
+        && lyt.arr_pay == lyt.inst_pay
+        && lyt.inst_pay == lyt.seq_pay
+    {
+        let mut recv: Vec<u32> = rcount
+            .iter()
+            .filter(|(_, c)| **c >= 2)
+            .map(|(r, _)| *r)
+            .collect();
+        recv.sort_unstable();
+        for r in recv.into_iter().take(8) {
+            vptr.push((r, fb.declare_var(I64)));
+            vptrm.push((r, fb.declare_var(I64)));
+        }
+    }
     let off2idx: HashMap<usize, usize> =
         ops.iter().enumerate().map(|(i, (o, _))| (*o, i)).collect();
     let blocks: Vec<Block> = (0..ops.len()).map(|_| fb.create_block()).collect();
@@ -2764,6 +3144,14 @@ pub(crate) fn emit_native_body(
     if let Some(wv) = wrote {
         fb.def_var(wv, zi);
     }
+    for i in 0..vptr.len() {
+        let v = vptr[i].1;
+        fb.def_var(v, zi);
+    }
+    for i in 0..vptrm.len() {
+        let v = vptrm[i].1;
+        fb.def_var(v, zi);
+    }
 
     let etrip = fb.create_block();
     fb.set_cold_block(etrip);
@@ -2790,6 +3178,8 @@ pub(crate) fn emit_native_body(
         cpb: vec![None; nops],
         windowed: plan.windowed,
         wrote,
+        vptr,
+        vptrm,
         bcn,
         bcn0,
         etrip,
