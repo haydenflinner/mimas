@@ -1088,5 +1088,4 @@ pub struct FxGate {
     pub file: String,
     pub have: String,
     pub allowed: String,
->>>>>>> fork/devin/graded-modes
 }
