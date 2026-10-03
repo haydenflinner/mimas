@@ -334,18 +334,8 @@ pub(crate) static SPECS: LazyLock<Vec<Spec>> = LazyLock::new(|| {
             Void
         ),
         spec!("mj_flush", jit::flush, [P, P, P], Void),
-        spec!(
-            "mj_call_body",
-            jit::call_body,
-            [P, P, P, P, P, P],
-            P
-        ),
-        spec!(
-            "mj_call_dyn",
-            jit::call_dyn,
-            [P, P, P, P, P, P, P],
-            P
-        ),
+        spec!("mj_call_body", jit::call_body, [P, P, P, P, P, P], P),
+        spec!("mj_call_dyn", jit::call_dyn, [P, P, P, P, P, P, P], P),
     ]
 });
 
@@ -517,9 +507,7 @@ pub fn compile_with(program: &Program, facts: &Facts) -> Result<Jit, Error> {
     for (b, k) in native_kinds.iter().enumerate() {
         let id = match k {
             Some(_) => {
-                let nargs = program.chunks[compile::BodyId::from(b as u32)]
-                    .params
-                    .len();
+                let nargs = program.chunks[compile::BodyId::from(b as u32)].params.len();
                 let sig = emit_native::native_sig(&mut module, nargs);
                 Some(module.declare_anonymous_function(&sig)?)
             }

@@ -10,16 +10,29 @@ fn main() {
     let (program, sources) =
         vm::Vm::compile_parts(&[("main", &source)], library::std).expect("compile");
     let j = jit::compile(&program).expect("jit");
-    let mut best = std::time::Duration::MAX;
+    let mut jit_best = std::time::Duration::MAX;
+    let mut bc_best = std::time::Duration::MAX;
     for _ in 0..n {
         let mut vm = vm::Vm::new();
         vm.load_prebuilt(program.clone(), sources.clone(), library::std);
         vm.install_bc(j.bodies());
         let t = Instant::now();
         match vm.run() {
-            Ok(_) => best = best.min(t.elapsed()),
-            Err(e) => eprintln!("ERR {e}"),
+            Ok(_) => jit_best = jit_best.min(t.elapsed()),
+            Err(e) => eprintln!("jit ERR {e}"),
         }
     }
-    eprintln!("done in {best:?}");
+    if std::env::var_os("MIMAS_PROBE_BC").is_some() {
+        for _ in 0..n {
+            let mut vm = vm::Vm::new();
+            vm.load_prebuilt(program.clone(), sources.clone(), library::std);
+            let t = Instant::now();
+            match vm.run() {
+                Ok(_) => bc_best = bc_best.min(t.elapsed()),
+                Err(e) => eprintln!("bc ERR {e}"),
+            }
+        }
+        eprintln!("bc done in {bc_best:?}");
+    }
+    eprintln!("jit done in {jit_best:?}");
 }

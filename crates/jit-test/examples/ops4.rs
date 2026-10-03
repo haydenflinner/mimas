@@ -3,7 +3,7 @@ fn main() {
     let path = std::env::args().nth(1).expect("usage: ops <file.mim>");
     let source = std::fs::read_to_string(&path).expect("read");
     let (program, _s) =
-        vm::Vm::compile_parts(&[("main", source.as_str())], jit_test::natives::install).expect("compile");
+        vm::Vm::compile_parts(&[("main", source.as_str())], library::std).expect("compile");
     for (id, chunk) in program.chunks.iter() {
         println!(
             "== body {} offset={} args={} regs={} params={:?} captures={:?}",

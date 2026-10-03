@@ -1341,6 +1341,12 @@ impl<'a, 'b> Ne<'a, 'b> {
 
     fn ld_tag64(&mut self, a: Value) -> Value {
         let t = self.ld_tag(a);
+        self.tag64(t)
+    }
+
+    /// A `tty()`-typed tag widened to `I64` — a no-op when the probed
+    /// discriminant already fills a qword.
+    fn tag64(&mut self, t: Value) -> Value {
         if self.lyt.tag_size < 8 {
             self.fb.ins().uextend(I64, t)
         } else {
@@ -1641,15 +1647,97 @@ impl<'a, 'b> Ne<'a, 'b> {
             let q0 = self.fb.use_var(v0);
             return self.q0_tag(q0);
         }
+        if !self.wb(r.index()) {
+            // proven scalar kind — the tag is a constant
+            let k = self.kinds[r.index()].expect("var-backed kind");
+            return self.tconst(self.ktag(k));
+        }
         let a = self.wslot(r);
         self.ld_tag(a)
     }
 
     /// A receiver's `Gc` payload — the shadow's `q1` (the `*_pay`
     /// offsets all equal `val_pay` under the `pend` gate), else a load.
+    /// A proven scalar can't be a container: `0` never ptr-matches and
+    /// the tag dispatch routes its constant tag to `slow` anyway.
     fn pgc(&mut self, r: compile::Reg) -> Value {
         if let Some((_, v1)) = self.pvars(r.index()) {
             return self.fb.use_var(v1);
+        }
+        if !self.wb(r.index()) {
+            return self.iconst(0);
+        }
+        let a = self.wslot(r);
+        self.fb
+            .ins()
+            .load(I64, tfw(), a, self.lyt.val_pay as i32)
+    }
+
+    /// `r`'s two window qwords — the `pend` shadow, a synthesized
+    /// `(q0, q1)` for proven scalar kinds (a `Val` copy sees the same
+    /// tag + payload bytes), or two slot loads.
+    fn vvals(&mut self, r: compile::Reg) -> (Value, Value) {
+        if let Some((v0, v1)) = self.pvars(r.index()) {
+            return (self.fb.use_var(v0), self.fb.use_var(v1));
+        }
+        let ri = r.index();
+        if !self.wb(ri) {
+            let k = self.kinds[ri].expect("var-backed kind");
+            // `q0` is a full qword — the LE tag in its low `tag_size`
+            // bytes, zeros above (the window's encoding for scalar tags).
+            let (q0, q1) = match k {
+                NK::Int => (self.iconst(self.lyt.t_int as i64), self.fb.use_var(self.vars[ri])),
+                NK::Float => {
+                    let v = self.fb.use_var(self.vars[ri]);
+                    (
+                        self.iconst(self.lyt.t_float as i64),
+                        self.fb.ins().bitcast(I64, MemFlagsData::new(), v),
+                    )
+                }
+                NK::Null => (self.iconst(self.lyt.t_null as i64), self.iconst(0)),
+                NK::Bool => {
+                    // the bool byte lives at `bool_pay` — inside `q0`
+                    // when it's under 8, `q1` otherwise
+                    let b64 = self.fb.use_var(self.vars[ri]);
+                    let t = self.iconst(self.lyt.t_bool as i64);
+                    if self.lyt.bool_pay < 8 {
+                        let sh = self
+                            .fb
+                            .ins()
+                            .ishl_imm_s(b64, (self.lyt.bool_pay * 8) as i64);
+                        let q0 = self.fb.ins().bor(sh, t);
+                        (q0, self.iconst(0))
+                    } else {
+                        let sh = self
+                            .fb
+                            .ins()
+                            .ishl_imm_s(b64, ((self.lyt.bool_pay - 8) * 8) as i64);
+                        (t, sh)
+                    }
+                }
+            };
+            return (q0, q1);
+        }
+        let a = self.wslot(r);
+        (
+            self.fb.ins().load(I64, tfw(), a, 0),
+            self.fb.ins().load(I64, tfw(), a, 8),
+        )
+    }
+
+    /// `r`'s `I64` payload — `vvals`'s `q1` for proven scalars without
+    /// the `q0` work.
+    fn vpay(&mut self, r: compile::Reg) -> Value {
+        if let Some((_, v1)) = self.pvars(r.index()) {
+            return self.fb.use_var(v1);
+        }
+        let ri = r.index();
+        if !self.wb(ri) {
+            let v = self.fb.use_var(self.vars[ri]);
+            return match self.kinds[ri].expect("var-backed kind") {
+                NK::Float => self.fb.ins().bitcast(I64, MemFlagsData::new(), v),
+                _ => v,
+            };
         }
         let a = self.wslot(r);
         self.fb
@@ -1736,13 +1824,11 @@ impl<'a, 'b> Ne<'a, 'b> {
     /// `*ea = *sa` — a `Val` store for the receiver-cache hit path.
     /// A `pend`-tracked `vreg` supplies the shadow instead of the slot.
     fn n_val_store(&mut self, i: usize, sa: Value, vreg: compile::Reg, ea: Value) {
-        let pv = self.pvars(vreg.index());
-        for w in (0..self.lyt.val_size).step_by(8) {
-            let v = match (pv, w) {
-                (Some((v0, _)), 0) => self.fb.use_var(v0),
-                (Some((_, v1)), 8) => self.fb.use_var(v1),
-                _ => self.fb.ins().load(I64, tfw(), sa, w as i32),
-            };
+        let (q0, q1) = self.vvals(vreg);
+        self.fb.ins().store(tfel(), q0, ea, 0);
+        self.fb.ins().store(tfel(), q1, ea, 8);
+        for w in (16..self.lyt.val_size).step_by(8) {
+            let v = self.fb.ins().load(I64, tfw(), sa, w as i32);
             self.fb.ins().store(tfel(), v, ea, w as i32);
         }
         let nb = self.next(i);
@@ -1867,16 +1953,14 @@ impl<'a, 'b> Ne<'a, 'b> {
         self.fb.ins().brif(k, good, &[], slow, &[]);
         self.fb.switch_to_block(good);
         self.commit(com);
-        let pv = self.pvars(vreg.index());
+        let (q0, q1) = self.vvals(vreg);
         let vs = self.lyt.val_size as i64;
         let off = self.fb.ins().imul_imm_s(slot, vs);
         let ea = self.fb.ins().iadd(data, off);
-        for w in (0..self.lyt.val_size).step_by(8) {
-            let v = match (pv, w) {
-                (Some((v0, _)), 0) => self.fb.use_var(v0),
-                (Some((_, v1)), 8) => self.fb.use_var(v1),
-                _ => self.fb.ins().load(I64, tfw(), sa, w as i32),
-            };
+        self.fb.ins().store(tfel(), q0, ea, 0);
+        self.fb.ins().store(tfel(), q1, ea, 8);
+        for w in (16..self.lyt.val_size).step_by(8) {
+            let v = self.fb.ins().load(I64, tfw(), sa, w as i32);
             self.fb.ins().store(tfel(), v, ea, w as i32);
         }
         let nb = self.next(i);
@@ -2035,10 +2119,7 @@ impl<'a, 'b> Ne<'a, 'b> {
                 gc,
                 (self.lyt.rl_seq + self.lyt.as_ints_vec + self.lyt.vec_len) as i32,
             );
-            let xv = match self.pvars(value.index()) {
-                Some((_, v1)) => self.fb.use_var(v1),
-                None => self.fb.ins().load(I64, tfw(), va, self.lyt.val_pay as i32),
-            };
+            let xv = self.vpay(value);
             self.n_write_prim(i, xv, slot, vl, vp, pre, com, slow);
         }
         self.fb.switch_to_block(noti);
@@ -2064,12 +2145,13 @@ impl<'a, 'b> Ne<'a, 'b> {
                 gc,
                 (self.lyt.rl_seq + self.lyt.as_floats_vec + self.lyt.vec_len) as i32,
             );
-            let xv = match self.pvars(value.index()) {
-                Some((_, v1)) => {
+            let xv = match (self.pvars(value.index()), self.wb(value.index())) {
+                (Some((_, v1)), _) => {
                     let q = self.fb.use_var(v1);
                     self.fb.ins().bitcast(F64, MemFlagsData::new(), q)
                 }
-                None => self.fb.ins().load(F64, tfw(), va, self.lyt.val_pay as i32),
+                (None, false) => self.fb.use_var(self.vars[value.index()]),
+                _ => self.fb.ins().load(F64, tfw(), va, self.lyt.val_pay as i32),
             };
             self.n_write_prim(i, xv, slot, vl, vp, pre, com, slow);
         }
@@ -2506,7 +2588,6 @@ impl<'a, 'b> Ne<'a, 'b> {
                 }
                 let slow = self.fb.create_block();
                 self.fb.set_cold_block(slow);
-                self.flush(set);
                 let Some(iv) = self.iv_or_slow(index, slow) else {
                     unreachable!("iv_maybe")
                 };
@@ -2578,7 +2659,7 @@ impl<'a, 'b> Ne<'a, 'b> {
                 );
                 let (c0, c1) = self.ctx2();
                 let op_ = self.out_p();
-                self.hstatus(i, H::GetIndex, &[r0, d, s, ii, k8, c0, c1, op_], &[index]);
+                self.hstatus(i, H::GetIndex, &[r0, d, s, ii, k8, c0, c1, op_], &[set, index]);
                 self.pend_reload(dst);
                 let nb = self.next(i);
                 self.fb.ins().jump(nb, &[]);
@@ -2610,8 +2691,6 @@ impl<'a, 'b> Ne<'a, 'b> {
                 }
                 let slow = self.fb.create_block();
                 self.fb.set_cold_block(slow);
-                self.flush(set);
-                self.flush(value);
                 let Some(iv) = self.iv_or_slow(index, slow) else {
                     unreachable!("iv_maybe")
                 };
@@ -2678,7 +2757,7 @@ impl<'a, 'b> Ne<'a, 'b> {
                 );
                 let (c0, c1) = self.ctx2();
                 let op_ = self.out_p();
-                self.hstatus(i, H::SetIndex, &[r0, s, ii, v, c0, c1, op_], &[index]);
+                self.hstatus(i, H::SetIndex, &[r0, s, ii, v, c0, c1, op_], &[set, index, value]);
                 let nb = self.next(i);
                 self.fb.ins().jump(nb, &[]);
             }
@@ -2705,7 +2784,6 @@ impl<'a, 'b> Ne<'a, 'b> {
                 }
                 let slow = self.fb.create_block();
                 self.fb.set_cold_block(slow);
-                self.flush(src);
                 let rt = self.prtag(src);
                 let tinst = self.tconst(self.lyt.t_instance);
                 let isinst = self.fb.ins().icmp(IntCC::Equal, rt, tinst);
@@ -2807,7 +2885,7 @@ impl<'a, 'b> Ne<'a, 'b> {
                     self.iconst8(kind as i64),
                 );
                 let op_ = self.out_p();
-                self.hstatus(i, H::GetField, &[r0, d, s, sl, k8, op_], &[]);
+                self.hstatus(i, H::GetField, &[r0, d, s, sl, k8, op_], &[src]);
                 self.pend_reload(dst);
                 let nb = self.next(i);
                 self.fb.ins().jump(nb, &[]);
@@ -2820,8 +2898,6 @@ impl<'a, 'b> Ne<'a, 'b> {
                 self.vclear();
                 let slow = self.fb.create_block();
                 self.fb.set_cold_block(slow);
-                self.flush(receiver);
-                self.flush(value);
                 let va = self.wslot(value);
                 let rt = self.prtag(receiver);
                 let ngc = self.ngc(value);
@@ -2922,7 +2998,7 @@ impl<'a, 'b> Ne<'a, 'b> {
                 );
                 let (c0, c1) = self.ctx2();
                 let op_ = self.out_p();
-                self.hstatus(i, H::SetField, &[r0, rc, sl, v, c0, c1, op_], &[]);
+                self.hstatus(i, H::SetField, &[r0, rc, sl, v, c0, c1, op_], &[receiver, value]);
                 let nb = self.next(i);
                 self.fb.ins().jump(nb, &[]);
             }
@@ -3328,7 +3404,9 @@ pub(crate) fn emit_native_body(
     {
         let mut recv: Vec<u32> = rcount
             .iter()
-            .filter(|(_, c)| **c >= 2)
+            .filter(|(r, c)| {
+                **c >= 2 && (plan.conflict[**r as usize] || kinds[**r as usize].is_none())
+            })
             .map(|(r, _)| *r)
             .collect();
         recv.sort_unstable();

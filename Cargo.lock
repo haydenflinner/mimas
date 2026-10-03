@@ -4273,6 +4273,7 @@ dependencies = [
  "mimas",
  "mimas-compile",
  "mimas-jit",
+ "mimas-library",
  "mimas-vm",
 ]
 

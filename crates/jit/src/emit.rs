@@ -137,7 +137,8 @@ fn analyze(ops: &[(usize, Op)], nregs: u32) -> Sh {
     for (_, op) in ops {
         match op {
             Op::Move { dst, src } => put(*dst, W::Copy(src.index() as u32)),
-            Op::LoadConst { dst, constant } => put(*dst,
+            Op::LoadConst { dst, constant } => put(
+                *dst,
                 match constant {
                     Constant::Int(_) => W::Int,
                     Constant::Float(_) => W::Float,
@@ -156,7 +157,8 @@ fn analyze(ops: &[(usize, Op)], nregs: u32) -> Sh {
             | Op::IntNe { dst, left, right } => {
                 iread(*left);
                 iread(*right);
-                put(*dst,
+                put(
+                    *dst,
                     if matches!(
                         op,
                         Op::AddInt { .. }
@@ -803,7 +805,9 @@ impl Em<'_> {
     fn st_fn(&mut self, a: Value, body32: Value) {
         let t = self.tconst(self.lyt.t_fn);
         self.fb.ins().store(tfw(), t, a, self.lyt.val_tag as i32);
-        self.fb.ins().store(tfw(), body32, a, self.lyt.fn_pay as i32);
+        self.fb
+            .ins()
+            .store(tfw(), body32, a, self.lyt.fn_pay as i32);
     }
 
     /// `val_size`-byte `Val` copy `*d = *s`, both sides window slots
@@ -1748,21 +1752,15 @@ pub(crate) fn emit_body(
     // `thread.frames.last().unwrap().base`
     let fptr = {
         let t = em.thread();
-        em.fb.ins().load(
-            I64,
-            tfs(),
-            t,
-            (lyt.frames_off + lyt.vec_ptr) as i32,
-        )
+        em.fb
+            .ins()
+            .load(I64, tfs(), t, (lyt.frames_off + lyt.vec_ptr) as i32)
     };
     let flen = {
         let t = em.thread();
-        em.fb.ins().load(
-            I64,
-            tfs(),
-            t,
-            (lyt.frames_off + lyt.vec_len) as i32,
-        )
+        em.fb
+            .ins()
+            .load(I64, tfs(), t, (lyt.frames_off + lyt.vec_len) as i32)
     };
     let fm1 = em.fb.ins().iadd_imm_s(flen, -1);
     let foff = em.fb.ins().imul_imm_s(fm1, lyt.frame_size as i64);
@@ -1771,7 +1769,9 @@ pub(crate) fn emit_body(
     // `thread.regs.as_mut_ptr()`
     let rp = {
         let t = em.thread();
-        em.fb.ins().load(I64, tfs(), t, (lyt.regs_off + lyt.vec_ptr) as i32)
+        em.fb
+            .ins()
+            .load(I64, tfs(), t, (lyt.regs_off + lyt.vec_ptr) as i32)
     };
     let boff = em.fb.ins().imul_imm_s(base, lyt.val_size as i64);
     let regs0 = em.fb.ins().iadd(rp, boff);
@@ -1795,8 +1795,7 @@ pub(crate) fn emit_body(
     // (arg-copied) and captures (capture-copied). Every other window slot is
     // `Null` by construction, so its probe can never hit — emit `ok=0`
     // directly instead (a Null reads `ok=0` → `estep`, same as probing).
-    let mut initd: HashSet<u32> =
-        chunk.params.iter().map(|p| p.index() as u32).collect();
+    let mut initd: HashSet<u32> = chunk.params.iter().map(|p| p.index() as u32).collect();
     initd.extend(chunk.captures.iter().map(|p| p.index() as u32));
     let int_keys: Vec<u32> = {
         let mut k: Vec<u32> = em.v.int.keys().copied().collect();
@@ -2990,9 +2989,7 @@ impl Em<'_> {
                     Some(dst.index() as u32),
                 );
             }
-            Op::Unary { dst, op, src } => {
-                self.emit_unary(i, off, next, *dst, *op, *src)
-            }
+            Op::Unary { dst, op, src } => self.emit_unary(i, off, next, *dst, *op, *src),
             Op::CallNative { dst, id, args } => {
                 let ap = self.reg_list_slot(args);
                 let (regs, d, nid, n) = (
@@ -3012,16 +3009,7 @@ impl Em<'_> {
                     next,
                     H::CallNative,
                     &[
-                        __e_thread,
-                        regs,
-                        d,
-                        nid,
-                        ap,
-                        n,
-                        __e_code,
-                        __e_ctx0,
-                        __e_ctx1,
-                        __e_out,
+                        __e_thread, regs, d, nid, ap, n, __e_code, __e_ctx0, __e_ctx1, __e_out,
                     ],
                     Some(dst.index() as u32),
                 );
@@ -3094,12 +3082,7 @@ impl Em<'_> {
 
     fn bool_opnd(&mut self, r: Reg) -> Value {
         let idx = r.index() as u32;
-        if let Some(&(_, bit)) = self
-            .v
-            .int
-            .get(&idx)
-            .or_else(|| self.v.float.get(&idx))
-        {
+        if let Some(&(_, bit)) = self.v.int.get(&idx).or_else(|| self.v.float.get(&idx)) {
             // a live scalar shadow means the reg is NOT a Bool → estep
             let okv = self.ok_get(bit);
             let nb = self.fb.create_block();
@@ -3705,20 +3688,26 @@ impl Em<'_> {
         let valsb = self.fb.create_block();
         self.fb.ins().brif(isvals, valsb, &[], slow, &[]);
         self.fb.switch_to_block(valsb);
-        let arr = self
-            .fb
-            .ins()
-            .load(I64, tfhd(), gc, (self.lyt.rl_seq + self.lyt.as_vals_arr) as i32);
+        let arr = self.fb.ins().load(
+            I64,
+            tfhd(),
+            gc,
+            (self.lyt.rl_seq + self.lyt.as_vals_arr) as i32,
+        );
         let fok2 = self.borrow_ok(arr, self.lyt.rl_flag, false);
         let pre = self.fb.ins().band(fok, fok2);
-        let vp = self
-            .fb
-            .ins()
-            .load(I64, tfhd(), arr, (self.lyt.rl_vec + self.lyt.vec_ptr) as i32);
-        let vl = self
-            .fb
-            .ins()
-            .load(I64, tfhd(), arr, (self.lyt.rl_vec + self.lyt.vec_len) as i32);
+        let vp = self.fb.ins().load(
+            I64,
+            tfhd(),
+            arr,
+            (self.lyt.rl_vec + self.lyt.vec_ptr) as i32,
+        );
+        let vl = self.fb.ins().load(
+            I64,
+            tfhd(),
+            arr,
+            (self.lyt.rl_vec + self.lyt.vec_len) as i32,
+        );
         self.read_elem(i, dst, slot, vl, vp, pre, slow);
     }
 
@@ -3795,22 +3784,28 @@ impl Em<'_> {
         self.fb.ins().brif(isvals, valsb, &[], slow, &[]);
         self.fb.switch_to_block(valsb);
         {
-            let arr = self
-                .fb
-                .ins()
-                .load(I64, tfhd(), gc, (self.lyt.rl_seq + self.lyt.as_vals_arr) as i32);
+            let arr = self.fb.ins().load(
+                I64,
+                tfhd(),
+                gc,
+                (self.lyt.rl_seq + self.lyt.as_vals_arr) as i32,
+            );
             let fok2 = self.borrow_ok(arr, self.lyt.rl_flag, true);
             let ngc = self.is_non_gc_tag(vt);
             let pre = self.fb.ins().band(fok, fok2);
             let pre = self.fb.ins().band(pre, ngc);
-            let vp = self
-                .fb
-                .ins()
-                .load(I64, tfhd(), arr, (self.lyt.rl_vec + self.lyt.vec_ptr) as i32);
-            let vl = self
-                .fb
-                .ins()
-                .load(I64, tfhd(), arr, (self.lyt.rl_vec + self.lyt.vec_len) as i32);
+            let vp = self.fb.ins().load(
+                I64,
+                tfhd(),
+                arr,
+                (self.lyt.rl_vec + self.lyt.vec_ptr) as i32,
+            );
+            let vl = self.fb.ins().load(
+                I64,
+                tfhd(),
+                arr,
+                (self.lyt.rl_vec + self.lyt.vec_len) as i32,
+            );
             self.write_elem(i, slot, vl, vp, va, pre, slow);
         }
     }
@@ -3877,16 +3872,7 @@ impl Em<'_> {
                 off,
                 next,
                 H::GetIndex,
-                &[
-                    regs,
-                    d,
-                    s,
-                    ii,
-                    kk,
-                    __e_ctx0,
-                    __e_ctx1,
-                    __e_out,
-                ],
+                &[regs, d, s, ii, kk, __e_ctx0, __e_ctx1, __e_out],
                 dst,
             );
         }
@@ -3967,16 +3953,7 @@ impl Em<'_> {
             off,
             next,
             H::GetIndex,
-            &[
-                regs,
-                d,
-                s,
-                ii,
-                kk,
-                __e_ctx0,
-                __e_ctx1,
-                __e_out,
-            ],
+            &[regs, d, s, ii, kk, __e_ctx0, __e_ctx1, __e_out],
             dst,
         );
     }
@@ -4431,10 +4408,7 @@ impl Em<'_> {
         );
         let __e_bodies_tbl = self.bodies_tbl();
         let rp = self
-            .hcall(
-                H::CallBody,
-                &[self.env.env, __e_bodies_tbl, b, d, ap, n],
-            )
+            .hcall(H::CallBody, &[self.env.env, __e_bodies_tbl, b, d, ap, n])
             .unwrap();
         self.post_call(i, dst, rp);
     }
@@ -4489,10 +4463,7 @@ impl Em<'_> {
         );
         let __e_bodies_tbl = self.bodies_tbl();
         let rp = self
-            .hcall(
-                H::CallBody,
-                &[self.env.env, __e_bodies_tbl, b, d, ap, n],
-            )
+            .hcall(H::CallBody, &[self.env.env, __e_bodies_tbl, b, d, ap, n])
             .unwrap();
         self.post_call(i, dst, rp);
 
@@ -4737,7 +4708,10 @@ impl Em<'_> {
         // already verified `captures.len() == cchunk.captures.len()`.
         if let Some(cp) = capsp {
             let cvec = self.fb.ins().iadd_imm_s(cp, self.lyt.cl_caps as i64);
-            let cdata = self.fb.ins().load(I64, tfhd(), cvec, self.lyt.vec_ptr as i32);
+            let cdata = self
+                .fb
+                .ins()
+                .load(I64, tfhd(), cvec, self.lyt.vec_ptr as i32);
             for (i, &cr) in cchunk.captures.iter().enumerate() {
                 let s = self.fb.ins().iadd_imm_s(cdata, i as i64 * vs);
                 let d = self.vaddr(nwin, cr.index() as u32);
@@ -4756,7 +4730,9 @@ impl Em<'_> {
         let cfo = self.fb.ins().imul_imm_s(fm1, fsz);
         let cf = self.fb.ins().iadd(fptr, cfo);
         let nxt = self.iconst(next as i64);
-        self.fb.ins().store(tfs(), nxt, cf, self.lyt.frame_ip as i32);
+        self.fb
+            .ins()
+            .store(tfs(), nxt, cf, self.lyt.frame_ip as i32);
         // push the callee frame
         let nfo = self.fb.ins().imul_imm_s(flen, fsz);
         let nf = self.fb.ins().iadd(fptr, nfo);
@@ -4765,9 +4741,13 @@ impl Em<'_> {
             .ins()
             .store(tfs(), bi, nf, self.lyt.frame_chunk as i32);
         let cip = self.iconst(cchunk.offset as i64);
-        self.fb.ins().store(tfs(), cip, nf, self.lyt.frame_ip as i32);
+        self.fb
+            .ins()
+            .store(tfs(), cip, nf, self.lyt.frame_ip as i32);
         let rr = self.iconst32(dst.index() as i64);
-        self.fb.ins().store(tfs(), rr, nf, self.lyt.frame_ret as i32);
+        self.fb
+            .ins()
+            .store(tfs(), rr, nf, self.lyt.frame_ret as i32);
         self.fb
             .ins()
             .store(tfs(), rlen, nf, self.lyt.frame_base as i32);
@@ -4825,7 +4805,10 @@ impl Em<'_> {
             .fb
             .ins()
             .load(I64, tfs(), pf, self.lyt.frame_base as i32);
-        let pret32 = self.fb.ins().load(I32, tfs(), pf, self.lyt.frame_ret as i32);
+        let pret32 = self
+            .fb
+            .ins()
+            .load(I32, tfs(), pf, self.lyt.frame_ret as i32);
         let pret = self.fb.ins().uextend(I64, pret32);
         let __e_thread = self.thread();
         self.fb.ins().store(
@@ -4845,7 +4828,10 @@ impl Em<'_> {
         let fm3 = self.fb.ins().iadd_imm_s(flen2, -2);
         let cfo2 = self.fb.ins().imul_imm_s(fm3, fsz);
         let cf2 = self.fb.ins().iadd(fptr2, cfo2);
-        let cip2 = self.fb.ins().load(I64, tfs(), cf2, self.lyt.frame_ip as i32);
+        let cip2 = self
+            .fb
+            .ins()
+            .load(I64, tfs(), cf2, self.lyt.frame_ip as i32);
         self.store_ip(cip2);
         let cbase = self
             .fb
@@ -4993,7 +4979,10 @@ impl Em<'_> {
         self.fb.ins().brif(is_cl, cl_load, &[], slow, &[]);
         self.fb.switch_to_block(cl_load);
         let clp = self.fb.ins().load(I64, tfw(), ca, self.lyt.cl_pay as i32);
-        let cb32 = self.fb.ins().load(I32, tfhd(), clp, self.lyt.cl_func as i32);
+        let cb32 = self
+            .fb
+            .ins()
+            .load(I32, tfhd(), clp, self.lyt.cl_func as i32);
         let cb = self.fb.ins().uextend(I64, cb32);
         let cl_eq = self.fb.ins().icmp(IntCC::Equal, cb, want);
         // a captures-carrying callee also needs `captures.len` to match —
@@ -5003,7 +4992,10 @@ impl Em<'_> {
             cl_eq
         } else {
             let cvec = self.fb.ins().iadd_imm_s(clp, self.lyt.cl_caps as i64);
-            let clen = self.fb.ins().load(I64, tfhd(), cvec, self.lyt.vec_len as i32);
+            let clen = self
+                .fb
+                .ins()
+                .load(I64, tfhd(), cvec, self.lyt.vec_len as i32);
             let cn = self.iconst(cchunk.captures.len() as i64);
             let len_eq = self.fb.ins().icmp(IntCC::Equal, clen, cn);
             self.fb.ins().band(cl_eq, len_eq)

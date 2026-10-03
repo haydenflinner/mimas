@@ -22,9 +22,7 @@ use std::collections::HashMap;
 use compile::{Decode, Op, Program};
 use vm::Vm;
 use vm::bc::jit::{frame_base, frame_nregs, regs_ptr, step_at};
-use vm::bc::{
-    BodyEnv, BodyFn, BodyId, Chunk, Ctx, Decoder, Frame, Gc, IdVec, ThreadState, Val,
-};
+use vm::bc::{BodyEnv, BodyFn, BodyId, Chunk, Ctx, Decoder, Frame, Gc, IdVec, ThreadState, Val};
 
 use crate::{BodyFacts, Error, Facts, Jit, Obs, ObsTag};
 
