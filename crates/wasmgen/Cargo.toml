@@ -1,0 +1,21 @@
+[package]
+name = "mimas-wasmgen"
+version = "0.2.0"
+edition = "2024"
+publish = false
+description = "mimas bytecode to wasm emitter: one exported fn per scalar-eligible chunk; unsupported bodies are skipped for the interpreter lane."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "mimas_wasmgen"
+
+[dependencies]
+compile = { package = "mimas-compile", path = "../compile", version = "0.2.0" }
+wasm-encoder = "0.242"
+
+[dev-dependencies]
+vm = { package = "mimas-vm", path = "../vm", version = "0.2.0" }
+mimas = { package = "mimas", path = "../mimas", version = "0.2.0" }
