@@ -169,6 +169,16 @@ impl TestResult {
     }
 }
 
+/// What `build_program` produces: the runnable program plus the
+/// grades-pass artifacts a host surfaces (lint warnings, effect footprint).
+struct BuiltProgram {
+    program: Program,
+    sources: Sources,
+    warnings: Vec<miette::Report>,
+    /// `(file, inferred top-level Fx)` per solved file.
+    script_fx: Vec<(String, shared::Fx)>,
+}
+
 pub struct Vm {
     pub(crate) entry: BodyId,
     pub(crate) code: Decoder,
@@ -198,6 +208,13 @@ pub struct Vm {
     /// body, that chunk dispatches through `step_one` as usual). Installed via
     /// [`Vm::install_bc`].
     pub(crate) bc: Option<Vec<Option<crate::bc::BodyFn>>>,
+    /// Lint warnings the grades pass emitted while loading this program
+    /// (unused bindings, dead stores, `must_use` discards). Compile used to
+    /// drop them; a host renders them on the source cells instead.
+    pub(crate) warnings: Vec<miette::Report>,
+    /// `(file, inferred top-level Fx)` from the same load — the program's
+    /// effect footprint, for hosts that badge a page with what it may do.
+    pub(crate) script_fx: Vec<(String, shared::Fx)>,
 }
 
 impl Vm {
@@ -225,6 +242,8 @@ impl Vm {
             root: Rc::default(),
             registry: Registry::new(),
             bc: None,
+            warnings: Vec::new(),
+            script_fx: Vec::new(),
         }
     }
 
@@ -2862,12 +2881,27 @@ impl Vm {
     {
         let mut vm = Self::new();
         let library = vm.install_library(install_lib);
-        let (program, sources) = Self::build_program(files, &library, allowed)?;
+        let built = Self::build_program(files, &library, allowed)?;
 
-        vm.load_program(program);
-        vm.set_sources(sources);
+        vm.warnings = built.warnings;
+        vm.script_fx = built.script_fx;
+        vm.load_program(built.program);
+        vm.set_sources(built.sources);
         vm.registry = library.into_registry();
         Ok(vm)
+    }
+
+    /// The lint warnings the grades pass emitted while this program loaded
+    /// (unused bindings, dead stores, `must_use` discards). Empty for
+    /// `load_prebuilt` Vms — `compile_parts` drops them.
+    pub fn warnings(&self) -> &[miette::Report] {
+        &self.warnings
+    }
+
+    /// `(file, inferred top-level Fx)` from this program's load — the
+    /// footprint a host badges a page with.
+    pub fn script_fx(&self) -> &[(String, shared::Fx)] {
+        &self.script_fx
     }
 
     /// Solve `files` and stop before codegen, returning only what the grades
@@ -2907,7 +2941,8 @@ impl Vm {
     {
         let mut probe = Self::new();
         let library = probe.install_library(install_lib);
-        Self::build_program(files, &library, None)
+        let built = Self::build_program(files, &library, None)?;
+        Ok((built.program, built.sources))
     }
 
     /// Load a [`compile_parts`] program into this Vm — same post-load
@@ -2929,7 +2964,7 @@ impl Vm {
         files: &[(&str, &str)],
         library: &::api::Library<()>,
         allowed: Option<shared::Fx>,
-    ) -> std::result::Result<(Program, Sources), ExecuteError> {
+    ) -> std::result::Result<BuiltProgram, ExecuteError> {
         use solve::Resolutions;
 
         let mut loaded = solve::load_files(files.iter().copied(), library);
@@ -2944,7 +2979,9 @@ impl Vm {
             .flat_map(|ast| ast.unpack())
             .collect();
         let sources = loaded.sources;
+        let warnings = loaded.warnings;
         let resolutions = Resolutions::from(loaded.solver);
+        let script_fx = resolutions.script_effects.iter().map(|(f, fx)| (f.clone(), *fx)).collect();
         // The gate sits between solve and codegen: a file whose inferred
         // effects escape `allowed` is refused before a single op is built.
         if let Some(allowed) = allowed {
@@ -2967,7 +3004,12 @@ impl Vm {
             library.intrinsics().iter().map(|(a, b)| (*a, *b)).collect(),
         );
         ir.lower(&stmts);
-        Ok((compile::Compiler::new().compile(ir), sources))
+        Ok(BuiltProgram {
+            program: compile::Compiler::new().compile(ir),
+            sources,
+            warnings,
+            script_fx,
+        })
     }
 
     /// Extracts `function_name`'s pure dataflow graph -- see [`compile::function_dataflow`] --
