@@ -72,6 +72,13 @@ pub enum Commands {
         #[clap(parse(from_os_str))]
         path: Option<PathBuf>,
     },
+    /// Transpiles a C++ file to mimas source and prints it, along with any
+    /// diagnostics. The result is what `mimas run file.cpp` would execute.
+    Cpp {
+        /// The .cpp file to transpile.
+        #[clap(parse(from_os_str))]
+        path: PathBuf,
+    },
     /// Assemble a fn by scoped content address from a blob dir: fetch the
     /// blob, follow its `@dep:` edges, rename markers, print the linked
     /// module source. The read half of `host::publish`'s blob store.

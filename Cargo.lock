@@ -3462,6 +3462,7 @@ dependencies = [
  "miette",
  "mimas-api",
  "mimas-compile",
+ "mimas-cpp",
  "mimas-hash",
  "mimas-library",
  "mimas-parse",
@@ -3487,6 +3488,18 @@ dependencies = [
  "mimas-solve",
  "mutants",
  "pretty_assertions",
+]
+
+[[package]]
+name = "mimas-cpp"
+version = "0.1.0"
+dependencies = [
+ "mimas",
+ "mimas-library",
+ "mimas-vm",
+ "thiserror 1.0.69",
+ "tree-sitter",
+ "tree-sitter-cpp",
 ]
 
 [[package]]
@@ -5587,6 +5600,7 @@ version = "1.0.150"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e8014e44b4736ed0538adeecded0fce2a272f22dc9578a7eb6b2d9993c74cfb9"
 dependencies = [
+ "indexmap 2.14.0",
  "itoa",
  "memchr",
  "serde",
@@ -6327,6 +6341,36 @@ dependencies = [
  "tracing-subscriber",
  "wasm-bindgen",
 ]
+
+[[package]]
+name = "tree-sitter"
+version = "0.25.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "78f873475d258561b06f1c595d93308a7ed124d9977cb26b148c2084a4a3cc87"
+dependencies = [
+ "cc",
+ "regex",
+ "regex-syntax",
+ "serde_json",
+ "streaming-iterator",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-cpp"
+version = "0.23.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df2196ea9d47b4ab4a31b9297eaa5a5d19a0b121dceb9f118f6790ad0ab94743"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-language"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ca0d1bf6fdd806e43ae5198f82f527056d359def39e54e67a0f478ac09dac081"
 
 [[package]]
 name = "try-lock"

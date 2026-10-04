@@ -32,6 +32,7 @@ fn main() {
         ),
         Some(Commands::Hash { path, scoped, deps }) => hash(path, scoped || deps, deps),
         Some(Commands::Link { addr, blobs }) => link(&addr, blobs),
+        Some(Commands::Cpp { path }) => cpp_dump(&path),
         Some(Commands::Run { path, script_args }) => build(
             path,
             script_args,
@@ -207,6 +208,31 @@ fn link(addr: &str, blobs: Option<PathBuf>) -> i32 {
     }
 }
 
+/// `mimas cpp <file>` — transpile a C++ file to mimas source and print it.
+/// Diagnostics go to stderr so the emitted `.mim` can be piped.
+fn cpp_dump(path: &std::path::Path) -> i32 {
+    let source = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("{}: {e}", path.display());
+            return 2;
+        }
+    };
+    match cpp::transpile(&source) {
+        Ok(out) => {
+            for diag in &out.diagnostics {
+                eprintln!("{diag}");
+            }
+            print!("{}", out.source);
+            0
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            1
+        }
+    }
+}
+
 /// `--blobs` (or its default) → the scoped blob dir: `<dir>-scoped` when
 /// the name isn't already scoped, `./blobs-scoped` when no flag is given.
 fn scoped_dir(blobs: Option<PathBuf>) -> Result<PathBuf, String> {
@@ -340,7 +366,7 @@ fn build(
 // bare `mimas foo.mim` means `mimas run foo.mim`; inject `run` when the first
 // positional isn't already a subcommand. `mimas` alone still falls through to help.
 fn massage_args(mut args: Vec<String>) -> Vec<String> {
-    const SUBCOMMANDS: [&str; 6] = ["check", "build", "hash", "run", "link", "help"];
+    const SUBCOMMANDS: [&str; 7] = ["check", "build", "hash", "run", "link", "cpp", "help"];
     if let Some(idx) = args.iter().skip(1).position(|a| !a.starts_with('-')) {
         let idx = idx + 1;
         if !SUBCOMMANDS.contains(&args[idx].as_str()) {

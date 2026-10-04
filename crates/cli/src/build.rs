@@ -30,6 +30,28 @@ pub fn solve(path: &Path) -> (vm::Vm, SolveSummary) {
         if file_path.file_stem().and_then(|n| n.to_str()) == Some("main") {
             has_main = true;
         }
+        let is_cpp = file_path
+            .extension()
+            .is_some_and(|e| ["cpp", "cc", "cxx", "c++", "hpp", "hxx"].contains(&e.to_string_lossy().as_ref()));
+        let mimas = if is_cpp {
+            match cpp::transpile(&mimas) {
+                Ok(out) => {
+                    for diag in &out.diagnostics {
+                        eprintln!("{diag}");
+                    }
+                    out.source
+                }
+                Err(e) => {
+                    io_errors.push(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("{}: {e}", file_path.display()),
+                    ));
+                    continue;
+                }
+            }
+        } else {
+            mimas
+        };
         lines_parsed += mimas.lines().count();
         // full path, not the stem: this is the name parse diagnostics render, and solve/runtime
         // already use the full path -- `module @` stem-ifies it on its own

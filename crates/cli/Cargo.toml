@@ -24,6 +24,7 @@ compile = { package = "mimas-compile", path = "../compile", version = "0.2.0" }
 vm = { package = "mimas-vm", path = "../vm", version = "0.2.0" }
 library = { package = "mimas-library", path = "../library", version = "0.2.0" }
 api = { package = "mimas-api", path = "../api", version = "0.2.0" }
+cpp = { package = "mimas-cpp", path = "../cpp", version = "0.1.0" }
 shared = { package = "mimas-shared", path = "../shared", version = "0.2.0" }
 colored.workspace = true
 miette.workspace = true
