@@ -1,0 +1,234 @@
+use std::polars::*;
+fn data(name: str) -> DataFrame! {
+    std::polars::from_csv("id,kind,x,y,w,h
+g0,ground,40,700,960,20
+p01,plat,120,640,100,16
+p02,plat,260,580,100,16
+p03,plat,400,525,100,16
+p04,plat,540,470,100,16
+p05,plat,680,420,100,16
+p06,plat,820,370,100,16
+p07,plat,660,290,100,16
+p08,plat,510,265,100,16
+p09,plat,360,265,100,16
+p10,plat,210,290,100,16
+p11,plat,60,340,100,16
+p12,plat,200,430,90,16
+p13,plat,340,480,90,16
+p14,plat,480,440,90,16
+p15,plat,640,500,90,16
+p16,plat,800,560,110,16
+flag,goal,880,496,12,64
+spawn,spawn,70,664,24,36
+hz1,lava,380,684,120,16
+gm1,goomba,560,676,90,24
+gm2,goomba,270,556,80,24
+c001,coin,136,598,20,20
+c002,coin,170,588,20,20
+c003,coin,204,598,20,20
+c004,coin,276,538,20,20
+c005,coin,310,528,20,20
+c006,coin,344,538,20,20
+c007,coin,416,483,20,20
+c008,coin,450,473,20,20
+c009,coin,484,483,20,20
+c010,coin,556,428,20,20
+c011,coin,590,418,20,20
+c012,coin,624,428,20,20
+c013,coin,696,378,20,20
+c014,coin,730,368,20,20
+c015,coin,764,378,20,20
+c016,coin,836,328,20,20
+c017,coin,870,318,20,20
+c018,coin,904,328,20,20
+c019,coin,676,248,20,20
+c020,coin,710,238,20,20
+c021,coin,744,248,20,20
+c022,coin,526,223,20,20
+c023,coin,560,213,20,20
+c024,coin,594,223,20,20
+c025,coin,376,223,20,20
+c026,coin,410,213,20,20
+c027,coin,444,223,20,20
+c028,coin,226,248,20,20
+c029,coin,260,238,20,20
+c030,coin,294,248,20,20
+c031,coin,76,298,20,20
+c032,coin,110,288,20,20
+c033,coin,144,298,20,20
+c034,coin,211,388,20,20
+c035,coin,245,378,20,20
+c036,coin,279,388,20,20
+c037,coin,351,438,20,20
+c038,coin,385,428,20,20
+c039,coin,419,438,20,20
+c040,coin,491,398,20,20
+c041,coin,525,388,20,20
+c042,coin,559,398,20,20
+c043,coin,651,458,20,20
+c044,coin,685,448,20,20
+c045,coin,719,458,20,20
+c046,coin,821,518,20,20
+c047,coin,855,508,20,20
+c048,coin,889,518,20,20
+c049,coin,222,514,20,20
+c050,coin,258,514,20,20
+c051,coin,362,459,20,20
+c052,coin,398,459,20,20
+c053,coin,502,404,20,20
+c054,coin,538,404,20,20
+c055,coin,642,354,20,20
+c056,coin,678,354,20,20
+c057,coin,782,304,20,20
+c058,coin,818,304,20,20
+c059,coin,772,224,20,20
+c060,coin,808,224,20,20
+c061,coin,617,199,20,20
+c062,coin,653,199,20,20
+c063,coin,467,199,20,20
+c064,coin,503,199,20,20
+c065,coin,317,199,20,20
+c066,coin,353,199,20,20
+c067,coin,167,224,20,20
+c068,coin,203,224,20,20
+c069,coin,162,274,20,20
+c070,coin,198,274,20,20
+c071,coin,297,364,20,20
+c072,coin,333,364,20,20
+c073,coin,437,374,20,20
+c074,coin,473,374,20,20
+c075,coin,587,374,20,20
+c076,coin,623,374,20,20
+c077,coin,747,434,20,20
+c078,coin,783,434,20,20
+c079,coin,80,660,20,20
+c080,coin,120,640,20,20
+c081,coin,208,660,20,20
+c082,coin,248,640,20,20
+c083,coin,336,660,20,20
+c084,coin,376,640,20,20
+c085,coin,464,660,20,20
+c086,coin,504,640,20,20
+c087,coin,592,660,20,20
+c088,coin,632,640,20,20
+c089,coin,720,660,20,20
+c090,coin,760,640,20,20
+c091,coin,848,660,20,20
+c092,coin,888,640,20,20
+c093,coin,870,480,20,20
+c094,coin,945,480,20,20
+c095,coin,880,430,20,20
+c096,coin,935,430,20,20
+c097,coin,305,210,20,20
+c098,coin,457,210,20,20
+c099,coin,610,240,20,20
+c100,coin,763,250,20,20")!
+}
+// g1 — walk right, touch flag. No gate, no jumps: the trivial baseline
+// the search should solve in a handful of expands.
+const FX = 40.0px;
+const FY = 40.0px;
+const FW = 960.0px;
+const FH = 720.0px;
+const GRAV = 1800.0px/s^2;
+const JUMP_V = 560.0px/s;
+const RUN = 300.0px/s;
+const ACCEL = 2800.0px/s^2;
+const TERM = 980.0px/s;
+const PLAYER_W = 24.0px;
+const PLAYER_H = 36.0px;
+const PICK = 18.0;
+
+// one flat ground row; [x, top, w]
+const NEED = 0;
+const FLAGX = 880.0; const FLAGY = 556.0;
+const FLAGW = 20.0; const FLAGH = 84.0;
+
+// flat arrays — const array literals aren't emitted, so build them
+fn level_plats() -> [float] { let p = []; p.push(40.0); p.push(640.0); p.push(920.0); p }
+fn level_coins() -> [float] { let c = []; c }
+
+struct W {
+    px: px, py: px, vx: px/s, vy: px/s,
+    face: float, grounded: bool,
+    got: [str], score: int, deaths: int,
+    won: bool, t: s,
+}
+
+fn init() -> W {
+    W { px = 70.0px, py = 604.0px, vx = 0.0px/s, vy = 0.0px/s,
+        face = 1.0, grounded = true, got = [], score = 0, deaths = 0,
+        won = false, t = 0.0s }
+}
+
+fn tick(w: W, inp: Input, evs: [Ev]) -> W {
+    let dt = inp.dt;
+    let px = w.px; let py = w.py;
+    let vx = w.vx; let vy = w.vy;
+    let grounded = w.grounded;
+    let face = w.face;
+    let t = w.t + dt;
+
+    if inp.held.contains("arrowleft") || inp.held.contains("a") {
+        vx = (vx - ACCEL * dt).max(-RUN); face = -1.0;
+    } else if inp.held.contains("arrowright") || inp.held.contains("d") {
+        vx = (vx + ACCEL * dt).min(RUN); face = 1.0;
+    } else {
+        vx = vx * (1.0 - 10.0Hz * dt);
+    }
+    if grounded && (inp.held.contains("arrowup") || inp.held.contains(" ") || inp.held.contains("w")) {
+        vy = -JUMP_V; grounded = false;
+    }
+    vy = (vy + GRAV * dt).min(TERM);
+
+    let old_bottom = py + PLAYER_H;
+    px = (px + vx * dt).max(FX).min(FX + FW - PLAYER_W);
+    py = py + vy * dt;
+    grounded = false;
+    let plats = level_plats();
+    let pi = 0;
+    while pi < plats.len() {
+        let top = plats[pi + 1] * 1.0px;
+        let sx = plats[pi] * 1.0px; let sw = plats[pi + 2] * 1.0px;
+        if vy >= 0.0px/s && old_bottom <= top + 1.0px && px + PLAYER_W > sx && px < sx + sw && py + PLAYER_H >= top && py + PLAYER_H <= top + 24.0px {
+            py = top - PLAYER_H; vy = 0.0px/s; grounded = true;
+        }
+        pi += 3;
+    }
+    if py > FY + FH + 200.0px {
+        return W { px = 70.0px, py = 604.0px, vx = 0.0px/s, vy = 0.0px/s,
+                   face = 1.0, grounded = false, got = w.got, score = w.score,
+                   deaths = w.deaths + 1, won = w.won, t = t };
+    }
+
+    // the flag
+    let won = w.won;
+    let fx = FLAGX * 1.0px; let fy = FLAGY * 1.0px;
+    let fw = FLAGW * 1.0px; let fh = FLAGH * 1.0px;
+    if px + PLAYER_W > fx && px < fx + fw && py + PLAYER_H > fy && py < fy + fh {
+        won = true;
+    }
+
+    W { px = px, py = py, vx = vx, vy = vy, face = face,
+        grounded = grounded, got = w.got, score = w.score, deaths = w.deaths,
+        won = won, t = t }
+}
+
+fn draw(w: W) {
+    game::rect(FX, FY, FW, FH, "#0a0f1e", "#31506b", 3.0px);
+    game::rect(FLAGX * 1.0px, FLAGY * 1.0px, FLAGW * 1.0px, FLAGH * 1.0px, "#e03e1a", "#ff8c42", 2.0px);
+    game::rect(w.px, w.py, PLAYER_W, PLAYER_H, "#2f7", "#4fa", 1.0px);
+}
+
+
+
+fn game_loop<W>(world: W, tick: (W, Input, [Ev]) -> W, draw: (W) -> ()) {
+    let w = world;
+    while !game::quitting() {
+        w = tick(w, game::input(), game::events());
+        draw(w);
+        game::yield_frame();
+    }
+}
+
+game_loop(init(), tick, draw);

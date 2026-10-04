@@ -1,0 +1,719 @@
+use std::polars::*;
+fn data(name: str) -> DataFrame! {
+    std::polars::from_csv("id,kind,x,y,w,h
+g0,ground,40,700,960,20
+p01,plat,120,640,100,16
+p02,plat,260,580,100,16
+p03,plat,400,525,100,16
+p04,plat,540,470,100,16
+p05,plat,680,420,100,16
+p06,plat,820,370,100,16
+p07,plat,660,290,100,16
+p08,plat,510,265,100,16
+p09,plat,360,265,100,16
+p10,plat,210,290,100,16
+p11,plat,60,340,100,16
+p12,plat,200,430,90,16
+p13,plat,340,480,90,16
+p14,plat,480,440,90,16
+p15,plat,640,500,90,16
+p16,plat,800,560,110,16
+flag,goal,880,496,12,64
+spawn,spawn,70,664,24,36
+hz1,lava,380,684,120,16
+gm1,goomba,560,676,90,24
+gm2,goomba,270,556,80,24
+c001,coin,136,598,20,20
+c002,coin,170,588,20,20
+c003,coin,204,598,20,20
+c004,coin,276,538,20,20
+c005,coin,310,528,20,20
+c006,coin,344,538,20,20
+c007,coin,416,483,20,20
+c008,coin,450,473,20,20
+c009,coin,484,483,20,20
+c010,coin,556,428,20,20
+c011,coin,590,418,20,20
+c012,coin,624,428,20,20
+c013,coin,696,378,20,20
+c014,coin,730,368,20,20
+c015,coin,764,378,20,20
+c016,coin,836,328,20,20
+c017,coin,870,318,20,20
+c018,coin,904,328,20,20
+c019,coin,676,248,20,20
+c020,coin,710,238,20,20
+c021,coin,744,248,20,20
+c022,coin,526,223,20,20
+c023,coin,560,213,20,20
+c024,coin,594,223,20,20
+c025,coin,376,223,20,20
+c026,coin,410,213,20,20
+c027,coin,444,223,20,20
+c028,coin,226,248,20,20
+c029,coin,260,238,20,20
+c030,coin,294,248,20,20
+c031,coin,76,298,20,20
+c032,coin,110,288,20,20
+c033,coin,144,298,20,20
+c034,coin,211,388,20,20
+c035,coin,245,378,20,20
+c036,coin,279,388,20,20
+c037,coin,351,438,20,20
+c038,coin,385,428,20,20
+c039,coin,419,438,20,20
+c040,coin,491,398,20,20
+c041,coin,525,388,20,20
+c042,coin,559,398,20,20
+c043,coin,651,458,20,20
+c044,coin,685,448,20,20
+c045,coin,719,458,20,20
+c046,coin,821,518,20,20
+c047,coin,855,508,20,20
+c048,coin,889,518,20,20
+c049,coin,222,514,20,20
+c050,coin,258,514,20,20
+c051,coin,362,459,20,20
+c052,coin,398,459,20,20
+c053,coin,502,404,20,20
+c054,coin,538,404,20,20
+c055,coin,642,354,20,20
+c056,coin,678,354,20,20
+c057,coin,782,304,20,20
+c058,coin,818,304,20,20
+c059,coin,772,224,20,20
+c060,coin,808,224,20,20
+c061,coin,617,199,20,20
+c062,coin,653,199,20,20
+c063,coin,467,199,20,20
+c064,coin,503,199,20,20
+c065,coin,317,199,20,20
+c066,coin,353,199,20,20
+c067,coin,167,224,20,20
+c068,coin,203,224,20,20
+c069,coin,162,274,20,20
+c070,coin,198,274,20,20
+c071,coin,297,364,20,20
+c072,coin,333,364,20,20
+c073,coin,437,374,20,20
+c074,coin,473,374,20,20
+c075,coin,587,374,20,20
+c076,coin,623,374,20,20
+c077,coin,747,434,20,20
+c078,coin,783,434,20,20
+c079,coin,80,660,20,20
+c080,coin,120,640,20,20
+c081,coin,208,660,20,20
+c082,coin,248,640,20,20
+c083,coin,336,660,20,20
+c084,coin,376,640,20,20
+c085,coin,464,660,20,20
+c086,coin,504,640,20,20
+c087,coin,592,660,20,20
+c088,coin,632,640,20,20
+c089,coin,720,660,20,20
+c090,coin,760,640,20,20
+c091,coin,848,660,20,20
+c092,coin,888,640,20,20
+c093,coin,870,480,20,20
+c094,coin,945,480,20,20
+c095,coin,880,430,20,20
+c096,coin,935,430,20,20
+c097,coin,305,210,20,20
+c098,coin,457,210,20,20
+c099,coin,610,240,20,20
+c100,coin,763,250,20,20")!
+}
+use game;
+use music;
+use "img";
+use "game-kit";
+
+// Mimo — a literate platformer. The level is a [[#]] `level` data cell:
+// one row per platform, coin, hazard, spawn and flag. This program reads
+// it with `data("level")`, runs it as physics, and — because the level is
+// data — *proves things about it*: `beatable()` below is a little solver
+// that flood-fills every surface the jump physics can actually reach.
+// `live_solve` paints that proof on the canvas every edit; `check
+// beatable()` gates it. Drag a coin row's `y` out of reach and both go
+// red in the same keystroke.
+//
+// `← →` run, `↑`/`space` jump, `r` restarts. Goombas walk, lava burns.
+// Grab every coin, then touch the flag.
+
+const FX = 40.0px;
+const FY = 40.0px;
+const FW = 960.0px;
+const FH = 720.0px;
+
+// §physics ------------------------------------------------------------
+const GRAV = 1800.0px/s^2;
+const JUMP_V = 560.0px/s;
+const RUN = 300.0px/s;
+const ACCEL = 2800.0px/s^2;
+const TERM = 980.0px/s;
+const PLAYER_W = 24.0px;
+const PLAYER_H = 36.0px;
+
+// §the level is data ---------------------------------------------------
+// One row per feature: kind ∈ {ground, plat, coin, lava, goomba, goal,
+// spawn}. The `level` data cell renders as the editable table on the
+// canvas — dragging a row's numbers *is* editing the level.
+struct LRow { id: str, kind: str, x: float, y: float, w: float, h: float }
+
+fn level() -> [LRow] {
+    // CSV ints arrive as `int` and `700 != 700.0` — `==` doesn't coerce.
+    // Normalize the numeric fields to float once, at the boundary, so a
+    // table full of integers can't poison the math below.
+    let out: [LRow] = [];
+    let r: [LRow] = data("level")!.rows()!;
+    for row in r {
+        out.push(LRow { id = row.id, kind = row.kind,
+            x = row.x + 0.0, y = row.y + 0.0, w = row.w + 0.0, h = row.h + 0.0 });
+    }
+    out
+}
+fn rows_of(k: str) -> [LRow] {
+    let out: [LRow] = [];
+    for r in level() { if r.kind == k { out.push(r); } }
+    out
+}
+fn solids() -> [LRow] {
+    let out: [LRow] = [];
+    for r in level() {
+        if r.kind == "plat" || r.kind == "ground" { out.push(r); }
+    }
+    out
+}
+fn coins() -> [LRow] { rows_of("coin") }
+fn first_row(k: str) -> LRow! {
+    for r in level() { if r.kind == k { return r; } }
+    raise "level has no '" + k + "' row";
+}
+fn spawn_row() -> LRow! { first_row("spawn") }
+fn goal_row() -> LRow! { first_row("goal") }
+
+// §the solver ----------------------------------------------------------
+// A level is "beatable" when every coin and the flag is reachable by
+// real jump arcs. Nodes are horizontal spans: a platform's top edge, a
+// coin's grab box, the flag's base. An edge a→b exists when a jump (or
+// falling drop) from anywhere on a can land on b — same numbers the
+// physics below uses, no hand-tuned fudge. It is a *movement* proof:
+// hazards are dodgeable, so the solver ignores them.
+struct N { top: float, l: float, r: float, id: str }
+
+const PICK = 18.0; // coin grab radius, px (float — solver math)
+
+fn nodes() -> [N] {
+    let out: [N] = [];
+    for s in solids() {
+        out.push(N { top = s.y, l = s.x, r = s.x + s.w, id = s.id });
+    }
+    for c in coins() {
+        let cx = c.x + c.w / 2.0;
+        let cy = c.y + c.h / 2.0;
+        out.push(N { top = cy, l = cx - PICK, r = cx + PICK, id = c.id });
+    }
+    let g = goal_row()!;
+    out.push(N { top = g.y + g.h, l = g.x - 20.0, r = g.x + g.w + 20.0, id = g.id });
+    out
+}
+
+// Longest flight from a's top to b's top: rising arc while dy ≤ apex,
+// free drop below. Landing needs the falling branch, so take the + root.
+fn can_jump(a: N, b: N) -> bool {
+    let jv = JUMP_V.to("px/s");
+    let g = GRAV.to("px/s^2");
+    let run = RUN.to("px/s");
+    let dy = a.top - b.top;
+    if dy > jv * jv / (2.0 * g) { return false; } // above jump apex
+    let disc = jv * jv - 2.0 * g * dy;
+    if disc < 0.0 { return false; }
+    let t = (jv + disc.sqrt()) / g;
+    let gap = (b.l - a.r).max(a.l - b.r).max(0.0);
+    gap + 4.0 <= run * t
+}
+
+fn reach() -> [str] {
+    let ns = nodes();
+    let s = spawn_row()!;
+    let got: [str] = [];
+    // the surface the spawn cell stands on seeds the flood
+    for n in ns {
+        if s.x + 12.0 >= n.l && s.x + 12.0 <= n.r && (n.top - s.y - s.h).abs() < 4.0 {
+            got.push(n.id);
+        }
+    }
+    let grew = true;
+    while grew {
+        grew = false;
+        for a in ns {
+            if got.contains(a.id) {
+                for b in ns {
+                    if !got.contains(b.id) && can_jump(a, b) {
+                        got.push(b.id);
+                        grew = true;
+                    }
+                }
+            }
+        }
+    }
+    got
+}
+
+// First thing a given flood can't reach — coin id, 'flag', or '' when
+// the whole level clears. `blocker`/`live_solve` share one `reach()`.
+fn blocker_of(got: [str]) -> str {
+    for c in coins() { if !got.contains(c.id) { return c.id; } }
+    if !got.contains("flag") { return "flag"; }
+    ""
+}
+fn blocker() -> str { blocker_of(reach()) }
+fn beatable() -> bool { blocker() == "" }
+
+// Which collectible the canvas points at: the blocker when there is
+// one, else the 50th coin — the "watch" row of the table.
+fn watch_id() -> str {
+    let b = blocker();
+    if b != "" { b } else { "c050" }
+}
+
+fn show_watch() -> DataFrame! {
+    data("level")!.filter(col("id") == lit(watch_id()))
+}
+
+// The solver's readout — repaints on every edit. A verdict strip under
+// the field (one dot per coin, reachable = gold, stuck = red) and a
+// ring around the watch coin's spot *in the level*.
+fn live_solve() -> [Img] {
+    let got = reach();
+    let b = blocker_of(got);
+    let ok = b == "";
+    let wid = if ok { "c050" } else { b };
+    let cs = coins();
+    let parts: [Img] = [];
+    let y0 = FY + FH + 30.0px;
+    parts.push(Img::Text {
+        x = FX, y = y0 + 26.0px, size = 22.0px,
+        fill = if ok { G_CYAN } else { G_RED },
+        text = if ok {
+            f"solver · {cs.len()}/{cs.len()} coins in jump range — level beatable ✓"
+        } else {
+            f"solver · {b} unreachable — level NOT beatable ✗"
+        },
+    });
+    // 10×10 dot grid — the whole table's reachability at a glance
+    let i = 0;
+    for c in cs {
+        let gx = FX + 260.0px + (i mod 20).to_float() * 20.0px;
+        let gy = y0 + 12.0px + (i / 20).floor() * 20.0px;
+        let hot = c.id == wid;
+        parts.push(Img::Ellipse {
+            x = gx, y = gy, w = 14.0px, h = 14.0px,
+            fill = if got.contains(c.id) { G_GOLD } else { G_RED },
+            stroke = if hot { G_WHITE } else { "" },
+            stroke_w = 2.0px,
+        });
+        i += 1;
+    }
+    // ring the watch coin where it sits in the level
+    for c in cs {
+        if c.id == wid {
+            let cx = (c.x + c.w / 2.0) * 1.0px;
+            let cy = (c.y + c.h / 2.0) * 1.0px;
+            parts.push(Img::Ellipse {
+                x = cx - 22.0px, y = cy - 22.0px, w = 44.0px, h = 44.0px,
+                fill = "", stroke = if ok { G_CYAN } else { G_RED },
+                stroke_w = 3.0px,
+            });
+            parts.push(Img::Text {
+                x = cx + 28.0px, y = cy + 6.0px, size = 16.0px,
+                fill = if ok { G_CYAN } else { G_RED },
+                text = f"{c.id}",
+            });
+        }
+    }
+    parts
+}
+
+// §sfx -----------------------------------------------------------------
+fn sfxCoin() -> Voice {
+    music::synth(0.0, 0.0, 0s, 0.05s, 1.0, 0.12s, 0Hz)
+        .vol(0.4).freq(1320Hz).slide(0.4)
+}
+fn sfxJump() -> Voice {
+    music::synth(0.0, 0.0, 0s, 0.03s, 1.0, 0.1s, 0Hz)
+        .vol(0.35).freq(420Hz).slide(0.5)
+}
+fn sfxDie() -> Voice {
+    music::synth(0.0, 0.0, 0s, 0.2s, 1.0, 0.3s, 0Hz)
+        .vol(0.7).freq(220Hz).slide(-0.8).noise(0.4)
+}
+fn sfxWin() -> Voice {
+    music::synth(0.0, 0.0, 0s, 0.3s, 1.0, 0.4s, 0Hz)
+        .vol(0.6).jitter(0.1).freq(660Hz).slide(0.5)
+}
+
+// §the game ------------------------------------------------------------
+struct W {
+    px: px, py: px, vx: px/s, vy: px/s,
+    face: float, grounded: bool,
+    got: [str], score: int, deaths: int,
+    won: bool, t: s,
+}
+
+fn init() -> W {
+    let s = spawn_row()!;
+    W { px = s.x * 1.0px, py = s.y * 1.0px, vx = 0.0px/s, vy = 0.0px/s,
+        face = 1.0, grounded = false, got = [], score = 0, deaths = 0,
+        won = false, t = 0.0s }
+}
+
+// One-way platforms: you fall onto tops, never bump a side or a head —
+// which is exactly the world the solver models.
+fn tick(w: W, inp: Input, evs: [Ev]) -> W {
+    if inp.held.contains("r") { return init(); }
+    let dt = inp.dt;
+    let px = w.px; let py = w.py;
+    let vx = w.vx; let vy = w.vy;
+    let grounded = w.grounded;
+    let face = w.face;
+    let t = w.t + dt;
+
+    // run
+    if inp.held.contains("arrowleft") || inp.held.contains("a") {
+        vx = (vx - ACCEL * dt).max(-RUN); face = -1.0;
+    } else if inp.held.contains("arrowright") || inp.held.contains("d") {
+        vx = (vx + ACCEL * dt).min(RUN); face = 1.0;
+    } else {
+        vx = vx * (1.0 - 10.0Hz * dt);
+    }
+    // jump
+    if grounded && (inp.held.contains("arrowup") || inp.held.contains(" ") || inp.held.contains("w")) {
+        vy = -JUMP_V; grounded = false;
+        music::sfx(sfxJump());
+    }
+    vy = (vy + GRAV * dt).min(TERM);
+
+    // integrate + land on tops (only while falling)
+    let old_bottom = py + PLAYER_H;
+    px = (px + vx * dt).max(FX).min(FX + FW - PLAYER_W);
+    py = py + vy * dt;
+    grounded = false;
+    for s in solids() {
+        let top = s.y * 1.0px;
+        let sx = s.x * 1.0px; let sw = s.w * 1.0px;
+        if vy >= 0.0px/s && old_bottom <= top + 1.0px && px + PLAYER_W > sx && px < sx + sw && py + PLAYER_H >= top && py + PLAYER_H <= top + 24.0px {
+            py = top - PLAYER_H; vy = 0.0px/s; grounded = true;
+        }
+    }
+    if py > FY + FH + 200.0px {
+        // fell out of the world — respawn
+        music::sfx(sfxDie());
+        let s0 = spawn_row()!;
+        return W { px = s0.x * 1.0px, py = s0.y * 1.0px, vx = 0.0px/s,
+                   vy = 0.0px/s, face = 1.0, grounded = false,
+                   got = w.got, score = w.score, deaths = w.deaths + 1,
+                   won = w.won, t = t };
+    }
+
+    // hazards — goombas patrol their row's span, lava just burns
+    for h in level() {
+        if h.kind == "goomba" || h.kind == "lava" {
+            let hx = h.x * 1.0px; let hy = h.y * 1.0px;
+            let hw = h.w * 1.0px; let hh = h.h * 1.0px;
+            let ox = if h.kind == "goomba" {
+                let span = (hw - 24.0px).max(0.0px);
+                let ph = (t.to("s") * 60.0 / span.to("px").max(1.0)) mod 2.0;
+                hx + (if ph < 1.0 { ph } else { 2.0 - ph }) * span
+            } else { hx };
+            let ow = if h.kind == "goomba" { 24.0px } else { hw };
+            let mhh = if h.kind == "goomba" { 24.0px } else { hh };
+            if px + PLAYER_W > ox && px < ox + ow && py + PLAYER_H > hy && py < hy + mhh {
+                music::sfx(sfxDie());
+                let s0 = spawn_row()!;
+                return W { px = s0.x * 1.0px, py = s0.y * 1.0px, vx = 0.0px/s,
+                           vy = 0.0px/s, face = 1.0, grounded = false,
+                           got = w.got, score = w.score, deaths = w.deaths + 1,
+                           won = w.won, t = t };
+            }
+        }
+    }
+
+    // coins
+    let got = w.got;
+    let score = w.score;
+    for c in coins() {
+        if !got.contains(c.id) {
+            let dx = (px + PLAYER_W / 2.0 - (c.x + c.w / 2.0) * 1.0px).abs();
+            let dy = (py + PLAYER_H / 2.0 - (c.y + c.h / 2.0) * 1.0px).abs();
+            if dx < PICK * 1.0px + 8.0px && dy < PICK * 1.0px + 14.0px {
+                got.push(c.id); score += 1;
+                music::sfx(sfxCoin());
+            }
+        }
+    }
+
+    // the flag — only counts once every coin is pocketed
+    let won = w.won;
+    if !won && score == coins().len() {
+        let g = goal_row()!;
+        let gx = g.x * 1.0px; let gy = g.y * 1.0px;
+        let gw = g.w * 1.0px; let gh = g.h * 1.0px;
+        if px + PLAYER_W > gx && px < gx + gw && py + PLAYER_H > gy && py < gy + gh {
+            won = true; music::sfx(sfxWin());
+        }
+    }
+
+    W { px = px, py = py, vx = vx, vy = vy, face = face,
+        grounded = grounded, got = got, score = score, deaths = w.deaths,
+        won = won, t = t }
+}
+
+// §follow-cam ----------------------------------------------------------
+// The field is bigger than a screenful — `game::cam` centres the camera
+// on the player at ZOOM× for every world draw after it, clamped so the
+// view never leaves the field. `game::text` is screen-space, so the HUD
+// stays pinned; `cam_reset` would free field-space HUD geometry anyway.
+const ZOOM = 2.2;
+
+fn follow(px: px, py: px) {
+    // half the 1280×720 view, in world px, at this zoom
+    let hw = 640.0px / ZOOM;
+    let hh = 360.0px / ZOOM;
+    game::cam(
+        px.max(FX + hw).min(FX + FW - hw),
+        py.max(FY + hh).min(FY + FH - hh),
+        ZOOM,
+    );
+}
+
+fn draw(w: W) {
+    follow(w.px + PLAYER_W / 2.0, w.py + PLAYER_H / 2.0);
+    game::rect(FX, FY, FW, FH, "#0a0f1e", "#31506b", 3.0px);
+    game::tile("clouds", FX, FY, FW, FH * 0.4, 220.0px);
+    for r in level() {
+        let x = r.x * 1.0px; let y = r.y * 1.0px;
+        let wd = r.w * 1.0px; let ht = r.h * 1.0px;
+        if r.kind == "ground" {
+            game::rect(x, y, wd, ht, "#3b2f23", "#6b5335", 2.0px);
+        } else if r.kind == "plat" {
+            game::sprite("block", x, y, wd, ht, 0.0);
+        } else if r.kind == "coin" {
+            if !w.got.contains(r.id) {
+                game::sprite("coin", x, y, wd, ht, 0.0);
+            }
+        } else if r.kind == "lava" {
+            game::rect(x, y, wd, ht, "#e03e1a", "#ff8c42", 2.0px);
+        } else if r.kind == "goomba" {
+            let span = (wd - 24.0px).max(0.0px);
+            let ph = (w.t.to("s") * 60.0 / span.to("px").max(1.0)) mod 2.0;
+            let gx = x + (if ph < 1.0 { ph } else { 2.0 - ph }) * span;
+            game::sprite("goomba", gx, y, 24.0px, 24.0px, 0.0);
+        } else if r.kind == "goal" {
+            game::sprite("flag", x, y, wd.max(48.0px), ht.max(64.0px), 0.0);
+        }
+    }
+    game::sprite("mimo", w.px - 6.0px, w.py - 4.0px, 36.0px, 44.0px, w.face * 6deg);
+    game::cam_reset();
+    let sc = w.score; let dn = w.deaths;
+    game::text(60.0px, 62.0px, f"◉ {sc}/{coins().len()}", 22.0px, G_GOLD);
+    game::text(860.0px, 62.0px, f"✗ {dn}", 22.0px, G_DIM);
+    game::ctext(520.0px, FY + FH + 26.0px,
+        "← → run   ·   ↑ jump   ·   r restart   ·   the level is the table — edit it",
+        20.0px, G_DIM);
+    if w.won {
+        game::ctext(520.0px, 380.0px, f"★ you cleared it — {sc}/{coins().len()} ★",
+            42.0px, G_GOLD);
+    }
+}
+
+// §asset panels ---------------------------------------------------------
+// Each `live_<name>` is the vector base of `game::sprite("<name>")` —
+// and the [[#]] sprite cell of the same name frames it on the canvas,
+// so ink drawn there bakes into every stamp. A little sprite sheet.
+fn live_mimo() -> [Img] {
+    [
+        Img::Rect { x = 60.0px, y = 905.0px, w = 24.0px, h = 10.0px,
+                    fill = "#d43a2f", stroke = "", stroke_w = 0.0px },
+        Img::Rect { x = 62.0px, y = 913.0px, w = 20.0px, h = 14.0px,
+                    fill = "#f2c19b", stroke = "", stroke_w = 0.0px },
+        Img::Rect { x = 60.0px, y = 927.0px, w = 24.0px, h = 16.0px,
+                    fill = "#2f5fd4", stroke = "", stroke_w = 0.0px },
+    ]
+}
+fn live_coin() -> [Img] {
+    [
+        Img::Ellipse { x = 130.0px, y = 905.0px, w = 28.0px, h = 28.0px,
+                       fill = G_GOLD, stroke = "#a07c12", stroke_w = 2.0px },
+        Img::Ellipse { x = 137.0px, y = 912.0px, w = 14.0px, h = 14.0px,
+                       fill = "#fde047", stroke = "", stroke_w = 0.0px },
+    ]
+}
+fn live_block() -> [Img] {
+    [
+        Img::Rect { x = 190.0px, y = 905.0px, w = 40.0px, h = 24.0px,
+                    fill = "#7a5a34", stroke = "#54390f", stroke_w = 2.0px },
+        Img::Rect { x = 194.0px, y = 909.0px, w = 32.0px, h = 6.0px,
+                    fill = "#a87f4a", stroke = "", stroke_w = 0.0px },
+    ]
+}
+fn live_goomba() -> [Img] {
+    [
+        Img::Ellipse { x = 260.0px, y = 905.0px, w = 30.0px, h = 24.0px,
+                       fill = "#8a4b2a", stroke = "#5c3018", stroke_w = 2.0px },
+        Img::Ellipse { x = 266.0px, y = 912.0px, w = 5.0px, h = 6.0px,
+                       fill = G_WHITE, stroke = "", stroke_w = 0.0px },
+        Img::Ellipse { x = 279.0px, y = 912.0px, w = 5.0px, h = 6.0px,
+                       fill = G_WHITE, stroke = "", stroke_w = 0.0px },
+    ]
+}
+fn live_flag() -> [Img] {
+    [
+        Img::Line { x = 340.0px, y = 896.0px, x2 = 340.0px, y2 = 960.0px,
+                    stroke = G_DIM, stroke_w = 3.0px },
+        Img::Path { points = [[340.0px, 898.0px], [374.0px, 908.0px], [340.0px, 918.0px]],
+                    closed = true, fill = G_CYAN, stroke = "", stroke_w = 0.0px },
+    ]
+}
+fn live_clouds() -> [Img] {
+    [
+        Img::Ellipse { x = 420.0px, y = 900.0px, w = 46.0px, h = 20.0px,
+                       fill = "#22314d", stroke = "", stroke_w = 0.0px },
+        Img::Ellipse { x = 432.0px, y = 890.0px, w = 26.0px, h = 20.0px,
+                       fill = "#22314d", stroke = "", stroke_w = 0.0px },
+    ]
+}
+
+check coins().len() == 100
+check solids().len() >= 10
+check beatable()
+
+game_loop(init(), tick, draw);
+
+
+// img — the scene vocabulary. A page draws *values*: `game::draw`,
+// `game::bounds`, the `live_*` fns, and the debugger's hover-draw all
+// walk a returned tree into vector prims by reading each node's
+// variant name (`Img::Rect` is the "rect" kind) and fields — so this
+// enum is the checked spelling of that contract: a typo'd field or
+// variant name is a compile error here, not a silent no-op. Include
+// it with `use "img";`.
+//
+// `stroke = ""` means none. `Group`'s `at` translates its children
+// (and is the only `at`-carrying node). The enum is the typed path,
+// not the only one — a `~{kind = "…", …}` dict or your own
+// identically-named struct walks the same way.
+//
+// Every geometric field is `px` — the renderer works in pixel space,
+// so passing a quantity (or a bare literal suffixed `px`) is checked
+// rather than silently rescaled. A `float` helper can put the unit
+// on at the boundary with `v * 1.0px`.
+enum Img {
+    Rect { x: px, y: px, w: px, h: px, fill: str, stroke: str, stroke_w: px },
+    Ellipse { x: px, y: px, w: px, h: px, fill: str, stroke: str, stroke_w: px },
+    Line { x: px, y: px, x2: px, y2: px, stroke: str, stroke_w: px },
+    Path { points: [[px]], closed: bool, fill: str, stroke: str, stroke_w: px },
+    Text { x: px, y: px, text: str, size: px, fill: str },
+    Prose { x: px, y: px, w: px, text: str },
+    Group { at: [px], children: [Img] },
+}
+
+/// The debugger's draw pact: hover a value and the inspector calls its
+/// `draw` for the scene — `impl Draw for W` makes that checked.
+pact Draw {
+    fn draw(self) -> [Img];
+}
+
+
+// game-kit — the shared scaffold for `use game` pages. Include it with
+// `use "game-kit";` (the host splices this page's source in, like
+// `use "img";`).
+//
+// Two things every game page kept repeating:
+//   · the frame loop at the bottom — `game_loop`/`time_loop` say it once
+//   · the palette — every page spelled the same hexes out by hand
+
+// ---- the loop -------------------------------------------------------
+//
+// A game is three pieces: `init` makes the starting world, `tick`
+// steps it on the frame's input and events, `draw` paints it. The
+// loop that turns those into a running game is always the same — one
+// `yield_frame` per pass until the host quits — so say it once and
+// hand the pieces in: `game_loop(init(), tick, draw)`, or skip the
+// init fn and pass the literal — `game_loop(W { t = 0.0 }, tick, draw)`.
+// `W` is the game's own state type; generic, so the kit doesn't pin it.
+// Note `tick` *gets* the frame's events — `game::events()` drains its
+// queue on read, so take `evs` as a param rather than re-reading it.
+fn game_loop<W>(world: W, tick: (W, Input, [Ev]) -> W, draw: (W) -> ()) {
+    let w = world;
+    while !game::quitting() {
+        w = tick(w, game::input(), game::events());
+        draw(w);
+        game::yield_frame();
+    }
+}
+
+// The animation flavor for pages that only need the frame's `dt`.
+// NOT `game_loop` underneath — `game::events()` drains its queue when
+// read, so fetching it here would starve a `tick` that reads events
+// itself. Input snapshots are safe to double-read; events are not.
+fn time_loop<W>(world: W, tick: (W, s) -> W, draw: (W) -> ()) {
+    let w = world;
+    while !game::quitting() {
+        w = tick(w, game::input().dt);
+        draw(w);
+        game::yield_frame();
+    }
+}
+
+// ---- geometry -------------------------------------------------------
+//
+// `Rect<T>` is a plain positioned box, generic over the unit: `Rect<px>`
+// is a screen-space region (hit tests, layout), but `Rect<inch>` in a
+// carpentry spec or `Rect<float>` on a dimless field work the same way —
+// the methods only need `T + T` and `T <= T`, which unify when every
+// side is the same param. (Distinct units in one rect — `Rect{ x: px,
+// w: inch }` — are a type error: the methods would be unsound.)
+struct Rect<T> {
+    x: T,
+    y: T,
+    w: T,
+    h: T,
+}
+impl Rect {
+    fn right(self) -> T { self.x + self.w }
+    fn bottom(self) -> T { self.y + self.h }
+    fn cx(self) -> float { (self.x + self.x + self.w) / 2.0 }
+    fn cy(self) -> float { (self.y + self.y + self.h) / 2.0 }
+    fn contains(self, x: T, y: T) -> bool {
+        x >= self.x && x <= self.right() && y >= self.y && y <= self.bottom()
+    }
+    fn inflate(self, d: T) -> Rect<T> {
+        Rect { x = self.x - d, y = self.y - d,
+            w = self.w + d + d, h = self.h + d + d }
+    }
+    fn move_to(self, x: T, y: T) -> Rect<T> {
+        Rect { x = x, y = y, w = self.w, h = self.h }
+    }
+    fn intersects(self, r: Rect<T>) -> bool {
+        self.x < r.right() && r.x < self.right() && self.y < r.bottom() && r.y < self.bottom()
+    }
+}
+
+// ---- the palette ----------------------------------------------------
+// The slate ramp for surfaces and text (deep → ink), then the accent
+// hues. `G_` keeps them out of the way of a game's own COLOR_* roles:
+// name the role in your page, point it at the shared hue —
+//     const COLOR_(LEFT, RIGHT) = (G_CYAN, G_PINK);
+// A soft halo is the hue plus an alpha tail — `G_CYAN + "2a"`.
+const G_(DEEP, BG, PANEL) = ("#0b1020", "#0f172a", "#1e293b");
+const G_(EDGE, MID) = ("#334155", "#475569");
+const G_(FAINT, DIM, INK) = ("#64748b", "#94a3b8", "#e2e8f0");
+const G_WHITE = "#ffffff";
+const G_(CYAN, SKY, BLUE) = ("#22d3ee", "#38bdf8", "#60a5fa");
+const G_(VIOLET, PINK) = ("#a78bfa", "#f472b6");
+const G_(RED, ROSE) = ("#f43f5e", "#f87171");
+const G_(ORANGE, AMBER) = ("#f0a03c", "#fbbf24");
+const G_(GOLD, YELLOW) = ("#facc15", "#fde047");
+const G_GREEN = "#4ade80";
