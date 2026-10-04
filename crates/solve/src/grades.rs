@@ -30,10 +30,17 @@
 //! their effects to the enclosing scope (a `let f = || net_get(); ...` may call it anywhere,
 //! or never -- v1 treats the write as "could do anything it captured", not as a call).
 //!
-//! What the pass deliberately does not do: it issues no errors (all findings are warnings or
-//! Resolutions surface), it does not grade types (modes live on bindings and signatures --
-//! `int` is ungraded), and it does not distinguish move from use -- Stage 1's `consuming`
-//! semantics and Stage 3's certificate checks read these maps; this pass only fills them.
+//! Stage 1 (`consuming`/`must_use`) rides the same walk. A native may mark a param
+//! `#[consumes]` (or `#[consumes(self)]` on a method): handing a binding to that slot kills
+//! its dec -- resolving it afterwards is a compile error, the one finding this pass fails
+//! the solve for. Consumed state unions across branches (a maybe-consumed binding is gone),
+//! a real re-store reborns it, and consuming is refused for fields, globals, captures,
+//! and decs bound outside the enclosing loop. `#[must_use]` on a native warns when a bare
+//! call statement discards its result.
+//!
+//! What the pass deliberately does not do beyond that: it does not grade types (modes live
+//! on bindings and signatures -- `int` is ungraded), and Stage 3's certificate checks read
+//! the maps this pass fills without adding their own.
 
 use std::collections::{HashMap, HashSet};
 
@@ -49,7 +56,10 @@ use shared::{Fx, Located, Location};
 use crate::{
     Solver,
     components::{DecId, DecKind},
-    errors::{DeadStore, UnusedBinding, UnusedParam},
+    errors::{
+        ConsumeForbidden, DeadStore, MustUseResult, UnusedBinding, UnusedParam,
+        UseAfterConsume,
+    },
 };
 
 /// How many sites read or write a declaration. Saturates at `Many` -- the lint suite and any
@@ -117,6 +127,10 @@ struct Flow {
     /// Write sites created inside this path segment. Killing one is unconditional -- it
     /// can't exist on a sibling path -- so it reports straight away.
     born: HashSet<Location>,
+    /// dec -> the `(site, callee)` it was consumed at on this path (`#[consumes]` params).
+    /// Unioned at merges: a binding *maybe* consumed on any surviving path is treated as
+    /// gone from the join on -- matching Rust's move-out-of-one-branch behavior.
+    consumed: HashMap<DecId, (Location, String)>,
     diverged: bool,
 }
 
@@ -173,11 +187,18 @@ impl Flow {
         // post-merge the flow is again a single path, so every surviving pending span is
         // fair game for an eager dead verdict
         let born: HashSet<Location> = pending.values().flatten().copied().collect();
+        let mut consumed: HashMap<DecId, (Location, String)> = HashMap::new();
+        for f in &arms {
+            for (dec, at) in &f.consumed {
+                consumed.entry(*dec).or_insert_with(|| at.clone());
+            }
+        }
         Flow {
             pending,
             killed,
             read_spans,
             born,
+            consumed,
             diverged: arms.is_empty(),
         }
     }
@@ -206,6 +227,14 @@ struct Pass<'a> {
     /// closure may run zero or many times, so its reads/writes can't decide whether an
     /// outer write is dead.
     closure_floors: Vec<usize>,
+    /// scope_decs.len() at each enclosing loop's entry. Consuming a dec bound at or
+    /// outside the floor inside the loop body would poison the next iteration -- refused.
+    loop_floors: Vec<usize>,
+    /// Decs whose use-after-consume already reported (one error per dec, not per read).
+    consume_reported: HashSet<DecId>,
+    /// Fatal findings (`consuming` violations). Unlike the lints these stop the solve --
+    /// collected so sibling files still fill their effects and warnings first.
+    errors: Vec<Report>,
 
     flow: Flow,
     /// Flows that exited the enclosing fn early (`return`, `raise`, `let-else`). Their
@@ -233,8 +262,10 @@ struct Pass<'a> {
 }
 
 /// Fill `solver.dec_uses`, `solver.fn_effects`, `solver.script_effects`, `solver.warnings`.
-/// Runs after `dims::check` at the tail of `solve_all`; never fails.
-pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) {
+/// Runs after `dims::check` at the tail of `solve_all`. Lints only warn, but a
+/// `#[consumes]` violation is a real refusal: `Err` fails the solve like any other pass.
+pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> crate::errors::Result<()> {
+    let mut errors: Vec<Report> = Vec::new();
     // call edges and per-caller effects gather across all asts before the fixpoint -- a fn in
     // file A can call a fn in file B
     let mut edges: HashMap<DecId, HashSet<DecId>> = HashMap::new();
@@ -261,6 +292,9 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) {
             warnings: Vec::new(),
             scope_decs: Vec::new(),
             closure_floors: Vec::new(),
+            loop_floors: Vec::new(),
+            consume_reported: HashSet::new(),
+            errors: Vec::new(),
             flow: Flow::default(),
             retired: Vec::new(),
             breaks: Vec::new(),
@@ -300,7 +334,13 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) {
             }
         }
         // `pass` borrows `&*solver`; pull its results out before writing solver fields
-        let Pass { uses, warnings, .. } = pass;
+        let Pass {
+            uses,
+            warnings,
+            errors: errs,
+            ..
+        } = pass;
+        errors.extend(errs);
         for (dec, info) in uses {
             let entry = solver.dec_uses.entry(dec).or_default();
             for _ in 0..info.reads as usize {
@@ -348,6 +388,11 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) {
         }
         solver.script_effects.insert(name, file_fx);
     }
+    // consume violations ride every other phase's convention: first error out
+    if let Some(err) = errors.into_iter().next() {
+        return Err(err);
+    }
+    Ok(())
 }
 
 impl<'a> Pass<'a> {
@@ -370,10 +415,27 @@ impl<'a> Pass<'a> {
         }
     }
 
-    /// `dec` was read (by name, or through a resolved access leaf). Its pending writes
-    /// move to `read_spans` -- proof of life that vetoes a dead verdict at later merges.
-    fn read(&mut self, dec: DecId) {
+    /// `dec` was read (by name, or through a resolved access leaf) at `at`. Its pending
+    /// writes move to `read_spans` -- proof of life that vetoes a dead verdict at later
+    /// merges. Reading a dec a `#[consumes]` call already took is a solve error.
+    fn read(&mut self, dec: DecId, at: Location) {
         self.uses.entry(dec).or_default().reads.tick();
+        if !self.flow.diverged
+            && let Some((consumed_at, by)) = self.flow.consumed.get(&dec)
+            && self.consume_reported.insert(dec)
+        {
+            let d = &self.solver.decs[dec];
+            self.errors.push(
+                UseAfterConsume {
+                    src: self.solver.src(at),
+                    at: at.into(),
+                    consumed_at: (*consumed_at).into(),
+                    name: d.name.clone(),
+                    by: by.clone(),
+                }
+                .into(),
+            );
+        }
         if self.outside_closure(dec) || self.flow.diverged {
             return;
         }
@@ -387,6 +449,11 @@ impl<'a> Pass<'a> {
     /// only `Local` decs are ever tracked -- globals/items/constants are ω or frozen anyway).
     fn write(&mut self, dec: DecId, at: Location, pend: bool) {
         self.uses.entry(dec).or_default().writes.tick();
+        if pend {
+            // a real re-store (`let x =`, `x =`) reborns the binding -- the consumed
+            // state it carried describes the old value, not the new one
+            self.flow.consumed.remove(&dec);
+        }
         let local = matches!(self.solver.decs[dec].kind, DecKind::Local);
         if !pend || !local || self.flow.diverged || self.outside_closure(dec) {
             return;
@@ -439,10 +506,12 @@ impl<'a> Pass<'a> {
             self.flow.pending.remove(&dec);
             self.flow.killed.remove(&dec);
             self.flow.read_spans.remove(&dec);
+            self.flow.consumed.remove(&dec);
             for flow in &mut self.retired {
                 flow.pending.remove(&dec);
                 flow.killed.remove(&dec);
                 flow.read_spans.remove(&dec);
+                flow.consumed.remove(&dec);
             }
         }
     }
@@ -532,6 +601,73 @@ impl<'a> Pass<'a> {
                 .into(),
             );
         }
+    }
+
+    /// A `#[consumes]` slot took `arg`. Kills the binding's dec: any later resolve of it
+    /// errors in `read`. Only a root local binding can be consumed -- passing `s.ch`
+    /// would leave `s` half-alive, globals are shared with the entry frame, captures and
+    /// loop-outer decs can't die somewhere they'll be read again.
+    fn consume_arg(&mut self, arg: &'a Expr, by: &str) {
+        let Some((root, path)) = crate::root_and_path(arg) else {
+            // a computed value has no binding to kill -- consumed for free
+            return;
+        };
+        let Some(dec) = self.dec_of(root) else {
+            return;
+        };
+        let name = self.solver.decs[dec].name.clone();
+        let fail = |pass: &mut Self, why: &str| {
+            if pass.consume_reported.insert(dec) {
+                pass.errors.push(
+                    ConsumeForbidden {
+                        src: pass.solver.src(arg.location()),
+                        at: arg.location().into(),
+                        name: name.clone(),
+                        why: why.to_string(),
+                    }
+                    .into(),
+                );
+            }
+        };
+        if !path.is_empty() {
+            fail(
+                self,
+                "only the binding itself can be consumed -- not a field or element of it",
+            );
+            return;
+        }
+        match self.solver.decs[dec].kind {
+            DecKind::Local | DecKind::LoopVar => {}
+            DecKind::Global => {
+                fail(
+                    self,
+                    "globals live in the shared entry frame -- they can't be consumed",
+                );
+                return;
+            }
+            _ => {
+                fail(self, "only a local binding can be consumed");
+                return;
+            }
+        }
+        if self.outside_closure(dec) {
+            fail(
+                self,
+                "it's bound outside this closure -- the closure may run more than once",
+            );
+            return;
+        }
+        if let Some(&floor) = self.loop_floors.last()
+            && self.dec_scope.get(&dec).copied().unwrap_or(0) <= floor
+        {
+            fail(
+                self,
+                "it's bound outside this loop -- consuming it would poison later iterations",
+            );
+            return;
+        }
+        self.uses.entry(dec).or_default().reads.tick();
+        self.flow.consumed.insert(dec, (arg.location(), by.to_string()));
     }
 
     // ---- calls and effects
@@ -626,7 +762,7 @@ impl<'a> Pass<'a> {
                         if !matches!(a.op, AssignmentOp::Identity)
                             && let Some(dec) = dec
                         {
-                            self.read(dec);
+                            self.read(dec, ident.location);
                         }
                         self.expr(&a.right);
                         if let Some(dec) = dec {
@@ -646,7 +782,25 @@ impl<'a> Pass<'a> {
                     }
                 }
             }
-            StmtKind::Expr(e) => self.expr(e),
+            StmtKind::Expr(e) => {
+                // a `#[must_use]` native's result dropped on the floor warns
+                // (`let _x = f()` still counts as a use -- Rust agrees)
+                if let ExprKind::Call(c) = e.kind()
+                    && let Some(dec) = self.callee_dec(&c.left)
+                    && let Some(binding) = self.solver.dec_to_native.get(&dec)
+                    && binding.sig.must_use
+                {
+                    self.warnings.push(
+                        MustUseResult {
+                            src: self.solver.src(e.location()),
+                            at: e.location().into(),
+                            name: self.solver.decs[dec].name.clone(),
+                        }
+                        .into(),
+                    );
+                }
+                self.expr(e);
+            }
             StmtKind::Item(item) => self.item(item),
             StmtKind::Module(_) => {}
         }
@@ -742,7 +896,7 @@ impl<'a> Pass<'a> {
         match e.kind() {
             ExprKind::Ident(ident) => {
                 if let Some(dec) = self.dec_of(ident) {
-                    self.read(dec);
+                    self.read(dec, ident.location);
                 }
             }
             ExprKind::Literal(l) => self.literal(l),
@@ -821,17 +975,27 @@ impl<'a> Pass<'a> {
             }
             ExprKind::Call(c) => {
                 self.expr(&c.left);
-                for arg in &c.arguments {
+                let callee = self.callee_dec(&c.left);
+                let binding = callee.and_then(|d| self.solver.dec_to_native.get(&d));
+                let callee_name = callee
+                    .map(|d| self.solver.decs[d].name.clone())
+                    .unwrap_or_default();
+                // arg eval is left-to-right: a consuming slot kills the binding before
+                // any later arg's walk can read it (`f(close_me(x), x)` errors)
+                for (i, arg) in c.arguments.iter().enumerate() {
                     self.expr(&arg.value);
+                    if binding.is_some_and(|b| b.sig.consumes.get(i).copied().unwrap_or(false)) {
+                        self.consume_arg(&arg.value, &callee_name);
+                    }
+                }
+                if binding.is_some_and(|b| b.sig.consumes_recv)
+                    && let ExprKind::Access(Access::Dot { left, .. }) = c.left.kind()
+                {
+                    self.consume_arg(left, &callee_name);
                 }
                 // `xs.push(..)` mutates its receiver -- the binding was both read and written
                 if let ExprKind::Access(Access::Dot { left, .. }) = c.left.kind()
-                    && let Some(dec) = self.callee_dec(&c.left)
-                    && self
-                        .solver
-                        .dec_to_native
-                        .get(&dec)
-                        .is_some_and(|b| b.mutates_recv)
+                    && binding.is_some_and(|b| b.mutates_recv)
                     && let Some((root, _)) = crate::root_and_path(left)
                     && let Some(root_dec) = self.dec_of(root)
                 {
@@ -886,10 +1050,12 @@ impl<'a> Pass<'a> {
                 // the body may run zero times: its kills need the merge's arbitration
                 self.flow.born.clear();
                 self.breaks.push(Vec::new());
+                self.loop_floors.push(self.scope_decs.len());
                 self.push_scope();
                 self.bind(&f.binding, Site::Binding, false);
                 self.expr(&f.body);
                 self.pop_scope();
+                self.loop_floors.pop();
                 let body_end = std::mem::take(&mut self.flow);
                 // a `for` may run zero times: the pre-loop state exits too
                 self.end_loop(Some(pre), body_end);
@@ -899,18 +1065,22 @@ impl<'a> Pass<'a> {
                 let pre = self.flow.clone();
                 self.flow.born.clear();
                 self.breaks.push(Vec::new());
+                self.loop_floors.push(self.scope_decs.len());
                 self.push_scope();
                 if let Some(b) = &w.binding {
                     self.bind(b, Site::Binding, false);
                 }
                 self.expr(&w.body);
                 self.pop_scope();
+                self.loop_floors.pop();
                 let body_end = std::mem::take(&mut self.flow);
                 self.end_loop(Some(pre), body_end);
             }
             ExprKind::Loop(l) => {
                 self.breaks.push(Vec::new());
+                self.loop_floors.push(self.scope_decs.len());
                 self.expr(&l.body);
+                self.loop_floors.pop();
                 let body_end = self.flow.clone();
                 let exits = self.breaks.pop().unwrap_or_default();
                 // `loop` with no `break` never falls through

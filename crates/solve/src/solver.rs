@@ -343,7 +343,7 @@ impl Solver {
         // last, once every node has its type: do the units add up?
         crate::dims::check(self, &asts)?;
         // and, with decs resolved everywhere the walk reaches: the usage/effect grades
-        crate::grades::check(self, &asts);
+        crate::grades::check(self, &asts)?;
         Ok(())
     }
 
@@ -878,6 +878,8 @@ impl Solver {
         validate: Option<api::LitValidator>,
         src: Option<api::NativeSrc>,
         effects: Option<shared::Fx>,
+        consumes: Vec<bool>,
+        must_use: bool,
     ) -> DecId {
         let sig = NativeFnSig {
             params,
@@ -886,6 +888,9 @@ impl Solver {
             return_dim,
             recv: None,
             effects,
+            consumes,
+            consumes_recv: false,
+            must_use,
         };
         // first instantiation fills the dec's vid, later ident resolutions detect that this is
         // a native and re-instantiate so each call gets its own type vars.
@@ -1254,6 +1259,8 @@ impl Solver {
                         f.validate,
                         f.src,
                         f.effects,
+                        f.consumes.clone(),
+                        f.must_use,
                     );
                 }
                 // module-nested native fn
@@ -1266,6 +1273,9 @@ impl Solver {
                         return_dim: f.return_dim,
                         recv: None,
                         effects: f.effects,
+                        consumes: f.consumes.clone(),
+                        consumes_recv: false,
+                        must_use: f.must_use,
                     };
                     let ident = Ident::synthetic(f.name.clone());
                     let ty = self.instantiate_native(&sig, None).expect("no recv");
@@ -1314,6 +1324,9 @@ impl Solver {
                         return_dim: m.return_dim,
                         recv: Some(m.recv_ty.clone()),
                         effects: m.effects,
+                        consumes: m.consumes.clone(),
+                        consumes_recv: m.consumes_recv,
+                        must_use: m.must_use,
                     };
                     let ident = Ident::synthetic(m.name.clone());
                     let ty = self.instantiate_native(&sig, None).expect("no recv check");
@@ -2588,6 +2601,13 @@ pub(crate) struct NativeFnSig {
     /// The native's declared effect footprint (`#[effects(...)]`), read by the grades
     /// pass. `None` = unannotated: inference treats the call as `Fx::unknown()`.
     pub effects: Option<shared::Fx>,
+    /// Parallel to `params` (`#[consumes]`): passing a binding to a true slot
+    /// consumes it -- the grades pass kills the `DecId` at the call site.
+    pub consumes: Vec<bool>,
+    /// `#[consumes(self)]` on a method -- the receiver binding is consumed.
+    pub consumes_recv: bool,
+    /// `#[must_use]` -- the grades pass warns on a discarded result.
+    pub must_use: bool,
 }
 
 pub(crate) struct NativeBinding {

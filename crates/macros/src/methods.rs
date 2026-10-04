@@ -35,12 +35,29 @@ pub fn expand_impl(mut block: ItemImpl) -> Result<TokenStream2, syn::Error> {
         match item {
             ImplItem::Fn(method) => {
                 let (mut shim, muts, add) = method_shim(&self_ident, method)?;
+                // `#[consumes]` names resolve in the method's declared order -- `self`
+                // first, the typed params after it -- which matches the shim's param
+                // order (its receiver lands at index 0 either way)
+                let declared: Vec<String> = method
+                    .sig
+                    .inputs
+                    .iter()
+                    .map(|arg| match arg {
+                        FnArg::Receiver(_) => "self".to_string(),
+                        FnArg::Typed(t) => match &*t.pat {
+                            Pat::Ident(p) => p.ident.to_string(),
+                            _ => "_".to_string(),
+                        },
+                    })
+                    .collect();
+                let grades = crate::grades(&mut method.attrs, &declared)?;
                 // the shim is the registered fn, so it submits the method's meta -- inside its
                 // body, since `submit!` expands to an unnamed const (see `meta_submission`)
                 let meta = meta_submission(
                     &shim.sig.ident,
                     &param_names(&shim.sig),
                     &collect_doc(&method.attrs),
+                    &grades,
                 );
                 if let Some(meta) = meta {
                     shim.block.stmts.insert(0, meta);

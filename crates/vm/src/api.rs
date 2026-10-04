@@ -59,6 +59,11 @@ pub struct NativeMeta {
     pub path: &'static str,
     pub parameters: &'static [&'static str],
     pub doc: &'static str,
+    /// Indices into `parameters` (receiver counts) named by `#[consumes(...)]` --
+    /// the grades pass kills the binding passed to one of these slots.
+    pub consumes: &'static [usize],
+    /// `#[must_use]` on the item -- discarding the return warns.
+    pub must_use: bool,
 }
 
 inventory::collect!(NativeMeta);
@@ -185,16 +190,20 @@ static EFFECTS_BY_PATH: std::sync::LazyLock<std::collections::HashMap<&'static s
 /// and pair `arity` slots with their declared names, dropping the `skip` leading ones the arity
 /// doesn't cover (a method's receiver). Missing or mismatched submissions degrade to `arg{i}`
 /// names and an empty doc (see [`NativeMeta`]).
-fn meta_for(path: &str, skip: usize, arity: usize) -> (String, Vec<String>) {
-    // `#[native]` submits `module::name` from inside the fn body, but a
-    // method on `impl T` registers under `type_name`'s `module::T::name`
-    // -- on a miss, retry with the penultimate (impl-name) segment out.
-    let meta = META_BY_PATH.get(path).or_else(|| {
+/// `#[native]` submits `module::name` from inside the fn body, but a method on
+/// `impl T` registers under `type_name`'s `module::T::name` -- on a miss, retry
+/// with the penultimate (impl-name) segment out.
+fn meta_entry(path: &str) -> Option<&'static NativeMeta> {
+    META_BY_PATH.get(path).copied().or_else(|| {
         let (rest, last) = path.rsplit_once("::")?;
         let (head, _) = rest.rsplit_once("::")?;
         let stripped = format!("{head}::{last}");
-        META_BY_PATH.get(stripped.as_str())
-    });
+        META_BY_PATH.get(stripped.as_str()).copied()
+    })
+}
+
+fn meta_for(path: &str, skip: usize, arity: usize) -> (String, Vec<String>) {
+    let meta = meta_entry(path);
     let names = meta
         .and_then(|m| m.parameters.get(skip..))
         .filter(|names| names.len() == arity);
@@ -224,6 +233,30 @@ fn validator_for(path: &str) -> Option<api::LitValidator> {
 /// means unannotated: effect inference reads the call as `Fx::unknown()`.
 fn effects_for(path: &str) -> Option<Fx> {
     EFFECTS_BY_PATH.get(path).copied()
+}
+
+/// `(consumes, consumes_recv, must_use)` for `path`: the `consumes` indices of
+/// [`NativeMeta`] re-based by `skip` onto the entry's `parameters` (indices
+/// under `skip` -- a method's receiver at 0 -- come back as `consumes_recv`).
+/// Missing meta degrades to all-false -- never a consume check that was never
+/// declared.
+fn grades_for(path: &str, skip: usize, arity: usize) -> (Vec<bool>, bool, bool) {
+    let Some(meta) = meta_entry(path) else {
+        return (vec![false; arity], false, false);
+    };
+    let mut consumes = vec![false; arity];
+    let mut consumes_recv = false;
+    for &i in meta.consumes {
+        match i.checked_sub(skip) {
+            Some(j) => {
+                if let Some(slot) = consumes.get_mut(j) {
+                    *slot = true;
+                }
+            }
+            None => consumes_recv = true,
+        }
+    }
+    (consumes, consumes_recv, meta.must_use)
 }
 
 impl<'a, 'gc> Api<'a, 'gc> {
@@ -451,6 +484,9 @@ impl<'a, 'gc> Api<'a, 'gc> {
             mutates_recv: false,
             // described fns have no Rust path to join effects metadata on -- unaudited
             effects: None,
+            consumes: Vec::new(),
+            consumes_recv: false,
+            must_use: false,
             doc: String::new(),
             validate: None,
             src: None,
@@ -559,6 +595,8 @@ impl<'b, 'a, 'gc> ModuleApi<'b, 'a, 'gc> {
             return_dim: None,
             // described fns have no Rust path to join effects metadata on -- unaudited
             effects: None,
+            consumes: Vec::new(),
+            must_use: false,
             doc: String::new(),
             validate: None,
             src: None,
@@ -621,6 +659,11 @@ macro_rules! impl_into_fn {
                     parameters.len(),
                 );
                 let src = src_for(std::any::type_name_of_val(&self));
+                let (consumes, _, must_use) = grades_for(
+                    std::any::type_name_of_val(&self),
+                    0,
+                    parameters.len(),
+                );
                 let native = make_native(&api.ctx, move |ctx, args| {
                     let mut it = args.iter().copied();
                     $(let $arg = <$arg as MimasType<'gc>>::from_value(
@@ -638,6 +681,8 @@ macro_rules! impl_into_fn {
                     return_ty,
                     return_dim,
                     effects: effects_for(std::any::type_name_of_val(&self)),
+                    consumes,
+                    must_use,
                     doc,
                     validate: validator_for(std::any::type_name_of_val(&self)),
                     src,
@@ -660,6 +705,11 @@ macro_rules! impl_into_fn {
                     parameters.len(),
                 );
                 let src = src_for(std::any::type_name_of_val(&self));
+                let (consumes, consumes_recv, must_use) = grades_for(
+                    std::any::type_name_of_val(&self),
+                    0,
+                    parameters.len(),
+                );
                 let native = make_native(&api.ctx, move |ctx, args| {
                     let mut it = args.iter().copied();
                     $(let $arg = <$arg as MimasType<'gc>>::from_value(
@@ -679,6 +729,9 @@ macro_rules! impl_into_fn {
                     takes_self: false,
                     mutates_recv: false,
                     effects: effects_for(std::any::type_name_of_val(&self)),
+                    consumes,
+                    consumes_recv,
+                    must_use,
                     doc,
                     validate: validator_for(std::any::type_name_of_val(&self)),
                     src,
@@ -724,6 +777,11 @@ macro_rules! impl_into_method {
                     1,
                     parameters.len(),
                 );
+                let (consumes, consumes_recv, must_use) = grades_for(
+                    std::any::type_name_of_val(&self),
+                    1,
+                    parameters.len(),
+                );
                 let native = make_native(&api.ctx, move |ctx, args| {
                     let mut it = args.iter().copied();
                     let recv = <Recv as MimasType<'gc>>::from_value(
@@ -747,6 +805,9 @@ macro_rules! impl_into_method {
                     takes_self: true,
                     mutates_recv: mutates_recv(std::any::type_name_of_val(&self)),
                     effects: effects_for(std::any::type_name_of_val(&self)),
+                    consumes,
+                    consumes_recv,
+                    must_use,
                     doc,
                     validate: validator_for(std::any::type_name_of_val(&self)),
                     src: src_for(std::any::type_name_of_val(&self)),

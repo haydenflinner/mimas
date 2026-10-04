@@ -32,6 +32,13 @@ pub struct ApiFunction<C> {
     /// joined like `doc`. `None` = nobody said — effect inference treats the call as
     /// `Fx::unknown()` so gating peer code fails closed.
     pub effects: Option<Fx>,
+    /// Parallel to `parameters` — a `#[consumes(name)]` slot *consumes* the binding
+    /// passed to it: the grades pass kills that `DecId` and every later resolve
+    /// errors (`x was consumed by f at …`). Only root bindings can be consumed
+    /// (fields/elements, globals, and closure-captured or loop-outer decs refuse).
+    pub consumes: Vec<bool>,
+    /// `#[must_use]` — discarding the return (a bare call statement) warns.
+    pub must_use: bool,
     pub doc: String,
     pub validate: Option<LitValidator>,
     pub src: Option<NativeSrc>,
@@ -57,6 +64,14 @@ pub struct ApiMethod<C> {
     pub mutates_recv: bool,
     /// See [`ApiFunction::effects`] — `None` fails closed in effect inference.
     pub effects: Option<Fx>,
+    /// See [`ApiFunction::consumes`] — indices into `parameters` (the receiver
+    /// lives in `consumes_recv` instead).
+    pub consumes: Vec<bool>,
+    /// `#[consumes(self)]` on an `#[mimas]` impl method (or a `#[native]`
+    /// receiver-param) — `x.close()` kills `x`.
+    pub consumes_recv: bool,
+    /// See [`ApiFunction::must_use`].
+    pub must_use: bool,
     pub doc: String,
     pub validate: Option<LitValidator>,
     pub src: Option<NativeSrc>,
