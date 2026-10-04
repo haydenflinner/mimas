@@ -2127,10 +2127,13 @@ fn try_resume_body(
                     }
                     None => match op {
                         // CallNative writes no `writes` entry — sink passthru
-                        // kinds hand back their last arg's class
+                        // kinds hand back their last arg's class, math
+                        // natives produce Float, imported natives carry the
+                        // dst class their import sig was registered with
                         Op::CallNative { dst, id, args, .. } => {
                             use crate::SinkKind::*;
-                            let k = match sink.get(&(id.index() as u32)) {
+                            let ni = id.index() as u32;
+                            let k = match sink.get(&ni) {
                                 Some(Leaf) | Some(PointPass) | Some(Passthru) => {
                                     args.last().and_then(|a| {
                                         st.get(&(a.index() as u32)).copied()
@@ -2139,7 +2142,12 @@ fn try_resume_body(
                                 Some(Cond) | Some(Cmp) | Some(Dec) | Some(Begin) => {
                                     Some(K::Bool)
                                 }
-                                _ => None,
+                                _ if math.contains_key(&ni) => Some(K::Float),
+                                _ => natives
+                                    .keys()
+                                    .find(|(i, _, _)| *i == ni)
+                                    .and_then(|(_, _, dk)| *dk)
+                                    .filter(|&k| k != K::Word),
                             };
                             Some((dst.index() as u32, k))
                         }
@@ -2634,11 +2642,10 @@ pub fn emit_resumable(
         );
     }
 
-    let mut gnext = 0u32;
-    let mut import_global = |imports: &mut ImportSection, name: &str, vt| {
+    let gnext = 0u32;
+    let import_global = |imports: &mut ImportSection, name: &str, vt| {
         let g = gnext;
-        gnext += 1;
-        imports.import(
+            imports.import(
             "env",
             name,
             EntityType::Global(GlobalType {
@@ -2656,11 +2663,8 @@ pub fn emit_resumable(
         .pause
         .then(|| import_global(&mut imports, "__pause", ValType::I32));
     let g_status = gnext;
-    gnext += 1;
     let g_sp = gnext;
-    gnext += 1;
     let g_hp = gnext;
-    gnext += 1;
     globals.global(
         GlobalType {
             val_type: ValType::I32,
@@ -2700,7 +2704,6 @@ pub fn emit_resumable(
         &ConstExpr::i32_const(heap_base as i32), // __hp: heap bump pointer
     );
     let g_covp = gnext;
-    gnext += 1;
     globals.global(
         GlobalType {
             val_type: ValType::I32,
@@ -2710,7 +2713,6 @@ pub fn emit_resumable(
         &ConstExpr::i32_const(0), // __covp: sink record cursor
     );
     let g_covbuf = gnext;
-    gnext += 1;
     globals.global(
         GlobalType {
             val_type: ValType::I32,
@@ -2720,7 +2722,6 @@ pub fn emit_resumable(
         &ConstExpr::i32_const(sink_base as i32), // __covbuf: sink region base
     );
     let g_ptmap = gnext;
-    gnext += 1;
     globals.global(
         GlobalType {
             val_type: ValType::I32,
@@ -2730,7 +2731,6 @@ pub fn emit_resumable(
         &ConstExpr::i32_const(ptmap_base as i32), // __ptmap: point bitmap base
     );
     let g_osp = gnext;
-    gnext += 1;
     globals.global(
         GlobalType {
             val_type: ValType::I32,
