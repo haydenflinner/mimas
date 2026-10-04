@@ -120,6 +120,10 @@ struct RE<'a> {
     l_sz: u32,
     l_rec: u32,
     region: u32,
+    /// op index -> reaching class of a Leaf call's arg, from the
+    /// must-dataflow over the region graph (None at a present key =
+    /// non-numeric; absent key = fall back to union `class`).
+    leafc: &'a HashMap<usize, Option<K>>,
 }
 
 macro_rules! bail {
@@ -1292,7 +1296,18 @@ impl RE<'_> {
                         Leaf => {
                             let a = args[0];
                             let idx = a.index() as u32;
-                            let cls = self.class.get(&idx).copied();
+                            // reaching class at this callsite (must-dataflow)
+                            // — the union `class` goes flat whenever the
+                            // slot was reused for another class elsewhere.
+                            let cls = self
+                                .leafc
+                                .get(&i)
+                                .copied()
+                                .flatten()
+                                .or_else(|| self.class.get(&idx).copied());
+                            if std::env::var("DBG_LEAF").is_ok() {
+                                eprintln!("leaf b{} op{} arg r{} cls={:?} class={:?} mask={:?}", self.body, i, idx, cls, self.class.get(&idx), self.mask.get(&idx));
+                            }
                             let num = matches!(cls, Some(K::Int) | Some(K::Float));
                             if cls == Some(K::Float) {
                                 self.get(a, K::Float)?;
@@ -2035,10 +2050,162 @@ fn try_resume_body(
     g_status: u32,
     g_sp: u32,
     g_hp: u32,
+    field_class: &HashMap<u32, K>,
 ) -> Result<(Function, Vec<(u32, u32)>), Bail> {
     let chunk = &program.chunks[compile::BodyId::from(b as u32)];
     let Some(sig) = &sigs[b] else { bail!("no sig") };
     let (rs, region_of) = regions(ops)?;
+
+    // Reaching-class dataflow over the region graph — a must-analysis:
+    // head[j][r] = k means every path into region j left r holding a
+    // class-k value. Leaf operands read this instead of the union `class`
+    // map, which goes flat whenever a reg is reused (a slot written Int by
+    // `len()` then Bool by a cmp result shows mask 7 / class None — the
+    // live value at the leaf callsite is still Int).
+    let mut w_at: HashMap<usize, (u32, crate::W)> = HashMap::new();
+    for (&r, ws) in &ana.writes {
+        for &(i, w) in ws {
+            w_at.insert(i, (r, w));
+        }
+    }
+    let off2idx: HashMap<usize, usize> = ops
+        .iter()
+        .enumerate()
+        .map(|(i, (o, _))| (*o, i))
+        .collect();
+    let mut head: Vec<Option<HashMap<u32, K>>> = vec![None; rs.len()];
+    {
+        let mut s0 = HashMap::new();
+        for (pi, p) in chunk.params.iter().enumerate() {
+            s0.insert(p.index() as u32, sig.params[pi]);
+        }
+        head[0] = Some(s0);
+    }
+    // op index -> reaching class of a Leaf call's arg (None = non-numeric)
+    let mut leafc: HashMap<usize, Option<K>> = HashMap::new();
+    {
+        let mut wl: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
+        wl.push_back(0);
+        while let Some(j) = wl.pop_front() {
+            let Some(mut st) = head[j].clone() else { continue };
+            let (start, end) = rs[j];
+            for i in start..end {
+                let (_, op) = &ops[i];
+                if let Op::CallNative { id, args, .. } = op {
+                    if matches!(
+                        sink.get(&(id.index() as u32)),
+                        Some(crate::SinkKind::Leaf)
+                    ) {
+                        if let Some(a) = args.first() {
+                            leafc.insert(i, st.get(&(a.index() as u32)).copied());
+                        }
+                    }
+                }
+                let wk: Option<(u32, Option<K>)> = match w_at.get(&i) {
+                    Some(&(r, w)) => {
+                        let k = match w {
+                            crate::W::Int => Some(K::Int),
+                            crate::W::Float => Some(K::Float),
+                            crate::W::Bool => Some(K::Bool),
+                            crate::W::Copy(s) => st
+                                .get(&s)
+                                .copied()
+                                .or_else(|| ana.class.get(&s).copied()),
+                            crate::W::Call(c) => sigs[c]
+                                .as_ref()
+                                .and_then(|s| s.ret)
+                                .filter(|&k| k != K::Word),
+                            crate::W::Reads => match op {
+                                Op::GetField { slot, .. } => {
+                                    field_class.get(slot).copied()
+                                }
+                                _ => None,
+                            },
+                            crate::W::Dyn => None,
+                        };
+                        Some((r, k))
+                    }
+                    None => match op {
+                        // CallNative writes no `writes` entry — sink passthru
+                        // kinds hand back their last arg's class
+                        Op::CallNative { dst, id, args, .. } => {
+                            use crate::SinkKind::*;
+                            let k = match sink.get(&(id.index() as u32)) {
+                                Some(Leaf) | Some(PointPass) | Some(Passthru) => {
+                                    args.last().and_then(|a| {
+                                        st.get(&(a.index() as u32)).copied()
+                                    })
+                                }
+                                Some(Cond) | Some(Cmp) | Some(Dec) | Some(Begin) => {
+                                    Some(K::Bool)
+                                }
+                                _ => None,
+                            };
+                            Some((dst.index() as u32, k))
+                        }
+                        _ => None,
+                    },
+                };
+                if let Some((r, k)) = wk {
+                    match k {
+                        Some(k) => {
+                            st.insert(r, k);
+                        }
+                        None => {
+                            st.remove(&r);
+                        }
+                    }
+                }
+            }
+            // edges: terminator's jump targets + bytecode fallthrough
+            let last = &ops[end - 1].1;
+            let mut succs: Vec<usize> = Vec::new();
+            let fall = if end < ops.len() {
+                Some(region_of[end] as usize)
+            } else {
+                None
+            };
+            match last {
+                Op::Jump { target }
+                | Op::JumpIf { target, .. }
+                | Op::ForNext { target, .. } => {
+                    if let Ok(i) = tgt_idx(target, &off2idx) {
+                        succs.push(region_of[i] as usize);
+                    }
+                    if !matches!(last, Op::Jump { .. }) {
+                        succs.extend(fall);
+                    }
+                }
+                Op::Switch { table, default, .. } => {
+                    for t in table.iter().chain(std::iter::once(default)) {
+                        if let Ok(i) = tgt_idx(t, &off2idx) {
+                            succs.push(region_of[i] as usize);
+                        }
+                    }
+                    succs.extend(fall);
+                }
+                Op::Return { .. } | Op::Raise { .. } | Op::Panic {} => {}
+                _ => succs.extend(fall),
+            }
+            for s in succs {
+                let changed = match &mut head[s] {
+                    None => {
+                        head[s] = Some(st.clone());
+                        true
+                    }
+                    Some(m) => {
+                        let before = m.len();
+                        m.retain(|r, k| st.get(r) == Some(k));
+                        m.len() != before
+                    }
+                };
+                if changed {
+                    wl.push_back(s);
+                }
+            }
+        }
+    }
+
     let nparams = chunk.params.len() as u32;
     let mut re = RE {
         ops,
@@ -2077,6 +2244,7 @@ fn try_resume_body(
         l_sz: nparams + 7,
         l_rec: nparams + 8,
         region: 0,
+        leafc: &leafc,
     };
     let fsize = (chunk.regs as u32) * 8 + 8;
 
@@ -2222,6 +2390,46 @@ pub fn emit_resumable(
             break;
         }
     }
+    // field slot -> union of every written value's class bits, program-wide.
+    // A slot whose writers all agree on one class lets a GetField dst claim
+    // that class for coverage operand typing (w.score reads as Int).
+    // 0x80 = an unclassed write poisoned the slot.
+    let mut field_bits: HashMap<u32, u8> = HashMap::new();
+    for b in 0..nbodies {
+        let Some(ana) = &anas[b] else { continue };
+        for (_, op) in &bodies_ops[b] {
+            match op {
+                Op::SetField { slot, value, .. } => {
+                    let m = ana
+                        .mask
+                        .get(&(value.index() as u32))
+                        .copied()
+                        .unwrap_or(0x80);
+                    *field_bits.entry(*slot).or_insert(0) |= m;
+                }
+                Op::NewInstance { fields, .. } => {
+                    for (i, f) in fields.iter().enumerate() {
+                        let m = ana
+                            .mask
+                            .get(&(f.index() as u32))
+                            .copied()
+                            .unwrap_or(0x80);
+                        *field_bits.entry(i as u32).or_insert(0) |= m;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let field_class: HashMap<u32, K> = field_bits
+        .iter()
+        .filter_map(|(s, m)| match *m {
+            crate::K_INT => Some((*s, K::Int)),
+            crate::K_FLOAT => Some((*s, K::Float)),
+            crate::K_BOOL => Some((*s, K::Bool)),
+            _ => None,
+        })
+        .collect();
     let mut skipped: Vec<Skip> = Vec::new();
     let mut sigs: Vec<Option<Sig>> = (0..nbodies).map(|_| None).collect();
     for b in 0..nbodies {
@@ -2344,6 +2552,7 @@ pub fn emit_resumable(
                     0,
                     1,
                     2,
+                    &field_class,
                 ) {
                     why = e;
                 }
@@ -2531,7 +2740,6 @@ pub fn emit_resumable(
         &ConstExpr::i32_const(0), // __osp: operand-stack depth
     );
     let g_dcov = gnext;
-    gnext += 1;
     globals.global(
         GlobalType {
             val_type: ValType::I32,
@@ -2540,7 +2748,6 @@ pub fn emit_resumable(
         },
         &ConstExpr::i32_const(decv_base as i32), // __dcov: decision cells
     );
-    let _ = gnext;
     // helper func indices: appended after the body functions, fixed order
     let hbase = nimports + func_map.len() as u32;
     let covh = CovHelpers {
@@ -2592,6 +2799,7 @@ pub fn emit_resumable(
             g_status,
             g_sp,
             g_hp,
+            &field_class,
         )
         .map_err(|e| format!("body {b}: {e}"))?;
         let fidx = func_map[&b];

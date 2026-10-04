@@ -177,8 +177,8 @@ pub(crate) fn op_dst(op: &Op) -> Option<Reg> {
     })
 }
 
-fn put(writes: &mut HashMap<u32, Vec<W>>, r: Reg, w: W) {
-    writes.entry(r.index() as u32).or_default().push(w);
+fn put(writes: &mut HashMap<u32, Vec<(usize, W)>>, r: Reg, w: W, i: usize) {
+    writes.entry(r.index() as u32).or_default().push((i, w));
 }
 
 fn tgt_off(t: &BlockTarget) -> usize {
@@ -220,12 +220,16 @@ pub(crate) struct Ana {
     pub callee: HashMap<usize, usize>,
     /// resolved return class (None = void/unknown — emitted as a void result)
     pub ret: Option<K>,
+    /// dst reg -> (op index, write kind) — the reaching-class analysis in
+    /// the resume lane uses positions to know the class of the value live
+    /// at each callsite (the union mask can't).
+    pub writes: HashMap<u32, Vec<(usize, W)>>,
 }
 
 /// Classify one body's registers. `ret[c]` is the current best guess of body
 /// `c`'s return class — iterated to a fixpoint across the program.
 pub(crate) fn analyze(ops: &[(usize, Op)], nregs: u32, ret: &[Option<K>]) -> Result<Ana, Bail> {
-    let mut writes: HashMap<u32, Vec<W>> = HashMap::new();
+    let mut writes: HashMap<u32, Vec<(usize, W)>> = HashMap::new();
     let mut reads_i: HashSet<u32> = HashSet::new();
     let mut reads_f: HashSet<u32> = HashSet::new();
     let mut reads_b: HashSet<u32> = HashSet::new();
@@ -250,7 +254,7 @@ pub(crate) fn analyze(ops: &[(usize, Op)], nregs: u32, ret: &[Option<K>]) -> Res
 
     for (i, (_, op)) in ops.iter().enumerate() {
         match op {
-            Op::Move { dst, src } => put(&mut writes, *dst, W::Copy(src.index() as u32)),
+            Op::Move { dst, src } => put(&mut writes, *dst, W::Copy(src.index() as u32), i),
             Op::LoadConst { dst, constant } => put(
                 &mut writes,
                 *dst,
@@ -260,9 +264,10 @@ pub(crate) fn analyze(ops: &[(usize, Op)], nregs: u32, ret: &[Option<K>]) -> Res
                     Constant::Bool(_) => W::Bool,
                     _ => W::Dyn,
                 },
+                i,
             ),
             Op::LoadBody { dst, body } => {
-                put(&mut writes, *dst, W::Dyn);
+                put(&mut writes, *dst, W::Dyn, i);
                 const_callee
                     .entry(dst.index() as u32)
                     .and_modify(|e| *e = None)
@@ -274,7 +279,7 @@ pub(crate) fn analyze(ops: &[(usize, Op)], nregs: u32, ret: &[Option<K>]) -> Res
             | Op::ModInt { dst, left, right } => {
                 iread(*left);
                 iread(*right);
-                put(&mut writes, *dst, W::Int);
+                put(&mut writes, *dst, W::Int, i);
             }
             Op::IntLt { dst, left, right }
             | Op::IntLe { dst, left, right }
@@ -284,14 +289,14 @@ pub(crate) fn analyze(ops: &[(usize, Op)], nregs: u32, ret: &[Option<K>]) -> Res
             | Op::IntNe { dst, left, right } => {
                 iread(*left);
                 iread(*right);
-                put(&mut writes, *dst, W::Bool);
+                put(&mut writes, *dst, W::Bool, i);
             }
             Op::AddIntImm { dst, left, .. }
             | Op::SubIntImm { dst, left, .. }
             | Op::MultIntImm { dst, left, .. }
             | Op::ModIntImm { dst, left, .. } => {
                 iread(*left);
-                put(&mut writes, *dst, W::Int);
+                put(&mut writes, *dst, W::Int, i);
             }
             Op::IntLtImm { dst, left, .. }
             | Op::IntLeImm { dst, left, .. }
@@ -300,7 +305,7 @@ pub(crate) fn analyze(ops: &[(usize, Op)], nregs: u32, ret: &[Option<K>]) -> Res
             | Op::IntEqImm { dst, left, .. }
             | Op::IntNeImm { dst, left, .. } => {
                 iread(*left);
-                put(&mut writes, *dst, W::Bool);
+                put(&mut writes, *dst, W::Bool, i);
             }
             Op::AddFloat { dst, left, right }
             | Op::SubFloat { dst, left, right }
@@ -308,7 +313,7 @@ pub(crate) fn analyze(ops: &[(usize, Op)], nregs: u32, ret: &[Option<K>]) -> Res
             | Op::DivFloat { dst, left, right } => {
                 fread(*left);
                 fread(*right);
-                put(&mut writes, *dst, W::Float);
+                put(&mut writes, *dst, W::Float, i);
             }
             Op::FloatLt { dst, left, right }
             | Op::FloatLe { dst, left, right }
@@ -318,14 +323,14 @@ pub(crate) fn analyze(ops: &[(usize, Op)], nregs: u32, ret: &[Option<K>]) -> Res
             | Op::FloatNe { dst, left, right } => {
                 fread(*left);
                 fread(*right);
-                put(&mut writes, *dst, W::Bool);
+                put(&mut writes, *dst, W::Bool, i);
             }
             Op::AddFloatImm { dst, left, .. }
             | Op::SubFloatImm { dst, left, .. }
             | Op::MultFloatImm { dst, left, .. }
             | Op::ModFloatImm { dst, left, .. } => {
                 fread(*left);
-                put(&mut writes, *dst, W::Float);
+                put(&mut writes, *dst, W::Float, i);
             }
             Op::FloatLtImm { dst, left, .. }
             | Op::FloatLeImm { dst, left, .. }
@@ -334,24 +339,24 @@ pub(crate) fn analyze(ops: &[(usize, Op)], nregs: u32, ret: &[Option<K>]) -> Res
             | Op::FloatEqImm { dst, left, .. }
             | Op::FloatNeImm { dst, left, .. } => {
                 fread(*left);
-                put(&mut writes, *dst, W::Bool);
+                put(&mut writes, *dst, W::Bool, i);
             }
             Op::Len { dst, src } => {
                 wread(*src);
-                put(&mut writes, *dst, W::Int);
+                put(&mut writes, *dst, W::Int, i);
             }
             Op::ToFloat { dst, src } => {
                 iread(*src);
-                put(&mut writes, *dst, W::Float);
+                put(&mut writes, *dst, W::Float, i);
             }
             Op::Sqrt { dst, src } => {
                 fread(*src);
-                put(&mut writes, *dst, W::Float);
+                put(&mut writes, *dst, W::Float, i);
             }
             Op::ForNext { idx, bound, .. } => {
                 iread(*idx);
                 iread(*bound);
-                put(&mut writes, *idx, W::Int);
+                put(&mut writes, *idx, W::Int, i);
             }
             Op::BIntLt { left, right, .. }
             | Op::BIntLe { left, right, .. }
@@ -386,24 +391,24 @@ pub(crate) fn analyze(ops: &[(usize, Op)], nregs: u32, ret: &[Option<K>]) -> Res
             Op::BoolEq { dst, left, right } | Op::BoolNe { dst, left, right } => {
                 bread(*left);
                 bread(*right);
-                put(&mut writes, *dst, W::Bool);
+                put(&mut writes, *dst, W::Bool, i);
             }
             Op::StrEq { dst, left, right } | Op::StrNe { dst, left, right } => {
                 wread(*left);
                 wread(*right);
-                put(&mut writes, *dst, W::Bool);
+                put(&mut writes, *dst, W::Bool, i);
             }
             Op::IsRaised { dst, src } => {
                 wread(*src);
-                put(&mut writes, *dst, W::Bool);
+                put(&mut writes, *dst, W::Bool, i);
             }
             Op::In { dst, needle, haystack, .. } => {
                 wread(*needle);
                 wread(*haystack);
-                put(&mut writes, *dst, W::Bool);
+                put(&mut writes, *dst, W::Bool, i);
             }
             Op::IsInstance { dst, .. } => {
-                put(&mut writes, *dst, W::Bool);
+                put(&mut writes, *dst, W::Bool, i);
             }
             Op::JumpIf { cond, .. } => bread(*cond),
             Op::Switch { scrut, .. } => iread(*scrut),
@@ -413,7 +418,7 @@ pub(crate) fn analyze(ops: &[(usize, Op)], nregs: u32, ret: &[Option<K>]) -> Res
             }
             Op::Bin { dst, .. } | Op::Unary { dst, .. } => {
                 // operand class resolves at emit time; dst is classed by its reads
-                put(&mut writes, *dst, W::Reads);
+                put(&mut writes, *dst, W::Reads, i);
             }
             Op::CallDirect { dst, body, args } => {
                 callee.insert(i, body.index());
@@ -422,7 +427,7 @@ pub(crate) fn analyze(ops: &[(usize, Op)], nregs: u32, ret: &[Option<K>]) -> Res
                 for a in args {
                     wread(*a);
                 }
-                put(&mut writes, *dst, W::Call(body.index()));
+                put(&mut writes, *dst, W::Call(body.index()), i);
             }
             Op::Call {
                 dst,
@@ -434,40 +439,40 @@ pub(crate) fn analyze(ops: &[(usize, Op)], nregs: u32, ret: &[Option<K>]) -> Res
                 }
                 if let Some(&Some(b)) = const_callee.get(&(creg.index() as u32)) {
                     callee.insert(i, b);
-                    put(&mut writes, *dst, W::Call(b));
+                    put(&mut writes, *dst, W::Call(b), i);
                 } else {
-                    put(&mut writes, *dst, W::Dyn);
+                    put(&mut writes, *dst, W::Dyn, i);
                 }
             }
             // dst inherits the loaded word's class from its readers —
             // W::Reads contributes the dst's read-set to the union
             Op::GetField { dst, src, .. } => {
                 wread(*src);
-                put(&mut writes, *dst, W::Reads);
+                put(&mut writes, *dst, W::Reads, i);
             }
             Op::GetIndex { dst, set, index, .. } => {
                 iread(*index);
                 wread(*set);
-                put(&mut writes, *dst, W::Reads);
+                put(&mut writes, *dst, W::Reads, i);
             }
             Op::LoadEntry { dst, .. }
             | Op::NewArray { dst }
             | Op::NewDict { dst }
             | Op::NewClosure { dst, .. }
-            | Op::Format { dst, .. } => put(&mut writes, *dst, W::Dyn),
+            | Op::Format { dst, .. } => put(&mut writes, *dst, W::Dyn, i),
             // `regs[d] = regs[s]` minus Null/Raised — a word passthrough,
             // dst inherits src's class like Move
             Op::Unwrap { dst, src } => {
                 wread(*src);
-                put(&mut writes, *dst, W::Copy(src.index() as u32));
+                put(&mut writes, *dst, W::Copy(src.index() as u32), i);
             }
             Op::UnwrapRaised { dst, src } => {
                 wread(*src);
-                put(&mut writes, *dst, W::Reads);
+                put(&mut writes, *dst, W::Reads, i);
             }
             Op::UnwrapUnit { dst, src } => {
                 wread(*src);
-                put(&mut writes, *dst, W::Reads);
+                put(&mut writes, *dst, W::Reads, i);
             }
             // native dst is classed by its reads; args are read raw
             Op::CallNative { .. } => {}
@@ -485,7 +490,7 @@ pub(crate) fn analyze(ops: &[(usize, Op)], nregs: u32, ret: &[Option<K>]) -> Res
                 wread(*value);
             }
             Op::NewInstance { dst, fields, .. } => {
-                put(&mut writes, *dst, W::Dyn);
+                put(&mut writes, *dst, W::Dyn, i);
                 for f in fields {
                     wread(*f);
                 }
@@ -528,12 +533,12 @@ pub(crate) fn analyze(ops: &[(usize, Op)], nregs: u32, ret: &[Option<K>]) -> Res
                 | snap_extra.get(&r).copied().unwrap_or(0);
             let mut m = 0u8;
             for w in ws {
-                m |= match w {
+                m |= match w.1 {
                     W::Int => K_INT,
                     W::Float => K_FLOAT,
                     W::Bool => K_BOOL,
-                    W::Copy(s) => snap.get(s).copied().unwrap_or(0),
-                    W::Call(c) => match ret[*c].map(kbit) {
+                    W::Copy(s) => snap.get(&s).copied().unwrap_or(0),
+                    W::Call(c) => match ret[c].map(kbit) {
                         Some(bits) if bits != 0 => bits,
                         // callee ret unconstrained (word/void): the dst's
                         // readers pick the width
@@ -573,8 +578,8 @@ pub(crate) fn analyze(ops: &[(usize, Op)], nregs: u32, ret: &[Option<K>]) -> Res
             }
             // copy sources owe every class their copy's readers demand
             for w in ws {
-                if let W::Copy(s) = w {
-                    let e = extra.entry(*s).or_insert(0);
+                if let W::Copy(s) = w.1 {
+                    let e = extra.entry(s).or_insert(0);
                     if *e & need != need {
                         *e |= need;
                         changed = true;
@@ -584,7 +589,7 @@ pub(crate) fn analyze(ops: &[(usize, Op)], nregs: u32, ret: &[Option<K>]) -> Res
             // word-read-ness flows through copies: `y = x; heap_op(y)`
             // means x's word is what the heap op sees
             if !reads_w.contains(&r)
-                && ws.iter().any(|w| matches!(w, W::Copy(s) if reads_w.contains(s)))
+                && ws.iter().any(|w| matches!(w.1, W::Copy(s) if reads_w.contains(&s)))
             {
                 reads_w.insert(r);
                 changed = true;
@@ -643,6 +648,7 @@ pub(crate) fn analyze(ops: &[(usize, Op)], nregs: u32, ret: &[Option<K>]) -> Res
         mask,
         callee,
         ret: ret_k,
+        writes,
     })
 }
 
