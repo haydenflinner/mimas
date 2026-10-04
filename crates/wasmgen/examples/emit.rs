@@ -29,7 +29,7 @@ fn main() {
         vm::Vm::compile_parts(&[("main", source.as_str())], mimas::library::std).expect("compile");
     let t1 = std::time::Instant::now();
     let w = if resume {
-        mimas_wasmgen::resume::emit_resumable(&program, &opts).expect("emit resumable")
+        mimas_wasmgen::resume::emit_resumable(&program, &opts, None, None, 0, 0).expect("emit resumable")
     } else {
         mimas_wasmgen::emit_opts(&program, &opts).expect("emit")
     };

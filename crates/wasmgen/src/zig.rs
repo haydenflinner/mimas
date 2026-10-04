@@ -22,7 +22,7 @@ pub struct Ziggen {
 
 fn zt(k: K) -> &'static str {
     match k {
-        K::Int => "i64",
+        K::Int | K::Word => "i64",
         K::Float => "f64",
         K::Bool => "bool",
     }
@@ -30,7 +30,7 @@ fn zt(k: K) -> &'static str {
 
 fn zero(k: K) -> &'static str {
     match k {
-        K::Int => "0",
+        K::Int | K::Word => "0",
         K::Float => "0.0",
         K::Bool => "false",
     }
@@ -496,7 +496,7 @@ impl ZEm<'_> {
                 let sig_desc: String = params
                     .iter()
                     .map(|k| match k {
-                        K::Int => 'i',
+                        K::Int | K::Word => 'i',
                         K::Float => 'f',
                         K::Bool => 'b',
                     })
@@ -1035,6 +1035,7 @@ pub fn emit_zig(program: &Program) -> Result<Ziggen, Bail> {
                 K::Int => 'i',
                 K::Float => 'f',
                 K::Bool => 'b',
+                K::Word => 'i',
             })
             .collect();
         let args = (0..params.len())
