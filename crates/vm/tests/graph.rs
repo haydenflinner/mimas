@@ -21,10 +21,15 @@ let head: index = 0;
     vm.run().expect("run");
     let g = vm.locals_graph(Some(&["nodes"]));
     assert_eq!(g.roots.len(), 1);
-    let Obj::Array { items, more } = &g.objs[obj(&g, &g.roots[0].1)] else {
+    let Obj::Array {
+        items,
+        more,
+        gap_at,
+    } = &g.objs[obj(&g, &g.roots[0].1)]
+    else {
         panic!()
     };
-    assert_eq!((items.len(), *more), (2, 0));
+    assert_eq!((items.len(), *more, *gap_at), (2, 0, 2));
     let Obj::Instance { type_name, fields } = &g.objs[obj(&g, &items[0])] else {
         panic!()
     };
@@ -90,4 +95,31 @@ let s = f"{a}";
         .unwrap();
     let err = handle.join().expect("no stack overflow");
     assert!(err.contains("too deep") || err.contains("Display"), "{err}");
+}
+
+#[test]
+fn a_long_array_keeps_its_head_and_tail() {
+    let nums: Vec<String> = (0..100).map(|i| i.to_string()).collect();
+    let src = format!("let xs = [{}];", nums.join(", "));
+    let src = src.as_str();
+    let mut vm = Vm::compile(src, |_| {}).expect("compile");
+    vm.run().expect("run");
+    let g = vm.locals_graph(Some(&["xs"]));
+    let Obj::Array {
+        items,
+        more,
+        gap_at,
+    } = &g.objs[obj(&g, &g.roots[0].1)]
+    else {
+        panic!()
+    };
+    assert_eq!(items.len() + more, 100);
+    assert_eq!(items.len(), vm::GRAPH_MAX_ELEMS);
+    let int = |s: &Slot| match s {
+        Slot::Leaf(vm::Inspect::Int(n)) => *n,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(int(&items[*gap_at - 1]), *gap_at as i64 - 1);
+    assert_eq!(int(&items[*gap_at]), (*gap_at + more) as i64);
+    assert_eq!(int(items.last().unwrap()), 99);
 }

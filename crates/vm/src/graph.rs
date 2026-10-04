@@ -11,8 +11,12 @@ use crate::{Inspect, Val, Vm};
 
 /// Most heap objects one graph will walk; anything further reads as [`Slot::Elided`].
 pub const GRAPH_MAX_OBJS: usize = 400;
-/// Most elements read per array; the rest are counted in [`Obj::Array::more`].
+/// Most elements read per array; the middle of a longer one is counted in
+/// [`Obj::Array::more`].
 pub const GRAPH_MAX_ELEMS: usize = 64;
+/// Of those, how many come from a long array's end -- its last cells matter as much as its
+/// first (a `push`ed tail, a queue's back).
+pub const GRAPH_TAIL_ELEMS: usize = 16;
 
 /// One value position: a scalar (or opaque) leaf, or an edge to a heap object.
 #[derive(Debug, Clone)]
@@ -41,9 +45,12 @@ impl GField {
 
 #[derive(Debug, Clone)]
 pub enum Obj {
+    /// `items[..gap_at]` are the first cells, then `more` unread ones, then the rest of
+    /// `items` -- the array's last cells. `gap_at == items.len()` when `more == 0`.
     Array {
         items: Vec<Slot>,
         more: usize,
+        gap_at: usize,
     },
     Dict(Vec<(String, Slot)>),
     Instance {
@@ -129,9 +136,23 @@ impl Builder<'_> {
     }
 
     fn array<'gc>(&mut self, vals: impl ExactSizeIterator<Item = Val<'gc>>) -> Obj {
-        let more = vals.len().saturating_sub(GRAPH_MAX_ELEMS);
-        let items = vals.take(GRAPH_MAX_ELEMS).map(|v| self.slot(v)).collect();
-        Obj::Array { items, more }
+        let n = vals.len();
+        let more = n.saturating_sub(GRAPH_MAX_ELEMS);
+        let gap_at = if more > 0 {
+            GRAPH_MAX_ELEMS - GRAPH_TAIL_ELEMS
+        } else {
+            n
+        };
+        let items = vals
+            .enumerate()
+            .filter(|(i, _)| *i < gap_at || *i >= gap_at + more)
+            .map(|(_, v)| self.slot(v))
+            .collect();
+        Obj::Array {
+            items,
+            more,
+            gap_at,
+        }
     }
 
     fn slot<'gc>(&mut self, v: Val<'gc>) -> Slot {
