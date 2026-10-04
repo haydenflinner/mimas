@@ -43,6 +43,28 @@ use wasm_encoder::{
 use crate::{analyze, op_dst, Bail, Body, K, Opts, Sig, Skip, Wasmgen};
 
 const STACK_CAP: u32 = 1 << 20;
+/// bytes reserved for sink records (64B each, host drains per frame)
+const SINK_CAP: u32 = 8 << 20;
+/// bytes per decision cell: [leafbits u64][dist_t 8×f64][dist_f 8×f64]
+const DCELL: u32 = 136;
+/// operand-stack entries (16B each: f64 value + u8 numeric flag)
+const OPSTK_N: u32 = 64;
+/// f64 bit pattern for +Infinity, for dist-cell init/reset
+const F64_INF: f64 = f64::INFINITY;
+const EPS: f64 = 1e-9;
+
+/// Everything the per-op emitter needs for the cell-aggregated cov sink:
+/// region bases plus the func indices of the internal helpers appended
+/// after the body functions. Helper order is fixed — see emit_resumable.
+pub(crate) struct CovHelpers {
+    pub f_leaf: u32,
+    pub f_begin: u32,
+    pub f_cond: u32,
+    pub f_cmp: u32,
+    pub f_dec: u32,
+}
+/// sink record stride: [id][hdr][arg0..arg5] = 64B
+const REC: u32 = 64;
 const PAGE: u64 = 65536;
 const STATUS_PAUSED: i32 = 1;
 const STATUS_FUEL: i32 = 2;
@@ -59,10 +81,21 @@ struct RE<'a> {
     ops: &'a [(usize, Op)],
     mask: &'a HashMap<u32, u8>,
     reads_w: &'a HashSet<u32>,
+    class: &'a HashMap<u32, K>,
     sigs: &'a [Option<Sig>],
     func_map: &'a HashMap<usize, u32>,
     callee: &'a HashMap<usize, usize>,
     natives: &'a HashMap<(u32, Vec<K>, Option<K>), u32>,
+    /// natives recorded into the linear-memory sink instead of imported
+    sink: &'a crate::CovSink,
+    math: &'a crate::MathNatives,
+    g_covp: u32,
+    /// base address of the sink record region in linear memory
+    sink_base: u32,
+    /// base address of the point-hit bitmap (`u8[base + point_id]`)
+    ptmap_base: u32,
+    /// decision cells + operand stack + helper fn indices
+    covh: &'a CovHelpers,
     ret_k: Option<K>,
     body: usize,
     /// op index -> region index
@@ -85,6 +118,7 @@ struct RE<'a> {
     l_tmpc: u32,
     l_hp: u32,
     l_sz: u32,
+    l_rec: u32,
     region: u32,
 }
 
@@ -125,10 +159,20 @@ impl RE<'_> {
             self.ins(Instruction::I64Load(mem(off, 3)));
             return Ok(());
         }
-        let m = *self
-            .mask
-            .get(&idx)
-            .ok_or_else(|| format!("reg {} has no scalar class", idx))?;
+        let Some(&m) = self.mask.get(&idx) else {
+            // unclassed reg read in a scalar context — raw word load,
+            // reinterpreted at the width the context wants (the value is
+            // unread on any path a valid program would take, e.g. an
+            // unused parameter's declared width)
+            self.fp();
+            self.ins(Instruction::I64Load(mem(off, 3)));
+            match want {
+                K::Int | K::Word => {}
+                K::Float => self.ins(Instruction::F64ReinterpretI64),
+                K::Bool => self.ins(Instruction::I32WrapI64),
+            }
+            return Ok(());
+        };
         if m & crate::kbit(want) != 0 {
             self.fp();
             self.ins(match want {
@@ -171,14 +215,22 @@ impl RE<'_> {
         Ok(())
     }
 
-    /// store the stack-top value of class `k` into reg r's slot
+    /// store the stack-top value of class `k` into reg r's slot. Every
+    /// write is a full 8-byte word — bools extend before storing — so
+    /// word-width reads (i64/f64) never pick up stale upper bytes.
+    /// Partial-width stores leave garbage behind for `ld_word` readers.
     fn st(&mut self, r: Reg, k: K) {
         let off = r.index() as u32 * 8;
-        self.ins(match k {
-            K::Int | K::Word => Instruction::I64Store(mem(off, 3)),
-            K::Float => Instruction::F64Store(mem(off, 3)),
-            K::Bool => Instruction::I32Store(mem(off, 2)),
-        });
+        match k {
+            K::Int | K::Word | K::Float => self.ins(match k {
+                K::Float => Instruction::F64Store(mem(off, 3)),
+                _ => Instruction::I64Store(mem(off, 3)),
+            }),
+            K::Bool => {
+                self.ins(Instruction::I64ExtendI32U);
+                self.ins(Instruction::I64Store(mem(off, 3)));
+            }
+        }
     }
 
     /// `frame[dst] = <produced k>`: emit addr first, then producer, then store.
@@ -208,6 +260,100 @@ impl RE<'_> {
         } else {
             K::Bool
         })
+    }
+
+    /// Write one sink record for a CallNative: `[id][hdr][arg words]` at
+    /// `sink_base + __covp*REC`, then bump `__covp`. Arg words are raw
+    /// i64 slot reads — `hdr` packs the arg count plus each arg's class
+    /// tag so the host can reinterpret (i→0, f→1, b→2, w→3).
+    fn sink_record(&mut self, id: u32, args: &[Reg], params: &[K]) -> Result<(), Bail> {
+        let tag = |k: K| -> i64 {
+            match k {
+                K::Int => 0,
+                K::Float => 1,
+                K::Bool => 2,
+                K::Word => 3,
+            }
+        };
+        self.ins(Instruction::I32Const(self.sink_base as i32));
+        self.ins(Instruction::GlobalGet(self.g_covp));
+        self.ins(Instruction::I32Const(REC as i32));
+        self.ins(Instruction::I32Mul);
+        self.ins(Instruction::I32Add);
+        self.ins(Instruction::LocalSet(self.l_rec));
+        self.ins(Instruction::LocalGet(self.l_rec));
+        self.ins(Instruction::I64Const(id as i64));
+        self.ins(Instruction::I64Store(mem(0, 3)));
+        let mut hdr = args.len() as i64;
+        for (i, &k) in params.iter().enumerate() {
+            hdr |= tag(k) << (8 + i * 8);
+        }
+        self.ins(Instruction::LocalGet(self.l_rec));
+        self.ins(Instruction::I64Const(hdr));
+        self.ins(Instruction::I64Store(mem(8, 3)));
+        for (i, a) in args.iter().enumerate() {
+            self.ins(Instruction::LocalGet(self.l_rec));
+            self.get(*a, K::Word)?;
+            self.ins(Instruction::I64Store(mem(16 + i as u32 * 8, 3)));
+        }
+        self.ins(Instruction::GlobalGet(self.g_covp));
+        self.ins(Instruction::I32Const(1));
+        self.ins(Instruction::I32Add);
+        self.ins(Instruction::GlobalSet(self.g_covp));
+        Ok(())
+    }
+
+    /// Push the sink native's result at `dst`'s dst-class: passthroughs
+    /// re-load their last arg, `begin` yields constant 1, `hit` nothing.
+    /// `dk` mirrors the normal CallNative arm's dst-class rule.
+    fn sink_result(
+        &mut self,
+        dst: Reg,
+        args: &[Reg],
+        kind: crate::SinkKind,
+    ) -> Result<(), Bail> {
+        use crate::SinkKind::*;
+        let dk = self
+            .class
+            .get(&(dst.index() as u32))
+            .copied()
+            .or_else(|| {
+                (self.reads_w.contains(&(dst.index() as u32))
+                    || self.mask.contains_key(&(dst.index() as u32)))
+                .then_some(K::Word)
+            });
+        let Some(k) = dk else { return Ok(()) };
+        if !matches!(kind, Hit | Point) {
+            self.fp();
+        }
+        match kind {
+            Hit | Point => {}
+            Begin => match k {
+                K::Float => self.ins(Instruction::F64Const(1.0f64.into())),
+                K::Bool => self.ins(Instruction::I32Const(1)),
+                _ => self.ins(Instruction::I64Const(1)),
+            },
+            Passthru | PointPass | Leaf | Cond | Cmp | Dec => {
+                let Some(&last) = args.last() else { bail!("passthru sink with no args") };
+                self.get(last, k)?;
+            }
+        }
+        if !matches!(kind, Hit | Point) {
+            self.st(dst, k);
+        }
+        Ok(())
+    }
+
+    /// `u8[ptmap_base + arg0] = 1` — the point-hit bitmap that replaces
+    /// sink records for `cov::hit`/`cov::pass`.
+    fn point_mark(&mut self, args: &[Reg]) -> Result<(), Bail> {
+        self.ins(Instruction::I32Const(self.ptmap_base as i32));
+        self.get(args[0], K::Word)?;
+        self.ins(Instruction::I32WrapI64);
+        self.ins(Instruction::I32Add);
+        self.ins(Instruction::I32Const(1));
+        self.ins(Instruction::I32Store8(mem(0, 0)));
+        Ok(())
     }
 
     /// suspend: pc_table[b]=region, __status=code, __sp=myfp, return dummy.
@@ -435,6 +581,23 @@ impl RE<'_> {
     }
 
     fn emit_bin(&mut self, dst: Reg, l: Reg, op: BinOp, r: Reg) -> Result<(), Bail> {
+        // word equality — interned strings, opaque handles: both operands
+        // unclassed → raw i64 compare
+        if matches!(op, BinOp::Identity | BinOp::NotEqual)
+            && self.pick(l).is_none()
+            && self.pick(r).is_none()
+        {
+            let i = match op {
+                BinOp::Identity => Instruction::I64Eq,
+                _ => Instruction::I64Ne,
+            };
+            return self.setv(dst, K::Bool, |s| {
+                s.ld_word(l);
+                s.ld_word(r);
+                s.ins(i);
+                Ok(())
+            });
+        }
         // operand class for heap-loaded words: best-known class per operand,
         // falling back to the sibling's, the dst's, then Float
         let kl = self
@@ -581,6 +744,9 @@ impl RE<'_> {
             if !matches!(op, Op::Move { .. })
                 && !self.mask.contains_key(&(d.index() as u32))
                 && !self.reads_w.contains(&(d.index() as u32))
+                // sink natives have a memory side effect — never elide them
+                && !matches!(op, Op::CallNative { id, .. }
+                    if self.sink.contains_key(&(id.index() as u32)))
             {
                 return Ok(());
             }
@@ -618,6 +784,13 @@ impl RE<'_> {
                     // raw zero word — Null is only meaningful to word-reads
                     self.fp();
                     self.ins(Instruction::I64Const(0));
+                    self.ins(Instruction::I64Store(mem(dst.index() as u32 * 8, 3)));
+                }
+                compile::Constant::Str(sid) => {
+                    // interned string id as a word — `==`/contains are word
+                    // comparisons; host natives decode via the strs table
+                    self.fp();
+                    self.ins(Instruction::I64Const(sid.index() as i64));
                     self.ins(Instruction::I64Store(mem(dst.index() as u32 * 8, 3)));
                 }
                 c => bail!("LoadConst {c:?}"),
@@ -855,14 +1028,26 @@ impl RE<'_> {
                         })?,
                         K::Bool => bail!("abs bool"),
                     },
-                    UnaryOp::Not => match sk {
-                        K::Word => unreachable!(),
-                        K::Bool => self.setv(*dst, K::Bool, |s| {
+                    // `!` produces a bool — class off the src alone (the dst's
+                    // own reader-demand is irrelevant). Unclassed srcs hold the
+                    // bool in their word's low bits.
+                    UnaryOp::Not => match self.pick(*src) {
+                        Some(K::Bool) => self.setv(*dst, K::Bool, |s| {
                             s.get(*src, K::Bool)?;
                             s.ins(Instruction::I32Eqz);
                             Ok(())
                         })?,
-                        _ => bail!("not on {sk:?}"),
+                        Some(K::Int) => self.setv(*dst, K::Bool, |s| {
+                            s.get(*src, K::Int)?;
+                            s.ins(Instruction::I64Eqz);
+                            Ok(())
+                        })?,
+                        _ => self.setv(*dst, K::Bool, |s| {
+                            s.ld_word(*src);
+                            s.ins(Instruction::I32WrapI64);
+                            s.ins(Instruction::I32Eqz);
+                            Ok(())
+                        })?,
                     },
                     UnaryOp::BitwiseNot => self.setv(*dst, K::Int, |s| {
                         s.get(*src, K::Int)?;
@@ -872,21 +1057,296 @@ impl RE<'_> {
                     })?,
                 }
             }
+            Op::Unwrap { dst, src } => {
+                // regs[d] = regs[s]; Null (0) / Raised (negative tag) → trap
+                self.fp();
+                self.ld_word(*src);
+                self.ins(Instruction::LocalTee(self.l_tmp));
+                self.ins(Instruction::I64Store(mem(dst.index() as u32 * 8, 3)));
+                self.ins(Instruction::LocalGet(self.l_tmp));
+                self.ins(Instruction::I64Const(0));
+                self.ins(Instruction::I64LeS);
+                self.ins(Instruction::If(BlockType::Empty));
+                self.ins(Instruction::Unreachable);
+                self.ins(Instruction::End);
+            }
+            Op::UnwrapRaised { dst, src } => {
+                // payload = low 63 bits of the raised word
+                self.fp();
+                self.ld_word(*src);
+                self.ins(Instruction::I64Const(0x7fff_ffff_ffff_ffffu64 as i64));
+                self.ins(Instruction::I64And);
+                self.ins(Instruction::I64Store(mem(dst.index() as u32 * 8, 3)));
+            }
+            Op::UnwrapUnit { dst, src } => {
+                // dst = Null; only Raised faults
+                self.fp();
+                self.ld_word(*src);
+                self.ins(Instruction::LocalSet(self.l_tmp));
+                self.ins(Instruction::I64Const(0));
+                self.ins(Instruction::I64Store(mem(dst.index() as u32 * 8, 3)));
+                self.ins(Instruction::LocalGet(self.l_tmp));
+                self.ins(Instruction::I64Const(0));
+                self.ins(Instruction::I64LtS);
+                self.ins(Instruction::If(BlockType::Empty));
+                self.ins(Instruction::Unreachable);
+                self.ins(Instruction::End);
+            }
+            Op::IsRaised { dst, src } => {
+                self.setv(*dst, K::Bool, |s| {
+                    s.ld_word(*src);
+                    s.ins(Instruction::I64Const(0));
+                    s.ins(Instruction::I64LtS);
+                    Ok(())
+                })?;
+            }
+            Op::Raise { .. } => {
+                // a raise inside a wasm body aborts the export — the host
+                // sees it as a trapped fault, matching an unwound error
+                self.ins(Instruction::Unreachable);
+            }
+            Op::Format { dst, .. } => {
+                // f-string display — emit a null word; only feeds text
+                // natives (the value parts' own ops still run)
+                self.fp();
+                self.ins(Instruction::I64Const(0));
+                self.ins(Instruction::I64Store(mem(dst.index() as u32 * 8, 3)));
+            }
+            Op::In { dst, needle, haystack, condition } => {
+                // element-word scan over the array buffer — strids and
+                // instance words compare by identity; `condition` selects
+                // `in` (found) vs `not in` (!found). Array haystacks only.
+                self.ld_word(*needle);
+                self.ins(Instruction::LocalSet(self.l_tmp));
+                self.ld_word(*haystack);
+                self.ins(Instruction::I32WrapI64);
+                self.ins(Instruction::LocalSet(self.l_sz));
+                self.ins(Instruction::LocalGet(self.l_sz));
+                self.ins(Instruction::I32Load(mem(4, 2)));
+                self.ins(Instruction::LocalSet(self.l_tmpb));
+                self.ins(Instruction::I32Const(0));
+                self.ins(Instruction::LocalSet(self.l_tmpc));
+                self.ins(Instruction::I32Const(0));
+                self.ins(Instruction::LocalSet(self.l_hp));
+                self.ins(Instruction::Block(BlockType::Empty));
+                self.ins(Instruction::Loop(BlockType::Empty));
+                self.ins(Instruction::LocalGet(self.l_tmpc));
+                self.ins(Instruction::LocalGet(self.l_tmpb));
+                self.ins(Instruction::I32GeU);
+                self.ins(Instruction::BrIf(1));
+                self.ins(Instruction::LocalGet(self.l_sz));
+                self.ins(Instruction::I32Load(mem(0, 2)));
+                self.ins(Instruction::LocalGet(self.l_tmpc));
+                self.ins(Instruction::I32Const(3));
+                self.ins(Instruction::I32Shl);
+                self.ins(Instruction::I32Add);
+                self.ins(Instruction::I64Load(mem(0, 3)));
+                self.ins(Instruction::LocalGet(self.l_tmp));
+                self.ins(Instruction::I64Eq);
+                self.ins(Instruction::If(BlockType::Empty));
+                self.ins(Instruction::I32Const(1));
+                self.ins(Instruction::LocalSet(self.l_hp));
+                self.ins(Instruction::Br(2));
+                self.ins(Instruction::End);
+                self.ins(Instruction::LocalGet(self.l_tmpc));
+                self.ins(Instruction::I32Const(1));
+                self.ins(Instruction::I32Add);
+                self.ins(Instruction::LocalSet(self.l_tmpc));
+                self.ins(Instruction::Br(0));
+                self.ins(Instruction::End);
+                self.ins(Instruction::End);
+                self.setv(*dst, K::Bool, |s| {
+                    if *condition {
+                        s.ins(Instruction::LocalGet(s.l_hp));
+                    } else {
+                        s.ins(Instruction::I32Const(1));
+                        s.ins(Instruction::LocalGet(s.l_hp));
+                        s.ins(Instruction::I32Sub);
+                    }
+                    Ok(())
+                })?;
+            }
+            Op::StrEq { dst, left, right } | Op::StrNe { dst, left, right } => {
+                // interned strids — equality is a raw word compare
+                let i = match op {
+                    Op::StrEq { .. } => Instruction::I64Eq,
+                    _ => Instruction::I64Ne,
+                };
+                self.setv(*dst, K::Bool, |s| {
+                    s.ld_word(*left);
+                    s.ld_word(*right);
+                    s.ins(i);
+                    Ok(())
+                })?;
+            }
             Op::Bin { dst, left, op: bop, right } => {
                 self.emit_bin(*dst, *left, *bop, *right)?;
             }
             Op::CallNative { dst, id, args } => {
                 let mut params = Vec::new();
                 for a in args {
-                    params.push(self.pick(*a).unwrap_or(K::Word));
+                    // single-class regs present as that class; multi/unclassed
+                    // pass raw words — a `pick`ed Float on an Int-written slot
+                    // would bit-mangle the value (denormal, not a coerce)
+                    params.push(
+                        self.class
+                            .get(&(a.index() as u32))
+                            .copied()
+                            .unwrap_or(K::Word),
+                    );
+                }
+                if let Some(&mop) = self.math.get(&(id.index() as u32)) {
+                    // pure math natives: inline the f64 op (or identity) —
+                    // Float::abs/min/max/floor alone were ~200 imports/tick.
+                    // Only when every arg reads cleanly as Float — a
+                    // multi-class Int|Bool slot can't be coerced (the
+                    // bytes belong to whichever write ran last) so those
+                    // call sites fall through to the import below.
+                    // mirrors get()'s coercion table: multi-class masks need
+                    // the wanted bit; single-class always converts; unclassed
+                    // loads the raw word
+                    let arg_ok = |want: K, a: &Reg| -> bool {
+                        match self.mask.get(&(a.index() as u32)) {
+                            None => true,
+                            Some(&m) => {
+                                m & crate::kbit(want) != 0 || m.count_ones() == 1
+                            }
+                        }
+                    };
+                    let dk = self
+                        .class
+                        .get(&(dst.index() as u32))
+                        .copied()
+                        .or_else(|| {
+                            (self.reads_w.contains(&(dst.index() as u32))
+                                || self.mask.contains_key(&(dst.index() as u32)))
+                            .then_some(K::Word)
+                        });
+                    let inline = match (dk, mop) {
+                        (Some(k), _) => {
+                            if mop == crate::MathOp::Identity {
+                                arg_ok(k, &args[0])
+                            } else {
+                                args.iter().all(|a| arg_ok(K::Float, a))
+                            }
+                        }
+                        (None, _) => false,
+                    };
+                    if !inline || dk.is_none() {
+                        // fall through to the imported native
+                    } else {
+                    let k = dk.unwrap();
+                    use crate::MathOp::*;
+                    self.fp();
+                    match mop {
+                        Identity => self.get(args[0], k)?,
+                        Abs | Min | Max | Floor => {
+                            for (i, a) in args.iter().enumerate() {
+                                if i >= 2 {
+                                    break;
+                                }
+                                self.get(*a, K::Float)?;
+                            }
+                            self.ins(match mop {
+                                Abs => Instruction::F64Abs,
+                                Min => Instruction::F64Min,
+                                Max => Instruction::F64Max,
+                                Floor => Instruction::F64Floor,
+                                Identity => unreachable!(),
+                            });
+                            match k {
+                                K::Float => {}
+                                K::Word => self.ins(Instruction::I64ReinterpretF64),
+                                K::Int => self.ins(Instruction::I64TruncF64S),
+                                _ => bail!("math dst class"),
+                            }
+                        }
+                    }
+                    self.st(*dst, k);
+                    return Ok(());
+                    }
+                }
+                if let Some(&kind) = self.sink.get(&(id.index() as u32)) {
+                    use crate::SinkKind::*;
+                    // i32 helper arg from any slot encoding
+                    let w = |re: &mut Self, a: Reg| -> Result<(), Bail> {
+                        re.get(a, K::Word)?;
+                        re.ins(Instruction::I32WrapI64);
+                        Ok(())
+                    };
+                    match kind {
+                        // point markers: one byte in the ptmap, no record —
+                        // hit/pass are ~70% of sink traffic
+                        Point | PointPass => {
+                            self.point_mark(args)?;
+                        }
+                        // begin(d): reset the leaf mask, result is const 1
+                        Begin => {
+                            w(self, args[0])?;
+                            self.ins(Instruction::Call(self.covh.f_begin));
+                        }
+                        // lhs/rhs(x): push (f64 value, numeric flag).
+                        // Numeric iff the arg's class at THIS site is Int or
+                        // Float — multi-class (w) or Bool operands read as
+                        // non-numeric, matching record-mode's tag decode.
+                        Leaf => {
+                            let a = args[0];
+                            let idx = a.index() as u32;
+                            let cls = self.class.get(&idx).copied();
+                            let num = matches!(cls, Some(K::Int) | Some(K::Float));
+                            if cls == Some(K::Float) {
+                                self.get(a, K::Float)?;
+                            } else if num {
+                                self.get(a, K::Word)?;
+                                self.ins(Instruction::F64ConvertI64S);
+                            } else {
+                                self.ins(Instruction::F64Const(0.0f64.into()));
+                            }
+                            self.ins(Instruction::I32Const(num as i32));
+                            self.ins(Instruction::Call(self.covh.f_leaf));
+                        }
+                        // cond(d, k, v)
+                        Cond => {
+                            for &a in args.iter().take(3) {
+                                w(self, a)?;
+                            }
+                            self.ins(Instruction::Call(self.covh.f_cond));
+                        }
+                        // cmp(d, k, op, v)
+                        Cmp => {
+                            for &a in args.iter().take(4) {
+                                w(self, a)?;
+                            }
+                            self.ins(Instruction::Call(self.covh.f_cmp));
+                        }
+                        // dec(d, v): helper writes the (d, v, leafbits) record
+                        Dec => {
+                            self.ins(Instruction::I32Const(id.index() as i32));
+                            for &a in args.iter().take(2) {
+                                w(self, a)?;
+                            }
+                            self.ins(Instruction::Call(self.covh.f_dec));
+                        }
+                        _ => {
+                            self.sink_record(id.index() as u32, args, &params)?;
+                        }
+                    }
+                    self.sink_result(*dst, args, kind)?;
+                    return Ok(());
                 }
                 // classless dst that a heap op reads later must round-trip the
-                // word — passthrough natives (cov::pass & co) rely on it
-                let dk = self.pick(*dst).or_else(|| {
-                    self.reads_w
-                        .contains(&(dst.index() as u32))
+                // word — passthrough natives (cov::pass & co) rely on it.
+                // Multi-class dsts take the word too: the native's bits are
+                // the value, and a Drop here would leave readers a zero slot
+                let dk = self
+                    .class
+                    .get(&(dst.index() as u32))
+                    .copied()
+                    .or_else(|| {
+                        (self.reads_w.contains(&(dst.index() as u32))
+                            || self.mask.contains_key(&(dst.index() as u32)))
                         .then_some(K::Word)
-                });
+                    });
                 let ret = dk.unwrap_or(K::Int);
                 let fi = self.natives[&(id.index() as u32, params.clone(), Some(ret))];
                 for (a, &k) in args.iter().zip(&params) {
@@ -1562,6 +2022,12 @@ fn try_resume_body(
     sigs: &[Option<Sig>],
     func_map: &HashMap<usize, u32>,
     natives: &HashMap<(u32, Vec<K>, Option<K>), u32>,
+    sink: &crate::CovSink,
+    math: &crate::MathNatives,
+    g_covp: u32,
+    sink_base: u32,
+    ptmap_base: u32,
+    covh: &CovHelpers,
     opts: &Opts,
     cov_base: u32,
     g_fuel: Option<u32>,
@@ -1578,10 +2044,17 @@ fn try_resume_body(
         ops,
         mask: &ana.mask,
         reads_w: &ana.reads_w,
+        class: &ana.class,
         sigs,
         func_map,
         callee: &ana.callee,
         natives,
+        sink,
+        math,
+        g_covp,
+        sink_base,
+        ptmap_base,
+        covh,
         ret_k: sig.ret,
         body: b,
         region_of: &region_of,
@@ -1602,6 +2075,7 @@ fn try_resume_body(
         l_tmpc: nparams + 5,
         l_hp: nparams + 6,
         l_sz: nparams + 7,
+        l_rec: nparams + 8,
         region: 0,
     };
     let fsize = (chunk.regs as u32) * 8 + 8;
@@ -1624,11 +2098,16 @@ fn try_resume_body(
         let off = p.index() as u32 * 8;
         re.fp();
         re.ins(Instruction::LocalGet(pi as u32));
-        re.ins(match k {
-            K::Int | K::Word => Instruction::I64Store(mem(off, 3)),
-            K::Float => Instruction::F64Store(mem(off, 3)),
-            K::Bool => Instruction::I32Store(mem(off, 2)),
-        });
+        match k {
+            K::Int | K::Word | K::Float => re.ins(match k {
+                K::Float => Instruction::F64Store(mem(off, 3)),
+                _ => Instruction::I64Store(mem(off, 3)),
+            }),
+            K::Bool => {
+                re.ins(Instruction::I64ExtendI32U);
+                re.ins(Instruction::I64Store(mem(off, 3)));
+            }
+        }
     }
     re.ins(Instruction::End);
 
@@ -1679,6 +2158,7 @@ fn try_resume_body(
         (1, ValType::I32), // tmpc
         (1, ValType::I32), // hp
         (1, ValType::I32), // sz
+        (1, ValType::I32), // rec
     ];
     let mut f = Function::new(locals.drain(..));
     f.raw(re.c.iter().copied());
@@ -1700,7 +2180,22 @@ fn ana_pick(ana: &crate::Ana, r: Reg) -> Option<K> {
     })
 }
 
-pub fn emit_resumable(program: &Program, opts: &Opts) -> Result<Wasmgen, Bail> {
+/// `sink`: natives to record into the linear-memory sink region instead
+/// of calling as imports (see [`crate::SinkKind`]). The host drains the
+/// buffer via the exported `__covbuf`/`__covp` globals — every record is
+/// 64B: `[id i64][hdr i64 = nargs | tag_i<<8+8i][arg words ≤6]`.
+pub fn emit_resumable(
+    program: &Program,
+    opts: &Opts,
+    sink: Option<&crate::CovSink>,
+    math: Option<&crate::MathNatives>,
+    cov_points: u32,
+    cov_decs: u32,
+) -> Result<Wasmgen, Bail> {
+    let empty_sink = crate::CovSink::new();
+    let sink = sink.unwrap_or(&empty_sink);
+    let empty_math = crate::MathNatives::new();
+    let math = math.unwrap_or(&empty_math);
     let nbodies = program.chunks.len();
     let bodies_ops: Vec<Vec<(usize, Op)>> = (0..nbodies)
         .map(|b| program.ops(compile::BodyId::from(b as u32)))
@@ -1741,8 +2236,17 @@ pub fn emit_resumable(program: &Program, opts: &Opts) -> Result<Wasmgen, Bail> {
         let params: Vec<K> = chunk
             .params
             .iter()
-            // param never read: any class works — i64 word is the widest
-            .map(|p| ana_pick(ana, *p).unwrap_or(K::Int))
+            // unclassed params read as raw words (native passthrough) take a
+            // word slot; never-read params take any class
+            .map(|p| {
+                ana_pick(ana, *p).unwrap_or({
+                    if ana.reads_w.contains(&(p.index() as u32)) {
+                        K::Word
+                    } else {
+                        K::Int
+                    }
+                })
+            })
             .collect();
         sigs[b] = Some(Sig {
             params,
@@ -1759,16 +2263,31 @@ pub fn emit_resumable(program: &Program, opts: &Opts) -> Result<Wasmgen, Bail> {
         }
         for (_, op) in &bodies_ops[b] {
             if let Op::CallNative { dst, id, args } = op {
+                if sink.contains_key(&(id.index() as u32)) {
+                    continue; // records go to the sink region, not imports
+                }
+                // math natives stay in the import list: callers with args a
+                // multi-class mask can't safely read as Float fall back here
+                // must mirror emit's CallNative arm exactly: single-class
+                // args/dsts present as their class, everything else is a
+                // raw word passthrough
                 let params: Vec<K> = args
                     .iter()
-                    .map(|a| ana_pick(ana, *a).unwrap_or(K::Word))
+                    .map(|a| {
+                        ana.class
+                            .get(&(a.index() as u32))
+                            .copied()
+                            .unwrap_or(K::Word)
+                    })
                     .collect();
                 let ret = Some(
-                    ana_pick(ana, *dst)
+                    ana.class
+                        .get(&(dst.index() as u32))
+                        .copied()
                         .or_else(|| {
-                            ana.reads_w
-                                .contains(&(dst.index() as u32))
-                                .then_some(K::Word)
+                            (ana.reads_w.contains(&(dst.index() as u32))
+                                || ana.mask.contains_key(&(dst.index() as u32)))
+                            .then_some(K::Word)
                         })
                         .unwrap_or(K::Int),
                 );
@@ -1806,6 +2325,18 @@ pub fn emit_resumable(program: &Program, opts: &Opts) -> Result<Wasmgen, Bail> {
                     &sigs,
                     &dummy_map,
                     &natives,
+                    sink,
+                    math,
+                    3,
+                    0,
+                    0,
+                    &CovHelpers {
+                        f_leaf: 0,
+                        f_begin: 0,
+                        f_cond: 0,
+                        f_cmp: 0,
+                        f_dec: 0,
+                    },
                     opts,
                     0,
                     None,
@@ -1920,6 +2451,7 @@ pub fn emit_resumable(program: &Program, opts: &Opts) -> Result<Wasmgen, Bail> {
     let g_sp = gnext;
     gnext += 1;
     let g_hp = gnext;
+    gnext += 1;
     globals.global(
         GlobalType {
             val_type: ValType::I32,
@@ -1936,13 +2468,20 @@ pub fn emit_resumable(program: &Program, opts: &Opts) -> Result<Wasmgen, Bail> {
         },
         &ConstExpr::i32_const(nbodies as i32 * 8), // __sp starts at STACK
     );
-    // heap arena follows the coverage region: arrays/instances are bump-
-    // allocated blocks of 8-byte words
+    // heap arena follows the coverage + sink regions: arrays/instances
+    // are bump-allocated blocks of 8-byte words
     let total_ops: u32 = (0..nbodies).map(|b| bodies_ops[b].len() as u32).sum();
     let stack_base = nbodies as u32 * 8;
     let cov_addr = stack_base + STACK_CAP;
     let cov_end = if opts.coverage { cov_addr + total_ops + 64 } else { cov_addr };
-    let heap_base = (cov_end + 7) & !7;
+    // point-hit bitmap for SinkKind::Point/PointPass — one byte per point
+    // id, then the decision cells (leafbits + dist min-pairs) and the
+    // operand stack, before the (8B-aligned) sink record region
+    let ptmap_base = cov_end;
+    let decv_base = (ptmap_base + cov_points + 7) & !7;
+    let opstk_base = decv_base + cov_decs * DCELL;
+    let sink_base = (opstk_base + OPSTK_N * 16 + 7) & !7;
+    let heap_base = sink_base + if sink.is_empty() { 0 } else { SINK_CAP };
     globals.global(
         GlobalType {
             val_type: ValType::I32,
@@ -1951,6 +2490,66 @@ pub fn emit_resumable(program: &Program, opts: &Opts) -> Result<Wasmgen, Bail> {
         },
         &ConstExpr::i32_const(heap_base as i32), // __hp: heap bump pointer
     );
+    let g_covp = gnext;
+    gnext += 1;
+    globals.global(
+        GlobalType {
+            val_type: ValType::I32,
+            mutable: true,
+            shared: false,
+        },
+        &ConstExpr::i32_const(0), // __covp: sink record cursor
+    );
+    let g_covbuf = gnext;
+    gnext += 1;
+    globals.global(
+        GlobalType {
+            val_type: ValType::I32,
+            mutable: false,
+            shared: false,
+        },
+        &ConstExpr::i32_const(sink_base as i32), // __covbuf: sink region base
+    );
+    let g_ptmap = gnext;
+    gnext += 1;
+    globals.global(
+        GlobalType {
+            val_type: ValType::I32,
+            mutable: false,
+            shared: false,
+        },
+        &ConstExpr::i32_const(ptmap_base as i32), // __ptmap: point bitmap base
+    );
+    let g_osp = gnext;
+    gnext += 1;
+    globals.global(
+        GlobalType {
+            val_type: ValType::I32,
+            mutable: true,
+            shared: false,
+        },
+        &ConstExpr::i32_const(0), // __osp: operand-stack depth
+    );
+    let g_dcov = gnext;
+    gnext += 1;
+    globals.global(
+        GlobalType {
+            val_type: ValType::I32,
+            mutable: false,
+            shared: false,
+        },
+        &ConstExpr::i32_const(decv_base as i32), // __dcov: decision cells
+    );
+    let _ = gnext;
+    // helper func indices: appended after the body functions, fixed order
+    let hbase = nimports + func_map.len() as u32;
+    let covh = CovHelpers {
+        f_leaf: hbase,
+        f_begin: hbase + 1,
+        f_cond: hbase + 2,
+        f_cmp: hbase + 3,
+        f_dec: hbase + 4,
+    };
 
     for b in 0..nbodies {
         let Some(sig) = &sigs[b] else { continue };
@@ -1980,6 +2579,12 @@ pub fn emit_resumable(program: &Program, opts: &Opts) -> Result<Wasmgen, Bail> {
             &sigs,
             &func_map,
             &natives,
+            sink,
+            math,
+            g_covp,
+            sink_base,
+            ptmap_base,
+            &covh,
             opts,
             cov_base,
             g_fuel,
@@ -2020,6 +2625,376 @@ pub fn emit_resumable(program: &Program, opts: &Opts) -> Result<Wasmgen, Bail> {
         });
     }
 
+    // ---- internal cov helpers (call targets for the sink kinds) -----------
+    // Fixed order matching CovHelpers: leaf, begin, cond, cmp, dec, then
+    // the private gap/cellnear/leafbit they call.
+    if !sink.is_empty() {
+        let (f_leaf, f_begin, f_cond, f_cmp, f_dec) =
+            (hbase, hbase + 1, hbase + 2, hbase + 3, hbase + 4);
+        let (f_gap, f_cellnear, f_leafbit) = (hbase + 5, hbase + 6, hbase + 7);
+        let mut tys = |params: &[ValType], results: &[ValType]| -> u32 {
+            let n = types.len();
+            types.ty().function(
+                params.iter().copied(),
+                results.iter().copied(),
+            );
+            n
+        };
+        let i1 = tys(&[ValType::I32], &[]);
+        let i3 = tys(&[ValType::I32; 3], &[]);
+        let i4 = tys(&[ValType::I32; 4], &[]);
+        let leaf_ty = tys(&[ValType::F64, ValType::I32], &[]);
+        let near_ty = tys(&[ValType::I32, ValType::I32, ValType::F64, ValType::F64], &[]);
+        let gap_ty = tys(
+            &[ValType::F64, ValType::F64, ValType::I32],
+            &[ValType::F64, ValType::F64],
+        );
+        // ()->(f64,f64) block type for the nested if-chain arms
+        let pair_ty = tys(&[], &[ValType::F64, ValType::F64]);
+        fn ins(f: &mut Function, i: Instruction) {
+            f.instruction(&i);
+        }
+
+        // f_leaf(x, n): operand push — opstk[__osp] = (f64 x, u8 n); __osp++
+        let mut f = Function::new(vec![(1, ValType::I32)]);
+        ins(&mut f, Instruction::I32Const(opstk_base as i32));
+        ins(&mut f, Instruction::GlobalGet(g_osp));
+        ins(&mut f, Instruction::I32Const(16));
+        ins(&mut f, Instruction::I32Mul);
+        ins(&mut f, Instruction::I32Add);
+        ins(&mut f, Instruction::LocalSet(2));
+        ins(&mut f, Instruction::LocalGet(2));
+        ins(&mut f, Instruction::LocalGet(0));
+        ins(&mut f, Instruction::F64Store(mem(0, 3)));
+        ins(&mut f, Instruction::LocalGet(2));
+        ins(&mut f, Instruction::LocalGet(1));
+        ins(&mut f, Instruction::I32Store8(mem(8, 0)));
+        ins(&mut f, Instruction::GlobalGet(g_osp));
+        ins(&mut f, Instruction::I32Const(1));
+        ins(&mut f, Instruction::I32Add);
+        ins(&mut f, Instruction::GlobalSet(g_osp));
+        ins(&mut f, Instruction::End);
+        funcs.function(leaf_ty);
+        code.function(&f);
+        names.append(f_leaf, "cov_leaf");
+
+        // f_begin(d): leafbits[d] = 0
+        let mut f = Function::new(vec![]);
+        ins(&mut f, Instruction::I32Const(decv_base as i32));
+        ins(&mut f, Instruction::LocalGet(0));
+        ins(&mut f, Instruction::I32Const(DCELL as i32));
+        ins(&mut f, Instruction::I32Mul);
+        ins(&mut f, Instruction::I32Add);
+        ins(&mut f, Instruction::I64Const(0));
+        ins(&mut f, Instruction::I64Store(mem(0, 3)));
+        ins(&mut f, Instruction::End);
+        funcs.function(i1);
+        code.function(&f);
+        names.append(f_begin, "cov_begin");
+
+        // f_cond(d, k, v): flag-near + leafbit
+        let mut f = Function::new(vec![]);
+        ins(&mut f, Instruction::LocalGet(0));
+        ins(&mut f, Instruction::LocalGet(1));
+        ins(&mut f, Instruction::LocalGet(2));
+        ins(&mut f, Instruction::If(BlockType::Result(ValType::F64)));
+        ins(&mut f, Instruction::F64Const(0.0f64.into()));
+        ins(&mut f, Instruction::Else);
+        ins(&mut f, Instruction::F64Const(F64_INF.into()));
+        ins(&mut f, Instruction::End);
+        ins(&mut f, Instruction::LocalGet(2));
+        ins(&mut f, Instruction::If(BlockType::Result(ValType::F64)));
+        ins(&mut f, Instruction::F64Const(F64_INF.into()));
+        ins(&mut f, Instruction::Else);
+        ins(&mut f, Instruction::F64Const(0.0f64.into()));
+        ins(&mut f, Instruction::End);
+        ins(&mut f, Instruction::Call(f_cellnear));
+        ins(&mut f, Instruction::LocalGet(0));
+        ins(&mut f, Instruction::LocalGet(1));
+        ins(&mut f, Instruction::LocalGet(2));
+        ins(&mut f, Instruction::Call(f_leafbit));
+        ins(&mut f, Instruction::End);
+        funcs.function(i3);
+        code.function(&f);
+        names.append(f_cond, "cov_cond");
+
+        // f_cmp(d, k, op, v): pop 2 operands; gap->cellnear or flag->cellnear
+        // locals: l4=addr(i32), l5=a_num(i32), l6=b_num(i32), l7=a(f64), l8=b(f64)
+        let mut f = Function::new(vec![(3, ValType::I32), (2, ValType::F64)]);
+        ins(&mut f, Instruction::GlobalGet(g_osp));
+        ins(&mut f, Instruction::I32Const(2));
+        ins(&mut f, Instruction::I32Sub);
+        ins(&mut f, Instruction::GlobalSet(g_osp));
+        ins(&mut f, Instruction::I32Const(opstk_base as i32));
+        ins(&mut f, Instruction::GlobalGet(g_osp));
+        ins(&mut f, Instruction::I32Const(16));
+        ins(&mut f, Instruction::I32Mul);
+        ins(&mut f, Instruction::I32Add);
+        ins(&mut f, Instruction::LocalSet(4));
+        ins(&mut f, Instruction::LocalGet(4));
+        ins(&mut f, Instruction::F64Load(mem(0, 3)));
+        ins(&mut f, Instruction::LocalSet(7));
+        ins(&mut f, Instruction::LocalGet(4));
+        ins(&mut f, Instruction::I32Load8U(mem(8, 0)));
+        ins(&mut f, Instruction::LocalSet(5));
+        ins(&mut f, Instruction::LocalGet(4));
+        ins(&mut f, Instruction::F64Load(mem(16, 3)));
+        ins(&mut f, Instruction::LocalSet(8));
+        ins(&mut f, Instruction::LocalGet(4));
+        ins(&mut f, Instruction::I32Load8U(mem(24, 0)));
+        ins(&mut f, Instruction::LocalSet(6));
+        ins(&mut f, Instruction::LocalGet(5));
+        ins(&mut f, Instruction::LocalGet(6));
+        ins(&mut f, Instruction::I32And);
+        ins(&mut f, Instruction::If(BlockType::Empty));
+        ins(&mut f, Instruction::LocalGet(0));
+        ins(&mut f, Instruction::LocalGet(1));
+        ins(&mut f, Instruction::LocalGet(7));
+        ins(&mut f, Instruction::LocalGet(8));
+        ins(&mut f, Instruction::LocalGet(2));
+        ins(&mut f, Instruction::Call(f_gap));
+        ins(&mut f, Instruction::Call(f_cellnear));
+        ins(&mut f, Instruction::Else);
+        ins(&mut f, Instruction::LocalGet(0));
+        ins(&mut f, Instruction::LocalGet(1));
+        ins(&mut f, Instruction::LocalGet(3));
+        ins(&mut f, Instruction::If(BlockType::Result(ValType::F64)));
+        ins(&mut f, Instruction::F64Const(0.0f64.into()));
+        ins(&mut f, Instruction::Else);
+        ins(&mut f, Instruction::F64Const(F64_INF.into()));
+        ins(&mut f, Instruction::End);
+        ins(&mut f, Instruction::LocalGet(3));
+        ins(&mut f, Instruction::If(BlockType::Result(ValType::F64)));
+        ins(&mut f, Instruction::F64Const(F64_INF.into()));
+        ins(&mut f, Instruction::Else);
+        ins(&mut f, Instruction::F64Const(0.0f64.into()));
+        ins(&mut f, Instruction::End);
+        ins(&mut f, Instruction::Call(f_cellnear));
+        ins(&mut f, Instruction::End);
+        ins(&mut f, Instruction::LocalGet(0));
+        ins(&mut f, Instruction::LocalGet(1));
+        ins(&mut f, Instruction::LocalGet(3));
+        ins(&mut f, Instruction::Call(f_leafbit));
+        ins(&mut f, Instruction::End);
+        funcs.function(i4);
+        code.function(&f);
+        names.append(f_cmp, "cov_cmp");
+
+        // f_dec(id, d, v): 16B dec-log entry [d u32][v u32][leafbits u64] —
+        // the only records left, so no id/header. __covp counts entries.
+        let mut f = Function::new(vec![(1, ValType::I32)]);
+        ins(&mut f, Instruction::I32Const(sink_base as i32));
+        ins(&mut f, Instruction::GlobalGet(g_covp));
+        ins(&mut f, Instruction::I32Const(16));
+        ins(&mut f, Instruction::I32Mul);
+        ins(&mut f, Instruction::I32Add);
+        ins(&mut f, Instruction::LocalSet(3));
+        ins(&mut f, Instruction::LocalGet(3));
+        ins(&mut f, Instruction::LocalGet(1));
+        ins(&mut f, Instruction::I32Store(mem(0, 2)));
+        ins(&mut f, Instruction::LocalGet(3));
+        ins(&mut f, Instruction::LocalGet(2));
+        ins(&mut f, Instruction::I32Store(mem(4, 2)));
+        ins(&mut f, Instruction::LocalGet(3));
+        ins(&mut f, Instruction::I32Const(decv_base as i32));
+        ins(&mut f, Instruction::LocalGet(1));
+        ins(&mut f, Instruction::I32Const(DCELL as i32));
+        ins(&mut f, Instruction::I32Mul);
+        ins(&mut f, Instruction::I32Add);
+        ins(&mut f, Instruction::I64Load(mem(0, 3)));
+        ins(&mut f, Instruction::I64Store(mem(8, 3)));
+        ins(&mut f, Instruction::GlobalGet(g_covp));
+        ins(&mut f, Instruction::I32Const(1));
+        ins(&mut f, Instruction::I32Add);
+        ins(&mut f, Instruction::GlobalSet(g_covp));
+        ins(&mut f, Instruction::End);
+        funcs.function(i3);
+        code.function(&f);
+        names.append(f_dec, "cov_dec");
+
+        // f_gap(a, b, op) -> (t, f): coverage.rs's gap(), verbatim.
+        // Nested if-chain on op (0..5); each arm leaves (t, f) on the stack.
+        let mut f = Function::new(vec![]);
+        let pair = BlockType::FunctionType(pair_ty);
+        let one = BlockType::Result(ValType::F64);
+        let pos = |f: &mut Function| {
+            ins(f, Instruction::F64Const(0.0f64.into()));
+            ins(f, Instruction::F64Max);
+        };
+        let cond_eps = |f: &mut Function| {
+            // cond already pushed: if -> EPS else 0
+            ins(f, Instruction::If(one));
+            ins(f, Instruction::F64Const(EPS.into()));
+            ins(f, Instruction::Else);
+            ins(f, Instruction::F64Const(0.0f64.into()));
+            ins(f, Instruction::End);
+        };
+        for op in 0..6 {
+            if op < 5 {
+                ins(&mut f, Instruction::LocalGet(2));
+                ins(&mut f, Instruction::I32Const(op));
+                ins(&mut f, Instruction::I32Eq);
+            }
+            ins(&mut f, if op < 5 { Instruction::If(pair) } else { Instruction::Nop });
+            match op {
+                // Eq: t=|a-b|, f=a==b?eps:0
+                0 => {
+                    ins(&mut f, Instruction::LocalGet(0));
+                    ins(&mut f, Instruction::LocalGet(1));
+                    ins(&mut f, Instruction::F64Sub);
+                    ins(&mut f, Instruction::F64Abs);
+                    ins(&mut f, Instruction::LocalGet(0));
+                    ins(&mut f, Instruction::LocalGet(1));
+                    ins(&mut f, Instruction::F64Eq);
+                    cond_eps(&mut f);
+                }
+                // Ne: t=a==b?eps:0, f=|a-b|
+                1 => {
+                    ins(&mut f, Instruction::LocalGet(0));
+                    ins(&mut f, Instruction::LocalGet(1));
+                    ins(&mut f, Instruction::F64Eq);
+                    cond_eps(&mut f);
+                    ins(&mut f, Instruction::LocalGet(0));
+                    ins(&mut f, Instruction::LocalGet(1));
+                    ins(&mut f, Instruction::F64Sub);
+                    ins(&mut f, Instruction::F64Abs);
+                }
+                // Gt: t=pos(b-a)+(a<=b?eps:0), f=pos(a-b)
+                2 => {
+                    ins(&mut f, Instruction::LocalGet(1));
+                    ins(&mut f, Instruction::LocalGet(0));
+                    ins(&mut f, Instruction::F64Sub);
+                    pos(&mut f);
+                    ins(&mut f, Instruction::LocalGet(0));
+                    ins(&mut f, Instruction::LocalGet(1));
+                    ins(&mut f, Instruction::F64Le);
+                    cond_eps(&mut f);
+                    ins(&mut f, Instruction::F64Add);
+                    ins(&mut f, Instruction::LocalGet(0));
+                    ins(&mut f, Instruction::LocalGet(1));
+                    ins(&mut f, Instruction::F64Sub);
+                    pos(&mut f);
+                }
+                // Ge: t=pos(b-a), f=pos(a-b)+(a>=b?eps:0)
+                3 => {
+                    ins(&mut f, Instruction::LocalGet(1));
+                    ins(&mut f, Instruction::LocalGet(0));
+                    ins(&mut f, Instruction::F64Sub);
+                    pos(&mut f);
+                    ins(&mut f, Instruction::LocalGet(0));
+                    ins(&mut f, Instruction::LocalGet(1));
+                    ins(&mut f, Instruction::F64Sub);
+                    pos(&mut f);
+                    ins(&mut f, Instruction::LocalGet(0));
+                    ins(&mut f, Instruction::LocalGet(1));
+                    ins(&mut f, Instruction::F64Ge);
+                    cond_eps(&mut f);
+                    ins(&mut f, Instruction::F64Add);
+                }
+                // Lt: t=pos(a-b)+(a>=b?eps:0), f=pos(b-a)
+                4 => {
+                    ins(&mut f, Instruction::LocalGet(0));
+                    ins(&mut f, Instruction::LocalGet(1));
+                    ins(&mut f, Instruction::F64Sub);
+                    pos(&mut f);
+                    ins(&mut f, Instruction::LocalGet(0));
+                    ins(&mut f, Instruction::LocalGet(1));
+                    ins(&mut f, Instruction::F64Ge);
+                    cond_eps(&mut f);
+                    ins(&mut f, Instruction::F64Add);
+                    ins(&mut f, Instruction::LocalGet(1));
+                    ins(&mut f, Instruction::LocalGet(0));
+                    ins(&mut f, Instruction::F64Sub);
+                    pos(&mut f);
+                }
+                // Le (default): t=pos(a-b), f=pos(b-a)+(a<=b?eps:0)
+                _ => {
+                    ins(&mut f, Instruction::LocalGet(0));
+                    ins(&mut f, Instruction::LocalGet(1));
+                    ins(&mut f, Instruction::F64Sub);
+                    pos(&mut f);
+                    ins(&mut f, Instruction::LocalGet(1));
+                    ins(&mut f, Instruction::LocalGet(0));
+                    ins(&mut f, Instruction::F64Sub);
+                    pos(&mut f);
+                    ins(&mut f, Instruction::LocalGet(0));
+                    ins(&mut f, Instruction::LocalGet(1));
+                    ins(&mut f, Instruction::F64Le);
+                    cond_eps(&mut f);
+                    ins(&mut f, Instruction::F64Add);
+                }
+            }
+            if op < 5 {
+                ins(&mut f, Instruction::Else);
+            }
+        }
+        for _ in 0..5 {
+            ins(&mut f, Instruction::End);
+        }
+        ins(&mut f, Instruction::End);
+        funcs.function(gap_ty);
+        code.function(&f);
+        names.append(f_gap, "cov_gap");
+
+        // f_cellnear(d, k, t, f): min-merge into the dist cell pair
+        let mut f = Function::new(vec![(1, ValType::I32)]);
+        ins(&mut f, Instruction::I32Const(decv_base as i32));
+        ins(&mut f, Instruction::LocalGet(0));
+        ins(&mut f, Instruction::I32Const(DCELL as i32));
+        ins(&mut f, Instruction::I32Mul);
+        ins(&mut f, Instruction::I32Add);
+        ins(&mut f, Instruction::LocalGet(1));
+        ins(&mut f, Instruction::I32Const(8));
+        ins(&mut f, Instruction::I32Mul);
+        ins(&mut f, Instruction::I32Add);
+        ins(&mut f, Instruction::I32Const(8));
+        ins(&mut f, Instruction::I32Add);
+        ins(&mut f, Instruction::LocalSet(4));
+        ins(&mut f, Instruction::LocalGet(4));
+        ins(&mut f, Instruction::LocalGet(4));
+        ins(&mut f, Instruction::F64Load(mem(0, 3)));
+        ins(&mut f, Instruction::LocalGet(2));
+        ins(&mut f, Instruction::F64Min);
+        ins(&mut f, Instruction::F64Store(mem(0, 3)));
+        ins(&mut f, Instruction::LocalGet(4));
+        ins(&mut f, Instruction::LocalGet(4));
+        ins(&mut f, Instruction::F64Load(mem(64, 3)));
+        ins(&mut f, Instruction::LocalGet(3));
+        ins(&mut f, Instruction::F64Min);
+        ins(&mut f, Instruction::F64Store(mem(64, 3)));
+        ins(&mut f, Instruction::End);
+        funcs.function(near_ty);
+        code.function(&f);
+        names.append(f_cellnear, "cov_cellnear");
+
+        // f_leafbit(d, k, v): leafbits[d] |= (v ? 1 : 2) << (k*2)
+        let mut f = Function::new(vec![(1, ValType::I32)]);
+        ins(&mut f, Instruction::I32Const(decv_base as i32));
+        ins(&mut f, Instruction::LocalGet(0));
+        ins(&mut f, Instruction::I32Const(DCELL as i32));
+        ins(&mut f, Instruction::I32Mul);
+        ins(&mut f, Instruction::I32Add);
+        ins(&mut f, Instruction::LocalSet(3));
+        ins(&mut f, Instruction::LocalGet(3));
+        ins(&mut f, Instruction::LocalGet(3));
+        ins(&mut f, Instruction::I64Load(mem(0, 3)));
+        ins(&mut f, Instruction::I32Const(2));
+        ins(&mut f, Instruction::LocalGet(2));
+        ins(&mut f, Instruction::I32Sub);
+        ins(&mut f, Instruction::I64ExtendI32U);
+        ins(&mut f, Instruction::LocalGet(1));
+        ins(&mut f, Instruction::I32Const(2));
+        ins(&mut f, Instruction::I32Mul);
+        ins(&mut f, Instruction::I64ExtendI32U);
+        ins(&mut f, Instruction::I64Shl);
+        ins(&mut f, Instruction::I64Or);
+        ins(&mut f, Instruction::I64Store(mem(0, 3)));
+        ins(&mut f, Instruction::End);
+        funcs.function(i3);
+        code.function(&f);
+        names.append(f_leafbit, "cov_leafbit");
+    }
+
     let pages = (heap_base as u64 + PAGE) / PAGE;
 
     let mut module = Module::new();
@@ -2040,6 +3015,10 @@ pub fn emit_resumable(program: &Program, opts: &Opts) -> Result<Wasmgen, Bail> {
     exports.export("__status", ExportKind::Global, g_status);
     exports.export("__sp", ExportKind::Global, g_sp);
     exports.export("__hp", ExportKind::Global, g_hp);
+    exports.export("__covp", ExportKind::Global, g_covp);
+    exports.export("__covbuf", ExportKind::Global, g_covbuf);
+    exports.export("__ptmap", ExportKind::Global, g_ptmap);
+    exports.export("__dcov", ExportKind::Global, g_dcov);
     module.section(&exports);
     module.section(&code);
     let mut ns = NameSection::new();

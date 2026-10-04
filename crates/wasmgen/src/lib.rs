@@ -388,11 +388,23 @@ pub(crate) fn analyze(ops: &[(usize, Op)], nregs: u32, ret: &[Option<K>]) -> Res
                 bread(*right);
                 put(&mut writes, *dst, W::Bool);
             }
-            Op::StrEq { dst, .. }
-            | Op::StrNe { dst, .. }
-            | Op::In { dst, .. }
-            | Op::IsInstance { dst, .. }
-            | Op::IsRaised { dst, .. } => put(&mut writes, *dst, W::Bool),
+            Op::StrEq { dst, left, right } | Op::StrNe { dst, left, right } => {
+                wread(*left);
+                wread(*right);
+                put(&mut writes, *dst, W::Bool);
+            }
+            Op::IsRaised { dst, src } => {
+                wread(*src);
+                put(&mut writes, *dst, W::Bool);
+            }
+            Op::In { dst, needle, haystack, .. } => {
+                wread(*needle);
+                wread(*haystack);
+                put(&mut writes, *dst, W::Bool);
+            }
+            Op::IsInstance { dst, .. } => {
+                put(&mut writes, *dst, W::Bool);
+            }
             Op::JumpIf { cond, .. } => bread(*cond),
             Op::Switch { scrut, .. } => iread(*scrut),
             Op::Return { val } => {
@@ -403,13 +415,23 @@ pub(crate) fn analyze(ops: &[(usize, Op)], nregs: u32, ret: &[Option<K>]) -> Res
                 // operand class resolves at emit time; dst is classed by its reads
                 put(&mut writes, *dst, W::Reads);
             }
-            Op::CallDirect { dst, body, .. } => {
+            Op::CallDirect { dst, body, args } => {
                 callee.insert(i, body.index());
+                // emit_call reads each arg at the callee sig's class —
+                // a raw word read is the safe superset
+                for a in args {
+                    wread(*a);
+                }
                 put(&mut writes, *dst, W::Call(body.index()));
             }
             Op::Call {
-                dst, callee: creg, ..
+                dst,
+                callee: creg,
+                args,
             } => {
+                for a in args {
+                    wread(*a);
+                }
                 if let Some(&Some(b)) = const_callee.get(&(creg.index() as u32)) {
                     callee.insert(i, b);
                     put(&mut writes, *dst, W::Call(b));
@@ -429,13 +451,24 @@ pub(crate) fn analyze(ops: &[(usize, Op)], nregs: u32, ret: &[Option<K>]) -> Res
                 put(&mut writes, *dst, W::Reads);
             }
             Op::LoadEntry { dst, .. }
-            | Op::UnwrapRaised { dst, .. }
-            | Op::Unwrap { dst, .. }
-            | Op::UnwrapUnit { dst, .. }
             | Op::NewArray { dst }
             | Op::NewDict { dst }
             | Op::NewClosure { dst, .. }
             | Op::Format { dst, .. } => put(&mut writes, *dst, W::Dyn),
+            // `regs[d] = regs[s]` minus Null/Raised — a word passthrough,
+            // dst inherits src's class like Move
+            Op::Unwrap { dst, src } => {
+                wread(*src);
+                put(&mut writes, *dst, W::Copy(src.index() as u32));
+            }
+            Op::UnwrapRaised { dst, src } => {
+                wread(*src);
+                put(&mut writes, *dst, W::Reads);
+            }
+            Op::UnwrapUnit { dst, src } => {
+                wread(*src);
+                put(&mut writes, *dst, W::Reads);
+            }
             // native dst is classed by its reads; args are read raw
             Op::CallNative { .. } => {}
             Op::SetIndex { set, index, value, .. } => {
@@ -1836,6 +1869,64 @@ pub struct Opts {
     /// Write one byte per executed op into exported `memory` at op index.
     pub coverage: bool,
 }
+
+/// Passthrough-native classification for [`resume::emit_resumable`]'s
+/// linear-memory sink: the named natives record `(id, arg words)` into an
+/// exported buffer instead of crossing the wasm import boundary, and the
+/// host replays them in order. Return semantics are fixed per kind — the
+/// sink is only for natives whose result the wasm side can produce itself.
+#[derive(Clone, Copy)]
+pub enum SinkKind {
+    /// No result — `cov::hit(p)`.
+    Hit,
+    /// Result is the last argument, bit-preserved —
+    /// `lhs`/`rhs`/`cmp`/`cond`/`dec` all follow this shape.
+    Passthru,
+    /// Result is constant 1 — `cov::begin(d)`'s always-true gate.
+    Begin,
+    /// Point-marker only: `cov::hit(p)` — writes `u8[ptmap+p]=1`, no record,
+    /// no result. Point hits are ~70% of sink traffic; a bitmap drains them
+    /// O(new-points) instead of O(hits).
+    Point,
+    /// Point-marker + passthrough: `cov::pass(p, v)` — marks `ptmap[p]` and
+    /// returns `v` bit-preserved.
+    PointPass,
+    /// Operand push: `cov::lhs`/`cov::rhs` — pushes the arg onto the
+    /// wasm-side operand stack (f64 + numeric flag), returns it bit-preserved.
+    Leaf,
+    /// Non-comparison leaf: `cov::cond(d, k, v)` — sets the leaf bit and
+    /// the flag-side dist cell, returns `v`.
+    Cond,
+    /// Comparison leaf: `cov::cmp(d, k, op, v)` — pops two operands,
+    /// computes the gap/near into the dist cells, sets the leaf bit,
+    /// returns `v`.
+    Cmp,
+    /// Decision outcome: `cov::dec(d, v)` — writes one sink record
+    /// `(d, v, leafbits[d])` for the row item, returns `v`.
+    Dec,
+}
+
+/// native id -> sink kind; see [`SinkKind`].
+pub type CovSink = std::collections::HashMap<u32, SinkKind>;
+
+/// Pure math natives that map 1:1 onto wasm float ops — emitted inline
+/// instead of as `env` imports (a JS boundary call is ~100x an f64.abs).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum MathOp {
+    /// `Float::abs` (f64 -> f64)
+    Abs,
+    /// `Float::min` (f64 f64 -> f64)
+    Min,
+    /// `Float::max` (f64 f64 -> f64)
+    Max,
+    /// `Float::floor` (f64 -> f64)
+    Floor,
+    /// identity passthrough — `Float::to` (units are advisory; `x.to(m) = x`)
+    Identity,
+}
+
+/// native id -> inline math op, keyed by `NativeId.index()`.
+pub type MathNatives = std::collections::HashMap<u32, MathOp>;
 
 pub fn emit(program: &Program) -> Result<Wasmgen, Bail> {
     emit_opts(program, &Opts::default())

@@ -94,7 +94,7 @@ fn main() {
         ids.push((df.add(sum).index() as u32, "df::sum"));
     })
     .expect("compile");
-    let w = mimas_wasmgen::resume::emit_resumable(&program, &Default::default())
+    let w = mimas_wasmgen::resume::emit_resumable(&program, &Default::default(), None, None, 0, 0)
         .expect("emit resumable");
     std::fs::write(&out, &w.bytes).expect("write wasm");
     let natives = ids
