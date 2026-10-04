@@ -509,6 +509,8 @@ const seenKey = (s, a) => sig(s) ^ ((BigInt(a) + 1n) * 0x9E3779B97F4A7C15n);
 class Search {
   constructor() {
     this.archive = []; this.seen = new Set(); this.expandedPairs = new Set(); this.covered = new Set();
+    this.MAT = new Map(); // LRU materialized archive imgs
+
     this.banMap = new Map();
     this.total = emptyHits(); this.witnesses = []; this.expanded = 0;
   }
@@ -516,6 +518,97 @@ class Search {
   hit() {
     const l = M.target_line;
     return PLAN.points.some((p, i) => p.line === l && this.covered.has('p:' + i));
+  }
+
+  // ---- delta snapshots: archive nodes store sparse write-lists vs
+  // parent + a full img every 256th node. Full-per-node imgs OOM'd the
+  // kernel past ~11k nodes (RSS, not V8 heap) — deltas are ~50x smaller.
+  matOf(i) {
+    const sn = this.archive[i].snap;
+    if (sn.img) return sn.img;
+    let v = this.MAT.get(i);
+    if (v) { this.MAT.delete(i); this.MAT.set(i, v); return v; }
+    const chain = []; let j = i;
+    while (!this.archive[j].snap.img) { chain.push(j); j = this.archive[j].snap.base; }
+    const anc = this.archive[j].snap;
+    const img = new Uint8Array(sn.imgLen);
+    const s2n = sn.sb - sn.cb, s2a = anc.sb - anc.cb;
+    img.set(anc.img.subarray(0, Math.min(sn.sp, anc.sp)), 0);
+    img.set(anc.img.subarray(anc.sp, anc.sp + s2a), sn.sp);
+    const h3 = Math.min(sn.hp - sn.he, anc.hp - anc.he);
+    if (h3 > 0) img.set(anc.img.subarray(anc.sp + s2a, anc.sp + s2a + h3), sn.sp + s2n);
+    for (let k = chain.length - 1; k >= 0; k--) {
+      const d = this.archive[chain[k]].snap, s2d = d.sb - d.cb;
+      let bp = 0;
+      for (let w = 0; w < d.dOff.length; w++) {
+        const a = d.dOff[w], l = d.dLen[w];
+        let po = -1;
+        if (a < d.sp) po = a;
+        else if (a >= d.cb && a < d.sb) po = d.sp + (a - d.cb);
+        else if (a >= d.he && a < d.hp) po = d.sp + s2d + (a - d.he);
+        if (po >= 0) img.set(d.dBytes.subarray(bp, bp + l), po);
+        bp += l;
+      }
+    }
+    this.MAT.set(i, img);
+    while (this.MAT.size > 32) this.MAT.delete(this.MAT.keys().next().value);
+    return img;
+  }
+  snapOf(i) {
+    const n = this.archive[i].snap;
+    return { img: this.matOf(i), sp: n.sp, hp: n.hp, w: n.w, fin: n.fin, cb: n.cb, sb: n.sb, he: n.he };
+  }
+  tapeOf(i) {
+    const n = this.archive[i];
+    if (n._t) return n._t;
+    const idxs = [];
+    for (let j = i; j >= 0; j = this.archive[j].tp) idxs.push(j);
+    const t = [];
+    for (let k = idxs.length - 1; k >= 0; k--) t.push(...this.archive[idxs[k]].tseg);
+    return n._t = t;
+  }
+  // diff live u8 (the just-committed child state) vs parent's
+  // materialized img; writes carry wasm addrs, applied into the child's
+  // own packed layout at materialize time
+  mkDelta(pIdx, c) {
+    const p = this.archive[pIdx].snap, pImg = this.matOf(pIdx);
+    const s2p = p.sb - p.cb;
+    const u32 = new Uint32Array(u8.buffer);
+    const p32 = new Uint32Array(pImg.buffer, 0, pImg.length >> 2);
+    const offs = [], lens = [], blobs = [];
+    let bLen = 0, run = -1;
+    const close = end => { if (run >= 0) { offs.push(run); lens.push(end - run); blobs.push(u8.slice(run, end)); bLen += end - run; run = -1; } };
+    const regs = [
+      [0, c.sp, a => a < p.sp ? a : -1],
+      [c.cb, c.sb, a => (a >= p.cb && a < p.sb) ? p.sp + (a - p.cb) : -1],
+      [c.he, c.hp, a => (a >= p.he && a < p.hp) ? p.sp + s2p + (a - p.he) : -1]];
+    for (const [a0, a1, pck] of regs) {
+      const wEnd = a1 >> 2;
+      for (let w = a0 >> 2; w < wEnd; w++) {
+        const a = w * 4, po = pck(a);
+        let same = false;
+        if (po >= 0 && po + 4 <= pImg.length) {
+          if ((po & 3) === 0) same = p32[po >> 2] === u32[w];
+          else same = pImg[po] === u8[a] && pImg[po + 1] === u8[a + 1] && pImg[po + 2] === u8[a + 2] && pImg[po + 3] === u8[a + 3];
+        }
+        if (same) close(a);
+        else if (run < 0) run = a;
+      }
+      close(a1);
+    }
+    const dBytes = new Uint8Array(bLen);
+    let q = 0; for (const b of blobs) { dBytes.set(b, q); q += b.length; }
+    return { dOff: new Uint32Array(offs), dLen: new Uint32Array(lens), dBytes };
+  }
+  // store a transient snapshot in the archive: anchor (full img) every
+  // 256 nodes / when delta is huge, else delta vs pIdx
+  storeSnap(c, pIdx) {
+    const idx = this.archive.length;
+    if (pIdx < 0 || idx % 256 === 0) return c;
+    const d = this.mkDelta(pIdx, c);
+    if (d.dBytes.length > c.img.length / 2) return c;
+    return { img: null, base: pIdx, imgLen: c.img.length, ...d,
+             sp: c.sp, hp: c.hp, w: c.w, fin: c.fin, cb: c.cb, sb: c.sb, he: c.he };
   }
   record(seg, tape, error) {
     for (const it of items(seg))
@@ -535,9 +628,9 @@ class Search {
     if (this.expandedPairs.has(pair)) return null;
     this.expandedPairs.add(pair);
     let t = performance.now();
-    restore(p.snap);
+    restore(this.snapOf(parent));
     PROF.restore += performance.now() - t; t = performance.now();
-    const tape = p.tape.slice(); tape.push(a);
+    const tape = this.tapeOf(parent).slice(); tape.push(a);
     PROF.frames += performance.now() - t; t = performance.now();
     covTake();
     PROF.cov += performance.now() - t; t = performance.now();
@@ -573,7 +666,7 @@ class Search {
     });
     for (const e of seg.edges) mem.edges.add(e);
     this.buckets(mem, tape);
-    this.archive.push({ snap, tape, seg, mem, dead, score });
+    this.archive.push({ snap: this.storeSnap(snap, parent), tp: parent, tseg: [a], tlen: p.tlen + 1, seg, mem, dead, score });
     return this.archive.length - 1;
   }
   newItems(seg, before) { let n = 0; for (const it of items(seg)) if (!before.has(it)) n++; return n; }
@@ -630,7 +723,7 @@ class Search {
     if (prim === null) prim = hdist(node.mem, d, want, dec.conj, dec.conds.length);
     const dd = node.mem.decs[d];
     const hits = dd ? (want ? dd.t : dd.f) : 0;
-    return [prim === null ? 1e3 + appr : prim, appr - Math.min(hits, 8) * 0.01, node.tape.length, n];
+    return [prim === null ? 1e3 + appr : prim, appr - Math.min(hits, 8) * 0.01, node.tlen, n];
   }
   astar(d, want, budget, goal) {
     const stop = this.expanded + budget;
@@ -729,8 +822,8 @@ class Search {
     const dec = PLAN.decisions[d];
     const p0 = this.archive[n];
     if (p0.dead) return;
-    let wsnap = p0.snap;
-    const wtape = p0.tape.slice();
+    let wsnap = this.snapOf(n);
+    const wtape = this.tapeOf(n).slice();
     const wmem = { points: p0.mem.points.slice(),
       decs: p0.mem.decs.map(dd => dd && { t: dd.t, f: dd.f, rows: new Set(dd.rows) }),
       dist: new Map(p0.mem.dist), edges: new Set(p0.mem.edges) };
@@ -774,7 +867,7 @@ class Search {
       const key = seenKey(wsnap, wtape[wtape.length - 1]);
       if (!this.seen.has(key)) {
         this.seen.add(key);
-        this.archive.push({ snap: wsnap, tape: wtape.slice(), seg: lastSeg, mem: this.cloneMem(wmem), dead: GAME.fin, score: Number(dv.getBigInt64(Number(wsnap.w) + 8 + 7 * 8, true)) });
+        this.archive.push({ snap: this.storeSnap(wsnap, n), tp: n, tseg: wtape.slice(p0.tlen), tlen: wtape.length, seg: lastSeg, mem: this.cloneMem(wmem), dead: GAME.fin, score: Number(dv.getBigInt64(Number(wsnap.w) + 8 + 7 * 8, true)) });
       }
     }
   }
@@ -783,12 +876,12 @@ class Search {
       decs: m.decs.map(dd => dd && { t: dd.t, f: dd.f, rows: new Set(dd.rows) }),
       dist: new Map(m.dist), edges: new Set(m.edges) };
   }
-  bank(wsnap, wtape, wmem, lastSeg) {
+  bank(wsnap, wtape, wmem, lastSeg, base) {
     const key = seenKey(wsnap, wtape[wtape.length - 1]);
     if (this.seen.has(key)) return;
     this.seen.add(key);
     const score = Number(dv.getBigInt64(Number(wsnap.w) + 8 + 7 * 8, true));
-    this.archive.push({ snap: wsnap, tape: wtape.slice(), seg: lastSeg, mem: this.cloneMem(wmem), dead: GAME.fin, score });
+    this.archive.push({ snap: this.storeSnap(wsnap, base), tp: base, tseg: wtape.slice(this.archive[base].tlen), tlen: wtape.length, seg: lastSeg, mem: this.cloneMem(wmem), dead: GAME.fin, score });
   }
   // AFL havoc: coverage-blind diversification — commit random actions
   // (repeat-biased, Go-Explore's p≈0.6) on a working snapshot; every
@@ -797,8 +890,8 @@ class Search {
   walk(n, k, forced) {
     const p0 = this.archive[n];
     if (!p0 || p0.dead) return;
-    let wsnap = p0.snap;
-    const wtape = p0.tape.slice();
+    let wsnap = this.snapOf(n);
+    const wtape = this.tapeOf(n).slice();
     const wmem = this.cloneMem(p0.mem);
     let a = wtape.length ? wtape[wtape.length - 1] : 0;
     let lastSeg = null, steps = 0;
@@ -820,15 +913,16 @@ class Search {
       wsnap = snapshot(); steps++;
       if (GAME.fin) break;
     }
-    if (steps && lastSeg) this.bank(wsnap, wtape, wmem, lastSeg);
+    if (steps && lastSeg) this.bank(wsnap, wtape, wmem, lastSeg, n);
   }
   // AFL splice: replay tape B's suffix from node A's state — route
   // fragments recombine (reach-coin-A prefix + near-coin-B tail).
   splice(nA, nB, k = 8) {
     const pb = this.archive[nB];
-    if (!pb || !pb.tape.length) return;
-    const i = (Math.random() * pb.tape.length) | 0;
-    this.walk(nA, k, pb.tape.slice(i, i + k));
+    if (!pb || !pb.tlen) return;
+    const pt = this.tapeOf(nB);
+    const i = (Math.random() * pt.length) | 0;
+    this.walk(nA, k, pt.slice(i, i + k));
   }
   // w.got decode — [dp:u32][len:u32] header, len i64 strids — same
   // layout sig() hashes, read on live memory right after restore.
@@ -858,8 +952,8 @@ class Search {
   seek(n, maxSteps = 150) {
     const p0 = this.archive[n];
     if (!p0 || p0.dead) return;
-    let wsnap = p0.snap;
-    const wtape = p0.tape.slice();
+    let wsnap = this.snapOf(n);
+    const wtape = this.tapeOf(n).slice();
     const wmem = this.cloneMem(p0.mem);
     restore(wsnap); fresh();
     const deaths0 = dv.getBigInt64(Number(GAME.w) + 8 + 8 * 8, true);
@@ -959,7 +1053,7 @@ class Search {
       wsnap = snapshot();
       // bank on pickups or every 8th step: mid-route states survive
       // deaths — full-density banking OOM'd the archive past ~11k snaps
-      if (this.gotIds().size > gotSz || steps % 8 === 0) this.bank(wsnap, wtape, wmem, lastSeg);
+      if (this.gotIds().size > gotSz || steps % 8 === 0) this.bank(wsnap, wtape, wmem, lastSeg, n);
       fresh();
       const pw = Number(GAME.w);
       const pxc = dv.getFloat64(pw + 8, true), pyc = dv.getFloat64(pw + 16, true);
@@ -969,7 +1063,7 @@ class Search {
       lastSc = sc;
       if (GAME.fin || posStuck >= 4) break;
     }
-    if (steps && lastSeg) this.bank(wsnap, wtape, wmem, lastSeg);
+    if (steps && lastSeg) this.bank(wsnap, wtape, wmem, lastSeg, n);
   }
   // One diversification round: havoc/splice from random archive nodes.
   // Runs where there's no gradient — the fuzzer layer for flat regions.
@@ -1030,7 +1124,7 @@ frame([]);                             // one frame of default input, like Game:
 const s0 = snapshot();
 const s = new Search();
 s.seen.add(sig(s0));
-s.archive.push({ snap: s0, tape: [], seg: emptyHits(), mem: emptyHits(), dead: false });
+s.archive.push({ snap: s0, tp: -1, tseg: [], tlen: 0, seg: emptyHits(), mem: emptyHits(), dead: false });
 s.beam();
 if (!s.done()) s.aim();
 const ms = performance.now() - t0;
