@@ -192,7 +192,9 @@ impl<'a> Pass<'a> {
             self.structs.iter().map(|(n, s)| (n.clone(), *s)).collect();
         for (name, s) in structs {
             for f in &s.fields {
-                let FieldKey::Ident(k) = &f.name else { continue };
+                let FieldKey::Ident(k) = &f.name else {
+                    continue;
+                };
                 let tps = s.type_params.iter().map(|i| i.lexeme.clone()).collect();
                 let d = self.with_ty_params(tps, |p| p.annotation(&f.annotation));
                 if let Some(d) = scalar(d) {

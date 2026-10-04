@@ -21,9 +21,13 @@ let head: index = 0;
     vm.run().expect("run");
     let g = vm.locals_graph(Some(&["nodes"]));
     assert_eq!(g.roots.len(), 1);
-    let Obj::Array { items, more } = &g.objs[obj(&g, &g.roots[0].1)] else { panic!() };
+    let Obj::Array { items, more } = &g.objs[obj(&g, &g.roots[0].1)] else {
+        panic!()
+    };
     assert_eq!((items.len(), *more), (2, 0));
-    let Obj::Instance { type_name, fields } = &g.objs[obj(&g, &items[0])] else { panic!() };
+    let Obj::Instance { type_name, fields } = &g.objs[obj(&g, &items[0])] else {
+        panic!()
+    };
     assert_eq!(type_name, "Node");
     assert_eq!(fields[0].name, "val");
     assert!(!fields[0].is_index());
@@ -43,13 +47,27 @@ let alias = b;
     let mut vm = Vm::compile(src, |_| {}).expect("compile");
     vm.run().expect("run");
     let g = vm.locals_graph(None);
-    let root = |n: &str| g.roots.iter().find(|(k, _)| k == n).map(|(_, s)| obj(&g, s)).unwrap();
+    let root = |n: &str| {
+        g.roots
+            .iter()
+            .find(|(k, _)| k == n)
+            .map(|(_, s)| obj(&g, s))
+            .unwrap()
+    };
     let (a, b) = (root("a"), root("b"));
     assert_eq!(root("alias"), b, "an alias is the same object, not a copy");
-    let Obj::Instance { fields, .. } = &g.objs[a] else { panic!() };
+    let Obj::Instance { fields, .. } = &g.objs[a] else {
+        panic!()
+    };
     assert_eq!(obj(&g, &fields[1].slot), b);
-    let Obj::Instance { fields, .. } = &g.objs[b] else { panic!() };
-    assert_eq!(obj(&g, &fields[2].slot), a, "the back edge points at a, not <cycle>");
+    let Obj::Instance { fields, .. } = &g.objs[b] else {
+        panic!()
+    };
+    assert_eq!(
+        obj(&g, &fields[2].slot),
+        a,
+        "the back edge points at a, not <cycle>"
+    );
     assert_eq!(g.objs.len(), 2);
 }
 

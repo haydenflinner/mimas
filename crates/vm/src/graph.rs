@@ -41,9 +41,15 @@ impl GField {
 
 #[derive(Debug, Clone)]
 pub enum Obj {
-    Array { items: Vec<Slot>, more: usize },
+    Array {
+        items: Vec<Slot>,
+        more: usize,
+    },
     Dict(Vec<(String, Slot)>),
-    Instance { type_name: String, fields: Vec<GField> },
+    Instance {
+        type_name: String,
+        fields: Vec<GField>,
+    },
 }
 
 /// Named roots plus every heap object reachable from them, ids in first-visit order.
@@ -76,7 +82,11 @@ impl GraphNames {
         let roots = roots.into_iter().map(|(n, v)| (n, b.slot(v))).collect();
         HeapGraph {
             roots,
-            objs: b.objs.into_iter().map(|o| o.expect("every claimed id is filled")).collect(),
+            objs: b
+                .objs
+                .into_iter()
+                .map(|o| o.expect("every claimed id is filled"))
+                .collect(),
             truncated: b.truncated,
         }
     }
@@ -136,12 +146,11 @@ impl Builder<'_> {
                 b.array(vals.into_iter())
             }),
             Val::Dict(d) => self.node(Gc::as_ptr(d.0) as *const (), |b| {
-                let entries: Vec<(String, Val<'gc>)> = d
-                    .0
-                    .borrow()
-                    .iter()
-                    .map(|(k, v)| (k.as_str().to_string(), *v))
-                    .collect();
+                let entries: Vec<(String, Val<'gc>)> =
+                    d.0.borrow()
+                        .iter()
+                        .map(|(k, v)| (k.as_str().to_string(), *v))
+                        .collect();
                 Obj::Dict(entries.into_iter().map(|(k, v)| (k, b.slot(v))).collect())
             }),
             Val::Instance(inst) => self.node(Gc::as_ptr(inst.0) as *const (), |b| {
@@ -165,7 +174,12 @@ impl Builder<'_> {
                             .and_then(|n| n.get(i))
                             .cloned()
                             .unwrap_or_else(|| i.to_string()),
-                        dim: names.field_dims.get(sid).and_then(|d| d.get(i)).copied().flatten(),
+                        dim: names
+                            .field_dims
+                            .get(sid)
+                            .and_then(|d| d.get(i))
+                            .copied()
+                            .flatten(),
                         slot: b.slot(v),
                     })
                     .collect();

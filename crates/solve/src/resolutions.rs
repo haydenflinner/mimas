@@ -225,7 +225,12 @@ impl ResolvedAdt {
         };
         let member_dims = fields
             .iter()
-            .map(|f| solver.member_units.get(&(adt.name.clone(), f.clone())).copied())
+            .map(|f| {
+                solver
+                    .member_units
+                    .get(&(adt.name.clone(), f.clone()))
+                    .copied()
+            })
             .collect();
         let type_params = adt.type_params.iter().map(|(_, pid)| *pid).collect();
 
