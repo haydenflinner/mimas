@@ -204,6 +204,8 @@ pub struct Vm {
     /// Declared field names per struct, indexed by `struct_id` like `methods` -- see
     /// [`Val::inspect`] and [`Vm::frames`]'s `locals_inspect`.
     pub(crate) field_names: Vec<Vec<String>>,
+    /// Declared unit per field, parallel to `field_names` -- see [`Vm::graph`].
+    pub(crate) field_dims: Vec<Vec<Option<shared::units::Dim>>>,
     pub(crate) root: Rc<Module>,
     pub(crate) registry: Registry,
     /// bcgen-specialized body fns, one slot per `BodyId` (`None` = no generated
@@ -244,6 +246,7 @@ impl Vm {
             chunk_names: HashMap::default(),
             methods: Vec::new(),
             field_names: Vec::new(),
+            field_dims: Vec::new(),
             root: Rc::default(),
             registry: Registry::new(),
             bc: None,
@@ -273,6 +276,7 @@ impl Vm {
             struct_names,
             methods,
             field_names,
+            field_dims,
             tests,
         } = program;
         self.entry = entry;
@@ -303,6 +307,7 @@ impl Vm {
         self.methods = methods.into_values().collect();
         let field_names: Vec<Vec<String>> = field_names.into_values().collect();
         self.field_names = field_names.clone();
+        self.field_dims = field_dims.into_values().collect();
         let chunks = &self.chunks;
         self.arena.mutate(|mc, state| {
             *state.struct_names.borrow_mut(mc) = struct_names.into_values().collect();

@@ -70,6 +70,11 @@ pub struct Solver {
     /// Populated by `install_user_adt` from `ApiVariantFields::Named` dims; the dims pass
     /// consults it when a `.field` read isn't on a source-declared struct.
     pub(crate) field_dims: HashMap<(String, String), shared::units::Dim>,
+    /// Declared unit of each source-struct member, through `?`/`[..]`:
+    /// `(struct name, field name)`. `next: index?` and `kids: [idx]` both
+    /// land as `INDEX`. Recorded by the dims pass; surfaces on
+    /// [`ResolvedAdt::member_dims`](crate::ResolvedAdt).
+    pub(crate) member_units: HashMap<(String, String), shared::units::Dim>,
     /// Exprs that fulfill a `[T; n]` position with a length the compiler couldn't
     /// prove -- emit wraps each in a runtime dim check (see `lens.rs`).
     /// Surfaces on [`Resolutions::len_checks`](crate::Resolutions).
@@ -145,6 +150,7 @@ impl Solver {
             node_dims: IndexMap::new(),
             want_dims: IndexMap::new(),
             field_dims: HashMap::new(),
+            member_units: HashMap::new(),
             len_checks: IndexMap::new(),
             default_ctors: IndexMap::new(),
             dec_uses: IndexMap::new(),

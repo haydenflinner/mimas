@@ -36,6 +36,10 @@ pub struct Program {
     /// inspector, say). Tuple-struct members show up as their positional index stringified
     /// ("0", "1", ..), matching `solve::ResolvedAdt::fields`, which this is copied from.
     pub field_names: IdVec<AdtId, Vec<String>>,
+    /// Declared unit per field, parallel to `field_names` -- copied from
+    /// `solve::ResolvedAdt::member_dims`. A host's value diagram reads
+    /// `index` fields as pointers into an array.
+    pub field_dims: IdVec<AdtId, Vec<Option<shared::units::Dim>>>,
     /// Functions marked `#[test]`, in source order. Each name is a fn path in `root`.
     pub tests: Vec<String>,
 }

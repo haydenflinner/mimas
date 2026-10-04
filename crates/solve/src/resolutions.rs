@@ -189,6 +189,9 @@ pub struct ResolvedAdt {
     /// `S::default()` lowering substitutes with the call site's args.
     /// Empty for enums and modules.
     pub member_tys: Vec<Ty>,
+    /// Each member's declared unit, parallel to `fields` (through `?`/`[..]`):
+    /// `next: index?` is `Some(INDEX)`. `None` for unitless members and tuples.
+    pub member_dims: Vec<Option<shared::units::Dim>>,
     /// The adt's declared type params (`struct P<T>` → `[T]`), positionally
     /// parallel to the `args` on a `Ty::Adt`/`Ty::Identity` instantiation.
     pub type_params: Vec<ParamId>,
@@ -220,6 +223,10 @@ impl ResolvedAdt {
                 .collect(),
             _ => Vec::new(),
         };
+        let member_dims = fields
+            .iter()
+            .map(|f| solver.member_units.get(&(adt.name.clone(), f.clone())).copied())
+            .collect();
         let type_params = adt.type_params.iter().map(|(_, pid)| *pid).collect();
 
         let mut implements: Vec<PactId> = solver
@@ -253,6 +260,7 @@ impl ResolvedAdt {
             module,
             fields,
             member_tys,
+            member_dims,
             type_params,
             implements,
             methods,

@@ -697,6 +697,14 @@ impl Compiler {
             .collect::<Vec<_>>()
             .into();
 
+        let field_dims: IdVec<_, Vec<Option<shared::units::Dim>>> = ir
+            .resolutions
+            .adts
+            .values()
+            .map(|adt| adt.member_dims.clone())
+            .collect::<Vec<_>>()
+            .into();
+
         let tests = std::mem::take(&mut ir.tests);
 
         Program {
@@ -709,6 +717,7 @@ impl Compiler {
             struct_names,
             methods,
             field_names,
+            field_dims,
             tests,
         }
     }

@@ -145,6 +145,7 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> Result<()> {
             errors: Vec::new(),
         };
         pass.index(ast.stmts());
+        let member_units = pass.member_units();
         // two quiet rounds settle constants that build on each other in any order, then the
         // real one reports
         for _ in 0..2 {
@@ -168,12 +169,39 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> Result<()> {
         drop(pass); // ends the `&*solver` borrow
         solver.node_dims.extend(dims);
         solver.want_dims.extend(want_dims);
+        solver.member_units.extend(member_units);
     }
     Ok(())
 }
 
 impl<'a> Pass<'a> {
     // ---- indexing
+
+    /// Every indexed struct's members that declare a unit, looking through
+    /// `?` and `[..]` to the scalar inside.
+    fn member_units(&mut self) -> Vec<((String, String), Dim)> {
+        fn scalar(d: D) -> Option<Dim> {
+            match d {
+                D::Q(d) | D::Iv(d) if !d.is_none() => Some(d),
+                D::Arr(inner) => scalar(*inner),
+                _ => None,
+            }
+        }
+        let mut out = Vec::new();
+        let structs: Vec<(String, &'a Struct)> =
+            self.structs.iter().map(|(n, s)| (n.clone(), *s)).collect();
+        for (name, s) in structs {
+            for f in &s.fields {
+                let FieldKey::Ident(k) = &f.name else { continue };
+                let tps = s.type_params.iter().map(|i| i.lexeme.clone()).collect();
+                let d = self.with_ty_params(tps, |p| p.annotation(&f.annotation));
+                if let Some(d) = scalar(d) {
+                    out.push(((name.clone(), k.lexeme.clone()), d));
+                }
+            }
+        }
+        out
+    }
 
     fn index(&mut self, stmts: &'a [Stmt]) {
         for stmt in stmts {

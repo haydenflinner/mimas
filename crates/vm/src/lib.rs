@@ -24,6 +24,8 @@ mod snapshot;
 pub use snapshot::*;
 mod rebind;
 pub use rebind::*;
+mod graph;
+pub use graph::*;
 mod math;
 #[cfg(feature = "tensor")]
 pub mod tensor;
