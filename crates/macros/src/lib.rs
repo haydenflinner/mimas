@@ -21,7 +21,8 @@ use proc_macro_crate::{FoundCrate, crate_name};
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::{
-    DeriveInput, FnArg, Ident, Pat, Token, parse_macro_input, parse_quote, punctuated::Punctuated,
+    DeriveInput, FnArg, Ident, Pat, Token, ext::IdentExt, parse::Parse, parse::ParseStream,
+    parse_macro_input, parse_quote, punctuated::Punctuated,
 };
 
 mod convert;
@@ -296,9 +297,16 @@ pub(crate) fn effects_submission(
         return Ok(None);
     };
     let attr = attrs.remove(pos);
-    let names = attr.parse_args_with(Punctuated::<Ident, Token![,]>::parse_terminated)?;
+    /// An effect name that may be a keyword (`yield` is one of the six).
+    struct FxName(Ident);
+    impl Parse for FxName {
+        fn parse(input: ParseStream) -> Result<Self, syn::Error> {
+            input.call(Ident::parse_any).map(FxName)
+        }
+    }
+    let names = attr.parse_args_with(Punctuated::<FxName, Token![,]>::parse_terminated)?;
     let mut bits: u8 = 0;
-    for name in names {
+    for FxName(name) in names {
         bits |= match name.to_string().as_str() {
             "doc" => 1 << 0,
             "net" => 1 << 1,
