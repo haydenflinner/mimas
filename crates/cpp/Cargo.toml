@@ -1,0 +1,23 @@
+[package]
+name = "mimas-cpp"
+version = "0.1.0"
+edition = "2024"
+description = "C++ frontend for mimas: parses a C++ subset with tree-sitter and emits mimas source."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "cpp"
+path = "src/lib.rs"
+
+[dependencies]
+tree-sitter = "0.25"
+tree-sitter-cpp = "0.23"
+thiserror.workspace = true
+
+[dev-dependencies]
+mimas = { path = "../mimas" }
+vm = { package = "mimas-vm", path = "../vm" }
+library = { package = "mimas-library", path = "../library" }
