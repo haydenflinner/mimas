@@ -119,15 +119,20 @@ impl RE<'_> {
     /// A single-class reg of a different class gets the coercion.
     fn get(&mut self, r: Reg, want: K) -> Result<(), Bail> {
         let idx = r.index() as u32;
+        let off = idx * 8;
+        if want == K::Word {
+            self.fp();
+            self.ins(Instruction::I64Load(mem(off, 3)));
+            return Ok(());
+        }
         let m = *self
             .mask
             .get(&idx)
             .ok_or_else(|| format!("reg {} has no scalar class", idx))?;
-        let off = idx * 8;
         if m & crate::kbit(want) != 0 {
             self.fp();
             self.ins(match want {
-                K::Int => Instruction::I64Load(mem(off, 3)),
+                K::Int | K::Word => Instruction::I64Load(mem(off, 3)),
                 K::Float => Instruction::F64Load(mem(off, 3)),
                 K::Bool => Instruction::I32Load(mem(off, 2)),
             });
@@ -170,7 +175,7 @@ impl RE<'_> {
     fn st(&mut self, r: Reg, k: K) {
         let off = r.index() as u32 * 8;
         self.ins(match k {
-            K::Int => Instruction::I64Store(mem(off, 3)),
+            K::Int | K::Word => Instruction::I64Store(mem(off, 3)),
             K::Float => Instruction::F64Store(mem(off, 3)),
             K::Bool => Instruction::I32Store(mem(off, 2)),
         });
@@ -224,6 +229,7 @@ impl RE<'_> {
         self.ins(Instruction::LocalGet(self.l_myfp));
         self.ins(Instruction::GlobalSet(self.g_sp));
         match self.ret_k {
+            Some(K::Word) => self.ins(Instruction::I64Const(0)),
             Some(K::Int) => self.ins(Instruction::I64Const(0)),
             Some(K::Float) => self.ins(Instruction::F64Const(0.0f64.into())),
             Some(K::Bool) => self.ins(Instruction::I32Const(0)),
@@ -438,6 +444,7 @@ impl RE<'_> {
             .unwrap_or(K::Float);
         let kr = kl;
         match (kl, kr) {
+            (K::Word, _) | (_, K::Word) => unreachable!("bin operands resolve to scalar"),
             (K::Int, K::Int) => match op {
                 BinOp::Add | BinOp::Sub | BinOp::Mult | BinOp::Mod | BinOp::IDiv => {
                     self.setv(dst, K::Int, |s| s.checked_int(l, r, op))?;
@@ -606,6 +613,12 @@ impl RE<'_> {
                         s.ins(Instruction::I32Const(v));
                         Ok(())
                     })?;
+                }
+                compile::Constant::Null => {
+                    // raw zero word — Null is only meaningful to word-reads
+                    self.fp();
+                    self.ins(Instruction::I64Const(0));
+                    self.ins(Instruction::I64Store(mem(dst.index() as u32 * 8, 3)));
                 }
                 c => bail!("LoadConst {c:?}"),
             },
@@ -789,6 +802,7 @@ impl RE<'_> {
                     .unwrap_or(K::Float);
                 match uop {
                     UnaryOp::Negative => match sk {
+                        K::Word => unreachable!(),
                         K::Int => self.setv(*dst, K::Int, |s| {
                             s.ins(Instruction::I64Const(0));
                             s.get(*src, K::Int)?;
@@ -812,6 +826,7 @@ impl RE<'_> {
                     },
                     // mimas `+x` is checked abs on ints, fabs on floats
                     UnaryOp::Positive => match sk {
+                        K::Word => unreachable!(),
                         K::Int => self.setv(*dst, K::Int, |s| {
                             s.get(*src, K::Int)?;
                             s.ins(Instruction::LocalSet(s.l_tmp));
@@ -841,6 +856,7 @@ impl RE<'_> {
                         K::Bool => bail!("abs bool"),
                     },
                     UnaryOp::Not => match sk {
+                        K::Word => unreachable!(),
                         K::Bool => self.setv(*dst, K::Bool, |s| {
                             s.get(*src, K::Bool)?;
                             s.ins(Instruction::I32Eqz);
@@ -862,33 +878,35 @@ impl RE<'_> {
             Op::CallNative { dst, id, args } => {
                 let mut params = Vec::new();
                 for a in args {
-                    let Some(k) = self.pick(*a) else {
-                        bail!("native arg reg {} has no class", a.index())
-                    };
-                    params.push(k);
+                    params.push(self.pick(*a).unwrap_or(K::Word));
                 }
-                let dk = self.pick(*dst);
+                // classless dst that a heap op reads later must round-trip the
+                // word — passthrough natives (cov::pass & co) rely on it
+                let dk = self.pick(*dst).or_else(|| {
+                    self.reads_w
+                        .contains(&(dst.index() as u32))
+                        .then_some(K::Word)
+                });
                 let ret = dk.unwrap_or(K::Int);
                 let fi = self.natives[&(id.index() as u32, params.clone(), Some(ret))];
-                for a in args {
-                    let k = self.pick(*a).unwrap();
+                for (a, &k) in args.iter().zip(&params) {
                     self.get(*a, k)?;
                 }
                 self.ins(Instruction::Call(fi));
                 match dk {
-                    Some(_) => {
-                        self.ins(match ret {
-                            K::Int => Instruction::LocalSet(self.l_tmp),
+                    Some(k) => {
+                        self.ins(match k {
+                            K::Int | K::Word => Instruction::LocalSet(self.l_tmp),
                             K::Float => Instruction::LocalSet(self.l_tmpf),
                             K::Bool => Instruction::LocalSet(self.l_tmpb),
                         });
                         self.fp();
-                        self.ins(match ret {
-                            K::Int => Instruction::LocalGet(self.l_tmp),
+                        self.ins(match k {
+                            K::Int | K::Word => Instruction::LocalGet(self.l_tmp),
                             K::Float => Instruction::LocalGet(self.l_tmpf),
                             K::Bool => Instruction::LocalGet(self.l_tmpb),
                         });
-                        self.st(*dst, ret);
+                        self.st(*dst, k);
                     }
                     None => self.ins(Instruction::Drop),
                 }
@@ -1199,25 +1217,43 @@ impl RE<'_> {
         self.ins(Instruction::End);
         let store_k = if self.mask.contains_key(&(dst.index() as u32)) {
             ret_k
+        } else if self.reads_w.contains(&(dst.index() as u32)) {
+            ret_k.map(|_| K::Word)
         } else {
             None
         };
         match store_k {
             Some(k) => {
-                self.ins(match k {
-                    K::Int => Instruction::LocalSet(self.l_tmp),
-                    K::Float => Instruction::LocalSet(self.l_tmpf),
-                    K::Bool => Instruction::LocalSet(self.l_tmpb),
-                });
-                self.fp();
-                self.ins(match k {
-                    K::Int => Instruction::LocalGet(self.l_tmp),
-                    K::Float => Instruction::LocalGet(self.l_tmpf),
-                    K::Bool => Instruction::LocalGet(self.l_tmpb),
-                });
+                if k == K::Word {
+                    // callee's declared ret → raw i64 word
+                    match ret_k {
+                        Some(K::Float) => self.ins(Instruction::I64ReinterpretF64),
+                        Some(K::Bool) => self.ins(Instruction::I64ExtendI32U),
+                        _ => {}
+                    }
+                    self.ins(Instruction::LocalSet(self.l_tmp));
+                    self.fp();
+                    self.ins(Instruction::LocalGet(self.l_tmp));
+                } else {
+                    self.ins(match k {
+                        K::Int | K::Word => Instruction::LocalSet(self.l_tmp),
+                        K::Float => Instruction::LocalSet(self.l_tmpf),
+                        K::Bool => Instruction::LocalSet(self.l_tmpb),
+                    });
+                    self.fp();
+                    self.ins(match k {
+                        K::Int | K::Word => Instruction::LocalGet(self.l_tmp),
+                        K::Float => Instruction::LocalGet(self.l_tmpf),
+                        K::Bool => Instruction::LocalGet(self.l_tmpb),
+                    });
+                }
                 self.st(dst, k);
             }
-            None => self.ins(Instruction::Drop),
+            None => {
+                if ret_k.is_some() {
+                    self.ins(Instruction::Drop);
+                }
+            }
         }
         Ok(())
     }
@@ -1589,7 +1625,7 @@ fn try_resume_body(
         re.fp();
         re.ins(Instruction::LocalGet(pi as u32));
         re.ins(match k {
-            K::Int => Instruction::I64Store(mem(off, 3)),
+            K::Int | K::Word => Instruction::I64Store(mem(off, 3)),
             K::Float => Instruction::F64Store(mem(off, 3)),
             K::Bool => Instruction::I32Store(mem(off, 2)),
         });
@@ -1702,24 +1738,12 @@ pub fn emit_resumable(program: &Program, opts: &Opts) -> Result<Wasmgen, Bail> {
             });
             continue;
         };
-        let mut params = Vec::new();
-        let mut ok = true;
-        for p in &chunk.params {
-            match ana.class.get(&(p.index() as u32)) {
-                Some(&k) => params.push(k),
-                None => {
-                    ok = false;
-                    break;
-                }
-            }
-        }
-        if !ok {
-            skipped.push(Skip {
-                body: b,
-                reason: "param has no scalar class".into(),
-            });
-            continue;
-        }
+        let params: Vec<K> = chunk
+            .params
+            .iter()
+            // param never read: any class works — i64 word is the widest
+            .map(|p| ana_pick(ana, *p).unwrap_or(K::Int))
+            .collect();
         sigs[b] = Some(Sig {
             params,
             ret: ana.ret,
@@ -1735,17 +1759,19 @@ pub fn emit_resumable(program: &Program, opts: &Opts) -> Result<Wasmgen, Bail> {
         }
         for (_, op) in &bodies_ops[b] {
             if let Op::CallNative { dst, id, args } = op {
-                if !args
-                    .iter()
-                    .all(|a| ana_pick(ana, *a).is_some())
-                {
-                    continue;
-                }
                 let params: Vec<K> = args
                     .iter()
-                    .map(|a| ana_pick(ana, *a).unwrap())
+                    .map(|a| ana_pick(ana, *a).unwrap_or(K::Word))
                     .collect();
-                let ret = Some(ana_pick(ana, *dst).unwrap_or(K::Int));
+                let ret = Some(
+                    ana_pick(ana, *dst)
+                        .or_else(|| {
+                            ana.reads_w
+                                .contains(&(dst.index() as u32))
+                                .then_some(K::Word)
+                        })
+                        .unwrap_or(K::Int),
+                );
                 let key = (id.index() as u32, params, ret);
                 if !natives.contains_key(&key) {
                     natives.insert(key.clone(), native_list.len() as u32);
@@ -1772,15 +1798,7 @@ pub fn emit_resumable(program: &Program, opts: &Opts) -> Result<Wasmgen, Bail> {
             if let Some(c) = ana.callee.values().find(|c| !emitted[**c]) {
                 why = format!("calls skipped body {c}");
             } else {
-                let all_native_args_classed = bodies_ops[b].iter().all(|(_, op)| match op {
-                    Op::CallNative { args, .. } => args
-                        .iter()
-                        .all(|a| ana_pick(ana, *a).is_some()),
-                    _ => true,
-                });
-                if !all_native_args_classed {
-                    why = "native arg has no scalar class".into();
-                } else if let Err(e) = try_resume_body(
+                if let Err(e) = try_resume_body(
                     b,
                     &bodies_ops[b],
                     program,
@@ -1859,12 +1877,14 @@ pub fn emit_resumable(program: &Program, opts: &Opts) -> Result<Wasmgen, Bail> {
                 K::Int => 'i',
                 K::Float => 'f',
                 K::Bool => 'b',
+                K::Word => 'w',
             })
             .collect::<String>();
         let ret_desc = match ret {
             Some(K::Int) => 'i',
             Some(K::Float) => 'f',
             Some(K::Bool) => 'b',
+            Some(K::Word) => 'w',
             None => 'v',
         };
         imports.import(

@@ -55,6 +55,9 @@ pub enum K {
     Int,
     Float,
     Bool,
+    /// opaque 8-byte word — native passthrough for classless/handle values
+    /// (never a register class; only an import-arg/ret kind)
+    Word,
 }
 
 impl K {
@@ -63,6 +66,7 @@ impl K {
             K::Int => ValType::I64,
             K::Float => ValType::F64,
             K::Bool => ValType::I32,
+            K::Word => ValType::I64,
         }
     }
 }
@@ -195,6 +199,7 @@ pub(crate) fn kbit(k: K) -> u8 {
         K::Int => K_INT,
         K::Float => K_FLOAT,
         K::Bool => K_BOOL,
+        K::Word => 0,
     }
 }
 
@@ -331,7 +336,10 @@ pub(crate) fn analyze(ops: &[(usize, Op)], nregs: u32, ret: &[Option<K>]) -> Res
                 fread(*left);
                 put(&mut writes, *dst, W::Bool);
             }
-            Op::Len { dst, .. } => put(&mut writes, *dst, W::Int),
+            Op::Len { dst, src } => {
+                wread(*src);
+                put(&mut writes, *dst, W::Int);
+            }
             Op::ToFloat { dst, src } => {
                 iread(*src);
                 put(&mut writes, *dst, W::Float);
@@ -389,6 +397,7 @@ pub(crate) fn analyze(ops: &[(usize, Op)], nregs: u32, ret: &[Option<K>]) -> Res
             Op::Switch { scrut, .. } => iread(*scrut),
             Op::Return { val } => {
                 ret_regs.insert(val.index() as u32);
+                wread(*val);
             }
             Op::Bin { dst, .. } | Op::Unary { dst, .. } => {
                 // operand class resolves at emit time; dst is classed by its reads
@@ -410,9 +419,13 @@ pub(crate) fn analyze(ops: &[(usize, Op)], nregs: u32, ret: &[Option<K>]) -> Res
             }
             // dst inherits the loaded word's class from its readers —
             // W::Reads contributes the dst's read-set to the union
-            Op::GetField { dst, .. } => put(&mut writes, *dst, W::Reads),
-            Op::GetIndex { dst, index, .. } => {
+            Op::GetField { dst, src, .. } => {
+                wread(*src);
+                put(&mut writes, *dst, W::Reads);
+            }
+            Op::GetIndex { dst, set, index, .. } => {
                 iread(*index);
+                wread(*set);
                 put(&mut writes, *dst, W::Reads);
             }
             Op::LoadEntry { dst, .. }
@@ -425,12 +438,19 @@ pub(crate) fn analyze(ops: &[(usize, Op)], nregs: u32, ret: &[Option<K>]) -> Res
             | Op::Format { dst, .. } => put(&mut writes, *dst, W::Dyn),
             // native dst is classed by its reads; args are read raw
             Op::CallNative { .. } => {}
-            Op::SetIndex { index, value, .. } => {
+            Op::SetIndex { set, index, value, .. } => {
                 iread(*index);
+                wread(*set);
                 wread(*value);
             }
-            Op::Push { value, .. } => wread(*value),
-            Op::SetField { value, .. } => wread(*value),
+            Op::Push { array, value, .. } => {
+                wread(*array);
+                wread(*value);
+            }
+            Op::SetField { receiver, value, .. } => {
+                wread(*receiver);
+                wread(*value);
+            }
             Op::NewInstance { dst, fields, .. } => {
                 put(&mut writes, *dst, W::Dyn);
                 for f in fields {
@@ -459,15 +479,20 @@ pub(crate) fn analyze(ops: &[(usize, Op)], nregs: u32, ret: &[Option<K>]) -> Res
         }
     }
     // fixpoint over written regs — a reg may carry a multi-bit mask
+    // `extra`: read-classes demanded through Move copies — `r = copy(s)`
+    // means s's slot must produce whatever r's readers demand
+    let mut extra: HashMap<u32, u8> = HashMap::new();
     loop {
         let mut changed = false;
         let snap = mask.clone();
+        let snap_extra = extra.clone();
         for (&r, ws) in &writes {
             // union of classes the writes produce — a reg may hold any of
             // them at runtime; each read site picks its own context's width
             let need = (reads_i.contains(&r) as u8) * K_INT
                 | (reads_f.contains(&r) as u8) * K_FLOAT
-                | (reads_b.contains(&r) as u8) * K_BOOL;
+                | (reads_b.contains(&r) as u8) * K_BOOL
+                | snap_extra.get(&r).copied().unwrap_or(0);
             let mut m = 0u8;
             for w in ws {
                 m |= match w {
@@ -475,7 +500,18 @@ pub(crate) fn analyze(ops: &[(usize, Op)], nregs: u32, ret: &[Option<K>]) -> Res
                     W::Float => K_FLOAT,
                     W::Bool => K_BOOL,
                     W::Copy(s) => snap.get(s).copied().unwrap_or(0),
-                    W::Call(c) => ret[*c].map(kbit).unwrap_or(0),
+                    W::Call(c) => match ret[*c].map(kbit) {
+                        Some(bits) if bits != 0 => bits,
+                        // callee ret unconstrained (word/void): the dst's
+                        // readers pick the width
+                        _ => {
+                            if need == 0 {
+                                K_INT | K_FLOAT | K_BOOL
+                            } else {
+                                need
+                            }
+                        }
+                    },
                     W::Reads => {
                         // untyped word: no scalar reads => grant all classes so
                         // consumers raw-load at whatever width they need (sound
@@ -502,9 +538,46 @@ pub(crate) fn analyze(ops: &[(usize, Op)], nregs: u32, ret: &[Option<K>]) -> Res
                 }
                 changed = true;
             }
+            // copy sources owe every class their copy's readers demand
+            for w in ws {
+                if let W::Copy(s) = w {
+                    let e = extra.entry(*s).or_insert(0);
+                    if *e & need != need {
+                        *e |= need;
+                        changed = true;
+                    }
+                }
+            }
+            // word-read-ness flows through copies: `y = x; heap_op(y)`
+            // means x's word is what the heap op sees
+            if !reads_w.contains(&r)
+                && ws.iter().any(|w| matches!(w, W::Copy(s) if reads_w.contains(s)))
+            {
+                reads_w.insert(r);
+                changed = true;
+            }
         }
         if !changed {
             break;
+        }
+    }
+    // never-written regs (params) were seeded before the loop — merge
+    // copy-demand classes in afterwards
+    for (&s, &e) in &extra {
+        if !writes.contains_key(&s) && e != 0 {
+            *mask.entry(s).or_insert(0) |= e;
+        }
+    }
+    // classless native args are raw-word reads at emit time (handle
+    // passthrough) — their producers must keep the word
+    for (_, op) in ops {
+        if let Op::CallNative { args, .. } = op {
+            for a in args {
+                let r = a.index() as u32;
+                if !mask.contains_key(&r) {
+                    reads_w.insert(r);
+                }
+            }
         }
     }
     let class: HashMap<u32, K> = mask
@@ -526,6 +599,9 @@ pub(crate) fn analyze(ops: &[(usize, Op)], nregs: u32, ret: &[Option<K>]) -> Res
         K_INT => Some(K::Int),
         K_FLOAT => Some(K::Float),
         K_BOOL => Some(K::Bool),
+        // returns disagree in class (or param passthrough): the raw word
+        // carries any of them, callers read their own width
+        _ if !ret_regs.is_empty() => Some(K::Word),
         _ => None,
     };
     Ok(Ana {
@@ -1052,6 +1128,7 @@ impl Em<'_> {
             K::Bool => {
                 self.ins(Instruction::I32Const(v as i32));
             }
+            K::Word => unreachable!("word is never a comparison class"),
         }
         self.ins(i);
         Ok(())
@@ -1979,6 +2056,7 @@ pub fn emit_opts(program: &Program, opts: &Opts) -> Result<Wasmgen, Bail> {
                 K::Int => 'i',
                 K::Float => 'f',
                 K::Bool => 'b',
+                K::Word => 'i',
             })
             .collect::<String>();
         imports.import(
