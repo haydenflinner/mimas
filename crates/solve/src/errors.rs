@@ -1076,6 +1076,49 @@ pub struct DeadStore {
     pub name: String,
 }
 
+// ---- grade-pass refusals (Stage 1 `consuming`) -- these fail the solve: a
+// consumed binding has been given away and the program must not pretend it
+// still has it.
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("`{name}` was consumed by `{by}` and can't be used again")]
+#[diagnostic(help("rebind `{name}` if you need to keep using a value here"))]
+pub struct UseAfterConsume {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("`{name}` is used after being consumed")]
+    pub at: SourceSpan,
+    #[label("consumed by `{by}` here")]
+    pub consumed_at: SourceSpan,
+    pub name: String,
+    pub by: String,
+}
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("`{name}` can't be consumed here")]
+pub struct ConsumeForbidden {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("{why}")]
+    pub at: SourceSpan,
+    pub name: String,
+    pub why: String,
+}
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("the result of `{name}` is `must_use` and can't be discarded")]
+#[diagnostic(
+    severity(Warning),
+    help("bind it (`let x = {name}(...)`) or handle what it returns")
+)]
+pub struct MustUseResult {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("this return value must not be dropped")]
+    pub at: SourceSpan,
+    pub name: String,
+}
+
 // ---- effect gate (`Vm::compile_files_gated`) -- a refusal, not a lint: the
 // file's inferred effects exceed what the host granted, so it never runs.
 

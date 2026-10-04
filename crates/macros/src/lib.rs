@@ -21,8 +21,7 @@ use proc_macro_crate::{FoundCrate, crate_name};
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::{
-    DeriveInput, FnArg, Ident, Pat, Token, ext::IdentExt, parse::Parse, parse::ParseStream,
-    parse_macro_input, parse_quote, punctuated::Punctuated,
+    DeriveInput, FnArg, Ident, Pat, Token, parse_macro_input, parse_quote, punctuated::Punctuated,
 };
 
 mod convert;
@@ -45,10 +44,16 @@ pub fn native(_attr: TokenStream, item: TokenStream) -> TokenStream {
         Ok((_, mutating)) => {
             // `submit!` expands to an unnamed const, which an `impl` block rejects -- the meta
             // submission goes inside the fn body instead, so `#[native]` works on impl methods.
+            let params = param_names(&input.sig);
+            let grades = match grades(&mut input.attrs, &params) {
+                Ok(g) => g,
+                Err(e) => return e.to_compile_error().into(),
+            };
             let meta = meta_submission(
                 &input.sig.ident,
-                &param_names(&input.sig),
+                &params,
                 &collect_doc(&input.attrs),
+                &grades,
             );
             if let Some(meta) = meta {
                 input.block.stmts.insert(0, meta);
@@ -122,10 +127,13 @@ fn expand_mimas(attr: TokenStream, item: TokenStream) -> Result<TokenStream2, sy
             let src = src_submission(&function.sig.ident, function.sig.ident.span());
             let effects = effects_submission(&function.sig.ident, &mut function.attrs)?;
             let (_, mutating) = convert::expand_conversion(&mut function)?;
+            let params = param_names(&function.sig);
+            let grades = grades(&mut function.attrs, &params)?;
             let meta = meta_submission(
                 &function.sig.ident,
-                &param_names(&function.sig),
+                &params,
                 &collect_doc(&function.attrs),
+                &grades,
             );
             if let Some(meta) = meta {
                 function.block.stmts.insert(0, meta);
@@ -223,8 +231,52 @@ fn collect_doc(attrs: &[syn::Attribute]) -> String {
 /// (whose receiver/module are known only at the `api.add_*` call site, not here). Callers
 /// insert the returned statement into the fn's body: `inventory::submit!` expands to an
 /// unnamed `const`, which an `impl` block rejects but a fn body accepts.
-fn meta_submission(fn_ident: &Ident, params: &[String], doc: &str) -> Option<syn::Stmt> {
-    if doc.is_empty() && params.is_empty() {
+/// `(consumes, must_use)` from `#[consumes(name, ...)]` / `#[must_use]` helper attrs.
+/// `consumes` names resolve to indices into `params` (the caller's choice of name list --
+/// for an `#[mimas]` impl method it's the declared params with the receiver as `"self"`).
+/// `#[consumes]` is drained (rustc wouldn't know it); `#[must_use]` is *kept* so rustc
+/// lints the Rust side too -- the same spelling means the same thing on both sides.
+pub(crate) fn grades(
+    attrs: &mut Vec<syn::Attribute>,
+    params: &[String],
+) -> Result<(Vec<usize>, bool), syn::Error> {
+    let mut consumes = Vec::new();
+    let mut must_use = false;
+    let mut kept = Vec::with_capacity(attrs.len());
+    for attr in std::mem::take(attrs) {
+        if attr.path().is_ident("consumes") {
+            let names =
+                attr.parse_args_with(Punctuated::<Ident, Token![,]>::parse_terminated)?;
+            for name in names {
+                let wanted = name.to_string();
+                match params.iter().position(|p| p == &wanted) {
+                    Some(i) => consumes.push(i),
+                    None => {
+                        return Err(syn::Error::new_spanned(
+                            name,
+                            "unknown parameter -- `#[consumes]` names the fn's own params",
+                        ));
+                    }
+                }
+            }
+        } else {
+            if attr.path().is_ident("must_use") {
+                must_use = true;
+            }
+            kept.push(attr);
+        }
+    }
+    *attrs = kept;
+    Ok((consumes, must_use))
+}
+
+fn meta_submission(
+    fn_ident: &Ident,
+    params: &[String],
+    doc: &str,
+    (consumes, must_use): &(Vec<usize>, bool),
+) -> Option<syn::Stmt> {
+    if doc.is_empty() && params.is_empty() && consumes.is_empty() && !must_use {
         return None;
     }
     let vm = vm_path();
@@ -235,6 +287,8 @@ fn meta_submission(fn_ident: &Ident, params: &[String], doc: &str) -> Option<syn
                 path: ::std::concat!(::std::module_path!(), "::", #name),
                 parameters: &[#(#params),*],
                 doc: #doc,
+                consumes: &[#(#consumes),*],
+                must_use: #must_use,
             }
         }
     })
@@ -293,20 +347,23 @@ pub(crate) fn effects_submission(
     fn_ident: &Ident,
     attrs: &mut Vec<syn::Attribute>,
 ) -> Result<Option<TokenStream2>, syn::Error> {
+    // `yield` is an effect name but a Rust keyword, so effect lists parse with
+    // `Ident::parse_any` and compare the unraw text.
+    struct EffectIdent(Ident);
+    impl syn::parse::Parse for EffectIdent {
+        fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+            use syn::ext::IdentExt;
+            Ok(Self(input.call(Ident::parse_any)?.unraw()))
+        }
+    }
     let Some(pos) = attrs.iter().position(|a| a.path().is_ident("effects")) else {
         return Ok(None);
     };
     let attr = attrs.remove(pos);
-    /// An effect name that may be a keyword (`yield` is one of the six).
-    struct FxName(Ident);
-    impl Parse for FxName {
-        fn parse(input: ParseStream) -> Result<Self, syn::Error> {
-            input.call(Ident::parse_any).map(FxName)
-        }
-    }
-    let names = attr.parse_args_with(Punctuated::<FxName, Token![,]>::parse_terminated)?;
+    let names = attr.parse_args_with(Punctuated::<EffectIdent, Token![,]>::parse_terminated)?;
+    let names = names.into_iter().map(|n| n.0);
     let mut bits: u8 = 0;
-    for FxName(name) in names {
+    for name in names {
         bits |= match name.to_string().as_str() {
             "doc" => 1 << 0,
             "net" => 1 << 1,

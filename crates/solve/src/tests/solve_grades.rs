@@ -13,17 +13,29 @@ use shared::Fx;
 /// Register a zero-arg native named `name`, with `fx` as its `#[effects]` declaration
 /// (`None` = unannotated, which inference must read as `Fx::unknown()`).
 fn native(name: &str, fx: Option<Fx>) {
+    native_opts(name, 0, &[], false, fx);
+}
+
+/// `arity` untyped params, `consumes[i]` marks slot `i` `#[consumes]`, `must_use`
+/// flags the return. What `#[consumes]`/`#[must_use]` land as post-install.
+fn native_opts(name: &str, arity: usize, consumes: &[usize], must_use: bool, fx: Option<Fx>) {
     TEST_SESSION.with(|s| {
+        let mut slots = vec![false; arity];
+        for &i in consumes {
+            slots[i] = true;
+        }
         s.borrow_mut().0.declare_native_fn(
             name.to_string(),
-            vec![],
-            vec![],
+            vec![None; arity],
+            vec![None; arity],
             Some(Ty::Unit),
             None,
             NativeId::from(999),
             None,
             None,
             fx,
+            slots,
+            must_use,
         );
     });
 }
@@ -282,4 +294,133 @@ fn warnings_are_not_errors() {
             .run("fn f() -> int { let x = 1; x = 2; x }", "test")
             .unwrap();
     });
+}
+
+// ---- consuming + must_use (Stage 1)
+
+/// The solve error a source produces, if any.
+fn err(src: &str) -> Option<String> {
+    TEST_SESSION.with(|s| s.borrow_mut().run(src, "test").err().map(|e| e.to_string()))
+}
+
+#[test]
+fn use_after_consume_errors() {
+    let _t = TestResetter;
+    native_opts("close", 1, &[0], false, Some(Fx::empty()));
+    let e = err("fn f() -> int { let ch = 1; close(ch); ch }").unwrap();
+    assert!(e.contains("`ch` was consumed by `close`"), "{e}");
+}
+
+#[test]
+fn consume_counts_as_a_use() {
+    let _t = TestResetter;
+    native_opts("close", 1, &[0], false, Some(Fx::empty()));
+    // passing `ch` to `close` reads it -- no unused-binding lint
+    let w = warns("fn f() { let ch = 1; close(ch); }");
+    assert!(w.is_empty(), "{w:?}");
+}
+
+#[test]
+fn restoring_consumed_binding_reborns_it() {
+    let _t = TestResetter;
+    native_opts("close", 1, &[0], false, Some(Fx::empty()));
+    run("fn f() -> int { let ch = 1; close(ch); ch = 2; ch }");
+}
+
+#[test]
+fn consume_on_one_branch_poisons_the_join() {
+    let _t = TestResetter;
+    native_opts("close", 1, &[0], false, Some(Fx::empty()));
+    let e = err("fn f(c: bool) -> int { let ch = 1; if c { close(ch); }; ch }").unwrap();
+    assert!(e.contains("consumed"), "{e}");
+}
+
+#[test]
+fn consume_branch_with_rebirth_is_fine() {
+    let _t = TestResetter;
+    native_opts("close", 1, &[0], false, Some(Fx::empty()));
+    // consumed only inside the arm, re-stored before the join -- `ch` is live again
+    run("fn f(c: bool) -> int { let ch = 1; if c { close(ch); ch = 2; }; ch }");
+}
+
+#[test]
+fn consuming_a_temporary_is_free() {
+    let _t = TestResetter;
+    native_opts("close", 1, &[0], false, Some(Fx::empty()));
+    native_opts("mk", 0, &[], false, Some(Fx::empty()));
+    run("fn f() { close(mk()); }");
+}
+
+#[test]
+fn consuming_through_a_path_is_refused() {
+    let _t = TestResetter;
+    native_opts("close", 1, &[0], false, Some(Fx::empty()));
+    let e = err("fn f() { let arr = [1, 2]; close(arr[0]); }").unwrap();
+    assert!(e.contains("can't be consumed"), "{e}");
+}
+
+#[test]
+fn consuming_a_global_is_refused() {
+    let _t = TestResetter;
+    native_opts("close", 1, &[0], false, Some(Fx::empty()));
+    let e = err("let ch = 1; close(ch);").unwrap();
+    assert!(e.contains("can't be consumed"), "{e}");
+}
+
+#[test]
+fn consuming_outer_dec_inside_a_loop_is_refused() {
+    let _t = TestResetter;
+    native_opts("close", 1, &[0], false, Some(Fx::empty()));
+    let e = err("fn f() { let ch = 1; for x in [1, 2] { close(ch); } }").unwrap();
+    assert!(e.contains("can't be consumed"), "{e}");
+}
+
+#[test]
+fn consuming_a_loopvar_is_fine() {
+    let _t = TestResetter;
+    native_opts("close", 1, &[0], false, Some(Fx::empty()));
+    // each iteration binds `x` fresh -- it can die there
+    run("fn f() { for x in [1, 2] { close(x); } }");
+}
+
+#[test]
+fn consuming_a_capture_is_refused() {
+    let _t = TestResetter;
+    native_opts("close", 1, &[0], false, Some(Fx::empty()));
+    let e = err("fn f() { let ch = 1; let g = || { close(ch); 0 }; g(); }").unwrap();
+    assert!(e.contains("can't be consumed"), "{e}");
+}
+
+#[test]
+fn consuming_a_dec_inside_its_own_loop_scope_is_fine() {
+    let _t = TestResetter;
+    native_opts("close", 1, &[0], false, Some(Fx::empty()));
+    run("fn f() { for x in [1, 2] { let ch = x; close(ch); } }");
+}
+
+#[test]
+fn must_use_result_discard_warns() {
+    let _t = TestResetter;
+    native_opts("reply", 0, &[], true, Some(Fx::empty()));
+    let w = warns("fn f() { reply(); }");
+    assert_eq!(
+        w,
+        ["the result of `reply` is `must_use` and can't be discarded"]
+    );
+}
+
+#[test]
+fn must_use_result_bound_is_quiet() {
+    let _t = TestResetter;
+    native_opts("reply", 0, &[], true, Some(Fx::empty()));
+    let w = warns("fn f() { let _x = reply(); }");
+    assert!(w.is_empty(), "{w:?}");
+}
+
+#[test]
+fn non_must_use_discard_is_quiet() {
+    let _t = TestResetter;
+    native("reply", Some(Fx::empty()));
+    let w = warns("fn f() { reply(); }");
+    assert!(w.is_empty(), "{w:?}");
 }
