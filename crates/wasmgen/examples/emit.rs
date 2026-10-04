@@ -24,13 +24,20 @@ fn main() {
     let path = pos.first().expect("usage: emit <file.mim> [out.wasm] [flags]");
     let out = pos.get(1).cloned().unwrap_or_else(|| "out.wasm".to_string());
     let source = std::fs::read_to_string(path).expect("read");
+    let t0 = std::time::Instant::now();
     let (program, _s) =
         vm::Vm::compile_parts(&[("main", source.as_str())], mimas::library::std).expect("compile");
+    let t1 = std::time::Instant::now();
     let w = if resume {
         mimas_wasmgen::resume::emit_resumable(&program, &opts).expect("emit resumable")
     } else {
         mimas_wasmgen::emit_opts(&program, &opts).expect("emit")
     };
+    eprintln!(
+        "compile_parts: {:?}  emit: {:?}",
+        t1 - t0,
+        t1.elapsed()
+    );
     std::fs::write(&out, &w.bytes).expect("write wasm");
     let bodies = w
         .bodies
