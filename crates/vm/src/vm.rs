@@ -2086,12 +2086,19 @@ impl Vm {
         arena.mutate(|mc, state| {
             let ctx = state.ctx(mc);
             // scope the borrow so it's released before we re-borrow to read the result.
-            {
+            let out = {
                 let mut thread = state.thread.borrow_mut(mc);
+                // The callee's return lands in `dst` of the caller's window —
+                // Reg::ZERO is the caller frame's slot 0, a *live* register once
+                // the entry body has run (a top-level `let`'s slot). A check
+                // run after `run()` would otherwise clobber the first global
+                // for the next caller, so save and restore it.
+                let caller_base = thread.frames.last().unwrap().base;
+                let saved = thread.regs.get(caller_base).copied();
                 let stop_depth = thread.frames.len() + 1;
                 enter_call(&mut thread, code, chunks, body_id, Reg::ZERO, &[], &[])
                     .map_err(Error::msg)?;
-                run_dispatch(
+                let run = run_dispatch(
                     ctx,
                     code,
                     chunks,
@@ -2102,11 +2109,16 @@ impl Vm {
                     bc.as_deref(),
                     usize::MAX,
                     stop_depth,
-                )?;
-            }
-
-            let t = state.thread.borrow();
-            Ok(t.regs.first().unwrap().capture())
+                );
+                let out = run.map(|_| thread.regs[caller_base].capture());
+                if let (Some(saved), Some(slot)) =
+                    (saved, thread.regs.get_mut(caller_base))
+                {
+                    *slot = saved;
+                }
+                out
+            };
+            out
         })
     }
 
@@ -2381,6 +2393,17 @@ impl Vm {
     /// `debug_step`). A panic or other runtime fault is a failure; a `false` bool is a failure
     /// (for `#[tests]` checks); any other return is a pass. Resets the thread afterwards so a
     /// debug session still starts at program entry.
+    ///
+    /// Cold-globals caveat: each body is injected via `call_fn_result` and the
+    /// thread is rewound with `reset_to_entry` after every test, so top-level
+    /// `let`s never execute — a test that reads one sees `Null`. The host's
+    /// check runner (literate-eval `run_top_level_for_checks`) inits the entry
+    /// chunk once up front instead; if `mimas test` needs the same, the fix is
+    /// a checkpoint reset — run the entry chunk once, snapshot
+    /// `regs.len()`/`frames`, and between tests truncate back to that instead
+    /// of `reset_to_entry` (heap mutations by tests still persist either way —
+    /// `Val` slots are shallow). Only faulted calls actually need the recovery;
+    /// successful ones already leave `frames == [entry]`.
     pub fn run_tests(&mut self) -> Vec<TestResult> {
         let names = self.tests.clone();
         let mut results = Vec::with_capacity(names.len());
