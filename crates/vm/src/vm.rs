@@ -177,6 +177,8 @@ struct BuiltProgram {
     warnings: Vec<miette::Report>,
     /// `(file, inferred top-level Fx)` per solved file.
     script_fx: Vec<(String, shared::Fx)>,
+    /// `(file, site, inferred Fx)` per top-level statement.
+    script_segments: Vec<(String, shared::Location, shared::Fx)>,
 }
 
 pub struct Vm {
@@ -215,6 +217,9 @@ pub struct Vm {
     /// `(file, inferred top-level Fx)` from the same load — the program's
     /// effect footprint, for hosts that badge a page with what it may do.
     pub(crate) script_fx: Vec<(String, shared::Fx)>,
+    /// `(file, site, inferred Fx)` per top-level statement from the same
+    /// load — a `check` line or `use`-spliced stmt's own footprint.
+    pub(crate) script_segments: Vec<(String, shared::Location, shared::Fx)>,
 }
 
 impl Vm {
@@ -244,6 +249,7 @@ impl Vm {
             bc: None,
             warnings: Vec::new(),
             script_fx: Vec::new(),
+            script_segments: Vec::new(),
         }
     }
 
@@ -2885,6 +2891,7 @@ impl Vm {
 
         vm.warnings = built.warnings;
         vm.script_fx = built.script_fx;
+        vm.script_segments = built.script_segments;
         vm.load_program(built.program);
         vm.set_sources(built.sources);
         vm.registry = library.into_registry();
@@ -2902,6 +2909,14 @@ impl Vm {
     /// footprint a host badges a page with.
     pub fn script_fx(&self) -> &[(String, shared::Fx)] {
         &self.script_fx
+    }
+
+    /// `(file, site, inferred Fx)` per top-level statement from this
+    /// program's load — the segment-level footprint a host attributes back
+    /// to a `check` line or a `use`-spliced statement. Empty for
+    /// `load_prebuilt` Vms — `compile_parts` drops it like `warnings`.
+    pub fn script_segments(&self) -> &[(String, shared::Location, shared::Fx)] {
+        &self.script_segments
     }
 
     /// Solve `files` and stop before codegen, returning only what the grades
@@ -2982,6 +2997,7 @@ impl Vm {
         let warnings = loaded.warnings;
         let resolutions = Resolutions::from(loaded.solver);
         let script_fx = resolutions.script_effects.iter().map(|(f, fx)| (f.clone(), *fx)).collect();
+        let script_segments = resolutions.script_segments.clone();
         // The gate sits between solve and codegen: a file whose inferred
         // effects escape `allowed` is refused before a single op is built.
         if let Some(allowed) = allowed {
@@ -3009,6 +3025,7 @@ impl Vm {
             sources,
             warnings,
             script_fx,
+            script_segments,
         })
     }
 
