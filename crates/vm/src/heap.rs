@@ -425,7 +425,7 @@ impl<'gc> Ctx<'gc> {
     /// dicts, or instances) past [`MAX_DISPLAY_DEPTH`] -- see that constant's docs.
     pub fn display(self, value: Val<'gc>) -> RtResult<String> {
         let mut out = String::new();
-        self.render_into(&mut out, value, true, 0)?;
+        self.render_into(&mut out, value, true, 0, &mut Vec::new())?;
         Ok(out)
     }
 
@@ -433,21 +433,52 @@ impl<'gc> Ctx<'gc> {
     /// f-strings and `print` use; every non-string renders the same as [Ctx::display].
     pub fn to_string(self, value: Val<'gc>) -> RtResult<String> {
         let mut out = String::new();
-        self.render_into(&mut out, value, false, 0)?;
+        self.render_into(&mut out, value, false, 0, &mut Vec::new())?;
         Ok(out)
     }
 
     /// [Ctx::to_string], appending into an existing buffer (the f-string builder).
     pub fn to_string_into(self, out: &mut String, value: Val<'gc>) -> RtResult<()> {
-        self.render_into(out, value, false, 0)
+        self.render_into(out, value, false, 0, &mut Vec::new())
     }
 
+    /// `path` holds the containers being rendered around `value`: meeting one again is a
+    /// reference cycle, which fails at once rather than recursing to [`MAX_DISPLAY_DEPTH`]
+    /// (deep enough to overflow a small host stack -- a wasm tab hovering a `prev` link).
     fn render_into(
         self,
         out: &mut String,
         value: Val<'gc>,
         quote: bool,
         depth: usize,
+        path: &mut Vec<*const ()>,
+    ) -> RtResult<()> {
+        let ptr = match value {
+            Val::Array(a) => Some(Gc::as_ptr(a.0) as *const ()),
+            Val::IntArray(a) | Val::FloatArray(a) => Some(Gc::as_ptr(a.0) as *const ()),
+            Val::Dict(d) => Some(Gc::as_ptr(d.0) as *const ()),
+            Val::Instance(i) => Some(Gc::as_ptr(i.0) as *const ()),
+            _ => None,
+        };
+        let Some(ptr) = ptr else {
+            return self.render_node(out, value, quote, depth, path);
+        };
+        if path.contains(&ptr) {
+            return Err(RtErr::DisplayTooDeep);
+        }
+        path.push(ptr);
+        let r = self.render_node(out, value, quote, depth, path);
+        path.pop();
+        r
+    }
+
+    fn render_node(
+        self,
+        out: &mut String,
+        value: Val<'gc>,
+        quote: bool,
+        depth: usize,
+        path: &mut Vec<*const ()>,
     ) -> RtResult<()> {
         if depth > MAX_DISPLAY_DEPTH {
             return Err(RtErr::DisplayTooDeep);
@@ -475,7 +506,7 @@ impl<'gc> Ctx<'gc> {
                     if i > 0 {
                         out.push_str(", ");
                     }
-                    self.render_into(out, v, true, depth + 1)?;
+                    self.render_into(out, v, true, depth + 1, path)?;
                 }
                 out.push(']');
             }
@@ -490,7 +521,7 @@ impl<'gc> Ctx<'gc> {
                         out.push_str(", ");
                     }
                     let v = a.0.borrow().at(i);
-                    self.render_into(out, v, true, depth + 1)?;
+                    self.render_into(out, v, true, depth + 1, path)?;
                 }
                 out.push(']');
             }
@@ -501,7 +532,7 @@ impl<'gc> Ctx<'gc> {
                         out.push_str(", ");
                     }
                     let _ = write!(out, "{} = ", k.as_str());
-                    self.render_into(out, *v, true, depth + 1)?;
+                    self.render_into(out, *v, true, depth + 1, path)?;
                 }
                 out.push('}');
             }
@@ -533,7 +564,7 @@ impl<'gc> Ctx<'gc> {
                     if i > 0 {
                         out.push_str(", ");
                     }
-                    self.render_into(out, v, true, depth + 1)?;
+                    self.render_into(out, v, true, depth + 1, path)?;
                 }
                 out.push_str(" }");
             }

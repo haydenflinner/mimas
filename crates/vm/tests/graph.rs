@@ -52,3 +52,24 @@ let alias = b;
     assert_eq!(obj(&g, &fields[2].slot), a, "the back edge points at a, not <cycle>");
     assert_eq!(g.objs.len(), 2);
 }
+
+/// Displaying a cyclic list fails fast instead of recursing to the depth limit.
+#[test]
+fn displaying_a_cycle_errors_without_deep_recursion() {
+    let src = r#"
+struct Node { val: int, next: Node? }
+let a = Node { val = 1, next = null };
+a.next = a;
+let s = f"{a}";
+"#;
+    // 1 MiB: the old depth-1000 recursion overflowed this; fail-fast needs a few frames
+    let handle = std::thread::Builder::new()
+        .stack_size(1024 * 1024)
+        .spawn(move || {
+            let mut vm = Vm::compile(src, |_| {}).expect("compile");
+            format!("{:?}", vm.run().err())
+        })
+        .unwrap();
+    let err = handle.join().expect("no stack overflow");
+    assert!(err.contains("too deep") || err.contains("Display"), "{err}");
+}
