@@ -30,7 +30,7 @@
 //! re-entering exactly at the call — no op that suspends sits mid-region, so no
 //! host-visible side effect (natives) is ever replayed on resume.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use compile::{BinOp, Op, Program, Reg, UnaryOp};
 use wasm_encoder::{
@@ -57,7 +57,8 @@ fn mem(offset: u32, align: u32) -> MemArg {
 
 struct RE<'a> {
     ops: &'a [(usize, Op)],
-    class: &'a HashMap<u32, K>,
+    mask: &'a HashMap<u32, u8>,
+    reads_w: &'a HashSet<u32>,
     sigs: &'a [Option<Sig>],
     func_map: &'a HashMap<usize, u32>,
     callee: &'a HashMap<usize, usize>,
@@ -75,11 +76,15 @@ struct RE<'a> {
     g_pause: Option<u32>,
     g_status: u32,
     g_sp: u32,
+    g_hp: u32,
     l_pc: u32,
     l_myfp: u32,
     l_tmp: u32,
     l_tmpf: u32,
     l_tmpb: u32,
+    l_tmpc: u32,
+    l_hp: u32,
+    l_sz: u32,
     region: u32,
 }
 
@@ -101,21 +106,68 @@ impl RE<'_> {
         self.ins(Instruction::LocalGet(self.l_myfp));
     }
 
-    /// load reg r of any class
-    fn ld(&mut self, r: Reg) -> Result<K, Bail> {
-        let k = self.k(r)?;
+    /// load reg r's raw 8-byte word (heap handles, Move, field elements —
+    /// values whose class the reader's op decides, not the slot)
+    fn ld_word(&mut self, r: Reg) {
         self.fp();
-        let off = r.index() as u32 * 8;
-        self.ins(match k {
-            K::Int => Instruction::I64Load(mem(off, 3)),
-            K::Float => Instruction::F64Load(mem(off, 3)),
-            K::Bool => Instruction::I32Load(mem(off, 2)),
-        });
-        Ok(k)
+        self.ins(Instruction::I64Load(mem(r.index() as u32 * 8, 3)));
     }
 
-    fn st(&mut self, r: Reg) {
-        let k = self.class[&(r.index() as u32)];
+    /// load reg r in context `want`. A multi-class reg is read at `want`'s
+    /// width — on any path that reaches this op in a valid program the last
+    /// write had that class, so the bytes are already in the right encoding.
+    /// A single-class reg of a different class gets the coercion.
+    fn get(&mut self, r: Reg, want: K) -> Result<(), Bail> {
+        let idx = r.index() as u32;
+        let m = *self
+            .mask
+            .get(&idx)
+            .ok_or_else(|| format!("reg {} has no scalar class", idx))?;
+        let off = idx * 8;
+        if m & crate::kbit(want) != 0 {
+            self.fp();
+            self.ins(match want {
+                K::Int => Instruction::I64Load(mem(off, 3)),
+                K::Float => Instruction::F64Load(mem(off, 3)),
+                K::Bool => Instruction::I32Load(mem(off, 2)),
+            });
+            return Ok(());
+        }
+        self.fp();
+        match (m, want) {
+            (crate::K_INT, K::Float) => {
+                self.ins(Instruction::I64Load(mem(off, 3)));
+                self.ins(Instruction::F64ConvertI64S);
+            }
+            (crate::K_FLOAT, K::Int) => {
+                self.ins(Instruction::F64Load(mem(off, 3)));
+                self.ins(Instruction::I64TruncF64S);
+            }
+            (crate::K_BOOL, K::Int) => {
+                self.ins(Instruction::I32Load(mem(off, 2)));
+                self.ins(Instruction::I64ExtendI32U);
+            }
+            (crate::K_BOOL, K::Float) => {
+                self.ins(Instruction::I32Load(mem(off, 2)));
+                self.ins(Instruction::F64ConvertI32S);
+            }
+            (crate::K_INT, K::Bool) => {
+                self.ins(Instruction::I64Load(mem(off, 3)));
+                self.ins(Instruction::I64Const(0));
+                self.ins(Instruction::I64Ne);
+            }
+            (crate::K_FLOAT, K::Bool) => {
+                self.ins(Instruction::F64Load(mem(off, 3)));
+                self.ins(Instruction::F64Const(0.0f64.into()));
+                self.ins(Instruction::F64Ne);
+            }
+            _ => bail!("coerce mask {m:#x}->{want:?}"),
+        }
+        Ok(())
+    }
+
+    /// store the stack-top value of class `k` into reg r's slot
+    fn st(&mut self, r: Reg, k: K) {
         let off = r.index() as u32 * 8;
         self.ins(match k {
             K::Int => Instruction::I64Store(mem(off, 3)),
@@ -124,45 +176,33 @@ impl RE<'_> {
         });
     }
 
-    fn k(&self, r: Reg) -> Result<K, Bail> {
-        self.class
-            .get(&(r.index() as u32))
-            .copied()
-            .ok_or_else(|| format!("reg {} has no scalar class", r.index()))
-    }
-
-    fn get(&mut self, r: Reg, want: K) -> Result<(), Bail> {
-        let k = self.ld(r)?;
-        if k != want {
-            match (k, want) {
-                (K::Int, K::Float) => self.ins(Instruction::F64ConvertI64S),
-                (K::Float, K::Int) => self.ins(Instruction::I64TruncF64S),
-                (K::Bool, K::Int) => self.ins(Instruction::I64ExtendI32U),
-                (K::Bool, K::Float) => self.ins(Instruction::F64ConvertI32S),
-                (K::Int, K::Bool) => {
-                    self.ins(Instruction::I64Const(0));
-                    self.ins(Instruction::I64Ne);
-                }
-                (K::Float, K::Bool) => {
-                    self.ins(Instruction::F64Const(0.0f64.into()));
-                    self.ins(Instruction::F64Ne);
-                }
-                _ => bail!("coerce {k:?}->{want:?}"),
-            }
-        }
-        Ok(())
-    }
-
-    /// `frame[dst] = <produced value>`: emit addr first, then producer, then store.
+    /// `frame[dst] = <produced k>`: emit addr first, then producer, then store.
     fn setv(
         &mut self,
         dst: Reg,
+        k: K,
         produce: impl FnOnce(&mut Self) -> Result<(), Bail>,
     ) -> Result<(), Bail> {
         self.fp();
         produce(self)?;
-        self.st(dst);
+        self.st(dst, k);
         Ok(())
+    }
+
+    /// a class for regs whose producer's class is implicit (CallNative dst,
+    /// Unary/Bin operands on untyped heap words): prefer Float (heap values
+    /// in mimas programs are overwhelmingly numeric-float), then Int, then
+    /// Bool — a wrong pick only mis-encodes a read a valid program wouldn't
+    /// reach anyway
+    fn pick(&self, r: Reg) -> Option<K> {
+        let m = self.mask.get(&(r.index() as u32))?;
+        Some(if m & crate::K_FLOAT != 0 {
+            K::Float
+        } else if m & crate::K_INT != 0 {
+            K::Int
+        } else {
+            K::Bool
+        })
     }
 
     /// suspend: pc_table[b]=region, __status=code, __sp=myfp, return dummy.
@@ -275,18 +315,18 @@ impl RE<'_> {
                 } else {
                     (Instruction::I64GtS, Instruction::I64LtS)
                 };
-                self.ld(r)?;
+                self.get(r, K::Int)?;
                 self.ins(Instruction::I64Const(0));
                 self.ins(Instruction::I64GtS);
                 self.ins(Instruction::LocalGet(self.l_tmp));
-                self.ld(l)?;
+                self.get(l, K::Int)?;
                 self.ins(c1);
                 self.ins(Instruction::I32And);
-                self.ld(r)?;
+                self.get(r, K::Int)?;
                 self.ins(Instruction::I64Const(0));
                 self.ins(Instruction::I64LtS);
                 self.ins(Instruction::LocalGet(self.l_tmp));
-                self.ld(l)?;
+                self.get(l, K::Int)?;
                 self.ins(c2);
                 self.ins(Instruction::I32And);
                 self.ins(Instruction::I32Or);
@@ -295,14 +335,14 @@ impl RE<'_> {
                 self.ins(Instruction::End);
             }
             BinOp::Mult => {
-                self.ld(r)?;
+                self.get(r, K::Int)?;
                 self.ins(Instruction::I64Eqz);
                 self.ins(Instruction::I32Eqz);
                 self.ins(Instruction::If(BlockType::Empty));
                 self.ins(Instruction::LocalGet(self.l_tmp));
-                self.ld(r)?;
+                self.get(r, K::Int)?;
                 self.ins(Instruction::I64DivS);
-                self.ld(l)?;
+                self.get(l, K::Int)?;
                 self.ins(Instruction::I64Ne);
                 self.ins(Instruction::If(BlockType::Empty));
                 self.ins(Instruction::Unreachable);
@@ -353,14 +393,14 @@ impl RE<'_> {
                 self.ins(Instruction::I64Const(0));
                 self.ins(Instruction::I64GtS);
                 self.ins(Instruction::LocalGet(self.l_tmp));
-                self.ld(l)?;
+                self.get(l, K::Int)?;
                 self.ins(c1);
                 self.ins(Instruction::I32And);
                 self.ins(Instruction::I64Const(v));
                 self.ins(Instruction::I64Const(0));
                 self.ins(Instruction::I64LtS);
                 self.ins(Instruction::LocalGet(self.l_tmp));
-                self.ld(l)?;
+                self.get(l, K::Int)?;
                 self.ins(c2);
                 self.ins(Instruction::I32And);
                 self.ins(Instruction::I32Or);
@@ -376,7 +416,7 @@ impl RE<'_> {
                 self.ins(Instruction::LocalGet(self.l_tmp));
                 self.ins(Instruction::I64Const(v));
                 self.ins(Instruction::I64DivS);
-                self.ld(l)?;
+                self.get(l, K::Int)?;
                 self.ins(Instruction::I64Ne);
                 self.ins(Instruction::If(BlockType::Empty));
                 self.ins(Instruction::Unreachable);
@@ -389,25 +429,33 @@ impl RE<'_> {
     }
 
     fn emit_bin(&mut self, dst: Reg, l: Reg, op: BinOp, r: Reg) -> Result<(), Bail> {
-        match (self.k(l)?, self.k(r)?) {
+        // operand class for heap-loaded words: best-known class per operand,
+        // falling back to the sibling's, the dst's, then Float
+        let kl = self
+            .pick(dst)
+            .or_else(|| self.pick(l))
+            .or_else(|| self.pick(r))
+            .unwrap_or(K::Float);
+        let kr = kl;
+        match (kl, kr) {
             (K::Int, K::Int) => match op {
                 BinOp::Add | BinOp::Sub | BinOp::Mult | BinOp::Mod | BinOp::IDiv => {
-                    self.setv(dst, |s| s.checked_int(l, r, op))?;
+                    self.setv(dst, K::Int, |s| s.checked_int(l, r, op))?;
                 }
                 _ => {
-                    let i = match op {
-                        BinOp::LessThan => Instruction::I64LtS,
-                        BinOp::LessEqual => Instruction::I64LeS,
-                        BinOp::GreaterThan => Instruction::I64GtS,
-                        BinOp::GreaterEqual => Instruction::I64GeS,
-                        BinOp::Identity => Instruction::I64Eq,
-                        BinOp::NotEqual => Instruction::I64Ne,
-                        BinOp::And => Instruction::I64And,
-                        BinOp::Or => Instruction::I64Or,
-                        BinOp::Xor => Instruction::I64Xor,
+                    let (i, dk) = match op {
+                        BinOp::LessThan => (Instruction::I64LtS, K::Bool),
+                        BinOp::LessEqual => (Instruction::I64LeS, K::Bool),
+                        BinOp::GreaterThan => (Instruction::I64GtS, K::Bool),
+                        BinOp::GreaterEqual => (Instruction::I64GeS, K::Bool),
+                        BinOp::Identity => (Instruction::I64Eq, K::Bool),
+                        BinOp::NotEqual => (Instruction::I64Ne, K::Bool),
+                        BinOp::And => (Instruction::I64And, K::Int),
+                        BinOp::Or => (Instruction::I64Or, K::Int),
+                        BinOp::Xor => (Instruction::I64Xor, K::Int),
                         _ => bail!("Bin int {op:?}"),
                     };
-                    self.setv(dst, |s| {
+                    self.setv(dst, dk, |s| {
                         s.get(l, K::Int)?;
                         s.get(r, K::Int)?;
                         s.ins(i);
@@ -423,7 +471,7 @@ impl RE<'_> {
                         BinOp::Mult => Instruction::F64Mul,
                         _ => Instruction::F64Div,
                     };
-                    self.setv(dst, |s| {
+                    self.setv(dst, K::Float, |s| {
                         s.get(l, K::Float)?;
                         s.get(r, K::Float)?;
                         s.ins(i);
@@ -440,7 +488,7 @@ impl RE<'_> {
                         BinOp::Identity => Instruction::F64Eq,
                         _ => Instruction::F64Ne,
                     };
-                    self.setv(dst, |s| {
+                    self.setv(dst, K::Bool, |s| {
                         s.get(l, K::Float)?;
                         s.get(r, K::Float)?;
                         s.ins(i);
@@ -457,7 +505,7 @@ impl RE<'_> {
                     BinOp::Or => Instruction::I32Or,
                     _ => bail!("Bin bool {op:?}"),
                 };
-                self.setv(dst, |s| {
+                self.setv(dst, K::Bool, |s| {
                     s.get(l, K::Bool)?;
                     s.get(r, K::Bool)?;
                     s.ins(i);
@@ -469,66 +517,121 @@ impl RE<'_> {
         Ok(())
     }
 
+    /// bump-allocate `[size]` bytes from the __hp arena; pops size (i32) from
+    /// the wasm stack, pushes the block handle (i32). Grows memory on demand.
+    fn alloc(&mut self) {
+        self.ins(Instruction::LocalSet(self.l_sz));
+        // if __hp + size > memory.size * 65536 → grow
+        self.ins(Instruction::GlobalGet(self.g_hp));
+        self.ins(Instruction::LocalGet(self.l_sz));
+        self.ins(Instruction::I32Add);
+        self.ins(Instruction::MemorySize(0));
+        self.ins(Instruction::I32Const(16));
+        self.ins(Instruction::I32Shl);
+        self.ins(Instruction::I32GtU);
+        self.ins(Instruction::If(BlockType::Empty));
+        // pages = ceil((__hp + size - membytes) / 65536)
+        self.ins(Instruction::GlobalGet(self.g_hp));
+        self.ins(Instruction::LocalGet(self.l_sz));
+        self.ins(Instruction::I32Add);
+        self.ins(Instruction::MemorySize(0));
+        self.ins(Instruction::I32Const(16));
+        self.ins(Instruction::I32Shl);
+        self.ins(Instruction::I32Sub);
+        self.ins(Instruction::I32Const(65535));
+        self.ins(Instruction::I32Add);
+        self.ins(Instruction::I32Const(16));
+        self.ins(Instruction::I32ShrU);
+        self.ins(Instruction::MemoryGrow(0));
+        self.ins(Instruction::I32Const(-1));
+        self.ins(Instruction::I32Eq);
+        self.ins(Instruction::If(BlockType::Empty));
+        self.ins(Instruction::Unreachable);
+        self.ins(Instruction::End);
+        self.ins(Instruction::End);
+        self.ins(Instruction::GlobalGet(self.g_hp));
+        self.ins(Instruction::GlobalGet(self.g_hp));
+        self.ins(Instruction::LocalGet(self.l_sz));
+        self.ins(Instruction::I32Add);
+        self.ins(Instruction::GlobalSet(self.g_hp));
+    }
+
+    /// only `AccessKind::Direct` field/index reads lower to bare word loads —
+    /// Option access would need a Null representation we don't model
+    fn direct(&self, kind: &compile::AccessKind) -> Result<(), Bail> {
+        match kind {
+            compile::AccessKind::Direct => Ok(()),
+            _ => bail!("optional access needs Null values"),
+        }
+    }
+
     /// one NON-terminator op (regions handle jumps/calls/returns)
     fn emit_op(&mut self, i: usize) -> Result<(), Bail> {
         let (_, op) = &self.ops[i];
+        // Move and heap ops are raw word operations — they emit even when the
+        // dst has no scalar mask (a handle is never scalar-read)
         if let Some(d) = op_dst(op) {
-            if !self.class.contains_key(&(d.index() as u32)) {
+            if !matches!(op, Op::Move { .. })
+                && !self.mask.contains_key(&(d.index() as u32))
+                && !self.reads_w.contains(&(d.index() as u32))
+            {
                 return Ok(());
             }
         }
         match op {
             Op::Move { dst, src } => {
-                let k = self.k(*dst)?;
-                self.setv(*dst, |s| s.get(*src, k))?;
+                // raw 8-byte slot copy — class- and handle-agnostic
+                self.fp();
+                self.ld_word(*src);
+                self.ins(Instruction::I64Store(mem(dst.index() as u32 * 8, 3)));
             }
-            Op::LoadConst { dst, constant } => match (self.k(*dst)?, constant) {
-                (K::Int, compile::Constant::Int(v)) => {
+            Op::LoadConst { dst, constant } => match constant {
+                compile::Constant::Int(v) => {
                     let v = *v;
-                    self.setv(*dst, |s| {
+                    self.setv(*dst, K::Int, |s| {
                         s.ins(Instruction::I64Const(v));
                         Ok(())
                     })?;
                 }
-                (K::Float, compile::Constant::Float(v)) => {
+                compile::Constant::Float(v) => {
                     let v = (*v).into();
-                    self.setv(*dst, |s| {
+                    self.setv(*dst, K::Float, |s| {
                         s.ins(Instruction::F64Const(v));
                         Ok(())
                     })?;
                 }
-                (K::Bool, compile::Constant::Bool(v)) => {
+                compile::Constant::Bool(v) => {
                     let v = *v as i32;
-                    self.setv(*dst, |s| {
+                    self.setv(*dst, K::Bool, |s| {
                         s.ins(Instruction::I32Const(v));
                         Ok(())
                     })?;
                 }
-                (k, c) => bail!("LoadConst {c:?} into {k:?}"),
+                c => bail!("LoadConst {c:?}"),
             },
             Op::AddInt { dst, left, right } => {
-                self.setv(*dst, |s| s.checked_int(*left, *right, BinOp::Add))?;
+                self.setv(*dst, K::Int, |s| s.checked_int(*left, *right, BinOp::Add))?;
             }
             Op::SubInt { dst, left, right } => {
-                self.setv(*dst, |s| s.checked_int(*left, *right, BinOp::Sub))?;
+                self.setv(*dst, K::Int, |s| s.checked_int(*left, *right, BinOp::Sub))?;
             }
             Op::MultInt { dst, left, right } => {
-                self.setv(*dst, |s| s.checked_int(*left, *right, BinOp::Mult))?;
+                self.setv(*dst, K::Int, |s| s.checked_int(*left, *right, BinOp::Mult))?;
             }
             Op::ModInt { dst, left, right } => {
-                self.setv(*dst, |s| s.checked_int(*left, *right, BinOp::Mod))?;
+                self.setv(*dst, K::Int, |s| s.checked_int(*left, *right, BinOp::Mod))?;
             }
             Op::AddIntImm { dst, left, val } => {
-                self.setv(*dst, |s| s.checked_int_imm(*left, *val, BinOp::Add))?;
+                self.setv(*dst, K::Int, |s| s.checked_int_imm(*left, *val, BinOp::Add))?;
             }
             Op::SubIntImm { dst, left, val } => {
-                self.setv(*dst, |s| s.checked_int_imm(*left, *val, BinOp::Sub))?;
+                self.setv(*dst, K::Int, |s| s.checked_int_imm(*left, *val, BinOp::Sub))?;
             }
             Op::MultIntImm { dst, left, val } => {
-                self.setv(*dst, |s| s.checked_int_imm(*left, *val, BinOp::Mult))?;
+                self.setv(*dst, K::Int, |s| s.checked_int_imm(*left, *val, BinOp::Mult))?;
             }
             Op::ModIntImm { dst, left, val } => {
-                self.setv(*dst, |s| s.checked_int_imm(*left, *val, BinOp::Mod))?;
+                self.setv(*dst, K::Int, |s| s.checked_int_imm(*left, *val, BinOp::Mod))?;
             }
             Op::IntLt { dst, left, right }
             | Op::IntLe { dst, left, right }
@@ -544,7 +647,7 @@ impl RE<'_> {
                     Op::IntEq { .. } => Instruction::I64Eq,
                     _ => Instruction::I64Ne,
                 };
-                self.setv(*dst, |s| {
+                self.setv(*dst, K::Bool, |s| {
                     s.get(*left, K::Int)?;
                     s.get(*right, K::Int)?;
                     s.ins(i);
@@ -565,7 +668,7 @@ impl RE<'_> {
                     Op::IntEqImm { .. } => (Instruction::I64Eq, *val),
                     _ => (Instruction::I64Ne, *val),
                 };
-                self.setv(*dst, |s| {
+                self.setv(*dst, K::Bool, |s| {
                     s.get(*left, K::Int)?;
                     s.ins(Instruction::I64Const(v));
                     s.ins(i);
@@ -582,7 +685,7 @@ impl RE<'_> {
                     Op::MultFloat { .. } => Instruction::F64Mul,
                     _ => Instruction::F64Div,
                 };
-                self.setv(*dst, |s| {
+                self.setv(*dst, K::Float, |s| {
                     s.get(*left, K::Float)?;
                     s.get(*right, K::Float)?;
                     s.ins(i);
@@ -603,7 +706,7 @@ impl RE<'_> {
                     Op::FloatEq { .. } => Instruction::F64Eq,
                     _ => Instruction::F64Ne,
                 };
-                self.setv(*dst, |s| {
+                self.setv(*dst, K::Bool, |s| {
                     s.get(*left, K::Float)?;
                     s.get(*right, K::Float)?;
                     s.ins(i);
@@ -619,7 +722,7 @@ impl RE<'_> {
                     _ => Instruction::F64Mul,
                 };
                 let v = f64::from_bits(*val as u64).into();
-                self.setv(*dst, |s| {
+                self.setv(*dst, K::Float, |s| {
                     s.get(*left, K::Float)?;
                     s.ins(Instruction::F64Const(v));
                     s.ins(i);
@@ -643,7 +746,7 @@ impl RE<'_> {
                     Op::FloatEqImm { .. } => (Instruction::F64Eq, f64::from_bits(*val as u64)),
                     _ => (Instruction::F64Ne, f64::from_bits(*val as u64)),
                 };
-                self.setv(*dst, |s| {
+                self.setv(*dst, K::Bool, |s| {
                     s.get(*left, K::Float)?;
                     s.ins(Instruction::F64Const(v.into()));
                     s.ins(i);
@@ -656,7 +759,7 @@ impl RE<'_> {
                 } else {
                     Instruction::I32Ne
                 };
-                self.setv(*dst, |s| {
+                self.setv(*dst, K::Bool, |s| {
                     s.get(*left, K::Bool)?;
                     s.get(*right, K::Bool)?;
                     s.ins(i);
@@ -664,21 +767,29 @@ impl RE<'_> {
                 })?;
             }
             Op::ToFloat { dst, src } => {
-                let dk = self.k(*dst)?;
-                self.setv(*dst, |s| s.get(*src, dk))?;
+                self.setv(*dst, K::Float, |s| {
+                    s.get(*src, K::Int)?;
+                    s.ins(Instruction::F64ConvertI64S);
+                    Ok(())
+                })?;
             }
             Op::Sqrt { dst, src } => {
-                self.setv(*dst, |s| {
+                self.setv(*dst, K::Float, |s| {
                     s.get(*src, K::Float)?;
                     s.ins(Instruction::F64Sqrt);
                     Ok(())
                 })?;
             }
             Op::Unary { dst, op: uop, src } => {
-                let sk = self.k(*src)?;
+                // operand class for heap-loaded words: best-known class,
+                // else Float (numbers dominate untyped unary use)
+                let sk = self
+                    .pick(*dst)
+                    .or_else(|| self.pick(*src))
+                    .unwrap_or(K::Float);
                 match uop {
-                    UnaryOp::Negative if sk == K::Int => {
-                        self.setv(*dst, |s| {
+                    UnaryOp::Negative => match sk {
+                        K::Int => self.setv(*dst, K::Int, |s| {
                             s.ins(Instruction::I64Const(0));
                             s.get(*src, K::Int)?;
                             s.ins(Instruction::I64Sub);
@@ -691,26 +802,58 @@ impl RE<'_> {
                             s.ins(Instruction::End);
                             s.ins(Instruction::LocalGet(s.l_tmp));
                             Ok(())
-                        })?;
-                    }
-                    _ => {
-                        self.setv(*dst, |s| {
-                            s.get(*src, sk)?;
-                            match uop {
-                                UnaryOp::Negative => match sk {
-                                    K::Float => s.ins(Instruction::F64Neg),
-                                    _ => bail!("neg"),
-                                },
-                                UnaryOp::Not => s.ins(Instruction::I32Eqz),
-                                UnaryOp::BitwiseNot => {
-                                    s.ins(Instruction::I64Const(-1));
-                                    s.ins(Instruction::I64Xor);
-                                }
-                                UnaryOp::Positive => {}
-                            }
+                        })?,
+                        K::Float => self.setv(*dst, K::Float, |s| {
+                            s.get(*src, K::Float)?;
+                            s.ins(Instruction::F64Neg);
                             Ok(())
-                        })?;
-                    }
+                        })?,
+                        K::Bool => bail!("neg bool"),
+                    },
+                    // mimas `+x` is checked abs on ints, fabs on floats
+                    UnaryOp::Positive => match sk {
+                        K::Int => self.setv(*dst, K::Int, |s| {
+                            s.get(*src, K::Int)?;
+                            s.ins(Instruction::LocalSet(s.l_tmp));
+                            s.ins(Instruction::LocalGet(s.l_tmp));
+                            s.ins(Instruction::I64Const(i64::MIN));
+                            s.ins(Instruction::I64Eq);
+                            s.ins(Instruction::If(BlockType::Empty));
+                            s.ins(Instruction::Unreachable);
+                            s.ins(Instruction::End);
+                            s.ins(Instruction::LocalGet(s.l_tmp));
+                            s.ins(Instruction::I64Const(0));
+                            s.ins(Instruction::I64LtS);
+                            s.ins(Instruction::If(BlockType::Result(ValType::I64)));
+                            s.ins(Instruction::I64Const(0));
+                            s.ins(Instruction::LocalGet(s.l_tmp));
+                            s.ins(Instruction::I64Sub);
+                            s.ins(Instruction::Else);
+                            s.ins(Instruction::LocalGet(s.l_tmp));
+                            s.ins(Instruction::End);
+                            Ok(())
+                        })?,
+                        K::Float => self.setv(*dst, K::Float, |s| {
+                            s.get(*src, K::Float)?;
+                            s.ins(Instruction::F64Abs);
+                            Ok(())
+                        })?,
+                        K::Bool => bail!("abs bool"),
+                    },
+                    UnaryOp::Not => match sk {
+                        K::Bool => self.setv(*dst, K::Bool, |s| {
+                            s.get(*src, K::Bool)?;
+                            s.ins(Instruction::I32Eqz);
+                            Ok(())
+                        })?,
+                        _ => bail!("not on {sk:?}"),
+                    },
+                    UnaryOp::BitwiseNot => self.setv(*dst, K::Int, |s| {
+                        s.get(*src, K::Int)?;
+                        s.ins(Instruction::I64Const(-1));
+                        s.ins(Instruction::I64Xor);
+                        Ok(())
+                    })?,
                 }
             }
             Op::Bin { dst, left, op: bop, right } => {
@@ -719,13 +862,16 @@ impl RE<'_> {
             Op::CallNative { dst, id, args } => {
                 let mut params = Vec::new();
                 for a in args {
-                    params.push(self.k(*a)?);
+                    let Some(k) = self.pick(*a) else {
+                        bail!("native arg reg {} has no class", a.index())
+                    };
+                    params.push(k);
                 }
-                let dk = self.class.get(&(dst.index() as u32)).copied();
+                let dk = self.pick(*dst);
                 let ret = dk.unwrap_or(K::Int);
                 let fi = self.natives[&(id.index() as u32, params.clone(), Some(ret))];
                 for a in args {
-                    let k = self.k(*a)?;
+                    let k = self.pick(*a).unwrap();
                     self.get(*a, k)?;
                 }
                 self.ins(Instruction::Call(fi));
@@ -742,12 +888,188 @@ impl RE<'_> {
                             K::Float => Instruction::LocalGet(self.l_tmpf),
                             K::Bool => Instruction::LocalGet(self.l_tmpb),
                         });
-                        self.st(*dst);
+                        self.st(*dst, ret);
                     }
                     None => self.ins(Instruction::Drop),
                 }
             }
             Op::LoadBody { .. } => {}
+            // ---------- heap ops: bump-arena objects in linear memory ----------
+            // array object = 16B header [data_ptr][len][cap][pad] (indirect —
+            // Move'd aliases share the header, so realloc updates every alias)
+            // instance = [adt u32][pad u32][field words] — fields at +8+slot*8
+            Op::NewArray { dst } => {
+                self.ins(Instruction::I32Const(16));
+                self.alloc();
+                self.ins(Instruction::LocalSet(self.l_hp));
+                self.ins(Instruction::LocalGet(self.l_hp));
+                self.ins(Instruction::I64Const(0));
+                self.ins(Instruction::I64Store(mem(0, 3)));
+                self.ins(Instruction::LocalGet(self.l_hp));
+                self.ins(Instruction::I64Const(0));
+                self.ins(Instruction::I64Store(mem(8, 3)));
+                self.fp();
+                self.ins(Instruction::LocalGet(self.l_hp));
+                self.ins(Instruction::I64ExtendI32U);
+                self.ins(Instruction::I64Store(mem(dst.index() as u32 * 8, 3)));
+            }
+            Op::Push { array, value } => {
+                // l_hp = array header
+                self.ld_word(*array);
+                self.ins(Instruction::I32WrapI64);
+                self.ins(Instruction::LocalSet(self.l_hp));
+                // l_tmpb = len
+                self.ins(Instruction::LocalGet(self.l_hp));
+                self.ins(Instruction::I32Load(mem(4, 2)));
+                self.ins(Instruction::LocalSet(self.l_tmpb));
+                // grow when len == cap
+                self.ins(Instruction::LocalGet(self.l_hp));
+                self.ins(Instruction::I32Load(mem(4, 2)));
+                self.ins(Instruction::LocalGet(self.l_hp));
+                self.ins(Instruction::I32Load(mem(8, 2)));
+                self.ins(Instruction::I32Eq);
+                self.ins(Instruction::If(BlockType::Empty));
+                // newcap = cap ? cap*2 : 4
+                self.ins(Instruction::LocalGet(self.l_hp));
+                self.ins(Instruction::I32Load(mem(8, 2)));
+                self.ins(Instruction::I32Eqz);
+                self.ins(Instruction::If(BlockType::Result(ValType::I32)));
+                self.ins(Instruction::I32Const(4));
+                self.ins(Instruction::Else);
+                self.ins(Instruction::LocalGet(self.l_hp));
+                self.ins(Instruction::I32Load(mem(8, 2)));
+                self.ins(Instruction::I32Const(2));
+                self.ins(Instruction::I32Mul);
+                self.ins(Instruction::End);
+                self.ins(Instruction::LocalSet(self.l_tmpc));
+                // l_tmp = newptr (i64 form)
+                self.ins(Instruction::LocalGet(self.l_tmpc));
+                self.ins(Instruction::I32Const(8));
+                self.ins(Instruction::I32Mul);
+                self.alloc();
+                self.ins(Instruction::I64ExtendI32U);
+                self.ins(Instruction::LocalSet(self.l_tmp));
+                // memory.copy(newptr, ptr, len*8)
+                self.ins(Instruction::LocalGet(self.l_tmp));
+                self.ins(Instruction::I32WrapI64);
+                self.ins(Instruction::LocalGet(self.l_hp));
+                self.ins(Instruction::I32Load(mem(0, 2)));
+                self.ins(Instruction::LocalGet(self.l_tmpb));
+                self.ins(Instruction::I32Const(8));
+                self.ins(Instruction::I32Mul);
+                self.ins(Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+                self.ins(Instruction::LocalGet(self.l_hp));
+                self.ins(Instruction::LocalGet(self.l_tmp));
+                self.ins(Instruction::I32WrapI64);
+                self.ins(Instruction::I32Store(mem(0, 2)));
+                self.ins(Instruction::LocalGet(self.l_hp));
+                self.ins(Instruction::LocalGet(self.l_tmpc));
+                self.ins(Instruction::I32Store(mem(8, 2)));
+                self.ins(Instruction::End);
+                // ptr[len] = value word; len += 1
+                self.ins(Instruction::LocalGet(self.l_hp));
+                self.ins(Instruction::I32Load(mem(0, 2)));
+                self.ins(Instruction::LocalGet(self.l_tmpb));
+                self.ins(Instruction::I32Const(8));
+                self.ins(Instruction::I32Mul);
+                self.ins(Instruction::I32Add);
+                self.ld_word(*value);
+                self.ins(Instruction::I64Store(mem(0, 3)));
+                self.ins(Instruction::LocalGet(self.l_hp));
+                self.ins(Instruction::LocalGet(self.l_tmpb));
+                self.ins(Instruction::I32Const(1));
+                self.ins(Instruction::I32Add);
+                self.ins(Instruction::I32Store(mem(4, 2)));
+            }
+            Op::GetIndex { dst, set, index, kind } => {
+                self.direct(kind)?;
+                // l_tmpb = index (bounds-checked below)
+                self.get(*index, K::Int)?;
+                self.ins(Instruction::I32WrapI64);
+                self.ins(Instruction::LocalSet(self.l_tmpb));
+                // if idx >= len → trap (interp: IndexOutOfBounds)
+                self.ins(Instruction::LocalGet(self.l_tmpb));
+                self.ld_word(*set);
+                self.ins(Instruction::I32WrapI64);
+                self.ins(Instruction::I32Load(mem(4, 2)));
+                self.ins(Instruction::I32GeU);
+                self.ins(Instruction::If(BlockType::Empty));
+                self.ins(Instruction::Unreachable);
+                self.ins(Instruction::End);
+                // dst = word(ptr + idx*8)
+                self.fp();
+                self.ld_word(*set);
+                self.ins(Instruction::I32WrapI64);
+                self.ins(Instruction::I32Load(mem(0, 2)));
+                self.ins(Instruction::LocalGet(self.l_tmpb));
+                self.ins(Instruction::I32Const(8));
+                self.ins(Instruction::I32Mul);
+                self.ins(Instruction::I32Add);
+                self.ins(Instruction::I64Load(mem(0, 3)));
+                self.ins(Instruction::I64Store(mem(dst.index() as u32 * 8, 3)));
+            }
+            Op::SetIndex { set, index, value, .. } => {
+                self.get(*index, K::Int)?;
+                self.ins(Instruction::I32WrapI64);
+                self.ins(Instruction::LocalSet(self.l_tmpb));
+                self.ins(Instruction::LocalGet(self.l_tmpb));
+                self.ld_word(*set);
+                self.ins(Instruction::I32WrapI64);
+                self.ins(Instruction::I32Load(mem(4, 2)));
+                self.ins(Instruction::I32GeU);
+                self.ins(Instruction::If(BlockType::Empty));
+                self.ins(Instruction::Unreachable);
+                self.ins(Instruction::End);
+                self.ld_word(*set);
+                self.ins(Instruction::I32WrapI64);
+                self.ins(Instruction::I32Load(mem(0, 2)));
+                self.ins(Instruction::LocalGet(self.l_tmpb));
+                self.ins(Instruction::I32Const(8));
+                self.ins(Instruction::I32Mul);
+                self.ins(Instruction::I32Add);
+                self.ld_word(*value);
+                self.ins(Instruction::I64Store(mem(0, 3)));
+            }
+            Op::NewInstance { dst, adt, fields } => {
+                let n = fields.len() as i32;
+                self.ins(Instruction::I32Const(8 + n * 8));
+                self.alloc();
+                self.ins(Instruction::LocalSet(self.l_hp));
+                self.ins(Instruction::LocalGet(self.l_hp));
+                self.ins(Instruction::I32Const(adt.index() as i32));
+                self.ins(Instruction::I32Store(mem(0, 2)));
+                for (fi, f) in fields.iter().enumerate() {
+                    self.ins(Instruction::LocalGet(self.l_hp));
+                    self.ld_word(*f);
+                    self.ins(Instruction::I64Store(mem(8 + fi as u32 * 8, 3)));
+                }
+                self.fp();
+                self.ins(Instruction::LocalGet(self.l_hp));
+                self.ins(Instruction::I64ExtendI32U);
+                self.ins(Instruction::I64Store(mem(dst.index() as u32 * 8, 3)));
+            }
+            Op::GetField { dst, src, slot, kind } => {
+                self.direct(kind)?;
+                self.fp();
+                self.ld_word(*src);
+                self.ins(Instruction::I32WrapI64);
+                self.ins(Instruction::I64Load(mem(8 + *slot * 8, 3)));
+                self.ins(Instruction::I64Store(mem(dst.index() as u32 * 8, 3)));
+            }
+            Op::SetField { receiver, slot, value } => {
+                self.ld_word(*receiver);
+                self.ins(Instruction::I32WrapI64);
+                self.ld_word(*value);
+                self.ins(Instruction::I64Store(mem(8 + *slot * 8, 3)));
+            }
+            Op::Len { dst, src } => {
+                self.fp();
+                self.ld_word(*src);
+                self.ins(Instruction::I32WrapI64);
+                self.ins(Instruction::I32Load(mem(4, 2)));
+                self.ins(Instruction::I64ExtendI32U);
+                self.ins(Instruction::I64Store(mem(dst.index() as u32 * 8, 3)));
+            }
             other => bail!("unsupported op {other:?}"),
         }
         if self.opts.coverage {
@@ -760,7 +1082,7 @@ impl RE<'_> {
     }
 
     fn mod_float(&mut self, dst: Reg, l: Reg, v: f64) -> Result<(), Bail> {
-        self.setv(dst, |s| {
+        self.setv(dst, K::Float, |s| {
             s.get(l, K::Float)?;
             s.ins(Instruction::LocalSet(s.l_tmpf));
             s.ins(Instruction::LocalGet(s.l_tmpf));
@@ -841,7 +1163,7 @@ impl RE<'_> {
     /// a call terminator: set callee frame base, call, propagate suspend,
     /// store dst, goto next region
     fn emit_call(&mut self, i: usize, fsize: u32) -> Result<(), Bail> {
-        let (dst, args, fi) = {
+        let (dst, args, fi, params, ret_k) = {
             let (_, op) = &self.ops[i];
             let (dst, b, args) = match op {
                 Op::CallDirect { dst, body, args } => (*dst, body.index(), args.as_slice()),
@@ -859,16 +1181,15 @@ impl RE<'_> {
             if sig.params.len() != args.len() {
                 bail!("arity mismatch calling body {b}");
             }
-            (dst, args.to_vec(), fi)
+            (dst, args.to_vec(), fi, sig.params.clone(), sig.ret)
         };
         // __sp = myfp + fsize (callee's frame base)
         self.ins(Instruction::LocalGet(self.l_myfp));
         self.ins(Instruction::I32Const(fsize as i32));
         self.ins(Instruction::I32Add);
         self.ins(Instruction::GlobalSet(self.g_sp));
-        for a in &args {
-            let k = self.k(*a)?;
-            self.get(*a, k)?;
+        for (a, &pk) in args.iter().zip(&params) {
+            self.get(*a, pk)?;
         }
         self.ins(Instruction::Call(fi));
         // propagate suspend
@@ -876,8 +1197,12 @@ impl RE<'_> {
         self.ins(Instruction::If(BlockType::Empty));
         self.suspend_keep(0, true); // callee already set the status
         self.ins(Instruction::End);
-        let dk = self.class.get(&(dst.index() as u32)).copied();
-        match dk {
+        let store_k = if self.mask.contains_key(&(dst.index() as u32)) {
+            ret_k
+        } else {
+            None
+        };
+        match store_k {
             Some(k) => {
                 self.ins(match k {
                     K::Int => Instruction::LocalSet(self.l_tmp),
@@ -890,7 +1215,7 @@ impl RE<'_> {
                     K::Float => Instruction::LocalGet(self.l_tmpf),
                     K::Bool => Instruction::LocalGet(self.l_tmpb),
                 });
-                self.st(dst);
+                self.st(dst, k);
             }
             None => self.ins(Instruction::Drop),
         }
@@ -924,10 +1249,10 @@ impl RE<'_> {
                 let (ix, bound) = (*idx, *bound);
                 // idx += 1
                 self.fp();
-                self.ld(ix)?;
+                self.get(ix, K::Int)?;
                 self.ins(Instruction::I64Const(1));
                 self.ins(Instruction::I64Add);
-                self.st(ix);
+                self.st(ix, K::Int);
                 let r = self.region_of[tgt_idx(target, &off2idx)?];
                 let f = self.region + 1;
                 self.goto_if(r, f, true, |s| {
@@ -1207,6 +1532,7 @@ fn try_resume_body(
     g_pause: Option<u32>,
     g_status: u32,
     g_sp: u32,
+    g_hp: u32,
 ) -> Result<(Function, Vec<(u32, u32)>), Bail> {
     let chunk = &program.chunks[compile::BodyId::from(b as u32)];
     let Some(sig) = &sigs[b] else { bail!("no sig") };
@@ -1214,7 +1540,8 @@ fn try_resume_body(
     let nparams = chunk.params.len() as u32;
     let mut re = RE {
         ops,
-        class: &ana.class,
+        mask: &ana.mask,
+        reads_w: &ana.reads_w,
         sigs,
         func_map,
         callee: &ana.callee,
@@ -1230,11 +1557,15 @@ fn try_resume_body(
         g_pause,
         g_status,
         g_sp,
+        g_hp,
         l_pc: nparams,
         l_myfp: nparams + 1,
         l_tmp: nparams + 2,
         l_tmpf: nparams + 3,
         l_tmpb: nparams + 4,
+        l_tmpc: nparams + 5,
+        l_hp: nparams + 6,
+        l_sz: nparams + 7,
         region: 0,
     };
     let fsize = (chunk.regs as u32) * 8 + 8;
@@ -1309,6 +1640,9 @@ fn try_resume_body(
         (1, ValType::I64), // tmp
         (1, ValType::F64), // tmpf
         (1, ValType::I32), // tmpb
+        (1, ValType::I32), // tmpc
+        (1, ValType::I32), // hp
+        (1, ValType::I32), // sz
     ];
     let mut f = Function::new(locals.drain(..));
     f.raw(re.c.iter().copied());
@@ -1318,6 +1652,18 @@ fn try_resume_body(
 /// Emit the resumable lane: pc-dispatch + memory-resident registers. Same
 /// coverage as `emit` for op semantics, plus ALL control flow (no irreducible
 /// skips). Every emitted body suspends/resumes on `__pause`/`__fuel`.
+/// emit-side `pick` (mask-based, Float>Int>Bool) for pre-pass collection
+fn ana_pick(ana: &crate::Ana, r: Reg) -> Option<K> {
+    let m = *ana.mask.get(&(r.index() as u32))?;
+    Some(if m & crate::K_FLOAT != 0 {
+        K::Float
+    } else if m & crate::K_INT != 0 {
+        K::Int
+    } else {
+        K::Bool
+    })
+}
+
 pub fn emit_resumable(program: &Program, opts: &Opts) -> Result<Wasmgen, Bail> {
     let nbodies = program.chunks.len();
     let bodies_ops: Vec<Vec<(usize, Op)>> = (0..nbodies)
@@ -1345,7 +1691,6 @@ pub fn emit_resumable(program: &Program, opts: &Opts) -> Result<Wasmgen, Bail> {
             break;
         }
     }
-
     let mut skipped: Vec<Skip> = Vec::new();
     let mut sigs: Vec<Option<Sig>> = (0..nbodies).map(|_| None).collect();
     for b in 0..nbodies {
@@ -1392,20 +1737,15 @@ pub fn emit_resumable(program: &Program, opts: &Opts) -> Result<Wasmgen, Bail> {
             if let Op::CallNative { dst, id, args } = op {
                 if !args
                     .iter()
-                    .all(|a| ana.class.contains_key(&(a.index() as u32)))
+                    .all(|a| ana_pick(ana, *a).is_some())
                 {
                     continue;
                 }
                 let params: Vec<K> = args
                     .iter()
-                    .map(|a| ana.class[&(a.index() as u32)])
+                    .map(|a| ana_pick(ana, *a).unwrap())
                     .collect();
-                let ret = Some(
-                    ana.class
-                        .get(&(dst.index() as u32))
-                        .copied()
-                        .unwrap_or(K::Int),
-                );
+                let ret = Some(ana_pick(ana, *dst).unwrap_or(K::Int));
                 let key = (id.index() as u32, params, ret);
                 if !natives.contains_key(&key) {
                     natives.insert(key.clone(), native_list.len() as u32);
@@ -1435,7 +1775,7 @@ pub fn emit_resumable(program: &Program, opts: &Opts) -> Result<Wasmgen, Bail> {
                 let all_native_args_classed = bodies_ops[b].iter().all(|(_, op)| match op {
                     Op::CallNative { args, .. } => args
                         .iter()
-                        .all(|a| ana.class.contains_key(&(a.index() as u32))),
+                        .all(|a| ana_pick(ana, *a).is_some()),
                     _ => true,
                 });
                 if !all_native_args_classed {
@@ -1454,6 +1794,7 @@ pub fn emit_resumable(program: &Program, opts: &Opts) -> Result<Wasmgen, Bail> {
                     None,
                     0,
                     1,
+                    2,
                 ) {
                     why = e;
                 }
@@ -1520,7 +1861,17 @@ pub fn emit_resumable(program: &Program, opts: &Opts) -> Result<Wasmgen, Bail> {
                 K::Bool => 'b',
             })
             .collect::<String>();
-        imports.import("env", &format!("n{id}_{sig_desc}"), EntityType::Function(ty));
+        let ret_desc = match ret {
+            Some(K::Int) => 'i',
+            Some(K::Float) => 'f',
+            Some(K::Bool) => 'b',
+            None => 'v',
+        };
+        imports.import(
+            "env",
+            &format!("n{id}_{sig_desc}_{ret_desc}"),
+            EntityType::Function(ty),
+        );
     }
 
     let mut gnext = 0u32;
@@ -1547,7 +1898,8 @@ pub fn emit_resumable(program: &Program, opts: &Opts) -> Result<Wasmgen, Bail> {
     let g_status = gnext;
     gnext += 1;
     let g_sp = gnext;
-    let _ = g_sp;
+    gnext += 1;
+    let g_hp = gnext;
     globals.global(
         GlobalType {
             val_type: ValType::I32,
@@ -1563,6 +1915,21 @@ pub fn emit_resumable(program: &Program, opts: &Opts) -> Result<Wasmgen, Bail> {
             shared: false,
         },
         &ConstExpr::i32_const(nbodies as i32 * 8), // __sp starts at STACK
+    );
+    // heap arena follows the coverage region: arrays/instances are bump-
+    // allocated blocks of 8-byte words
+    let total_ops: u32 = (0..nbodies).map(|b| bodies_ops[b].len() as u32).sum();
+    let stack_base = nbodies as u32 * 8;
+    let cov_addr = stack_base + STACK_CAP;
+    let cov_end = if opts.coverage { cov_addr + total_ops + 64 } else { cov_addr };
+    let heap_base = (cov_end + 7) & !7;
+    globals.global(
+        GlobalType {
+            val_type: ValType::I32,
+            mutable: true,
+            shared: false,
+        },
+        &ConstExpr::i32_const(heap_base as i32), // __hp: heap bump pointer
     );
 
     for b in 0..nbodies {
@@ -1599,6 +1966,7 @@ pub fn emit_resumable(program: &Program, opts: &Opts) -> Result<Wasmgen, Bail> {
             g_pause,
             g_status,
             g_sp,
+            g_hp,
         )
         .map_err(|e| format!("body {b}: {e}"))?;
         let fidx = func_map[&b];
@@ -1632,11 +2000,7 @@ pub fn emit_resumable(program: &Program, opts: &Opts) -> Result<Wasmgen, Bail> {
         });
     }
 
-    let total_ops: u32 = (0..nbodies).map(|b| bodies_ops[b].len() as u32).sum();
-    let stack_base = nbodies as u32 * 8;
-    let cov_addr = stack_base + STACK_CAP;
-    let cov_end = if opts.coverage { cov_addr + total_ops + 64 } else { cov_addr };
-    let pages = (cov_end as u64 + PAGE - 1) / PAGE;
+    let pages = (heap_base as u64 + PAGE) / PAGE;
 
     let mut module = Module::new();
     module.section(&types);
@@ -1655,6 +2019,7 @@ pub fn emit_resumable(program: &Program, opts: &Opts) -> Result<Wasmgen, Bail> {
     exports.export("memory", ExportKind::Memory, 0);
     exports.export("__status", ExportKind::Global, g_status);
     exports.export("__sp", ExportKind::Global, g_sp);
+    exports.export("__hp", ExportKind::Global, g_hp);
     module.section(&exports);
     module.section(&code);
     let mut ns = NameSection::new();
