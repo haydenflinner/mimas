@@ -40,10 +40,13 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use compile::{BinOp, BlockTarget, Constant, Op, Program, Reg, UnaryOp};
 
+pub mod resume;
 pub mod zig;
 use wasm_encoder::{
-    BlockType, CodeSection, EntityType, ExportKind, ExportSection, Function, FunctionSection,
-    ImportSection, Instruction, Module, NameMap, NameSection, TypeSection, ValType,
+    BlockType, CodeSection, CustomSection, Encode, EntityType, ExportKind,
+    ExportSection, Function, FunctionSection, GlobalType, ImportSection,
+    Instruction, MemArg, MemorySection, MemoryType, Module, NameMap, NameSection, TypeSection,
+    ValType,
 };
 
 /// Scalar register class — the wasm local's type.
@@ -681,12 +684,46 @@ struct Em<'a> {
     tmp: u32, // i64 scratch local for checked arith
     stack: Vec<Scope>,
     f: Function,
+    /// byte offset into the function body, for the srcmap
+    code_off: u32,
+    /// (code_off, op_index) per emitted op
+    srcmap: Vec<(u32, u32)>,
+    fuel_g: Option<u32>,
+    pause_g: Option<u32>,
+    /// memory address of this body's coverage byte for op i
+    cov_base: u32,
 }
 
 impl Em<'_> {
     fn ins(&mut self, i: Instruction) -> &mut Self {
-        self.f.instruction(&i);
+        let mut v = Vec::with_capacity(8);
+        i.encode(&mut v);
+        self.code_off += v.len() as u32;
+        self.f.raw(v);
         self
+    }
+
+    /// Per-op instrumentation, emitted just before the op itself.
+    fn tick(&mut self, i: usize) {
+        if let Some(g) = self.fuel_g {
+            self.ins(Instruction::GlobalGet(g));
+            self.ins(Instruction::I64Const(1));
+            self.ins(Instruction::I64Sub);
+            self.ins(Instruction::GlobalSet(g));
+            self.ins(Instruction::GlobalGet(g));
+            self.ins(Instruction::I64Const(0));
+            self.ins(Instruction::I64LtS);
+            self.trap_if();
+        }
+        if self.cov_base != u32::MAX {
+            self.ins(Instruction::I32Const((self.cov_base + i as u32) as i32));
+            self.ins(Instruction::I32Const(1));
+            self.ins(Instruction::I32Store8(MemArg {
+                offset: 0,
+                align: 0,
+                memory_index: 0,
+            }));
+        }
     }
 
     fn k(&self, r: Reg) -> Result<K, Bail> {
@@ -736,10 +773,10 @@ impl Em<'_> {
         self.ins(Instruction::LocalSet(self.li(r)));
     }
 
-    fn depth(&self, t: usize) -> Result<u32, Bail> {
+    fn depth(&self, t: usize) -> Result<(u32, ScopeKind), Bail> {
         for (i, s) in self.stack.iter().enumerate().rev() {
             if s.target == t {
-                return Ok((self.stack.len() - 1 - i) as u32);
+                return Ok(((self.stack.len() - 1 - i) as u32, s.kind));
             }
         }
         bail!("no open scope for target op {t}")
@@ -754,7 +791,13 @@ impl Em<'_> {
     }
 
     fn br(&mut self, t: &BlockTarget, off2idx: &HashMap<usize, usize>) -> Result<(), Bail> {
-        let d = self.depth(self.target_idx(t, off2idx)?)?;
+        let (d, kind) = self.depth(self.target_idx(t, off2idx)?)?;
+        if kind == ScopeKind::Loop {
+            if let Some(g) = self.pause_g {
+                self.ins(Instruction::GlobalGet(g));
+                self.trap_if();
+            }
+        }
         self.ins(Instruction::Br(d));
         Ok(())
     }
@@ -768,7 +811,13 @@ impl Em<'_> {
         if !is_true {
             self.ins(Instruction::I32Eqz);
         }
-        let d = self.depth(self.target_idx(t, off2idx)?)?;
+        let (d, kind) = self.depth(self.target_idx(t, off2idx)?)?;
+        if kind == ScopeKind::Loop {
+            if let Some(g) = self.pause_g {
+                self.ins(Instruction::GlobalGet(g));
+                self.trap_if();
+            }
+        }
         self.ins(Instruction::BrIf(d));
         Ok(())
     }
@@ -1054,6 +1103,8 @@ impl Em<'_> {
                     self.stack.push(s);
                 }
             }
+            self.srcmap.push((self.code_off, i as u32));
+            self.tick(i);
             // a scalar op whose dst is unclassed has no scalar reader — the
             // write is dead, so the whole op is skipped (all such ops are pure)
             if let Some(d) = op_dst(op) {
@@ -1303,9 +1354,9 @@ impl Em<'_> {
                     self.ins(Instruction::I32WrapI64);
                     let mut tbl = Vec::with_capacity(table.len());
                     for t in table {
-                        tbl.push(self.depth(self.target_idx(t, off2idx)?)?);
+                        tbl.push(self.depth(self.target_idx(t, off2idx)?)?.0);
                     }
-                    let d = self.depth(self.target_idx(default, off2idx)?)?;
+                    let d = self.depth(self.target_idx(default, off2idx)?)?.0;
                     self.ins(Instruction::BrTable(tbl.into(), d));
                 }
                 Op::BIntLt {
@@ -1634,7 +1685,25 @@ impl Em<'_> {
 
 /// Emit the module. Skipped bodies are reported, not fatal — the caller keeps
 /// them on the interpreter lane.
+/// Instrumentation knobs for the structured lane.
+#[derive(Default, Clone, Copy)]
+pub struct Opts {
+    /// Decrement imported mutable global `env.__fuel` per op; trap when it
+    /// goes negative.
+    pub fuel: bool,
+    /// Trap when imported mutable global `env.__pause` is nonzero, checked at
+    /// every loop back-edge. (Structured lane can't suspend mid-function —
+    /// this halts, it doesn't resume.)
+    pub pause: bool,
+    /// Write one byte per executed op into exported `memory` at op index.
+    pub coverage: bool,
+}
+
 pub fn emit(program: &Program) -> Result<Wasmgen, Bail> {
+    emit_opts(program, &Opts::default())
+}
+
+pub fn emit_opts(program: &Program, opts: &Opts) -> Result<Wasmgen, Bail> {
     let nbodies = program.chunks.len();
     let bodies_ops: Vec<Vec<(usize, Op)>> = (0..nbodies)
         .map(|b| program.ops(compile::BodyId::from(b as u32)))
@@ -1753,6 +1822,7 @@ pub fn emit(program: &Program) -> Result<Wasmgen, Bail> {
                 &sigs,
                 &dummy_func_map,
                 &trial_natives,
+                &ProbeGlobals::default(),
             ) {
                 why = e;
             }
@@ -1826,6 +1896,10 @@ pub fn emit(program: &Program) -> Result<Wasmgen, Bail> {
     let mut names = NameMap::new();
     let mut out_bodies: Vec<Body> = Vec::new();
     let mut type_ids: HashMap<(Vec<K>, Option<K>), u32> = HashMap::new();
+    let mut srcmaps: Vec<(u32, Vec<(u32, u32)>)> = Vec::new();
+    let mut locs: Vec<(u32, u32, u32)> = Vec::new();
+    let mut loc_map: HashMap<(u32, u32, u32), u32> = HashMap::new();
+    let mut cov_next = 0u32;
 
     // import types + entries first so natives occupy the leading func indices
     for (id, params, ret) in &native_list {
@@ -1853,6 +1927,31 @@ pub fn emit(program: &Program) -> Result<Wasmgen, Bail> {
         );
     }
 
+    // instrumentation imports — globals live in their own index space
+    let mut gnext = 0u32;
+    let mut import_global = |module: &mut ImportSection, name, vt| {
+        let g = gnext;
+        gnext += 1;
+        module.import(
+            "env",
+            name,
+            EntityType::Global(GlobalType {
+                val_type: vt,
+                mutable: true,
+                shared: false,
+            }),
+        );
+        g
+    };
+    let fuel_g = opts.fuel.then(|| import_global(&mut imports, "__fuel", ValType::I64));
+    let pause_g = opts.pause.then(|| import_global(&mut imports, "__pause", ValType::I32));
+    let mut globs = ProbeGlobals {
+        fuel_g,
+        pause_g,
+        cov_base: u32::MAX,
+    };
+    let nimport_entries = imports.len();
+
     for b in 0..nbodies {
         let Some(sig) = &sigs[b] else { continue };
         let ana = anas[b].as_ref().unwrap();
@@ -1866,8 +1965,31 @@ pub fn emit(program: &Program) -> Result<Wasmgen, Bail> {
             );
         }
         funcs.function(ty);
-        let f = try_body(b, &bodies_ops[b], &program, ana, &sigs, &func_map, &natives)
+        if opts.coverage {
+            globs.cov_base = cov_next;
+            cov_next += bodies_ops[b].len() as u32;
+        }
+        let (f, sm) = try_body(b, &bodies_ops[b], &program, ana, &sigs, &func_map, &natives, &globs)
             .map_err(|e| format!("body {b} passed trial but failed emit: {e}"))?;
+        let chunk = &program.chunks[compile::BodyId::from(b as u32)];
+        let sm_loc: Vec<(u32, u32)> = sm
+            .iter()
+            .map(|&(off, i)| {
+                let (boff, _) = bodies_ops[b][i as usize];
+                let loc = chunk.loc_at((boff - chunk.offset) as u32);
+                let key = (
+                    loc.file_id as u32,
+                    loc.span.start as u32,
+                    loc.span.end as u32,
+                );
+                let li = *loc_map.entry(key).or_insert_with(|| {
+                    locs.push(key);
+                    (locs.len() - 1) as u32
+                });
+                (off, li)
+            })
+            .collect();
+        srcmaps.push((func_map[&b], sm_loc));
         let fidx = func_map[&b];
         code.function(&f);
         let name = format!("b{b}");
@@ -1882,15 +2004,53 @@ pub fn emit(program: &Program) -> Result<Wasmgen, Bail> {
 
     let mut module = Module::new();
     module.section(&types);
-    if nimports > 0 {
+    if nimport_entries > 0 {
         module.section(&imports);
     }
     module.section(&funcs);
+    if opts.coverage {
+        let pages = (cov_next as u64 + 65535) / 65536;
+        let mut mems = MemorySection::new();
+        mems.memory(MemoryType {
+            minimum: pages.max(1),
+            maximum: None,
+            memory64: false,
+            shared: false,
+            page_size_log2: None,
+        });
+        module.section(&mems);
+        exports.export("memory", ExportKind::Memory, 0);
+    }
     module.section(&exports);
     module.section(&code);
     let mut ns = NameSection::new();
     ns.functions(&names);
     module.section(&ns);
+    if !srcmaps.is_empty() {
+        // mimas.srcmap: magic, per-func (func_idx, [(code_off, loc_idx)]),
+        // then the shared loc table of (file_id, span_lo, span_hi)
+        let mut d = Vec::new();
+        d.extend_from_slice(&0x4D534D31u32.to_le_bytes());
+        d.extend_from_slice(&(srcmaps.len() as u32).to_le_bytes());
+        for (fi, entries) in &srcmaps {
+            d.extend_from_slice(&fi.to_le_bytes());
+            d.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+            for (off, li) in entries {
+                d.extend_from_slice(&off.to_le_bytes());
+                d.extend_from_slice(&li.to_le_bytes());
+            }
+        }
+        d.extend_from_slice(&(locs.len() as u32).to_le_bytes());
+        for (f, lo, hi) in &locs {
+            d.extend_from_slice(&f.to_le_bytes());
+            d.extend_from_slice(&lo.to_le_bytes());
+            d.extend_from_slice(&hi.to_le_bytes());
+        }
+        module.section(&CustomSection {
+            name: std::borrow::Cow::Borrowed("mimas.srcmap"),
+            data: std::borrow::Cow::Borrowed(&d),
+        });
+    }
     Ok(Wasmgen {
         bytes: module.finish(),
         bodies: out_bodies,
@@ -1899,6 +2059,15 @@ pub fn emit(program: &Program) -> Result<Wasmgen, Bail> {
 }
 
 /// Trial/final emission of one body into a fresh `Function`.
+/// Module-level indices try_body needs for instrumentation.
+#[derive(Default)]
+pub(crate) struct ProbeGlobals {
+    pub fuel_g: Option<u32>,
+    pub pause_g: Option<u32>,
+    /// coverage byte base for this body's op 0 (u32::MAX = off)
+    pub cov_base: u32,
+}
+
 fn try_body(
     b: usize,
     ops: &[(usize, Op)],
@@ -1907,7 +2076,8 @@ fn try_body(
     sigs: &[Option<Sig>],
     func_map: &HashMap<usize, u32>,
     natives: &HashMap<(u32, Vec<K>, Option<K>), u32>,
-) -> Result<Function, Bail> {
+    globs: &ProbeGlobals,
+) -> Result<(Function, Vec<(u32, u32)>), Bail> {
     let chunk = &program.chunks[compile::BodyId::from(b as u32)];
     let Some(sig) = &sigs[b] else {
         bail!("no sig for body {b}");
@@ -1952,11 +2122,16 @@ fn try_body(
         tmp,
         stack: Vec::new(),
         f: Function::new(groups),
+        code_off: 0,
+        srcmap: Vec::new(),
+        fuel_g: globs.fuel_g,
+        pause_g: globs.pause_g,
+        cov_base: globs.cov_base,
     };
     let mut off2idx = HashMap::new();
     for (i, (off, _)) in ops.iter().enumerate() {
         off2idx.insert(*off, i);
     }
     em.emit(&off2idx, sc)?;
-    Ok(em.f)
+    Ok((em.f, em.srcmap))
 }

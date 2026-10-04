@@ -1,16 +1,36 @@
 // Compile a .mim file to a .wasm module and print a JSON manifest of
 // exports/skips for the Node driver.
+//
+// usage: emit <file.mim> [out.wasm] [--resume] [--fuel] [--pause] [--cov]
+//   --resume  pc-dispatch lane (irreducible CFGs, mid-function pause/resume,
+//             memory-resident registers for checkpointing)
+//   --fuel    decrement imported env.__fuel (i64) per op/region
+//   --pause   check imported env.__pause (i32) at back-edges / region heads
+//   --cov     write per-op coverage bytes into exported memory
 fn main() {
-    let path = std::env::args()
-        .nth(1)
-        .expect("usage: emit <file.mim> [out.wasm]");
-    let out = std::env::args()
-        .nth(2)
-        .unwrap_or_else(|| "out.wasm".to_string());
-    let source = std::fs::read_to_string(&path).expect("read");
+    let mut args = std::env::args().skip(1);
+    let mut opts = mimas_wasmgen::Opts::default();
+    let mut resume = false;
+    let mut pos = Vec::new();
+    for a in args.by_ref() {
+        match a.as_str() {
+            "--resume" => resume = true,
+            "--fuel" => opts.fuel = true,
+            "--pause" => opts.pause = true,
+            "--cov" => opts.coverage = true,
+            _ => pos.push(a),
+        }
+    }
+    let path = pos.first().expect("usage: emit <file.mim> [out.wasm] [flags]");
+    let out = pos.get(1).cloned().unwrap_or_else(|| "out.wasm".to_string());
+    let source = std::fs::read_to_string(path).expect("read");
     let (program, _s) =
         vm::Vm::compile_parts(&[("main", source.as_str())], mimas::library::std).expect("compile");
-    let w = mimas_wasmgen::emit(&program).expect("emit");
+    let w = if resume {
+        mimas_wasmgen::resume::emit_resumable(&program, &opts).expect("emit resumable")
+    } else {
+        mimas_wasmgen::emit_opts(&program, &opts).expect("emit")
+    };
     std::fs::write(&out, &w.bytes).expect("write wasm");
     let bodies = w
         .bodies
