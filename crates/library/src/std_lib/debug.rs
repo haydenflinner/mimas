@@ -39,6 +39,7 @@ fn caller_loc(ctx: Ctx<'_>, skip: i64) -> Option<(FileId, usize)> {
 /// line that called *it*. Null when nothing is loaded, the frame doesn't exist, or the Vm has
 /// no source text to count lines against.
 #[native]
+#[effects()]
 fn caller_line<'gc>(ctx: Ctx<'gc>, skip: i64) -> Option<i64> {
     let (file_id, offset) = caller_loc(ctx, skip)?;
     let sources = ctx.fixture::<DebugInfo>().sources.borrow();
@@ -50,6 +51,7 @@ fn caller_line<'gc>(ctx: Ctx<'gc>, skip: i64) -> Option<i64> {
 /// The whole source text of the file the call site `skip` frames up lives in -- a debugger
 /// page grabs it once at init and slices its own context window around `caller_line`'s hits.
 #[native]
+#[effects()]
 fn srcfile<'gc>(ctx: Ctx<'gc>, skip: i64) -> Option<String> {
     let (file_id, _) = caller_loc(ctx, skip)?;
     ctx.fixture::<DebugInfo>()

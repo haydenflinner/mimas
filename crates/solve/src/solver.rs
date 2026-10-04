@@ -71,6 +71,23 @@ pub struct Solver {
     /// consults it when a `.field` read isn't on a source-declared struct.
     pub(crate) field_dims: HashMap<(String, String), shared::units::Dim>,
 
+    /// Per-declaration read/write site counts, filled by the grades pass -- the `{0,1,ω}`
+    /// usage grades behind the lint suite. Surfaces on [`Resolutions::dec_uses`].
+    pub(crate) dec_uses: IndexMap<DecId, crate::grades::UseInfo>,
+    /// Inferred effect sets for each `fn` dec (`#[effects]`-declared natives seed the
+    /// fixpoint; user fns are the union of their callees). `Resolutions::fn_effects`.
+    pub(crate) fn_effects: IndexMap<DecId, shared::Fx>,
+    /// Effect set of each file's top-level statements, keyed by the ast's name. Script code
+    /// isn't a dec, so page-eval effects surface here for a host to check against its caps.
+    pub(crate) script_effects: IndexMap<String, shared::Fx>,
+    /// Per top-level statement: `(file name, site, inferred fx)` in source order. A host
+    /// that splices `use`-includes into one file maps each site back onto its include's
+    /// byte range -- how a peer page's contribution is attributed (and gated) separately.
+    pub(crate) script_segments: Vec<(String, shared::Location, shared::Fx)>,
+    /// Non-fatal diagnostics (the lint suite). Solve succeeds; hosts decide how to show them.
+    /// Surfaces on `Loaded::warnings` and `Resolutions::warnings`.
+    pub(crate) warnings: Vec<miette::Report>,
+
     pub(crate) control_flow: ControlFlow,
     pub(crate) ribs: Ribs,
     pub(crate) loop_stack: Vec<LoopRun>,
@@ -120,6 +137,11 @@ impl Solver {
             node_dims: IndexMap::new(),
             want_dims: IndexMap::new(),
             field_dims: HashMap::new(),
+            dec_uses: IndexMap::new(),
+            fn_effects: IndexMap::new(),
+            script_effects: IndexMap::new(),
+            script_segments: Vec::new(),
+            warnings: Vec::new(),
             non_value: None,
             iter_guards: vec![],
             type_params: vec![],
@@ -320,6 +342,8 @@ impl Solver {
         assert!(self.loop_stack.is_empty());
         // last, once every node has its type: do the units add up?
         crate::dims::check(self, &asts)?;
+        // and, with decs resolved everywhere the walk reaches: the usage/effect grades
+        crate::grades::check(self, &asts);
         Ok(())
     }
 
@@ -853,6 +877,7 @@ impl Solver {
         native_id: NativeId,
         validate: Option<api::LitValidator>,
         src: Option<api::NativeSrc>,
+        effects: Option<shared::Fx>,
     ) -> DecId {
         let sig = NativeFnSig {
             params,
@@ -860,6 +885,7 @@ impl Solver {
             return_ty,
             return_dim,
             recv: None,
+            effects,
         };
         // first instantiation fills the dec's vid, later ident resolutions detect that this is
         // a native and re-instantiate so each call gets its own type vars.
@@ -1227,6 +1253,7 @@ impl Solver {
                         id,
                         f.validate,
                         f.src,
+                        f.effects,
                     );
                 }
                 // module-nested native fn
@@ -1238,6 +1265,7 @@ impl Solver {
                         return_ty: f.return_ty.clone(),
                         return_dim: f.return_dim,
                         recv: None,
+                        effects: f.effects,
                     };
                     let ident = Ident::synthetic(f.name.clone());
                     let ty = self.instantiate_native(&sig, None).expect("no recv");
@@ -1285,6 +1313,7 @@ impl Solver {
                         return_ty: m.return_ty.clone(),
                         return_dim: m.return_dim,
                         recv: Some(m.recv_ty.clone()),
+                        effects: m.effects,
                     };
                     let ident = Ident::synthetic(m.name.clone());
                     let ty = self.instantiate_native(&sig, None).expect("no recv check");
@@ -1936,6 +1965,9 @@ impl Solver {
                     at: root.location.into(),
                     name: root.lexeme.clone(),
                 })?;
+                // `x = v` doesn't *read* x, but the grades pass needs the target's dec to
+                // count the store -- same lookup as every other ident site
+                self.node_decs.insert(root.id, dec_id);
 
                 match self.decs[dec_id].kind {
                     DecKind::Constant(_) => Err(AssignToConst {
@@ -2553,6 +2585,9 @@ pub(crate) struct NativeFnSig {
     /// Dimension of the return value, when it measures something.
     pub return_dim: Option<shared::units::Dim>,
     pub recv: Option<Ty>,
+    /// The native's declared effect footprint (`#[effects(...)]`), read by the grades
+    /// pass. `None` = unannotated: inference treats the call as `Fx::unknown()`.
+    pub effects: Option<shared::Fx>,
 }
 
 pub(crate) struct NativeBinding {

@@ -16,6 +16,7 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
 }
 
 #[native]
+#[effects(io)]
 /// Writes `value` to standard output, followed by a newline. A string prints as its plain text,
 /// and any other value prints the same way it would inside an f-string.
 ///
@@ -42,6 +43,7 @@ fn print<'gc>(ctx: Ctx<'gc>, msg: Val<'gc>) -> Result<(), RtErr> {
 /// side of "skip the bit that's in err". Repeats from the same site are
 /// suppressed, so `warn` inside a loop doesn't flood.
 #[native]
+#[effects(io)]
 fn warn<'gc>(ctx: Ctx<'gc>, msg: &str) {
     ctx.warn(msg);
 }
@@ -60,6 +62,7 @@ fn warn<'gc>(ctx: Ctx<'gc>, msg: &str) {
 ///
 /// For a failure the caller should be able to recover from, return a
 /// [result](../reference/error-handling.md#results) and `raise` instead.
+#[effects()]
 fn panic<'gc>(ctx: Ctx<'gc>, msg: Option<anon::T<'gc>>) -> Result<NeverReturn, RtErr> {
     let text = match msg {
         Some(msg) => format!("panic: {}", ctx.to_string(msg.0)?),
@@ -80,6 +83,7 @@ fn panic<'gc>(ctx: Ctx<'gc>, msg: Option<anon::T<'gc>>) -> Result<NeverReturn, R
 ///     todo("read the save format")
 /// }
 /// ```
+#[effects()]
 fn todo<'gc>(ctx: Ctx<'gc>, msg: Option<anon::T<'gc>>) -> Result<NeverReturn, RtErr> {
     Err(match msg {
         Some(m) => RtErr::Custom(format!("todo: {}", ctx.to_string(m.0)?)),
@@ -88,6 +92,7 @@ fn todo<'gc>(ctx: Ctx<'gc>, msg: Option<anon::T<'gc>>) -> Result<NeverReturn, Rt
 }
 
 #[native]
+#[effects(io)]
 /// Prints `value` to standard output in its debug form, then returns it. The line starts with
 /// `dbg value:`, and strings keep their quotes.
 ///

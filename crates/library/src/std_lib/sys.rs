@@ -27,6 +27,7 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
 /// let path = sys::arg(1) ?? "default.txt"; // "input.txt"
 /// ```
 #[native]
+#[effects(io)]
 fn arg<'gc>(ctx: Ctx<'gc>, index: usize) -> Option<String> {
     ctx.fixture::<ScriptArgs>().get(index)
 }
@@ -45,6 +46,7 @@ fn arg<'gc>(ctx: Ctx<'gc>, index: usize) -> Option<String> {
 /// `exit` ends the whole process. When mimas is embedded in a larger program, that program exits
 /// as well.
 #[native]
+#[effects(io)]
 fn exit<'gc>(code: i32) -> NeverReturn {
     std::process::exit(code)
 }
@@ -63,6 +65,7 @@ fn exit<'gc>(code: i32) -> NeverReturn {
 /// print(words.len()); // 3
 /// ```
 #[native]
+#[effects(io)]
 fn stdin<'gc>() -> Raisable<String> {
     let mut buf = String::new();
     std::io::stdin()
@@ -83,6 +86,7 @@ fn stdin<'gc>() -> Raisable<String> {
 /// print(sys::file()); // /home/ada/projects/game/main.mim
 /// ```
 #[native]
+#[effects()]
 fn file() -> String {
     "<unknown>".into()
 }

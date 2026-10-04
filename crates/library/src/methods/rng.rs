@@ -28,6 +28,7 @@ pub(crate) fn unit<'gc>(ctx: Ctx<'gc>) -> f64 {
 }
 
 #[native]
+#[effects(rng)]
 /// Pins the random stream to `seed` — every `random`/`shuffle`/`choose`
 /// after this draws the same sequence a fresh session started on `seed`
 /// would. Seed `0` is legal but degenerate (xorshift pins at 0).

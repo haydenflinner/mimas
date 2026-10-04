@@ -25,6 +25,7 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
 /// let config = fs::read("config.txt") absolve |err| "";
 /// ```
 #[native]
+#[effects(io)]
 fn read<'gc>(path: &str) -> Raisable<String> {
     std::fs::read_to_string(path).into()
 }
@@ -41,6 +42,7 @@ fn read<'gc>(path: &str) -> Raisable<String> {
 /// fs::write("scores.txt", "ada 3\nbob 5\n")!;
 /// ```
 #[native]
+#[effects(io)]
 fn write<'gc>(path: &str, contents: &str) -> Raisable<bool> {
     std::fs::write(path, contents).map(|_| true).into()
 }
@@ -54,6 +56,7 @@ fn write<'gc>(path: &str, contents: &str) -> Raisable<bool> {
 /// fs::remove("scores.txt")!;
 /// ```
 #[native]
+#[effects(io)]
 fn remove<'gc>(path: &str) -> Raisable<bool> {
     std::fs::remove_file(path).map(|_| true).into()
 }
@@ -67,6 +70,7 @@ fn remove<'gc>(path: &str) -> Raisable<bool> {
 /// fs::remove_dir("saves")!;
 /// ```
 #[native]
+#[effects(io)]
 fn remove_dir<'gc>(path: &str) -> Raisable<bool> {
     std::fs::remove_dir_all(path).map(|_| true).into()
 }
@@ -82,6 +86,7 @@ fn remove_dir<'gc>(path: &str) -> Raisable<bool> {
 /// fs::write("saves/slot1/state.txt", "level 3")!;
 /// ```
 #[native]
+#[effects(io)]
 fn make_dir<'gc>(path: &str) -> Raisable<bool> {
     std::fs::create_dir_all(path).map(|_| true).into()
 }
@@ -100,6 +105,7 @@ fn make_dir<'gc>(path: &str) -> Raisable<bool> {
 ///
 /// [`walk`](#walk) goes into subdirectories as well.
 #[native]
+#[effects(io)]
 fn list_dir<'gc>(_ctx: Ctx<'gc>, path: &str) -> Raisable<Vec<String>> {
     let path = Utf8PathBuf::from(path);
     let read_dir = match path.read_dir_utf8() {
@@ -127,6 +133,7 @@ fn list_dir<'gc>(_ctx: Ctx<'gc>, path: &str) -> Raisable<Vec<String>> {
 /// ```
 // todo, i want a walk_files version of this
 #[native]
+#[effects(io)]
 fn walk<'gc>(_ctx: Ctx<'gc>, path: &str) -> Raisable<Vec<String>> {
     walkdir::WalkDir::new(path)
         .into_iter()
@@ -148,6 +155,7 @@ fn walk<'gc>(_ctx: Ctx<'gc>, path: &str) -> Raisable<Vec<String>> {
 /// print(fs::cwd()!); // /home/ada/projects/game
 /// ```
 #[native]
+#[effects(io)]
 fn cwd<'gc>() -> Raisable<String> {
     std::env::current_dir()
         .map(|v| v.display().to_string())

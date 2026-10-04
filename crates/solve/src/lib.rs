@@ -46,6 +46,8 @@ pub use solver::*;
 use unify::*;
 
 mod dims;
+mod grades;
+pub use grades::{Use, UseInfo};
 pub mod errors;
 pub use errors::{Error, Result};
 
@@ -59,6 +61,7 @@ mod tests {
     mod solve_exprs;
     mod solve_functions;
     mod solve_generics;
+    mod solve_grades;
     mod solve_match;
     mod solve_modules;
     mod solve_options;

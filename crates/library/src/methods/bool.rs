@@ -12,6 +12,7 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
 /// let side = if bool::random() "heads" else "tails";
 /// ```
 #[native]
+#[effects(rng)]
 fn random<'gc>(ctx: Ctx<'gc>) -> bool {
     super::rng::unit(ctx) < 0.5
 }

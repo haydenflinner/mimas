@@ -136,6 +136,7 @@ enum DarklyLayer {
 /// region. Pixels live in a side map rather than on the tree because a `DarklyLayer` value
 /// can't hold one directly (see the comment on `DarklyLayer::Raster`'s `id` field).
 #[native]
+#[effects(io)]
 fn open<'gc>(
     ctx: Ctx<'gc>,
     path: &str,
@@ -185,10 +186,12 @@ fn open<'gc>(
     };
     let selection = match manifest.selection_id {
         None => None,
-        Some(id) => match read_filter_pixels(ctx, &mut archive, &nodes, id, "selection", &mut pixels) {
-            Ok(()) => Some(id),
-            Err(e) => return Raisable::Raised(e),
-        },
+        Some(id) => {
+            match read_filter_pixels(ctx, &mut archive, &nodes, id, "selection", &mut pixels) {
+                Ok(()) => Some(id),
+                Err(e) => return Raisable::Raised(e),
+            }
+        }
     };
     let doc = DarklyDocument::Document {
         name: manifest.name,
