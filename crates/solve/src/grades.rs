@@ -135,6 +135,16 @@ struct Flow {
 }
 
 impl Flow {
+    /// Stores pending at an iteration's end whose dec the loop reads: the next iteration
+    /// (or the re-run header) may read them before any overwrite, so they count as read.
+    fn carry_back_edge(&mut self, loop_reads: &HashSet<DecId>) {
+        for dec in loop_reads {
+            if let Some(spans) = self.pending.remove(dec) {
+                self.read_spans.entry(*dec).or_default().extend(spans);
+            }
+        }
+    }
+
     /// The flow an alternative path starts from: same pending/killed/read sets, but no
     /// writes born yet -- an inherited span killed inside an arm has to wait for the merge
     /// to decide its fate.
@@ -230,6 +240,9 @@ struct Pass<'a> {
     /// scope_decs.len() at each enclosing loop's entry. Consuming a dec bound at or
     /// outside the floor inside the loop body would poison the next iteration -- refused.
     loop_floors: Vec<usize>,
+    /// Decs read anywhere in each enclosing loop's header or body. A store still pending
+    /// when an iteration ends reaches the next one's reads -- the back edge keeps it live.
+    loop_reads: Vec<HashSet<DecId>>,
     /// Decs whose use-after-consume already reported (one error per dec, not per read).
     consume_reported: HashSet<DecId>,
     /// Fatal findings (`consuming` violations). Unlike the lints these stop the solve --
@@ -293,6 +306,7 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> crate::errors::Result
             scope_decs: Vec::new(),
             closure_floors: Vec::new(),
             loop_floors: Vec::new(),
+            loop_reads: Vec::new(),
             consume_reported: HashSet::new(),
             errors: Vec::new(),
             flow: Flow::default(),
@@ -420,6 +434,9 @@ impl<'a> Pass<'a> {
     /// merges. Reading a dec a `#[consumes]` call already took is a solve error.
     fn read(&mut self, dec: DecId, at: Location) {
         self.uses.entry(dec).or_default().reads.tick();
+        for reads in &mut self.loop_reads {
+            reads.insert(dec);
+        }
         if !self.flow.diverged
             && let Some((consumed_at, by)) = self.flow.consumed.get(&dec)
             && self.consume_reported.insert(dec)
@@ -555,7 +572,9 @@ impl<'a> Pass<'a> {
             if !matches!(d.kind, DecKind::Local | DecKind::LoopVar) {
                 continue;
             }
-            if d.name.starts_with('_') {
+            // `self` reads resolve as the identity, never to the param's dec -- and a
+            // receiver the body ignores is a signature choice, not a bug
+            if d.name.starts_with('_') || (site == Site::Param && d.name == "self") {
                 continue;
             }
             let reads = self.uses.get(&dec).map_or(Use::Never, |u| u.reads);
@@ -1051,6 +1070,7 @@ impl<'a> Pass<'a> {
                 self.flow.born.clear();
                 self.breaks.push(Vec::new());
                 self.loop_floors.push(self.scope_decs.len());
+                self.loop_reads.push(HashSet::new());
                 self.push_scope();
                 self.bind(&f.binding, Site::Binding, false);
                 self.expr(&f.body);
@@ -1061,6 +1081,8 @@ impl<'a> Pass<'a> {
                 self.end_loop(Some(pre), body_end);
             }
             ExprKind::While(w) => {
+                // the header re-runs after every iteration -- its reads see the body's stores
+                self.loop_reads.push(HashSet::new());
                 self.expr(&w.header);
                 let pre = self.flow.clone();
                 self.flow.born.clear();
@@ -1079,10 +1101,15 @@ impl<'a> Pass<'a> {
             ExprKind::Loop(l) => {
                 self.breaks.push(Vec::new());
                 self.loop_floors.push(self.scope_decs.len());
+                self.loop_reads.push(HashSet::new());
                 self.expr(&l.body);
                 self.loop_floors.pop();
-                let body_end = self.flow.clone();
-                let exits = self.breaks.pop().unwrap_or_default();
+                let mut body_end = self.flow.clone();
+                let mut exits = self.breaks.pop().unwrap_or_default();
+                let reads = self.loop_reads.pop().unwrap_or_default();
+                for arm in exits.iter_mut().chain(std::iter::once(&mut body_end)) {
+                    arm.carry_back_edge(&reads);
+                }
                 // `loop` with no `break` never falls through
                 if exits.is_empty() {
                     self.flow.diverged = true;
@@ -1142,8 +1169,14 @@ impl<'a> Pass<'a> {
     /// Post-loop state: the union of the pre-body state (when the loop can run zero times),
     /// the body's own fallthrough (a pending write at body end can be read on the next pass),
     /// and every `break`/`continue` exit.
-    fn end_loop(&mut self, pre: Option<Flow>, body_end: Flow) {
+    fn end_loop(&mut self, pre: Option<Flow>, mut body_end: Flow) {
         let mut arms = self.breaks.pop().unwrap_or_default();
+        // `continue`s share `breaks` with real exits -- carrying them all only spares
+        // stores, never invents a dead one
+        let reads = self.loop_reads.pop().unwrap_or_default();
+        for arm in arms.iter_mut().chain(std::iter::once(&mut body_end)) {
+            arm.carry_back_edge(&reads);
+        }
         if let Some(pre) = pre {
             arms.push(pre);
         }

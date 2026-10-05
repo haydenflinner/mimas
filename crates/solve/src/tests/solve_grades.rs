@@ -33,6 +33,7 @@ fn native_opts(name: &str, arity: usize, consumes: &[usize], must_use: bool, fx:
             NativeId::from(999),
             None,
             None,
+            String::new(),
             fx,
             slots,
             must_use,
@@ -422,5 +423,31 @@ fn non_must_use_discard_is_quiet() {
     let _t = TestResetter;
     native("reply", Some(Fx::empty()));
     let w = warns("fn f() { reply(); }");
+    assert!(w.is_empty(), "{w:?}");
+}
+
+#[test]
+fn while_counter_is_read_by_the_next_header() {
+    let _t = TestResetter;
+    let w =
+        warns("fn f(n: int) -> int { let s = 0; let i = 0; while i < n { s += i; i += 1; }; s }");
+    assert!(w.is_empty(), "{w:?}");
+}
+
+#[test]
+fn loop_carried_store_is_read_next_iteration() {
+    let _t = TestResetter;
+    let w = warns(
+        "fn f(xs: [int]) -> int { let prev = 0; let s = 0; for x in xs { s += prev; prev = x; }; s }",
+    );
+    assert!(w.is_empty(), "{w:?}");
+}
+
+#[test]
+fn self_read_through_a_field_is_used() {
+    let _t = TestResetter;
+    let w = warns(
+        "struct R { x: int }\nimpl R {\n    fn get(self) -> int { self.x }\n}\nfn f() -> int { R { x = 1 }.get() }",
+    );
     assert!(w.is_empty(), "{w:?}");
 }
