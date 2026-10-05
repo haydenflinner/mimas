@@ -272,20 +272,9 @@ impl RE<'_> {
         Ok(())
     }
 
-    /// a class for regs whose producer's class is implicit (CallNative dst,
-    /// Unary/Bin operands on untyped heap words): prefer Float (heap values
-    /// in mimas programs are overwhelmingly numeric-float), then Int, then
-    /// Bool — a wrong pick only mis-encodes a read a valid program wouldn't
-    /// reach anyway
+    /// a reg's scalar class; None for opaque-word regs
     fn pick(&self, r: Reg) -> Option<K> {
-        let m = self.mask.get(&(r.index() as u32))?;
-        Some(if m & crate::K_FLOAT != 0 {
-            K::Float
-        } else if m & crate::K_INT != 0 {
-            K::Int
-        } else {
-            K::Bool
-        })
+        self.class.get(&(r.index() as u32)).copied()
     }
 
     /// Write one sink record for a CallNative: `[id][hdr][arg words]` at
