@@ -1147,6 +1147,13 @@ impl Lower for Expr {
             ExprKind::Unwrap(un) => un.emit(id, ir),
             ExprKind::While(while_expr) => while_expr.emit(id, ir),
         });
+        if let Some(iid) = out {
+            let kind = num_kind_of(ir, id);
+            let slot = ir.current_body_mut().kinds.entry(iid).or_insert(kind);
+            if *slot == OperandKind::Generic {
+                *slot = kind;
+            }
+        }
         // the solver marked this expr as fulfilling a `[T; n]` slot it couldn't
         // prove -- re-assert the dims on the value now (see lens.rs). Inside the
         // expr's own loc so a failure underlines the argument, not the caller.

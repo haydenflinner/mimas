@@ -43,10 +43,9 @@ use compile::{BinOp, BlockTarget, Constant, Op, Program, Reg, UnaryOp};
 pub mod resume;
 pub mod zig;
 use wasm_encoder::{
-    BlockType, CodeSection, CustomSection, Encode, EntityType, ExportKind,
-    ExportSection, Function, FunctionSection, GlobalType, ImportSection,
-    Instruction, MemArg, MemorySection, MemoryType, Module, NameMap, NameSection, TypeSection,
-    ValType,
+    BlockType, CodeSection, CustomSection, Encode, EntityType, ExportKind, ExportSection, Function,
+    FunctionSection, GlobalType, ImportSection, Instruction, MemArg, MemorySection, MemoryType,
+    Module, NameMap, NameSection, TypeSection, ValType,
 };
 
 /// Scalar register class — the wasm local's type.
@@ -69,22 +68,6 @@ impl K {
             K::Word => ValType::I64,
         }
     }
-}
-
-/// What one writer proves about a register it stores into.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum W {
-    Int,
-    Float,
-    Bool,
-    /// `Move` — inherits the source register's class.
-    Copy(u32),
-    /// `CallDirect`/resolvable `Call` — the callee body's return class.
-    Call(usize),
-    /// `GetField`/`GetIndex` — the loaded word's class is whatever the
-    /// destination's readers expect (heap values are untyped words).
-    Reads,
-    Dyn,
 }
 
 /// Reason a body wasn't emitted — the caller keeps it on the interpreter.
@@ -177,10 +160,6 @@ pub(crate) fn op_dst(op: &Op) -> Option<Reg> {
     })
 }
 
-fn put(writes: &mut HashMap<u32, Vec<(usize, W)>>, r: Reg, w: W, i: usize) {
-    writes.entry(r.index() as u32).or_default().push((i, w));
-}
-
 fn tgt_off(t: &BlockTarget) -> usize {
     match t {
         BlockTarget::ByteOffset(o) => *o,
@@ -204,452 +183,83 @@ pub(crate) fn kbit(k: K) -> u8 {
 }
 
 pub(crate) struct Ana {
-    /// reg -> resolved class — present only when the reg resolves to ONE class
+    /// reg -> scalar class; regs of kind `Str`/`Generic` are absent (opaque words)
     pub class: HashMap<u32, K>,
-    /// regs read as raw words by heap ops (Push/SetIndex/SetField values,
-    /// NewInstance fields) — a producer writing such a reg must emit even
-    /// when the reg has no scalar mask, or the stored word would be stale
+    /// regs holding opaque words (`Str`/`Generic` kind)
     pub reads_w: std::collections::HashSet<u32>,
-    /// reg -> bitmask (K_INT|K_FLOAT|K_BOOL) of every class the reg may hold.
-    /// A reg reused across scalar classes (mandelbrot's `Reg(22)` written
-    /// Float then Bool) has a multi-bit mask: the resume lane emits each
-    /// access at the width its context demands, since a read can only be
-    /// reached when the last write had that class in a valid program.
+    /// reg -> class bit (K_INT|K_FLOAT|K_BOOL) for every scalar reg
     pub mask: HashMap<u32, u8>,
     /// call op index -> callee body (`Call` resolved via a constant callee reg, or `CallDirect`)
     pub callee: HashMap<usize, usize>,
-    /// resolved return class (None = void/unknown — emitted as a void result)
+    /// return class (None = no Return op)
     pub ret: Option<K>,
-    /// dst reg -> (op index, write kind) — the reaching-class analysis in
-    /// the resume lane uses positions to know the class of the value live
-    /// at each callsite (the union mask can't).
-    pub writes: HashMap<u32, Vec<(usize, W)>>,
 }
 
-/// Classify one body's registers. `ret[c]` is the current best guess of body
-/// `c`'s return class — iterated to a fixpoint across the program.
-pub(crate) fn analyze(ops: &[(usize, Op)], nregs: u32, ret: &[Option<K>]) -> Result<Ana, Bail> {
-    let mut writes: HashMap<u32, Vec<(usize, W)>> = HashMap::new();
-    let mut reads_i: HashSet<u32> = HashSet::new();
-    let mut reads_f: HashSet<u32> = HashSet::new();
-    let mut reads_b: HashSet<u32> = HashSet::new();
+pub(crate) fn kind_k(kind: compile::OperandKind) -> K {
+    match kind {
+        compile::OperandKind::Int => K::Int,
+        compile::OperandKind::Float => K::Float,
+        compile::OperandKind::Bool => K::Bool,
+        compile::OperandKind::Str | compile::OperandKind::Generic => K::Word,
+    }
+}
+
+/// One body's register classes, straight from the compiler's per-register kinds — registers
+/// are only reused within a class, so each has exactly one.
+pub(crate) fn analyze(ops: &[(usize, Op)], chunk: &compile::Chunk) -> Ana {
+    let mut class = HashMap::new();
+    let mut reads_w = HashSet::new();
+    let mut mask = HashMap::new();
+    for (r, &kind) in chunk.kinds.iter().enumerate() {
+        let r = r as u32;
+        match kind_k(kind) {
+            K::Word => {
+                reads_w.insert(r);
+            }
+            k => {
+                class.insert(r, k);
+                mask.insert(r, kbit(k));
+            }
+        }
+    }
+    let k_of = |r: Reg| kind_k(chunk.kinds[r.index()]);
     // regs that may be constant callees: None once written by anything else
     let mut const_callee: HashMap<u32, Option<usize>> = HashMap::new();
     let mut callee: HashMap<usize, usize> = HashMap::new();
-    let mut ret_regs: HashSet<u32> = HashSet::new();
-
-    let mut reads_w: HashSet<u32> = HashSet::new();
-    let mut wread = |r: Reg| {
-        reads_w.insert(r.index() as u32);
-    };
-    let mut iread = |r: Reg| {
-        reads_i.insert(r.index() as u32);
-    };
-    let mut fread = |r: Reg| {
-        reads_f.insert(r.index() as u32);
-    };
-    let mut bread = |r: Reg| {
-        reads_b.insert(r.index() as u32);
-    };
-
+    let mut ret: Option<K> = None;
     for (i, (_, op)) in ops.iter().enumerate() {
         match op {
-            Op::Move { dst, src } => put(&mut writes, *dst, W::Copy(src.index() as u32), i),
-            Op::LoadConst { dst, constant } => put(
-                &mut writes,
-                *dst,
-                match constant {
-                    Constant::Int(_) => W::Int,
-                    Constant::Float(_) => W::Float,
-                    Constant::Bool(_) => W::Bool,
-                    _ => W::Dyn,
-                },
-                i,
-            ),
             Op::LoadBody { dst, body } => {
-                put(&mut writes, *dst, W::Dyn, i);
                 const_callee
                     .entry(dst.index() as u32)
                     .and_modify(|e| *e = None)
                     .or_insert(Some(body.index()));
             }
-            Op::AddInt { dst, left, right }
-            | Op::SubInt { dst, left, right }
-            | Op::MultInt { dst, left, right }
-            | Op::ModInt { dst, left, right } => {
-                iread(*left);
-                iread(*right);
-                put(&mut writes, *dst, W::Int, i);
-            }
-            Op::IntLt { dst, left, right }
-            | Op::IntLe { dst, left, right }
-            | Op::IntGt { dst, left, right }
-            | Op::IntGe { dst, left, right }
-            | Op::IntEq { dst, left, right }
-            | Op::IntNe { dst, left, right } => {
-                iread(*left);
-                iread(*right);
-                put(&mut writes, *dst, W::Bool, i);
-            }
-            Op::AddIntImm { dst, left, .. }
-            | Op::SubIntImm { dst, left, .. }
-            | Op::MultIntImm { dst, left, .. }
-            | Op::ModIntImm { dst, left, .. } => {
-                iread(*left);
-                put(&mut writes, *dst, W::Int, i);
-            }
-            Op::IntLtImm { dst, left, .. }
-            | Op::IntLeImm { dst, left, .. }
-            | Op::IntGtImm { dst, left, .. }
-            | Op::IntGeImm { dst, left, .. }
-            | Op::IntEqImm { dst, left, .. }
-            | Op::IntNeImm { dst, left, .. } => {
-                iread(*left);
-                put(&mut writes, *dst, W::Bool, i);
-            }
-            Op::AddFloat { dst, left, right }
-            | Op::SubFloat { dst, left, right }
-            | Op::MultFloat { dst, left, right }
-            | Op::DivFloat { dst, left, right } => {
-                fread(*left);
-                fread(*right);
-                put(&mut writes, *dst, W::Float, i);
-            }
-            Op::FloatLt { dst, left, right }
-            | Op::FloatLe { dst, left, right }
-            | Op::FloatGt { dst, left, right }
-            | Op::FloatGe { dst, left, right }
-            | Op::FloatEq { dst, left, right }
-            | Op::FloatNe { dst, left, right } => {
-                fread(*left);
-                fread(*right);
-                put(&mut writes, *dst, W::Bool, i);
-            }
-            Op::AddFloatImm { dst, left, .. }
-            | Op::SubFloatImm { dst, left, .. }
-            | Op::MultFloatImm { dst, left, .. }
-            | Op::ModFloatImm { dst, left, .. } => {
-                fread(*left);
-                put(&mut writes, *dst, W::Float, i);
-            }
-            Op::FloatLtImm { dst, left, .. }
-            | Op::FloatLeImm { dst, left, .. }
-            | Op::FloatGtImm { dst, left, .. }
-            | Op::FloatGeImm { dst, left, .. }
-            | Op::FloatEqImm { dst, left, .. }
-            | Op::FloatNeImm { dst, left, .. } => {
-                fread(*left);
-                put(&mut writes, *dst, W::Bool, i);
-            }
-            Op::Len { dst, src } => {
-                wread(*src);
-                put(&mut writes, *dst, W::Int, i);
-            }
-            Op::ToFloat { dst, src } => {
-                iread(*src);
-                put(&mut writes, *dst, W::Float, i);
-            }
-            Op::Sqrt { dst, src } => {
-                fread(*src);
-                put(&mut writes, *dst, W::Float, i);
-            }
-            Op::ForNext { idx, bound, .. } => {
-                iread(*idx);
-                iread(*bound);
-                put(&mut writes, *idx, W::Int, i);
-            }
-            Op::BIntLt { left, right, .. }
-            | Op::BIntLe { left, right, .. }
-            | Op::BIntGt { left, right, .. }
-            | Op::BIntGe { left, right, .. }
-            | Op::BIntEq { left, right, .. }
-            | Op::BIntNe { left, right, .. } => {
-                iread(*left);
-                iread(*right);
-            }
-            Op::BIntLtImm { left, .. }
-            | Op::BIntLeImm { left, .. }
-            | Op::BIntGtImm { left, .. }
-            | Op::BIntGeImm { left, .. }
-            | Op::BIntEqImm { left, .. }
-            | Op::BIntNeImm { left, .. } => iread(*left),
-            Op::BFloatLt { left, right, .. }
-            | Op::BFloatLe { left, right, .. }
-            | Op::BFloatGt { left, right, .. }
-            | Op::BFloatGe { left, right, .. }
-            | Op::BFloatEq { left, right, .. }
-            | Op::BFloatNe { left, right, .. } => {
-                fread(*left);
-                fread(*right);
-            }
-            Op::BFloatLtImm { left, .. }
-            | Op::BFloatLeImm { left, .. }
-            | Op::BFloatGtImm { left, .. }
-            | Op::BFloatGeImm { left, .. }
-            | Op::BFloatEqImm { left, .. }
-            | Op::BFloatNeImm { left, .. } => fread(*left),
-            Op::BoolEq { dst, left, right } | Op::BoolNe { dst, left, right } => {
-                bread(*left);
-                bread(*right);
-                put(&mut writes, *dst, W::Bool, i);
-            }
-            Op::StrEq { dst, left, right } | Op::StrNe { dst, left, right } => {
-                wread(*left);
-                wread(*right);
-                put(&mut writes, *dst, W::Bool, i);
-            }
-            Op::IsRaised { dst, src } => {
-                wread(*src);
-                put(&mut writes, *dst, W::Bool, i);
-            }
-            Op::In { dst, needle, haystack, .. } => {
-                wread(*needle);
-                wread(*haystack);
-                put(&mut writes, *dst, W::Bool, i);
-            }
-            Op::IsInstance { dst, .. } => {
-                put(&mut writes, *dst, W::Bool, i);
-            }
-            Op::JumpIf { cond, .. } => bread(*cond),
-            Op::Switch { scrut, .. } => iread(*scrut),
-            Op::Return { val } => {
-                ret_regs.insert(val.index() as u32);
-                wread(*val);
-            }
-            Op::Bin { dst, .. } | Op::Unary { dst, .. } => {
-                // operand class resolves at emit time; dst is classed by its reads
-                put(&mut writes, *dst, W::Reads, i);
-            }
-            Op::CallDirect { dst, body, args } => {
+            Op::CallDirect { body, .. } => {
                 callee.insert(i, body.index());
-                // emit_call reads each arg at the callee sig's class —
-                // a raw word read is the safe superset
-                for a in args {
-                    wread(*a);
-                }
-                put(&mut writes, *dst, W::Call(body.index()), i);
             }
-            Op::Call {
-                dst,
-                callee: creg,
-                args,
-            } => {
-                for a in args {
-                    wread(*a);
-                }
+            Op::Call { callee: creg, .. } => {
                 if let Some(&Some(b)) = const_callee.get(&(creg.index() as u32)) {
                     callee.insert(i, b);
-                    put(&mut writes, *dst, W::Call(b), i);
-                } else {
-                    put(&mut writes, *dst, W::Dyn, i);
                 }
             }
-            // dst inherits the loaded word's class from its readers —
-            // W::Reads contributes the dst's read-set to the union
-            Op::GetField { dst, src, .. } => {
-                wread(*src);
-                put(&mut writes, *dst, W::Reads, i);
+            Op::Return { val } => {
+                let k = k_of(*val);
+                ret = Some(match ret {
+                    Some(prev) if prev != k => K::Word,
+                    _ => k,
+                });
             }
-            Op::GetIndex { dst, set, index, .. } => {
-                iread(*index);
-                wread(*set);
-                put(&mut writes, *dst, W::Reads, i);
-            }
-            Op::LoadEntry { dst, .. }
-            | Op::NewArray { dst }
-            | Op::NewDict { dst }
-            | Op::NewClosure { dst, .. }
-            | Op::Format { dst, .. } => put(&mut writes, *dst, W::Dyn, i),
-            // `regs[d] = regs[s]` minus Null/Raised — a word passthrough,
-            // dst inherits src's class like Move
-            Op::Unwrap { dst, src } => {
-                wread(*src);
-                put(&mut writes, *dst, W::Copy(src.index() as u32), i);
-            }
-            Op::UnwrapRaised { dst, src } => {
-                wread(*src);
-                put(&mut writes, *dst, W::Reads, i);
-            }
-            Op::UnwrapUnit { dst, src } => {
-                wread(*src);
-                put(&mut writes, *dst, W::Reads, i);
-            }
-            // native dst is classed by its reads; args are read raw
-            Op::CallNative { .. } => {}
-            Op::SetIndex { set, index, value, .. } => {
-                iread(*index);
-                wread(*set);
-                wread(*value);
-            }
-            Op::Push { array, value, .. } => {
-                wread(*array);
-                wread(*value);
-            }
-            Op::SetField { receiver, value, .. } => {
-                wread(*receiver);
-                wread(*value);
-            }
-            Op::NewInstance { dst, fields, .. } => {
-                put(&mut writes, *dst, W::Dyn, i);
-                for f in fields {
-                    wread(*f);
-                }
-            }
-            Op::Jump { .. }
-            | Op::Insert { .. }
-            | Op::StoreEntry { .. }
-            | Op::Panic {}
-            | Op::Raise { .. } => {}
+            _ => {}
         }
     }
-
-    // never-written regs (params, scratch): the reads decide
-    let mut mask: HashMap<u32, u8> = HashMap::new();
-    for r in 0..nregs {
-        if writes.contains_key(&r) {
-            continue;
-        }
-        let m = (reads_i.contains(&r) as u8) * K_INT
-            | (reads_f.contains(&r) as u8) * K_FLOAT
-            | (reads_b.contains(&r) as u8) * K_BOOL;
-        if m != 0 {
-            mask.insert(r, m);
-        }
-    }
-    // fixpoint over written regs — a reg may carry a multi-bit mask
-    // `extra`: read-classes demanded through Move copies — `r = copy(s)`
-    // means s's slot must produce whatever r's readers demand
-    let mut extra: HashMap<u32, u8> = HashMap::new();
-    loop {
-        let mut changed = false;
-        let snap = mask.clone();
-        let snap_extra = extra.clone();
-        for (&r, ws) in &writes {
-            // union of classes the writes produce — a reg may hold any of
-            // them at runtime; each read site picks its own context's width
-            let need = (reads_i.contains(&r) as u8) * K_INT
-                | (reads_f.contains(&r) as u8) * K_FLOAT
-                | (reads_b.contains(&r) as u8) * K_BOOL
-                | snap_extra.get(&r).copied().unwrap_or(0);
-            let mut m = 0u8;
-            for w in ws {
-                m |= match w.1 {
-                    W::Int => K_INT,
-                    W::Float => K_FLOAT,
-                    W::Bool => K_BOOL,
-                    W::Copy(s) => snap.get(&s).copied().unwrap_or(0),
-                    W::Call(c) => match ret[c].map(kbit) {
-                        Some(bits) if bits != 0 => bits,
-                        // callee ret unconstrained (word/void): the dst's
-                        // readers pick the width
-                        _ => {
-                            if need == 0 {
-                                K_INT | K_FLOAT | K_BOOL
-                            } else {
-                                need
-                            }
-                        }
-                    },
-                    W::Reads => {
-                        // untyped word: no scalar reads => grant all classes so
-                        // consumers raw-load at whatever width they need (sound
-                        // for class-stable heaps); else grant the read classes
-                        if need == 0 {
-                            K_INT | K_FLOAT | K_BOOL
-                        } else {
-                            need
-                        }
-                    }
-                    W::Dyn => 0,
-                };
-            }
-            // every declared read must be covered by the mask, else the reg
-            // can't serve its readers and the body can't emit
-            if need & !m != 0 {
-                m = 0;
-            }
-            if snap.get(&r).copied().unwrap_or(0) != m {
-                if m == 0 {
-                    mask.remove(&r);
-                } else {
-                    mask.insert(r, m);
-                }
-                changed = true;
-            }
-            // copy sources owe every class their copy's readers demand
-            for w in ws {
-                if let W::Copy(s) = w.1 {
-                    let e = extra.entry(s).or_insert(0);
-                    if *e & need != need {
-                        *e |= need;
-                        changed = true;
-                    }
-                }
-            }
-            // word-read-ness flows through copies: `y = x; heap_op(y)`
-            // means x's word is what the heap op sees
-            if !reads_w.contains(&r)
-                && ws.iter().any(|w| matches!(w.1, W::Copy(s) if reads_w.contains(&s)))
-            {
-                reads_w.insert(r);
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-    // never-written regs (params) were seeded before the loop — merge
-    // copy-demand classes in afterwards
-    for (&s, &e) in &extra {
-        if !writes.contains_key(&s) && e != 0 {
-            *mask.entry(s).or_insert(0) |= e;
-        }
-    }
-    // classless native args are raw-word reads at emit time (handle
-    // passthrough) — their producers must keep the word
-    for (_, op) in ops {
-        if let Op::CallNative { args, .. } = op {
-            for a in args {
-                let r = a.index() as u32;
-                if !mask.contains_key(&r) {
-                    reads_w.insert(r);
-                }
-            }
-        }
-    }
-    let class: HashMap<u32, K> = mask
-        .iter()
-        .filter_map(|(&r, &m)| match m {
-            K_INT => Some((r, K::Int)),
-            K_FLOAT => Some((r, K::Float)),
-            K_BOOL => Some((r, K::Bool)),
-            _ => None,
-        })
-        .collect();
-
-    // the return class every Return reg agrees on (multi-class regs intersect)
-    let mut cand = 7u8;
-    for &r in &ret_regs {
-        cand &= mask.get(&r).copied().unwrap_or(0);
-    }
-    let ret_k = match cand {
-        K_INT => Some(K::Int),
-        K_FLOAT => Some(K::Float),
-        K_BOOL => Some(K::Bool),
-        // returns disagree in class (or param passthrough): the raw word
-        // carries any of them, callers read their own width
-        _ if !ret_regs.is_empty() => Some(K::Word),
-        _ => None,
-    };
-    Ok(Ana {
+    Ana {
         class,
         reads_w,
         mask,
         callee,
-        ret: ret_k,
-        writes,
-    })
+        ret,
+    }
 }
 
 // ---------- scope analysis ----------
@@ -1944,28 +1554,12 @@ pub fn emit_opts(program: &Program, opts: &Opts) -> Result<Wasmgen, Bail> {
         .map(|b| program.ops(compile::BodyId::from(b as u32)))
         .collect();
 
-    // cross-body fixpoint on return classes (call dsts class off callee rets)
-    let mut ret: Vec<Option<K>> = vec![None; nbodies];
-    let mut anas: Vec<Option<Ana>> = (0..nbodies).map(|_| None).collect();
-    for _ in 0..16 {
-        let mut stable = true;
-        for b in 0..nbodies {
-            let nregs = program.chunks[compile::BodyId::from(b as u32)].regs as u32;
-            match analyze(&bodies_ops[b], nregs, &ret) {
-                Ok(a) => {
-                    if a.ret != ret[b] {
-                        ret[b] = a.ret;
-                        stable = false;
-                    }
-                    anas[b] = Some(a);
-                }
-                Err(_) => {}
-            }
-        }
-        if stable {
-            break;
-        }
-    }
+    let anas: Vec<Option<Ana>> = (0..nbodies)
+        .map(|b| {
+            let chunk = &program.chunks[compile::BodyId::from(b as u32)];
+            Some(analyze(&bodies_ops[b], chunk))
+        })
+        .collect();
 
     let mut skipped: Vec<Skip> = Vec::new();
     let mut sigs: Vec<Option<Sig>> = (0..nbodies).map(|_| None).collect();
@@ -2179,8 +1773,12 @@ pub fn emit_opts(program: &Program, opts: &Opts) -> Result<Wasmgen, Bail> {
         );
         g
     };
-    let fuel_g = opts.fuel.then(|| import_global(&mut imports, "__fuel", ValType::I64));
-    let pause_g = opts.pause.then(|| import_global(&mut imports, "__pause", ValType::I32));
+    let fuel_g = opts
+        .fuel
+        .then(|| import_global(&mut imports, "__fuel", ValType::I64));
+    let pause_g = opts
+        .pause
+        .then(|| import_global(&mut imports, "__pause", ValType::I32));
     let mut globs = ProbeGlobals {
         fuel_g,
         pause_g,
@@ -2205,8 +1803,17 @@ pub fn emit_opts(program: &Program, opts: &Opts) -> Result<Wasmgen, Bail> {
             globs.cov_base = cov_next;
             cov_next += bodies_ops[b].len() as u32;
         }
-        let (f, sm) = try_body(b, &bodies_ops[b], &program, ana, &sigs, &func_map, &natives, &globs)
-            .map_err(|e| format!("body {b} passed trial but failed emit: {e}"))?;
+        let (f, sm) = try_body(
+            b,
+            &bodies_ops[b],
+            &program,
+            ana,
+            &sigs,
+            &func_map,
+            &natives,
+            &globs,
+        )
+        .map_err(|e| format!("body {b} passed trial but failed emit: {e}"))?;
         let chunk = &program.chunks[compile::BodyId::from(b as u32)];
         let sm_loc: Vec<(u32, u32)> = sm
             .iter()

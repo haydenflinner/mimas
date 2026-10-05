@@ -898,27 +898,12 @@ pub fn emit_zig(program: &Program) -> Result<Ziggen, Bail> {
         .map(|b| program.ops(compile::BodyId::from(b as u32)))
         .collect();
 
-    let mut ret: Vec<Option<K>> = vec![None; nbodies];
-    let mut anas: Vec<Option<crate::Ana>> = (0..nbodies).map(|_| None).collect();
-    for _ in 0..16 {
-        let mut stable = true;
-        for b in 0..nbodies {
-            let nregs = program.chunks[compile::BodyId::from(b as u32)].regs as u32;
-            match analyze(&bodies_ops[b], nregs, &ret) {
-                Ok(a) => {
-                    if a.ret != ret[b] {
-                        ret[b] = a.ret;
-                        stable = false;
-                    }
-                    anas[b] = Some(a);
-                }
-                Err(_) => {}
-            }
-        }
-        if stable {
-            break;
-        }
-    }
+    let anas: Vec<Option<crate::Ana>> = (0..nbodies)
+        .map(|b| {
+            let chunk = &program.chunks[compile::BodyId::from(b as u32)];
+            Some(analyze(&bodies_ops[b], chunk))
+        })
+        .collect();
 
     let mut skipped: Vec<Skip> = Vec::new();
     let mut sigs: Vec<Option<Sig>> = (0..nbodies).map(|_| None).collect();

@@ -9,7 +9,7 @@ pub use solve::components::Vis;
 
 use crate::{
     BinOp, BlockTarget, BodyId, Constant, ConstantCode, Op, OpCode, OpFormatPart, OpFormatPartCode,
-    Reg, UnaryOp,
+    OperandKind, Reg, UnaryOp,
 };
 
 #[derive(Clone)]
@@ -183,6 +183,10 @@ pub struct Chunk {
     // sorted and deduped against the previous loc -- hermes/v8-style sparse table. consult via
     // `loc_at`; an empty table or an ip before the first entry resolves to `Location::SYNTHETIC`.
     pub locs: Vec<(u32, Location)>,
+    /// Value class of each register, indexed by `Reg`. Registers are only reused within one
+    /// class (`Str`/`Generic` share a class and widen to `Generic`), so every write to a
+    /// register holds a value of its kind. The VM ignores this; wasm lowering reads it.
+    pub kinds: Vec<OperandKind>,
 }
 
 impl Chunk {
