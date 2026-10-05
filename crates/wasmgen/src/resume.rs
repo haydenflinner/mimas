@@ -2462,9 +2462,10 @@ pub fn emit_resumable(
         );
     }
 
-    let gnext = 0u32;
-    let import_global = |imports: &mut ImportSection, name: &str, vt| {
+    let mut gnext = 0u32;
+    let mut import_global = |imports: &mut ImportSection, name: &str, vt| {
         let g = gnext;
+        gnext += 1;
         imports.import(
             "env",
             name,
@@ -2483,8 +2484,11 @@ pub fn emit_resumable(
         .pause
         .then(|| import_global(&mut imports, "__pause", ValType::I32));
     let g_status = gnext;
+    gnext += 1;
     let g_sp = gnext;
+    gnext += 1;
     let g_hp = gnext;
+    gnext += 1;
     globals.global(
         GlobalType {
             val_type: ValType::I32,
@@ -2528,6 +2532,7 @@ pub fn emit_resumable(
         &ConstExpr::i32_const(heap_base as i32), // __hp: heap bump pointer
     );
     let g_covp = gnext;
+    gnext += 1;
     globals.global(
         GlobalType {
             val_type: ValType::I32,
@@ -2537,6 +2542,7 @@ pub fn emit_resumable(
         &ConstExpr::i32_const(0), // __covp: sink record cursor
     );
     let g_covbuf = gnext;
+    gnext += 1;
     globals.global(
         GlobalType {
             val_type: ValType::I32,
@@ -2546,6 +2552,7 @@ pub fn emit_resumable(
         &ConstExpr::i32_const(sink_base as i32), // __covbuf: sink region base
     );
     let g_ptmap = gnext;
+    gnext += 1;
     globals.global(
         GlobalType {
             val_type: ValType::I32,
@@ -2555,6 +2562,7 @@ pub fn emit_resumable(
         &ConstExpr::i32_const(ptmap_base as i32), // __ptmap: point bitmap base
     );
     let g_osp = gnext;
+    gnext += 1;
     globals.global(
         GlobalType {
             val_type: ValType::I32,
