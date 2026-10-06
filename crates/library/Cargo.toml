@@ -32,7 +32,7 @@ walkdir.workspace = true
 # The `literate` fork carries wasm32 shims (inline block_on, byte_source
 # fallbacks) upstream lacks — required by hosts that compile `dataframe`
 # to wasm. Pinned to the rev the shim commits sit on.
-polars = { git = "https://github.com/haydenflinner/polars.git", rev = "c90a33e76c", optional = true, default-features = false, features = [
+polars = { git = "https://github.com/haydenflinner/polars.git", rev = "4c06e6beae", optional = true, default-features = false, features = [
     "lazy",
     "fmt_no_tty",
     "dtype-full",
@@ -55,7 +55,7 @@ polars = { git = "https://github.com/haydenflinner/polars.git", rev = "c90a33e76
 # see the note on the `polars` dep above); `polars-io/csv` on its own pulls in neither. Same git
 # source as the `polars` dep above, so Cargo resolves this to the identical `DataFrame`/`Column`
 # types `polars::frame`/`polars::prelude` re-export, not a second copy.
-polars-io = { git = "https://github.com/haydenflinner/polars.git", rev = "c90a33e76c", optional = true, default-features = false, features = [
+polars-io = { git = "https://github.com/haydenflinner/polars.git", rev = "4c06e6beae", optional = true, default-features = false, features = [
     "csv",
 ] }
 # `std_lib::darkly` (a `.darkly` file's own layer/manifest format, not a game-engine dependency):

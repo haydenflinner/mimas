@@ -42,7 +42,7 @@ glam.workspace = true
 # `optional = true`: gated behind the `dataframe` feature below so an embedder who never touches
 # `Val::DataFrame`/`Val::PlExpr` doesn't pay for polars's dependency tree at all.
 # Same `literate` fork as `library`'s dep — the wasm32 shims hosts need.
-polars = { git = "https://github.com/haydenflinner/polars.git", rev = "c90a33e76c", optional = true, default-features = false, features = [
+polars = { git = "https://github.com/haydenflinner/polars.git", rev = "4c06e6beae", optional = true, default-features = false, features = [
     "lazy",
     "fmt_no_tty",
     "dtype-full",

@@ -1657,7 +1657,7 @@ checksum = "fe6d2e5af09e8c8ad56c969f2157a3d4238cebc7c55f0a517728c38f7b200f81"
 dependencies = [
  "serde",
  "termcolor",
- "unicode-width 0.2.2",
+ "unicode-width 0.1.14",
 ]
 
 [[package]]
@@ -1668,7 +1668,7 @@ checksum = "af491d569909a7e4dee0ad7db7f5341fef5c614d5b8ec8cf765732aba3cff681"
 dependencies = [
  "serde",
  "termcolor",
- "unicode-width 0.2.2",
+ "unicode-width 0.1.14",
 ]
 
 [[package]]
@@ -1911,7 +1911,7 @@ dependencies = [
  "cranelift-entity",
  "cranelift-isle",
  "gimli 0.33.0",
- "hashbrown 0.17.1",
+ "hashbrown 0.17.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "libm",
  "log",
  "regalloc2",
@@ -1966,7 +1966,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "247fa35f45fd4477ca045e23f14b2aafe6bdbe9df3d754b1429e0587b356116b"
 dependencies = [
  "cranelift-codegen",
- "hashbrown 0.17.1",
+ "hashbrown 0.17.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "log",
  "smallvec",
  "target-lexicon",
@@ -3380,6 +3380,14 @@ version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 dependencies = [
+ "foldhash 0.2.0",
+]
+
+[[package]]
+name = "hashbrown"
+version = "0.17.1"
+source = "git+https://github.com/pola-rs/hashbrown?rev=d76a6f81abd8f388676aff15068236a8d21c7e1a#d76a6f81abd8f388676aff15068236a8d21c7e1a"
+dependencies = [
  "allocator-api2",
  "equivalent",
  "foldhash 0.2.0",
@@ -3736,7 +3744,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d466e9454f08e4a911e14806c24e16fba1b4c121d1ea474396f396069cf949d9"
 dependencies = [
  "equivalent",
- "hashbrown 0.17.1",
+ "hashbrown 0.17.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde",
  "serde_core",
 ]
@@ -5124,7 +5132,7 @@ dependencies = [
 [[package]]
 name = "polars"
 version = "0.55.1"
-source = "git+https://github.com/haydenflinner/polars.git?rev=c90a33e76c#c90a33e76c8a00d88928773f885a6ea1ffedfb27"
+source = "git+https://github.com/haydenflinner/polars.git?rev=4c06e6beae#4c06e6beae6732b8edb709f0c1b7edafe880dfa1"
 dependencies = [
  "getrandom 0.2.17",
  "getrandom 0.4.3",
@@ -5132,6 +5140,7 @@ dependencies = [
  "polars-buffer",
  "polars-compute",
  "polars-core",
+ "polars-defs",
  "polars-error",
  "polars-expr",
  "polars-io",
@@ -5147,7 +5156,7 @@ dependencies = [
 [[package]]
 name = "polars-arrow"
 version = "0.55.1"
-source = "git+https://github.com/haydenflinner/polars.git?rev=c90a33e76c#c90a33e76c8a00d88928773f885a6ea1ffedfb27"
+source = "git+https://github.com/haydenflinner/polars.git?rev=4c06e6beae#4c06e6beae6732b8edb709f0c1b7edafe880dfa1"
 dependencies = [
  "atoi_simd",
  "bitflags 2.11.1",
@@ -5161,7 +5170,7 @@ dependencies = [
  "getrandom 0.2.17",
  "getrandom 0.4.3",
  "half",
- "hashbrown 0.17.1",
+ "hashbrown 0.17.1 (git+https://github.com/pola-rs/hashbrown?rev=d76a6f81abd8f388676aff15068236a8d21c7e1a)",
  "itoa",
  "lz4",
  "num-traits",
@@ -5191,7 +5200,7 @@ dependencies = [
 [[package]]
 name = "polars-async"
 version = "0.55.1"
-source = "git+https://github.com/haydenflinner/polars.git?rev=c90a33e76c#c90a33e76c8a00d88928773f885a6ea1ffedfb27"
+source = "git+https://github.com/haydenflinner/polars.git?rev=4c06e6beae#4c06e6beae6732b8edb709f0c1b7edafe880dfa1"
 dependencies = [
  "atomic-waker",
  "crossbeam-channel",
@@ -5210,7 +5219,7 @@ dependencies = [
 [[package]]
 name = "polars-buffer"
 version = "0.55.1"
-source = "git+https://github.com/haydenflinner/polars.git?rev=c90a33e76c#c90a33e76c8a00d88928773f885a6ea1ffedfb27"
+source = "git+https://github.com/haydenflinner/polars.git?rev=4c06e6beae#4c06e6beae6732b8edb709f0c1b7edafe880dfa1"
 dependencies = [
  "bytemuck",
  "either",
@@ -5222,15 +5231,14 @@ dependencies = [
 [[package]]
 name = "polars-compute"
 version = "0.55.1"
-source = "git+https://github.com/haydenflinner/polars.git?rev=c90a33e76c#c90a33e76c8a00d88928773f885a6ea1ffedfb27"
+source = "git+https://github.com/haydenflinner/polars.git?rev=4c06e6beae#4c06e6beae6732b8edb709f0c1b7edafe880dfa1"
 dependencies = [
  "atoi_simd",
  "bytemuck",
  "chrono",
- "either",
  "fast-float2",
  "half",
- "hashbrown 0.17.1",
+ "hashbrown 0.17.1 (git+https://github.com/pola-rs/hashbrown?rev=d76a6f81abd8f388676aff15068236a8d21c7e1a)",
  "itoa",
  "num-traits",
  "polars-arrow",
@@ -5248,17 +5256,19 @@ dependencies = [
 [[package]]
 name = "polars-config"
 version = "0.55.1"
-source = "git+https://github.com/haydenflinner/polars.git?rev=c90a33e76c#c90a33e76c8a00d88928773f885a6ea1ffedfb27"
+source = "git+https://github.com/haydenflinner/polars.git?rev=4c06e6beae#4c06e6beae6732b8edb709f0c1b7edafe880dfa1"
 dependencies = [
  "polars-error",
  "serde",
+ "sysinfo",
 ]
 
 [[package]]
 name = "polars-core"
 version = "0.55.1"
-source = "git+https://github.com/haydenflinner/polars.git?rev=c90a33e76c#c90a33e76c8a00d88928773f885a6ea1ffedfb27"
+source = "git+https://github.com/haydenflinner/polars.git?rev=4c06e6beae#4c06e6beae6732b8edb709f0c1b7edafe880dfa1"
 dependencies = [
+ "atoi_simd",
  "bitflags 2.11.1",
  "boxcar",
  "bytemuck",
@@ -5267,7 +5277,7 @@ dependencies = [
  "comfy-table",
  "either",
  "getrandom 0.4.3",
- "hashbrown 0.17.1",
+ "hashbrown 0.17.1 (git+https://github.com/pola-rs/hashbrown?rev=d76a6f81abd8f388676aff15068236a8d21c7e1a)",
  "indexmap 2.14.0",
  "itoa",
  "num-traits",
@@ -5295,9 +5305,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "polars-defs"
+version = "0.55.1"
+source = "git+https://github.com/haydenflinner/polars.git?rev=4c06e6beae#4c06e6beae6732b8edb709f0c1b7edafe880dfa1"
+dependencies = [
+ "chrono",
+ "chrono-tz",
+ "polars-arrow",
+ "polars-compute",
+ "polars-core",
+ "polars-error",
+ "polars-utils",
+ "strum_macros",
+]
+
+[[package]]
 name = "polars-descriptions"
 version = "0.55.1"
-source = "git+https://github.com/haydenflinner/polars.git?rev=c90a33e76c#c90a33e76c8a00d88928773f885a6ea1ffedfb27"
+source = "git+https://github.com/haydenflinner/polars.git?rev=4c06e6beae#4c06e6beae6732b8edb709f0c1b7edafe880dfa1"
 dependencies = [
  "serde",
  "strum_macros",
@@ -5306,10 +5331,10 @@ dependencies = [
 [[package]]
 name = "polars-dtype"
 version = "0.55.1"
-source = "git+https://github.com/haydenflinner/polars.git?rev=c90a33e76c#c90a33e76c8a00d88928773f885a6ea1ffedfb27"
+source = "git+https://github.com/haydenflinner/polars.git?rev=4c06e6beae#4c06e6beae6732b8edb709f0c1b7edafe880dfa1"
 dependencies = [
  "boxcar",
- "hashbrown 0.17.1",
+ "hashbrown 0.17.1 (git+https://github.com/pola-rs/hashbrown?rev=d76a6f81abd8f388676aff15068236a8d21c7e1a)",
  "polars-arrow",
  "polars-error",
  "polars-utils",
@@ -5320,7 +5345,7 @@ dependencies = [
 [[package]]
 name = "polars-error"
 version = "0.55.1"
-source = "git+https://github.com/haydenflinner/polars.git?rev=c90a33e76c#c90a33e76c8a00d88928773f885a6ea1ffedfb27"
+source = "git+https://github.com/haydenflinner/polars.git?rev=4c06e6beae#4c06e6beae6732b8edb709f0c1b7edafe880dfa1"
 dependencies = [
  "object_store",
  "parking_lot",
@@ -5333,15 +5358,16 @@ dependencies = [
 [[package]]
 name = "polars-expr"
 version = "0.55.1"
-source = "git+https://github.com/haydenflinner/polars.git?rev=c90a33e76c#c90a33e76c8a00d88928773f885a6ea1ffedfb27"
+source = "git+https://github.com/haydenflinner/polars.git?rev=4c06e6beae#4c06e6beae6732b8edb709f0c1b7edafe880dfa1"
 dependencies = [
  "bitflags 2.11.1",
- "hashbrown 0.17.1",
+ "hashbrown 0.17.1 (git+https://github.com/pola-rs/hashbrown?rev=d76a6f81abd8f388676aff15068236a8d21c7e1a)",
  "num-traits",
  "polars-arrow",
  "polars-buffer",
  "polars-compute",
  "polars-core",
+ "polars-defs",
  "polars-io",
  "polars-ops",
  "polars-plan",
@@ -5358,7 +5384,7 @@ dependencies = [
 [[package]]
 name = "polars-io"
 version = "0.55.1"
-source = "git+https://github.com/haydenflinner/polars.git?rev=c90a33e76c#c90a33e76c8a00d88928773f885a6ea1ffedfb27"
+source = "git+https://github.com/haydenflinner/polars.git?rev=4c06e6beae#4c06e6beae6732b8edb709f0c1b7edafe880dfa1"
 dependencies = [
  "async-trait",
  "atoi_simd",
@@ -5372,7 +5398,7 @@ dependencies = [
  "fs4",
  "futures",
  "glob",
- "hashbrown 0.17.1",
+ "hashbrown 0.17.1 (git+https://github.com/pola-rs/hashbrown?rev=d76a6f81abd8f388676aff15068236a8d21c7e1a)",
  "home",
  "itoa",
  "libc",
@@ -5391,7 +5417,6 @@ dependencies = [
  "polars-json",
  "polars-parquet",
  "polars-schema",
- "polars-time",
  "polars-utils",
  "rand",
  "rayon",
@@ -5410,11 +5435,11 @@ dependencies = [
 [[package]]
 name = "polars-json"
 version = "0.55.1"
-source = "git+https://github.com/haydenflinner/polars.git?rev=c90a33e76c#c90a33e76c8a00d88928773f885a6ea1ffedfb27"
+source = "git+https://github.com/haydenflinner/polars.git?rev=4c06e6beae#4c06e6beae6732b8edb709f0c1b7edafe880dfa1"
 dependencies = [
  "chrono",
  "fallible-streaming-iterator",
- "hashbrown 0.17.1",
+ "hashbrown 0.17.1 (git+https://github.com/pola-rs/hashbrown?rev=d76a6f81abd8f388676aff15068236a8d21c7e1a)",
  "indexmap 2.14.0",
  "itoa",
  "num-traits",
@@ -5430,7 +5455,7 @@ dependencies = [
 [[package]]
 name = "polars-lazy"
 version = "0.55.1"
-source = "git+https://github.com/haydenflinner/polars.git?rev=c90a33e76c#c90a33e76c8a00d88928773f885a6ea1ffedfb27"
+source = "git+https://github.com/haydenflinner/polars.git?rev=4c06e6beae#4c06e6beae6732b8edb709f0c1b7edafe880dfa1"
 dependencies = [
  "bitflags 2.11.1",
  "chrono",
@@ -5441,6 +5466,7 @@ dependencies = [
  "polars-compute",
  "polars-config",
  "polars-core",
+ "polars-defs",
  "polars-expr",
  "polars-io",
  "polars-mem-engine",
@@ -5457,11 +5483,14 @@ dependencies = [
 [[package]]
 name = "polars-mem-engine"
 version = "0.55.1"
-source = "git+https://github.com/haydenflinner/polars.git?rev=c90a33e76c#c90a33e76c8a00d88928773f885a6ea1ffedfb27"
+source = "git+https://github.com/haydenflinner/polars.git?rev=4c06e6beae#4c06e6beae6732b8edb709f0c1b7edafe880dfa1"
 dependencies = [
  "memmap2",
  "polars-arrow",
+ "polars-buffer",
+ "polars-config",
  "polars-core",
+ "polars-defs",
  "polars-error",
  "polars-expr",
  "polars-io",
@@ -5476,7 +5505,7 @@ dependencies = [
 [[package]]
 name = "polars-observer"
 version = "0.55.1"
-source = "git+https://github.com/haydenflinner/polars.git?rev=c90a33e76c#c90a33e76c8a00d88928773f885a6ea1ffedfb27"
+source = "git+https://github.com/haydenflinner/polars.git?rev=4c06e6beae#4c06e6beae6732b8edb709f0c1b7edafe880dfa1"
 dependencies = [
  "parking_lot",
  "polars-descriptions",
@@ -5486,7 +5515,7 @@ dependencies = [
 [[package]]
 name = "polars-ooc"
 version = "0.55.1"
-source = "git+https://github.com/haydenflinner/polars.git?rev=c90a33e76c#c90a33e76c8a00d88928773f885a6ea1ffedfb27"
+source = "git+https://github.com/haydenflinner/polars.git?rev=4c06e6beae#4c06e6beae6732b8edb709f0c1b7edafe880dfa1"
 dependencies = [
  "async-trait",
  "boxcar",
@@ -5507,15 +5536,14 @@ dependencies = [
 [[package]]
 name = "polars-ops"
 version = "0.55.1"
-source = "git+https://github.com/haydenflinner/polars.git?rev=c90a33e76c#c90a33e76c8a00d88928773f885a6ea1ffedfb27"
+source = "git+https://github.com/haydenflinner/polars.git?rev=4c06e6beae#4c06e6beae6732b8edb709f0c1b7edafe880dfa1"
 dependencies = [
  "argminmax",
  "base64 0.22.1",
  "bytemuck",
  "chrono",
- "chrono-tz",
  "either",
- "hashbrown 0.17.1",
+ "hashbrown 0.17.1 (git+https://github.com/pola-rs/hashbrown?rev=d76a6f81abd8f388676aff15068236a8d21c7e1a)",
  "hex",
  "indexmap 2.14.0",
  "libm",
@@ -5525,6 +5553,7 @@ dependencies = [
  "polars-buffer",
  "polars-compute",
  "polars-core",
+ "polars-defs",
  "polars-error",
  "polars-schema",
  "polars-utils",
@@ -5540,7 +5569,7 @@ dependencies = [
 [[package]]
 name = "polars-parquet"
 version = "0.55.1"
-source = "git+https://github.com/haydenflinner/polars.git?rev=c90a33e76c#c90a33e76c8a00d88928773f885a6ea1ffedfb27"
+source = "git+https://github.com/haydenflinner/polars.git?rev=4c06e6beae#4c06e6beae6732b8edb709f0c1b7edafe880dfa1"
 dependencies = [
  "async-stream",
  "base64 0.22.1",
@@ -5549,7 +5578,7 @@ dependencies = [
  "ethnum",
  "flate2",
  "futures",
- "hashbrown 0.17.1",
+ "hashbrown 0.17.1 (git+https://github.com/pola-rs/hashbrown?rev=d76a6f81abd8f388676aff15068236a8d21c7e1a)",
  "lz4",
  "num-traits",
  "polars-arrow",
@@ -5580,7 +5609,7 @@ dependencies = [
 [[package]]
 name = "polars-plan"
 version = "0.55.1"
-source = "git+https://github.com/haydenflinner/polars.git?rev=c90a33e76c#c90a33e76c8a00d88928773f885a6ea1ffedfb27"
+source = "git+https://github.com/haydenflinner/polars.git?rev=4c06e6beae#4c06e6beae6732b8edb709f0c1b7edafe880dfa1"
 dependencies = [
  "bitflags 2.11.1",
  "blake3",
@@ -5591,7 +5620,7 @@ dependencies = [
  "digest-io",
  "either",
  "futures",
- "hashbrown 0.17.1",
+ "hashbrown 0.17.1 (git+https://github.com/pola-rs/hashbrown?rev=d76a6f81abd8f388676aff15068236a8d21c7e1a)",
  "hex",
  "indexmap 2.14.0",
  "memmap2",
@@ -5603,11 +5632,10 @@ dependencies = [
  "polars-compute",
  "polars-config",
  "polars-core",
+ "polars-defs",
  "polars-descriptions",
  "polars-error",
  "polars-io",
- "polars-ops",
- "polars-time",
  "polars-utils",
  "rayon",
  "recursive",
@@ -5622,7 +5650,7 @@ dependencies = [
 [[package]]
 name = "polars-row"
 version = "0.55.1"
-source = "git+https://github.com/haydenflinner/polars.git?rev=c90a33e76c#c90a33e76c8a00d88928773f885a6ea1ffedfb27"
+source = "git+https://github.com/haydenflinner/polars.git?rev=4c06e6beae#4c06e6beae6732b8edb709f0c1b7edafe880dfa1"
 dependencies = [
  "bitflags 2.11.1",
  "bytemuck",
@@ -5637,7 +5665,7 @@ dependencies = [
 [[package]]
 name = "polars-schema"
 version = "0.55.1"
-source = "git+https://github.com/haydenflinner/polars.git?rev=c90a33e76c#c90a33e76c8a00d88928773f885a6ea1ffedfb27"
+source = "git+https://github.com/haydenflinner/polars.git?rev=4c06e6beae#4c06e6beae6732b8edb709f0c1b7edafe880dfa1"
 dependencies = [
  "indexmap 2.14.0",
  "polars-error",
@@ -5649,18 +5677,18 @@ dependencies = [
 [[package]]
 name = "polars-sql"
 version = "0.55.1"
-source = "git+https://github.com/haydenflinner/polars.git?rev=c90a33e76c#c90a33e76c8a00d88928773f885a6ea1ffedfb27"
+source = "git+https://github.com/haydenflinner/polars.git?rev=4c06e6beae#4c06e6beae6732b8edb709f0c1b7edafe880dfa1"
 dependencies = [
  "bitflags 2.11.1",
  "hex",
  "polars-compute",
  "polars-core",
+ "polars-defs",
  "polars-error",
  "polars-lazy",
  "polars-ops",
  "polars-plan",
  "polars-testing",
- "polars-time",
  "polars-utils",
  "regex",
  "serde",
@@ -5670,7 +5698,7 @@ dependencies = [
 [[package]]
 name = "polars-stream"
 version = "0.55.1"
-source = "git+https://github.com/haydenflinner/polars.git?rev=c90a33e76c#c90a33e76c8a00d88928773f885a6ea1ffedfb27"
+source = "git+https://github.com/haydenflinner/polars.git?rev=4c06e6beae#4c06e6beae6732b8edb709f0c1b7edafe880dfa1"
 dependencies = [
  "async-channel",
  "async-trait",
@@ -5691,6 +5719,7 @@ dependencies = [
  "polars-compute",
  "polars-config",
  "polars-core",
+ "polars-defs",
  "polars-descriptions",
  "polars-error",
  "polars-expr",
@@ -5703,6 +5732,7 @@ dependencies = [
  "polars-plan",
  "polars-time",
  "polars-utils",
+ "rand",
  "rayon",
  "recursive",
  "slotmap",
@@ -5715,7 +5745,7 @@ dependencies = [
 [[package]]
 name = "polars-testing"
 version = "0.55.1"
-source = "git+https://github.com/haydenflinner/polars.git?rev=c90a33e76c#c90a33e76c8a00d88928773f885a6ea1ffedfb27"
+source = "git+https://github.com/haydenflinner/polars.git?rev=4c06e6beae#4c06e6beae6732b8edb709f0c1b7edafe880dfa1"
 dependencies = [
  "polars-core",
  "polars-ops",
@@ -5724,9 +5754,8 @@ dependencies = [
 [[package]]
 name = "polars-time"
 version = "0.55.1"
-source = "git+https://github.com/haydenflinner/polars.git?rev=c90a33e76c#c90a33e76c8a00d88928773f885a6ea1ffedfb27"
+source = "git+https://github.com/haydenflinner/polars.git?rev=4c06e6beae#4c06e6beae6732b8edb709f0c1b7edafe880dfa1"
 dependencies = [
- "atoi_simd",
  "bytemuck",
  "chrono",
  "chrono-tz",
@@ -5735,6 +5764,7 @@ dependencies = [
  "polars-arrow",
  "polars-compute",
  "polars-core",
+ "polars-defs",
  "polars-error",
  "polars-ops",
  "polars-utils",
@@ -5746,7 +5776,7 @@ dependencies = [
 [[package]]
 name = "polars-utils"
 version = "0.55.1"
-source = "git+https://github.com/haydenflinner/polars.git?rev=c90a33e76c#c90a33e76c8a00d88928773f885a6ea1ffedfb27"
+source = "git+https://github.com/haydenflinner/polars.git?rev=4c06e6beae#4c06e6beae6732b8edb709f0c1b7edafe880dfa1"
 dependencies = [
  "argminmax",
  "bincode",
@@ -5758,7 +5788,7 @@ dependencies = [
  "foldhash 0.2.0",
  "futures",
  "half",
- "hashbrown 0.17.1",
+ "hashbrown 0.17.1 (git+https://github.com/pola-rs/hashbrown?rev=d76a6f81abd8f388676aff15068236a8d21c7e1a)",
  "indexmap 2.14.0",
  "libc",
  "memmap2",
@@ -6179,7 +6209,7 @@ checksum = "757712e8e61590d6d4f5d563483755538b5aa13467837a3b41cd9832509a7f85"
 dependencies = [
  "allocator-api2",
  "bumpalo",
- "hashbrown 0.17.1",
+ "hashbrown 0.17.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "log",
  "rustc-hash 2.1.2",
  "smallvec",
@@ -7740,7 +7770,7 @@ version = "48.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72250d72e27bea7d614af6742ed185d3e9d39de471f33e177c71874a7184586d"
 dependencies = [
- "hashbrown 0.17.1",
+ "hashbrown 0.17.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "libm",
 ]
 
