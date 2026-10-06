@@ -277,6 +277,7 @@ impl Vm {
             methods,
             field_names,
             field_dims,
+            field_tys: _,
             tests,
         } = program;
         self.entry = entry;

@@ -705,6 +705,14 @@ impl Compiler {
             .collect::<Vec<_>>()
             .into();
 
+        let field_tys: IdVec<_, Vec<Ty>> = ir
+            .resolutions
+            .adts
+            .values()
+            .map(|adt| adt.member_tys.clone())
+            .collect::<Vec<_>>()
+            .into();
+
         let tests = std::mem::take(&mut ir.tests);
 
         Program {
@@ -718,6 +726,7 @@ impl Compiler {
             methods,
             field_names,
             field_dims,
+            field_tys,
             tests,
         }
     }

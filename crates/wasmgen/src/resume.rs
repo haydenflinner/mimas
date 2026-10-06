@@ -32,7 +32,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use compile::{BinOp, Op, Program, Reg, UnaryOp};
+use compile::{AdtId, BinOp, Op, Program, Reg, Ty, UnaryOp};
 use wasm_encoder::{
     BlockType, CodeSection, ConstExpr, CustomSection, Encode, EntityType, ExportKind,
     ExportSection, Function, FunctionSection, GlobalSection, GlobalType, ImportSection,
@@ -2029,6 +2029,43 @@ fn regions(ops: &[(usize, Op)]) -> Result<(Vec<(usize, usize)>, Vec<u32>), Bail>
     Ok((rs, region_of))
 }
 
+/// Scalar class of a declared type, from `Program::field_tys` /
+/// signatures — the real type table, replacing the old inference over
+/// written *values* (which a single classless store poisoned). `T?`
+/// unwraps: an `int?` field reads as Int when non-null.
+fn ty_k(ty: &Ty) -> Option<K> {
+    match ty {
+        Ty::Int => Some(K::Int),
+        Ty::Float => Some(K::Float),
+        Ty::Bool => Some(K::Bool),
+        Ty::Option(t) => ty_k(t),
+        _ => None,
+    }
+}
+
+/// Heap shape of a declared type — what a register/field can *point at*.
+/// Deliberately coarser than `Ty`: `Option`s unwrap (null-or-T shares T's
+/// shape) and every non-heap kind collapses to `Flat`, so the reaching
+/// dataflow's merge doesn't lose knowledge across `T`/`T?` joins.
+#[derive(Clone, PartialEq)]
+enum Sh {
+    /// instance (or `T?` of one) of adt
+    Inst(u32),
+    /// array/dict — element scalar class + element heap shape
+    Seq(Option<K>, Box<Sh>),
+    /// scalars, handles, fns, unknown — no heap shape
+    Flat,
+}
+
+fn ty_sh(ty: &Ty) -> Sh {
+    match ty {
+        Ty::Adt(a, _) | Ty::Identity(a, _) => Sh::Inst(a.index() as u32),
+        Ty::Option(t) => ty_sh(t),
+        Ty::Array(e, _) | Ty::Dict(e) => Sh::Seq(ty_k(e), Box::new(ty_sh(e))),
+        _ => Sh::Flat,
+    }
+}
+
 fn try_resume_body(
     b: usize,
     ops: &[(usize, Op)],
@@ -2074,12 +2111,30 @@ fn try_resume_body(
         .map(|(i, (o, _))| (*o, i))
         .collect();
     let mut head: Vec<Option<HashMap<u32, K>>> = vec![None; rs.len()];
+    // Reaching *declared type* per reg, merged by heap shape — parallel
+    // to `head`, seeded from the signature's param types and carried
+    // through NewInstance/Call/GetField writes. `Sh` is what turns the
+    // field-type table into per-GetField resolution: the receiver's adt
+    // picks the exact `field_tys[adt][slot]` row instead of the
+    // program-wide slot union.
+    let mut head_sh: Vec<Option<HashMap<u32, Sh>>> = vec![None; rs.len()];
     {
         let mut s0 = HashMap::new();
+        let mut s0_sh = HashMap::new();
         for (pi, p) in chunk.params.iter().enumerate() {
             s0.insert(p.index() as u32, sig.params[pi]);
+            if let Some(ty) = program
+                .signatures
+                .get(compile::BodyId::from(b as u32))
+                .and_then(|f| f.as_ref())
+                .and_then(|f| f.header.parameters.get(pi))
+                .map(|p| &p.ty)
+            {
+                s0_sh.insert(p.index() as u32, ty_sh(ty));
+            }
         }
         head[0] = Some(s0);
+        head_sh[0] = Some(s0_sh);
     }
     // op index -> reaching class of a Leaf call's arg (None = non-numeric)
     let mut leafc: HashMap<usize, Option<K>> = HashMap::new();
@@ -2088,6 +2143,7 @@ fn try_resume_body(
         wl.push_back(0);
         while let Some(j) = wl.pop_front() {
             let Some(mut st) = head[j].clone() else { continue };
+            let mut st_sh = head_sh[j].clone().unwrap_or_default();
             let (start, end) = rs[j];
             for i in start..end {
                 let (_, op) = &ops[i];
@@ -2101,27 +2157,94 @@ fn try_resume_body(
                         }
                     }
                 }
+                let mut wsh: Option<(u32, Option<Sh>)> = None;
                 let wk: Option<(u32, Option<K>)> = match w_at.get(&i) {
                     Some(&(r, w)) => {
                         let k = match w {
                             crate::W::Int => Some(K::Int),
                             crate::W::Float => Some(K::Float),
                             crate::W::Bool => Some(K::Bool),
-                            crate::W::Copy(s) => st
-                                .get(&s)
-                                .copied()
-                                .or_else(|| ana.class.get(&s).copied()),
-                            crate::W::Call(c) => sigs[c]
-                                .as_ref()
-                                .and_then(|s| s.ret)
-                                .filter(|&k| k != K::Word),
-                            crate::W::Reads => match op {
-                                Op::GetField { slot, .. } => {
-                                    field_class.get(slot).copied()
+                            crate::W::Copy(s) => {
+                                wsh = Some((r, st_sh.get(&s).cloned()));
+                                st.get(&s)
+                                    .copied()
+                                    .or_else(|| ana.class.get(&s).copied())
+                            }
+                            crate::W::Call(c) => {
+                                wsh = Some((
+                                    r,
+                                    program
+                                        .signatures
+                                        .get(compile::BodyId::from(c as u32))
+                                        .and_then(|f| f.as_ref())
+                                        .map(|f| ty_sh(&f.header.return_ty)),
+                                ));
+                                sigs[c]
+                                    .as_ref()
+                                    .and_then(|s| s.ret)
+                                    .filter(|&k| k != K::Word)
+                            }
+                            crate::W::Reads => {
+                                // field/index reads resolve the loaded
+                                // word's class + shape from the receiver's
+                                // reaching declared type — the real table
+                                // lookup. The per-slot union (`field_class`)
+                                // is only a fallback when the receiver's
+                                // shape isn't pinned by reaching defs.
+                                let mty = match op {
+                                    Op::GetField { src, slot, .. } => st_sh
+                                        .get(&(src.index() as u32))
+                                        .and_then(|sh| match sh {
+                                            Sh::Inst(a) => program
+                                                .field_tys
+                                                .get(AdtId::from(*a))
+                                                .and_then(|f| {
+                                                    f.get(*slot as usize)
+                                                }),
+                                            _ => None,
+                                        }),
+                                    _ => None,
+                                };
+                                wsh = Some((
+                                    r,
+                                    match op {
+                                        Op::GetField { .. } => mty.map(ty_sh),
+                                        Op::GetIndex { set, .. } => st_sh
+                                            .get(&(set.index() as u32))
+                                            .and_then(|sh| match sh {
+                                                Sh::Seq(_, e) => {
+                                                    Some((**e).clone())
+                                                }
+                                                _ => None,
+                                            }),
+                                        _ => None,
+                                    },
+                                ));
+                                match op {
+                                    Op::GetField { slot, .. } => mty
+                                        .and_then(ty_k)
+                                        .or_else(|| field_class.get(slot).copied()),
+                                    Op::GetIndex { set, .. } => st_sh
+                                        .get(&(set.index() as u32))
+                                        .and_then(|sh| match sh {
+                                            Sh::Seq(k, _) => *k,
+                                            _ => None,
+                                        }),
+                                    _ => None,
                                 }
-                                _ => None,
-                            },
-                            crate::W::Dyn => None,
+                            }
+                            crate::W::Dyn => {
+                                wsh = Some((
+                                    r,
+                                    match op {
+                                        Op::NewInstance { adt, .. } => {
+                                            Some(Sh::Inst(adt.index() as u32))
+                                        }
+                                        _ => None,
+                                    },
+                                ));
+                                None
+                            }
                         };
                         Some((r, k))
                     }
@@ -2132,6 +2255,9 @@ fn try_resume_body(
                         // dst class their import sig was registered with
                         Op::CallNative { dst, id, args, .. } => {
                             use crate::SinkKind::*;
+                            // natives hand back handles/words — any shape
+                            // the dst reg held is overwritten
+                            wsh = Some((dst.index() as u32, None));
                             let ni = id.index() as u32;
                             let k = match sink.get(&ni) {
                                 Some(Leaf) | Some(PointPass) | Some(Passthru) => {
@@ -2161,6 +2287,16 @@ fn try_resume_body(
                         }
                         None => {
                             st.remove(&r);
+                        }
+                    }
+                }
+                if let Some((r, sh)) = wsh {
+                    match sh {
+                        Some(sh) => {
+                            st_sh.insert(r, sh);
+                        }
+                        None => {
+                            st_sh.remove(&r);
                         }
                     }
                 }
@@ -2196,7 +2332,7 @@ fn try_resume_body(
                 _ => succs.extend(fall),
             }
             for s in succs {
-                let changed = match &mut head[s] {
+                let mut changed = match &mut head[s] {
                     None => {
                         head[s] = Some(st.clone());
                         true
@@ -2204,6 +2340,17 @@ fn try_resume_body(
                     Some(m) => {
                         let before = m.len();
                         m.retain(|r, k| st.get(r) == Some(k));
+                        m.len() != before
+                    }
+                };
+                changed |= match &mut head_sh[s] {
+                    None => {
+                        head_sh[s] = Some(st_sh.clone());
+                        true
+                    }
+                    Some(m) => {
+                        let before = m.len();
+                        m.retain(|r, sh| st_sh.get(r) == Some(sh));
                         m.len() != before
                     }
                 };
@@ -2398,45 +2545,28 @@ pub fn emit_resumable(
             break;
         }
     }
-    // field slot -> union of every written value's class bits, program-wide.
-    // A slot whose writers all agree on one class lets a GetField dst claim
-    // that class for coverage operand typing (w.score reads as Int).
-    // 0x80 = an unclassed write poisoned the slot.
-    let mut field_bits: HashMap<u32, u8> = HashMap::new();
-    for b in 0..nbodies {
-        let Some(ana) = &anas[b] else { continue };
-        for (_, op) in &bodies_ops[b] {
-            match op {
-                Op::SetField { slot, value, .. } => {
-                    let m = ana
-                        .mask
-                        .get(&(value.index() as u32))
-                        .copied()
-                        .unwrap_or(0x80);
-                    *field_bits.entry(*slot).or_insert(0) |= m;
-                }
-                Op::NewInstance { fields, .. } => {
-                    for (i, f) in fields.iter().enumerate() {
-                        let m = ana
-                            .mask
-                            .get(&(f.index() as u32))
-                            .copied()
-                            .unwrap_or(0x80);
-                        *field_bits.entry(i as u32).or_insert(0) |= m;
+    // field slot -> scalar class, from the compile-time type table
+    // (`Program::field_tys`). A slot claims a class only when every adt
+    // declaring that slot agrees — this is the fallback for GetField ops
+    // whose receiver adt isn't pinned by the reaching-type dataflow;
+    // exact `(adt, slot)` lookups happen in `try_resume_body` itself.
+    let mut slot_k: HashMap<u32, Option<K>> = HashMap::new();
+    for tys in program.field_tys.values() {
+        for (i, ty) in tys.iter().enumerate() {
+            let k = ty_k(ty);
+            slot_k
+                .entry(i as u32)
+                .and_modify(|u| {
+                    if *u != k {
+                        *u = None;
                     }
-                }
-                _ => {}
-            }
+                })
+                .or_insert(k);
         }
     }
-    let field_class: HashMap<u32, K> = field_bits
-        .iter()
-        .filter_map(|(s, m)| match *m {
-            crate::K_INT => Some((*s, K::Int)),
-            crate::K_FLOAT => Some((*s, K::Float)),
-            crate::K_BOOL => Some((*s, K::Bool)),
-            _ => None,
-        })
+    let field_class: HashMap<u32, K> = slot_k
+        .into_iter()
+        .filter_map(|(s, k)| k.map(|k| (s, k)))
         .collect();
     let mut skipped: Vec<Skip> = Vec::new();
     let mut sigs: Vec<Option<Sig>> = (0..nbodies).map(|_| None).collect();
@@ -2642,9 +2772,10 @@ pub fn emit_resumable(
         );
     }
 
-    let gnext = 0u32;
-    let import_global = |imports: &mut ImportSection, name: &str, vt| {
+    let mut gnext = 0u32;
+    let mut import_global = |imports: &mut ImportSection, name: &str, vt| {
         let g = gnext;
+        gnext += 1;
             imports.import(
             "env",
             name,
@@ -2663,8 +2794,11 @@ pub fn emit_resumable(
         .pause
         .then(|| import_global(&mut imports, "__pause", ValType::I32));
     let g_status = gnext;
+    gnext += 1;
     let g_sp = gnext;
+    gnext += 1;
     let g_hp = gnext;
+    gnext += 1;
     globals.global(
         GlobalType {
             val_type: ValType::I32,
@@ -2704,6 +2838,7 @@ pub fn emit_resumable(
         &ConstExpr::i32_const(heap_base as i32), // __hp: heap bump pointer
     );
     let g_covp = gnext;
+    gnext += 1;
     globals.global(
         GlobalType {
             val_type: ValType::I32,
@@ -2713,6 +2848,7 @@ pub fn emit_resumable(
         &ConstExpr::i32_const(0), // __covp: sink record cursor
     );
     let g_covbuf = gnext;
+    gnext += 1;
     globals.global(
         GlobalType {
             val_type: ValType::I32,
@@ -2722,6 +2858,7 @@ pub fn emit_resumable(
         &ConstExpr::i32_const(sink_base as i32), // __covbuf: sink region base
     );
     let g_ptmap = gnext;
+    gnext += 1;
     globals.global(
         GlobalType {
             val_type: ValType::I32,
@@ -2731,6 +2868,7 @@ pub fn emit_resumable(
         &ConstExpr::i32_const(ptmap_base as i32), // __ptmap: point bitmap base
     );
     let g_osp = gnext;
+    gnext += 1;
     globals.global(
         GlobalType {
             val_type: ValType::I32,
@@ -2740,6 +2878,7 @@ pub fn emit_resumable(
         &ConstExpr::i32_const(0), // __osp: operand-stack depth
     );
     let g_dcov = gnext;
+    let _ = gnext;
     globals.global(
         GlobalType {
             val_type: ValType::I32,
