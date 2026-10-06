@@ -3,8 +3,9 @@ use std::collections::HashMap;
 use api::NativeId;
 use indexmap::IndexMap;
 use parse::AccessKind;
-use shared::{Error, FnHeader, IdVec, Location, Result, StrId, StrInterner, Ty};
-use solve::components::AdtId;
+use shared::{Error, FnHeader, IdVec, Location, Result, StrId, StrInterner};
+pub use shared::Ty;
+pub use solve::components::AdtId;
 pub use solve::components::Vis;
 
 use crate::{
@@ -40,6 +41,14 @@ pub struct Program {
     /// `solve::ResolvedAdt::member_dims`. A host's value diagram reads
     /// `index` fields as pointers into an array.
     pub field_dims: IdVec<AdtId, Vec<Option<shared::units::Dim>>>,
+    /// Declared member types, parallel to `field_names` -- copied from
+    /// `solve::ResolvedAdt::member_tys`. `Ty::Param`s stand for the adt's
+    /// own params (see `member_tys`), so generic fields stay generic until
+    /// a host substitutes call-site args. This is the heap-walker's real
+    /// type table: it replaces per-field *value* inference (a field read
+    /// as Int everywhere may still declare `float`) and lets snapshot
+    /// marking follow exactly the fields that can hold heap pointers.
+    pub field_tys: IdVec<AdtId, Vec<Ty>>,
     /// Functions marked `#[test]`, in source order. Each name is a fn path in `root`.
     pub tests: Vec<String>,
 }

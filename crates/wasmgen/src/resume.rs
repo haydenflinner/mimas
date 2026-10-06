@@ -2561,6 +2561,7 @@ pub fn emit_resumable(
         &ConstExpr::i32_const(0), // __osp: operand-stack depth
     );
     let g_dcov = gnext;
+    let _ = gnext;
     globals.global(
         GlobalType {
             val_type: ValType::I32,

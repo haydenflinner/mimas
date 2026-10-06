@@ -26,10 +26,21 @@ const ROW_COLOR = { ground: '#3d4351', plat: '#4a5163', lava: '#b04040',
 let st = freshState();
 function freshState() {
   return { nodes: [], trails: [], ghosts: null, phase: '—', goal: null,
-    pick: null, elites: new Map(), findList: [], covered: 0,
-    expanded: 0, maxScore: 0, alive: null, cells: 0 };
+    pick: null, lastPickVia: null, elites: new Map(), findList: [], covered: 0,
+    expanded: 0, maxScore: 0, alive: null, cells: 0, grid: [],
+    micro: { ok: 0, fail: 0, n: 0 },
+    actNames: [], acts: [], pol: [] };
 }
 const TRAIL_KEEP = 40;
+
+// ---- live swarm (tail mode) ------------------------------------------------
+// On each newly applied `commit` a bright marker rides the trail's
+// polyline (~MARK_MS, ease-out) while the polyline fades over ~FADE_MS.
+// Spawned from pump() — i.e. only for events crossing the replay head —
+// so full replays during scrub don't re-trigger them.
+const liveAnims = [];          // {tr, cum, total, t0, via, parent, landed}
+const commitTimes = [];        // performance.now() of commits at the head
+const LIVE_MAX = 100, MARK_MS = 900, FADE_MS = 1200;
 
 // ---- world → canvas transform ---------------------------------------------
 let view = { x: 0, y: 0, s: 1 };
@@ -72,8 +83,13 @@ function apply(ev) {
   if (t === 'meta') { meta = levelMeta = d; fit(); return; }
   if (t === 'phase') { st.phase = d.name + (d.goal !== undefined ? ' → ' + decode(d.goal) : ''); return; }
   if (t === 'goal') { st.goal = d; return; }
+  if (t === 'micro') { st.micro[d.ok ? 'ok' : 'fail']++; st.micro.n += d.n || 0; return; }
   // Rust fuzzer: scheduler decision — which corpus entry, which queue.
-  if (t === 'pick') { st.pick = d; st.phase = 'fuzz'; return; }
+  if (t === 'pick') { st.pick = d; st.lastPickVia = d.via; st.goal = null; st.phase = 'fuzz'; return; }
+  // Go-Explore action names + bin-occupancy snapshot [bx,by,visits,
+  // cells] with per-action [tries, wins] learned stats.
+  if (t === 'actions') { st.actNames = d.list || []; return; }
+  if (t === 'grid') { st.grid = d.bins || []; st.acts = d.acts || []; st.pol = d.pol || []; return; }
   if (t === 'node') {
     st.nodes[d.i] = d;
     st.expanded++;
@@ -82,8 +98,12 @@ function apply(ev) {
   }
   if (t === 'commit') {
     // driver: {kind, node, seq, trail} · rust: {parent, ok, trail, fault}
+    // stamp the pick's `via` on the log event so pump() can tint the
+    // swarm marker by intent even though `d` is a throwaway copy
+    ev._via = st.lastPickVia;
     st.trails.push({ kind: d.kind ?? (d.ok ? 'commit' : 'reject'),
-      node: d.node ?? d.parent, trail: d.trail, ok: d.ok !== false });
+      node: d.node ?? d.parent, trail: d.trail, ok: d.ok !== false,
+      via: st.lastPickVia });
     if (st.trails.length > TRAIL_KEEP) st.trails.shift();
     st.alive = d.trail && d.trail.length ? d.trail[d.trail.length - 1] : null;
     if (d.cells !== undefined) st.cells = d.cells;
@@ -114,6 +134,55 @@ function trail(tr, color, lw) {
   g.stroke();
 }
 
+// ---- live swarm ------------------------------------------------------------
+// Trail tint = intent: pink for elite-queue picks, green for cell picks,
+// gold when the rollout banked score (landed node's score beat parent's).
+function liveColor(a) {
+  const l = st.nodes[a.landed], p = st.nodes[a.parent];
+  if (l && p && (l.score || 0) > (p.score || 0)) return '#ffd75e';
+  return a.via === 'elite' ? '#ff9ad5' : a.via === 'detour' ? '#ffb75e' : a.via === 'goal' ? '#7ee8ff' : a.via === 'cell' ? '#7ed67e' : '#9ae0ff';
+}
+
+function spawnLive(ev) {
+  if (!tailTimer || !$('swarm').checked) return;   // live-tail mode only
+  const d = ev.d || ev;
+  const tr = d.trail;
+  if (!tr || tr.length < 2) return;
+  if (liveAnims.length >= LIVE_MAX) liveAnims.shift();  // drop oldest
+  const cum = new Float64Array(tr.length);   // cumulative arc length
+  for (let i = 1; i < tr.length; i++)
+    cum[i] = cum[i - 1] + Math.hypot(tr[i][0] - tr[i - 1][0], tr[i][1] - tr[i - 1][1]);
+  liveAnims.push({ tr, cum, total: cum[tr.length - 1] || 1,
+    t0: performance.now(), via: ev._via, parent: d.parent, landed: d.landed });
+}
+
+function drawSwarm() {
+  const now = performance.now();
+  for (let i = liveAnims.length - 1; i >= 0; i--) {
+    const a = liveAnims[i];
+    const t = now - a.t0;
+    if (t > FADE_MS) { liveAnims.splice(i, 1); continue; }
+    const col = liveColor(a);
+    g.globalAlpha = 1 - t / FADE_MS;
+    trail(a.tr, col, 2);
+    // marker: cubic ease-out along the arc-length table
+    const p = Math.min(t / MARK_MS, 1);
+    const dist = (1 - (1 - p) * (1 - p) * (1 - p)) * a.total;
+    let j = 1;
+    while (j < a.cum.length - 1 && a.cum[j] < dist) j++;
+    const f = Math.min((dist - a.cum[j - 1]) / (a.cum[j] - a.cum[j - 1] || 1), 1);
+    const mx = a.tr[j - 1][0] + (a.tr[j][0] - a.tr[j - 1][0]) * f;
+    const my = a.tr[j - 1][1] + (a.tr[j][1] - a.tr[j - 1][1]) * f;
+    g.globalAlpha = .45;                 // colored glow
+    g.fillStyle = col;
+    g.beginPath(); g.arc(X(mx), Y(my), 8, 0, 7); g.fill();
+    g.globalAlpha = 1;                   // white core
+    g.fillStyle = '#fff';
+    g.beginPath(); g.arc(X(mx), Y(my), 4, 0, 7); g.fill();
+  }
+  g.globalAlpha = 1;
+}
+
 function render() {
   cv.width = cv.clientWidth * devicePixelRatio;
   cv.height = cv.clientHeight * devicePixelRatio;
@@ -129,6 +198,25 @@ function render() {
     const x = X(+r[2]), y = Y(+r[3]), w = +r[4] * view.s, h = +r[5] * view.s;
     if (kind === 'coin') { g.beginPath(); g.arc(X(+r[2] + +r[4] / 2), Y(+r[3] + +r[5] / 2), 4, 0, 7); g.fill(); }
     else g.fillRect(x, y, w, Math.max(h, 2));
+  }
+
+  // Go-Explore 96px suppression grid — each visited bin tinted by how
+  // many rollout steps it has absorbed. A violet haze = "this area has
+  // been walked a gazillion times, cells here are being starved".
+  if (st.grid.length) {
+    const mv = Math.max(...st.grid.map(b => b[2]), 1);
+    for (const [bx, by, v, c] of st.grid) {
+      const a = 0.05 + 0.4 * Math.sqrt(v / mv);
+      g.fillStyle = `rgba(150,90,255,${a})`;
+      g.fillRect(X(bx * 96), Y(by * 96), 96 * view.s, 96 * view.s);
+      g.strokeStyle = `rgba(150,90,255,${Math.min(1, a + 0.1)})`;
+      g.strokeRect(X(bx * 96), Y(by * 96), 96 * view.s, 96 * view.s);
+      if (v > 60) {
+        g.fillStyle = `rgba(220,190,255,${Math.min(1, a + 0.2)})`;
+        g.font = '9px ui-monospace,monospace';
+        g.fillText(`${v}`, X(bx * 96) + 3, Y(by * 96) + 10);
+      }
+    }
   }
 
   // committed rollout trails, fading; rejected evals (rust fuzzer) draw
@@ -177,8 +265,23 @@ function render() {
   // gold = maxmap queue, green = go-explore cell, blue = AFL pick
   if (st.pick && st.nodes[st.pick.node]) {
     const p = st.nodes[st.pick.node];
-    g.strokeStyle = { max: '#ffd75e', cell: '#7ed67e' }[st.pick.via] || '#9ae0ff';
+    g.strokeStyle = { max: '#ffd75e', cell: '#7ed67e', elite: '#ff9ad5', detour: '#ffb75e', goal: '#7ee8ff' }[st.pick.via] || '#9ae0ff';
     g.beginPath(); g.arc(X(p.px), Y(p.py), 8, 0, 7); g.stroke();
+  }
+  // goal-conditioned launch: crosshair on the target the rollout is
+  // steering toward, linked back to its launchpad.
+  if (st.goal && st.goal.x !== undefined) {
+    const { x, y, node } = st.goal;
+    g.strokeStyle = '#7ee8ff'; g.lineWidth = 1.5;
+    g.beginPath(); g.moveTo(X(x) - 8, Y(y)); g.lineTo(X(x) + 8, Y(y));
+    g.moveTo(X(x), Y(y) - 8); g.lineTo(X(x), Y(y) + 8); g.stroke();
+    const n = st.nodes[node];
+    if (n && n.px !== undefined) {
+      g.strokeStyle = 'rgba(126,232,255,.35)';
+      g.setLineDash([4, 4]);
+      g.beginPath(); g.moveTo(X(n.px), Y(n.py)); g.lineTo(X(x), Y(y)); g.stroke();
+      g.setLineDash([]);
+    }
   }
   // live head
   if (st.alive) {
@@ -186,13 +289,24 @@ function render() {
     g.beginPath(); g.arc(X(st.alive[0]), Y(st.alive[1]), 4, 0, 7); g.fill();
   }
 
+  // live swarm — markers riding freshly committed rollout trails.
+  // Additive over the static st.trails buffer; repainted by the pump
+  // rAF while tailing, cleared on pause/scrub.
+  if (liveAnims.length && $('swarm').checked) drawSwarm();
+
+  // rollouts/sec — commits that crossed the replay head in the last 2s
+  const cnow = performance.now();
+  while (commitTimes.length && commitTimes[0] < cnow - 2000) commitTimes.shift();
+
   // status text
   $('status').innerHTML =
     `phase <b>${st.phase}</b> · archive <b>${st.nodes.length}</b>` +
     ` · expanded <b>${doneInfo ? doneInfo.expanded : '…'}</b>` +
     ` · finds <b>${st.findList.length}</b>` +
+    ` · roll/s <b>${(commitTimes.length / 2).toFixed(1)}</b>` +
     (st.cells ? ` · cells <b>${st.cells}</b>` : '') +
     ` · maxScore <b>${Math.max(st.maxScore, doneInfo?.maxScore || 0)}</b>` +
+    ((st.micro.ok + st.micro.fail) ? ` · micro <b>${st.micro.ok}</b>/${st.micro.ok + st.micro.fail} (${st.micro.n} exp)` : '') +
     (doneInfo ? ` · <b>${doneInfo.ms}ms</b>` + (doneInfo.found ? ' · <b style="color:#b7e59a">SOLVED</b>' : '') : '');
   const gd = $('decision');
   if (st.pick) {
@@ -208,9 +322,23 @@ function render() {
   else if (st.ghosts) gd.innerHTML = `node <b>${st.ghosts.node}</b> · ${st.ghosts.kind} · ${st.ghosts.cands.length} candidates`;
   $('evpos').textContent = pos + '/' + log.length;
 
-  // candidates panel
+  // candidates panel — wasm ghost sims, or Go-Explore's learned
+  // action table (which inputs actually grow the archive)
   const cd = $('cands');
-  if (st.ghosts) {
+  if (st.acts && st.acts.length) {
+    const mw = Math.max(...st.acts.map(a => a[1]), 1);
+    cd.innerHTML = '<div style="opacity:.6;margin-bottom:4px">learned action win-rates · bandit σ(θ·φ) in cyan</div>' +
+      st.acts.map(([tries, wins], i) => {
+        const rate = tries ? (wins / tries) : 0;
+        const w = Math.round(90 * wins / mw);
+        const pol = st.pol && st.pol[i] !== undefined
+          ? `<span style="display:inline-block;height:8px;width:${Math.round(90 * st.pol[i])}px;background:#6fd3e8;vertical-align:middle"></span> ` : '';
+        return `<div class="cand"><b>${st.actNames[i] ?? i}</b> ` +
+          `${wins}/${tries} (${(rate * 100).toFixed(0)}%) ` +
+          `<span style="display:inline-block;height:8px;width:${w}px;background:#7ed67e;vertical-align:middle"></span> ${pol}</div>`;
+      }).join('');
+  }
+  else if (st.ghosts) {
     const acts = meta ? meta.actions : [];
     cd.innerHTML = st.ghosts.cands.slice(0, 10).map(c => {
       const seq = c.seq.map(a => acts[a] ?? a).join(' ▸ ');
@@ -248,8 +376,16 @@ cv.addEventListener('click', e => {
 function pump() {
   if (!playing) return;
   const step = [1, 2, 4, 8, 16, 32, 64, 128][+$('speed').value - 1] || 4;
+  const from = pos;
   const n = Math.min(pos + step, log.length);
   replayTo(n);
+  // commits that just crossed the replay head get a swarm anim + count
+  // toward the roll/s HUD. Events before `from` were already spawned on
+  // an earlier pass (replayTo re-applies the whole log each frame).
+  const tnow = performance.now();
+  for (let i = from; i < n; i++) {
+    if (log[i].t === 'commit') { commitTimes.push(tnow); spawnLive(log[i]); }
+  }
   if (pos >= log.length && doneInfo) setPlaying(false);
   requestAnimationFrame(pump);
 }
@@ -257,9 +393,15 @@ function setPlaying(v) {
   playing = v;
   $('play').textContent = playing ? 'pause' : 'play';
   if (playing) requestAnimationFrame(pump);
+  else { liveAnims.length = 0; render(); }  // frozen markers would linger
 }
 $('play').onclick = () => setPlaying(!playing);
-$('scrub').oninput = () => { setPlaying(false); replayTo(+$('scrub').value); };
+$('swarm').onchange = () => { liveAnims.length = 0; render(); };
+$('scrub').oninput = () => {
+  setPlaying(false);
+  commitTimes.length = 0;
+  replayTo(+$('scrub').value);
+};
 onresize = () => { fit(); render(); };
 
 // ---- worker ----------------------------------------------------------------
@@ -272,6 +414,7 @@ $('tail').onclick = async () => {
   if (tailTimer) { clearInterval(tailTimer); tailTimer = null; }
   log.length = 0; pos = 0; doneInfo = null; meta = null; levelMeta = null;
   st = freshState(); sel = null;
+  liveAnims.length = 0; commitTimes.length = 0;
   $('err').textContent = ''; $('findlist').innerHTML = '';
   try {
     const csv = await (await fetch('./mimo/level.csv')).text();
@@ -302,6 +445,7 @@ $('run').onclick = () => {
   if (tailTimer) { clearInterval(tailTimer); tailTimer = null; }
   log.length = 0; pos = 0; doneInfo = null; meta = null; levelMeta = null;
   st = freshState(); sel = null;
+  liveAnims.length = 0; commitTimes.length = 0;
   $('err').textContent = ''; $('findlist').innerHTML = '';
   worker = new Worker('./worker.mjs', { type: 'module' });
   worker.onmessage = e => {
