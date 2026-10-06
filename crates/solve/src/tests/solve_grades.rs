@@ -33,6 +33,7 @@ fn native_opts(name: &str, arity: usize, consumes: &[usize], must_use: bool, fx:
             NativeId::from(999),
             None,
             None,
+            String::new(),
             fx,
             slots,
             must_use,
@@ -351,12 +352,118 @@ fn consuming_a_temporary_is_free() {
     run("fn f() { close(mk()); }");
 }
 
+/// Struct decl used by the field-path tests. A free fn builds values so each
+/// test source can stay on one line after `PDECL`.
+const PDECL: &str =
+    "struct P { id: int, other: int, list: [int] } fn pctor() -> P { P { id = 1, other = 2, list = [0] } } ";
+
 #[test]
-fn consuming_through_a_path_is_refused() {
+fn consuming_an_indexed_element_is_refused() {
     let _t = TestResetter;
     native_opts("close", 1, &[0], false, Some(Fx::empty()));
+    // `a[i]` can't name which element died -- bind it (`let x = a[i]`) first
     let e = err("fn f() { let arr = [1, 2]; close(arr[0]); }").unwrap();
     assert!(e.contains("can't be consumed"), "{e}");
+    let e = err(&format!("{PDECL} fn f() {{ let p = pctor(); close(p.list[0]); }}"))
+        .unwrap();
+    assert!(e.contains("can't be consumed"), "{e}");
+}
+
+#[test]
+fn consuming_a_field_kills_just_that_field() {
+    let _t = TestResetter;
+    native_opts("close", 1, &[0], false, Some(Fx::empty()));
+    // `r.id` is dead but its sibling `r.other` stays live
+    run(&format!(
+        "{PDECL} fn f() -> int {{ let r = pctor(); close(r.id); r.other }}"
+    ));
+}
+
+#[test]
+fn reading_a_consumed_field_errors() {
+    let _t = TestResetter;
+    native_opts("close", 1, &[0], false, Some(Fx::empty()));
+    let e = err(&format!(
+        "{PDECL} fn f() -> int {{ let r = pctor(); close(r.id); r.id }}"
+    ))
+    .unwrap();
+    assert!(e.contains("`r.id` was consumed by `close`"), "{e}");
+}
+
+#[test]
+fn reading_the_parent_after_field_consume_errors() {
+    let _t = TestResetter;
+    native_opts("close", 1, &[0], false, Some(Fx::empty()));
+    native_opts("touch", 1, &[], false, Some(Fx::empty()));
+    // whole `r` reads every member -- dead `r.id` included
+    let e =
+        err(&format!("{PDECL} fn f() {{ let r = pctor(); close(r.id); touch(r); }}"))
+            .unwrap();
+    assert!(e.contains("consumed by `close`"), "{e}");
+}
+
+#[test]
+fn restoring_a_consumed_field_reborns_it() {
+    let _t = TestResetter;
+    native_opts("close", 1, &[0], false, Some(Fx::empty()));
+    run(&format!(
+        "{PDECL} fn f() -> int {{ let r = pctor(); close(r.id); r.id = 9; r.id }}"
+    ));
+}
+
+#[test]
+fn field_consume_on_one_branch_poisons_the_join() {
+    let _t = TestResetter;
+    native_opts("close", 1, &[0], false, Some(Fx::empty()));
+    let e = err(&format!(
+        "{PDECL} fn f(c: bool) -> int {{ let r = pctor(); if c {{ close(r.id); }}; r.id }}"
+    ))
+    .unwrap();
+    assert!(e.contains("consumed"), "{e}");
+    // ...but the untouched sibling stays live through the same join
+    run(&format!(
+        "{PDECL} fn f(c: bool) -> int {{ let r = pctor(); if c {{ close(r.id); }}; r.other }}"
+    ));
+}
+
+#[test]
+fn field_consume_branch_rebirth_is_fine() {
+    let _t = TestResetter;
+    native_opts("close", 1, &[0], false, Some(Fx::empty()));
+    run(&format!(
+        "{PDECL} fn f(c: bool) -> int {{ let r = pctor(); if c {{ close(r.id); r.id = 3; }}; r.id }}"
+    ));
+}
+
+#[test]
+fn consuming_a_loopvar_field_is_fine() {
+    let _t = TestResetter;
+    native_opts("close", 1, &[0], false, Some(Fx::empty()));
+    // each iteration binds `r` fresh -- its fields can die there (the asteroids
+    // `squish::drop(r.id)` shape)
+    run(&format!("{PDECL} fn f() {{ for r in [pctor()] {{ close(r.id); }} }}"));
+}
+
+#[test]
+fn consuming_an_outer_dec_field_inside_a_loop_is_refused() {
+    let _t = TestResetter;
+    native_opts("close", 1, &[0], false, Some(Fx::empty()));
+    let e = err(&format!(
+        "{PDECL} fn f() {{ let r = pctor(); for x in [1, 2] {{ close(r.id); }} }}"
+    ))
+    .unwrap();
+    assert!(e.contains("can't be consumed"), "{e}");
+}
+
+#[test]
+fn double_consuming_a_field_errors() {
+    let _t = TestResetter;
+    native_opts("close", 1, &[0], false, Some(Fx::empty()));
+    let e = err(&format!(
+        "{PDECL} fn f() {{ let r = pctor(); close(r.id); close(r.id); }}"
+    ))
+    .unwrap();
+    assert!(e.contains("consumed"), "{e}");
 }
 
 #[test]

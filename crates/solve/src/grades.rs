@@ -31,12 +31,14 @@
 //! or never -- v1 treats the write as "could do anything it captured", not as a call).
 //!
 //! Stage 1 (`consuming`/`must_use`) rides the same walk. A native may mark a param
-//! `#[consumes]` (or `#[consumes(self)]` on a method): handing a binding to that slot kills
-//! its dec -- resolving it afterwards is a compile error, the one finding this pass fails
-//! the solve for. Consumed state unions across branches (a maybe-consumed binding is gone),
-//! a real re-store reborns it, and consuming is refused for fields, globals, captures,
-//! and decs bound outside the enclosing loop. `#[must_use]` on a native warns when a bare
-//! call statement discards its result.
+//! `#[consumes]` (or `#[consumes(self)]` on a method): handing a place to that slot kills
+//! the named region of its dec -- `f(r.id)` dies `r.id` (and `r` read whole afterwards,
+//! not `r.other`), `f(r)` dies `r` outright, and touching a dead path is a compile
+//! error, the one finding this pass fails the solve for. Consumed marks union across
+//! branches (a maybe-dead region is gone), a store to a dead field reborns its subtree,
+//! and consuming is refused for index-terminated paths (the element can't be named --
+//! bind `let x = a[i]` first), globals, captures, and decs bound outside the enclosing
+//! loop. `#[must_use]` on a native warns when a bare call statement discards its result.
 //!
 //! What the pass deliberately does not do beyond that: it does not grade types (modes live
 //! on bindings and signatures -- `int` is ungraded), and Stage 3's certificate checks read
@@ -54,13 +56,38 @@ use parse::{
 use shared::{Fx, Located, Location};
 
 use crate::{
-    Solver,
+    GuardSeg, Solver,
     components::{DecId, DecKind},
     errors::{
         ConsumeForbidden, DeadStore, MustUseResult, UnusedBinding, UnusedParam,
         UseAfterConsume,
     },
 };
+
+/// One `#[consumes]` kill: the field path under the dec that died (`[]` =
+/// the whole binding), where it happened, and the callee that took it.
+/// The vec is a small set under `paths_overlap` -- `r.a` dead and `r.b`
+/// dead are separate marks, while `r` dead alone covers both.
+type ConsumeMark = (Vec<String>, Location, String);
+
+/// The statically known field prefix of an access path: `a.b[i]` ->
+/// `["b"]`, `a[i]` -> `[]`. Anything past the first `Index` isn't a
+/// place this pass can name.
+fn field_prefix(path: &[GuardSeg]) -> Vec<String> {
+    path.iter()
+        .map_while(|s| match s {
+            GuardSeg::Field(f) => Some(f.clone()),
+            GuardSeg::Index => None,
+        })
+        .collect()
+}
+
+/// A consumed mark and a later touch collide when one path is a prefix
+/// of the other: `r.id` dead kills `r` read whole and `r.id.x`, while
+/// `r.other` stays live. `[]` overlaps everything (whole-binding dead).
+fn paths_overlap(a: &[String], b: &[String]) -> bool {
+    a.iter().zip(b).all(|(x, y)| x == y)
+}
 
 /// How many sites read or write a declaration. Saturates at `Many` -- the lint suite and any
 /// future `consuming` checks only need `{0, 1, ω}`.
@@ -127,10 +154,10 @@ struct Flow {
     /// Write sites created inside this path segment. Killing one is unconditional -- it
     /// can't exist on a sibling path -- so it reports straight away.
     born: HashSet<Location>,
-    /// dec -> the `(site, callee)` it was consumed at on this path (`#[consumes]` params).
-    /// Unioned at merges: a binding *maybe* consumed on any surviving path is treated as
+    /// dec -> the `(path, site, callee)` marks `#[consumes]` params took on this
+    /// path. Unioned at merges: a region *maybe* consumed on any surviving path is
     /// gone from the join on -- matching Rust's move-out-of-one-branch behavior.
-    consumed: HashMap<DecId, (Location, String)>,
+    consumed: HashMap<DecId, Vec<ConsumeMark>>,
     diverged: bool,
 }
 
@@ -187,10 +214,10 @@ impl Flow {
         // post-merge the flow is again a single path, so every surviving pending span is
         // fair game for an eager dead verdict
         let born: HashSet<Location> = pending.values().flatten().copied().collect();
-        let mut consumed: HashMap<DecId, (Location, String)> = HashMap::new();
+        let mut consumed: HashMap<DecId, Vec<ConsumeMark>> = HashMap::new();
         for f in &arms {
-            for (dec, at) in &f.consumed {
-                consumed.entry(*dec).or_insert_with(|| at.clone());
+            for (dec, marks) in &f.consumed {
+                consumed.entry(*dec).or_default().extend(marks.iter().cloned());
             }
         }
         Flow {
@@ -230,8 +257,17 @@ struct Pass<'a> {
     /// scope_decs.len() at each enclosing loop's entry. Consuming a dec bound at or
     /// outside the floor inside the loop body would poison the next iteration -- refused.
     loop_floors: Vec<usize>,
-    /// Decs whose use-after-consume already reported (one error per dec, not per read).
-    consume_reported: HashSet<DecId>,
+    /// Decs whose use-after-consume already reported (one error per dead
+    /// path, not per read of it).
+    consume_reported: HashSet<(DecId, Vec<String>)>,
+    /// The spine root's bare-name consume check already ran at the
+    /// access's deeper path -- `r.id` doesn't read all of `r`. Set by the
+    /// access arms before walking `left`, cleared by the next read.
+    skip_root_check: bool,
+    /// Inside an assignment's left spine -- those reads locate the slot,
+    /// they don't observe the value (the target's own check+revive ran
+    /// first). `x.f = v` is a store, `x.f += v` still reads.
+    in_lvalue: bool,
     /// Fatal findings (`consuming` violations). Unlike the lints these stop the solve --
     /// collected so sibling files still fill their effects and warnings first.
     errors: Vec<Report>,
@@ -294,6 +330,8 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> crate::errors::Result
             closure_floors: Vec::new(),
             loop_floors: Vec::new(),
             consume_reported: HashSet::new(),
+            skip_root_check: false,
+            in_lvalue: false,
             errors: Vec::new(),
             flow: Flow::default(),
             retired: Vec::new(),
@@ -415,26 +453,50 @@ impl<'a> Pass<'a> {
         }
     }
 
+    /// Reading/storing `path` under `dec` after a `#[consumes]` call took an
+    /// overlapping region: `r` read whole after `r.id` died counts, `r.other`
+    /// doesn't. Reports once per dead path, not per touch.
+    fn consume_check(&mut self, dec: DecId, path: &[String], at: Location) {
+        if self.flow.diverged {
+            return;
+        }
+        let Some(marks) = self.flow.consumed.get(&dec) else {
+            return;
+        };
+        let Some((segs, consumed_at, by)) =
+            marks.iter().find(|(s, ..)| paths_overlap(s, path))
+        else {
+            return;
+        };
+        if !self.consume_reported.insert((dec, segs.clone())) {
+            return;
+        }
+        let mut name = self.solver.decs[dec].name.clone();
+        for s in segs {
+            name.push('.');
+            name.push_str(s);
+        }
+        self.errors.push(
+            UseAfterConsume {
+                src: self.solver.src(at),
+                at: at.into(),
+                consumed_at: (*consumed_at).into(),
+                name,
+                by: by.clone(),
+            }
+            .into(),
+        );
+    }
+
     /// `dec` was read (by name, or through a resolved access leaf) at `at`. Its pending
     /// writes move to `read_spans` -- proof of life that vetoes a dead verdict at later
     /// merges. Reading a dec a `#[consumes]` call already took is a solve error.
     fn read(&mut self, dec: DecId, at: Location) {
         self.uses.entry(dec).or_default().reads.tick();
-        if !self.flow.diverged
-            && let Some((consumed_at, by)) = self.flow.consumed.get(&dec)
-            && self.consume_reported.insert(dec)
-        {
-            let d = &self.solver.decs[dec];
-            self.errors.push(
-                UseAfterConsume {
-                    src: self.solver.src(at),
-                    at: at.into(),
-                    consumed_at: (*consumed_at).into(),
-                    name: d.name.clone(),
-                    by: by.clone(),
-                }
-                .into(),
-            );
+        // the spine root's own check already ran at the access's deeper
+        // path; an lvalue spine locates the slot without reading it
+        if !self.in_lvalue && !std::mem::take(&mut self.skip_root_check) {
+            self.consume_check(dec, &[], at);
         }
         if self.outside_closure(dec) || self.flow.diverged {
             return;
@@ -603,10 +665,11 @@ impl<'a> Pass<'a> {
         }
     }
 
-    /// A `#[consumes]` slot took `arg`. Kills the binding's dec: any later resolve of it
-    /// errors in `read`. Only a root local binding can be consumed -- passing `s.ch`
-    /// would leave `s` half-alive, globals are shared with the entry frame, captures and
-    /// loop-outer decs can't die somewhere they'll be read again.
+    /// A `#[consumes]` slot took `arg`. Kills the named region of the binding's
+    /// dec: `f(r.id)` dies `r.id` (and `r` read whole afterwards), `f(r)` dies
+    /// `r` outright. Globals are shared with the entry frame, captures and
+    /// loop-outer decs can't die somewhere they'll be read again, and an index
+    /// can't name the element it hit.
     fn consume_arg(&mut self, arg: &'a Expr, by: &str) {
         let Some((root, path)) = crate::root_and_path(arg) else {
             // a computed value has no binding to kill -- consumed for free
@@ -616,8 +679,9 @@ impl<'a> Pass<'a> {
             return;
         };
         let name = self.solver.decs[dec].name.clone();
+        let fields = field_prefix(&path);
         let fail = |pass: &mut Self, why: &str| {
-            if pass.consume_reported.insert(dec) {
+            if pass.consume_reported.insert((dec, fields.clone())) {
                 pass.errors.push(
                     ConsumeForbidden {
                         src: pass.solver.src(arg.location()),
@@ -629,10 +693,10 @@ impl<'a> Pass<'a> {
                 );
             }
         };
-        if !path.is_empty() {
+        if fields.len() != path.len() {
             fail(
                 self,
-                "only the binding itself can be consumed -- not a field or element of it",
+                "an element's index isn't fixed -- bind it (`let x = a[i]`) first",
             );
             return;
         }
@@ -667,7 +731,15 @@ impl<'a> Pass<'a> {
             return;
         }
         self.uses.entry(dec).or_default().reads.tick();
-        self.flow.consumed.insert(dec, (arg.location(), by.to_string()));
+        // a whole-binding mark subsumes every mark under it; a field mark
+        // is subsumed by an earlier whole one
+        let marks = self.flow.consumed.entry(dec).or_default();
+        if fields.is_empty() {
+            marks.clear();
+            marks.push((fields, arg.location(), by.to_string()));
+        } else if !marks.iter().any(|(s, ..)| s.is_empty()) {
+            marks.push((fields, arg.location(), by.to_string()));
+        }
     }
 
     // ---- calls and effects
@@ -770,9 +842,59 @@ impl<'a> Pass<'a> {
                         }
                     }
                     _ => {
-                        // `x.f = v` / `x[i] = v`: the spine reads every expr (root binding,
-                        // field idents, indexes), and the root binding is written
+                        // `x.f = v` / `x[i] = v`: a pure-field target revives its
+                        // subtree (`s.f` dead is a store, not a read -- only a
+                        // *dead ancestor*, or a wholly dead `s`, still errors).
+                        // `x.f += v` reads the slot too, and an index-terminated
+                        // path can't name its element -- both take the ordinary
+                        // overlap check at the field prefix. The spine is walked
+                        // with checks off: it locates the slot, it doesn't read it.
+                        if let Some((root, path)) = crate::root_and_path(&a.left)
+                            && let Some(dec) = self.dec_of(root)
+                            && !self.flow.diverged
+                            && let Some(marks) = self.flow.consumed.get(&dec)
+                        {
+                            let fields = field_prefix(&path);
+                            let pure_field =
+                                fields.len() == path.len() && !fields.is_empty();
+                            let reads_slot =
+                                !matches!(a.op, AssignmentOp::Identity) || !pure_field;
+                            if let Some((segs, consumed_at, by)) = marks.iter().find(
+                                |(s, ..)| {
+                                    paths_overlap(s, &fields)
+                                        && (reads_slot || s.len() < fields.len())
+                                },
+                            ) && self.consume_reported.insert((dec, segs.clone()))
+                            {
+                                let mut name = self.solver.decs[dec].name.clone();
+                                for s in segs {
+                                    name.push('.');
+                                    name.push_str(s);
+                                }
+                                self.errors.push(
+                                    UseAfterConsume {
+                                        src: self.solver.src(a.left.location()),
+                                        at: a.left.location().into(),
+                                        consumed_at: (*consumed_at).into(),
+                                        name,
+                                        by: by.clone(),
+                                    }
+                                    .into(),
+                                );
+                            }
+                            // the store reborns its subtree: marks at or under
+                            // the target die (a whole-binding mark never does)
+                            if pure_field
+                                && let Some(ms) = self.flow.consumed.get_mut(&dec)
+                            {
+                                ms.retain(|(s, ..)| {
+                                    s.is_empty() || !s.starts_with(fields.as_slice())
+                                });
+                            }
+                        }
+                        let lv = std::mem::replace(&mut self.in_lvalue, true);
                         self.expr(&a.left);
+                        self.in_lvalue = lv;
                         self.expr(&a.right);
                         if let Some((root, _)) = crate::root_and_path(&a.left)
                             && let Some(dec) = self.dec_of(root)
@@ -975,6 +1097,17 @@ impl<'a> Pass<'a> {
             }
             ExprKind::Call(c) => {
                 self.expr(&c.left);
+                // `x.m(…)` evaluates the whole receiver -- the left walk already
+                // checked `x.m`, but a partial death under `x` still blocks it
+                if let ExprKind::Access(Access::Dot { left, right, .. }) = c.left.kind()
+                    && right
+                        .as_ident()
+                        .is_some_and(|i| self.solver.node_decs.contains_key(&i.id))
+                    && let Some((rroot, rpath)) = crate::root_and_path(left)
+                    && let Some(rdec) = self.dec_of(rroot)
+                {
+                    self.consume_check(rdec, &field_prefix(&rpath), left.location());
+                }
                 let callee = self.callee_dec(&c.left);
                 let binding = callee.and_then(|d| self.solver.dec_to_native.get(&d));
                 let callee_name = callee
@@ -1004,12 +1137,36 @@ impl<'a> Pass<'a> {
                 self.call_effect(&c.left);
             }
             ExprKind::Access(Access::Dot { left, right, .. }) => {
+                // `r.id` reads `r.id`, not all of `r` -- check the place at its
+                // own field path, then let the spine's root ident skip its bare
+                // check (its read already happened, deeper, right here)
+                if !self.in_lvalue
+                    && let Some((root, path)) = crate::root_and_path(e)
+                    && let Some(dec) = self.dec_of(root)
+                {
+                    self.consume_check(dec, &field_prefix(&path), e.location());
+                }
+                self.skip_root_check = true;
                 self.expr(left);
+                self.skip_root_check = false;
                 self.expr(right);
             }
             ExprKind::Access(Access::Square { left, key, .. }) => {
+                // `a.b[i]` overlaps a consumed mark up to the index -- the
+                // element itself can't be named
+                if !self.in_lvalue
+                    && let Some((root, path)) = crate::root_and_path(e)
+                    && let Some(dec) = self.dec_of(root)
+                {
+                    self.consume_check(dec, &field_prefix(&path), e.location());
+                }
+                self.skip_root_check = true;
                 self.expr(left);
+                self.skip_root_check = false;
+                // index keys evaluate normally even inside an lvalue spine
+                let lv = std::mem::replace(&mut self.in_lvalue, false);
                 self.expr(key);
+                self.in_lvalue = lv;
             }
             ExprKind::Access(Access::DoubleColon { left, right }) => {
                 self.expr(left);
