@@ -32,16 +32,11 @@
 //! scope any `loop` can span — those bodies are skipped. Covering them needs a
 //! relooper or a label-variable dispatch, same as Emscripten does for `goto`.
 //!
-//! `zig::emit_zig` emits the same subset as Zig source for
-//! `zig build-exe -target wasm32-freestanding -fno-entry -rdynamic`, for
-//! comparison with the direct wasm-encoder lane.
-
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use compile::{BinOp, BlockTarget, Constant, Op, Program, Reg, UnaryOp};
 
 pub mod resume;
-pub mod zig;
 use wasm_encoder::{
     BlockType, CodeSection, CustomSection, Encode, EntityType, ExportKind,
     ExportSection, Function, FunctionSection, GlobalType, ImportSection,
