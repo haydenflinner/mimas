@@ -88,6 +88,72 @@ impl DebugInfo {
     }
 }
 
+/// Execution trace counters — the sonification/profiling substrate.
+/// `run_dispatch` bumps `hits[ip]` once per dispatched op (`ip` is a byte
+/// offset into the program's shared code `bytes` — operand bytes simply
+/// never rise) and `calls` on every `Flow::Call` edge the driver takes.
+/// Hosts drain per frame/step via `Vm::trace_take`; counts are deltas
+/// since the last drain, not cumulative, so each read is "what ran in
+/// this slice of time".
+///
+/// Always on: one indexed increment per op is lost in dispatch noise, and
+/// keeping it unconditional means `take` works on any Vm — no recompile
+/// to start listening.
+#[derive(Default)]
+pub struct Trace {
+    /// `hits[i]` = ops dispatched at byte offset `i` since the last
+    /// `take_hits`. Sized to the program's code length on `load_program`.
+    pub hits: RefCell<Vec<u32>>,
+    /// `(caller_body << 32) | callee_body` → count since the last
+    /// `take_calls`. Only the `Flow::Call` driver arm records — calls
+    /// inlined inside bcgen bodies bypass it, the same observability
+    /// trade the debugger makes.
+    pub calls: RefCell<HashMap<u64, u32>>,
+}
+
+impl Trace {
+    /// One dispatched op at byte offset `ip`. The borrow is held only for
+    /// the increment — a native that re-enters `run_dispatch` (injected
+    /// calls) must never hit a live `RefMut` and panic.
+    #[inline]
+    pub fn tick(&self, ip: usize) {
+        if let Some(h) = self.hits.borrow_mut().get_mut(ip) {
+            *h = h.wrapping_add(1);
+        }
+    }
+
+    /// One call edge taken: `caller` (the frame on top at dispatch) →
+    /// `callee`. Packed into a u64 so the map key is a plain int.
+    pub fn call(&self, caller: u32, callee: u32) {
+        *self
+            .calls
+            .borrow_mut()
+            .entry(((caller as u64) << 32) | callee as u64)
+            .or_default() += 1;
+    }
+
+    /// Sparse `(ip, count)` pairs since the last take, zeroing as it
+    /// reads. O(code size), called at frame cadence at most.
+    pub fn take_hits(&self) -> Vec<(u32, u32)> {
+        let mut hits = self.hits.borrow_mut();
+        let mut out = Vec::new();
+        for (i, h) in hits.iter_mut().enumerate() {
+            if *h != 0 {
+                out.push((i as u32, *h));
+                *h = 0;
+            }
+        }
+        out
+    }
+
+    /// The call-edge deltas since the last take: `(packed_edge, count)`.
+    pub fn take_calls(&self) -> Vec<(u64, u32)> {
+        std::mem::take(&mut *self.calls.borrow_mut())
+            .into_iter()
+            .collect()
+    }
+}
+
 pub type OutSink = Box<dyn FnMut(&str)>;
 
 /// Where `print`/`dbg` and friends send their lines. The default sink is

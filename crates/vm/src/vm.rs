@@ -310,6 +310,7 @@ impl Vm {
         self.field_names = field_names.clone();
         self.field_dims = field_dims.into_values().collect();
         let chunks = &self.chunks;
+        let code_len = self.code.bytes.len();
         self.arena.mutate(|mc, state| {
             *state.struct_names.borrow_mut(mc) = struct_names.into_values().collect();
             *state.field_names.borrow_mut(mc) = field_names;
@@ -326,6 +327,11 @@ impl Vm {
                 .map(|(_, chunk)| chunk.offset as u32)
                 .collect::<Vec<_>>()
                 .into();
+            // fresh program = fresh trace: re-size the op counter to the
+            // new code length and drop edges that named dead BodyIds
+            let trace = state.fixtures.get::<crate::fixtures::Trace>();
+            *trace.hits.borrow_mut() = vec![0; code_len];
+            trace.calls.borrow_mut().clear();
         });
         self.reset_to_entry();
     }
@@ -488,6 +494,70 @@ impl Vm {
         self.arena
             .mutate(|mc, state| state.thread.borrow_mut(mc).ops_left)
     }
+
+    /// `pc → (fn, loc)` tables for the loaded program — one call per
+    /// compile. A [`trace_take`](Self::trace_take) `ip` is a byte offset
+    /// into the shared code bytes: subtract the owning chunk's `offset`
+    /// and binary-search `locs` (same rule as `Chunk::loc_at`) for its
+    /// `(file, span)`.
+    pub fn trace_map(&self) -> Vec<TraceMapChunk> {
+        self.chunks
+            .iter()
+            .map(|(body, chunk)| TraceMapChunk {
+                body: body.index(),
+                name: self
+                    .chunk_names
+                    .get(&body)
+                    .cloned()
+                    .unwrap_or_else(|| format!("body#{}", body.index())),
+                offset: chunk.offset as u32,
+                locs: chunk
+                    .locs
+                    .iter()
+                    .map(|(ip, loc)| {
+                        (*ip, loc.file_id as u32, loc.span.start as u32, loc.span.end as u32)
+                    })
+                    .collect(),
+            })
+            .collect()
+    }
+
+    /// Drain the [`Trace`](crate::fixtures::Trace) counters: flat
+    /// `(ip, count)…` op hits and `(caller_body, callee_body, count)…`
+    /// call edges since the last call — the sonifier's raw deltas. Empty
+    /// while nothing has run.
+    pub fn trace_take(&mut self) -> (Vec<u32>, Vec<u32>) {
+        self.arena.mutate(|_, state| {
+            let trace = state.fixtures.get::<crate::fixtures::Trace>();
+            let mut hits = Vec::new();
+            for (ip, n) in trace.take_hits() {
+                hits.push(ip);
+                hits.push(n);
+            }
+            let mut calls = Vec::new();
+            for (edge, n) in trace.take_calls() {
+                calls.push((edge >> 32) as u32);
+                calls.push(edge as u32);
+                calls.push(n);
+            }
+            (hits, calls)
+        })
+    }
+}
+
+/// One body's slice of [`Vm::trace_map`].
+#[derive(Debug)]
+pub struct TraceMapChunk {
+    /// The body's `BodyId` index — what call-edge tuples carry.
+    pub body: usize,
+    /// Source-level name (`update`, `helper::f`); unnamed bodies get
+    /// `body#N` so a host still has something to print.
+    pub name: String,
+    /// Byte offset of this body's code within the program's shared `bytes`.
+    pub offset: u32,
+    /// `(chunk-relative ip, file_id, span start, span end)` — sparse
+    /// ascending like `Chunk::locs`: an entry's loc applies until the next.
+    pub locs: Vec<(u32, u32, u32, u32)>,
 }
 
 impl Default for Vm {
@@ -767,6 +837,7 @@ fn run_dispatch<'gc>(
     stop_depth: usize,
 ) -> Result<bool, Error> {
     let (mut regs_ptr, mut regs_len) = window(thread, chunks);
+    let trace = ctx.state().fixtures.get::<crate::fixtures::Trace>();
     loop {
         // Cooperative pause (`yield_frame` and friends) — the native set
         // `State::paused` rather than touching the thread, which the
@@ -798,6 +869,7 @@ fn run_dispatch<'gc>(
                 .flatten()
         });
         let mut op_ip = code.ip;
+        trace.tick(op_ip);
         let res = match step {
             Some(f) => {
                 // The `BodyFn` ABI returns `RtResult<Flow>` through an out-slot
@@ -864,6 +936,10 @@ fn run_dispatch<'gc>(
                         (data.function, &data.captures)
                     }
                 };
+                trace.call(
+                    thread.frames.last().unwrap().chunk.index() as u32,
+                    body.index() as u32,
+                );
                 if let Err(kind) = enter_call(thread, code, chunks, body, dst, &args, captures) {
                     Err(Error::msg(locate(kind, op_ip, thread, chunks, sources)))?;
                 }
