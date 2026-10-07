@@ -262,7 +262,7 @@ fn resolve_callee(
 
 /// Classify one body's insts. `ret[c]` is the current best guess of body `c`'s
 /// return class — iterated to a fixpoint across the program.
-fn analyze_body(body: &IrBody, ret: &[Option<K>]) -> Result<AnaI, Bail> {
+pub(crate) fn analyze_body(body: &IrBody, ret: &[Option<K>]) -> Result<AnaI, Bail> {
     let n = body.instructions.len();
     let nl = body.locals.len();
     // classes the inst's readers demand of it

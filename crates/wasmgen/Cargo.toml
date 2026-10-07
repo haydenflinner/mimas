@@ -15,6 +15,7 @@ name = "mimas_wasmgen"
 [dependencies]
 compile = { package = "mimas-compile", path = "../compile", version = "0.2.0" }
 shared = { package = "mimas-shared", path = "../shared", version = "0.2.0" }
+waffle = "0.3.2"
 wasm-encoder = "0.242"
 
 [dev-dependencies]

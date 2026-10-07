@@ -37,6 +37,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use compile::{BinOp, BlockTarget, Constant, Op, Program, Reg, UnaryOp};
 
 pub mod irgen;
+pub mod wemit;
 use wasm_encoder::{
     BlockType, CodeSection, CustomSection, Encode, EntityType, ExportKind,
     ExportSection, Function, FunctionSection, GlobalType, ImportSection,
