@@ -3175,6 +3175,7 @@ dependencies = [
  "allocator-api2",
  "equivalent",
  "foldhash 0.1.5",
+ "serde",
 ]
 
 [[package]]
@@ -4201,8 +4202,10 @@ version = "0.2.0"
 dependencies = [
  "mimas",
  "mimas-compile",
+ "mimas-shared",
  "mimas-vm",
  "wasm-encoder",
+ "wasmparser",
 ]
 
 [[package]]
@@ -7487,8 +7490,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed3c6e611f4cd748d85c767815823b777dc56afca793fcda27beae4e85028849"
 dependencies = [
  "bitflags 2.11.1",
+ "hashbrown 0.15.5",
  "indexmap 2.14.0",
  "semver",
+ "serde",
 ]
 
 [[package]]

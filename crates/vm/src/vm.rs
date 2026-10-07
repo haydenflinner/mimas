@@ -173,6 +173,11 @@ impl TestResult {
 /// grades-pass artifacts a host surfaces (lint warnings, effect footprint).
 struct BuiltProgram {
     program: Program,
+    /// The compiler IR the program was lowered from — `compile` only drains
+    /// the pieces it serializes (`str_interner`, `resolutions.root`, tests,
+    /// `closure_bodies`); bodies/insts/type resolutions stay live for
+    /// consumers like wasmgen that want SSA structure rather than bytecode.
+    ir: compile::Ir,
     sources: Sources,
     warnings: Vec<miette::Report>,
     /// `(file, inferred top-level Fx)` per solved file.
@@ -3073,6 +3078,22 @@ impl Vm {
         Ok((built.program, built.sources))
     }
 
+    /// [`compile_parts`] that also hands back the compiler [`compile::Ir`]
+    /// the program was lowered from — the SSA `Body`s wasmgen's `emit_ir`
+    /// consumes instead of re-deriving dataflow from the flat bytecode.
+    pub fn compile_parts_ir<F>(
+        files: &[(&str, &str)],
+        install_lib: F,
+    ) -> std::result::Result<(compile::Program, compile::Ir, Sources), ExecuteError>
+    where
+        F: for<'gc> FnOnce(&mut crate::api::Api<'_, 'gc>),
+    {
+        let mut probe = Self::new();
+        let library = probe.install_library(install_lib);
+        let built = Self::build_program(files, &library, None)?;
+        Ok((built.program, built.ir, built.sources))
+    }
+
     /// Load a [`compile_parts`] program into this Vm — same post-load
     /// wiring as `compile_files`, with this Vm's arena installing the
     /// natives fresh (natives live per-Vm, in State fixtures).
@@ -3133,8 +3154,10 @@ impl Vm {
             library.intrinsics().iter().map(|(a, b)| (*a, *b)).collect(),
         );
         ir.lower(&stmts);
+        let program = compile::Compiler::new().compile(&mut ir);
         Ok(BuiltProgram {
-            program: compile::Compiler::new().compile(ir),
+            program,
+            ir,
             sources,
             warnings,
             script_fx,

@@ -22,7 +22,7 @@ pub(crate) fn compile_ops(src: &str) -> Vec<crate::Op> {
     let mut ir = crate::Ir::new(resolutions, Default::default());
     ir.lower(&ast.unpack());
     let mut compiler = crate::Compiler::new();
-    let _ = compiler.compile(ir);
+    let _ = compiler.compile(&mut ir);
     compiler.ops
 }
 

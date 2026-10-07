@@ -36,7 +36,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use compile::{BinOp, BlockTarget, Constant, Op, Program, Reg, UnaryOp};
 
-pub mod resume;
+pub mod irgen;
 use wasm_encoder::{
     BlockType, CodeSection, CustomSection, Encode, EntityType, ExportKind,
     ExportSection, Function, FunctionSection, GlobalType, ImportSection,
@@ -56,7 +56,7 @@ pub enum K {
 }
 
 impl K {
-    fn val_type(self) -> ValType {
+    pub(crate) fn val_type(self) -> ValType {
         match self {
             K::Int => ValType::I64,
             K::Float => ValType::F64,
@@ -201,24 +201,10 @@ pub(crate) fn kbit(k: K) -> u8 {
 pub(crate) struct Ana {
     /// reg -> resolved class — present only when the reg resolves to ONE class
     pub class: HashMap<u32, K>,
-    /// regs read as raw words by heap ops (Push/SetIndex/SetField values,
-    /// NewInstance fields) — a producer writing such a reg must emit even
-    /// when the reg has no scalar mask, or the stored word would be stale
-    pub reads_w: std::collections::HashSet<u32>,
-    /// reg -> bitmask (K_INT|K_FLOAT|K_BOOL) of every class the reg may hold.
-    /// A reg reused across scalar classes (mandelbrot's `Reg(22)` written
-    /// Float then Bool) has a multi-bit mask: the resume lane emits each
-    /// access at the width its context demands, since a read can only be
-    /// reached when the last write had that class in a valid program.
-    pub mask: HashMap<u32, u8>,
     /// call op index -> callee body (`Call` resolved via a constant callee reg, or `CallDirect`)
     pub callee: HashMap<usize, usize>,
     /// resolved return class (None = void/unknown — emitted as a void result)
     pub ret: Option<K>,
-    /// dst reg -> (op index, write kind) — the reaching-class analysis in
-    /// the resume lane uses positions to know the class of the value live
-    /// at each callsite (the union mask can't).
-    pub writes: HashMap<u32, Vec<(usize, W)>>,
 }
 
 /// Classify one body's registers. `ret[c]` is the current best guess of body
@@ -639,11 +625,8 @@ pub(crate) fn analyze(ops: &[(usize, Op)], nregs: u32, ret: &[Option<K>]) -> Res
     };
     Ok(Ana {
         class,
-        reads_w,
-        mask,
         callee,
         ret: ret_k,
-        writes,
     })
 }
 
@@ -770,7 +753,7 @@ pub(crate) fn scopes(ops: &[(usize, Op)], nops: usize) -> Result<Vec<Scope>, Bai
     bail!("scope repair did not converge")
 }
 
-enum Repair {
+pub(crate) enum Repair {
     /// loop `ix` expired while `top` was still open: extend its close past `top`'s.
     ExtendLoop(usize, usize),
     /// block `ix` expired inside block `top`: move `top`'s open to `ix`'s so `ix` nests inside it.
@@ -778,7 +761,7 @@ enum Repair {
     Fatal(Bail),
 }
 
-fn simulate(out: &mut Vec<Scope>, nops: usize) -> Result<(), Repair> {
+pub(crate) fn simulate(out: &mut Vec<Scope>, nops: usize) -> Result<(), Repair> {
     // index-based simulation: opens/closes hold indices into `out`. Order
     // matters for nesting: an outer scope (earlier open or, at a tie, later
     // close) must be pushed first; pops at a shared close go innermost-first.
@@ -1871,7 +1854,7 @@ pub struct Opts {
     pub coverage: bool,
 }
 
-/// Passthrough-native classification for [`resume::emit_resumable`]'s
+/// Passthrough-native classification for [`irgen::emit_ir`]'s
 /// linear-memory sink: the named natives record `(id, arg words)` into an
 /// exported buffer instead of crossing the wasm import boundary, and the
 /// host replays them in order. Return semantics are fixed per kind — the

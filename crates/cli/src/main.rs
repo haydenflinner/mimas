@@ -304,7 +304,7 @@ fn build(
         compile::Compiler::new()
             .with_disasm(disasm)
             .with_sources(srcs)
-            .compile(ir)
+            .compile(&mut ir)
     }) {
         Ok(p) => p,
         Err(report) => {

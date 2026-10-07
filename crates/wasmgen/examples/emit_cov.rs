@@ -76,7 +76,7 @@ fn main() {
     let out = pos.next().unwrap_or_else(|| "out.wasm".to_string());
     let source = std::fs::read_to_string(&path).expect("read");
     let mut ids = Vec::new();
-    let (program, _s) = vm::Vm::compile_parts(&[("main", source.as_str())], |api| {
+    let (program, ir, _s) = vm::Vm::compile_parts_ir(&[("main", source.as_str())], |api| {
         mimas::library::std(api);
         let mut cov = api.module("cov");
         ids.push((cov.add(hit).index() as u32, "cov::hit"));
@@ -94,8 +94,16 @@ fn main() {
         ids.push((df.add(sum).index() as u32, "df::sum"));
     })
     .expect("compile");
-    let w = mimas_wasmgen::resume::emit_resumable(&program, &Default::default(), None, None, 0, 0)
-        .expect("emit resumable");
+    let w = mimas_wasmgen::irgen::emit_ir(
+        &ir,
+        &program.strs,
+        &Default::default(),
+        None,
+        None,
+        0,
+        0,
+    )
+    .expect("emit ir");
     std::fs::write(&out, &w.bytes).expect("write wasm");
     let natives = ids
         .iter()

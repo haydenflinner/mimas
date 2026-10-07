@@ -67,7 +67,7 @@ impl Compiler {
         self
     }
 
-    pub fn compile(&mut self, mut ir: Ir) -> Program {
+    pub fn compile(&mut self, ir: &mut Ir) -> Program {
         let mut bytes = Encoder::new();
 
         // body -> source name, for the --disasm dump only
@@ -166,7 +166,7 @@ impl Compiler {
             let vis = ir.resolutions.decs[dec].vis;
             let defaults = defaults
                 .into_iter()
-                .map(|d| d.map(|lit| Constant::from_literal(&mut ir, lit)))
+                .map(|d| d.map(|lit| Constant::from_literal(ir, lit)))
                 .collect();
             signatures[body] = Some(Function {
                 body,
@@ -189,22 +189,22 @@ impl Compiler {
         }
 
         let root = std::mem::take(&mut ir.resolutions.root);
-        let root = export(&mut ir, &signatures, root);
+        let root = export(ir, &signatures, root);
 
         // the entry body's local->reg map, captured when body 0 compiles -- non-entry bodies
         // need it to turn a global's `Local` into its absolute (base-0) entry-frame register.
         let mut entry_to_reg: IdVec<Local, Reg> = IdVec::new();
 
-        for (body_id, mut body) in ir.bodies {
-            clean::clean(&mut body);
+        for (body_id, body) in ir.bodies.iter_mut() {
+            clean::clean(body);
 
             let mut regs: IdVec<Reg, ()> = IdVec::new();
             let mut local_to_reg: IdVec<Local, Reg> = IdVec::new();
-            let cross = clean::cross_block_iids(&body);
+            let cross = clean::cross_block_iids(body);
             let last_use_by_block: HashMap<BlockId, HashMap<InstId, InstId>> = body
                 .blocks
                 .iter()
-                .map(|(bid, _)| (bid, clean::last_uses(&body, bid)))
+                .map(|(bid, _)| (bid, clean::last_uses(body, bid)))
                 .collect();
 
             body.locals.iter().for_each(|_| {
@@ -252,7 +252,7 @@ impl Compiler {
                 for (_, block) in body.blocks.iter() {
                     for &iid in &block.stream {
                         let inst = &body.instructions[iid];
-                        let absorbs = imm_binop(&body, inst).map(|(_, con, _, _, _)| con);
+                        let absorbs = imm_binop(body, inst).map(|(_, con, _, _, _)| con);
                         for u in uses(inst) {
                             if matches!(
                                 body.instructions[u],
@@ -474,7 +474,7 @@ impl Compiler {
 
                     // fuse an int arith/comparison op with a constant operand into its immediate
                     // form, inlining the value instead of reading it from a register.
-                    if let Some((non_const, _con, val, op, kind)) = imm_binop(&body, inst) {
+                    if let Some((non_const, _con, val, op, kind)) = imm_binop(body, inst) {
                         let (left, dst) = {
                             let mut ctx = Ctx {
                                 inst_to_reg: &inst_to_reg,
@@ -720,7 +720,7 @@ impl Compiler {
             root,
             chunks: std::mem::replace(&mut self.chunks, IdVec::new()),
             signatures,
-            strs: ir.str_interner,
+            strs: std::mem::take(&mut ir.str_interner),
             bytes: bytes.finish(),
             struct_names,
             methods,
