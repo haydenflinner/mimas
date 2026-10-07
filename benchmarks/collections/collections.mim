@@ -10,7 +10,7 @@ for j in K {
 // build a dataset (array of bucket indices)
 let data: [int] = array::new();
 for i in N {
-    data.push(i % K);
+    data.push(i mod K);
 }
 
 // histogram it into a dict<str, int>
