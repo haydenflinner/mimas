@@ -28,7 +28,7 @@ mimas-bevy = { path = "../bevy", version = "0.2.0", optional = true }
 
 [features]
 default = ["dataframe", "darkly", "xlsx", "parquet", "tensor"]
-# First-class `Tensor` values (std::tensor) backed by burn's pure-Rust NdArray
+# First-class `Tensor` values (std::tensor) backed by burn's pure-Rust Flex
 # backend -- dynamic-rank f32 tensors for ML-style code. On by default; same
 # opt-out story as `dataframe` (`default-features = false`).
 tensor = ["vm/tensor", "library/tensor"]
