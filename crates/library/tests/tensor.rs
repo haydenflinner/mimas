@@ -1,4 +1,4 @@
-//! `std::tensor` -- first-class `Tensor` values backed by burn's NdArray backend.
+//! `std::tensor` -- first-class `Tensor` values backed by burn's Flex backend.
 //! See `crates/library/src/std_lib/tensor.rs` and `crates/vm/src/tensor.rs`.
 //!
 //! `Tensor` is a real `Val` variant (`Captured::Other` to the inspector, like

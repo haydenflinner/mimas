@@ -1,4 +1,4 @@
-//! `std::tensor` -- N-D `f32` tensors on Burn's NdArray backend.
+//! `std::tensor` -- N-D `f32` tensors on Burn's Flex backend.
 //!
 //! `Tensor` is a real `Val` variant (`vm::val::Tensor` wrapping a dynamic-rank
 //! `burn` primitive), not a `#[mimas] struct`, so this module is only the native
@@ -661,7 +661,7 @@ fn erf<'gc>(ctx: Ctx<'gc>, t: vm::Tensor<'gc>) -> Raisable<vm::Tensor<'gc>> {
 
 /// `t.to_list()` -- back to nested mimas lists of floats. `Result<_, RtErr>`
 /// rather than `Raisable` because `Val`'s type is `Unknown`, which would eat
-/// the `!` unwrap -- a read failure (essentially unreachable on NdArray) throws
+/// the `!` unwrap -- a read failure (essentially unreachable on Flex) throws
 /// as a runtime error instead.
 #[native]
 fn to_list<'gc>(ctx: Ctx<'gc>, t: vm::Tensor<'gc>) -> Result<Val<'gc>, vm::RtErr> {

@@ -339,7 +339,7 @@ impl crate::adt::MimasAdt for TensorTy {
             name: "Tensor",
             module: &["std", "tensor"],
             kind: api::ApiAdtKind::Struct,
-            doc: "An N-D `f32` tensor on the Burn NdArray backend (std::tensor).",
+            doc: "An N-D `f32` tensor on the Burn Flex backend (std::tensor).",
             variants: vec![crate::adt::ApiVariantShape {
                 name: "Tensor".into(),
                 doc: "",

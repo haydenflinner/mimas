@@ -6,7 +6,7 @@ use std::{
 };
 
 use compile::{BinFault, BinOp, Scalar, UnaryOp};
-#[cfg(any(feature = "dataframe", feature = "darkly"))]
+#[cfg(any(feature = "dataframe", feature = "darkly", feature = "tensor"))]
 use gc_arena::Static;
 use gc_arena::{Collect, Gc, RefLock};
 use shared::{BodyId, FnHeader};
@@ -59,7 +59,7 @@ pub enum Val<'gc> {
     /// once decoded (nothing mutates one in place), so no `RefLock` -- same reasoning as `PlExpr`.
     #[cfg(feature = "darkly")]
     DarklyImage(DarklyImage<'gc>),
-    /// An N-D tensor on the Burn NdArray backend (`std::tensor`). The payload is
+    /// An N-D tensor on the Burn Flex CPU backend (`std::tensor`). The payload is
     /// `TensorPrimitive` -- rank-erased, shape lives at runtime -- so one variant covers every
     /// rank. No `RefLock`: every burn op is functional (consumes and returns a new tensor), same
     /// reasoning as `PlExpr`.
@@ -735,7 +735,7 @@ impl std::fmt::Debug for GroupBy<'_> {
     }
 }
 
-/// A Burn `TensorPrimitive` on the NdArray backend -- a plain `'static` Rust value whose
+/// A Burn `TensorPrimitive` on the Flex backend -- a plain `'static` Rust value whose
 /// internal sharing is `Arc`-based, so `Static` (no GC tracing) is what it's for. No `RefLock`:
 /// burn ops are functional -- `a.matmul(b)` returns a new tensor rather than mutating -- so a
 /// mimas-level mutation like `t[0] = x` would have to be implemented as read-modify-swap anyway.

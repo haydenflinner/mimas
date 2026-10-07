@@ -1,11 +1,11 @@
 //! Everything Burn touches lives here. `Val::Tensor`'s payload is the backend
-//! *primitive* (`FloatTensor<B>` = `NdArrayTensor`) rather than
+//! *primitive* (`FloatTensor<B>` = `FlexTensor`) rather than
 //! `burn::Tensor<B, D>`: the public `Tensor` is const-generic over rank, but the
 //! primitive carries its `Shape` at runtime, so one `Val` variant covers scalars
 //! through N-D tensors.
 //!
-//! The backend is fixed at `NdArray<f32>` (pure Rust + matrixmultiply -- compiles
-//! to wasm, no C deps) behind the `B` alias; swapping in `Autodiff<..>` or `Flex`
+//! The backend is fixed at `Flex` (burn's pure-Rust CPU backend: gemm + SIMD,
+//! compiles to wasm, no C deps) behind the `B` alias; swapping in `Autodiff<..>`
 //! is a one-line change invisible to mimas code.
 //!
 //! Ops are `B::float_*` supertrait methods (`FloatTensorOps`, `ActivationOps`,
@@ -20,9 +20,9 @@ use burn_backend::{
     backend::ops::{ActivationOps, BoolTensorOps, FloatTensorOps, IntTensorOps},
     tensor::{BoolTensor, Device, FloatTensor, IntTensor},
 };
-use burn_ndarray::NdArray;
+use burn_flex::Flex;
 
-pub type B = NdArray<f32>;
+pub type B = Flex;
 /// The stored payload: dynamic-rank f32 tensor.
 pub type Prim = FloatTensor<B>;
 /// `argmax`-style results come back as int primitives.
@@ -226,8 +226,7 @@ pub fn dot(a: Prim, b: Prim) -> Result<Prim, String> {
     let a2 = guard(|| B::float_reshape(a, shape_of(&[1, da[0]])))?;
     let b2 = guard(|| B::float_reshape(b, shape_of(&[db[0], 1])))?;
     let m = guard(|| B::float_matmul(a2, b2))?;
-    // NdArray has no rank-0 tensors, so the scalar comes back as `[1]`
-    // (same convention as `sum`/`mean`).
+    // Scalars are kept rank-1 `[1]` (same convention as `sum`/`mean`).
     reshape(m, &[1])
 }
 
@@ -459,9 +458,8 @@ pub fn argsort(t: &Prim, dim: usize, desc: bool) -> Result<Vec<i64>, String> {
     int_to_list(&idx)
 }
 
-/// `topk(dim, k)` -> `(values, flat indices)`. `float_argtopk` is
-/// `unimplemented!` on the NdArray backend, so this sorts with indices and
-/// slices the first `k` -- same complexity, one sort.
+/// `topk(dim, k)` -> `(values, flat indices)`. One sort with indices, then
+/// slice the first `k` -- burn's `float_topk`/`float_argtopk` would each sort.
 pub fn topk(t: Prim, dim: usize, k: usize) -> Result<(Prim, Vec<i64>), String> {
     check_dim(&t, dim)?;
     let n = dims(&t)[dim];
