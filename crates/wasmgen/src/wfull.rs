@@ -22,6 +22,12 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::wrt::{
+    AnaI, COV_HELPER_NAMES, CovCtx, DCELL, HELPER_NAMES, OPSTK_N, SINK_CAP, STACK_CAP, Statics,
+    TAG_ARRAY, TAG_CLOSURE, TAG_DICT, TAG_INSTANCE, TAG_STR, analyze_body, binop_prod,
+    emit_helpers, emit_trampoline, native_key,
+};
+use crate::{Bail, Body, K, Opts, Sig, Skip, Wasmgen};
 use compile::{
     BinOp, BlockId, Body as IrBody, Constant, FormatPart, Inst, InstId, Ir, OperandKind, UnaryOp,
 };
@@ -29,15 +35,8 @@ use shared::{StrId, StrInterner};
 use waffle::{
     Block as WBlock, BlockTarget, Export, ExportKind, Func, FuncDecl, FunctionBody, Global,
     GlobalData, Import, ImportKind, Memory, MemoryData, MemorySegment, Module, Operator as WOp,
-    Signature, SignatureData, Table, TableData, Terminator, Type as WTy, Value,
-    entity::EntityRef,
+    Signature, SignatureData, Table, TableData, Terminator, Type as WTy, Value, entity::EntityRef,
 };
-use crate::wrt::{
-    AnaI, COV_HELPER_NAMES, CovCtx, DCELL, HELPER_NAMES, OPSTK_N, SINK_CAP, STACK_CAP, Statics,
-    TAG_ARRAY, TAG_CLOSURE, TAG_DICT, TAG_INSTANCE, TAG_STR, analyze_body, binop_prod,
-    emit_helpers, emit_trampoline, native_key,
-};
-use crate::{Bail, Body, K, Opts, Sig, Skip, Wasmgen};
 
 macro_rules! bail {
     ($($a:tt)*) => { return Err(format!($($a)*)) };
@@ -53,9 +52,7 @@ fn succs(body: &IrBody, bid: BlockId) -> (Option<BlockId>, Vec<BlockId>) {
         match &body.instructions[iid] {
             Inst::Jump { target } => ft = Some(*target),
             Inst::JumpIfFalse { target, .. } | Inst::ForNext { target, .. } => brs.push(*target),
-            Inst::Switch {
-                table, default, ..
-            } => {
+            Inst::Switch { table, default, .. } => {
                 brs.extend(table.iter().copied());
                 brs.push(*default);
             }
@@ -199,7 +196,12 @@ pub fn emit_waffle_ir(
     let bodies: Vec<&IrBody> = ir.bodies.iter().map(|(_, b)| b).collect();
     let ninsts: Vec<usize> = bodies
         .iter()
-        .map(|b| b.blocks.iter().map(|(_, bl)| bl.stream.len()).sum::<usize>())
+        .map(|b| {
+            b.blocks
+                .iter()
+                .map(|(_, bl)| bl.stream.len())
+                .sum::<usize>()
+        })
         .collect();
 
     // cross-body fixpoint on return classes
@@ -277,7 +279,12 @@ pub fn emit_waffle_ir(
         let mut params: Vec<K> = body
             .captures
             .iter()
-            .map(|p| ana.lclass.get(&(p.index() as u32)).copied().unwrap_or(K::Word))
+            .map(|p| {
+                ana.lclass
+                    .get(&(p.index() as u32))
+                    .copied()
+                    .unwrap_or(K::Word)
+            })
             .collect();
         params.extend(body.params.iter().map(|p| {
             ana.lclass
@@ -337,10 +344,13 @@ pub fn emit_waffle_ir(
         .iter()
         .flat_map(|(_, body)| {
             body.blocks.iter().flat_map(|(_, block)| {
-                block.stream.iter().filter_map(|&iid| match &body.instructions[iid] {
-                    Inst::Call { args, .. } => Some(args.len()),
-                    _ => None,
-                })
+                block
+                    .stream
+                    .iter()
+                    .filter_map(|&iid| match &body.instructions[iid] {
+                        Inst::Call { args, .. } => Some(args.len()),
+                        _ => None,
+                    })
             })
         })
         .max()
@@ -378,18 +388,16 @@ pub fn emit_waffle_ir(
     // signature dedup keyed on the (params, ret) class tuple
     let mut sig_map: HashMap<(Vec<K>, Option<K>), Signature> = HashMap::new();
     let sig_of = |module: &mut Module,
-                      sig_map: &mut HashMap<(Vec<K>, Option<K>), Signature>,
-                      params: &[K],
-                      ret: Option<K>|
+                  sig_map: &mut HashMap<(Vec<K>, Option<K>), Signature>,
+                  params: &[K],
+                  ret: Option<K>|
      -> Signature {
-        *sig_map
-            .entry((params.to_vec(), ret))
-            .or_insert_with(|| {
-                module.signatures.push(SignatureData {
-                    params: params.iter().map(|k| wty(*k)).collect(),
-                    returns: ret.iter().map(|k| wty(*k)).collect(),
-                })
+        *sig_map.entry((params.to_vec(), ret)).or_insert_with(|| {
+            module.signatures.push(SignatureData {
+                params: params.iter().map(|k| wty(*k)).collect(),
+                returns: ret.iter().map(|k| wty(*k)).collect(),
             })
+        })
     };
 
     // ---- native imports: (id, params, ret) per call site, same ABI names ----
@@ -465,14 +473,14 @@ pub fn emit_waffle_ir(
     let g_osp = Global::new(module.globals.len() + 6);
     let g_dcov = Global::new(module.globals.len() + 7);
     for (ty_v, mutable) in [
-        (heap_base as u64, true),  // __hp
-        (0, true),                 // __status
-        (sp_init as u64, true),    // __sp
-        (0, true),                 // __covp
-        (sink_base as u64, false), // __covbuf
-        (ptmap_base as u64, false),// __ptmap
-        (0, true),                 // __osp
-        (decv_base as u64, false), // __dcov
+        (heap_base as u64, true),   // __hp
+        (0, true),                  // __status
+        (sp_init as u64, true),     // __sp
+        (0, true),                  // __covp
+        (sink_base as u64, false),  // __covbuf
+        (ptmap_base as u64, false), // __ptmap
+        (0, true),                  // __osp
+        (decv_base as u64, false),  // __dcov
     ] {
         module.globals.push(GlobalData {
             ty: WTy::I32,
@@ -492,9 +500,7 @@ pub fn emit_waffle_ir(
         let mut stub = FunctionBody::new(&module, ws);
         stub.set_terminator(stub.entry, Terminator::Unreachable);
         let f = Func::new(module.funcs.len());
-        module
-            .funcs
-            .push(FuncDecl::Body(ws, format!("b{b}"), stub));
+        module.funcs.push(FuncDecl::Body(ws, format!("b{b}"), stub));
         funcs.insert(b, f);
     }
     let nbodies_slots = funcs.len() as u32;
@@ -694,14 +700,19 @@ pub fn emit_waffle_ir(
         });
         let buf = h.f.into_raw_body();
         let f = Func::new(module.funcs.len());
-        module.funcs.push(FuncDecl::Compiled(sig, h.name.into(), buf));
+        module
+            .funcs
+            .push(FuncDecl::Compiled(sig, h.name.into(), buf));
         debug_assert_eq!(f.index() as u32, helpers_u32[h.name]);
     }
     // trampolines: emit with real callee indices; table position = tramp idx
     let mut tramp_funcs: Vec<Func> = Vec::new();
     for &t in &tramp_targets {
-        let f_enc =
-            emit_trampoline(bodies[t], sigs[t].as_ref().unwrap(), funcs[&t].index() as u32);
+        let f_enc = emit_trampoline(
+            bodies[t],
+            sigs[t].as_ref().unwrap(),
+            funcs[&t].index() as u32,
+        );
         let buf = f_enc.into_raw_body();
         let f = Func::new(module.funcs.len());
         module
@@ -843,16 +854,40 @@ impl<'a> WFx<'a> {
         self.emit(WOp::F64Const { value: f.to_bits() }, &[], &[WTy::F64])
     }
     fn load64(&mut self, addr: Value, off: u32) -> Value {
-        self.emit(WOp::I64Load { memory: marg(off, 3) }, &[addr], &[WTy::I64])
+        self.emit(
+            WOp::I64Load {
+                memory: marg(off, 3),
+            },
+            &[addr],
+            &[WTy::I64],
+        )
     }
     fn load32(&mut self, addr: Value, off: u32) -> Value {
-        self.emit(WOp::I32Load { memory: marg(off, 2) }, &[addr], &[WTy::I32])
+        self.emit(
+            WOp::I32Load {
+                memory: marg(off, 2),
+            },
+            &[addr],
+            &[WTy::I32],
+        )
     }
     fn store64(&mut self, addr: Value, v: Value, off: u32) {
-        self.emit(WOp::I64Store { memory: marg(off, 3) }, &[addr, v], &[]);
+        self.emit(
+            WOp::I64Store {
+                memory: marg(off, 3),
+            },
+            &[addr, v],
+            &[],
+        );
     }
     fn store32(&mut self, addr: Value, v: Value, off: u32) {
-        self.emit(WOp::I32Store { memory: marg(off, 2) }, &[addr, v], &[]);
+        self.emit(
+            WOp::I32Store {
+                memory: marg(off, 2),
+            },
+            &[addr, v],
+            &[],
+        );
     }
     fn store8(&mut self, addr: Value, v: Value) {
         self.emit(WOp::I32Store8 { memory: marg(0, 0) }, &[addr, v], &[]);
@@ -986,16 +1021,12 @@ impl<'a> WFx<'a> {
             }
             _ => {
                 let ix = iid.index() as u32;
-                let (v, k) = self
-                    .iv
-                    .get(&ix)
-                    .copied()
-                    .ok_or_else(|| {
-                        format!(
-                            "inst {ix} not materialized: {:?}",
-                            self.body.instructions[iid]
-                        )
-                    })?;
+                let (v, k) = self.iv.get(&ix).copied().ok_or_else(|| {
+                    format!(
+                        "inst {ix} not materialized: {:?}",
+                        self.body.instructions[iid]
+                    )
+                })?;
                 self.coerce_val(v, k, want)
             }
         }
@@ -1097,9 +1128,9 @@ impl<'a> WFx<'a> {
             };
             let pk = self.stored_k(piid);
             let v = match branches.iter().find(|(b, _)| b.index() == pred) {
-                Some((_, i)) => self.get(*i, pk).map_err(|e| {
-                    format!("{e} (phi {piid:?} arg, b{pred}->b{target})")
-                })?,
+                Some((_, i)) => self
+                    .get(*i, pk)
+                    .map_err(|e| format!("{e} (phi {piid:?} arg, b{pred}->b{target})"))?,
                 None => self.zero(wty(pk)),
             };
             args.push(v);
@@ -1139,9 +1170,7 @@ impl<'a> WFx<'a> {
     fn imm(&self, iid: InstId, kind: OperandKind) -> Option<i64> {
         match (kind, &self.body.instructions[iid]) {
             (OperandKind::Int, Inst::Constant(Constant::Int(v))) => Some(*v),
-            (OperandKind::Float, Inst::Constant(Constant::Float(f))) => {
-                Some(f.to_bits() as i64)
-            }
+            (OperandKind::Float, Inst::Constant(Constant::Float(f))) => Some(f.to_bits() as i64),
             _ => None,
         }
     }
@@ -1172,7 +1201,7 @@ impl<'a> WFx<'a> {
             | Inst::UnaryOp { .. }
                 if !live =>
             {
-                return Ok(())
+                return Ok(());
             }
             _ => {}
         }
@@ -1227,8 +1256,7 @@ impl<'a> WFx<'a> {
                     let four = self.k32(4);
                     let two = self.k32(2);
                     let cap2 = self.emit(WOp::I32Mul, &[cap, two], &[WTy::I32]);
-                    let newcap =
-                        self.emit(WOp::Select, &[four, cap2, cz], &[WTy::I32]);
+                    let newcap = self.emit(WOp::Select, &[four, cap2, cz], &[WTy::I32]);
                     let eight = self.k32(8);
                     let szb = self.emit(WOp::I32Mul, &[newcap, eight], &[WTy::I32]);
                     let sz = self.alloc(szb);
@@ -1313,11 +1341,7 @@ impl<'a> WFx<'a> {
                 );
                 self.store_dst(iid, outs[0], K::Word)?;
             }
-            Inst::SetIndex {
-                set,
-                index,
-                value,
-            } => {
+            Inst::SetIndex { set, index, value } => {
                 let sw = self.get(set, K::Word)?;
                 let hp = self.wrap(sw);
                 let tag = self.load32(hp, 0);
@@ -1491,7 +1515,12 @@ impl<'a> WFx<'a> {
                 let ea = self.op_at(bb, WOp::I32Add, &[data, sh], &[WTy::I32]);
                 let elem = self.op_at(bb, WOp::I64Load { memory: marg(0, 3) }, &[ea], &[WTy::I64]);
                 let kf = self.helpers["__key_eq"];
-                let eq = self.op_at(bb, WOp::Call { function_index: kf }, &[elem, nw], &[WTy::I32]);
+                let eq = self.op_at(
+                    bb,
+                    WOp::Call { function_index: kf },
+                    &[elem, nw],
+                    &[WTy::I32],
+                );
                 let (hb, nb) = (self.fb.add_block(), self.fb.add_block());
                 self.fb.set_terminator(
                     bb,
@@ -2177,7 +2206,9 @@ impl<'a> WFx<'a> {
                         BinOp::Add => self.cmp(l, r, K::Float, K::Float, WOp::F64Add)?,
                         BinOp::Sub => self.cmp(l, r, K::Float, K::Float, WOp::F64Sub)?,
                         BinOp::Mult => self.cmp(l, r, K::Float, K::Float, WOp::F64Mul)?,
-                        BinOp::Div | BinOp::IDiv => self.cmp(l, r, K::Float, K::Float, WOp::F64Div)?,
+                        BinOp::Div | BinOp::IDiv => {
+                            self.cmp(l, r, K::Float, K::Float, WOp::F64Div)?
+                        }
                         BinOp::Mod => {
                             let a = self.get(l, K::Float)?;
                             let a2 = self.get(l, K::Float)?;
@@ -2222,53 +2253,48 @@ impl<'a> WFx<'a> {
                 self.store_dst(dst, v, K::Bool)?;
                 return Ok(());
             }
-            OperandKind::Str => {
-                match op {
-                    BinOp::Add => {
-                        let a = self.get(l, K::Word)?;
-                        let a32 = self.wrap(a);
-                        let b = self.get(r, K::Word)?;
-                        let b32 = self.wrap(b);
-                        let v = self.call_h("__str_cat", &[a32, b32], &[WTy::I32]);
-                        let v = self.extend(v);
-                        self.store_dst(dst, v, K::Word)?;
-                        return Ok(());
-                    }
-                    BinOp::Identity | BinOp::NotEqual => {
-                        let a = self.get(l, K::Word)?;
-                        let a32 = self.wrap(a);
-                        let b = self.get(r, K::Word)?;
-                        let b32 = self.wrap(b);
-                        let mut v = self.call_h("__str_eq", &[a32, b32], &[WTy::I32]);
-                        if op == BinOp::NotEqual {
-                            v = self.emit(WOp::I32Eqz, &[v], &[WTy::I32]);
-                        }
-                        self.store_dst(dst, v, K::Bool)?;
-                        return Ok(());
-                    }
-                    BinOp::LessThan
-                    | BinOp::LessEqual
-                    | BinOp::GreaterThan
-                    | BinOp::GreaterEqual => {
-                        let a = self.get(l, K::Word)?;
-                        let a32 = self.wrap(a);
-                        let b = self.get(r, K::Word)?;
-                        let b32 = self.wrap(b);
-                        let c = self.call_h("__str_cmp", &[a32, b32], &[WTy::I32]);
-                        let z = self.k32(0);
-                        let i = match op {
-                            BinOp::LessThan => WOp::I32LtS,
-                            BinOp::LessEqual => WOp::I32LeS,
-                            BinOp::GreaterThan => WOp::I32GtS,
-                            _ => WOp::I32GeS,
-                        };
-                        let v = self.emit(i, &[c, z], &[WTy::I32]);
-                        self.store_dst(dst, v, K::Bool)?;
-                        return Ok(());
-                    }
-                    _ => bail!("BinOp {op:?} on strs"),
+            OperandKind::Str => match op {
+                BinOp::Add => {
+                    let a = self.get(l, K::Word)?;
+                    let a32 = self.wrap(a);
+                    let b = self.get(r, K::Word)?;
+                    let b32 = self.wrap(b);
+                    let v = self.call_h("__str_cat", &[a32, b32], &[WTy::I32]);
+                    let v = self.extend(v);
+                    self.store_dst(dst, v, K::Word)?;
+                    return Ok(());
                 }
-            }
+                BinOp::Identity | BinOp::NotEqual => {
+                    let a = self.get(l, K::Word)?;
+                    let a32 = self.wrap(a);
+                    let b = self.get(r, K::Word)?;
+                    let b32 = self.wrap(b);
+                    let mut v = self.call_h("__str_eq", &[a32, b32], &[WTy::I32]);
+                    if op == BinOp::NotEqual {
+                        v = self.emit(WOp::I32Eqz, &[v], &[WTy::I32]);
+                    }
+                    self.store_dst(dst, v, K::Bool)?;
+                    return Ok(());
+                }
+                BinOp::LessThan | BinOp::LessEqual | BinOp::GreaterThan | BinOp::GreaterEqual => {
+                    let a = self.get(l, K::Word)?;
+                    let a32 = self.wrap(a);
+                    let b = self.get(r, K::Word)?;
+                    let b32 = self.wrap(b);
+                    let c = self.call_h("__str_cmp", &[a32, b32], &[WTy::I32]);
+                    let z = self.k32(0);
+                    let i = match op {
+                        BinOp::LessThan => WOp::I32LtS,
+                        BinOp::LessEqual => WOp::I32LeS,
+                        BinOp::GreaterThan => WOp::I32GtS,
+                        _ => WOp::I32GeS,
+                    };
+                    let v = self.emit(i, &[c, z], &[WTy::I32]);
+                    self.store_dst(dst, v, K::Bool)?;
+                    return Ok(());
+                }
+                _ => bail!("BinOp {op:?} on strs"),
+            },
             OperandKind::Generic => {
                 let g = self
                     .ana
@@ -2295,7 +2321,11 @@ impl<'a> WFx<'a> {
             let a = self.get(l, K::Int)?;
             let b = self.get(r, K::Int)?;
             return Ok(self.emit(
-                if op == BinOp::Mod { WOp::I64RemS } else { WOp::I64DivS },
+                if op == BinOp::Mod {
+                    WOp::I64RemS
+                } else {
+                    WOp::I64DivS
+                },
                 &[a, b],
                 &[WTy::I64],
             ));
@@ -2363,7 +2393,11 @@ impl<'a> WFx<'a> {
                 let a = self.get(l, K::Int)?;
                 let c = self.k64(v);
                 return Ok(self.emit(
-                    if op == BinOp::Mod { WOp::I64RemS } else { WOp::I64DivS },
+                    if op == BinOp::Mod {
+                        WOp::I64RemS
+                    } else {
+                        WOp::I64DivS
+                    },
                     &[a, c],
                     &[WTy::I64],
                 ));
@@ -2467,7 +2501,11 @@ fn wbody_full(
 
     let mut wb: Vec<WBlock> = Vec::with_capacity(body.blocks.len());
     for (b, _) in body.blocks.iter() {
-        wb.push(if b.index() == 0 { entry } else { fb.add_block() });
+        wb.push(if b.index() == 0 {
+            entry
+        } else {
+            fb.add_block()
+        });
     }
 
     // blockparams: phis (stream order, at their stored class) then live locals
@@ -2493,10 +2531,7 @@ fn wbody_full(
                 }
                 phis[b.index()].push(iid);
                 let pk = ana.class.get(&ix).copied().unwrap_or(K::Word);
-                phi_val.insert(
-                    ix,
-                    fb.add_blockparam(wb[b.index()], wty(pk)),
-                );
+                phi_val.insert(ix, fb.add_blockparam(wb[b.index()], wty(pk)));
             }
         }
         for &l in &live {
@@ -2554,7 +2589,8 @@ fn wbody_full(
         cx.cur.clear();
         if bx == 0 {
             for (i, p) in body.captures.iter().enumerate() {
-                cx.cur.insert(p.index() as u32, cx.fb.blocks[entry].params[i].1);
+                cx.cur
+                    .insert(p.index() as u32, cx.fb.blocks[entry].params[i].1);
             }
             let ncaps = body.captures.len();
             for (i, p) in body.params.iter().enumerate() {
@@ -2609,12 +2645,8 @@ fn wbody_full(
             cx.seq_i += 1;
             match &body.instructions[iid] {
                 Inst::Jump { target } => jump = Some(*target),
-                Inst::JumpIfFalse { condition, target } => {
-                    condbr = Some((*condition, *target))
-                }
-                Inst::ForNext { idx, bound, target } => {
-                    fornext = Some((*idx, *bound, *target))
-                }
+                Inst::JumpIfFalse { condition, target } => condbr = Some((*condition, *target)),
+                Inst::ForNext { idx, bound, target } => fornext = Some((*idx, *bound, *target)),
                 Inst::Switch {
                     scrut,
                     base,
@@ -2646,10 +2678,12 @@ fn wbody_full(
             match ana.ret {
                 Some(k) => {
                     let val = cx.get(v, k)?;
-                    cx.fb.set_terminator(cx.w, Terminator::Return { values: vec![val] });
+                    cx.fb
+                        .set_terminator(cx.w, Terminator::Return { values: vec![val] });
                 }
                 None => {
-                    cx.fb.set_terminator(cx.w, Terminator::Return { values: vec![] });
+                    cx.fb
+                        .set_terminator(cx.w, Terminator::Return { values: vec![] });
                 }
             }
             continue;
@@ -2684,10 +2718,7 @@ fn wbody_full(
                 bail!("for_next idx not a local read")
             };
             let lx = l.index() as u32;
-            let cur = *cx
-                .cur
-                .get(&lx)
-                .ok_or("for_next idx local unclassed")?;
+            let cur = *cx.cur.get(&lx).ok_or("for_next idx local unclassed")?;
             let one = cx.k64(1);
             let i1 = cx.emit(WOp::I64Add, &[cur, one], &[WTy::I64]);
             cx.cur.insert(lx, i1);
@@ -2751,7 +2782,8 @@ fn wbody_full(
         if done.contains(&b.index()) {
             continue;
         }
-        cx.fb.set_terminator(cx.wb[b.index()], Terminator::Unreachable);
+        cx.fb
+            .set_terminator(cx.wb[b.index()], Terminator::Unreachable);
     }
 
     cx.fb.recompute_edges();

@@ -7,8 +7,8 @@
 //
 // usage: emit_cov <file.mim> [out.wasm]
 use mimas::native;
-use vm::anon::T;
 use vm::Ctx;
+use vm::anon::T;
 
 #[native]
 fn hit<'gc>(_ctx: Ctx<'gc>, _p: i64) {}
@@ -113,7 +113,12 @@ fn main() {
     let bodies = w
         .bodies
         .iter()
-        .map(|b| format!("{{\"body\":{},\"func\":{},\"name\":\"{}\"}}", b.body, b.func, b.name))
+        .map(|b| {
+            format!(
+                "{{\"body\":{},\"func\":{},\"name\":\"{}\"}}",
+                b.body, b.func, b.name
+            )
+        })
         .collect::<Vec<_>>()
         .join(",");
     let skipped = w

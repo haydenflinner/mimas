@@ -32,7 +32,12 @@ fn main() {
     let (_program, ir, _s) =
         Vm::compile_parts_ir(&[("<t>", &src)], |api| mimas::library::std(api)).expect("compile");
     for (bid, body) in ir.bodies.iter() {
-        println!("=== body {} params={:?} locals={}", bid.index(), body.params, body.locals.len());
+        println!(
+            "=== body {} params={:?} locals={}",
+            bid.index(),
+            body.params,
+            body.locals.len()
+        );
         for (bkid, block) in body.blocks.iter() {
             println!("  block {}:", bkid.index());
             for &iid in &block.stream {

@@ -301,9 +301,7 @@ pub(crate) fn analyze_body(body: &IrBody, ret: &[Option<K>]) -> Result<AnaI, Bai
                         // "any materialization" like Format — neg/abs pick the
                         // operand's own class, so the demand must not pin it
                         // to one (but the operand must still materialize)
-                        UnaryOp::Negative | UnaryOp::Positive => {
-                            K_INT | K_FLOAT | K_BOOL | K_WORD
-                        }
+                        UnaryOp::Negative | UnaryOp::Positive => K_INT | K_FLOAT | K_BOOL | K_WORD,
                     };
                 }
                 Inst::JumpIfFalse { condition, .. } => need[condition.index()] |= K_BOOL,
@@ -323,11 +321,7 @@ pub(crate) fn analyze_body(body: &IrBody, ret: &[Option<K>]) -> Result<AnaI, Bai
                     need[set.index()] |= K_WORD;
                     need[index.index()] |= K_WORD;
                 }
-                Inst::SetIndex {
-                    set,
-                    index,
-                    value,
-                } => {
+                Inst::SetIndex { set, index, value } => {
                     need[set.index()] |= K_WORD;
                     need[index.index()] |= K_WORD;
                     need[value.index()] |= K_WORD;
@@ -499,11 +493,13 @@ pub(crate) fn analyze_body(body: &IrBody, ret: &[Option<K>]) -> Result<AnaI, Bai
                     Inst::BinOp { op, kind, .. } => {
                         binop_prod(*op, *kind).map(kbit).unwrap_or(0) | K_WORD
                     }
-                    Inst::UnaryOp { op, right } => (match op {
-                        UnaryOp::Negative | UnaryOp::Positive => snap_mask[right.index()],
-                        UnaryOp::Not => K_BOOL,
-                        _ => K_INT,
-                    }) | K_WORD,
+                    Inst::UnaryOp { op, right } => {
+                        (match op {
+                            UnaryOp::Negative | UnaryOp::Positive => snap_mask[right.index()],
+                            UnaryOp::Not => K_BOOL,
+                            _ => K_INT,
+                        }) | K_WORD
+                    }
                     Inst::Phi(branches) => branches
                         .iter()
                         .fold(0u8, |m, (_, v)| m | snap_mask[v.index()]),
@@ -2497,10 +2493,7 @@ pub(crate) fn emit_trampoline(body: &IrBody, sig: &Sig, callee_fi: u32) -> Funct
         }
     };
     for i in 0..ncaps {
-        for ins in [
-            I::LocalGet(0),
-            I::I64Load(mem_arg(16 + i as u32 * 8, 3)),
-        ] {
+        for ins in [I::LocalGet(0), I::I64Load(mem_arg(16 + i as u32 * 8, 3))] {
             f.instruction(&ins);
         }
         unmarshal(&mut f, sig.params[i]);

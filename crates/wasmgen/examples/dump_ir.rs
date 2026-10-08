@@ -46,14 +46,17 @@ let r = fib(10) + sum(20) + wh(30) + sw(2) + fl(3.5).to_int();
 "#;
 
 fn main() {
-    let out = std::env::args().nth(1).expect("usage: dump_ir <out.wasm> [src.mimas]");
+    let out = std::env::args()
+        .nth(1)
+        .expect("usage: dump_ir <out.wasm> [src.mimas]");
     let src = std::env::args()
         .nth(2)
         .map(|p| std::fs::read_to_string(&p).expect("read src"))
         .unwrap_or_else(|| SRC.to_string());
     let (program, ir, _s) =
         Vm::compile_parts_ir(&[("<t>", &src)], |api| mimas::library::std(api)).expect("compile");
-    let w = emit_waffle_ir(&ir, &program.strs, &Opts::default(), None, None, 0, 0).expect("emit_waffle_ir");
+    let w = emit_waffle_ir(&ir, &program.strs, &Opts::default(), None, None, 0, 0)
+        .expect("emit_waffle_ir");
 
     let mut names = std::collections::HashMap::new();
     fn walk(

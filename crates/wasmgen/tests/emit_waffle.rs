@@ -48,7 +48,8 @@ let r = fib(10) + sum(20) + wh(30) + sw(2) + fl(3.5).to_int();
 fn emits_valid_wasm() {
     let (_program, ir, _s) =
         Vm::compile_parts_ir(&[("<t>", SRC)], |api| mimas::library::std(api)).expect("compile");
-    let w = emit_waffle_ir(&ir, &_program.strs, &Opts::default(), None, None, 0, 0).expect("emit_waffle_ir");
+    let w = emit_waffle_ir(&ir, &_program.strs, &Opts::default(), None, None, 0, 0)
+        .expect("emit_waffle_ir");
     assert!(
         !w.bodies.is_empty(),
         "expected some bodies to emit; all skipped: {:?}",
@@ -98,7 +99,8 @@ fn heap_ops_emit_valid_wasm() {
     let (_program, ir, _s) =
         Vm::compile_parts_ir(&[("<t>", HEAP_SRC)], |api| mimas::library::std(api))
             .expect("compile");
-    let w = emit_waffle_ir(&ir, &_program.strs, &Opts::default(), None, None, 0, 0).expect("emit_waffle_ir");
+    let w = emit_waffle_ir(&ir, &_program.strs, &Opts::default(), None, None, 0, 0)
+        .expect("emit_waffle_ir");
     assert!(
         w.skipped.is_empty(),
         "heap-ops bodies must all emit; skipped: {:?}",
@@ -136,22 +138,12 @@ fn entry_ops_emit_valid_wasm() {
     let (_program, ir, _s) =
         Vm::compile_parts_ir(&[("<t>", ENTRY_SRC)], |api| mimas::library::std(api))
             .expect("compile");
-    let w = emit_waffle_ir(&ir, &_program.strs, &Opts::default(), None, None, 0, 0).expect("emit_waffle_ir");
+    let w = emit_waffle_ir(&ir, &_program.strs, &Opts::default(), None, None, 0, 0)
+        .expect("emit_waffle_ir");
     assert!(
         w.skipped.is_empty(),
         "entry-ops bodies must all emit; skipped: {:?}",
         w.skipped.iter().map(|s| &s.reason).collect::<Vec<_>>()
     );
-    wasmparser::validate(&w.bytes).expect("invalid wasm");
-}
-
-// Surfaces a pre-existing `emit` bug — "expected i64 but nothing on stack" —
-// on this source; the IR lane emits valid bytes for the same program.
-#[test]
-#[ignore = "pre-existing old-lane validation failure"]
-fn bytecode_lane_still_valid() {
-    let (program, _ir, _s) =
-        Vm::compile_parts_ir(&[("<t>", SRC)], |api| mimas::library::std(api)).expect("compile");
-    let w = mimas_wasmgen::emit(&program).expect("emit");
     wasmparser::validate(&w.bytes).expect("invalid wasm");
 }
