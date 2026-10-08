@@ -36,8 +36,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use compile::{BinOp, BlockTarget, Constant, Op, Program, Reg, UnaryOp};
 
-pub mod irgen;
-pub mod wemit;
+pub mod wrt;
 pub mod wfull;
 use wasm_encoder::{
     BlockType, CodeSection, CustomSection, Encode, EntityType, ExportKind, ExportSection, Function,
@@ -1469,7 +1468,7 @@ pub struct Opts {
     pub coverage: bool,
 }
 
-/// Passthrough-native classification for [`irgen::emit_ir`]'s
+/// Passthrough-native classification for [`wfull::emit_waffle_ir`]'s
 /// linear-memory sink: the named natives record `(id, arg words)` into an
 /// exported buffer instead of crossing the wasm import boundary, and the
 /// host replays them in order. Return semantics are fixed per kind — the

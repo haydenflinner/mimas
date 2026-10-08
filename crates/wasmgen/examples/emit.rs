@@ -28,7 +28,7 @@ fn main() {
         let (program, ir, _s) =
             vm::Vm::compile_parts_ir(&[("main", source.as_str())], mimas::library::std)
                 .expect("compile");
-        mimas_wasmgen::irgen::emit_ir(&ir, &program.strs, &opts, None, None, 0, 0).expect("emit ir")
+        mimas_wasmgen::wfull::emit_waffle_ir(&ir, &program.strs, &opts, None, None, 0, 0).expect("emit ir")
     } else {
         let (program, _s) = vm::Vm::compile_parts(&[("main", source.as_str())], mimas::library::std)
             .expect("compile");

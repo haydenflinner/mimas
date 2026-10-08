@@ -1,15 +1,15 @@
 //! `emit_waffle_ir` — the production lane: `compile::Ir` bodies -> waffle
-//! `FunctionBody`s -> wasm. Same inst semantics as `irgen::emit_ir` (the
-//! tagged heap, dict/str helpers, coverage sink, host ABI), but waffle's
-//! reducify/stackify/localify backend replaces `layout`/`scopes_ir`/repair.
+//! `FunctionBody`s -> wasm. Inst semantics (the tagged heap, dict/str
+//! helpers, coverage sink, host ABI) live in the per-inst arms below;
+//! waffle's reducify/stackify/localify backend owns CFG lowering, so any
+//! CFG shape — irreducible included — emits.
 //!
 //! ## Representation
 //!
 //! Mimas locals become SSA by threading one typed blockparam per *live*
 //! local through every CFG edge (max-SSA; `localify` prunes); `Phi` insts
 //! become real blockparams. Each SSA value carries its stored class
-//! (`class`/`lclass`, else `Word`) — the same repr contract as `irgen`'s
-//! slots, so `get`/`store_dst`/`coerce` are verbatim transcriptions.
+//! (`class`/`lclass`, else `Word`).
 //!
 //! Wasm scratch locals (`tmp`/`sz`/`hp`/`tb`/`tc`) become plain SSA values.
 //! Mid-block `if`s inside inst arms (`Len`/`GetIndex`/`Push`/`In`/checked
@@ -17,8 +17,8 @@
 //! value-producing `if` lowers to a merge blockparam.
 //!
 //! The runtime helpers (`__alloc`, `__str_*`, `__dict_*`, `__cov_*`) ride
-//! along as `FuncDecl::Compiled` — `emit_helpers` produces the exact same
-//! wasm_encoder bytes as the `irgen` lane, spliced into the code section.
+//! along as `FuncDecl::Compiled` — `wrt::emit_helpers` produces raw
+//! wasm_encoder bytes spliced into the code section.
 
 use std::collections::{HashMap, HashSet};
 
@@ -32,16 +32,105 @@ use waffle::{
     Signature, SignatureData, Table, TableData, Terminator, Type as WTy, Value,
     entity::EntityRef,
 };
-use crate::irgen::{
+use crate::wrt::{
     AnaI, COV_HELPER_NAMES, CovCtx, DCELL, HELPER_NAMES, OPSTK_N, SINK_CAP, STACK_CAP, Statics,
     TAG_ARRAY, TAG_CLOSURE, TAG_DICT, TAG_INSTANCE, TAG_STR, analyze_body, binop_prod,
     emit_helpers, emit_trampoline, native_key,
 };
-use crate::wemit::dfs_order;
 use crate::{Bail, Body, K, Opts, Sig, Skip, Wasmgen};
 
 macro_rules! bail {
     ($($a:tt)*) => { return Err(format!($($a)*)) };
+}
+
+/// body-block successors mirroring codegen's convention: `Jump` is the
+/// fallthrough (unconditional edge), `JumpIfFalse`/`ForNext`/`Switch` are the
+/// branch edges.
+fn succs(body: &IrBody, bid: BlockId) -> (Option<BlockId>, Vec<BlockId>) {
+    let mut ft = None;
+    let mut brs = Vec::new();
+    for &iid in &body.blocks[bid].stream {
+        match &body.instructions[iid] {
+            Inst::Jump { target } => ft = Some(*target),
+            Inst::JumpIfFalse { target, .. } | Inst::ForNext { target, .. } => brs.push(*target),
+            Inst::Switch {
+                table, default, ..
+            } => {
+                brs.extend(table.iter().copied());
+                brs.push(*default);
+            }
+            _ => {}
+        }
+    }
+    (ft, brs)
+}
+
+/// fallthrough-first DFS from entry — matches codegen's serialization order.
+fn dfs_order(body: &IrBody) -> Vec<BlockId> {
+    let mut order = Vec::new();
+    let mut placed = vec![false; body.blocks.len()];
+    let mut stack = vec![BlockId::ZERO];
+    while let Some(b) = stack.pop() {
+        if placed[b.index()] {
+            continue;
+        }
+        placed[b.index()] = true;
+        order.push(b);
+        let (ft, brs) = succs(body, b);
+        for t in brs {
+            stack.push(t);
+        }
+        if let Some(f) = ft {
+            stack.push(f);
+        }
+    }
+    order
+}
+
+/// Word bytes for one const-array element — Float rides as raw f64 bits,
+/// Str as its static object address, nested arrays recurse (children bake
+/// first so their addresses exist when the parent's words are written).
+fn const_word(ctx: &Statics, c: &Constant) -> Result<i64, Bail> {
+    Ok(match c {
+        Constant::Int(v) => *v,
+        Constant::Float(v) => v.to_bits() as i64,
+        Constant::Bool(v) => *v as i64,
+        Constant::Null => 0,
+        Constant::Str(s) => *ctx
+            .str_objs
+            .get(&(s.index() as u32))
+            .ok_or("str in const array not laid out")? as i64,
+        Constant::Array(es) => bake_const_array_obj(ctx, es)? as i64,
+    })
+}
+
+/// Bake `elems` as a tagged `TAG_ARRAY` object in the statics hole:
+/// `[tag][data][len][cap]` header followed by the 8-byte element words.
+/// Identical arrays dedup on their serialized element words.
+fn bake_const_array_obj(ctx: &Statics, elems: &[Constant]) -> Result<u32, Bail> {
+    let mut words = Vec::with_capacity(elems.len() * 8);
+    for e in elems {
+        words.extend(const_word(ctx, e)?.to_le_bytes());
+    }
+    if let Some(&a) = ctx.arr_objs.borrow().get(&words) {
+        return Ok(a);
+    }
+    let n = elems.len() as u32;
+    let addr = ctx.arr_cur.get();
+    let end = addr + 16 + n * 8;
+    if end > ctx.arr_cap {
+        return Err("const-array statics overflow the 1MB hole".into());
+    }
+    let mut b = Vec::with_capacity((end - addr) as usize);
+    b.extend(TAG_ARRAY.to_le_bytes());
+    b.extend((addr + 16).to_le_bytes());
+    b.extend(n.to_le_bytes());
+    b.extend(n.to_le_bytes());
+    b.extend_from_slice(&words);
+    ctx.arr_cur.set(end);
+    ctx.arr_statics.borrow_mut().push((addr, b));
+    ctx.arr_objs.borrow_mut().insert(words, addr);
+    Ok(addr)
 }
 
 /// `cov_base` sentinel — no per-inst coverage bytes.
@@ -75,10 +164,9 @@ fn marg(offset: u32, align: u32) -> waffle::MemoryArg {
 
 // ---------- module ----------
 
-/// Emit the module from `ir` through waffle. Mirrors `emit_ir`'s signature
-/// and `Wasmgen` output so the lanes are drop-in interchangeable; skipped
-/// bodies keep trapping stubs (callers are skipped by dep propagation, so
-/// the interpreter lane owns them, same as `irgen`).
+/// Emit the module from `ir` through waffle. Skipped bodies keep trapping
+/// stubs (callers are skipped by dep propagation, so the interpreter lane
+/// owns them).
 pub fn emit_waffle_ir(
     ir: &Ir,
     strs: &StrInterner,
@@ -136,7 +224,7 @@ pub fn emit_waffle_ir(
         }
     }
 
-    // ---- static string objects: same layout algorithm as emit_ir ----
+    // ---- static string objects: bake tagged Str objects into memory ----
     let mut str_objs: HashMap<u32, u32> = HashMap::new();
     {
         let mut ids: Vec<u32> = Vec::new();
@@ -144,7 +232,17 @@ pub fn emit_waffle_ir(
             for (_, block) in body.blocks.iter() {
                 for &iid in &block.stream {
                     match &body.instructions[iid] {
-                        Inst::Constant(Constant::Str(s)) => ids.push(s.index() as u32),
+                        Inst::Constant(c) => {
+                            // Str consts nested in const arrays need objects too
+                            let mut stack = vec![c];
+                            while let Some(c) = stack.pop() {
+                                match c {
+                                    Constant::Str(s) => ids.push(s.index() as u32),
+                                    Constant::Array(es) => stack.extend(es.iter()),
+                                    _ => {}
+                                }
+                            }
+                        }
                         Inst::Format(parts) => {
                             for p in parts {
                                 if let FormatPart::Literal(s) = p {
@@ -193,7 +291,7 @@ pub fn emit_waffle_ir(
         });
     }
 
-    // ---- memory layout: identical contract to emit_ir ----
+    // ---- memory layout: statics / heap base / cov plane ----
     let cov_total: u32 = if opts.coverage {
         (0..nbodies)
             .filter(|b| sigs[*b].is_some())
@@ -269,6 +367,11 @@ pub fn emit_waffle_ir(
         null_obj,
         call_scratch,
         i64_scratch,
+        // const arrays bake lazily past the fixed statics, capped at cov0
+        arr_cur: std::cell::Cell::new(off),
+        arr_cap: cov0,
+        arr_objs: std::cell::RefCell::new(HashMap::new()),
+        arr_statics: std::cell::RefCell::new(Vec::new()),
     };
 
     let mut module = Module::empty();
@@ -617,6 +720,13 @@ pub fn emit_waffle_ir(
         });
     }
     let pages = (heap_base as u64 + 65535) / 65536;
+    // lazily-baked const-array objects join the fixed statics
+    for (addr, bytes) in ctx.arr_statics.borrow_mut().drain(..) {
+        statics.push(MemorySegment {
+            offset: addr as usize,
+            data: bytes,
+        });
+    }
     module.memories.push(MemoryData {
         initial_pages: pages.max(1) as usize,
         maximum_pages: None,
@@ -802,14 +912,14 @@ impl<'a> WFx<'a> {
         outs
     }
 
-    /// `if (cond) unreachable` — irgen's trap_if. Continues in a new block.
+    /// `if (cond) unreachable`. Continues in a new block.
     fn trap_if(&mut self, cond: Value) {
         let (t, cont) = self.branch(cond);
         self.fb.set_terminator(t, Terminator::Unreachable);
         self.w = cont;
     }
 
-    // ----- value access: the irgen get/emit_const/coerce/store_dst quartet -----
+    // ----- value access: get/emit_const/coerce/store_dst -----
 
     fn stored_k(&self, iid: InstId) -> K {
         if let Inst::GetLocal(l) = &self.body.instructions[iid] {
@@ -907,7 +1017,10 @@ impl<'a> WFx<'a> {
                     self.k64(a as i64)
                 }
                 Constant::Null => self.k64(0),
-                Constant::Array(_) => bail!("const array literal can't materialize"),
+                Constant::Array(es) => {
+                    let a = bake_const_array_obj(self.ctx, es)?;
+                    self.k64(a as i64)
+                }
             },
             (Constant::Int(v), K::Int) => self.k64(*v),
             (Constant::Int(v), K::Float) => self.kf(*v as f64),
@@ -984,7 +1097,9 @@ impl<'a> WFx<'a> {
             };
             let pk = self.stored_k(piid);
             let v = match branches.iter().find(|(b, _)| b.index() == pred) {
-                Some((_, i)) => self.get(*i, pk)?,
+                Some((_, i)) => self.get(*i, pk).map_err(|e| {
+                    format!("{e} (phi {piid:?} arg, b{pred}->b{target})")
+                })?,
                 None => self.zero(wty(pk)),
             };
             args.push(v);
@@ -1013,7 +1128,7 @@ impl<'a> WFx<'a> {
         })
     }
 
-    /// Pause check before a backward edge (irgen gates on `ScopeKind::Loop`).
+    /// Pause check before a backward edge.
     fn pause_check(&mut self) {
         if let Some(g) = self.pause_g {
             let c = self.emit(WOp::GlobalGet { global_index: g }, &[], &[WTy::I32]);
@@ -2371,7 +2486,7 @@ fn wbody_full(
         for &iid in &blk.stream {
             if let Inst::Phi(_) = &body.instructions[iid] {
                 // dead phis get no blockparam — their sources needn't
-                // materialize either (mirrors irgen's dropped dst slots)
+                // materialize either
                 let ix = iid.index() as u32;
                 if !ana.class.contains_key(&ix) && !ana.wused.contains(&ix) {
                     continue;
@@ -2515,15 +2630,16 @@ fn wbody_full(
                     dead = true;
                     break;
                 }
-                _ => cx.emit_inst(iid)?,
+                _ => cx
+                    .emit_inst(iid)
+                    .map_err(|e| format!("{e} @emit_inst({})", iid.index()))?,
             }
         }
         if dead {
             continue;
         }
 
-        // pause check when any branch target is a back-edge (Loop scope in
-        // irgen terms — dfs-backward edges)
+        // pause check when any branch target is a dfs-backward edge
         let backward = |t: BlockId| pos[&t.index()] <= pos[&bx];
 
         if let Some(v) = ret {
@@ -2624,7 +2740,7 @@ fn wbody_full(
             let tt = cx.tgt(bx, nx)?;
             cx.fb.set_terminator(cx.w, Terminator::Br { target: tt });
         } else {
-            // dead tail — irgen marks the last block diverging
+            // dead tail — unreachable blocks emit unreachable
             cx.fb.set_terminator(cx.w, Terminator::Unreachable);
         }
     }

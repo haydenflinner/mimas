@@ -1,8 +1,8 @@
-//! Dump `emit_ir` output for node execution checks: `dump_ir <out.wasm>`
+//! Dump `emit_waffle_ir` output for node execution checks: `dump_ir <out.wasm>`
 //! prints `b{body} -> name` lines then writes the module.
 
 use mimas::vm::Vm;
-use mimas_wasmgen::{Opts, irgen::emit_ir};
+use mimas_wasmgen::{Opts, wfull::emit_waffle_ir};
 
 const SRC: &str = r#"
 fn fib(n: int) -> int {
@@ -53,7 +53,7 @@ fn main() {
         .unwrap_or_else(|| SRC.to_string());
     let (program, ir, _s) =
         Vm::compile_parts_ir(&[("<t>", &src)], |api| mimas::library::std(api)).expect("compile");
-    let w = emit_ir(&ir, &program.strs, &Opts::default(), None, None, 0, 0).expect("emit_ir");
+    let w = emit_waffle_ir(&ir, &program.strs, &Opts::default(), None, None, 0, 0).expect("emit_waffle_ir");
 
     let mut names = std::collections::HashMap::new();
     fn walk(

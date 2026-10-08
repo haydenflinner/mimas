@@ -3079,7 +3079,7 @@ impl Vm {
     }
 
     /// [`compile_parts`] that also hands back the compiler [`compile::Ir`]
-    /// the program was lowered from — the SSA `Body`s wasmgen's `emit_ir`
+    /// the program was lowered from — the SSA `Body`s wasmgen's `emit_waffle_ir`
     /// consumes instead of re-deriving dataflow from the flat bytecode.
     pub fn compile_parts_ir<F>(
         files: &[(&str, &str)],

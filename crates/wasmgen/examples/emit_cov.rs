@@ -1,4 +1,4 @@
-// Compile a .mim that calls cov::* natives into resumable wasm, printing a
+// Compile a .mim that calls cov::* natives into wasm, printing a
 // JSON manifest that also maps native ids -> names, so the Node driver can
 // bind env.n<id>_<sig> imports to the cov sink.
 //
@@ -94,7 +94,7 @@ fn main() {
         ids.push((df.add(sum).index() as u32, "df::sum"));
     })
     .expect("compile");
-    let w = mimas_wasmgen::irgen::emit_ir(
+    let w = mimas_wasmgen::wfull::emit_waffle_ir(
         &ir,
         &program.strs,
         &Default::default(),

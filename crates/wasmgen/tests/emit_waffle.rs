@@ -1,7 +1,7 @@
-//! `emit_ir` smoke test: scalar-heavy source must emit valid wasm.
+//! `emit_waffle_ir` smoke test: scalar-heavy source must emit valid wasm.
 
 use mimas::vm::Vm;
-use mimas_wasmgen::{Opts, irgen::emit_ir};
+use mimas_wasmgen::{Opts, wfull::emit_waffle_ir};
 
 const SRC: &str = r#"
 fn fib(n: int) -> int {
@@ -48,7 +48,7 @@ let r = fib(10) + sum(20) + wh(30) + sw(2) + fl(3.5).to_int();
 fn emits_valid_wasm() {
     let (_program, ir, _s) =
         Vm::compile_parts_ir(&[("<t>", SRC)], |api| mimas::library::std(api)).expect("compile");
-    let w = emit_ir(&ir, &_program.strs, &Opts::default(), None, None, 0, 0).expect("emit_ir");
+    let w = emit_waffle_ir(&ir, &_program.strs, &Opts::default(), None, None, 0, 0).expect("emit_waffle_ir");
     assert!(
         !w.bodies.is_empty(),
         "expected some bodies to emit; all skipped: {:?}",
@@ -98,7 +98,7 @@ fn heap_ops_emit_valid_wasm() {
     let (_program, ir, _s) =
         Vm::compile_parts_ir(&[("<t>", HEAP_SRC)], |api| mimas::library::std(api))
             .expect("compile");
-    let w = emit_ir(&ir, &_program.strs, &Opts::default(), None, None, 0, 0).expect("emit_ir");
+    let w = emit_waffle_ir(&ir, &_program.strs, &Opts::default(), None, None, 0, 0).expect("emit_waffle_ir");
     assert!(
         w.skipped.is_empty(),
         "heap-ops bodies must all emit; skipped: {:?}",
@@ -136,7 +136,7 @@ fn entry_ops_emit_valid_wasm() {
     let (_program, ir, _s) =
         Vm::compile_parts_ir(&[("<t>", ENTRY_SRC)], |api| mimas::library::std(api))
             .expect("compile");
-    let w = emit_ir(&ir, &_program.strs, &Opts::default(), None, None, 0, 0).expect("emit_ir");
+    let w = emit_waffle_ir(&ir, &_program.strs, &Opts::default(), None, None, 0, 0).expect("emit_waffle_ir");
     assert!(
         w.skipped.is_empty(),
         "entry-ops bodies must all emit; skipped: {:?}",

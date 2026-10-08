@@ -1,9 +1,9 @@
-//! Waffle-spike driver: `wemit <out.wasm> [src.mimas]` — compiles the source
-//! through `wemit::emit_waffle`, prints emitted/skipped bodies, writes the
-//! wasm, and (for comparison) also runs `emit_ir` on the same IR.
+//! Waffle driver: `wemit <out.wasm> [src.mimas]` — compiles the source
+//! through `wfull::emit_waffle_ir`, prints emitted/skipped bodies, writes the
+//! wasm.
 
 use mimas::vm::Vm;
-use mimas_wasmgen::{Opts, irgen::emit_ir, wfull::emit_waffle_ir};
+use mimas_wasmgen::{Opts, wfull::emit_waffle_ir};
 
 const SRC: &str = r#"
 fn fib(n: int) -> int {
@@ -62,14 +62,6 @@ fn main() {
 
     let w = emit_waffle_ir(&ir, &program.strs, &Opts::default(), None, None, 0, 0)
         .expect("emit_waffle_ir");
-    for b in &w.bodies {
-        println!("wemit b{}", b.body);
-    }
-    for s in &w.skipped {
-        println!("wemit skip b{} {}", s.body, s.reason);
-    }
-    std::fs::write(&out, &w.bytes).expect("write");
-    eprintln!("wrote {} bytes to {out}", w.bytes.len());
 
     let mut names = std::collections::HashMap::new();
     fn walk(
@@ -87,15 +79,16 @@ fn main() {
     walk(&program.root, "", &mut names);
     names.insert(program.entry.index(), "<top-level>".into());
 
-    let i = emit_ir(&ir, &program.strs, &Opts::default(), None, None, 0, 0).expect("emit_ir");
-    for b in &i.bodies {
+    for b in &w.bodies {
         println!(
-            "irgen b{} -> {}",
+            "wemit b{} -> {}",
             b.body,
             names.get(&b.body).cloned().unwrap_or_default()
         );
     }
-    for s in &i.skipped {
-        println!("irgen skip b{} {}", s.body, s.reason);
+    for s in &w.skipped {
+        println!("wemit skip b{} {}", s.body, s.reason);
     }
+    std::fs::write(&out, &w.bytes).expect("write");
+    eprintln!("wrote {} bytes to {out}", w.bytes.len());
 }
