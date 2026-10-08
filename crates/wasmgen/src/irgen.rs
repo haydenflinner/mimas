@@ -55,14 +55,14 @@ const K_WORD: u8 = 8;
 // Heap-object tags — the leading u32 of every __hp object, so a host
 // walking linear memory can self-describe everything (the "one tag word
 // per object" contract). Keep < 0x10 so a tag reads unlike any pointer.
-const TAG_ARRAY: u32 = 1;
-const TAG_STR: u32 = 2;
-const TAG_DICT: u32 = 3;
-const TAG_CLOSURE: u32 = 4;
-const TAG_INSTANCE: u32 = 5;
+pub(crate) const TAG_ARRAY: u32 = 1;
+pub(crate) const TAG_STR: u32 = 2;
+pub(crate) const TAG_DICT: u32 = 3;
+pub(crate) const TAG_CLOSURE: u32 = 4;
+pub(crate) const TAG_INSTANCE: u32 = 5;
 /// untagged-by-language internal regions (dict buckets) still carry a tag
 /// word so a sequential __hp walk stays parseable
-const TAG_RAW: u32 = 0xff;
+pub(crate) const TAG_RAW: u32 = 0xff;
 
 // internal helper functions appended after the emitted bodies; names index
 // `helpers` maps so bodies can `Call` them during emission.
@@ -81,7 +81,7 @@ const H_KEY_HASH: &str = "__key_hash";
 const H_DICT_FIND: &str = "__dict_find";
 const H_DICT_SET: &str = "__dict_set";
 const H_DICT_ENTRY: &str = "__dict_entry";
-const HELPER_NAMES: &[&str] = &[
+pub(crate) const HELPER_NAMES: &[&str] = &[
     H_ALLOC,
     H_IS_STR,
     H_STR_EQ,
@@ -110,12 +110,12 @@ const HELPER_NAMES: &[&str] = &[
 //   [__sp+1MB, ...)      coverage: [op bitmap][ptmap][dec cells][opstk]
 //   [__covbuf, +8MB)     cov::dec record ring
 //   [__hp, ...)          bump arena
-const STACK_CAP: u32 = 1 << 20;
-const SINK_CAP: u32 = 8 << 20;
+pub(crate) const STACK_CAP: u32 = 1 << 20;
+pub(crate) const SINK_CAP: u32 = 8 << 20;
 /// decision cell stride: [leafbits u64][dist_t 8×f64 @8][dist_f 8×f64 @72]
-const DCELL: u32 = 136;
+pub(crate) const DCELL: u32 = 136;
 /// cmp operand-stack entries (16B each: f64 + u8 numeric flag)
-const OPSTK_N: u32 = 64;
+pub(crate) const OPSTK_N: u32 = 64;
 const F64_INF: f64 = f64::INFINITY;
 const EPS: f64 = 1e-9;
 
@@ -127,7 +127,7 @@ const H_COV_DEC: &str = "__cov_dec";
 const H_COV_GAP: &str = "__cov_gap";
 const H_COV_NEAR: &str = "__cov_cellnear";
 const H_COV_BIT: &str = "__cov_leafbit";
-const COV_HELPER_NAMES: &[&str] = &[
+pub(crate) const COV_HELPER_NAMES: &[&str] = &[
     H_COV_LEAF,
     H_COV_BEGIN,
     H_COV_COND,
@@ -189,7 +189,7 @@ pub(crate) struct AnaI {
 }
 
 /// The class a `BinOp` produces given its operand kind — `None` = can't emit.
-fn binop_prod(op: BinOp, kind: OperandKind) -> Option<K> {
+pub(crate) fn binop_prod(op: BinOp, kind: OperandKind) -> Option<K> {
     use BinOp::*;
     Some(match kind {
         OperandKind::Int => match op {
@@ -3224,7 +3224,7 @@ impl Emi<'_> {
 /// The `(id, params, ret)` import key one `CallNative` emits under — args
 /// pass their stored class (`Word` when classless), the result is the
 /// inst's class, `Word` when only word-read, `Int` when dead.
-fn native_key(body: &IrBody, ana: &AnaI, iid: InstId) -> (u32, Vec<K>, Option<K>) {
+pub(crate) fn native_key(body: &IrBody, ana: &AnaI, iid: InstId) -> (u32, Vec<K>, Option<K>) {
     let Inst::CallNative { id, args } = &body.instructions[iid] else {
         unreachable!()
     };
@@ -4135,17 +4135,17 @@ fn try_ir_body(
 // ---------- internal helpers: hand-coded runtime functions ----------
 
 /// A hand-coded runtime function appended after the emitted bodies.
-struct HelperFn {
-    name: &'static str,
-    params: &'static [ValType],
-    rets: &'static [ValType],
-    f: Function,
+pub(crate) struct HelperFn {
+    pub name: &'static str,
+    pub params: &'static [ValType],
+    pub rets: &'static [ValType],
+    pub f: Function,
 }
 
 /// Emit every helper in `HELPER_NAMES`. They implement the tagged-heap
 /// runtime — str concat/compare/index, int/float ascii, dict hashing and
 /// probing — inside the module so the lane needs no host runtime services.
-fn emit_helpers(
+pub(crate) fn emit_helpers(
     ctx: &Statics,
     helpers: &HashMap<&'static str, u32>,
     hp_g: u32,
@@ -5937,7 +5937,7 @@ fn emit_helpers(
 /// The call_indirect trampoline for body `b`: (env, args_ptr, nargs) -> i64.
 /// Unmarshals captures out of the env object then args out of the scratch
 /// words, calls the body, and marshals its result back to a word.
-fn emit_trampoline(body: &IrBody, sig: &Sig, callee_fi: u32) -> Function {
+pub(crate) fn emit_trampoline(body: &IrBody, sig: &Sig, callee_fi: u32) -> Function {
     use Instruction as I;
     let ncaps = body.captures.len();
     let nparams = body.params.len();

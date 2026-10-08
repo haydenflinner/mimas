@@ -44,7 +44,7 @@ pub struct WEmit {
 /// body-block successors mirroring codegen's convention: `Jump` is the
 /// fallthrough (unconditional edge), `JumpIfFalse`/`ForNext`/`Switch` are the
 /// branch edges.
-fn succs(body: &IrBody, bid: BlockId) -> (Option<BlockId>, Vec<BlockId>) {
+pub(crate) fn succs(body: &IrBody, bid: BlockId) -> (Option<BlockId>, Vec<BlockId>) {
     let mut ft = None;
     let mut brs = Vec::new();
     for &iid in &body.blocks[bid].stream {
@@ -64,7 +64,7 @@ fn succs(body: &IrBody, bid: BlockId) -> (Option<BlockId>, Vec<BlockId>) {
 }
 
 /// fallthrough-first DFS from entry — matches codegen's serialization order.
-fn dfs_order(body: &IrBody) -> Vec<BlockId> {
+pub(crate) fn dfs_order(body: &IrBody) -> Vec<BlockId> {
     let mut order = Vec::new();
     let mut placed = vec![false; body.blocks.len()];
     let mut stack = vec![BlockId::ZERO];

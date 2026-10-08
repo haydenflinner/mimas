@@ -3,7 +3,7 @@
 //! wasm, and (for comparison) also runs `emit_ir` on the same IR.
 
 use mimas::vm::Vm;
-use mimas_wasmgen::{Opts, irgen::emit_ir, wemit::emit_waffle};
+use mimas_wasmgen::{Opts, irgen::emit_ir, wfull::emit_waffle_ir};
 
 const SRC: &str = r#"
 fn fib(n: int) -> int {
@@ -60,12 +60,13 @@ fn main() {
     let (program, ir, _s) =
         Vm::compile_parts_ir(&[("<t>", &src)], |api| mimas::library::std(api)).expect("compile");
 
-    let w = emit_waffle(&ir);
-    for &b in &w.emitted {
-        println!("wemit b{b}");
+    let w = emit_waffle_ir(&ir, &program.strs, &Opts::default(), None, None, 0, 0)
+        .expect("emit_waffle_ir");
+    for b in &w.bodies {
+        println!("wemit b{}", b.body);
     }
-    for (b, why) in &w.skipped {
-        println!("wemit skip b{b} {why}");
+    for s in &w.skipped {
+        println!("wemit skip b{} {}", s.body, s.reason);
     }
     std::fs::write(&out, &w.bytes).expect("write");
     eprintln!("wrote {} bytes to {out}", w.bytes.len());
