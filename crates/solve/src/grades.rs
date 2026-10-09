@@ -924,7 +924,7 @@ impl<'a> Pass<'a> {
                 self.expr(e);
             }
             StmtKind::Item(item) => self.item(item),
-            StmtKind::Module(_) => {}
+            StmtKind::Module(_) | StmtKind::Unit(_) => {}
         }
     }
 

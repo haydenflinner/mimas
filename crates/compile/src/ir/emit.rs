@@ -54,7 +54,7 @@ impl Ir {
                 }
                 Some(())
             }
-            StmtKind::Module(_) => Some(()),
+            StmtKind::Module(_) | StmtKind::Unit(_) => Some(()),
             StmtKind::Item(item) => {
                 match item.kind() {
                     parse::ItemKind::Poison(poison) => poison.escaped(),

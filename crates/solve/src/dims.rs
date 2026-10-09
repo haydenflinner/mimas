@@ -121,6 +121,9 @@ struct Pass<'a> {
     /// expr whose own dim is `Any` (`b.x` on a dimless `Vec2` field) can still
     /// carry the unit its slot required.
     want_dims: IndexMap<NodeId, Dim>,
+    /// `print`/`dbg`/`warn` call site → the dim of the reported value — surfaces to
+    /// `Resolutions::print_dims` so the program can ship it to the natives.
+    print_dims: IndexMap<Location, Dim>,
     report: bool,
     errors: Vec<miette::Report>,
 }
@@ -141,6 +144,7 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> Result<()> {
             rets: Vec::new(),
             dims: IndexMap::new(),
             want_dims: IndexMap::new(),
+            print_dims: IndexMap::new(),
             report: false,
             errors: Vec::new(),
         };
@@ -166,9 +170,11 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> Result<()> {
         }
         let dims = std::mem::take(&mut pass.dims);
         let want_dims = std::mem::take(&mut pass.want_dims);
+        let print_dims = std::mem::take(&mut pass.print_dims);
         drop(pass); // ends the `&*solver` borrow
         solver.node_dims.extend(dims);
         solver.want_dims.extend(want_dims);
+        solver.print_dims.extend(print_dims);
         solver.member_units.extend(member_units);
     }
     Ok(())
@@ -402,7 +408,8 @@ impl<'a> Pass<'a> {
                 self.expr(e);
             }
             StmtKind::Item(item) => self.item(item),
-            StmtKind::Module(_) => {}
+            // `unit` decls register into the units table at parse — nothing to check
+            StmtKind::Module(_) | StmtKind::Unit(_) => {}
         }
     }
 
@@ -931,7 +938,7 @@ impl<'a> Pass<'a> {
             {
                 return self.apply(f, c, &args, true, Some(&ty));
             }
-            if let Some(d) = self.native_apply(c, &args) {
+            if let Some(d) = self.native_apply(e, c, &args) {
                 return d;
             }
             return self.builtin(e, &method.lexeme, recv, c, &args);
@@ -951,7 +958,7 @@ impl<'a> Pass<'a> {
                     return self.interval_ctor(&right.lexeme, c, &args);
                 }
             }
-            return self.native_apply(c, &args).unwrap_or(D::Any);
+            return self.native_apply(e, c, &args).unwrap_or(D::Any);
         }
         let args: Vec<D> = c.arguments.iter().map(|a| self.expr(&a.value)).collect();
         if let ExprKind::Ident(callee) = c.left.kind() {
@@ -967,7 +974,7 @@ impl<'a> Pass<'a> {
         } else {
             self.expr(&c.left);
         }
-        self.native_apply(c, &args).unwrap_or(D::Any)
+        self.native_apply(e, c, &args).unwrap_or(D::Any)
     }
 
     /// A call the solver resolved to a native: check each argument against the slot's declared
@@ -975,7 +982,7 @@ impl<'a> Pass<'a> {
     /// declared return dimension. `None` when the callee isn't native *or* declares no dims at
     /// all -- a fully dimension-agnostic native falls through so `builtin`'s special cases
     /// (`pull`, `to`, `pow`, ...) still see it.
-    fn native_apply(&mut self, c: &'a parse::Call, args: &[D]) -> Option<D> {
+    fn native_apply(&mut self, e: &'a Expr, c: &'a parse::Call, args: &[D]) -> Option<D> {
         let dec = match c.left.kind() {
             ExprKind::Ident(i) => self.solver.node_decs.get(&i.id).copied(),
             ExprKind::Access(Access::Dot { .. } | Access::DoubleColon { .. }) => {
@@ -984,6 +991,16 @@ impl<'a> Pass<'a> {
             _ => None,
         }?;
         let binding = self.solver.dec_to_native.get(&dec)?;
+        // `print`/`dbg`/`warn` of a quantity gets its unit in the output —
+        // remember the arg's dim at the call site so the program can ship
+        // it to the native.
+        if let ExprKind::Ident(_) = c.left.kind()
+            && matches!(self.solver.decs[dec].name.as_str(), "print" | "dbg" | "warn")
+            && let Some(d) = args.first().and_then(D::dim)
+            && !d.is_none()
+        {
+            self.print_dims.insert(e.location(), d);
+        }
         if binding.sig.return_dim.is_none() && binding.sig.param_dims.iter().all(Option::is_none) {
             return None;
         }

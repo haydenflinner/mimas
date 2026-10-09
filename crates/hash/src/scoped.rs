@@ -274,7 +274,7 @@ impl Globals {
         queue: &mut VecDeque<String>,
         seen: &mut HashSet<String>,
     ) {
-        let Ok(ast) = Parser::new(Lexer::new(source, 0, "globals".into())).try_into_ast() else {
+        let Ok(ast) = Parser::new_extending(Lexer::new(source, 0, "globals".into())).try_into_ast() else {
             return;
         };
         for stmt in ast.stmts() {
@@ -614,7 +614,8 @@ impl<'s> Scoped<'s> {
             StmtKind::Expr(e) => self.expr(e),
             StmtKind::Item(item) => self.nested_item(item),
             // `module name;` is a file header, not a binding.
-            StmtKind::Module(_) => {}
+            // `unit name;` declares a unit, not a binding either.
+            StmtKind::Module(_) | StmtKind::Unit(_) => {}
         }
     }
 
@@ -900,7 +901,7 @@ impl<'s> Scoped<'s> {
 /// source doesn't parse or holds no fn — the gate [`canonical_scoped`]
 /// applies.
 fn scoped_pass<'s>(item_source: &'s str, globals: &'s Globals, base: usize) -> Option<Scoped<'s>> {
-    let ast = Parser::new(Lexer::new(item_source, 0, "scoped".into()))
+    let ast = Parser::new_extending(Lexer::new(item_source, 0, "scoped".into()))
         .try_into_ast()
         .ok()?;
     let function = ast.stmts().iter().find_map(|stmt| match stmt.kind() {

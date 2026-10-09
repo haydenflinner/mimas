@@ -109,6 +109,12 @@ impl<'s> Lexer<'s> {
         self
     }
 
+    /// Nonzero when this lexer is on a slice of a bigger source (an
+    /// f-string interpolation) — `unit` decls are top-level only.
+    pub(crate) fn offset(&self) -> usize {
+        self.offset
+    }
+
     pub(crate) fn file_name(&self) -> &str {
         &self.file_name
     }

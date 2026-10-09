@@ -227,6 +227,10 @@ pub struct Vm {
     /// `(file, site, inferred Fx)` per top-level statement from the same
     /// load — a `check` line or `use`-spliced stmt's own footprint.
     pub(crate) script_segments: Vec<(String, shared::Location, shared::Fx)>,
+    /// The program's `unit` declarations, installed into the live units
+    /// table at every dispatch entry — another program's compile between
+    /// this Vm's load and run must not make `.to("tile")` stop resolving.
+    pub(crate) units: std::rc::Rc<shared::units::CustomUnits>,
 }
 
 impl Vm {
@@ -258,6 +262,7 @@ impl Vm {
             warnings: Vec::new(),
             script_fx: Vec::new(),
             script_segments: Vec::new(),
+            units: Default::default(),
         }
     }
 
@@ -282,9 +287,12 @@ impl Vm {
             methods,
             field_names,
             field_dims,
+            print_dims,
             field_tys: _,
             tests,
+            units,
         } = program;
+        self.units = units;
         self.entry = entry;
         self.code = Decoder { bytes, ip: 0 };
         self.chunks = chunks;
@@ -332,6 +340,13 @@ impl Vm {
                 .map(|(_, chunk)| chunk.offset as u32)
                 .collect::<Vec<_>>()
                 .into();
+            // the call-site unit table ships with the program — refresh it so
+            // `print`/`dbg`/`warn` of a quantity can name its unit (`25000 W`)
+            *state
+                .fixtures
+                .get::<crate::fixtures::PrintDims>()
+                .dims
+                .borrow_mut() = print_dims;
             // fresh program = fresh trace: re-size the op counter to the
             // new code length and drop edges that named dead BodyIds
             let trace = state.fixtures.get::<crate::fixtures::Trace>();
@@ -408,6 +423,7 @@ impl Vm {
     }
 
     pub fn run(&mut self) -> Result<(), Error> {
+        shared::units::install(&self.units);
         loop {
             let Vm {
                 code,
@@ -457,6 +473,7 @@ impl Vm {
     /// `mutate`/`collect_debt` boundary per op. The flag is cleared on
     /// entry; ops budgeted via [`Vm::set_op_budget`].
     pub fn run_frame(&mut self) -> Result<bool, Error> {
+        shared::units::install(&self.units);
         self.arena.mutate(|_, state| state.paused.set(false));
         loop {
             let Vm {
@@ -2151,6 +2168,7 @@ impl Vm {
     /// dirty on error -- [`Vm::run_tests`] resets afterwards so a debug session still starts at
     /// program entry.
     pub fn call_fn_result(&mut self, name: &str) -> Result<Captured, Error> {
+        shared::units::install(&self.units);
         let Some(body_id) = self.items.get(name).copied() else {
             return Err(miette::miette!("no fn {name}"));
         };
@@ -2269,6 +2287,7 @@ impl Vm {
     where
         R: for<'gc> MimasType<'gc>,
     {
+        shared::units::install(&self.units);
         let Vm {
             code,
             chunks,
@@ -2325,6 +2344,7 @@ impl Vm {
     where
         R: for<'gc> MimasType<'gc>,
     {
+        shared::units::install(&self.units);
         let Vm {
             code,
             chunks,
@@ -2420,6 +2440,7 @@ impl Vm {
         name: &str,
         read: impl FnOnce(&Val<'_>) -> T,
     ) -> Result<(Inspect, T), Error> {
+        shared::units::install(&self.units);
         let Some(body_id) = self.items.get(name).copied() else {
             return Err(miette::miette!("no fn {name}"));
         };
@@ -2516,6 +2537,7 @@ impl Vm {
     /// the injected call's return value lands in a register appended past everything currently
     /// live, so this can't corrupt a real, still-paused program's state.
     pub fn call_method_on_first_instance(&mut self, method_name: &str) -> Option<Captured> {
+        shared::units::install(&self.units);
         let Vm {
             code,
             chunks,
@@ -2583,6 +2605,7 @@ impl Vm {
     /// independent of what a struct happens to be called); this is the counterpart for when the
     /// name is exactly the thing you need, e.g. dispatching on an `img::Image` variant.
     pub fn call_method_on_first_instance_inspect(&mut self, method_name: &str) -> Option<Inspect> {
+        shared::units::install(&self.units);
         let Vm {
             code,
             chunks,
@@ -2652,6 +2675,7 @@ impl Vm {
     /// form (the same text `print` would show), so hovering *any* identifier shows something
     /// instead of nothing. Returns `None` only when `name` isn't a live top-level local at all.
     pub fn resolve_for_scene(&mut self, name: &str, draw_method: &str) -> Option<SceneResult> {
+        shared::units::install(&self.units);
         let Vm {
             code,
             chunks,
@@ -2715,6 +2739,7 @@ impl Vm {
     /// single-step debuggers: reuses the same fuel mechanism `run` uses to yield control, just
     /// with a budget of one op instead of [`FUEL`].
     pub fn debug_step(&mut self) -> Result<bool, Error> {
+        shared::units::install(&self.units);
         let Vm {
             code,
             chunks,
@@ -3183,9 +3208,10 @@ impl Vm {
 
         let mut asts = Vec::with_capacity(files.len());
         let mut sources = Sources::with_capacity(files.len());
+        shared::units::clear();
         for (file_id, (name, source)) in files.iter().enumerate() {
             let lexer = Lexer::new(source, file_id, (*name).into());
-            let ast = Parser::new(lexer)
+            let ast = Parser::new_extending(lexer)
                 .try_into_ast()
                 .map_err(|mut errs| FunctionDataflowError::from(errs.swap_remove(0)))?;
             asts.push(ast);

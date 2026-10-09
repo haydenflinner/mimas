@@ -94,4 +94,4 @@ print(e.to("kWh"));   // 100
 print(e.to("kW"));    // compile error: cannot express energy (J) in kW
 ```
 
-Printing a quantity directly shows its base-unit value (`25kW` prints `25000`), so convert with `to` when you want to show one.
+Printing a quantity shows its base-unit value with its unit (`25kW` prints `25000 W`, `9ft / 24px` prints `0.1143 m/px`). Convert with `to` first when you want a different unit — `print(e.to("kWh"))` prints `100`.

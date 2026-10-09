@@ -725,6 +725,10 @@ impl Compiler {
 
         let tests = std::mem::take(&mut ir.tests);
 
+        let print_dims = std::mem::take(&mut ir.resolutions.print_dims)
+            .into_iter()
+            .collect();
+
         Program {
             entry: BodyId::ZERO,
             root,
@@ -736,8 +740,10 @@ impl Compiler {
             methods,
             field_names,
             field_dims,
+            print_dims,
             field_tys,
             tests,
+            units: shared::units::snapshot(),
         }
     }
 }

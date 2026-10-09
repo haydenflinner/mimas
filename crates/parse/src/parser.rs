@@ -6,7 +6,7 @@ use chompy::{
 use hashbrown::HashMap;
 use lex::{Lexer, TokKind, interp_end};
 use miette::NamedSource;
-use shared::{FileId, Located, Location, Span};
+use shared::{FileId, Located, Location, Span, units::Dim};
 use std::{cell::Cell, sync::Arc};
 
 /// Recursively descends mimas source, incrementally returning various
@@ -57,6 +57,17 @@ impl<'s> Parser<'s> {
     /// Creates a new parser.
     pub fn new(lexer: Lexer<'s>) -> Self {
         let src = NamedSource::new(lexer.file_name(), Arc::<str>::from(lexer.source()));
+        // A fresh source is a fresh unit scope — `unit` decls never leak
+        // between standalone parses.
+        shared::units::clear();
+        Self::with_src(lexer, src)
+    }
+
+    /// Like [`Self::new`], but keeps the ambient unit table — the files of
+    /// one program parse through this so their `unit` decls accumulate.
+    /// `load_files` clears once before the loop.
+    pub fn new_extending(lexer: Lexer<'s>) -> Self {
+        let src = NamedSource::new(lexer.file_name(), Arc::<str>::from(lexer.source()));
         Self::with_src(lexer, src)
     }
 
@@ -64,6 +75,19 @@ impl<'s> Parser<'s> {
     /// source (the lexer is on a slice of it).
     fn with_src(mut lexer: Lexer<'s>, src: NamedSource<Arc<str>>) -> Self {
         let mut tokens: Vec<_> = lexer.by_ref().collect();
+        // `unit` decls teach the lexer new suffixes — `18.0tile` only reads
+        // as a quantity once `tile` is registered — so the token list gets
+        // scanned for decls and the source relexed when a new name appears.
+        // Top-level sources only: an f-string interpolation's sublexer
+        // (offset > 0) inherits the file's table.
+        if lexer.offset() == 0 && declare_units(lexer.source(), &tokens) {
+            lexer = Lexer::new(
+                lexer.source(),
+                lexer.file_id(),
+                lexer.file_name().to_string(),
+            );
+            tokens = lexer.by_ref().collect();
+        }
         tokens.push(Tok::new(TokKind::Eof, lexer.end()));
 
         // Remove the comments from the stream, keep them for later
@@ -294,6 +318,12 @@ impl<'s> Parser<'s> {
             TokKind::Ident("check") if self.check_intro() => {
                 let item = Item::new(self.check_block().into(), self.location(start), false);
                 BlockElement::Stmt(self.new_stmt(item, start))
+            }
+            // `unit tile` declares a base dimension; `unit league = 3mi`
+            // a scale of known units. Contextual like `check`: `unit(x)`,
+            // `unit = 4`, `unit.foo` stay expressions.
+            TokKind::Ident("unit") if self.unit_intro() => {
+                BlockElement::Stmt(self.unit_stmt(start))
             }
             kind if kind.starts_item() => {
                 let item = self.item();
@@ -533,6 +563,83 @@ impl<'s> Parser<'s> {
             TokKind::Ident(_) | TokKind::FString(_) | TokKind::Bang => true,
             kind => Literal::try_from(kind).is_ok(),
         }
+    }
+
+    /// One-token lookahead for the contextual `unit` keyword: `unit` opens
+    /// a declaration when a plain name follows on the same line — `unit(x)`,
+    /// `unit = 4`, `unit.foo`, and `unit` alone stay ordinary expressions.
+    fn unit_intro(&self) -> bool {
+        let last = self.tokens.len() - 1;
+        let kw_end = self.tokens[self.next.min(last)].span().end();
+        let after = self.tokens[(self.next + 1).min(last)].span().start();
+        if self.src.inner()[kw_end..after].contains('\n') {
+            return false;
+        }
+        matches!(self.nth(1), TokKind::Ident(_))
+    }
+
+    /// `unit tile;` claims a new base dimension; `unit league = 3mi;` a
+    /// scale of known units. The pre-parse scan already registered the
+    /// name so `18tile` could lex as a quantity — this reports bad specs
+    /// and name collisions for real.
+    fn unit_stmt(&mut self, start: usize) -> Stmt {
+        let kw = self.advance(); // `unit`
+        if self.depth > 0 {
+            self.error(Misdirection {
+                src: self.src(),
+                at: Location::from(kw.location()).into(),
+                msg: "`unit` decls are top-level only".into(),
+                label: "declare units at the top of the file".into(),
+            });
+        }
+        let name = self.require_ident();
+        let name_loc: Location = name.location;
+        if !valid_unit_name(&name.lexeme) {
+            self.error(Misdirection {
+                src: self.src(),
+                at: name_loc.into(),
+                msg: format!("`{}` can't be a unit", name.lexeme),
+                label: "unit names are one word — letters, digits, `_`".into(),
+            });
+        }
+        let mut spec_text = None;
+        if self.at(TokKind::Equal) && !self.at_line_start() {
+            self.advance();
+            let rhs_start = self.next_start();
+            let mut rhs = vec![];
+            while !self.at_line_start() && self.peek().is_unit_spec() {
+                rhs.push(self.advance().kind());
+            }
+            spec_text = Some(self.src.inner()[rhs_start..self.cursor()].trim().to_string());
+            match unit_spec(&rhs) {
+                Some(spec) => {
+                    if let Err(msg) = shared::units::declare(&name.lexeme, Some(spec)) {
+                        self.error(Misdirection {
+                            src: self.src(),
+                            at: name_loc.into(),
+                            msg,
+                            label: name.lexeme.clone(),
+                        });
+                    }
+                }
+                None => self.error(Misdirection {
+                    src: self.src(),
+                    at: self.location(rhs_start).into(),
+                    msg: format!("`{}` isn't a quantity", spec_text.clone().unwrap_or_default()),
+                    label: "a number and unit names — `3mi`, `1852 m/h`, `12`".into(),
+                }),
+            }
+        } else if let Err(msg) = shared::units::declare(&name.lexeme, None) {
+            self.error(Misdirection {
+                src: self.src(),
+                at: name_loc.into(),
+                msg,
+                label: name.lexeme.clone(),
+            });
+        }
+        let stmt = self.new_stmt(Unit::new(name, spec_text), start);
+        self.end_stmt(stmt.location());
+        stmt
     }
 
     /// A `check` is one line: `check <expr>` — `check f(2) == 3` — becoming one
@@ -3395,6 +3502,206 @@ fn foreign_spelling(name: &str) -> Option<(&'static str, &'static str)> {
         )),
         _ => None,
     }
+}
+
+/// Whether a name can follow a number — what `scan_suffix` will ever read.
+/// `foo-bar` lexes `foo`, `bar`, and `-` separately, so it can never be a
+/// suffix; ASCII letters, digits, `_`, starting with a letter.
+fn valid_unit_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// The token scan that registers `unit` decls before the real lex — the
+/// lexer needs custom names in the table to read `18tile` as a quantity.
+/// Walks the probe tokens, finds `unit <name> [= spec]` at statement
+/// position, evaluates the spec, and declares. Returns whether the table
+/// gained a new name — that's what calls for a relex.
+fn declare_units(source: &str, tokens: &[Tok<TokKind<'_>>]) -> bool {
+    let toks: Vec<&Tok<TokKind>> = tokens
+        .iter()
+        .filter(|t| !t.kind().is_comment())
+        .collect();
+    // (name, spec tokens) at each top-level `unit` decl site; `None` for a
+    // bare `unit name;`.
+    let mut sites: Vec<(&str, Option<Vec<TokKind>>)> = vec![];
+    let mut i = 0;
+    let mut depth = 0usize;
+    while i + 1 < toks.len() {
+        match toks[i].kind() {
+            TokKind::LeftBrace | TokKind::TildeLeftBrace | TokKind::LeftParenthesis
+            | TokKind::LeftSquare | TokKind::HookLeftSquare => depth += 1,
+            TokKind::RightBrace | TokKind::RightParenthesis | TokKind::RightSquare => {
+                depth = depth.saturating_sub(1)
+            }
+            _ => {}
+        }
+        let stmt_pos = i == 0
+            || matches!(toks[i - 1].kind(), TokKind::SemiColon)
+            || source[toks[i - 1].span().end()..toks[i].span().start()].contains('\n');
+        let is_decl = depth == 0
+            && stmt_pos
+            && matches!(toks[i].kind(), TokKind::Ident("unit"))
+            && matches!(toks[i + 1].kind(), TokKind::Ident(_))
+            && !source[toks[i].span().end()..toks[i + 1].span().start()].contains('\n');
+        if !is_decl {
+            i += 1;
+            continue;
+        }
+        let TokKind::Ident(name) = toks[i + 1].kind() else {
+            unreachable!()
+        };
+        i += 2;
+        let mut spec = None;
+        if i < toks.len()
+            && matches!(toks[i].kind(), TokKind::Equal)
+            && !source[toks[i - 1].span().end()..toks[i].span().start()].contains('\n')
+        {
+            i += 1;
+            let mut rhs = vec![];
+            while i < toks.len()
+                && toks[i].kind().is_unit_spec()
+                && !source[toks[i - 1].span().end()..toks[i].span().start()].contains('\n')
+            {
+                rhs.push(toks[i].kind());
+                i += 1;
+            }
+            spec = Some(rhs);
+        }
+        if valid_unit_name(name) {
+            sites.push((name, spec));
+        }
+    }
+    // Base decls first so a spec can name a `unit` declared after it
+    // (`unit speed = 1tile/s; unit tile;` resolves); spec'd decls retry to
+    // a fixpoint so `unit a = 2tile; unit b = 2a;` works in either order.
+    // Whatever never evaluates stays undeclared — the stmt parser reports
+    // the bad spec.
+    let mut fresh = false;
+    let mut pending = vec![];
+    for (name, spec) in sites {
+        match spec {
+            None => {
+                fresh |= shared::units::lookup(name).is_none();
+                let _ = shared::units::declare(name, None);
+            }
+            Some(rhs) => pending.push((name, rhs)),
+        }
+    }
+    while !pending.is_empty() {
+        let mut progress = false;
+        pending.retain(|(name, rhs)| match unit_spec(rhs) {
+            Some(spec) => {
+                fresh |= shared::units::lookup(name).is_none();
+                let _ = shared::units::declare(name, Some(spec));
+                progress = true;
+                false
+            }
+            None => true,
+        });
+        if !progress {
+            break;
+        }
+    }
+    fresh
+}
+
+/// One factor of a unit spec: a unit name (bare ident or a quantity
+/// token's suffix) contributes its dim and scale; a bare number is a
+/// dimensionless scale.
+fn unit_factor(tok: TokKind<'_>, num: &mut f64, dim: &mut Dim) -> Option<()> {
+    match tok {
+        TokKind::Quantity(v, u) => {
+            // the suffix is a full unit expression — `1tile/s` lexes as
+            // one token whose unit text is "tile/s"
+            let (d, s) = shared::units::parse(u)?;
+            *num *= v * s;
+            *dim = dim.mul(d);
+        }
+        TokKind::Ident(u) => {
+            let (d, s) = shared::units::lookup(u)?;
+            *num *= s;
+            *dim = dim.mul(d);
+        }
+        TokKind::Int(v) => *num *= v as f64,
+        TokKind::Float(v) => *num *= v,
+        _ => return None,
+    }
+    Some(())
+}
+
+/// Evaluates a `unit` decl's spec tokens into (dim, scale): a leading
+/// number, then unit-name factors under `*`, `/`, and `^n`. `None` when
+/// the tokens aren't a quantity — the stmt reports the diagnostic.
+fn unit_spec(toks: &[TokKind<'_>]) -> Option<(Dim, f64)> {
+    let mut num = match toks.first().copied()? {
+        TokKind::Int(v) => v as f64,
+        TokKind::Float(v) => v,
+        TokKind::Quantity(v, u) => {
+            let (d, s) = shared::units::parse(u)?;
+            let mut num = v * s;
+            let mut dim = d;
+            spec_tail(&toks[1..], &mut num, &mut dim)?;
+            return Some((dim, num));
+        }
+        _ => return None,
+    };
+    let mut dim = Dim::NONE;
+    spec_tail(&toks[1..], &mut num, &mut dim)?;
+    Some((dim, num))
+}
+
+/// The `op factor` chain after the leading number of a unit spec.
+fn spec_tail(toks: &[TokKind<'_>], num: &mut f64, dim: &mut Dim) -> Option<()> {
+    let mut i = 0;
+    let mut divide = false;
+    while i < toks.len() {
+        match toks[i] {
+            TokKind::Star => {
+                divide = false;
+                i += 1;
+            }
+            TokKind::Slash => {
+                divide = true;
+                i += 1;
+            }
+            TokKind::Minus | TokKind::Caret => return None,
+            _ => {
+                let mut f_num = 1.0;
+                let mut f_dim = Dim::NONE;
+                unit_factor(toks[i], &mut f_num, &mut f_dim)?;
+                i += 1;
+                if matches!(toks.get(i), Some(TokKind::Caret)) {
+                    i += 1;
+                    let neg = matches!(toks.get(i), Some(TokKind::Minus));
+                    if neg {
+                        i += 1;
+                    }
+                    let Some(TokKind::Int(v)) = toks.get(i).copied() else {
+                        return None;
+                    };
+                    let exp = v.clamp(i8::MIN.into(), i8::MAX.into()) as i8;
+                    let exp = if neg { exp.wrapping_neg() } else { exp };
+                    f_dim = f_dim.powi(exp);
+                    f_num = f_num.powi(exp.into());
+                    i += 1;
+                }
+                if divide {
+                    *num /= f_num;
+                    *dim = dim.div(f_dim);
+                } else {
+                    *num *= f_num;
+                    *dim = dim.mul(f_dim);
+                }
+                divide = false;
+            }
+        }
+    }
+    Some(())
 }
 
 /// What `node()` parsed: either a fully-formed stmt, or a bare expression whose role

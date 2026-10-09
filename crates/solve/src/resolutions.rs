@@ -22,6 +22,9 @@ pub struct Resolutions {
     /// The unit dimension the expr's context demanded — `b.x + BALL` passed to a
     /// `px` param is `Any` in `node_dims` but `px` here.
     pub want_dims: IndexMap<NodeId, shared::units::Dim>,
+    /// `print`/`dbg`/`warn` call site → the dimension of the reported value — codegen ships
+    /// it on `Program` so the natives can print `25000 W` rather than `25000`.
+    pub print_dims: IndexMap<Location, shared::units::Dim>,
     pub node_decs: IndexMap<NodeId, DecId>,
     /// Read/write site counts per declaration -- the `{0,1,ω}` usage grades the
     /// lint suite is built on (`Use::Never` is what "unused" warnings report on).
@@ -416,6 +419,7 @@ impl From<Solver> for Resolutions {
             node_tys,
             node_dims: solver.node_dims,
             want_dims: solver.want_dims,
+            print_dims: solver.print_dims,
             node_decs: solver.node_decs,
             dec_uses: solver.dec_uses,
             fn_effects: solver.fn_effects,

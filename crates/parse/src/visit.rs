@@ -38,6 +38,8 @@ pub fn walk_stmt(stmt: &Stmt, visitor: &mut impl Visitor) {
         }
         StmtKind::Expr(expr) => walk_expr(expr, visitor),
         StmtKind::Item(item) => walk_item(item, visitor),
+        // a `unit` decl's spec is written text, not an expr — only the name visits
+        StmtKind::Unit(unit) => visitor.ident(&unit.name),
     }
 }
 

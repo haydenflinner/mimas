@@ -280,7 +280,7 @@ fn extract_parsed(source: &str) -> Option<Vec<Item>> {
     use parse::{ItemKind, Parser, StmtKind};
     use shared::Located;
 
-    let ast = Parser::new(Lexer::new(source, 0, "page".into()))
+    let ast = Parser::new_extending(Lexer::new(source, 0, "page".into()))
         .try_into_ast()
         .ok()?;
     let mut items = Vec::new();
@@ -578,7 +578,7 @@ fn callers_overlay_items(items: &[Item], source: &str, callee: &str) -> String {
 /// `None` when the slice doesn't parse.
 fn references(source: &str) -> Option<std::collections::HashSet<String>> {
     use parse::{Parser, lex::Lexer};
-    let ast = Parser::new(Lexer::new(source, 0, "refs".into()))
+    let ast = Parser::new_extending(Lexer::new(source, 0, "refs".into()))
         .try_into_ast()
         .ok()?;
     let mut out = std::collections::HashSet::new();
@@ -611,7 +611,7 @@ fn stmt_refs(stmt: &parse::Stmt, out: &mut RefSet) {
                 expr_refs(&f.body, out);
             }
         }
-        StmtKind::Module(_) => {}
+        StmtKind::Module(_) | StmtKind::Unit(_) => {}
     }
 }
 

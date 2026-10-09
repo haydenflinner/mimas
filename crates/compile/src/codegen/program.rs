@@ -41,6 +41,11 @@ pub struct Program {
     /// `solve::ResolvedAdt::member_dims`. A host's value diagram reads
     /// `index` fields as pointers into an array.
     pub field_dims: IdVec<AdtId, Vec<Option<shared::units::Dim>>>,
+    /// `print`/`dbg`/`warn` call site -> the dimension of the reported value, computed by
+    /// the dims pass — the natives append it so `print(25kW)` reads `25000 W`
+    /// rather than a bare `25000`. Keyed by the same call `Location` the `Prints`
+    /// fixture attributes; empty in programs a loader didn't solve.
+    pub print_dims: HashMap<Location, shared::units::Dim>,
     /// Declared member types, parallel to `field_names` -- copied from
     /// `solve::ResolvedAdt::member_tys`. `Ty::Param`s stand for the adt's
     /// own params (see `member_tys`), so generic fields stay generic until
@@ -51,6 +56,11 @@ pub struct Program {
     pub field_tys: IdVec<AdtId, Vec<Ty>>,
     /// Functions marked `#[test]`, in source order. Each name is a fn path in `root`.
     pub tests: Vec<String>,
+    /// The program's `unit` declarations, snapshotted when it finished
+    /// parsing — the names `18tile`-style literals were lexed against.
+    /// A `Vm` installs them before dispatch so `.to("tile")` still resolves
+    /// after a different program compiled in between.
+    pub units: std::rc::Rc<shared::units::CustomUnits>,
 }
 
 /// Everything a script declares, in declaration order: the fns, consts, types, and modules of

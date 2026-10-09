@@ -33,10 +33,14 @@ pub fn load_files<'a>(
     let mut asts = Vec::new();
     let mut sources = HashMap::new();
     let mut errors = Vec::new();
+    // One `unit` table per program: clear once, then every file parses
+    // into the same table so a `unit tile` in the first file lexes `4tile`
+    // in the second.
+    shared::units::clear();
     for (file_id, (name, text)) in files.into_iter().enumerate() {
         sources.insert(file_id, NamedSource::new(name, Arc::from(text)));
         let (ast, parse_errors) =
-            Parser::new(Lexer::new(text, file_id, name.to_owned())).into_ast();
+            Parser::new_extending(Lexer::new(text, file_id, name.to_owned())).into_ast();
         errors.extend(parse_errors);
         asts.push(ast);
     }

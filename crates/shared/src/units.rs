@@ -12,12 +12,24 @@
 //! carries a dimension and a scale to the base unit, which is how `25kW`, `25000W` and `25000`
 //! all mean the same watts.
 
-/// Number of base dimensions.
-pub const N: usize = 14;
+/// Number of base dimensions: the builtins, plus slots for `unit` decls.
+pub const N: usize = FIRST_CUSTOM + MAX_CUSTOM;
 
-/// The base dimensions, in [`Dim`] exponent order.
+/// Where a `unit tile;` declaration's base dimension sits in the [`Dim`]
+/// array -- the builtins occupy the slots before it.
+const FIRST_CUSTOM: usize = 14;
+
+/// How many new base dimensions (`unit tile;`) one program may declare.
+/// Derived decls (`unit league = 3mi;`) don't spend a slot -- they share
+/// the dimension of the unit they're scaled from.
+pub const MAX_CUSTOM: usize = 8;
+
+/// The base dimensions, in [`Dim`] exponent order. The custom slots name
+/// themselves through [`declare`]; the empty strings are the fallback for
+/// a `Dim` that outlives its compilation.
 pub const BASES: [&str; N] = [
     "m", "kg", "s", "A", "K", "mol", "cd", "usd", "px", "frame", "beat", "st", "b", "index",
+    "", "", "", "", "", "", "", "",
 ];
 
 /// An exponent per base dimension. All zeros is dimensionless.
@@ -76,6 +88,34 @@ impl Dim {
         Some(Dim(out))
     }
 
+    /// The base dimension a `unit name;` declaration claims -- slot
+    /// `FIRST_CUSTOM + slot` alone, exponent 1.
+    pub const fn custom(slot: usize) -> Dim {
+        let mut e = [0i8; N];
+        e[FIRST_CUSTOM + slot] = 1;
+        Dim(e)
+    }
+
+    /// For a pure custom base dim (`Dim::custom(3)`), the declared slot;
+    /// `None` for builtin dims and composites.
+    fn custom_slot(&self) -> Option<usize> {
+        let mut slot = None;
+        for (i, e) in self.0.iter().enumerate() {
+            match (*e, i >= FIRST_CUSTOM) {
+                (0, _) => {}
+                (1, true) if slot.is_none() => slot = Some(i - FIRST_CUSTOM),
+                _ => return None,
+            }
+        }
+        slot
+    }
+
+    /// The declared name of a pure custom base dim (`tile` for
+    /// `Dim::custom(0)` after `unit tile;`), else `None`.
+    fn custom_name(&self) -> Option<String> {
+        self.custom_slot().and_then(custom_name)
+    }
+
     /// The unit name for a type annotation — `px`, `px/s`, `kg*m^2/s^3` —
     /// unlike `describe`, which answers in prose (`pixels (px)`).
     pub fn name(&self) -> String {
@@ -93,9 +133,9 @@ impl Dim {
                 let e = if pos { *e } else { -*e };
                 if e > 0 {
                     s.push(if e == 1 {
-                        BASES[i].to_string()
+                        base_name(i)
                     } else {
-                        format!("{}^{e}", BASES[i])
+                        format!("{}^{e}", base_name(i))
                     });
                 }
             }
@@ -113,6 +153,10 @@ impl Dim {
     pub fn describe(&self) -> String {
         if self.is_none() {
             return "a plain number".into();
+        }
+        // `unit tile;` -- the declared name is the whole story
+        if let Some(name) = self.custom_name() {
+            return name;
         }
         for (name, dim, scale) in NAMED {
             if dim == *self && scale == 1.0 {
@@ -141,9 +185,9 @@ impl Dim {
                 let e = if pos { *e } else { -*e };
                 if e > 0 {
                     s.push(if e == 1 {
-                        BASES[i].to_string()
+                        base_name(i)
                     } else {
-                        format!("{}^{e}", BASES[i])
+                        format!("{}^{e}", base_name(i))
                     });
                 }
             }
@@ -162,6 +206,10 @@ impl Dim {
         if self.is_none() {
             return "a plain number".into();
         }
+        // `18tile` -- a custom base has no family name to add
+        if self.custom_name().is_some() {
+            return unit.to_string();
+        }
         format!("{} ({unit})", family(*self))
     }
 }
@@ -174,8 +222,15 @@ fn family(dim: Dim) -> &'static str {
     }
 }
 
-const fn d(e: [i8; N]) -> Dim {
-    Dim(e)
+/// The dim tables write just the builtin exponents — custom slots pad to 0.
+const fn d(e: [i8; FIRST_CUSTOM]) -> Dim {
+    let mut out = [0i8; N];
+    let mut i = 0;
+    while i < FIRST_CUSTOM {
+        out[i] = e[i];
+        i += 1;
+    }
+    Dim(out)
 }
 
 // exponents:        m  kg  s  A  K mol cd usd px frame beat st bit index
@@ -256,8 +311,129 @@ const NAMED: [(&str, Dim, f64); 21] = [
     ("idx", INDEX, 1.0),
 ];
 
+/// The word for base-dimension slot `i` — builtins by name, custom slots
+/// by their declaration (or a placeholder for a `Dim` read outside its
+/// compilation).
+fn base_name(i: usize) -> String {
+    if i < FIRST_CUSTOM {
+        BASES[i].to_string()
+    } else {
+        custom_name(i - FIRST_CUSTOM).unwrap_or_else(|| format!("unit{}", i - FIRST_CUSTOM))
+    }
+}
+
+/// A program's `unit` declarations: `unit tile;` claims a fresh base
+/// dimension; `unit league = 3mi;` names a scale of known units.
+///
+/// The table is thread-local and cleared when a new source starts
+/// compiling ([`clear`] is called from `Parser::new`; the files of one
+/// program parse under `Parser::new_extending` so they share it). A `Vm`
+/// [`snapshot`]s it after solving and [`install`]s it before running, so
+/// `.to("tile")` at runtime resolves even when another program compiled
+/// in between. Nothing here is ambient across compilations.
+#[derive(Clone, Debug, Default)]
+pub struct CustomUnits {
+    /// Every declared name -> (dimension, scale to coherent base).
+    names: std::collections::HashMap<String, (Dim, f64)>,
+    /// Declared base dims, in declaration order — entry `i` names the
+    /// `Dim` slot `FIRST_CUSTOM + i`.
+    bases: Vec<String>,
+}
+
+thread_local! {
+    static CUSTOM: std::cell::RefCell<std::rc::Rc<CustomUnits>> =
+        std::cell::RefCell::new(std::rc::Rc::new(CustomUnits::new()));
+}
+
+impl CustomUnits {
+    fn new() -> Self {
+        Self {
+            names: std::collections::HashMap::new(),
+            bases: Vec::new(),
+        }
+    }
+}
+
+/// Forget every `unit` declaration — the table is per-program, so a new
+/// parse starts empty rather than leaking the last file's names.
+pub fn clear() {
+    CUSTOM.with(|c| *c.borrow_mut() = std::rc::Rc::new(CustomUnits::new()));
+}
+
+/// The live table — a `Vm` keeps its program's so `run` can [`install`] it.
+pub fn snapshot() -> std::rc::Rc<CustomUnits> {
+    CUSTOM.with(|c| c.borrow().clone())
+}
+
+/// Make `units` the live table — see [`snapshot`]. Cheap when the table
+/// already installed is `units`, so run-loop batches can call it freely.
+pub fn install(units: &std::rc::Rc<CustomUnits>) {
+    CUSTOM.with(|c| {
+        let mut c = c.borrow_mut();
+        if !std::rc::Rc::ptr_eq(&c, units) {
+            *c = units.clone();
+        }
+    });
+}
+
+/// Register a `unit name` declaration: `spec` `None` claims the next base
+/// dimension slot; `Some((dim, scale))` derives from known units.
+/// Redeclaring a name *the same way* is a no-op; a different spec, a
+/// builtin name, or more than [`MAX_CUSTOM`] base dims is an error.
+pub fn declare(name: &str, spec: Option<(Dim, f64)>) -> Result<(Dim, f64), String> {
+    if lookup_builtin(name).is_some() {
+        return Err(format!("`{name}` is a builtin unit already"));
+    }
+    CUSTOM.with(|c| {
+        let mut binding = c.borrow_mut();
+        let c = std::rc::Rc::make_mut(&mut binding);
+        if let Some(&existing) = c.names.get(name) {
+            let same = match spec {
+                Some(spec) => spec == existing,
+                // `unit tile;` again is the same decl iff tile's base slot
+                // still says `tile`
+                None => existing
+                    .0
+                    .custom_slot()
+                    .is_some_and(|i| c.bases[i] == name),
+            };
+            return if same {
+                Ok(existing)
+            } else {
+                Err(format!("`{name}` is already declared as a different unit"))
+            };
+        }
+        let spec = match spec {
+            Some(spec) => spec,
+            None => {
+                if c.bases.len() >= MAX_CUSTOM {
+                    return Err(format!(
+                        "a program gets at most {MAX_CUSTOM} `unit` base dimensions"
+                    ));
+                }
+                let spec = (Dim::custom(c.bases.len()), 1.0);
+                c.bases.push(name.to_string());
+                spec
+            }
+        };
+        c.names.insert(name.to_string(), spec);
+        Ok(spec)
+    })
+}
+
+/// The declared name behind a custom base-dimension slot.
+fn custom_name(slot: usize) -> Option<String> {
+    CUSTOM.with(|c| c.borrow().bases.get(slot).cloned())
+}
+
 /// Every unit name: (dimension, scale to the coherent base unit).
+/// Declared units answer alongside the builtins.
 pub fn lookup(name: &str) -> Option<(Dim, f64)> {
+    lookup_builtin(name).or_else(|| CUSTOM.with(|c| c.borrow().names.get(name).copied()))
+}
+
+/// Every builtin unit name: (dimension, scale to the coherent base unit).
+fn lookup_builtin(name: &str) -> Option<(Dim, f64)> {
     const NONE: Dim = Dim::NONE;
     Some(match name {
         // length

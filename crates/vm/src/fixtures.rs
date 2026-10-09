@@ -182,7 +182,7 @@ impl Out {
 }
 
 /// What a line recorded at a call site is: `Print` is program output
-/// (`print`/`dbg`); `Warn` is a non-fatal diagnostic — something was
+/// (`print`/`dbg`/`warn`); `Warn` is a non-fatal diagnostic — something was
 /// skipped or defaulted, the run kept going, and the host gets a span to
 /// point at. A warning also reaches `Out`; a print never does the reverse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -244,6 +244,25 @@ impl Prints {
     /// they're per-Vm history).
     pub fn take(&self) -> Vec<(Location, PrintKind, String)> {
         std::mem::take(&mut *self.lines.borrow_mut())
+    }
+}
+
+/// `print`/`dbg`/`warn` call site → the dimension the dims pass computed for the
+/// reported value — `print(25kW)` writes `25000 W`, not a bare `25000`. The
+/// table ships on the `Program` and `load_program` refreshes it, so a Vm that
+/// swaps programs never attributes a unit to a call site that didn't earn one.
+/// Keyed by the same call `Location` `DebugInfo::top_loc` reports, which is
+/// also what `Prints` records.
+#[derive(Default)]
+pub struct PrintDims {
+    pub dims: RefCell<HashMap<Location, shared::units::Dim>>,
+}
+
+impl PrintDims {
+    /// The unit a `print`/`dbg`/`warn` call at `loc` should append (`m/px`, `W`),
+    /// `None` for a plain number or a site the checker couldn't follow.
+    pub fn at(&self, loc: Location) -> Option<shared::units::Dim> {
+        self.dims.borrow().get(&loc).copied()
     }
 }
 

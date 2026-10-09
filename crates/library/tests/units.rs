@@ -354,3 +354,112 @@ fn index_stays_int_or_nothing() {
     // and a fractional literal can't pretend -- `xs[2.5index]` is a float key
     rejected("let xs = [1];\nlet a = xs[2.5index];", "cannot be indexed");
 }
+
+// ---- user units: `unit` declarations -------------------------------------------------
+// `unit tile;` claims a base dimension of its own -- a quantity that can't mix with `m`
+// or `px` or `s`; `unit league = 3mi;` names a scale of units that already exist.
+// Declarations are top-level statements and apply to the whole program.
+
+test_run!(
+    declared_units_carry_and_convert,
+    "unit tile;
+     unit league = 3mi;
+     unit sprint = 2tile;
+     unit dozen = 12;
+     const W = 18tile;",
+    "W" => "18",
+    "(W + 2tile)" => "20",
+    "(3league).to(\"mi\")" => "9",
+    "((1league).to(\"m\") > 4828 && (1league).to(\"m\") < 4829)" => "true",
+    "(W / 2.0).to(\"tile\")" => "9",
+    "(1sprint).to(\"tile\")" => "2",
+    // a custom unit converts between its own spellings
+    "(9mi).to(\"league\")" => "3",
+    "2dozen" => "24",
+);
+
+#[test]
+fn declared_units_are_dimension_checked() {
+    // two fresh dims don't mix, and neither mixes with builtins
+    rejected("unit tile; unit elixir; let a = 4tile + 2elixir;", "cannot add");
+    rejected("unit tile; let a = 4tile + 2px;", "cannot add");
+    rejected("unit tile; let a = 4tile + 2.0;", "cannot add");
+    rejected("unit tile; let a: tile = 5px;", "declared type doesn't match");
+    rejected("unit tile; let a: px = 5tile;", "declared type doesn't match");
+    rejected("unit tile; fn f(x: tile) -> tile { x }\nlet a = f(3s);", "argument `x` of `f`");
+    // a derived unit is exactly its dimension
+    rejected("unit league = 3mi; let a = 1league + 1s;", "cannot add");
+    rejected("unit tile; let a = 2tile.to(\"px\");", "cannot express");
+    rejected("unit tile; let a = 2tile.to(\"bogus\");", "isn't a unit");
+}
+
+#[test]
+fn declared_units_flow_through_types() {
+    let fine = [
+        "unit tile; let a: tile = 18tile;",
+        "unit tile; fn f(x: tile) -> tile { x * 2.0 }\nlet a = f(9tile);",
+        "unit tile; struct S { w: tile }\nlet a = S { w = 3tile };",
+        "unit tile; unit elixir; let a = 4tile / 2elixir;",
+        "unit tile; let a: tile = (2tile * 3tile / 1tile);",
+        // the same declaration twice is a no-op, not an error
+        "unit tile;\nunit tile;\nlet a = 3tile;",
+        // products and powers of customs
+        "unit tile; let a: tile^2 = 3tile * 4tile;",
+        "unit tile; let a = (3tile * 3tile).sqrt();",
+        // custom spec spelled with `*` and `/` and `^`
+        "unit speed = 1tile/s;\nunit tile;\nlet a = 3speed;",
+        "unit tile;\nunit speed = 1tile/s;\nlet a = 3speed;",
+        "unit tile;\nunit speed = 1 tile / s;\nlet a = 3speed;",
+        "unit dozen = 12;\nlet a = 2dozen;",
+    ];
+    for src in fine {
+        test_runner::try_execute(src).unwrap_or_else(|e| panic!("`{src}` should pass: {e:?}"));
+    }
+}
+
+#[test]
+fn declared_units_compose_in_derived_decls() {
+    test_runner::try_execute(
+        "unit tile;\nunit speed = 1tile/s;\nlet a: speed = 3tile / 1s;",
+    )
+    .unwrap();
+    test_runner::try_execute(
+        "unit tile;\nunit room = 1tile*tile;\nlet a: room = 3tile * 2tile;",
+    )
+    .unwrap();
+}
+
+#[test]
+fn unit_decl_errors() {
+    // builtins can't be redeclared
+    rejected("unit m;", "builtin unit already");
+    rejected("unit s = 2m;", "builtin unit already");
+    // conflicting redeclarations
+    rejected("unit tile; unit tile = 3m;", "already declared");
+    rejected("unit tile = 3m; unit tile = 4m;", "already declared");
+    // a bad spec is a bad spec
+    rejected("unit tile = bogus;", "isn't a quantity");
+    rejected("unit tile =;", "isn't a quantity");
+    // only nine fresh dims fit
+    rejected(
+        "unit a; unit b2; unit c2; unit d2; unit e2; unit f2; unit g2; unit h2; unit i2;",
+        "at most 8",
+    );
+    // not inside a block or an interpolation
+    rejected("if true { unit tile; }", "top-level");
+    rejected("fn f() { unit tile; }", "top-level");
+}
+
+#[test]
+fn unit_keyword_stays_contextual() {
+    // `unit` is still an ordinary name everywhere else
+    let fine = [
+        "let unit = 5; let a = unit + 1;",
+        "fn unit(x: int) -> int { x } let a = unit(3);",
+        "let unit = [1,2]; let a = unit[0];",
+        "let unit = 4; unit = 5; let a = unit;",
+    ];
+    for src in fine {
+        test_runner::try_execute(src).unwrap_or_else(|e| panic!("`{src}` should pass: {e:?}"));
+    }
+}

@@ -4,8 +4,18 @@ use vm::{
     anon::{self},
     api::Api,
     conversion::NeverReturn,
-    fixtures::{DebugInfo, Out, Prints},
+    fixtures::{DebugInfo, Out, PrintDims, Prints},
 };
+
+/// The ` {unit}` a `print`/`dbg`/`warn` appends when the dims pass proved the value's
+/// dimension (`print(25kW)` writes `25000 W`). Empty for plain numbers, for
+/// sites the checker couldn't follow, and when there's no call-site loc.
+fn unit_suffix(ctx: Ctx<'_>, loc: Option<shared::Location>) -> String {
+    loc.and_then(|loc| ctx.fixture::<PrintDims>().at(loc))
+        .filter(|d| !d.is_none())
+        .map(|d| format!(" {}", d.name()))
+        .unwrap_or_default()
+}
 
 pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add(print);
@@ -21,20 +31,24 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
 /// Writes `value` to standard output, followed by a newline. A string prints as its plain text,
 /// and any other value prints the same way it would inside an f-string.
 ///
+/// A quantity prints with its unit — `print(25kW)` writes `25000 W`.
+///
 /// ```mimas
 /// print("hello");           // hello
 /// print([1, 2, 3]);         // [1, 2, 3]
 /// print(f"{1 + 2} apples"); // 3 apples
 /// ```
 fn print<'gc>(ctx: Ctx<'gc>, msg: Val<'gc>) -> Result<(), RtErr> {
+    let loc = ctx.fixture::<DebugInfo>().top_loc();
+    let suffix = unit_suffix(ctx, loc);
     let line = ctx.to_string(msg)?;
-    ctx.fixture::<Out>().write(&line);
+    ctx.fixture::<Out>().write(&format!("{line}{suffix}"));
     // `display` (quoted strings, structured values) is the richer read
     // a host tooltip wants; the plain line above is all `print` is
     // without one.
-    if let Some(loc) = ctx.fixture::<DebugInfo>().top_loc() {
+    if let Some(loc) = loc {
         let text = ctx.display(msg).unwrap_or(line);
-        ctx.fixture::<Prints>().push(loc, text);
+        ctx.fixture::<Prints>().push(loc, format!("{text}{suffix}"));
     }
     Ok(())
 }
@@ -43,10 +57,16 @@ fn print<'gc>(ctx: Ctx<'gc>, msg: Val<'gc>) -> Result<(), RtErr> {
 /// `warning: …` reaches the out sink, and the run continues — the reporting
 /// side of "skip the bit that's in err". Repeats from the same site are
 /// suppressed, so `warn` inside a loop doesn't flood.
+///
+/// A quantity warns with its unit — `warn(25kW)` writes `warning: 25000 W`.
 #[native]
 #[effects(io)]
-fn warn<'gc>(ctx: Ctx<'gc>, msg: &str) {
-    ctx.warn(msg);
+fn warn<'gc>(ctx: Ctx<'gc>, msg: Val<'gc>) -> Result<(), RtErr> {
+    let loc = ctx.fixture::<DebugInfo>().top_loc();
+    let suffix = unit_suffix(ctx, loc);
+    let line = ctx.to_string(msg)?;
+    ctx.warn(&format!("{line}{suffix}"));
+    Ok(())
 }
 
 #[native]
@@ -125,9 +145,11 @@ fn __contract_fail<'gc>(
 /// let name = dbg("ada");       // prints `dbg value: "ada"`
 /// ```
 fn dbg<'gc>(ctx: Ctx<'gc>, val: anon::T<'gc>) -> Result<anon::T<'gc>, RtErr> {
-    let text = format!("dbg value: {}", ctx.display(val.0)?);
+    let loc = ctx.fixture::<DebugInfo>().top_loc();
+    let suffix = unit_suffix(ctx, loc);
+    let text = format!("dbg value: {}{}", ctx.display(val.0)?, suffix);
     ctx.fixture::<Out>().write(&text);
-    if let Some(loc) = ctx.fixture::<DebugInfo>().top_loc() {
+    if let Some(loc) = loc {
         ctx.fixture::<Prints>().push(loc, text);
     }
     Ok(val)

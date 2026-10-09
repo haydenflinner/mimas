@@ -373,4 +373,15 @@ impl TokKind<'_> {
             TokKind::SemiColon | TokKind::RightBrace | TokKind::Eof
         ) || self.is_stmt_keyword()
     }
+
+    /// Whether this can appear in a `unit` decl's spec — `= 3mi`, `= 1852 m/h`,
+    /// `= 12`, `= 1 m/s^2`. Used to bound the same-line token collection;
+    /// `unit_spec` decides whether the collected tokens are a valid quantity.
+    pub(crate) fn is_unit_spec(self) -> bool {
+        matches!(
+            self,
+            TokKind::Int(_) | TokKind::Float(_) | TokKind::Quantity(..) | TokKind::Ident(_)
+                | TokKind::Star | TokKind::Slash | TokKind::Caret | TokKind::Minus
+        )
+    }
 }

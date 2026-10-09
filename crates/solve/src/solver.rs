@@ -66,6 +66,11 @@ pub struct Solver {
     /// dim) — an expr whose own dim is `Any` still knows the unit its slot wanted.
     /// Surfaces on [`Resolutions::want_dims`](crate::Resolutions).
     pub(crate) want_dims: IndexMap<NodeId, shared::units::Dim>,
+    /// `print`/`dbg`/`warn` call site → the dimension the pass computed for the printed
+    /// value — so the natives can render `25000 W` rather than a bare `25000`.
+    /// Keyed by call location, the same span the `Prints` fixture attributes.
+    /// Surfaces on [`Resolutions::print_dims`](crate::Resolutions).
+    pub(crate) print_dims: IndexMap<shared::Location, shared::units::Dim>,
     /// Dimensions of api-adt fields (`Input.dt` is `s`): `(adt name, field name)`.
     /// Populated by `install_user_adt` from `ApiVariantFields::Named` dims; the dims pass
     /// consults it when a `.field` read isn't on a source-declared struct.
@@ -149,6 +154,7 @@ impl Solver {
             ast_quantity_units: HashMap::new(),
             node_dims: IndexMap::new(),
             want_dims: IndexMap::new(),
+            print_dims: IndexMap::new(),
             field_dims: HashMap::new(),
             member_units: HashMap::new(),
             len_checks: IndexMap::new(),
@@ -2141,6 +2147,9 @@ impl Solver {
             StmtKind::Expr(expr) => expr.query(self).map(|_| ())?,
             StmtKind::Module(_) => {
                 // module decls are handled in the pre-pass of `solve`.
+            }
+            StmtKind::Unit(_) => {
+                // `unit` decls register into the units table at parse.
             }
             StmtKind::Item(item) => match item.kind() {
                 // block-scoped consts get solved here, top-level consts are handled by the
