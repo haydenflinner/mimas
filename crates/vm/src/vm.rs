@@ -2459,8 +2459,15 @@ impl Vm {
             } = self;
             arena.mutate(|mc, state| {
                 let ctx = state.ctx(mc);
-                {
+                let val = {
                     let mut thread = state.thread.borrow_mut(mc);
+                    // The callee's return lands in `dst` of the caller's window —
+                    // Reg::ZERO is the caller frame's slot 0, a *live* register once
+                    // the entry body has run (a top-level `let`'s slot). Live calls
+                    // run back-to-back, so save and restore it or each call reads
+                    // the previous call's return value as its first global.
+                    let caller_base = thread.frames.last().unwrap().base;
+                    let saved = thread.regs.get(caller_base).copied();
                     let stop_depth = thread.frames.len() + 1;
                     enter_call(&mut thread, code, chunks, body_id, Reg::ZERO, &[], &[])
                         .map_err(Error::msg)?;
@@ -2476,13 +2483,19 @@ impl Vm {
                         usize::MAX,
                         stop_depth,
                     )?;
-                }
+                    let ret = thread.regs.get(caller_base).copied();
+                    if let (Some(saved), Some(slot)) =
+                        (saved, thread.regs.get_mut(caller_base))
+                    {
+                        *slot = saved;
+                    }
+                    ret
+                };
 
+                let val = val.unwrap_or(Val::Null);
                 let struct_names = state.struct_names.borrow();
                 let mut seen = std::collections::HashSet::new();
-                let t = state.thread.borrow();
-                let val = t.regs.first().unwrap();
-                let extra = read(val);
+                let extra = read(&val);
                 Ok((val.inspect(&struct_names, field_names, &mut seen), extra))
             })
         };
