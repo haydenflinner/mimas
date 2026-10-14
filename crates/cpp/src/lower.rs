@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use tree_sitter::Node;
+use arborium_tree_sitter::Node;
 
 use crate::{Diag, DiagKind, Output, ty::CTy};
 

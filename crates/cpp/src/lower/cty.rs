@@ -1,6 +1,6 @@
 //! C++ type specifier + declarator parsing into [`CTy`].
 
-use tree_sitter::Node;
+use arborium_tree_sitter::Node;
 
 use super::Lower;
 use crate::{DiagKind, ty::CTy, ty::SeqKind};

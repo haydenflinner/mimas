@@ -1,6 +1,6 @@
 //! Top-level items: functions, structs, globals, enums, using/typedef.
 
-use tree_sitter::Node;
+use arborium_tree_sitter::Node;
 
 use super::cty::{declarator, spec_type, unqual};
 use super::{Alias, FnSig, Lower, StructInfo, one_line};

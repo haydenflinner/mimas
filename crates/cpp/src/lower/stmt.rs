@@ -1,6 +1,6 @@
 //! Statement lowering.
 
-use tree_sitter::Node;
+use arborium_tree_sitter::Node;
 
 use super::cty::{declarator, spec_type};
 use super::{Lower, one_line};

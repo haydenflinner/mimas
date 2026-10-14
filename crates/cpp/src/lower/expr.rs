@@ -5,7 +5,7 @@
 //! block expressions `{ ..; v }`, which mimas supports everywhere an
 //! expression is expected.
 
-use tree_sitter::Node;
+use arborium_tree_sitter::Node;
 
 use super::cty::{spec_type, unqual};
 use super::stmt::unwrap_parens;

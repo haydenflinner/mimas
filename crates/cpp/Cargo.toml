@@ -13,8 +13,8 @@ name = "cpp"
 path = "src/lib.rs"
 
 [dependencies]
-tree-sitter = "0.25"
-tree-sitter-cpp = "0.23"
+arborium-tree-sitter = "2"
+arborium-cpp = "2"
 thiserror.workspace = true
 
 [dev-dependencies]

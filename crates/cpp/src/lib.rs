@@ -92,9 +92,9 @@ pub enum Error {
 /// tolerated — they lower to diagnostics + `panic` stubs). Fails only when the
 /// tree itself is broken.
 pub fn transpile(source: &str) -> Result<Output, Error> {
-    let mut parser = tree_sitter::Parser::new();
+    let mut parser = arborium_tree_sitter::Parser::new();
     parser
-        .set_language(&tree_sitter_cpp::LANGUAGE.into())
+        .set_language(&arborium_cpp::language().into())
         .expect("tree-sitter-cpp should load");
     let tree = parser.parse(source, None).ok_or(Error::Parse {
         line: 0,
@@ -134,7 +134,7 @@ pub fn transpile(source: &str) -> Result<Output, Error> {
 
 /// Emit a helper for diagnostics during lowering.
 impl Diag {
-    pub(crate) fn new(kind: DiagKind, node: tree_sitter::Node, message: String) -> Self {
+    pub(crate) fn new(kind: DiagKind, node: arborium_tree_sitter::Node, message: String) -> Self {
         let p = node.start_position();
         Diag {
             line: p.row as u32 + 1,
