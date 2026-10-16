@@ -101,3 +101,25 @@ impl PartialEq<Stmt> for Stmt {
         self.kind == other.kind
     }
 }
+
+impl Stmt {
+    /// See [`Expr::refresh_ids`].
+    pub fn refresh_ids(&mut self) {
+        self.id = NodeId::new();
+        match &mut *self.kind {
+            StmtKind::Let(l) => {
+                l.left.refresh_ids();
+                l.right.refresh_ids();
+                if let Some(e) = &mut l.else_branch {
+                    e.refresh_ids();
+                }
+            }
+            StmtKind::Assignment(a) => {
+                a.left.refresh_ids();
+                a.right.refresh_ids();
+            }
+            StmtKind::Expr(e) => e.refresh_ids(),
+            StmtKind::Module(_) | StmtKind::Item(_) => {}
+        }
+    }
+}
