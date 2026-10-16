@@ -110,3 +110,33 @@ impl From<Ident> for PatKind {
         Self::Ident(value)
     }
 }
+
+impl Pat {
+    /// See [`Expr::refresh_ids`] -- fresh ids for cloned pattern subtrees.
+    pub fn refresh_ids(&mut self) {
+        self.id = NodeId::new();
+        match &mut self.kind {
+            PatKind::Tuple(pats) | PatKind::Or(pats) => {
+                for p in pats {
+                    p.refresh_ids();
+                }
+            }
+            PatKind::Struct(e, map) => {
+                e.refresh_ids();
+                for (_, p) in map {
+                    p.refresh_ids();
+                }
+            }
+            PatKind::TupleVariant(e, pats) => {
+                e.refresh_ids();
+                for p in pats {
+                    p.refresh_ids();
+                }
+            }
+            PatKind::Variant(e) => e.refresh_ids(),
+            PatKind::Literal(lit) => crate::expr::refresh_literal_ids(lit),
+            PatKind::NullBind(p) => p.refresh_ids(),
+            _ => {}
+        }
+    }
+}

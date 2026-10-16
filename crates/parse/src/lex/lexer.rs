@@ -259,6 +259,7 @@ impl<'s> Lex<'s, Tok<TokKind<'s>>, TokKind<'s>> for Lexer<'s> {
                 "const" => TokKind::Const,
                 "pub" => TokKind::Pub,
                 "module" => TokKind::Module,
+                "datalog" => TokKind::Datalog,
                 "break" => TokKind::Break,
                 "collect" => TokKind::Collect,
                 "fn" => TokKind::Fn,

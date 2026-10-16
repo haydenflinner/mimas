@@ -58,3 +58,14 @@ impl std::fmt::Display for Match {
         f.pad("match<todo>")
     }
 }
+
+impl MatchCase {
+    /// See [`Expr::refresh_ids`].
+    pub(crate) fn refresh_ids(&mut self) {
+        self.pat.refresh_ids();
+        if let Some(g) = &mut self.guard {
+            g.refresh_ids();
+        }
+        self.body.refresh_ids();
+    }
+}
