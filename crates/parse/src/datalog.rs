@@ -76,6 +76,7 @@ impl<'s> Parser<'s> {
         let mut decls: HashMap<String, Vec<Annotation>> = HashMap::new();
         let mut order: Vec<Ident> = vec![];
         let mut entries: Vec<DatalogEntry> = vec![];
+        let mut sources: Vec<(Ident, Expr)> = vec![];
 
         loop {
             if self.match_take(TokKind::RightBrace).is_some() {
@@ -106,7 +107,14 @@ impl<'s> Parser<'s> {
                     ));
                 }
                 decls.insert(rel.lexeme.clone(), cols);
-                order.push(rel);
+                order.push(rel.clone());
+                // `from <array>` seeds the relation from runtime tuple rows
+                if let Ok(tok) = self.peek() {
+                    if matches!(tok.kind(), TokKind::Ident(lex) if lex == "from") {
+                        self.take()?;
+                        sources.push((rel, self.expr()?));
+                    }
+                }
                 continue;
             }
 
@@ -286,7 +294,7 @@ impl<'s> Parser<'s> {
             });
         }
 
-        Ok(self.datalog_desugar(&order, &decls, entries, self.location(start)))
+        Ok(self.datalog_desugar(&order, &decls, sources, entries, self.location(start)))
     }
 
     fn datalog_err(&self, at: Location, msg: String) -> shared::Error {
@@ -304,6 +312,7 @@ impl<'s> Parser<'s> {
         &self,
         order: &[Ident],
         decls: &HashMap<String, Vec<Annotation>>,
+        sources: Vec<(Ident, Expr)>,
         entries: Vec<DatalogEntry>,
         loc: Location,
     ) -> Expr {
@@ -340,6 +349,69 @@ impl<'s> Parser<'s> {
                 }
             }
         }
+        // load `from` sources: push every runtime tuple row into rel + new
+        for (i, (rel, src)) in sources.iter().enumerate() {
+            let ivar = format!("__dl_load{i}");
+            let row = "__dl_row";
+            let mut inner: Vec<Stmt> = vec![
+                let_stmt(
+                    row,
+                    index_expr(fresh_clone(src), var_expr(&ivar, loc), loc),
+                    loc,
+                ),
+                Stmt::new(
+                    Assignment {
+                        left: var_expr(&ivar, loc),
+                        op: AssignmentOp::Identity,
+                        right: bin_expr(
+                            var_expr(&ivar, loc),
+                            EvaluationOp::Plus,
+                            int_expr(1, loc),
+                            loc,
+                        ),
+                    }
+                    .into(),
+                    NodeId::default(),
+                    loc,
+                ),
+            ];
+            for tbl in [rel_var(&rel.lexeme), new_var(&rel.lexeme)] {
+                inner.push(expr_stmt(
+                    call_expr(
+                        dot_expr(var_expr(&tbl, loc), "push", loc),
+                        vec![var_expr(row, loc)],
+                        loc,
+                    ),
+                    loc,
+                ));
+            }
+            let header = Expr::new(
+                Equality {
+                    left: var_expr(&ivar, loc),
+                    op: EqualityOp::Less,
+                    right: call_expr(
+                        dot_expr(fresh_clone(src), "len", loc),
+                        vec![],
+                        loc,
+                    ),
+                }
+                .into(),
+                loc,
+            );
+            stmts.push(let_stmt(&ivar, int_expr(0, loc), loc));
+            stmts.push(expr_stmt(
+                Expr::new(
+                    ExprKind::While(While {
+                        binding: None,
+                        header,
+                        body: block_expr(inner, None, loc),
+                    }),
+                    loc,
+                ),
+                loc,
+            ));
+        }
+
         // let __dl_changed = true
         stmts.push(let_stmt(
             "__dl_changed",
@@ -798,7 +870,11 @@ fn free_idents(e: &Expr, out: &mut HashSet<String>) {
         ExprKind::Unary(u) => free_idents(&u.right, out),
         ExprKind::Grouping(g) => free_idents(&g.inner, out),
         ExprKind::Call(c) => {
-            free_idents(&c.left, out);
+            // a bare callee names a function/global, not a bound var —
+            // `f(x)` binds `x`, never `f`
+            if !matches!(c.left.kind(), ExprKind::Ident(_)) {
+                free_idents(&c.left, out);
+            }
             for arg in &c.arguments {
                 free_idents(&arg.value, out);
             }
