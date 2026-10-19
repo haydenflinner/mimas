@@ -340,3 +340,31 @@ fn misdirection_renders_spelling() {
         "the `and` hint should teach `&&`: {rendered}"
     );
 }
+
+// datalog blocks desugar to ordinary AST at parse time
+test_ok!(
+    datalog_block,
+    "let r = datalog { rel edge(a: str, b: str) edge(\"a\", \"b\") };",
+    "let r = datalog { rel e(f: str, t: str) rel p(a: str, b: str) e(\"a\", \"b\") p(x, y) if e(x, y) p(x, z) if p(x, y), e(y, z) };",
+    "let r = datalog { rel i(x: int) rel o(x: int) i(1) o(x) if i(x), x > 0 };",
+    "let r = datalog { rel i(x: int) rel o(x: int) i(1) o(x) if i(_), i(x) };",
+    // head args may be expressions over bound variables
+    "let r = datalog { rel i(x: int) rel o(x: int) i(1) o(x + 1) if i(x) };",
+    "let r = datalog {};"
+);
+test_fail!(
+    datalog_rejects,
+    // undeclared relation
+    "let r = datalog { edge(1, 2) };",
+    // arity mismatch
+    "let r = datalog { rel edge(a: int, b: int) edge(1) };",
+    // head variable not bound by any body atom
+    "let r = datalog { rel i(x: int) rel o(x: int) i(1) o(y) if i(_) };",
+    // `_` not allowed in rule heads
+    "let r = datalog { rel i(x: int) rel o(x: int) i(1) o(_) if i(1) };",
+    // negated atom over a derived (output) relation is not stratifiable
+    "let r = datalog { rel i(x: int) rel o(x: int) o(1) if !o(_) };",
+    // duplicate declaration
+    "let r = datalog { rel i(x: int) rel i(x: int) };"
+);
+

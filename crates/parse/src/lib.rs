@@ -128,6 +128,7 @@ pub mod item {
 }
 
 mod ast;
+mod datalog;
 pub mod errors;
 mod parser;
 pub use ast::*;

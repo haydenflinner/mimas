@@ -196,6 +196,16 @@ pub struct InvalidPactItem {
 }
 
 #[derive(Error, Debug, Diagnostic)]
+#[error("invalid datalog block")]
+pub struct DatalogError {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("{msg}")]
+    pub at: SourceSpan,
+    pub msg: String,
+}
+
+#[derive(Error, Debug, Diagnostic)]
 #[error("missing function body")]
 pub struct MissingFunctionBody {
     #[source_code]

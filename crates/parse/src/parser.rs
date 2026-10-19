@@ -95,7 +95,7 @@ impl<'s> Parser<'s> {
     }
 
     /// Creates a [Location] from the given position up until our current position.
-    fn location(&self, start: usize) -> Location {
+    pub(crate) fn location(&self, start: usize) -> Location {
         Location::new(self.file_id, self.span(start))
     }
 }
@@ -366,6 +366,7 @@ impl<'s> Parser<'s> {
             TokKind::Break => self.break_stmt(),
             TokKind::Collect => self.collect(),
             TokKind::Continue => self.continue_expr(),
+            TokKind::Datalog => self.datalog_block(),
 
             // No keyword expressions found, so start recursive descent
             _ => self.null_coalecence(),
@@ -1665,7 +1666,7 @@ impl<'s> Parser<'s> {
         }
     }
 
-    fn annotation(&mut self) -> Result<Annotation> {
+    pub(crate) fn annotation(&mut self) -> Result<Annotation> {
         self.descend()?;
         let result = self.annotation_inner();
         self.depth -= 1;
@@ -1965,7 +1966,7 @@ impl<'s> Parser<'s> {
     }
 
     /// Returns the next tok as an Identifier if it is of TokenKind::Identifier.
-    fn require_ident(&mut self) -> Result<Ident> {
+    pub(crate) fn require_ident(&mut self) -> Result<Ident> {
         let next = self.take()?;
         if let TokKind::Ident(v) = next.kind() {
             Ok(Ident::new(v, next.location().into()))
