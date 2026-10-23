@@ -833,6 +833,17 @@ impl<'s> Parser<'s> {
     fn let_stmt(&mut self) -> Stmt {
         let start = self.next_start();
         self.bump(TokKind::Let);
+        // `let mut x = ...` -- a Rust habit. Every `let` is already reassignable, so teach
+        // that and recover as if `mut` weren't there. (`let mut = 1` still binds `mut`.)
+        if matches!(self.peek(), TokKind::Ident("mut")) && self.nth(1).starts_pattern() {
+            self.error(Misdirection {
+                src: self.src(),
+                at: self.next_location().into(),
+                msg: "mimas has no `mut` -- every `let` binding is reassignable".into(),
+                label: "drop `mut`: write `let x = ...`".into(),
+            });
+            self.advance();
+        }
         let left = self.pattern();
         let annotation = self.eat(TokKind::Colon).then(|| self.annotation());
         self.expect(TokKind::Equal);
@@ -2835,10 +2846,13 @@ impl<'s> Parser<'s> {
     }
 
     /// Ends a statement on its `;` -- or on the newline itself (semicolon insertion, Go's
-    /// rule: a newline where the grammar wants a `;` counts as one). When something the
-    /// statement couldn't use is in the way, the rest of the line goes with it.
+    /// rule: a newline where the grammar wants a `;` counts as one), or right before the
+    /// block's closing `}` (Go's other rule, and Rust's: `{ i += 1 }` needs no `;`). The `}`
+    /// is left for the block, which then has no yielded value -- the same as if the `;` were
+    /// written. When something the statement couldn't use is in the way, the rest of the
+    /// line goes with it.
     fn end_stmt(&mut self, stmt: Location) {
-        if self.eat(TokKind::SemiColon) || self.at_line_start() {
+        if self.eat(TokKind::SemiColon) || self.at_line_start() || self.at(TokKind::RightBrace) {
             return;
         }
         let stray = !self.peek().ends_stmt() && !self.at_line_start();

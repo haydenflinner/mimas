@@ -529,6 +529,15 @@ test_recover!(
 );
 
 test_recover!(
+    // no `mut`: every `let` is reassignable. Teach that, then carry on without it.
+    misdirected_let_mut,
+    "let mut i = 0
+     let j = 2;",
+    errors: ["mimas has no `mut` -- every `let` binding is reassignable"],
+    stmts: ["let i = 0;", "let j = 2;"],
+);
+
+test_recover!(
     assignment_in_condition,
     "while x = 1 {}
      let c = 1;",
@@ -1167,3 +1176,5 @@ fn preview(source: &str) -> String {
         format!("{}...", source.chars().take(MAX).collect::<String>())
     }
 }
+
+test_error_label!(let_mut_label_sits_on_mut, "let mut i = 0;", "mut");

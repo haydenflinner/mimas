@@ -31,6 +31,18 @@ test_fail!(named_before_positional, "foo(a=1, 2);", "foo(x=1, y=2, 3);");
 // missing semicolons / unexpected tokens
 test_fail!(missing_semicolon_let, "let a = 5", "let a = 5 let b = 6;");
 test_fail!(missing_semicolon_assign, "a = 1");
+// a `}` ends a statement the way a newline does -- `{ i += 1 }` needs no `;`
+test_ok!(
+    statement_before_closing_brace,
+    "fn f() { a = 1 }",
+    "fn f() { a += 1 }",
+    "while true { i = i + 1 }",
+    "fn f() { let x = 1 }",
+    "if c { a.b = 1 } else { a[0] -= 2 }"
+);
+// `mut` is only an error right before a binding; alone it's an ordinary name
+test_ok!(mut_is_still_a_name, "let mut = 1;", "let mut: int = 1;");
+test_fail!(let_mut_is_rejected, "let mut i = 0;", "let mut (a, b) = (1, 2);");
 test_fail!(unexpected_token_close_paren, "a = );", "a = ;");
 test_fail!(unexpected_token_double_colon_leading, "a = ::;");
 
@@ -98,10 +110,16 @@ test_fail!(
     "pact Foo { pub fn bar() -> (); }",
     "pact Foo { pub const BAR: int; }"
 );
-test_fail!(
-    pact_sig_missing_semi,
+// a sig's `;` may be left off before the pact's `}`, as before a newline
+test_ok!(
+    pact_sig_semi_optional_before_brace,
     "pact Foo { fn bar() -> () }",
     "pact Foo { const BAR: int }"
+);
+test_fail!(
+    pact_sig_missing_semi,
+    "pact Foo { fn bar() -> () fn baz() -> () }",
+    "pact Foo { const BAR: int const BAZ: int; }"
 );
 
 // fn body required at top level

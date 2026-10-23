@@ -147,3 +147,50 @@ test_vm!(
         3
     )" => Int(6),
 );
+
+// A statement as the last thing before a block's `}` needs no `;` -- Go's "a semicolon may be
+// omitted before a closing `}`" rule, and Rust's. It is still a statement, so the block yields
+// unit, exactly as if the `;` were written; only a bare value expression is a tail.
+
+test_vm!(
+    assignment_before_closing_brace_on_one_line,
+    "{
+        let x = 1
+        { x = 5 }
+        x
+    }" => Int(5),
+);
+
+test_vm!(
+    compound_assignment_before_closing_brace,
+    "{
+        let x = 1
+        if true { x += 41 }
+        x
+    }" => Int(42),
+);
+
+test_vm!(
+    while_body_assignment_without_semicolon,
+    "fn h() -> int {
+        let i = 0
+        while i < 5 { i = i + 1 }
+        i
+    }",
+    "h()" => Int(5),
+);
+
+test_vm!(
+    // the block's value is unit, the same as `{ let x = 0; x = 1; }`
+    statement_before_closing_brace_yields_unit,
+    "let a = { let x = 0; x = 1 }
+     let b = { let x = 0; x = 1; }",
+    "a" => Null,
+    "b" => Null,
+);
+
+test_vm!(
+    value_tail_before_closing_brace_still_yields,
+    "{ 41 + 1 }" => Int(42),
+    "{ let x = 40; x + 2 }" => Int(42),
+);
