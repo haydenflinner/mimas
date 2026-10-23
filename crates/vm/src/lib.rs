@@ -16,6 +16,7 @@ pub mod conversion;
 pub mod freeze;
 mod heap;
 pub use heap::*;
+pub mod mem;
 mod native;
 pub use native::*;
 pub mod fixtures;

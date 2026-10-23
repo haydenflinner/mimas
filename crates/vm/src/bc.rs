@@ -828,7 +828,7 @@ pub mod jit {
                 let s = Str(Gc::new(mc, SharedStr::from("p")));
                 let a = Array(Gc::new(
                     mc,
-                    gc_arena::RefLock::new(vec![Val::Int(11), Val::Int(22)]),
+                    gc_arena::RefLock::new(vec![Val::Int(11), Val::Int(22)].into()),
                 ));
                 let i = Instance(Gc::new(
                     mc,
@@ -861,7 +861,7 @@ pub mod jit {
                 let inst_pay = pay_of(&Val::Instance(i), Gc::as_ptr(i.0) as usize);
                 // RefLock<T> = repr(transparent) RefCell<T>; `as_ptr` hands
                 // the inner T's address directly.
-                let rl: &gc_arena::RefLock<Vec<Val>> = &*a.0;
+                let rl: &gc_arena::RefLock<crate::val::ValVec> = &*a.0;
                 let rl_vec = rl.as_ptr() as usize - rl as *const _ as usize;
                 let rli: &gc_arena::RefLock<InstanceData> = &*i.0;
                 let rl_inst = rli.as_ptr() as usize - rli as *const _ as usize;
@@ -1030,7 +1030,7 @@ pub mod jit {
             };
             let av = ArrayStore::Vals(crate::val::Array(Gc::new(
                 mc,
-                gc_arena::RefLock::new(vec![Val::Int(1)]),
+                gc_arena::RefLock::new(vec![Val::Int(1)].into()),
             )));
             let (ae_b, ai_b, af_b, av_b) = (
                 abytes(&ArrayStore::Empty),

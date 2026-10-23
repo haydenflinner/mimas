@@ -79,6 +79,24 @@ pub enum RtErr {
     )]
     OutOfFuel,
 
+    /// The heap passed the host's memory budget (`Vm::set_mem_budget`).
+    #[error(
+        "this program used more than {} MB of memory -- does a string, array or dict keep growing?",
+        crate::mem::mib(*limit)
+    )]
+    OutOfMemory { limit: usize },
+
+    /// One string or array would be bigger than the budget allows for a single value.
+    #[error("this value would be bigger than {} MB, the largest one string or array may be", crate::mem::mib(*limit))]
+    TooLarge { limit: usize },
+
+    /// More calls in progress than the thread allows (`Vm::set_max_depth`). Distinct from
+    /// `OutOfFuel`: deep recursion is not an endless loop.
+    #[error(
+        "recursion is too deep: more than {depth} calls are in progress -- does a function call itself with no base case?"
+    )]
+    RecursionTooDeep { depth: usize },
+
     #[error("called a value that isn't a function")]
     NotCallable { callee: Captured },
 
@@ -121,6 +139,9 @@ impl RtErr {
             Self::DisplayTooDeep => "nesting exceeds the display depth limit here".to_string(),
             Self::UserPanic => "panicked here".to_string(),
             Self::OutOfFuel => "ran out of steps here".to_string(),
+            Self::OutOfMemory { .. } => "memory ran out here".to_string(),
+            Self::TooLarge { .. } => "this value is too big".to_string(),
+            Self::RecursionTooDeep { .. } => "this call is one too many".to_string(),
             Self::NotCallable { callee } => format!("`{callee}` cannot be called"),
             Self::WrongArity { got, .. } => format!("this call passes {got}"),
             Self::InvalidArgument(_) | Self::Custom(_) => "here".to_string(),

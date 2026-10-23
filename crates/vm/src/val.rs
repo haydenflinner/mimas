@@ -325,7 +325,54 @@ pub struct Str<'gc>(pub Gc<'gc, SharedStr>);
 
 #[derive(Copy, Clone, Collect, Debug)]
 #[collect(no_drop)]
-pub struct Array<'gc>(pub Gc<'gc, RefLock<Vec<Val<'gc>>>>);
+pub struct Array<'gc>(pub Gc<'gc, RefLock<ValVec<'gc>>>);
+
+/// The payload behind a [`Val::Array`]: a `Vec<Val>` (it derefs to one) whose `Collect::trace`
+/// also tallies its buffer for the memory budget (see [`crate::mem`]). `repr(transparent)` keeps
+/// the layout the JIT probes (`bc::layout`) read the `Vec` through.
+#[repr(transparent)]
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ValVec<'gc>(pub Vec<Val<'gc>>);
+
+impl<'gc> std::ops::Deref for ValVec<'gc> {
+    type Target = Vec<Val<'gc>>;
+    fn deref(&self) -> &Vec<Val<'gc>> {
+        &self.0
+    }
+}
+
+impl<'gc> std::ops::DerefMut for ValVec<'gc> {
+    fn deref_mut(&mut self) -> &mut Vec<Val<'gc>> {
+        &mut self.0
+    }
+}
+
+impl<'gc> From<Vec<Val<'gc>>> for ValVec<'gc> {
+    fn from(v: Vec<Val<'gc>>) -> Self {
+        ValVec(v)
+    }
+}
+
+impl<'gc> From<ValVec<'gc>> for Vec<Val<'gc>> {
+    fn from(v: ValVec<'gc>) -> Self {
+        v.0
+    }
+}
+
+impl<'a, 'gc> IntoIterator for &'a ValVec<'gc> {
+    type Item = &'a Val<'gc>;
+    type IntoIter = std::slice::Iter<'a, Val<'gc>>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+unsafe impl<'gc> Collect<'gc> for ValVec<'gc> {
+    fn trace<T: gc_arena::collect::Trace<'gc>>(&self, cc: &mut T) {
+        crate::mem::note_traced(self.0.capacity() * std::mem::size_of::<Val>());
+        cc.trace(&self.0);
+    }
+}
 
 #[derive(Copy, Clone, Collect, Debug)]
 #[collect(no_drop)]
@@ -365,13 +412,24 @@ pub type FloatArray<'gc> = Seq<'gc>;
 /// starts in — the first push picks the store kind. Either tag can hold any
 /// store shape (an `IntArray` that received `push(1.5)` as its first write
 /// holds `Floats`); the tag is only a birth hint, the store is the truth.
-#[derive(Collect, Debug)]
-#[collect(no_drop)]
+#[derive(Debug)]
 pub enum ArrayStore<'gc> {
     Empty,
     Ints(Vec<i64>),
     Floats(Vec<f64>),
     Vals(Array<'gc>),
+}
+
+// Manual so a full mark tallies the primitive buffers for the memory budget (see `crate::mem`).
+unsafe impl<'gc> Collect<'gc> for ArrayStore<'gc> {
+    fn trace<T: gc_arena::collect::Trace<'gc>>(&self, cc: &mut T) {
+        match self {
+            ArrayStore::Empty => {}
+            ArrayStore::Ints(v) => crate::mem::note_traced(v.capacity() * 8),
+            ArrayStore::Floats(v) => crate::mem::note_traced(v.capacity() * 8),
+            ArrayStore::Vals(a) => cc.trace(a),
+        }
+    }
 }
 
 impl<'gc> ArrayStore<'gc> {
@@ -430,6 +488,7 @@ impl<'gc> ArrayStore<'gc> {
     /// incompatible write (the "any non-`i64` write to an `Ints`, any
     /// non-`f64` write to a `Floats`" rule — see the enum docs).
     pub fn push(&mut self, ctx: Ctx<'gc>, v: Val<'gc>) {
+        ctx.charge(std::mem::size_of::<Val>());
         match self {
             ArrayStore::Empty => {
                 *self = match v {
@@ -482,7 +541,7 @@ impl<'gc> ArrayStore<'gc> {
             ArrayStore::Empty => Vec::new(),
             ArrayStore::Ints(v) => v.iter().map(|&x| Val::Int(x)).collect(),
             ArrayStore::Floats(v) => v.iter().map(|&x| Val::Float(x)).collect(),
-            ArrayStore::Vals(a) => a.0.borrow().clone(),
+            ArrayStore::Vals(a) => a.0.borrow().to_vec(),
         }
     }
 
@@ -505,13 +564,22 @@ impl<'gc> ArrayStore<'gc> {
 
 // generic over the value slot so natives can take a type-safe `DictMap<'gc, anon::T<'gc>>` view
 // (see `anon::as_dict_mut`); gc storage is always the `V = Val` default.
-#[derive(Collect, Debug)]
-#[collect(no_drop)]
+#[derive(Debug)]
 pub struct DictMap<'gc, V = Val<'gc>> {
     // entries holds (key, value) in insertion order for stable positional iteration; index maps
     // each key to its slot in entries. invariant: index[k] == position of k in entries.
     entries: Vec<(Str<'gc>, V)>,
     index: HashMap<Str<'gc>, usize>,
+}
+
+// Manual so a full mark tallies the entry and index buffers for the memory budget (see
+// `crate::mem`). The index holds the same `Str`s as `entries`, so tracing `entries` covers it.
+unsafe impl<'gc, V: Collect<'gc>> Collect<'gc> for DictMap<'gc, V> {
+    fn trace<T: gc_arena::collect::Trace<'gc>>(&self, cc: &mut T) {
+        crate::mem::note_traced(self.heap_bytes());
+        cc.trace(&self.entries);
+        cc.trace(&self.index);
+    }
 }
 
 impl<'gc, V> Default for DictMap<'gc, V> {
@@ -530,6 +598,12 @@ impl<'gc, V> DictMap<'gc, V> {
 
     pub fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    /// Bytes of the entry and index buffers — what the memory budget counts for this map.
+    pub fn heap_bytes(&self) -> usize {
+        self.entries.capacity() * std::mem::size_of::<(Str<'gc>, V)>()
+            + self.index.capacity() * (std::mem::size_of::<(Str<'gc>, usize)>() + 1)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -610,15 +684,26 @@ pub struct InstanceData<'gc> {
 /// probably target what the exact cutoff is for your hot-path ADTs.
 pub const INLINE_FIELDS: usize = 4;
 
-#[derive(Clone, Collect, Debug)]
-#[collect(no_drop)]
+#[derive(Clone, Debug)]
 pub enum Fields<'gc> {
     Inline {
-        #[collect(require_static)]
         len: u8,
         data: [Val<'gc>; INLINE_FIELDS],
     },
     Spilled(Vec<Val<'gc>>),
+}
+
+// Manual so a full mark tallies a spilled field buffer for the memory budget (see `crate::mem`).
+unsafe impl<'gc> Collect<'gc> for Fields<'gc> {
+    fn trace<T: gc_arena::collect::Trace<'gc>>(&self, cc: &mut T) {
+        match self {
+            Fields::Inline { data, .. } => cc.trace(data),
+            Fields::Spilled(v) => {
+                crate::mem::note_traced(self.heap_bytes());
+                cc.trace(v)
+            }
+        }
+    }
 }
 
 impl<'gc> Fields<'gc> {
@@ -639,6 +724,14 @@ impl<'gc> Fields<'gc> {
         match self {
             Fields::Inline { len, .. } => *len as usize,
             Fields::Spilled(v) => v.len(),
+        }
+    }
+
+    /// Bytes outside the instance box: a spilled field buffer, else nothing.
+    pub fn heap_bytes(&self) -> usize {
+        match self {
+            Fields::Inline { .. } => 0,
+            Fields::Spilled(v) => v.capacity() * std::mem::size_of::<Val>(),
         }
     }
 
@@ -694,12 +787,18 @@ impl<'gc> IntoIterator for Fields<'gc> {
 #[collect(no_drop)]
 pub struct Closure<'gc>(pub Gc<'gc, ClosureData<'gc>>);
 
-#[derive(Collect, Debug)]
-#[collect(no_drop)]
+#[derive(Debug)]
 pub struct ClosureData<'gc> {
-    #[collect(require_static)]
     pub function: BodyId,
     pub captures: Vec<Val<'gc>>,
+}
+
+// Manual so a full mark tallies the capture buffer for the memory budget (see `crate::mem`).
+unsafe impl<'gc> Collect<'gc> for ClosureData<'gc> {
+    fn trace<T: gc_arena::collect::Trace<'gc>>(&self, cc: &mut T) {
+        crate::mem::note_traced(self.captures.capacity() * std::mem::size_of::<Val>());
+        cc.trace(&self.captures);
+    }
 }
 
 /// A `polars::frame::DataFrame`, heap-allocated like `Array`/`Dict`/`Instance` -- `RefLock` for
@@ -1416,6 +1515,7 @@ pub fn bin<'gc>(this: Val<'gc>, ctx: Ctx<'gc>, other: Val<'gc>, op: BinOp) -> Rt
 
     Ok(match (op, this, other) {
         (BinOp::Add, Val::Str(a), Val::Str(b)) => {
+            ctx.check_alloc(a.as_str().len().saturating_add(b.as_str().len()))?;
             let combined = format!("{}{}", a.as_str(), b.as_str());
             Val::Str(ctx.intern(&combined))
         }

@@ -1,6 +1,6 @@
 use heck::ToSnakeCase;
 use macros::native;
-use vm::{RtErr, api::Api, conversion::Raisable};
+use vm::{Ctx, RtErr, api::Api, conversion::Raisable};
 
 pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     let nid = api.add_method(len);
@@ -289,16 +289,10 @@ fn replace(s: &str, needle: &str, new: &str) -> String {
 /// let a = "ab".repeat(3);   // "ababab"
 /// let line = "-".repeat(20);
 /// ```
-fn repeat(s: &str, count: i64) -> Result<String, RtErr> {
+fn repeat<'gc>(ctx: Ctx<'gc>, s: &str, count: i64) -> Result<String, RtErr> {
     let count = usize::try_from(count)
         .map_err(|_| RtErr::InvalidArgument("repeat count cannot be negative".into()))?;
-    if s.len()
-        .checked_mul(count)
-        .is_none_or(|total| total > isize::MAX as usize)
-    {
-        return Err(RtErr::InvalidArgument(
-            "repeat result would be too large".into(),
-        ));
-    }
+    // before allocating: a size from a script integer must fit one value's share of the budget
+    ctx.check_alloc_n(s.len(), count)?;
     Ok(s.repeat(count))
 }

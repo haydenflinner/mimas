@@ -430,12 +430,98 @@ impl Vm {
     /// Let the thread run at most `ops` more ops before `RtErr::OutOfFuel` (re-arm per entry:
     /// per check, per live scene, per game frame). `u64::MAX` lifts the limit.
     pub fn set_op_budget(&mut self, ops: u64) {
+        self.arena.mutate(|mc, state| {
+            state.thread.borrow_mut(mc).ops_left = ops;
+            // ops a native charged against the previous entry don't carry into this one
+            let m = &state.mem;
+            m.ops_debt.set(0);
+            m.signal.set(m.signal.get() & !crate::mem::SIG_OPS);
+        });
+    }
+
+    /// Let the heap hold at most `bytes` (see [`crate::mem`]); past it the program fails with
+    /// `RtErr::OutOfMemory`. [`crate::mem::UNLIMITED`] (the default) turns the budget off. Unlike
+    /// the op budget this is not re-armed per entry: it caps what the program holds over its
+    /// whole life.
+    pub fn set_mem_budget(&mut self, bytes: usize) {
+        self.arena.mutate(|_, state| {
+            let m = &state.mem;
+            m.limit.set(bytes);
+            m.signal.set(m.signal.get() & crate::mem::SIG_OPS);
+        });
+        if bytes != crate::mem::UNLIMITED {
+            self.mem_settle();
+        }
+    }
+
+    /// The limit [`set_mem_budget`](Self::set_mem_budget) set.
+    pub fn mem_budget(&self) -> usize {
+        self.arena.mutate(|_, state| state.mem.limit.get())
+    }
+
+    /// The budget's current upper bound on heap bytes: measured at the last settle plus charged
+    /// since.
+    pub fn mem_estimate(&self) -> usize {
+        self.arena.mutate(|_, state| state.mem.estimate())
+    }
+
+    /// Let the thread hold at most `frames` calls in progress; one more fails with
+    /// `RtErr::RecursionTooDeep`. Default [`crate::mem::DEFAULT_MAX_FRAMES`].
+    pub fn set_max_depth(&mut self, frames: usize) {
         self.arena
-            .mutate(|mc, state| state.thread.borrow_mut(mc).ops_left = ops);
+            .mutate(|mc, state| state.thread.borrow_mut(mc).max_frames = frames.max(1));
+    }
+
+    /// Calls in progress on the thread, the entry frame included (`1` between host calls once the
+    /// entry body has run).
+    pub fn depth(&self) -> usize {
+        self.arena.mutate(|_, state| state.thread.borrow().frames.len())
+    }
+
+    /// Collect fully and measure the live heap (see [`crate::mem`]): returns the live bytes. When
+    /// they pass the limit, the next op fails with `RtErr::OutOfMemory`.
+    pub fn mem_settle(&mut self) -> usize {
+        use gc_arena::arena::CollectionPhase;
+        // finish a cycle already in progress: its mark saw mutation, so its tally is not clean
+        if self.arena.collection_phase() != CollectionPhase::Sleeping {
+            self.arena.finish_cycle();
+        }
+        crate::mem::reset_traced();
+        let strings = match self.arena.finish_marking() {
+            Some(marked) => marked.finalize(|fc, root| root.strings.prune_dead(fc)),
+            None => 0,
+        };
+        let traced = crate::mem::take_traced();
+        self.arena.finish_cycle();
+        let boxes = self.arena.metrics().total_gc_count() * crate::mem::BOX_BYTES;
+        let live = traced.saturating_add(strings).saturating_add(boxes);
+        self.arena.mutate(|_, state| {
+            let m = &state.mem;
+            m.live.set(live);
+            m.since.set(0);
+            let ops = m.signal.get() & crate::mem::SIG_OPS;
+            let fatal = if live > m.limit.get() { crate::mem::SIG_FATAL } else { 0 };
+            m.signal.set(ops | fatal);
+        });
+        live
+    }
+
+    /// An entry boundary: settle when the budget asks for it (cheap otherwise).
+    pub(crate) fn mem_boundary(&mut self) {
+        if self.arena.mutate(|_, state| state.mem.wants_settle()) {
+            self.mem_settle();
+        }
+    }
+
+    /// Between dispatch batches: pay the arena's debt, then settle if the budget asks.
+    fn collect_boundary(&mut self) {
+        self.arena.collect_debt();
+        self.mem_boundary();
     }
 
     pub fn run(&mut self) -> Result<(), Error> {
         shared::units::install(&self.units);
+        self.mem_boundary();
         loop {
             let Vm {
                 code,
@@ -472,7 +558,7 @@ impl Vm {
                 op_count::report();
                 return Ok(());
             }
-            self.arena.collect_debt();
+            self.collect_boundary();
         }
     }
 
@@ -486,6 +572,7 @@ impl Vm {
     /// entry; ops budgeted via [`Vm::set_op_budget`].
     pub fn run_frame(&mut self) -> Result<bool, Error> {
         shared::units::install(&self.units);
+        self.mem_boundary();
         self.arena.mutate(|_, state| state.paused.set(false));
         loop {
             let Vm {
@@ -518,7 +605,7 @@ impl Vm {
             if done || paused {
                 return Ok(done);
             }
-            self.arena.collect_debt();
+            self.collect_boundary();
         }
     }
 
@@ -592,6 +679,24 @@ pub struct TraceMapChunk {
     /// `(chunk-relative ip, file_id, span start, span end)` — sparse
     /// ascending like `Chunk::locs`: an entry's loc applies until the next.
     pub locs: Vec<(u32, u32, u32, u32)>,
+}
+
+/// What [`Vm::call_batched`] saved of the caller's frame.
+struct CallSlot {
+    caller_base: usize,
+    saved: Option<Stashed>,
+}
+
+impl CallSlot {
+    /// Put the caller's slot-0 value back.
+    fn restore<'gc>(self, ctx: Ctx<'gc>, thread: &mut ThreadState<'gc>) {
+        if let Some(saved) = self.saved
+            && ctx.holds(&saved)
+            && let Some(slot) = thread.regs.get_mut(self.caller_base)
+        {
+            *slot = ctx.fetch(&saved);
+        }
+    }
 }
 
 impl Default for Vm {
@@ -888,6 +993,28 @@ fn run_dispatch<'gc>(
         if fuel == 0 {
             return Ok(false);
         }
+        // the memory budget (see `crate::mem`): a charge past the limit ends the batch so the
+        // entry can collect and measure, or fails where it can't collect
+        let mut mem_signal = ctx.state().mem.signal.get();
+        if mem_signal & crate::mem::SIG_OPS != 0 {
+            let m = &ctx.state().mem;
+            thread.ops_left = thread.ops_left.saturating_sub(m.ops_debt.replace(0));
+            mem_signal &= !crate::mem::SIG_OPS;
+            m.signal.set(mem_signal);
+            if thread.ops_left == 0 {
+                return Err(locate(RtErr::OutOfFuel, code.ip, thread, chunks, sources));
+            }
+        }
+        if mem_signal != 0 {
+            if mem_signal & crate::mem::SIG_FATAL != 0 || fuel == usize::MAX {
+                let limit = ctx.state().mem.limit.get();
+                return Err(locate(RtErr::OutOfMemory { limit }, code.ip, thread, chunks, sources));
+            }
+            if let Some(top) = thread.frames.last_mut() {
+                top.ip = code.ip;
+            }
+            return Ok(false);
+        }
         // the host's budget for this entry (checks, live scenes, game frames): a loop with no
         // end becomes an error instead of a hung page
         if thread.ops_left == 0 {
@@ -1163,7 +1290,10 @@ pub(crate) fn step_one<'gc>(
             let value_reg = Reg::decode(code);
             let value = rd!(regs, value_reg);
             match rd!(regs, array_reg) {
-                Val::Array(a) => a.0.borrow_mut(&ctx).push(value),
+                Val::Array(a) => {
+                    ctx.charge(std::mem::size_of::<Val>());
+                    a.0.borrow_mut(&ctx).push(value)
+                }
                 // `IntArray`/`FloatArray`/`Anything` — typed push + demote,
                 // or the old `unwrap` panic for non-sequences
                 arr => seq_push(ctx, arr, value),
@@ -1494,6 +1624,11 @@ pub fn enter_call<'gc>(
         });
     }
     debug_assert_eq!(captures.len(), chunk.captures.len());
+    if thread.frames.len() >= thread.max_frames {
+        return Err(RtErr::RecursionTooDeep {
+            depth: thread.max_frames,
+        });
+    }
     let new_base = thread.regs.len();
     // hiiiiighwayyyyy toooo theeeee danger zone (be very careful now lol)
     thread
@@ -1538,6 +1673,11 @@ pub fn enter_call_regs<'gc>(
         });
     }
     debug_assert_eq!(captures.len(), chunk.captures.len());
+    if thread.frames.len() >= thread.max_frames {
+        return Err(RtErr::RecursionTooDeep {
+            depth: thread.max_frames,
+        });
+    }
     let caller_base = thread.frames.last().unwrap().base;
     let new_base = thread.regs.len();
     thread
@@ -1592,6 +1732,34 @@ fn call_args<'gc>(
 /// A fault unwinds to the pre-call depth so the Vm is still usable afterwards.
 #[allow(clippy::too_many_arguments)]
 fn inject_call<'gc>(
+    ctx: Ctx<'gc>,
+    code: &mut Decoder,
+    chunks: &IdVec<BodyId, Chunk>,
+    signatures: &IdVec<BodyId, Option<Function>>,
+    strs: &StrInterner,
+    sources: &Sources,
+    thread_bc: Option<&[Option<crate::bc::BodyFn>]>,
+    body: BodyId,
+    values: &[Val<'gc>],
+    captures: &[Val<'gc>],
+) -> Result<Val<'gc>, Error> {
+    // each nested host-to-script call is Rust stack (a native that calls a closure that calls
+    // the native ...): stop before the host's stack does
+    let nested = &ctx.state().mem.nested;
+    if nested.get() >= crate::mem::MAX_NESTED_CALLS {
+        let depth = ctx.thread().borrow().frames.len();
+        return Err(Error::msg(RtErr::RecursionTooDeep { depth }));
+    }
+    nested.set(nested.get() + 1);
+    let out = inject_call_inner(
+        ctx, code, chunks, signatures, strs, sources, thread_bc, body, values, captures,
+    );
+    nested.set(nested.get() - 1);
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn inject_call_inner<'gc>(
     ctx: Ctx<'gc>,
     code: &mut Decoder,
     chunks: &IdVec<BodyId, Chunk>,
@@ -1787,7 +1955,10 @@ pub fn set_index<'gc>(
 #[doc(hidden)]
 pub fn seq_push<'gc>(ctx: Ctx<'gc>, arr: Val<'gc>, value: Val<'gc>) {
     match arr {
-        Val::Array(a) => a.0.borrow_mut(&ctx).push(value),
+        Val::Array(a) => {
+            ctx.charge(std::mem::size_of::<Val>());
+            a.0.borrow_mut(&ctx).push(value)
+        }
         Val::IntArray(a) | Val::FloatArray(a) => a.0.borrow_mut(&ctx).push(ctx, value),
         _ => panic!("push: `array` register held a non-array"),
     }
@@ -2230,41 +2401,77 @@ impl Vm {
         self.call_fn_result(name).ok()
     }
 
-    /// [`Vm::call_fn`], but surfaces a runtime fault instead of swallowing it. Leaves the thread
-    /// dirty on error -- [`Vm::run_tests`] resets afterwards so a debug session still starts at
-    /// program entry.
+    /// [`Vm::call_fn`], but surfaces a runtime fault instead of swallowing it. A fault unwinds the
+    /// call's frames, so the thread (and every global the program holds) is usable for the next
+    /// call -- [`Vm::run_tests`] still resets afterwards so a debug session starts at program
+    /// entry.
     pub fn call_fn_result(&mut self, name: &str) -> Result<Captured, Error> {
         shared::units::install(&self.units);
+        self.mem_boundary();
         let Some(body_id) = self.items.get(name).copied() else {
             return Err(miette::miette!("no fn {name}"));
         };
+        let (slot, ran) = self.call_batched(body_id)?;
+        self.arena.mutate(|mc, state| {
+            let ctx = state.ctx(mc);
+            let mut thread = state.thread.borrow_mut(mc);
+            let out = ran.map(|_| thread.regs[slot.caller_base].capture());
+            slot.restore(ctx, &mut thread);
+            out
+        })
+    }
 
+    /// Enter script fn `body` as a call from the current top frame and run it to its return in
+    /// FUEL batches, collecting (and settling the memory budget) between batches like
+    /// [`Vm::run`] does — a 40M-op check would otherwise run inside one arena mutation and keep
+    /// every byte of its garbage until it returned. The return lands in the caller's slot 0:
+    /// read it, then [`CallSlot::restore`] the caller's own value there. A fault unwinds the
+    /// callee's frames.
+    fn call_batched(&mut self, body_id: BodyId) -> Result<(CallSlot, Result<(), Error>), Error> {
         let Vm {
             code,
             chunks,
-            c_strs: strs,
-            signatures,
             arena,
-            sources,
-            bc,
             ..
         } = self;
-        arena.mutate(|mc, state| {
+        let ip = code.ip;
+        let (caller_base, saved, stop_depth, regs_len) = arena.mutate(|mc, state| {
             let ctx = state.ctx(mc);
-            // scope the borrow so it's released before we re-borrow to read the result.
-            let out = {
+            let mut thread = state.thread.borrow_mut(mc);
+            // The callee's return lands in `dst` of the caller's window —
+            // Reg::ZERO is the caller frame's slot 0, a *live* register once
+            // the entry body has run (a top-level `let`'s slot). A check
+            // run after `run()` would otherwise clobber the first global
+            // for the next caller, so save it (stashed: it must outlive this
+            // mutation) and restore it afterwards.
+            let caller_base = thread.frames.last().unwrap().base;
+            let saved = thread.regs.get(caller_base).map(|&v| ctx.stash(v));
+            let stop_depth = thread.frames.len() + 1;
+            let regs_len = thread.regs.len();
+            enter_call(&mut thread, code, chunks, body_id, Reg::ZERO, &[], &[])
+                .map_err(Error::msg)?;
+            Ok::<_, Error>((caller_base, saved, stop_depth, regs_len))
+        })?;
+        let slot = CallSlot { caller_base, saved };
+        // a host call isn't a frame: a yield inside it doesn't stop it (as in `inject_call`),
+        // but the pause is relatched for the caller's next frame boundary
+        self.arena.mutate(|_, state| state.paused.set(false));
+        let mut yielded = false;
+        let ran = loop {
+            let Vm {
+                code,
+                chunks,
+                signatures,
+                c_strs: strs,
+                arena,
+                sources,
+                bc,
+                ..
+            } = self;
+            let step = arena.mutate(|mc, state| {
+                let ctx = state.ctx(mc);
                 let mut thread = state.thread.borrow_mut(mc);
-                // The callee's return lands in `dst` of the caller's window —
-                // Reg::ZERO is the caller frame's slot 0, a *live* register once
-                // the entry body has run (a top-level `let`'s slot). A check
-                // run after `run()` would otherwise clobber the first global
-                // for the next caller, so save and restore it.
-                let caller_base = thread.frames.last().unwrap().base;
-                let saved = thread.regs.get(caller_base).copied();
-                let stop_depth = thread.frames.len() + 1;
-                enter_call(&mut thread, code, chunks, body_id, Reg::ZERO, &[], &[])
-                    .map_err(Error::msg)?;
-                let run = run_dispatch(
+                let done = run_dispatch(
                     ctx,
                     code,
                     chunks,
@@ -2273,19 +2480,37 @@ impl Vm {
                     sources,
                     &mut thread,
                     bc.as_deref(),
-                    usize::MAX,
+                    FUEL,
                     stop_depth,
-                );
-                let out = run.map(|_| thread.regs[caller_base].capture());
-                if let (Some(saved), Some(slot)) =
-                    (saved, thread.regs.get_mut(caller_base))
-                {
-                    *slot = saved;
+                )?;
+                Ok::<_, Error>((done, state.paused.replace(false)))
+            });
+            match step {
+                Err(e) => break Err(e),
+                Ok((true, paused)) => {
+                    yielded |= paused;
+                    break Ok(());
                 }
-                out
-            };
-            out
-        })
+                Ok((false, paused)) => {
+                    yielded |= paused;
+                    self.collect_boundary();
+                }
+            }
+        };
+        if yielded {
+            self.arena.mutate(|_, state| state.paused.set(true));
+        }
+        // a fault returns without unwinding: drop the callee's frames, as `inject_call` does,
+        // so the thread is usable for the next call with the program's state intact
+        if ran.is_err() {
+            self.code.ip = ip;
+            self.arena.mutate(|mc, state| {
+                let mut thread = state.thread.borrow_mut(mc);
+                thread.frames.truncate(stop_depth - 1);
+                thread.regs.truncate(regs_len);
+            });
+        }
+        Ok((slot, ran))
     }
 
     /// The script's items as the host sees them: its fns, consts and types, and the same for
@@ -2354,6 +2579,7 @@ impl Vm {
         R: for<'gc> MimasType<'gc>,
     {
         shared::units::install(&self.units);
+        self.mem_boundary();
         let Vm {
             code,
             chunks,
@@ -2411,6 +2637,7 @@ impl Vm {
         R: for<'gc> MimasType<'gc>,
     {
         shared::units::install(&self.units);
+        self.mem_boundary();
         let Vm {
             code,
             chunks,
@@ -2489,8 +2716,9 @@ impl Vm {
 
     /// [`Vm::call_fn_result`], but captures the result as a name-labeled
     /// [`Inspect`] tree — for hosts that render a function's return value
-    /// (e.g. an `img::Draw` scene) rather than compare it in a test. Like
-    /// `call_fn_result`, a runtime fault leaves the thread dirty.
+    /// (e.g. an `img::Draw` scene) rather than compare it in a test. A
+    /// runtime fault rewinds the thread to the entry frame (see
+    /// [`Vm::call_fn_read`]).
     pub fn call_fn_inspect(&mut self, name: &str) -> Result<Inspect, Error> {
         Ok(self.call_fn_read(name, |_| ())?.0)
     }
@@ -2507,64 +2735,30 @@ impl Vm {
         read: impl FnOnce(&Val<'_>) -> T,
     ) -> Result<(Inspect, T), Error> {
         shared::units::install(&self.units);
+        self.mem_boundary();
         let Some(body_id) = self.items.get(name).copied() else {
             return Err(miette::miette!("no fn {name}"));
         };
 
-        let out = {
-            let Vm {
-                code,
-                chunks,
-                c_strs: strs,
-                signatures,
-                arena,
-                sources,
-                field_names,
-                bc,
-                ..
-            } = self;
-            arena.mutate(|mc, state| {
-                let ctx = state.ctx(mc);
-                let val = {
-                    let mut thread = state.thread.borrow_mut(mc);
-                    // The callee's return lands in `dst` of the caller's window —
-                    // Reg::ZERO is the caller frame's slot 0, a *live* register once
-                    // the entry body has run (a top-level `let`'s slot). Live calls
-                    // run back-to-back, so save and restore it or each call reads
-                    // the previous call's return value as its first global.
-                    let caller_base = thread.frames.last().unwrap().base;
-                    let saved = thread.regs.get(caller_base).copied();
-                    let stop_depth = thread.frames.len() + 1;
-                    enter_call(&mut thread, code, chunks, body_id, Reg::ZERO, &[], &[])
-                        .map_err(Error::msg)?;
-                    run_dispatch(
-                        ctx,
-                        code,
-                        chunks,
-                        signatures,
-                        strs,
-                        sources,
-                        &mut thread,
-                        bc.as_deref(),
-                        usize::MAX,
-                        stop_depth,
-                    )?;
-                    let ret = thread.regs.get(caller_base).copied();
-                    if let (Some(saved), Some(slot)) =
-                        (saved, thread.regs.get_mut(caller_base))
-                    {
-                        *slot = saved;
-                    }
-                    ret
-                };
-
-                let val = val.unwrap_or(Val::Null);
-                let struct_names = state.struct_names.borrow();
-                let mut seen = std::collections::HashSet::new();
-                let extra = read(&val);
-                Ok((val.inspect(&struct_names, field_names, &mut seen), extra))
-            })
-        };
+        // Live calls run back-to-back: `call_batched` saves and restores the caller's slot 0,
+        // or each call would read the previous call's return value as its first global.
+        let (slot, ran) = self.call_batched(body_id)?;
+        let field_names = &self.field_names;
+        let out = self.arena.mutate(|mc, state| {
+            let ctx = state.ctx(mc);
+            let val = {
+                let mut thread = state.thread.borrow_mut(mc);
+                let ret = thread.regs.get(slot.caller_base).copied();
+                slot.restore(ctx, &mut thread);
+                ret
+            };
+            ran?;
+            let val = val.unwrap_or(Val::Null);
+            let struct_names = state.struct_names.borrow();
+            let mut seen = std::collections::HashSet::new();
+            let extra = read(&val);
+            Ok((val.inspect(&struct_names, field_names, &mut seen), extra))
+        });
         if out.is_err() {
             self.reset_to_entry();
         }
@@ -2894,6 +3088,7 @@ impl Vm {
     /// with a budget of one op instead of [`FUEL`].
     pub fn debug_step(&mut self) -> Result<bool, Error> {
         shared::units::install(&self.units);
+        self.mem_boundary();
         let Vm {
             code,
             chunks,

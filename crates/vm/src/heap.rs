@@ -42,14 +42,27 @@ pub struct Frame {
     pub base: usize,
 }
 
-#[derive(Collect)]
-#[collect(no_drop)]
 pub struct ThreadState<'gc> {
     pub regs: Vec<Val<'gc>>,
     pub frames: Vec<Frame>,
     /// Ops this thread may still run before `RtErr::OutOfFuel`; the host re-arms it per entry
     /// (`Vm::set_op_budget`). `u64::MAX` (the default) is effectively unlimited.
     pub ops_left: u64,
+    /// Frames the thread may hold before a call fails with `RtErr::RecursionTooDeep`
+    /// (`Vm::set_max_depth`).
+    pub max_frames: usize,
+}
+
+// Manual so a full mark can tally the register stack's bytes for the memory budget (see
+// `crate::mem`); otherwise the same trace the derive wrote.
+unsafe impl<'gc> Collect<'gc> for ThreadState<'gc> {
+    fn trace<T: gc_arena::collect::Trace<'gc>>(&self, cc: &mut T) {
+        crate::mem::note_traced(
+            self.regs.capacity() * std::mem::size_of::<Val>()
+                + self.frames.capacity() * std::mem::size_of::<Frame>(),
+        );
+        cc.trace(&self.regs);
+    }
 }
 
 pub type Thread<'gc> = Gc<'gc, RefLock<ThreadState<'gc>>>;
@@ -63,16 +76,33 @@ impl<'gc> InternedStrings<'gc> {
         InternedStrings(Gc::new(mc, RefLock::new(FxHashMap::default())))
     }
 
-    pub fn intern(self, mc: &Mutation<'gc>, s: &str) -> Str<'gc> {
+    /// The interned `Str` for `s`, and whether this call allocated it.
+    pub fn intern(self, mc: &Mutation<'gc>, s: &str) -> (Str<'gc>, bool) {
         if let Some(weak) = self.0.borrow().get(s)
             && let Some(gc) = weak.upgrade(mc)
         {
-            return Str(gc);
+            return (Str(gc), false);
         }
         let shared: SharedStr = Arc::from(s);
         let gc = Gc::new(mc, shared.clone());
         self.0.borrow_mut(mc).insert(shared, Gc::downgrade(gc));
-        Str(gc)
+        (Str(gc), true)
+    }
+
+    /// Drop the table entries of strings the finished mark found dead, and return the byte total
+    /// of the strings still live. Without this the table's own `Arc` keeps every string the
+    /// program ever made in memory.
+    pub(crate) fn prune_dead(self, fc: &gc_arena::Finalization<'gc>) -> usize {
+        let mut live = 0usize;
+        self.0.borrow_mut(fc).retain(|k, weak| {
+            if weak.is_dead(fc) {
+                false
+            } else {
+                live += k.len() + std::mem::size_of::<SharedStr>() * 2;
+                true
+            }
+        });
+        live
     }
 }
 
@@ -102,6 +132,9 @@ pub struct State<'gc> {
     /// run -- a native writing thread state mid-op would double-borrow and panic. The
     /// dispatch loop reads it per op like a second fuel line.
     pub paused: Cell<bool>,
+    /// The memory budget and the nested-call count — see [`crate::mem`].
+    #[collect(require_static)]
+    pub mem: crate::mem::MemBudget,
 }
 
 impl<'gc> State<'gc> {
@@ -112,6 +145,7 @@ impl<'gc> State<'gc> {
                 regs: Vec::new(),
                 frames: Vec::new(),
                 ops_left: u64::MAX,
+                max_frames: crate::mem::DEFAULT_MAX_FRAMES,
             }),
         );
         let natives = Gc::new(mc, RefLock::new(Vec::new()));
@@ -129,6 +163,7 @@ impl<'gc> State<'gc> {
             field_names,
             roots: Gc::new(mc, Lock::new(DynamicRootSet::new(mc))),
             paused: Cell::new(false),
+            mem: crate::mem::MemBudget::default(),
         }
     }
 
@@ -182,7 +217,43 @@ impl<'gc> Ctx<'gc> {
     }
 
     pub fn intern(self, s: &str) -> Str<'gc> {
-        self.state.strings.intern(self.mutation, s)
+        let (str, fresh) = self.state.strings.intern(self.mutation, s);
+        if fresh {
+            self.charge(s.len() + crate::mem::BOX_BYTES);
+        }
+        str
+    }
+
+    /// Count `bytes` of new heap against the memory budget (see [`crate::mem`]). The Vm's own
+    /// constructors charge for themselves; a native that grows a container in place charges for
+    /// the growth. Never fails here: the dispatch loop stops the program at its next op.
+    #[inline]
+    pub fn charge(self, bytes: usize) {
+        self.state.mem.charge(bytes);
+    }
+
+    /// Count `ops` against the running entry's op budget — for a native that runs work the
+    /// dispatch loop can't see (a nested Vm). Taken off at the next op; an entry whose budget
+    /// it exhausts fails with `RtErr::OutOfFuel` there.
+    #[inline]
+    pub fn charge_ops(self, ops: u64) {
+        self.state.mem.charge_ops(ops);
+    }
+
+    /// Fail before allocating one string or array of `bytes` that is bigger than the budget allows
+    /// for a single value. Use it where a size comes from a script integer.
+    pub fn check_alloc(self, bytes: usize) -> RtResult<()> {
+        let limit = crate::mem::max_object_bytes(self.state.mem.limit.get());
+        if bytes > limit {
+            Err(RtErr::TooLarge { limit })
+        } else {
+            Ok(())
+        }
+    }
+
+    /// [`check_alloc`](Self::check_alloc) for `count` items of `size` bytes each.
+    pub fn check_alloc_n(self, count: usize, size: usize) -> RtResult<()> {
+        self.check_alloc(count.checked_mul(size).unwrap_or(usize::MAX))
     }
 
     /// Fetch the per-Vm fixture of type `T`, creating it on first access -- see the
@@ -275,7 +346,8 @@ impl<'gc> Ctx<'gc> {
     }
 
     pub fn new_array(self, items: Vec<Val<'gc>>) -> Array<'gc> {
-        Array(Gc::new(self.mutation, RefLock::new(items)))
+        self.charge(crate::mem::BOX_BYTES + items.capacity() * std::mem::size_of::<Val>());
+        Array(Gc::new(self.mutation, RefLock::new(items.into())))
     }
 
     /// The `[]` op's result: an empty sequence in `ArrayStore::Empty`, which
@@ -284,6 +356,7 @@ impl<'gc> Ctx<'gc> {
     /// but the hot `arr = []; for .. arr.push(i)` loop never allocates per
     /// element's 16-byte tag.
     pub fn new_seq(self) -> Val<'gc> {
+        self.charge(crate::mem::BOX_BYTES);
         Val::IntArray(Seq(Gc::new(self.mutation, RefLock::new(ArrayStore::Empty))))
     }
 
@@ -316,6 +389,7 @@ impl<'gc> Ctx<'gc> {
     }
 
     pub fn new_int_array(self, items: Vec<i64>) -> IntArray<'gc> {
+        self.charge(crate::mem::BOX_BYTES + items.capacity() * 8);
         Seq(Gc::new(
             self.mutation,
             RefLock::new(ArrayStore::Ints(items)),
@@ -323,6 +397,7 @@ impl<'gc> Ctx<'gc> {
     }
 
     pub fn new_float_array(self, items: Vec<f64>) -> FloatArray<'gc> {
+        self.charge(crate::mem::BOX_BYTES + items.capacity() * 8);
         Seq(Gc::new(
             self.mutation,
             RefLock::new(ArrayStore::Floats(items)),
@@ -330,10 +405,12 @@ impl<'gc> Ctx<'gc> {
     }
 
     pub fn new_dict(self, items: DictMap<'gc>) -> Dict<'gc> {
+        self.charge(crate::mem::BOX_BYTES + items.heap_bytes());
         Dict(Gc::new(self.mutation, RefLock::new(items)))
     }
 
     pub fn new_instance(self, struct_id: u32, fields: Fields<'gc>) -> Instance<'gc> {
+        self.charge(crate::mem::BOX_BYTES + fields.heap_bytes());
         Instance(Gc::new(
             self.mutation,
             RefLock::new(InstanceData { struct_id, fields }),
@@ -341,6 +418,7 @@ impl<'gc> Ctx<'gc> {
     }
 
     pub fn new_closure(self, function: BodyId, captures: Vec<Val<'gc>>) -> Closure<'gc> {
+        self.charge(crate::mem::BOX_BYTES + captures.capacity() * std::mem::size_of::<Val>());
         Closure(Gc::new(self.mutation, ClosureData { function, captures }))
     }
 

@@ -192,7 +192,7 @@ impl<'gc> Snapper<'gc> {
     fn fill(&mut self, i: u32, v: Val<'gc>) -> Result<(), SnapError> {
         self.nodes[i as usize] = match v {
             Val::Array(a) => {
-                let items: Vec<Val> = a.0.borrow().clone();
+                let items: Vec<Val> = a.0.borrow().to_vec();
                 let items = items
                     .iter()
                     .map(|&v| self.val(v))
@@ -383,7 +383,7 @@ impl Vm {
                             .iter()
                             .map(|sv| thaw.thaw(sv))
                             .collect::<Result<Vec<_>, _>>()?;
-                        *a.0.borrow_mut(mc) = vals;
+                        *a.0.borrow_mut(mc) = vals.into();
                     }
                     (SnapNode::IntArray(items), Some(Val::IntArray(a))) => {
                         *a.0.borrow_mut(mc) = crate::val::ArrayStore::Ints(items.clone());

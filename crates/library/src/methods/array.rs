@@ -75,10 +75,14 @@ fn new<'gc>() -> Vec<anon::T<'gc>> {
 /// grid[0].push(1);
 /// // grid is [[0, 0, 1], [0, 0]]
 /// ```
-fn new_filled<'gc>(ctx: Ctx<'gc>, val: anon::T<'gc>, len: i64) -> Vec<anon::T<'gc>> {
-    (0..len.max(0))
-        .map(|_| anon::Anon(ctx.deep_clone(val.0)))
-        .collect()
+fn new_filled<'gc>(
+    ctx: Ctx<'gc>,
+    val: anon::T<'gc>,
+    len: i64,
+) -> Result<Vec<anon::T<'gc>>, RtErr> {
+    let len = len.max(0) as usize;
+    ctx.check_alloc_n(len, std::mem::size_of::<Val>())?;
+    Ok((0..len).map(|_| anon::Anon(ctx.deep_clone(val.0))).collect())
 }
 
 #[native]
@@ -153,7 +157,7 @@ fn shuffle<'gc>(ctx: Ctx<'gc>, arr: &mut Vec<anon::T<'gc>>) {
 /// let xs = [1, 2];
 /// xs.extend([3, 4]); // xs is now [1, 2, 3, 4]
 /// ```
-fn extend(arr: &mut Vec<Val<'gc>>, other: Array<'gc>) {
+fn extend<'gc>(ctx: Ctx<'gc>, arr: &mut Vec<Val<'gc>>, other: Array<'gc>) -> Result<(), RtErr> {
     let copy: Vec<Val<'gc>> = match other.0.try_borrow() {
         Ok(v) => v.iter().copied().collect(),
         Err(_) => {
@@ -162,7 +166,10 @@ fn extend(arr: &mut Vec<Val<'gc>>, other: Array<'gc>) {
             arr.clone()
         }
     };
+    ctx.check_alloc_n(arr.len().saturating_add(copy.len()), std::mem::size_of::<Val>())?;
+    ctx.charge(copy.len() * std::mem::size_of::<Val>());
     arr.extend(copy);
+    Ok(())
 }
 
 #[native]
