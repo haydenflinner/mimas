@@ -53,6 +53,18 @@ pub enum SceneResult {
     Fallback(String),
 }
 
+/// One scalar in a host-built argument bag — [`Vm::resolve_for_call`] fills the callee's
+/// declared parameter shape from `&[(&str, ArgVal)]` field entries (a struct's declared
+/// field names, or a dict's keys).
+#[derive(Debug, Clone)]
+pub enum ArgVal {
+    Null,
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    Str(String),
+}
+
 /// A `DataFrame` flattened to display cells — column names plus up to
 /// `cap` rows of `AnyValue` display strings. [`Inspect`] flattens a frame to
 /// `Other`, so a host that typesets `show_*` results as tables reads the
@@ -1405,6 +1417,60 @@ pub(crate) fn step_one<'gc>(
     Ok(Flow::Next)
 }
 
+/// Top-level binding `name`'s value — the receiver both
+/// `Vm::resolve_for_scene`/`resolve_for_call` call methods on.
+fn top_level_receiver<'gc>(
+    thread: &ThreadState<'gc>,
+    chunks: &IdVec<BodyId, Chunk>,
+    name: &str,
+) -> Option<Val<'gc>> {
+    let frame = thread.frames.first()?;
+    let reg = *chunks[frame.chunk].locals.get(name)?;
+    Some(*thread.regs.get(frame.base + reg.index())?)
+}
+
+/// Build the one argument [`Vm::resolve_for_call`] passes. The callee's declared parameter
+/// type drives the shape: an adt becomes an `Instance` whose declared fields fill by name
+/// (names the bag didn't supply land as `Null`), anything else a `~{…}` dict of the entries.
+fn arg_val<'gc>(
+    ctx: Ctx<'gc>,
+    field_names: &[Vec<String>],
+    ty: &shared::Ty,
+    fields: &[(&str, ArgVal)],
+) -> Val<'gc> {
+    let scalar = |v: &ArgVal| -> Val<'gc> {
+        match v {
+            ArgVal::Null => Val::Null,
+            ArgVal::Bool(b) => Val::Bool(*b),
+            ArgVal::Int(i) => Val::Int(*i),
+            ArgVal::Float(f) => Val::Float(*f),
+            ArgVal::Str(s) => Val::Str(ctx.intern(s)),
+        }
+    };
+    let (shared::Ty::Adt(aid, _) | shared::Ty::Identity(aid, _)) = ty else {
+        let map: DictMap = fields
+            .iter()
+            .map(|(k, v)| (ctx.intern(k), scalar(v)))
+            .collect();
+        return Val::Dict(ctx.new_dict(map));
+    };
+    let sid = aid.index();
+    let Some(names) = field_names.get(sid) else {
+        return Val::Null;
+    };
+    let vals: Vec<Val> = names
+        .iter()
+        .map(|n| {
+            fields
+                .iter()
+                .find(|(k, _)| *k == n.as_str())
+                .map(|(_, v)| scalar(v))
+                .unwrap_or(Val::Null)
+        })
+        .collect();
+    Val::Instance(ctx.new_instance(sid as u32, Fields::new(vals)))
+}
+
 /// Push a new frame for `body`: grow `regs`, copy args into the param registers and captures into
 /// the capture registers, save the caller's ip, and jump. The window pointer in `run_dispatch` is
 /// stale after the `resize` here, which is why the driver re-derives it on the next `'frame` pass.
@@ -2703,48 +2769,123 @@ impl Vm {
         } = self;
         arena.mutate(|mc, state| {
             let ctx = state.ctx(mc);
-            let mut thread = state.thread.borrow_mut(mc);
-
-            let frame = thread.frames.first()?;
-            let chunk = frame.chunk;
-            let base = frame.base;
-            let reg = *chunks[chunk].locals.get(name)?;
-            let receiver = *thread.regs.get(base + reg.index())?;
-
-            if let Val::Instance(inst) = receiver {
-                let struct_id = inst.0.borrow().struct_id as usize;
-                if let Some(&body) = methods.get(struct_id).and_then(|m| m.get(draw_method)) {
-                    let return_slot = thread.regs.len();
-                    thread.regs.push(Val::Null);
-                    let caller_base = thread.frames.last().unwrap().base;
-                    let dst = Reg::from((return_slot - caller_base) as u32);
-                    let stop_depth = thread.frames.len() + 1;
-                    enter_call(&mut thread, code, chunks, body, dst, &[receiver], &[]).ok()?;
-                    let ok = run_dispatch(
-                        ctx,
-                        code,
-                        chunks,
-                        signatures,
-                        strs,
-                        sources,
-                        &mut thread,
-                        bc.as_deref(),
-                        usize::MAX,
-                        stop_depth,
-                    )
-                    .is_ok();
-                    if ok {
+            // Receiver and method look up under a short thread borrow —
+            // `inject_call` re-borrows it to dispatch.
+            let (receiver, body) = {
+                let thread = state.thread.borrow_mut(mc);
+                let receiver = top_level_receiver(&thread, chunks, name)?;
+                let body = if let Val::Instance(inst) = receiver {
+                    let sid = inst.0.borrow().struct_id as usize;
+                    methods.get(sid).and_then(|m| m.get(draw_method)).copied()
+                } else {
+                    None
+                };
+                (receiver, body)
+            };
+            if let Some(body) = body {
+                // `draw(self)` takes the receiver only — a fatter signature
+                // can't be injected (same `enter_call` arity refusal as
+                // before, just checked ahead of the call).
+                if chunks[body].args as usize != 1 {
+                    return None;
+                }
+                match inject_call(
+                    ctx,
+                    code,
+                    chunks,
+                    signatures,
+                    strs,
+                    sources,
+                    bc.as_deref(),
+                    body,
+                    &[receiver],
+                    &[],
+                ) {
+                    Ok(result) => {
                         let struct_names = state.struct_names.borrow();
                         let mut seen = std::collections::HashSet::new();
-                        let result =
-                            thread.regs[return_slot].inspect(&struct_names, field_names, &mut seen);
-                        thread.regs.truncate(return_slot);
-                        return Some(SceneResult::Drawn(result));
+                        return Some(SceneResult::Drawn(result.inspect(
+                            &struct_names,
+                            field_names,
+                            &mut seen,
+                        )));
                     }
-                    thread.regs.truncate(return_slot);
+                    Err(_) => {}
                 }
             }
             ctx.to_string(receiver).ok().map(SceneResult::Fallback)
+        })
+    }
+
+    /// [`Vm::resolve_for_scene`]'s sibling for methods that take one argument beyond `self`:
+    /// resolves `name` as a top-level local, looks up `method` on the instance it holds, builds
+    /// the argument host-side from `fields` (a named-field bag — see [`ArgVal`]), calls, and
+    /// returns the result as an [`Inspect`]. For a livelit `respond(self, ev)` the host
+    /// synthesizes `ev` — the method's declared parameter type drives the shape: an adt becomes
+    /// an `Instance` whose declared fields fill by name (absent names land as `Null`), anything
+    /// else becomes a `~{…}` dict of the given entries. `None` when `name` isn't a live
+    /// instance-typed local, has no `method`, or `method` doesn't take exactly one parameter.
+    /// Faults unwind like any other [`inject_call`] — no injected frame is left behind.
+    pub fn resolve_for_call(
+        &mut self,
+        name: &str,
+        method: &str,
+        fields: &[(&str, ArgVal)],
+    ) -> Option<Inspect> {
+        shared::units::install(&self.units);
+        let Vm {
+            code,
+            chunks,
+            c_strs: strs,
+            signatures,
+            arena,
+            sources,
+            methods,
+            field_names,
+            bc,
+            ..
+        } = self;
+        arena.mutate(|mc, state| {
+            let ctx = state.ctx(mc);
+            // Receiver, method, and header look up under a short thread
+            // borrow — `inject_call` re-borrows it to dispatch.
+            let (receiver, body, arg) = {
+                let thread = state.thread.borrow_mut(mc);
+                let receiver = top_level_receiver(&thread, chunks, name)?;
+                let Val::Instance(inst) = receiver else {
+                    return None;
+                };
+                let sid = inst.0.borrow().struct_id as usize;
+                let body = *methods.get(sid)?.get(method)?;
+                // `self` *is* `parameters[0]` on a method header (the
+                // receiver fills its slot), so `respond(self, ev)` reads
+                // as `[self, ev]`.
+                let header = &signatures[body].as_ref()?.header;
+                if !header.is_method || header.parameters.len() != 2 {
+                    return None;
+                }
+                let arg = arg_val(ctx, field_names, &header.parameters[1].ty, fields);
+                (receiver, body, arg)
+            };
+            let result = inject_call(
+                ctx,
+                code,
+                chunks,
+                signatures,
+                strs,
+                sources,
+                bc.as_deref(),
+                body,
+                &[receiver, arg],
+                &[],
+            )
+            .ok()?;
+            let struct_names = state.struct_names.borrow();
+            // Literal-bound inspect: a shared acyclic subgraph (e.g. a
+            // deck's four `Suit` objects) expands per alias — `repr`
+            // can't spell aliasing — while a real cycle still marks
+            // `Cycle` for the printer to refuse.
+            Some(result.inspect_literal(&struct_names, field_names, 100_000))
         })
     }
 

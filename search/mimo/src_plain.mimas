@@ -1,128 +1,6 @@
 use std::polars::*;
 fn data(name: str) -> DataFrame! {
-    std::polars::from_csv("id,kind,x,y,w,h
-g0,ground,40,700,960,20
-p01,plat,120,640,100,16
-p02,plat,260,580,100,16
-p03,plat,400,525,100,16
-p04,plat,540,470,100,16
-p05,plat,680,420,100,16
-p06,plat,820,370,100,16
-p07,plat,660,290,100,16
-p08,plat,510,265,100,16
-p09,plat,360,265,100,16
-p10,plat,210,290,100,16
-p11,plat,60,340,100,16
-p12,plat,200,430,90,16
-p13,plat,340,480,90,16
-p14,plat,480,440,90,16
-p15,plat,640,500,90,16
-p16,plat,800,560,110,16
-flag,goal,880,496,12,64
-spawn,spawn,70,664,24,36
-hz1,lava,380,684,120,16
-gm1,goomba,560,676,90,24
-gm2,goomba,270,556,80,24
-c001,coin,136,598,20,20
-c002,coin,170,588,20,20
-c003,coin,204,598,20,20
-c004,coin,276,538,20,20
-c005,coin,310,528,20,20
-c006,coin,344,538,20,20
-c007,coin,416,483,20,20
-c008,coin,450,473,20,20
-c009,coin,484,483,20,20
-c010,coin,556,428,20,20
-c011,coin,590,418,20,20
-c012,coin,624,428,20,20
-c013,coin,696,378,20,20
-c014,coin,730,368,20,20
-c015,coin,764,378,20,20
-c016,coin,836,328,20,20
-c017,coin,870,318,20,20
-c018,coin,904,328,20,20
-c019,coin,676,248,20,20
-c020,coin,710,238,20,20
-c021,coin,744,248,20,20
-c022,coin,526,223,20,20
-c023,coin,560,213,20,20
-c024,coin,594,223,20,20
-c025,coin,376,223,20,20
-c026,coin,410,213,20,20
-c027,coin,444,223,20,20
-c028,coin,226,248,20,20
-c029,coin,260,238,20,20
-c030,coin,294,248,20,20
-c031,coin,76,298,20,20
-c032,coin,110,288,20,20
-c033,coin,144,298,20,20
-c034,coin,211,388,20,20
-c035,coin,245,378,20,20
-c036,coin,279,388,20,20
-c037,coin,351,438,20,20
-c038,coin,385,428,20,20
-c039,coin,419,438,20,20
-c040,coin,491,398,20,20
-c041,coin,525,388,20,20
-c042,coin,559,398,20,20
-c043,coin,651,458,20,20
-c044,coin,685,448,20,20
-c045,coin,719,458,20,20
-c046,coin,821,518,20,20
-c047,coin,855,508,20,20
-c048,coin,889,518,20,20
-c049,coin,222,514,20,20
-c050,coin,258,514,20,20
-c051,coin,362,459,20,20
-c052,coin,398,459,20,20
-c053,coin,502,404,20,20
-c054,coin,538,404,20,20
-c055,coin,642,354,20,20
-c056,coin,678,354,20,20
-c057,coin,782,304,20,20
-c058,coin,818,304,20,20
-c059,coin,772,224,20,20
-c060,coin,808,224,20,20
-c061,coin,617,199,20,20
-c062,coin,653,199,20,20
-c063,coin,467,199,20,20
-c064,coin,503,199,20,20
-c065,coin,317,199,20,20
-c066,coin,353,199,20,20
-c067,coin,167,224,20,20
-c068,coin,203,224,20,20
-c069,coin,162,274,20,20
-c070,coin,198,274,20,20
-c071,coin,297,364,20,20
-c072,coin,333,364,20,20
-c073,coin,437,374,20,20
-c074,coin,473,374,20,20
-c075,coin,587,374,20,20
-c076,coin,623,374,20,20
-c077,coin,747,434,20,20
-c078,coin,783,434,20,20
-c079,coin,80,660,20,20
-c080,coin,120,640,20,20
-c081,coin,208,660,20,20
-c082,coin,248,640,20,20
-c083,coin,336,660,20,20
-c084,coin,376,640,20,20
-c085,coin,464,660,20,20
-c086,coin,504,640,20,20
-c087,coin,592,660,20,20
-c088,coin,632,640,20,20
-c089,coin,720,660,20,20
-c090,coin,760,640,20,20
-c091,coin,848,660,20,20
-c092,coin,888,640,20,20
-c093,coin,870,480,20,20
-c094,coin,945,480,20,20
-c095,coin,880,430,20,20
-c096,coin,935,430,20,20
-c097,coin,305,210,20,20
-c098,coin,457,210,20,20
-c099,coin,610,240,20,20
-c100,coin,763,250,20,20")!
+    std::polars::from_csv("id,kind,x,y,w,h\ng0,ground,40,700,960,20\np01,plat,120,640,100,16\np02,plat,260,580,100,16\np03,plat,400,525,100,16\np04,plat,540,470,100,16\np05,plat,680,420,100,16\np06,plat,820,370,100,16\np07,plat,660,290,100,16\np08,plat,510,265,100,16\np09,plat,360,265,100,16\np10,plat,210,290,100,16\np11,plat,60,340,100,16\np12,plat,200,430,90,16\np13,plat,340,480,90,16\np14,plat,480,440,90,16\np15,plat,640,500,90,16\np16,plat,800,560,110,16\nflag,goal,880,496,12,64\nspawn,spawn,70,664,24,36\nhz1,lava,380,684,120,16\ngm1,goomba,560,676,90,24\ngm2,goomba,270,556,80,24\nc001,coin,136,598,20,20\nc002,coin,170,588,20,20\nc003,coin,204,598,20,20\nc004,coin,276,538,20,20\nc005,coin,310,528,20,20\nc006,coin,344,538,20,20\nc007,coin,416,483,20,20\nc008,coin,450,473,20,20\nc009,coin,484,483,20,20\nc010,coin,556,428,20,20\nc011,coin,590,418,20,20\nc012,coin,624,428,20,20\nc013,coin,696,378,20,20\nc014,coin,730,368,20,20\nc015,coin,764,378,20,20\nc016,coin,836,328,20,20\nc017,coin,870,318,20,20\nc018,coin,904,328,20,20\nc019,coin,676,248,20,20\nc020,coin,710,238,20,20\nc021,coin,744,248,20,20\nc022,coin,526,223,20,20\nc023,coin,560,213,20,20\nc024,coin,594,223,20,20\nc025,coin,376,223,20,20\nc026,coin,410,213,20,20\nc027,coin,444,223,20,20\nc028,coin,226,248,20,20\nc029,coin,260,238,20,20\nc030,coin,294,248,20,20\nc031,coin,76,298,20,20\nc032,coin,110,288,20,20\nc033,coin,144,298,20,20\nc034,coin,211,388,20,20\nc035,coin,245,378,20,20\nc036,coin,279,388,20,20\nc037,coin,351,438,20,20\nc038,coin,385,428,20,20\nc039,coin,419,438,20,20\nc040,coin,491,398,20,20\nc041,coin,525,388,20,20\nc042,coin,559,398,20,20\nc043,coin,651,458,20,20\nc044,coin,685,448,20,20\nc045,coin,719,458,20,20\nc046,coin,821,518,20,20\nc047,coin,855,508,20,20\nc048,coin,889,518,20,20\nc049,coin,222,514,20,20\nc050,coin,258,514,20,20\nc051,coin,362,459,20,20\nc052,coin,398,459,20,20\nc053,coin,502,404,20,20\nc054,coin,538,404,20,20\nc055,coin,642,354,20,20\nc056,coin,678,354,20,20\nc057,coin,782,304,20,20\nc058,coin,818,304,20,20\nc059,coin,772,224,20,20\nc060,coin,808,224,20,20\nc061,coin,617,199,20,20\nc062,coin,653,199,20,20\nc063,coin,467,199,20,20\nc064,coin,503,199,20,20\nc065,coin,317,199,20,20\nc066,coin,353,199,20,20\nc067,coin,167,224,20,20\nc068,coin,203,224,20,20\nc069,coin,162,274,20,20\nc070,coin,198,274,20,20\nc071,coin,297,364,20,20\nc072,coin,333,364,20,20\nc073,coin,437,374,20,20\nc074,coin,473,374,20,20\nc075,coin,587,374,20,20\nc076,coin,623,374,20,20\nc077,coin,747,434,20,20\nc078,coin,783,434,20,20\nc079,coin,80,660,20,20\nc080,coin,120,640,20,20\nc081,coin,208,660,20,20\nc082,coin,248,640,20,20\nc083,coin,336,660,20,20\nc084,coin,376,640,20,20\nc085,coin,464,660,20,20\nc086,coin,504,640,20,20\nc087,coin,592,660,20,20\nc088,coin,632,640,20,20\nc089,coin,720,660,20,20\nc090,coin,760,640,20,20\nc091,coin,848,660,20,20\nc092,coin,888,640,20,20\nc093,coin,870,480,20,20\nc094,coin,945,480,20,20\nc095,coin,880,430,20,20\nc096,coin,935,430,20,20\nc097,coin,305,210,20,20\nc098,coin,457,210,20,20\nc099,coin,610,240,20,20\nc100,coin,763,250,20,20\n")!
 }
 use game;
 use music;
@@ -173,25 +51,28 @@ fn level() -> [LRow] {
     }
     out
 }
-fn rows_of(k: str) -> [LRow] {
+// The parsed rows live on the world (`w.lv`) — init parses once and
+// every per-frame consumer reads that. Parsers stay for the solver and
+// checks, which run on demand, and for `r` — a reset re-reads the table.
+fn rows_of(lv: [LRow], k: str) -> [LRow] {
     let out: [LRow] = [];
-    for r in level() { if r.kind == k { out.push(r); } }
+    for r in lv { if r.kind == k { out.push(r); } }
     out
 }
-fn solids() -> [LRow] {
+fn solids(lv: [LRow]) -> [LRow] {
     let out: [LRow] = [];
-    for r in level() {
+    for r in lv {
         if r.kind == "plat" || r.kind == "ground" { out.push(r); }
     }
     out
 }
-fn coins() -> [LRow] { rows_of("coin") }
-fn first_row(k: str) -> LRow! {
-    for r in level() { if r.kind == k { return r; } }
+fn coins(lv: [LRow]) -> [LRow] { rows_of(lv, "coin") }
+fn first_row(lv: [LRow], k: str) -> LRow! {
+    for r in lv { if r.kind == k { return r; } }
     raise "level has no '" + k + "' row";
 }
-fn spawn_row() -> LRow! { first_row("spawn") }
-fn goal_row() -> LRow! { first_row("goal") }
+fn spawn_row(lv: [LRow]) -> LRow! { first_row(lv, "spawn") }
+fn goal_row(lv: [LRow]) -> LRow! { first_row(lv, "goal") }
 
 // §the solver ----------------------------------------------------------
 // A level is "beatable" when every coin and the flag is reachable by
@@ -204,17 +85,17 @@ struct N { top: float, l: float, r: float, id: str }
 
 const PICK = 18.0; // coin grab radius, px (float — solver math)
 
-fn nodes() -> [N] {
+fn nodes(lv: [LRow]) -> [N] {
     let out: [N] = [];
-    for s in solids() {
+    for s in solids(lv) {
         out.push(N { top = s.y, l = s.x, r = s.x + s.w, id = s.id });
     }
-    for c in coins() {
+    for c in coins(lv) {
         let cx = c.x + c.w / 2.0;
         let cy = c.y + c.h / 2.0;
         out.push(N { top = cy, l = cx - PICK, r = cx + PICK, id = c.id });
     }
-    let g = goal_row()!;
+    let g = goal_row(lv)!;
     out.push(N { top = g.y + g.h, l = g.x - 20.0, r = g.x + g.w + 20.0, id = g.id });
     out
 }
@@ -234,9 +115,9 @@ fn can_jump(a: N, b: N) -> bool {
     gap + 4.0 <= run * t
 }
 
-fn reach() -> [str] {
-    let ns = nodes();
-    let s = spawn_row()!;
+fn reach(lv: [LRow]) -> [str] {
+    let ns = nodes(lv);
+    let s = spawn_row(lv)!;
     let got: [str] = [];
     // the surface the spawn cell stands on seeds the flood
     for n in ns {
@@ -263,34 +144,35 @@ fn reach() -> [str] {
 
 // First thing a given flood can't reach — coin id, 'flag', or '' when
 // the whole level clears. `blocker`/`live_solve` share one `reach()`.
-fn blocker_of(got: [str]) -> str {
-    for c in coins() { if !got.contains(c.id) { return c.id; } }
+fn blocker_of(lv: [LRow], got: [str]) -> str {
+    for c in coins(lv) { if !got.contains(c.id) { return c.id; } }
     if !got.contains("flag") { return "flag"; }
     ""
 }
-fn blocker() -> str { blocker_of(reach()) }
-fn beatable() -> bool { blocker() == "" }
+fn blocker(lv: [LRow]) -> str { blocker_of(lv, reach(lv)) }
+fn beatable(lv: [LRow]) -> bool { blocker(lv) == "" }
 
 // Which collectible the canvas points at: the blocker when there is
 // one, else the 50th coin — the "watch" row of the table.
-fn watch_id() -> str {
-    let b = blocker();
+fn watch_id(lv: [LRow]) -> str {
+    let b = blocker(lv);
     if b != "" { b } else { "c050" }
 }
 
 fn show_watch() -> DataFrame! {
-    data("level")!.filter(col("id") == lit(watch_id()))
+    data("level")!.filter(col("id") == lit(watch_id(level())))
 }
 
 // The solver's readout — repaints on every edit. A verdict strip under
 // the field (one dot per coin, reachable = gold, stuck = red) and a
 // ring around the watch coin's spot *in the level*.
 fn live_solve() -> [Img] {
-    let got = reach();
-    let b = blocker_of(got);
+    let lv = level();
+    let got = reach(lv);
+    let b = blocker_of(lv, got);
     let ok = b == "";
     let wid = if ok { "c050" } else { b };
-    let cs = coins();
+    let cs = coins(lv);
     let parts: [Img] = [];
     let y0 = FY + FH + 30.0px;
     parts.push(Img::Text {
@@ -359,14 +241,15 @@ struct W {
     px: px, py: px, vx: px/s, vy: px/s,
     face: float, grounded: bool,
     got: [str], score: int, deaths: int,
-    won: bool, t: s,
+    won: bool, t: s, lv: [LRow],
 }
 
 fn init() -> W {
-    let s = spawn_row()!;
+    let lv = level();
+    let s = spawn_row(lv)!;
     W { px = s.x * 1.0px, py = s.y * 1.0px, vx = 0.0px/s, vy = 0.0px/s,
         face = 1.0, grounded = false, got = [], score = 0, deaths = 0,
-        won = false, t = 0.0s }
+        won = false, t = 0.0s, lv = lv }
 }
 
 // One-way platforms: you fall onto tops, never bump a side or a head —
@@ -374,6 +257,7 @@ fn init() -> W {
 fn tick(w: W, inp: Input, evs: [Ev]) -> W {
     if inp.held.contains("r") { return init(); }
     let dt = inp.dt;
+    let lv = w.lv;
     let px = w.px; let py = w.py;
     let vx = w.vx; let vy = w.vy;
     let grounded = w.grounded;
@@ -400,7 +284,7 @@ fn tick(w: W, inp: Input, evs: [Ev]) -> W {
     px = (px + vx * dt).max(FX).min(FX + FW - PLAYER_W);
     py = py + vy * dt;
     grounded = false;
-    for s in solids() {
+    for s in solids(lv) {
         let top = s.y * 1.0px;
         let sx = s.x * 1.0px; let sw = s.w * 1.0px;
         if vy >= 0.0px/s && old_bottom <= top + 1.0px && px + PLAYER_W > sx && px < sx + sw && py + PLAYER_H >= top && py + PLAYER_H <= top + 24.0px {
@@ -410,15 +294,15 @@ fn tick(w: W, inp: Input, evs: [Ev]) -> W {
     if py > FY + FH + 200.0px {
         // fell out of the world — respawn
         music::sfx(sfxDie());
-        let s0 = spawn_row()!;
+        let s0 = spawn_row(lv)!;
         return W { px = s0.x * 1.0px, py = s0.y * 1.0px, vx = 0.0px/s,
                    vy = 0.0px/s, face = 1.0, grounded = false,
                    got = w.got, score = w.score, deaths = w.deaths + 1,
-                   won = w.won, t = t };
+                   won = w.won, t = t, lv = lv };
     }
 
     // hazards — goombas patrol their row's span, lava just burns
-    for h in level() {
+    for h in lv {
         if h.kind == "goomba" || h.kind == "lava" {
             let hx = h.x * 1.0px; let hy = h.y * 1.0px;
             let hw = h.w * 1.0px; let hh = h.h * 1.0px;
@@ -431,11 +315,11 @@ fn tick(w: W, inp: Input, evs: [Ev]) -> W {
             let mhh = if h.kind == "goomba" { 24.0px } else { hh };
             if px + PLAYER_W > ox && px < ox + ow && py + PLAYER_H > hy && py < hy + mhh {
                 music::sfx(sfxDie());
-                let s0 = spawn_row()!;
+                let s0 = spawn_row(lv)!;
                 return W { px = s0.x * 1.0px, py = s0.y * 1.0px, vx = 0.0px/s,
                            vy = 0.0px/s, face = 1.0, grounded = false,
                            got = w.got, score = w.score, deaths = w.deaths + 1,
-                           won = w.won, t = t };
+                           won = w.won, t = t, lv = lv };
             }
         }
     }
@@ -443,12 +327,12 @@ fn tick(w: W, inp: Input, evs: [Ev]) -> W {
     // coins
     let got = w.got;
     let score = w.score;
-    for c in coins() {
+    for c in coins(lv) {
         if !got.contains(c.id) {
             let dx = (px + PLAYER_W / 2.0 - (c.x + c.w / 2.0) * 1.0px).abs();
             let dy = (py + PLAYER_H / 2.0 - (c.y + c.h / 2.0) * 1.0px).abs();
             if dx < PICK * 1.0px + 8.0px && dy < PICK * 1.0px + 14.0px {
-                got.push(c.id); score += 1;
+                got.push(c.id); score += 1; fuzz::set(c.id);
                 music::sfx(sfxCoin());
             }
         }
@@ -456,8 +340,8 @@ fn tick(w: W, inp: Input, evs: [Ev]) -> W {
 
     // the flag — only counts once every coin is pocketed
     let won = w.won;
-    if !won && score == coins().len() {
-        let g = goal_row()!;
+    if !won && score == coins(lv).len() {
+        let g = goal_row(lv)!;
         let gx = g.x * 1.0px; let gy = g.y * 1.0px;
         let gw = g.w * 1.0px; let gh = g.h * 1.0px;
         if px + PLAYER_W > gx && px < gx + gw && py + PLAYER_H > gy && py < gy + gh {
@@ -467,7 +351,7 @@ fn tick(w: W, inp: Input, evs: [Ev]) -> W {
 
     W { px = px, py = py, vx = vx, vy = vy, face = face,
         grounded = grounded, got = got, score = score, deaths = w.deaths,
-        won = won, t = t }
+        won = won, t = t, lv = w.lv }
 }
 
 // §follow-cam ----------------------------------------------------------
@@ -492,7 +376,7 @@ fn draw(w: W) {
     follow(w.px + PLAYER_W / 2.0, w.py + PLAYER_H / 2.0);
     game::rect(FX, FY, FW, FH, "#0a0f1e", "#31506b", 3.0px);
     game::tile("clouds", FX, FY, FW, FH * 0.4, 220.0px);
-    for r in level() {
+    for r in w.lv {
         let x = r.x * 1.0px; let y = r.y * 1.0px;
         let wd = r.w * 1.0px; let ht = r.h * 1.0px;
         if r.kind == "ground" {
@@ -517,13 +401,13 @@ fn draw(w: W) {
     game::sprite("mimo", w.px - 6.0px, w.py - 4.0px, 36.0px, 44.0px, w.face * 6deg);
     game::cam_reset();
     let sc = w.score; let dn = w.deaths;
-    game::text(60.0px, 62.0px, f"◉ {sc}/{coins().len()}", 22.0px, G_GOLD);
+    game::text(60.0px, 62.0px, f"◉ {sc}/{coins(w.lv).len()}", 22.0px, G_GOLD);
     game::text(860.0px, 62.0px, f"✗ {dn}", 22.0px, G_DIM);
     game::ctext(520.0px, FY + FH + 26.0px,
         "← → run   ·   ↑ jump   ·   r restart   ·   the level is the table — edit it",
         20.0px, G_DIM);
     if w.won {
-        game::ctext(520.0px, 380.0px, f"★ you cleared it — {sc}/{coins().len()} ★",
+        game::ctext(520.0px, 380.0px, f"★ you cleared it — {sc}/{coins(w.lv).len()} ★",
             42.0px, G_GOLD);
     }
 }
@@ -585,9 +469,9 @@ fn live_clouds() -> [Img] {
     ]
 }
 
-check coins().len() == 100
-check solids().len() >= 10
-check beatable()
+check coins(level()).len() == 100
+check solids(level()).len() >= 10
+check beatable(level())
 
 game_loop(init(), tick, draw);
 

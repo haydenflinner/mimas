@@ -140,6 +140,27 @@ fn unused_closure_param_warns() {
 }
 
 #[test]
+fn self_param_reads_count() {
+    let _t = TestResetter;
+    // `self` is the method's declared parameter -- reading it must count.
+    // The identity resolve used to return no dec, so every impl method
+    // warned `unused parameter self` no matter what the body did.
+    let w = warns("struct W { x: float } impl W { fn f(self) -> float { self.x } }");
+    assert!(w.is_empty(), "{w:?}");
+    let w = warns(
+        "pact P { fn f(self) -> float; } struct W { x: float } impl P for W { fn f(self) -> float { self.x } }",
+    );
+    assert!(w.is_empty(), "{w:?}");
+}
+
+#[test]
+fn unused_self_param_still_warns() {
+    let _t = TestResetter;
+    let w = warns("struct W { x: float } impl W { fn f(self) -> float { 1.0 } }");
+    assert_eq!(w, ["unused parameter `self`"]);
+}
+
+#[test]
 fn dead_store_warns_on_overwrite() {
     let _t = TestResetter;
     let w = warns("fn f() -> int { let x = 1; x = 2; x }");
@@ -529,5 +550,184 @@ fn non_must_use_discard_is_quiet() {
     let _t = TestResetter;
     native("reply", Some(Fx::empty()));
     let w = warns("fn f() { reply(); }");
+    assert!(w.is_empty(), "{w:?}");
+}
+
+#[test]
+fn while_counter_increment_is_live() {
+    let _t = TestResetter;
+    // `i += 1` at the loop bottom feeds `i < n` on the next pass -- the
+    // back-edge keeps the store live
+    let w = warns("fn f(n: int) -> int { let i = 0; while i < n { i += 1; } i }");
+    assert!(w.is_empty(), "{w:?}");
+}
+
+#[test]
+fn for_carried_prev_is_live() {
+    let _t = TestResetter;
+    let w = warns(
+        "fn f(a: [int]) -> int {
+            let prev = 0;
+            for v in a { if prev == v { prev = v + 1; } }
+            prev
+        }",
+    );
+    assert!(w.is_empty(), "{w:?}");
+}
+
+#[test]
+fn nested_loop_counter_is_live() {
+    let _t = TestResetter;
+    let w = warns(
+        "fn f(n: int) -> int {
+            let i = 0;
+            while i < n {
+                let j = 0;
+                while j < n { j += 1; }
+                i += 1;
+            }
+            i
+        }",
+    );
+    assert!(w.is_empty(), "{w:?}");
+}
+
+#[test]
+fn truly_dead_store_inside_loop_still_warns() {
+    let _t = TestResetter;
+    // `x` is never read anywhere -- the write is dead for real
+    let w = warns("fn f(n: int) { let x = 0; while x < n { x += 1; } x = 0; }");
+    // x is read (in `x < n`) so unused-binding doesn't own it; the `x = 0`
+    // overwrite past the loop is dead
+    assert!(
+        w.iter().any(|m| m.contains("never read")),
+        "{w:?}"
+    );
+}
+
+#[test]
+fn continue_path_store_is_live_when_read_next_pass() {
+    let _t = TestResetter;
+    let w = warns(
+        "fn f(a: [int]) -> int {
+            let acc = 0;
+            for v in a {
+                acc += v;
+                if v < 0 { acc += 1; continue; }
+            }
+            acc
+        }",
+    );
+    assert!(w.is_empty(), "{w:?}");
+}
+
+#[test]
+fn break_path_store_reaches_exit_read() {
+    let _t = TestResetter;
+    // `acc += 100` on the break path is read by the `acc` after the loop --
+    // exit flows carry evidence just like fall-through ones
+    let w = warns(
+        "fn f(a: [int]) -> int {
+            let acc = 0;
+            for v in a {
+                acc += v;
+                if v < 0 { acc += 100; break; }
+            }
+            acc
+        }",
+    );
+    assert!(w.is_empty(), "{w:?}");
+}
+
+#[test]
+fn let_unread_on_one_continue_path_stays_live() {
+    let _t = TestResetter;
+    // `c` is unread on the `continue` path but read on the others -- scope
+    // exit must consult the break/continue flows before calling a store dead
+    let w = warns(
+        "fn f(spells: [int], cards: [int]) -> int {
+            let acc = 0;
+            for s in spells {
+                let c = cards[s];
+                if s > 0 { acc += s; continue; }
+                acc += c;
+            }
+            acc
+        }",
+    );
+    assert!(w.is_empty(), "{w:?}");
+}
+
+#[test]
+fn merge_inherited_pending_store_stays_live() {
+    let _t = TestResetter;
+    // `over = 2` kills the `over = 1` span on this path, but that span is
+    // still pending on the `by <= 10.0` sibling -- a merge must not rebrand
+    // inherited pending writes as segment-local and flag them eagerly
+    let w = warns(
+        "fn f(lives: int, score: int, by: float) -> int {
+            let over = 0;
+            if score >= 400 { over = 1; }
+            if by > 10.0 {
+                if lives > 1 { return 7; }
+                over = 2;
+            }
+            over
+        }",
+    );
+    assert!(w.is_empty(), "{w:?}");
+}
+
+#[test]
+fn else_if_arm_write_then_late_write_stays_live() {
+    let _t = TestResetter;
+    // the asteroids shape: read in an else-if arm, writes in two branches,
+    // read at the tail
+    let w = warns(
+        "fn f(ship: int, reborn0: float, dt: float) -> float {
+            let reborn = reborn0;
+            if ship > 0 { } else if reborn > 0.0 { reborn -= dt; }
+            if ship < 0 { reborn = 1.4; }
+            reborn
+        }",
+    );
+    assert!(w.is_empty(), "{w:?}");
+}
+
+#[test]
+fn loop_carried_store_read_after_loop() {
+    let _t = TestResetter;
+    // ui-kit's `hit`: written inside the loop on every path that reaches it,
+    // read after the loop
+    let w = warns(
+        "fn f(ws: [int]) -> int {
+            let hit = -1;
+            for s in ws {
+                if s < 0 { continue; }
+                hit = s;
+            }
+            hit
+        }",
+    );
+    assert!(w.is_empty(), "{w:?}");
+}
+
+#[test]
+fn break_path_write_inside_loop_is_live() {
+    let _t = TestResetter;
+    // meridian's `leaf`/`lv`: written right before `break`, read after the
+    // loop -- the exit flow proves the store live
+    let w = warns(
+        "fn f(a: [int]) -> int {
+            let leaf = 0;
+            let lv = 0.5;
+            loop {
+                let tn = a[0];
+                if tn > 0 { leaf = tn; lv = 1.0; break; }
+                if tn < 0 { break; }
+            }
+            if lv > 0.0 { leaf } else { -leaf }
+        }",
+    );
     assert!(w.is_empty(), "{w:?}");
 }

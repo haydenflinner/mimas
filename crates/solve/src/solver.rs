@@ -2283,7 +2283,11 @@ impl Solver {
                     })
                 })?,
             };
-            (ty, None)
+            // `self` is still the method's declared parameter: link the use to its
+            // dec so the grades pass counts the read (`None` here left every `self`
+            // param looking unread, so `unused parameter self` fired on every impl
+            // method). `Self` and pact signatures bind nothing, so they keep `None`.
+            (ty, self.ribs.resolve(ident))
         } else {
             match self.ribs.resolve(ident) {
                 Some(dec_id) => {

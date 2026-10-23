@@ -211,9 +211,10 @@ impl Flow {
             });
         }
         killed.retain(|_, spans| !spans.is_empty());
-        // post-merge the flow is again a single path, so every surviving pending span is
-        // fair game for an eager dead verdict
-        let born: HashSet<Location> = pending.values().flatten().copied().collect();
+        // born restarts empty: a pending span inherited through a merge was written on a
+        // path a sibling may still read from, so it isn't segment-local -- only writes
+        // that happen after the merge can be eager-killed
+        let born: HashSet<Location> = HashSet::new();
         let mut consumed: HashMap<DecId, Vec<ConsumeMark>> = HashMap::new();
         for f in &arms {
             for (dec, marks) in &f.consumed {
@@ -257,6 +258,12 @@ struct Pass<'a> {
     /// scope_decs.len() at each enclosing loop's entry. Consuming a dec bound at or
     /// outside the floor inside the loop body would poison the next iteration -- refused.
     loop_floors: Vec<usize>,
+    /// Decs read anywhere inside each enclosing loop (header and body alike), one set per
+    /// nesting level. The pass walks a body once, so a store at the bottom can never be
+    /// observed reaching a read -- but the back-edge carries it to next iteration's reads.
+    /// A dec in this set keeps its body-end writes live (conservative: it can't see
+    /// whether an intervening write beats the read, only that one exists).
+    loop_reads: Vec<HashSet<DecId>>,
     /// Decs whose use-after-consume already reported (one error per dead
     /// path, not per read of it).
     consume_reported: HashSet<(DecId, Vec<String>)>,
@@ -329,6 +336,7 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> crate::errors::Result
             scope_decs: Vec::new(),
             closure_floors: Vec::new(),
             loop_floors: Vec::new(),
+            loop_reads: Vec::new(),
             consume_reported: HashSet::new(),
             skip_root_check: false,
             in_lvalue: false,
@@ -493,6 +501,12 @@ impl<'a> Pass<'a> {
     /// merges. Reading a dec a `#[consumes]` call already took is a solve error.
     fn read(&mut self, dec: DecId, at: Location) {
         self.uses.entry(dec).or_default().reads.tick();
+        // a read inside any enclosing loop's text can observe that loop's
+        // body-end stores on a later pass -- the back-edge the single
+        // walk can't see
+        for reads in &mut self.loop_reads {
+            reads.insert(dec);
+        }
         // the spine root's own check already ran at the access's deeper
         // path; an lvalue spine locates the slot without reading it
         if !self.in_lvalue && !std::mem::take(&mut self.skip_root_check) {
@@ -541,9 +555,11 @@ impl<'a> Pass<'a> {
     }
 
     /// The scope's own decs die here. A write span is a dead store when no surviving
-    /// path (this flow, plus any that retired early via `return`/`raise`/`let-else`)
-    /// still carries it pending or read it -- writes only ever live on paths that
-    /// stored them, so pending and killed spans both count as deaths.
+    /// path (this flow, any that retired early via `return`/`raise`/`let-else`, and the
+    /// innermost loop's `break`/`continue` exits -- the only exit flows that can carry
+    /// writes for decs this young) still carries it pending or read it -- writes only
+    /// ever live on paths that stored them, so pending and killed spans both count as
+    /// deaths.
     fn pop_scope(&mut self) {
         let Some(decs) = self.scope_decs.pop() else {
             return;
@@ -551,7 +567,11 @@ impl<'a> Pass<'a> {
         for dec in decs {
             let mut spans: HashSet<Location> = HashSet::new();
             let mut live: HashSet<Location> = HashSet::new();
-            for flow in std::iter::once(&self.flow).chain(self.retired.iter()) {
+            let exits = self.breaks.last().into_iter().flatten();
+            for flow in std::iter::once(&self.flow)
+                .chain(self.retired.iter())
+                .chain(exits)
+            {
                 if let Some(s) = flow.pending.get(&dec) {
                     spans.extend(s.iter().copied());
                 }
@@ -569,7 +589,11 @@ impl<'a> Pass<'a> {
             self.flow.killed.remove(&dec);
             self.flow.read_spans.remove(&dec);
             self.flow.consumed.remove(&dec);
-            for flow in &mut self.retired {
+            for flow in self
+                .retired
+                .iter_mut()
+                .chain(self.breaks.last_mut().into_iter().flatten())
+            {
                 flow.pending.remove(&dec);
                 flow.killed.remove(&dec);
                 flow.read_spans.remove(&dec);
@@ -982,6 +1006,7 @@ impl<'a> Pass<'a> {
             std::mem::take(&mut self.retired),
             std::mem::take(&mut self.breaks),
             std::mem::take(&mut self.closure_floors),
+            std::mem::take(&mut self.loop_reads),
         );
         self.push_scope();
         f(self);
@@ -992,6 +1017,7 @@ impl<'a> Pass<'a> {
             self.retired,
             self.breaks,
             self.closure_floors,
+            self.loop_reads,
         ) = saved;
     }
 
@@ -1208,6 +1234,7 @@ impl<'a> Pass<'a> {
                 self.flow.born.clear();
                 self.breaks.push(Vec::new());
                 self.loop_floors.push(self.scope_decs.len());
+                self.loop_reads.push(HashSet::new());
                 self.push_scope();
                 self.bind(&f.binding, Site::Binding, false);
                 self.expr(&f.body);
@@ -1218,6 +1245,9 @@ impl<'a> Pass<'a> {
                 self.end_loop(Some(pre), body_end);
             }
             ExprKind::While(w) => {
+                // the header re-evaluates per pass, so its reads count
+                // toward the back-edge set too
+                self.loop_reads.push(HashSet::new());
                 self.expr(&w.header);
                 let pre = self.flow.clone();
                 self.flow.born.clear();
@@ -1236,10 +1266,15 @@ impl<'a> Pass<'a> {
             ExprKind::Loop(l) => {
                 self.breaks.push(Vec::new());
                 self.loop_floors.push(self.scope_decs.len());
+                self.loop_reads.push(HashSet::new());
                 self.expr(&l.body);
                 self.loop_floors.pop();
-                let body_end = self.flow.clone();
-                let exits = self.breaks.pop().unwrap_or_default();
+                let mut body_end = self.flow.clone();
+                let mut exits = self.breaks.pop().unwrap_or_default();
+                for flow in exits.iter_mut().chain(std::iter::once(&mut body_end)) {
+                    self.absorb_back_edge(flow);
+                }
+                self.loop_reads.pop();
                 // `loop` with no `break` never falls through
                 if exits.is_empty() {
                     self.flow.diverged = true;
@@ -1299,13 +1334,39 @@ impl<'a> Pass<'a> {
     /// Post-loop state: the union of the pre-body state (when the loop can run zero times),
     /// the body's own fallthrough (a pending write at body end can be read on the next pass),
     /// and every `break`/`continue` exit.
-    fn end_loop(&mut self, pre: Option<Flow>, body_end: Flow) {
+    fn end_loop(&mut self, pre: Option<Flow>, mut body_end: Flow) {
         let mut arms = self.breaks.pop().unwrap_or_default();
+        for flow in arms.iter_mut().chain(std::iter::once(&mut body_end)) {
+            self.absorb_back_edge(flow);
+        }
+        self.loop_reads.pop();
         if let Some(pre) = pre {
             arms.push(pre);
         }
         arms.push(body_end);
         self.flow = Flow::merge(arms);
+    }
+
+    /// The back-edge the single body walk can't see: a store pending (or killed) where an
+    /// iteration ends can reach a read on the next pass, so a dec the loop's text read
+    /// anywhere keeps those spans live. Runs on body-end and `break`/`continue` exit
+    /// flows alike -- the two aren't told apart here; a `break` flow's spans merging into
+    /// post-loop stay pending for post-loop reads regardless, so over-marking only ever
+    /// misses the rare write-then-break of a loop-read dec.
+    fn absorb_back_edge(&mut self, flow: &mut Flow) {
+        let Some(reads) = self.loop_reads.last() else {
+            return;
+        };
+        for dec in reads {
+            let pending = flow.pending.remove(dec).unwrap_or_default();
+            let killed = flow.killed.remove(dec).unwrap_or_default();
+            if !pending.is_empty() || !killed.is_empty() {
+                flow.read_spans
+                    .entry(*dec)
+                    .or_default()
+                    .extend(pending.into_iter().chain(killed));
+            }
+        }
     }
 
     fn literal(&mut self, l: &'a Literal) {

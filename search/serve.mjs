@@ -31,6 +31,18 @@ http.createServer((req, res) => {
     }
     return;
   }
+  // /three/* serves the vendored three.js checkout (data/three.js) so the
+  // plain-module pages can import `three` / `three/addons/*` via an import
+  // map — no bundler in this directory.
+  if (u.pathname.startsWith('/three/')) {
+    const THREE_ROOT = path.resolve(ROOT, '../../data/three.js');
+    const p = path.join(THREE_ROOT, decodeURIComponent(u.pathname.slice(7)));
+    if (!p.startsWith(THREE_ROOT) || !fs.existsSync(p) || fs.statSync(p).isDirectory()) {
+      res.writeHead(404); return res.end('nope');
+    }
+    res.writeHead(200, { 'content-type': MIME[path.extname(p)] || 'application/octet-stream' });
+    return fs.createReadStream(p).pipe(res);
+  }
   const p = path.join(ROOT, decodeURIComponent(u.pathname));
   if (!p.startsWith(ROOT) || !fs.existsSync(p) || fs.statSync(p).isDirectory()) {
     res.writeHead(404); return res.end('nope');

@@ -58,6 +58,7 @@ mod tests {
     pub mod solve_test_utils;
 
     mod reduce_exprs;
+    mod solve_audit;
     mod solve_contracts;
     mod solve_enums;
     mod solve_exprs;

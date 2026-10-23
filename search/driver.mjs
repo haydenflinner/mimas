@@ -35,20 +35,43 @@ const DBG = {
 const natName = M.natives; // id -> "::print" / "Float::floor" / "Adt(...)::rows" / "cov::hit" ...
 
 // ---- strids ---------------------------------------------------------------
-const strs = M.strs.slice();            // strid -> string
-const strIds = new Map();               // string -> strid (host allocs fresh)
-strs.forEach((s, i) => strIds.set(s, i));
-function strid(s) {
-  let id = strIds.get(s);
-  if (id === undefined) { id = strs.length; strs.push(s); strIds.set(s, id); }
-  return id;
+// Str words are tagged heap objects: [tag=2][data][len][cap][bytes@data].
+const strs = M.strs.slice();            // strid -> string (manifest strings)
+const STRTAG = 2;
+const strPtrs = new Map();              // string -> tagged-str heap ptr
+function strWord(s) {
+  let p = strPtrs.get(s);
+  if (p === undefined) {
+    fresh();
+    const bs = new TextEncoder().encode(s);
+    const a = alloc(16 + ((bs.length + 7) & ~7));
+    dv.setUint32(a, STRTAG, true);
+    dv.setUint32(a + 4, a + 16, true);
+    dv.setUint32(a + 8, bs.length, true);
+    dv.setUint32(a + 12, bs.length, true);
+    u8.set(bs, a + 16);
+    strPtrs.set(s, p = BigInt(a));
+  }
+  return p;
 }
-const strOf = id => strs[Number(id)];
+// decode a str word — tagged heap object in the current ABI, manifest
+// StrId otherwise
+function strOf(w) {
+  const p = Number(w);
+  if (p >= 16 && !(p & 7)) {
+    fresh();
+    if (p + 12 <= dv.buffer.byteLength && dv.getUint32(p, true) === STRTAG) {
+      const d = dv.getUint32(p + 4, true), n = dv.getUint32(p + 8, true);
+      return new TextDecoder().decode(new Uint8Array(dv.buffer, d, n));
+    }
+  }
+  return strs[p];
+}
 // level geometry from the embedded CSV (strs[0]) — coin centers +
 // flag for position-subgoal steering (the game's own `data()` source).
 const LROWS = strs[0].trim().split('\n').slice(1).map(l => l.split(','));
 const COINS = LROWS.filter(r => r[1] === 'coin')
-  .map(r => ({ sid: BigInt(strid(r[0])), x: +r[2] + +r[4] / 2, y: +r[3] + +r[5] / 2 }));
+  .map(r => ({ sid: r[0], x: +r[2] + +r[4] / 2, y: +r[3] + +r[5] / 2 }));
 const FLAG = (() => { const r = LROWS.find(r => r[0] === 'flag');
   return { x: +r[2] + +r[4] / 2, y: +r[3] + +r[5] / 2 }; })();
 // Movement graph — the same math as the game's own nodes()/can_jump()/
@@ -277,18 +300,23 @@ function alloc(n) {
   return hp;
 }
 const f64bits = x => { const b = new ArrayBuffer(8); new DataView(b).setFloat64(0, x, true); return new DataView(b).getBigInt64(0, true); };
+// Tagged heap objects: array [tag=1][data][len][cap][i64s @ data],
+// instance [tag=5][adt][words @ +8].
 function writeArray(words) {
   fresh();
-  const data = alloc(words.length * 8);
-  const h = alloc(16);
-  dv.setInt32(h, data, true); dv.setInt32(h + 4, words.length, true); dv.setInt32(h + 8, words.length, true);
-  words.forEach((w, i) => dv.setBigInt64(data + i * 8, BigInt(w), true));
+  const n = words.length;
+  const h = alloc(16 + n * 8);
+  dv.setUint32(h, 1, true);
+  dv.setUint32(h + 4, h + 16, true);
+  dv.setUint32(h + 8, n, true);
+  dv.setUint32(h + 12, n, true);
+  words.forEach((w, i) => dv.setBigInt64(h + 16 + i * 8, BigInt(w), true));
   return BigInt(h);
 }
 function writeInst(adtId, words) {
   fresh();
   const p = alloc(8 + words.length * 8);
-  dv.setUint32(p, adtId, true); dv.setUint32(p + 4, 0, true);
+  dv.setUint32(p, 5, true); dv.setUint32(p + 4, adtId, true);
   words.forEach((w, i) => dv.setBigInt64(p + 8 + i * 8, BigInt(w), true));
   return BigInt(p);
 }
@@ -296,14 +324,14 @@ const LROW = M.adts.LRow, INPUT = M.adts.Input;
 function lrow(cols, vals) {
   const w = cols.map((c, i) => {
     switch (c) {
-      case 'id': case 'kind': return BigInt(strid(vals[i]));
+      case 'id': case 'kind': return strWord(vals[i]);
       default: return f64bits(parseFloat(vals[i]));
     }
   });
   return writeInst(LROW.id, w);
 }
 function input(held, dt) {
-  const h = writeArray(held.map(s => BigInt(strid(s))));
+  const h = writeArray(held.map(strWord));
   const empty = writeArray([]);
   return writeInst(INPUT.id, [h, f64bits(320), f64bits(240), 0n, f64bits(dt), empty, empty, 0n]);
 }
@@ -321,8 +349,8 @@ function makeImport(id, ps, r) {
     if (r === 'b') return v ? 1 : 0;
     return typeof v === 'bigint' ? v : B(Math.trunc(v));
   };
-  // decode w arg strids when a string makes sense
-  const wstr = a => strs[Number(a)];
+  // decode a w-class arg's str word (tagged heap object, StrId fallback)
+  const wstr = a => strOf(a);
   const _cb = new ArrayBuffer(8), _cd = new DataView(_cb);
   const asF = w => { _cd.setBigInt64(0, BigInt(w), true); return _cd.getFloat64(0, true); };
   const asI = f => { _cd.setFloat64(0, f, true); return _cd.getBigInt64(0, true); };
@@ -390,7 +418,7 @@ function makeImport(id, ps, r) {
     if (name.endsWith('::filter')) return castRet(argWord(0)); // uncalled in practice
     if (name === 'game::input') return castRet(input([], 1 / 60));
     if (name === 'game::events') return castRet(writeArray([]));
-    if (name === 'game::quitting') return castRet(0);
+    if (name === 'game::quitting') return castRet(booting ? 1 : 0);
     if (name === 'music::synth') return castRet(newHandle({ synth: 1 }));
     if (/^Adt\(AdtId\(40\)/.test(name)) return passthru(args[0], r); // synth builders
     // draw/input/misc stubs
@@ -475,6 +503,9 @@ const ACTIONS = [[], ['arrowup'], ['arrowdown'], ['arrowleft'], ['arrowright'],
                  ['arrowup', 'arrowleft'], ['arrowup', 'arrowright'], [' ']];
 
 const GAME = { w: 0n, fin: false };
+// `game::quitting` reads true only while the entry body runs — an
+// embedded `game_loop` there unwinds immediately.
+let booting = true;
 const FT = { inp: 0, tick: 0, draw: 0 };
 // Trail capture for the GUI: when non-null, each executed frame appends
 // the player's (px,py) — the rollout a commit/sims event then attaches.
@@ -484,10 +515,10 @@ function frame(held) {
   const inp = input(held, 1 / 60);
   const evs = writeArray([]);
   FT.inp += performance.now() - t; t = performance.now();
-  GAME.w = X.b23(GAME.w, inp, evs);   // tick
+  GAME.w = X[TICK](GAME.w, inp, evs); // tick
   FT.tick += performance.now() - t; t = performance.now();
   const hpDraw = X.__hp.value;
-  X.b25(GAME.w);                      // draw — its ~35KB of allocs are
+  X[DRAW](GAME.w);                    // draw — its ~35KB of allocs are
   X.__hp.value = hpDraw;              // transient; rewind keeps snaps small
   FT.draw += performance.now() - t;
   if (curTrail) {
@@ -544,7 +575,7 @@ function sig(s) {
   for (let i = 0; i < 11; i++) mix(dv.getBigInt64(w + 8 + i * 8, true));
   const got = Number(dv.getBigInt64(w + 8 + 6 * 8, true)); // field 6 = `got`
   if (got) {
-    const dp = dv.getUint32(got, true), len = dv.getUint32(got + 4, true);
+    const dp = dv.getUint32(got + 4, true), len = dv.getUint32(got + 8, true);
     for (let i = 0; i < len; i++) mix(dv.getBigInt64(dp + i * 8, true));
   }
   mix(BigInt(s.fin ? 1 : 0));
@@ -1049,14 +1080,14 @@ class Search {
     const i = (Math.random() * pt.length) | 0;
     this.walk(nA, k, pt.slice(i, i + k));
   }
-  // w.got decode — [dp:u32][len:u32] header, len i64 strids — same
-  // layout sig() hashes, read on live memory right after restore.
+  // w.got decode — tagged array [tag][data][len][cap], len i64 str words
+  // — same layout sig() hashes, read on live memory right after restore.
   gotIds() {
     const out = new Set();
     const w = Number(GAME.w);
     const got = Number(dv.getBigInt64(w + 8 + 6 * 8, true));
     if (!got) return out;
-    const dp = dv.getUint32(got, true), len = dv.getUint32(got + 4, true);
+    const dp = dv.getUint32(got + 4, true), len = dv.getUint32(got + 8, true);
     for (let i = 0; i < len; i++) out.add(dv.getBigInt64(dp + i * 8, true));
     return out;
   }
@@ -1101,12 +1132,12 @@ class Search {
       // BFS waypoint: next node on the jumpable route to the nearest
       // uncollected coin (or the flag once the board is clean).
       const targets = new Set();
-      NODES.forEach((n, i) => { if (n.id === 'coin' && !got.has(n.sid) && !ban.has(i)) targets.add(i); });
+      NODES.forEach((n, i) => { if (n.id === 'coin' && !got.has(strWord(n.sid)) && !ban.has(i)) targets.add(i); });
       if (!targets.size) NODES.forEach((n, i) => { if (n.id === 'flag') targets.add(i); });
       const path = route(px0, py0 + PH, targets);
       if (!path) break;
       if (DBG.tgt && s === 0)
-        console.error('  tgt n=' + n + ' got=' + got.size + ' path=' + path.map(i => NODES[i].id + (NODES[i].sid !== undefined ? ':' + strOf(NODES[i].sid) : '')).join('>'));
+        console.error('  tgt n=' + n + ' got=' + got.size + ' path=' + path.map(i => NODES[i].id + (NODES[i].sid !== undefined ? ':' + NODES[i].sid : '')).join('>'));
       // waypoint = first path node whose span doesn't contain the
       // player — standing on path[1] advances the route, not the score
       let wi = path.length - 1;
@@ -1368,14 +1399,26 @@ const { instance } = await WebAssembly.instantiate(WASM, { env });
 X = instance.exports; views();
 initDecs();                           // dist cells must start at +Inf
 const stackBase = X.__sp.value;    // == nbodies*8, the pc_table end
+// init/tick/draw resolved by name — body indices shift with the source.
+const byName = {};
+for (const [b, n] of Object.entries(M.names)) byName[n] = 'b' + b;
+const INIT = byName.init, TICK = byName.tick, DRAW = byName.draw;
 
-GAME.w = X.b22();                      // init()
+X.b0();                                // top-level consts (entry-local region)
+GAME.w = X[INIT]();                    // init()
+booting = false;
 frame([]);                             // one frame of default input, like Game::compile's first yield
 const s0 = snapshot();
 const s = new Search();
 s.seen.add(sig(s0));
 const wf0 = wfields(s0.w);
 s.archive.push({ snap: s0, tp: -1, tseg: [], tlen: 0, seg: emptyHits(), mem: emptyHits(), dead: false, score: wf0.score, px: wf0.px, py: wf0.py, got: 0 });
+// level geometry for the viewers — emitted by the driver (not worker.mjs)
+// so CLI logs and the wasm lane both carry it
+emit('meta', {
+  rows: LROWS, coins: COINS.map(c => ({ x: c.x, y: c.y })), flag: FLAG,
+  nodes: NODES.map(n => ({ top: n.top, l: n.l, r: n.r, id: n.id })),
+});
 emit('node', { i: 0, parent: -1, px: wf0.px, py: wf0.py, score: wf0.score, dead: false, tlen: 0, kind: 'seed' });
 
 return {

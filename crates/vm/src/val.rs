@@ -1161,6 +1161,127 @@ impl<'gc> Val<'gc> {
             Val::Tensor(_) => Inspect::Other,
         }
     }
+
+    /// [`Val::inspect`]'s literal-oriented sibling: `Cycle` here means *only* a
+    /// true cycle back to a live ancestor (the `Captured` semantics) — a shared
+    /// acyclic subgraph expands once per alias, because a source literal can't
+    /// spell "same as above". `budget` caps those expansions so a wide DAG can't
+    /// blow up into 2^n copies before the host's printer gets to refuse it;
+    /// exhausting it marks `Cycle` too (a refusal either way). Same arena-scope
+    /// requirement as `inspect`.
+    pub fn inspect_literal(
+        self,
+        struct_names: &[String],
+        field_names: &[Vec<String>],
+        mut budget: usize,
+    ) -> Inspect {
+        fn guarded(
+            ptr: *const (),
+            seen: &mut std::collections::HashSet<*const ()>,
+            budget: &mut usize,
+            body: impl FnOnce(&mut std::collections::HashSet<*const ()>, &mut usize) -> Inspect,
+        ) -> Inspect {
+            if *budget == 0 || !seen.insert(ptr) {
+                return Inspect::Cycle;
+            }
+            *budget -= 1;
+            let out = body(seen, budget);
+            seen.remove(&ptr);
+            out
+        }
+        let mut seen = std::collections::HashSet::new();
+        fn walk<'gc>(
+            v: Val<'gc>,
+            struct_names: &[String],
+            field_names: &[Vec<String>],
+            seen: &mut std::collections::HashSet<*const ()>,
+            budget: &mut usize,
+        ) -> Inspect {
+            match v {
+                Val::Null => Inspect::Null,
+                Val::Bool(b) => Inspect::Bool(b),
+                Val::Int(i) => Inspect::Int(i),
+                Val::Float(f) => Inspect::Float(f),
+                Val::Str(s) => Inspect::Str(s.as_str().to_string()),
+                Val::Array(a) => {
+                    guarded(Gc::as_ptr(a.0) as *const (), seen, budget, |seen, budget| {
+                        Inspect::Array(
+                            a.0.borrow()
+                                .iter()
+                                .map(|v| walk(*v, struct_names, field_names, seen, budget))
+                                .collect(),
+                        )
+                    })
+                }
+                Val::IntArray(a) | Val::FloatArray(a) => {
+                    guarded(Gc::as_ptr(a.0) as *const (), seen, budget, |seen, budget| {
+                        Inspect::Array(
+                            a.0.borrow()
+                                .to_vals()
+                                .iter()
+                                .map(|v| walk(*v, struct_names, field_names, seen, budget))
+                                .collect(),
+                        )
+                    })
+                }
+                Val::Dict(d) => {
+                    guarded(Gc::as_ptr(d.0) as *const (), seen, budget, |seen, budget| {
+                        Inspect::Dict(
+                            d.0.borrow()
+                                .iter()
+                                .map(|(k, v)| {
+                                    (
+                                        k.as_str().to_string(),
+                                        walk(*v, struct_names, field_names, seen, budget),
+                                    )
+                                })
+                                .collect(),
+                        )
+                    })
+                }
+                Val::Instance(inst) => {
+                    guarded(Gc::as_ptr(inst.0) as *const (), seen, budget, |seen, budget| {
+                        let inst_ref = inst.0.borrow();
+                        let struct_id = inst_ref.struct_id as usize;
+                        let type_name = struct_names
+                            .get(struct_id)
+                            .cloned()
+                            .unwrap_or_else(|| format!("@{struct_id}"));
+                        let names = field_names.get(struct_id);
+                        let fields = inst_ref
+                            .fields
+                            .iter()
+                            .enumerate()
+                            .map(|(i, v)| {
+                                let name = names
+                                    .and_then(|n| n.get(i))
+                                    .cloned()
+                                    .unwrap_or_else(|| i.to_string());
+                                (name, walk(*v, struct_names, field_names, seen, budget))
+                            })
+                            .collect();
+                        Inspect::Instance { type_name, fields }
+                    })
+                }
+                Val::Fn(body_id) => Inspect::Fn(body_id),
+                Val::Raised(s) => Inspect::Raised(s.as_str().to_string()),
+                Val::Closure(_) => Inspect::Other,
+                #[cfg(feature = "dataframe")]
+                Val::DataFrame(d) => {
+                    guarded(Gc::as_ptr(d.0) as *const (), seen, budget, |_, _| {
+                        inspect_frame(&d.0.borrow().0)
+                    })
+                }
+                #[cfg(feature = "dataframe")]
+                Val::PlExpr(_) | Val::GroupBy(_) => Inspect::Other,
+                #[cfg(feature = "darkly")]
+                Val::DarklyImage(_) => Inspect::Other,
+                #[cfg(feature = "tensor")]
+                Val::Tensor(_) => Inspect::Other,
+            }
+        }
+        walk(self, struct_names, field_names, &mut seen, &mut budget)
+    }
 }
 
 /// `a <op> b` on an ADT instance — libraries register impls keyed by
