@@ -61,8 +61,22 @@ pub struct Resolutions {
     /// The `panic` native's id -- emit's contract-failure fallback when the
     /// prettier `__contract_fail` channel isn't installed.
     pub panic_native: Option<NativeId>,
+    /// `a <op> b` / `<op> a` / `a <op>= b` nodes the checker resolved to an
+    /// operator method on an operand's adt (`v.add(w)` for `v + w`, `v.rsub(s)`
+    /// for `s - v`). Emit lowers them as ordinary method calls rather than
+    /// `Bin`/`Unary` ops.
+    pub op_decs: IndexMap<NodeId, OpDispatch>,
     pub root: ResolvedModule,
     pub sources: HashMap<FileId, NamedSource<Arc<str>>>,
+}
+
+/// A solved `a <op> b` → method call: `dec` is the `fn` inside the operand's
+/// `impl`; `swap` marks an `r`-prefixed method whose receiver is the *right*
+/// operand (`s - v` ⇒ `v.rsub(s)` — `self` always owns the impl).
+#[derive(Debug, Clone, Copy)]
+pub struct OpDispatch {
+    pub dec: DecId,
+    pub swap: bool,
 }
 
 impl Resolutions {
@@ -435,6 +449,7 @@ impl From<Solver> for Resolutions {
             default_ctors: solver.default_ctors,
             contract_native,
             panic_native,
+            op_decs: solver.op_decs,
             root,
             sources: solver.sources,
         }

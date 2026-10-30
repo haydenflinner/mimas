@@ -2,6 +2,55 @@
 
 Memorable additions to mimas beyond what the changelog tracks — newest first.
 
+## Operator overloading — operators resolve to ordinary methods
+
+`a + b` is a method call: the left operand's type is asked for `add`, and
+if it doesn't provide one the right operand's is asked for `radd` — so
+`s * v` finds `v.rmul(s)` with `self` always the operand that owns the
+implementation. The same naming covers the whole infix surface —
+`add sub mul div idiv rem band bor bxor shl shr` for `+ - * / ~/ mod &
+| ⊕ << >>`, `lt le gt ge` for the comparisons, `neg pos bnot` for prefix
+`- + ~` — plus `r`-prefixed reverse forms for every binary name. Names
+dodge the keywords (`rem` not `mod`, `bxor` not `xor`); `==`/`!=` stay
+structural and `&&`/`||`/`??` stay non-overloadable.
+
+Resolution is static and recorded: the solver writes an `OpDispatch`
+(`dec` + `swap`) into `Resolutions::op_decs` keyed by the operator node,
+and codegen lowers to an ordinary direct/native call — receiver first,
+operand second — rather than a generic `Bin`. An operator-shaped method
+must take exactly one operand (zero for unary); a `fn add(self, o, k)`
+is just a method and `a + b` keeps its plain invalid-op error. Compound
+assignments ride the same dispatch: `x += y` calls `x.add(y)` and stores
+the result — `??=` keeps its option semantics.
+
+Two consequences fell out of making it ordinary methods:
+
+- **Vectors, tensors and deltas speak infix.** `std::math`'s `Vec2`/`Vec3`
+  ship `mul`/`rmul`/`div`/`neg`, so `v * 2.0`, `2.0 * v`, `v / 2.0` and
+  `-v` all work (`add`/`sub` were already methods — `v + w` arrived
+  free). In game-kit, `Change<T>` gets `radd`/`rsub`, so `xs += add 3`
+  applies a delta and `xs -= remove 2` applies its undo.
+- **CUE-style unification is a library.** `host/web/games/cue-kit.mimas`
+  defines a `CVal` ADT (top/bottom/atoms/lists/structs/disjunctions/
+  bounds/defaults) and implements `band`/`bor` as `meet`/`join`, so a
+  config schema reads `~{port = ge(1024) & le(65535)}` and `schema &
+  record` unifies fieldwise with `⊥` propagating. The lattice laws are
+  `check` lines run by `cue_kit::cue_kit_check_lines_all_pass`.
+
+`crates/library/tests/operators.rs` pins the contract: left dispatch,
+reverse dispatch, non-bool comparisons, compound assign, structural
+equality untouched, and arity/type rejections.
+
+## `and`/`or`/`not` — the logical operators in word form
+
+C++-style alternative tokens: `and` and `or` lex straight to
+`DoubleAmpersand`/`DoublePipe`, and `not` lexes to a new `NotWord` token
+that parses as prefix `!` (never a postfix unwrap — `x!` stays `Bang`
+territory). Same precedence, same short-circuit; `t or f and f` is
+`(t || f) && f`. Source canonically spells `&&`/`||`/`!` — the words
+exist so the editor can show and accept them as a per-person reading
+option, and so `not x` stops being a foreign-spelling teaching error.
+
 ## Typed arrays — `IntArray`/`FloatArray` backing stores — branch `typed-arrays`
 
 Homogeneous `[int]`/`[float]` sequences stop paying `Vec<Val>`'s 16-byte

@@ -12,7 +12,7 @@ use parse::{
 };
 use shared::{Located, PactId, ParamId};
 use solve::{
-    ResolvedDeclKind,
+    OpDispatch, ResolvedDeclKind,
     components::{AdtId, DecId, FnHeader, Ty},
 };
 
@@ -107,12 +107,21 @@ impl Ir {
                 let value = match ass.op.into() {
                     BinOp::Identity => ass.right.lower(ir)?,
                     op => {
-                        // the compound op's result type is the place's type (a typed lvalue); a
-                        // mismatched runtime operand falls back to the generic op.
-                        let kind = num_kind(ir, stmt.id(), &ass.left, &ass.right);
-                        let lhs = place.load(ir);
-                        let rhs = ass.right.lower(ir)?;
-                        ir.current().bin(op, lhs, rhs, kind)
+                        if let Some(&d) = ir.resolutions.op_decs.get(&stmt.id()) {
+                            // `x <op>= v` desugared to `x.<op>(v)` — or
+                            // `v.r<op>(x)` when the right side owns the impl
+                            let lhs = place.load(ir);
+                            let rhs = ass.right.lower(ir)?;
+                            let (recv, arg) = if d.swap { (rhs, lhs) } else { (lhs, rhs) };
+                            emit_op_call(ir, d, vec![recv, arg])?
+                        } else {
+                            // the compound op's result type is the place's type (a typed lvalue); a
+                            // mismatched runtime operand falls back to the generic op.
+                            let kind = num_kind(ir, stmt.id(), &ass.left, &ass.right);
+                            let lhs = place.load(ir);
+                            let rhs = ass.right.lower(ir)?;
+                            ir.current().bin(op, lhs, rhs, kind)
+                        }
                     }
                 };
                 place.store(ir, value);
@@ -1743,8 +1752,11 @@ impl Emit for Return {
 }
 
 impl Emit for Unary {
-    fn emit(&self, _id: NodeId, ir: &mut Ir) -> Option<InstId> {
+    fn emit(&self, id: NodeId, ir: &mut Ir) -> Option<InstId> {
         let right = self.right.lower(ir)?;
+        if let Some(&d) = ir.resolutions.op_decs.get(&id) {
+            return emit_op_call(ir, d, vec![right]);
+        }
         Some(ir.current().unary(self.op.into(), right))
     }
 }
@@ -1911,6 +1923,22 @@ impl Emit for While {
     }
 }
 
+/// `a <op> b` the checker desugared to an operator method — `a.add(b)`, or
+/// `b.rsub(a)` when the right operand owns the impl (`swap`). Emits the method
+/// call the solver's `op_dispatch` already vetted: source `fn`s go `call_direct`
+/// like any method, `#[native]`s `call_native` with the receiver first.
+fn emit_op_call(ir: &mut Ir, d: OpDispatch, args: Vec<InstId>) -> Option<InstId> {
+    let ResolvedDeclKind::Item { native, .. } = ir.resolutions.decs[d.dec].kind else {
+        return None;
+    };
+    let body = (native.is_none()).then(|| ir.item_body_for(d.dec));
+    Some(match (native, body) {
+        (Some(nid), _) => ir.current().call_native(nid, args),
+        (None, Some(b)) => ir.current().call_direct(b, args),
+        _ => unreachable!(),
+    })
+}
+
 fn emit_bin_op(
     ir: &mut Ir,
     id: NodeId,
@@ -1918,6 +1946,13 @@ fn emit_bin_op(
     op: impl Into<BinOp>,
     right: &Expr,
 ) -> Option<InstId> {
+    if let Some(&d) = ir.resolutions.op_decs.get(&id) {
+        // operands keep source order — only the call's receiver flips
+        let left = left.lower(ir)?;
+        let right = right.lower(ir)?;
+        let (recv, arg) = if d.swap { (right, left) } else { (left, right) };
+        return emit_op_call(ir, d, vec![recv, arg]);
+    }
     let kind = num_kind(ir, id, left, right);
     let left = left.lower(ir)?;
     let right = right.lower(ir)?;

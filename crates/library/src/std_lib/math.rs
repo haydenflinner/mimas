@@ -36,12 +36,22 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add_method_named("add", vec2_add);
     api.add_method_named("sub", vec2_sub);
     api.add_method_named("scale", vec2_scale);
+    // the `*`, `/` and unary `-` operators — `mul`/`rmul` cover `v * s` and
+    // `s * v`, `div` is `v / s`, `neg` is `-v` (see `op_method_names` in solve)
+    api.add_method_named("mul", vec2_scale);
+    api.add_method_named("rmul", vec2_scale);
+    api.add_method_named("div", vec2_div);
+    api.add_method_named("neg", vec2_neg);
     api.add_method_named("dot", vec2_dot);
     api.add_method_named("distance", vec2_distance);
     api.add_method_named("angle", vec2_angle);
     api.add_method_named("lerp", vec2_lerp);
     api.add_method_named("length", vec3_length);
     api.add_method_named("normalize", vec3_normalize);
+    api.add_method_named("mul", vec3_scale);
+    api.add_method_named("rmul", vec3_scale);
+    api.add_method_named("div", vec3_div);
+    api.add_method_named("neg", vec3_neg);
     api.add_assoc_of::<Quat, _, _>("from_rotation_z", quat_from_rotation_z);
     api.add_method_named("rotate_z", quat_rotate_z);
 }
@@ -139,6 +149,68 @@ fn vec2_sub(v: Vec2, other: Vec2) -> Vec2 {
 #[native]
 fn vec2_scale(v: Vec2, by: f32) -> Vec2 {
     v * by
+}
+
+/// `v / by` — componentwise division. `v.div(2.0)` is also the `/` operator's method,
+/// so `v / 2.0` spells the same thing.
+///
+/// ```mimas
+/// use std::math::Vec2;
+///
+/// let half = Vec2::new(3.0, 4.0) / 2.0;
+/// let x = half.x; // 1.5
+/// ```
+#[native]
+fn vec2_div(v: Vec2, by: f32) -> Vec2 {
+    v / by
+}
+
+/// `-v` — the unary `-` operator's method.
+///
+/// ```mimas
+/// use std::math::Vec2;
+///
+/// let backwards = -Vec2::new(1.0, 0.0); // Vec2(-1, 0)
+/// ```
+#[native]
+fn vec2_neg(v: Vec2) -> Vec2 {
+    -v
+}
+
+/// `Vec3`'s `*` — `v * s` and `s * v` (`rmul`) both land here.
+///
+/// ```mimas
+/// use std::math::Vec3;
+///
+/// let dbl = Vec3 { x = 1.0, y = 0.0, z = 2.0 } * 2.0;
+/// ```
+#[native]
+fn vec3_scale(v: Vec3, by: f32) -> Vec3 {
+    v * by
+}
+
+/// `Vec3`'s `/` — `v / s`.
+///
+/// ```mimas
+/// use std::math::Vec3;
+///
+/// let half = Vec3 { x = 1.0, y = 0.0, z = 2.0 } / 2.0;
+/// ```
+#[native]
+fn vec3_div(v: Vec3, by: f32) -> Vec3 {
+    v / by
+}
+
+/// `Vec3`'s unary `-`.
+///
+/// ```mimas
+/// use std::math::Vec3;
+///
+/// let down = -Vec3 { x = 0.0, y = 0.0, z = 1.0 };
+/// ```
+#[native]
+fn vec3_neg(v: Vec3) -> Vec3 {
+    -v
 }
 
 /// Returns the dot product, `x * other.x + y * other.y`. For two vectors of length `1.0` it's the

@@ -6,6 +6,7 @@ use crate::{
     },
     errors::*,
     option,
+    resolutions::OpDispatch,
     traits::Query,
 };
 use parse::{components::Binding, *};
@@ -84,6 +85,163 @@ fn pick_method_overload(
 pub trait Solve {
     /// Evaluates this T and its inner nodes on the provided Session to discover its Ty.
     fn solve(&self, id: NodeId, location: Location, solver: &mut Solver) -> Result<Ty>;
+}
+
+/// The method names an infix `a <op> b` desugars to — `a.<name>(b)` when the left
+/// operand's type implements it, else `b.<rname>(a)` on the right's, the same
+/// left-to-right order the native `add_bin_op` dispatch uses. `self` always owns
+/// the impl, so `s - v` finds `v.rsub(s)` for `s - self`. Spellings avoid the
+/// word-operators — `mod`/`xor`/`and`/`or` can't name a method.
+fn op_method_names(op: EvaluationOp) -> (&'static str, &'static str) {
+    match op {
+        EvaluationOp::Plus => ("add", "radd"),
+        EvaluationOp::Minus => ("sub", "rsub"),
+        EvaluationOp::Multiply => ("mul", "rmul"),
+        EvaluationOp::Divide => ("div", "rdiv"),
+        EvaluationOp::Div => ("idiv", "ridiv"),
+        EvaluationOp::Modulo => ("rem", "rrem"),
+        EvaluationOp::And => ("band", "rband"),
+        EvaluationOp::Or => ("bor", "rbor"),
+        EvaluationOp::Xor => ("bxor", "rbxor"),
+        EvaluationOp::BitShiftLeft => ("shl", "rshl"),
+        EvaluationOp::BitShiftRight => ("shr", "rshr"),
+    }
+}
+
+/// `x <op>= y` — `x = x.<name>(y)` under the same dispatch as the infix form.
+pub(crate) fn op_assign_names(op: AssignmentOp) -> Option<(&'static str, &'static str)> {
+    Some(match op {
+        AssignmentOp::PlusEqual => ("add", "radd"),
+        AssignmentOp::MinusEqual => ("sub", "rsub"),
+        AssignmentOp::StarEqual => ("mul", "rmul"),
+        AssignmentOp::SlashEqual => ("div", "rdiv"),
+        AssignmentOp::DivEqual => ("idiv", "ridiv"),
+        AssignmentOp::ModEqual => ("rem", "rrem"),
+        AssignmentOp::AndEqual => ("band", "rband"),
+        AssignmentOp::OrEqual => ("bor", "rbor"),
+        AssignmentOp::XorEqual => ("bxor", "rbxor"),
+        AssignmentOp::Identity | AssignmentOp::NullCoalescenceEqual => return None,
+    })
+}
+
+/// `<` `<=` `>` `>=` — `a < b` ⇒ `a.lt(b)` / `b.rlt(a)`. `==`/`!=` never dispatch:
+/// instance equality is structural, matching the `add_bin_op` contract.
+fn cmp_method_names(op: EqualityOp) -> Option<(&'static str, &'static str)> {
+    Some(match op {
+        EqualityOp::Less => ("lt", "rlt"),
+        EqualityOp::LessOrEqual => ("le", "rle"),
+        EqualityOp::Greater => ("gt", "rgt"),
+        EqualityOp::GreaterOrEqual => ("ge", "rge"),
+        EqualityOp::Equal | EqualityOp::NotEqual => return None,
+    })
+}
+
+/// `-a`/`+a`/`~a` ⇒ `a.neg()`/`a.pos()`/`a.bnot()`. `!` stays bool-only — `not`
+/// is a keyword and can't name a method.
+fn un_method_name(op: UnaryOp) -> Option<&'static str> {
+    match op {
+        UnaryOp::Negative => Some("neg"),
+        UnaryOp::Positive => Some("pos"),
+        UnaryOp::BitwiseNot => Some("bnot"),
+        UnaryOp::Not => None,
+    }
+}
+
+/// The shared lookup for operator dispatch: `recv_ty`'s adt (builtin containers
+/// included — a native `rem` on `array` would dispatch the same way) offering a
+/// method called `name`, specialized to the receiver's instantiation.
+fn op_method_sig(
+    solver: &mut Solver,
+    aid: AdtId,
+    name: &str,
+    recv_ty: &Ty,
+    args: &[Ty],
+    location: Location,
+) -> Result<Option<(crate::components::DecId, FnHeader)>> {
+    let Some(field) = pick_method_overload(solver, aid, name, recv_ty, location)? else {
+        return Ok(None);
+    };
+    solver.check_vis(field.dec, location)?;
+    let sig = match solver.dec_to_native.get(&field.dec).map(|b| b.sig.clone()) {
+        Some(sig) => solver.instantiate_native(&sig, Some((recv_ty, location)))?,
+        None => solver.specialize(&field.ty, aid, args),
+    };
+    let Ty::Fn(f) = sig else { return Ok(None) };
+    Ok(Some((field.dec, f)))
+}
+
+/// `a <op> b` → `a.<name>(b)` when `a`'s type implements an operator-shaped
+/// `<name>` method, else `b.<rname>(a)` when `b`'s does. "Operator-shaped" is
+/// `self` plus exactly one operand — a same-named method of another arity just
+/// isn't an operator impl and the search continues. Records the hit in
+/// `op_decs` for codegen and returns the method's return type. `None` leaves
+/// the caller's built-in rules — and their diagnostics — in place.
+pub(crate) fn op_dispatch(
+    solver: &mut Solver,
+    id: NodeId,
+    names: (&'static str, &'static str),
+    left: &Expr,
+    right: &Expr,
+    lhs: &Ty,
+    rhs: &Ty,
+    location: Location,
+) -> Result<Option<Ty>> {
+    for (recv_ty, name, arg, swap) in [
+        (lhs, names.0, right, false),
+        (rhs, names.1, left, true),
+    ] {
+        let (aid, args) = match recv_ty {
+            Ty::Adt(a, args) | Ty::Identity(a, args) => (*a, args.clone()),
+            other => match solver.builtin_adt(other) {
+                Some(a) => (a, vec![]),
+                None => continue,
+            },
+        };
+        let Some((dec, f)) = op_method_sig(solver, aid, name, recv_ty, &args, location)? else {
+            continue;
+        };
+        // source methods carry `self` in parameters[0]; a native sig bound its
+        // receiver during `instantiate_native`, so its params are all operands
+        let operand = match f.parameters.as_slice() {
+            [_, operand] if f.is_method => operand.ty.clone(),
+            [operand] if !f.is_method => operand.ty.clone(),
+            _ => continue,
+        };
+        let ret = f.return_ty.as_ref().clone();
+        arg.fulfill_ty(operand, solver)?;
+        solver.op_decs.insert(id, OpDispatch { dec, swap });
+        return Ok(Some(ret));
+    }
+    Ok(None)
+}
+
+/// `<op> a` → `a.<name>()` — the unary half of `op_dispatch`.
+fn unary_dispatch(
+    solver: &mut Solver,
+    id: NodeId,
+    name: &'static str,
+    expr: &Expr,
+    ty: &Ty,
+    location: Location,
+) -> Result<Option<Ty>> {
+    let (aid, args) = match ty {
+        Ty::Adt(a, args) | Ty::Identity(a, args) => (*a, args.clone()),
+        other => match solver.builtin_adt(other) {
+            Some(a) => (a, vec![]),
+            None => return Ok(None),
+        },
+    };
+    let Some((dec, f)) = op_method_sig(solver, aid, name, ty, &args, location)? else {
+        return Ok(None);
+    };
+    let nullary = f.parameters.len() == usize::from(f.is_method);
+    if !nullary {
+        return Ok(None);
+    }
+    let ret = f.return_ty.as_ref().clone();
+    let _ = expr;
+    solver.op_decs.insert(id, OpDispatch { dec, swap: false });
+    Ok(Some(ret))
 }
 
 impl Solve for Access {
@@ -1218,7 +1376,7 @@ fn tensor_overload_ty(lhs: &Ty, rhs: &Ty, solver: &Solver) -> Option<Ty> {
 }
 
 impl Solve for Equality {
-    fn solve(&self, _id: NodeId, location: Location, solver: &mut Solver) -> Result<Ty> {
+    fn solve(&self, id: NodeId, location: Location, solver: &mut Solver) -> Result<Ty> {
         let lhs = self.left.query(solver)?;
         let rhs = self.right.query(solver)?;
         let lhs_n = lhs.clone().normalized(solver);
@@ -1234,6 +1392,13 @@ impl Solve for Equality {
             let has_ops = |t: &Ty| matches!(t, Ty::Adt(id, _) if solver.adts[*id].flags.contains(AdtFlags::HAS_OPS));
             if has_ops(&lhs_n) || has_ops(&rhs_n) {
                 return Ok(Ty::Bool);
+            }
+            if let Some(names) = cmp_method_names(self.op)
+                && let Some(ty) = op_dispatch(
+                    solver, id, names, &self.left, &self.right, &lhs_n, &rhs_n, location,
+                )?
+            {
+                return Ok(ty);
             }
             // unresolved operands on a relational op (`r.x <= r.w` inside `Rect<T>`):
             // anywhere the comparison could run both sides already agree, so a shared
@@ -1301,7 +1466,7 @@ impl Solve for Equality {
 }
 
 impl Solve for Evaluation {
-    fn solve(&self, _id: NodeId, location: Location, solver: &mut Solver) -> Result<Ty> {
+    fn solve(&self, id: NodeId, location: Location, solver: &mut Solver) -> Result<Ty> {
         fn eval(
             op: EvaluationOp,
             lhs: &Ty,
@@ -1419,6 +1584,18 @@ impl Solve for Evaluation {
                 }
                 _ => break,
             }
+        }
+        if let Some(ty) = op_dispatch(
+            solver,
+            id,
+            op_method_names(self.op),
+            &self.left,
+            &self.right,
+            &lhs_n,
+            &rhs_n,
+            location,
+        )? {
+            return Ok(ty);
         }
         eval(self.op, &lhs_n, &rhs_n, location, solver)
     }
@@ -2281,7 +2458,7 @@ impl Solve for Struct {
 }
 
 impl Solve for Unary {
-    fn solve(&self, _id: NodeId, location: Location, solver: &mut Solver) -> Result<Ty> {
+    fn solve(&self, id: NodeId, location: Location, solver: &mut Solver) -> Result<Ty> {
         fn unary(op: UnaryOp, ty: &Ty, location: Location, solver: &Solver) -> Result<Ty> {
             match (op, ty) {
                 (UnaryOp::Not, Ty::Bool) => Ok(Ty::Bool),
@@ -2317,6 +2494,11 @@ impl Solve for Unary {
             };
             self.right.fulfill_ty(pin.clone(), solver)?;
             return Ok(pin);
+        }
+        if let Some(name) = un_method_name(self.op)
+            && let Some(t) = unary_dispatch(solver, id, name, &self.right, &ty, location)?
+        {
+            return Ok(t);
         }
         unary(self.op, &ty, location, solver)
     }

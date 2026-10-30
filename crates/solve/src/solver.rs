@@ -33,6 +33,7 @@ pub struct Solver {
     pub(crate) pact_self: Option<PactId>,
     pub(crate) node_to_vid: IndexMap<NodeId, Vid>,
     pub(crate) node_decs: IndexMap<NodeId, DecId>,
+    pub(crate) op_decs: IndexMap<NodeId, crate::OpDispatch>,
     pub(crate) closure_captures: IndexMap<NodeId, IndexSet<DecId>>,
     pub(crate) expected_closures: IndexMap<NodeId, Vec<FnParam>>,
     vids: IdVec<Vid, ()>,
@@ -134,6 +135,7 @@ impl Solver {
             pact_self: None,
             node_to_vid: IndexMap::new(),
             node_decs: IndexMap::new(),
+            op_decs: IndexMap::new(),
             closure_captures: IndexMap::new(),
             expected_closures: IndexMap::new(),
             control_flow: ControlFlow::new(),
@@ -2082,7 +2084,32 @@ impl Solver {
                         })?,
                     }
                 } else {
-                    right.fulfill_ty(left.query(self)?, self)?
+                    // `x <op>= v` is `x = x <op> v`: an operand adt's operator
+                    // method (`x.add(v)`, or `v.radd(x)` when the rhs owns the
+                    // impl) beats the plain same-type rule.
+                    let place = left.query(self)?;
+                    let dispatched = match crate::traits::op_assign_names(*op) {
+                        Some(names) => {
+                            let place_n = place.clone().normalized(self);
+                            let right_n = right.query(self)?.normalized(self);
+                            crate::traits::op_dispatch(
+                                self,
+                                stmt.id(),
+                                names,
+                                left,
+                                right,
+                                &place_n,
+                                &right_n,
+                                left.location(),
+                            )?
+                        }
+                        None => None,
+                    };
+                    match dispatched {
+                        // the method's result still has to fit the place
+                        Some(ret) => left.fulfill_ty(ret, self)?,
+                        None => right.fulfill_ty(place, self)?,
+                    }
                 }
             }
             StmtKind::Let(Let {
