@@ -59,6 +59,7 @@ test_run!(
 );
 
 test_run!(
+    // r[verify mimas.num.convert]
     int_to_float,
     "(3).to_float()" => "3",
     "(0).to_float()" => "0",
@@ -130,6 +131,7 @@ test_run!(
 );
 
 test_run!(
+    // r[verify mimas.num.convert]
     float_to_int_negative_truncates_toward_zero,
     "(-3.7).to_int()" => "-3",
     "(-3.2).to_int()" => "-3",
