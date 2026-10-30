@@ -1244,13 +1244,13 @@ pub mod jit {
         }
     }
 
-    /// `Op::UnwrapRaised` — `regs[d] = err` for `Val::Raised(err)`.
+    /// `Op::UnwrapRaised` — `regs[d] = payload` for `Val::Raised(payload)`.
     pub unsafe extern "C" fn unwrap_raised<'gc>(regs: *mut Val<'gc>, d: usize, s: usize) {
         unsafe {
             let Val::Raised(err) = *regs.add(s) else {
                 unreachable!("UnwrapRaised on non-raised value")
             };
-            *regs.add(d) = Val::Str(err);
+            *regs.add(d) = *err;
         }
     }
 
@@ -1259,6 +1259,7 @@ pub mod jit {
         regs: *mut Val<'gc>,
         d: usize,
         s: usize,
+        ctx: Ctx<'gc>,
         out: *mut RtResult<Flow<'gc>>,
     ) -> u8 {
         unsafe {
@@ -1268,7 +1269,10 @@ pub mod jit {
                     1
                 }
                 Val::Raised(err) => {
-                    *out = Err(RtErr::UnwrappedRaised(err.as_str().to_string()));
+                    *out = Err(match ctx.to_string(*err) {
+                        Ok(s) => RtErr::UnwrappedRaised(s),
+                        Err(e) => e,
+                    });
                     1
                 }
                 v => {
@@ -1284,12 +1288,16 @@ pub mod jit {
         regs: *mut Val<'gc>,
         d: usize,
         s: usize,
+        ctx: Ctx<'gc>,
         out: *mut RtResult<Flow<'gc>>,
     ) -> u8 {
         unsafe {
             match *regs.add(s) {
                 Val::Raised(err) => {
-                    *out = Err(RtErr::UnwrappedRaised(err.as_str().to_string()));
+                    *out = Err(match ctx.to_string(*err) {
+                        Ok(s) => RtErr::UnwrappedRaised(s),
+                        Err(e) => e,
+                    });
                     1
                 }
                 _ => {
@@ -1300,17 +1308,16 @@ pub mod jit {
         }
     }
 
-    /// `Op::Raise` — `*out = Ok(Flow::Return(Val::Raised(err)))`.
+    /// `Op::Raise` — `*out = Ok(Flow::Return(Val::Raised(payload)))`.
     pub unsafe extern "C" fn raise<'gc>(
         regs: *const Val<'gc>,
         s: usize,
+        ctx: Ctx<'gc>,
         out: *mut RtResult<Flow<'gc>>,
     ) {
         unsafe {
-            let Val::Str(err) = *regs.add(s) else {
-                unreachable!("raise on a non-str value")
-            };
-            *out = Ok(Flow::Return(Val::Raised(err)));
+            let err = *regs.add(s);
+            *out = Ok(Flow::Return(Val::Raised(Gc::new(ctx.mutation(), err))));
         }
     }
 

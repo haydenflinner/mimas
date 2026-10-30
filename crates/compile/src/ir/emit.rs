@@ -1709,7 +1709,8 @@ impl Emit for Absolve {
 
         let err_branch = ir.in_block(err_block, |b| {
             let err = b.unwrap_raised(value);
-            let r = b.call(handler, vec![err]);
+            let note = b.format(vec![FormatPart::Value(err)]);
+            let r = b.call(handler, vec![note]);
             let end = b.id();
             b.jump(merge);
             (end, r)

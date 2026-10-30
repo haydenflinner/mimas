@@ -49,7 +49,9 @@ pub enum SnapVal {
     /// Strings travel by content and re-intern on restore — `Str` equality is content-wise,
     /// so identity needn't survive (and can't: the interner dedupes).
     Str(SharedStr),
-    Raised(SharedStr),
+    /// A raised value's payload, recursively snapped like any other value —
+    /// the wrapper's identity needn't survive (it's rebuilt on thaw).
+    Raised(Box<SnapVal>),
     Node(u32),
 }
 
@@ -148,7 +150,7 @@ impl<'gc> Snapper<'gc> {
             Val::Float(f) => SnapVal::Float(f),
             Val::Fn(b) => SnapVal::Fn(b.into()),
             Val::Str(s) => SnapVal::Str(Gc::as_ref(s.0).clone()),
-            Val::Raised(s) => SnapVal::Raised(Gc::as_ref(s.0).clone()),
+            Val::Raised(s) => SnapVal::Raised(Box::new(self.val(*s)?)),
             Val::Array(a) => self.node(Gc::as_ptr(a.0) as *const (), v),
             Val::Dict(d) => self.node(Gc::as_ptr(d.0) as *const (), v),
             Val::Instance(i) => self.node(Gc::as_ptr(i.0) as *const (), v),
@@ -237,7 +239,10 @@ impl<'gc> Thaw<'gc, '_> {
             SnapVal::Float(f) => Val::Float(*f),
             SnapVal::Fn(b) => Val::Fn(BodyId::from(*b)),
             SnapVal::Str(s) => Val::Str(self.ctx.intern(s)),
-            SnapVal::Raised(s) => Val::Raised(self.ctx.intern(s)),
+            SnapVal::Raised(s) => {
+                let payload = self.thaw(s)?;
+                Val::Raised(Gc::new(self.ctx.mutation(), payload))
+            }
             SnapVal::Node(i) => match self.resolved[*i as usize] {
                 Some(v) => v,
                 None => self.thaw_closure(*i)?,

@@ -1877,11 +1877,8 @@ fn emit_op(
         }
         Op::Panic {} => wln!("*io.op_ip = {offset}; return Err(RtErr::MatchPanicReached);"),
         Op::Raise { val } => {
-            wln!(
-                "let Val::Str(err) = rd(regs, {}) else {{ unreachable!(\"raise on a non-str value\") }};",
-                reg(*val)
-            );
-            wln!("let rv = Val::Raised(err);");
+            wln!("let err = rd(regs, {});", reg(*val));
+            wln!("let rv = Val::Raised(Gc::new(ctx.mutation(), err));");
             gen_pop(&mut s);
             wln!("return Ok(Flow::Return(rv));");
         }
@@ -1899,14 +1896,14 @@ fn emit_op(
                 "let Val::Raised(err) = rd(regs, {}) else {{ unreachable!(\"UnwrapRaised on non-raised value\") }};",
                 reg(*src)
             );
-            wln!("wr(regs, {}, Val::Str(err)); code.ip = {next};", reg(*dst));
+            wln!("wr(regs, {}, *err); code.ip = {next};", reg(*dst));
         }
         Op::Unwrap { dst, src } => {
             wln!("let v = rd(regs, {});", reg(*src));
             wln!("match v {{");
             wln!("    Val::Null => {{ *io.op_ip = {offset}; return Err(RtErr::UnwrappedNull); }}");
             wln!(
-                "    Val::Raised(err) => {{ *io.op_ip = {offset}; return Err(RtErr::UnwrappedRaised(err.as_str().to_string())); }}"
+                "    Val::Raised(err) => {{ *io.op_ip = {offset}; return Err(RtErr::UnwrappedRaised(match ctx.to_string(*err) {{ Ok(s) => s, Err(e) => return Err(e) }})); }}"
             );
             wln!("    _ => wr(regs, {}, v),", reg(*dst));
             wln!("}}");
@@ -1915,7 +1912,7 @@ fn emit_op(
         Op::UnwrapUnit { dst, src } => {
             wln!("match rd(regs, {}) {{", reg(*src));
             wln!(
-                "    Val::Raised(err) => {{ *io.op_ip = {offset}; return Err(RtErr::UnwrappedRaised(err.as_str().to_string())); }}"
+                "    Val::Raised(err) => {{ *io.op_ip = {offset}; return Err(RtErr::UnwrappedRaised(match ctx.to_string(*err) {{ Ok(s) => s, Err(e) => return Err(e) }})); }}"
             );
             wln!("    _ => wr(regs, {}, Val::Null),", reg(*dst));
             wln!("}}");

@@ -430,7 +430,9 @@ impl<'gc> Ctx<'gc> {
                 );
             }
             Val::Raised(s) => {
-                let _ = write!(out, "<raised {:?}>", s.as_str());
+                out.push_str("<raised ");
+                self.render_into(out, *s, true, depth + 1)?;
+                out.push('>');
             }
             Val::Instance(i) => {
                 let inst = i.0.borrow();

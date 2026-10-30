@@ -2271,7 +2271,9 @@ impl Solve for parse::Raise {
             })?
         }
 
-        self.value.fulfill_ty(Ty::Str, solver)?;
+        // `raise` takes any value — `T!`'s error side is just a raised `Val`,
+        // stringified only at cold boundaries (`!` faults, `absolve`).
+        self.value.query(solver)?;
         solver.control_flow.push(Flow::Return);
         Ok(Ty::Never)
     }

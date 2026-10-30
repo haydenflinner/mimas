@@ -3,6 +3,8 @@ use std::collections::HashMap;
 use api::Registry;
 use shared::{FnHeader, FnParam, Ty, units::Dim};
 
+use gc_arena::Gc;
+
 use crate::{Array, Ctx, Dict, DictMap, Instance, RtErr, RtResult, Str, Val};
 
 #[derive(Debug, Clone)]
@@ -418,14 +420,22 @@ impl<'gc, T: MimasType<'gc>> MimasType<'gc> for Raisable<T> {
     }
     fn from_value(ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError> {
         match v {
-            Val::Raised(s) => Ok(Raisable::Raised(s.as_str().to_string())),
+            Val::Raised(s) => Ok(Raisable::Raised(
+                // the str-message API stays str — stringify is cold here,
+                // and an unprintable payload still reads as a note
+                ctx.to_string(*s)
+                    .unwrap_or_else(|_| "<unprintable raise payload>".into()),
+            )),
             other => Ok(Raisable::Ok(T::from_value(ctx, other)?)),
         }
     }
     fn into_value(self, ctx: Ctx<'gc>) -> Val<'gc> {
         match self {
             Raisable::Ok(v) => v.into_value(ctx),
-            Raisable::Raised(s) => Val::Raised(ctx.intern(&s)),
+            Raisable::Raised(s) => {
+                let payload = Val::Str(ctx.intern(&s));
+                Val::Raised(Gc::new(ctx.mutation(), payload))
+            }
         }
     }
 }

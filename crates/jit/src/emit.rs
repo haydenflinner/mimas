@@ -1445,7 +1445,10 @@ impl Em<'_> {
                 self.flush_seq();
                 self.mark_op(off, next);
                 let (regs, s) = (self.regs(), self.iconst(val.index() as i64));
-                self.hcall(H::Raise, &[regs, s, self.env.out]);
+                self.hcall(
+                    H::Raise,
+                    &[regs, s, self.env.ctx0, self.env.ctx1, self.env.out],
+                );
                 self.root_flush(self.ex.eret);
             }
             Op::LoadConst { dst, constant } => match constant {
@@ -2185,7 +2188,13 @@ impl Em<'_> {
                     self.iconst(dst.index() as i64),
                     self.iconst(src.index() as i64),
                 );
-                self.helper_op(i, off, next, H::Unwrap, &[regs, d, s, self.env.out]);
+                self.helper_op(
+                    i,
+                    off,
+                    next,
+                    H::Unwrap,
+                    &[regs, d, s, self.env.ctx0, self.env.ctx1, self.env.out],
+                );
             }
             Op::UnwrapUnit { dst, src } => {
                 let (regs, d, s) = (
@@ -2193,7 +2202,13 @@ impl Em<'_> {
                     self.iconst(dst.index() as i64),
                     self.iconst(src.index() as i64),
                 );
-                self.helper_op(i, off, next, H::UnwrapUnit, &[regs, d, s, self.env.out]);
+                self.helper_op(
+                    i,
+                    off,
+                    next,
+                    H::UnwrapUnit,
+                    &[regs, d, s, self.env.ctx0, self.env.ctx1, self.env.out],
+                );
             }
             Op::Len { dst, src } => {
                 self.flush_seq();

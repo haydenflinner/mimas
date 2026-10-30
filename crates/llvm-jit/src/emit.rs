@@ -1575,7 +1575,16 @@ impl<'c> Em<'c, '_> {
                 self.flush_seq();
                 self.mark_op(off, next);
                 let (regs, s) = (self.regs(), self.i64c(val.index() as i64));
-                self.hcall(H::Raise, &[regs.into(), s.into(), self.env.out.into()]);
+                self.hcall(
+                    H::Raise,
+                    &[
+                        regs.into(),
+                        s.into(),
+                        self.env.ctx0.into(),
+                        self.env.ctx1.into(),
+                        self.env.out.into(),
+                    ],
+                );
                 self.root_flush(self.ex.eret);
             }
             Op::LoadConst { dst, constant } => match constant {
@@ -2301,7 +2310,7 @@ impl<'c> Em<'c, '_> {
                     self.i64c(dst.index() as i64),
                     self.i64c(src.index() as i64),
                 );
-                self.helper_op(i, off, next, H::Unwrap, &[regs.into(), d.into(), s.into(), self.env.out.into()]);
+                self.helper_op(i, off, next, H::Unwrap, &[regs.into(), d.into(), s.into(), self.env.ctx0.into(), self.env.ctx1.into(), self.env.out.into()]);
             }
             Op::UnwrapUnit { dst, src } => {
                 let (regs, d, s) = (
@@ -2309,7 +2318,7 @@ impl<'c> Em<'c, '_> {
                     self.i64c(dst.index() as i64),
                     self.i64c(src.index() as i64),
                 );
-                self.helper_op(i, off, next, H::UnwrapUnit, &[regs.into(), d.into(), s.into(), self.env.out.into()]);
+                self.helper_op(i, off, next, H::UnwrapUnit, &[regs.into(), d.into(), s.into(), self.env.ctx0.into(), self.env.ctx1.into(), self.env.out.into()]);
             }
             Op::Len { dst, src } => {
                 self.flush_seq();
