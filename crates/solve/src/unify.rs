@@ -80,6 +80,20 @@ impl Unification {
                 }
             }
 
+            // a primitive fulfills a pact its library adt implements (`impl Opp for
+            // bool`: a `bool` goes wherever an `Opp` is expected)
+            (prim @ (Ty::Int | Ty::Float | Ty::Str | Ty::Bool), Ty::Pacts(pids))
+            | (Ty::Pacts(pids), prim @ (Ty::Int | Ty::Float | Ty::Str | Ty::Bool)) => {
+                let aid = solver.builtin_adt(prim);
+                if aid.is_some_and(|aid| {
+                    pids.iter().all(|pid| solver.pact_impls.contains(&(*pid, aid)))
+                }) {
+                    Ok(Substitution::None)
+                } else {
+                    Err(potential_err)
+                }
+            }
+
             // fn types unify structurally -- param names and the synthesized is_ctor flag
             // don't affect compatibility, only the per-position param types + return type.
             (Ty::Fn(lhs), Ty::Fn(rhs)) if lhs.parameters.len() == rhs.parameters.len() => {

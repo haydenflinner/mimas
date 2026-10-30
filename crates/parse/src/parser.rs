@@ -1267,7 +1267,15 @@ impl<'s> Parser<'s> {
         // `impl Foo {}` (inherent) vs `impl Pact for Foo {}` (pact impl). After the first ident,
         // a `for` token disambiguates -- first becomes the pact, second becomes the target.
         let (pact, target) = if self.eat(TokKind::For) {
-            let target = self.require_ident();
+            // a pact may be implemented for a primitive (`impl Opp for bool`)
+            let target = match self.peek() {
+                TokKind::TyKw(ty) => {
+                    let at = self.next_location();
+                    self.advance();
+                    Ident::new(ty.to_string(), at)
+                }
+                _ => self.require_ident(),
+            };
             let generics = self.type_params();
             self.reject_type_params(&generics);
             (Some(first), target)

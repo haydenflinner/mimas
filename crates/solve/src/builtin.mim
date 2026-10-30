@@ -1,12 +1,18 @@
 // The built-in source every program has (solve::BUILTIN_SRC): declarations
 // only, so a program built without std has it too. `Opp` is the pact an
 // `opp` declaration implements -- two ends and a flip: `!x` is `x.inv()`,
-// the other end, and `!(!x) == x`. `bool` is the first opp (its `!` is
-// built in); the rest are the pairs pages kept spelling as bools or ±1, so
+// the other end, and `!(!x) == x`. `bool` is the first opp (its `!` stays
+// the built-in op); the rest are the pairs pages kept spelling as bools or ±1, so
 // `Size::Big` on one page means what it means on the next.
 
 pact Opp {
     fn inv(self) -> Self;
+}
+
+// `bool` is the first opp: `!b` stays the built-in op; the impl lets a bool
+// go wherever an `Opp` is expected (`involutive(true)`).
+impl Opp for bool {
+    fn inv(self) -> bool { !self }
 }
 opp Sign { Pos, Neg }
 opp Size { Big, Small }

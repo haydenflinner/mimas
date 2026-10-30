@@ -128,3 +128,19 @@ test_run!(
     "BOTH[1] == Team::Red && BOTH.len() == 2" => "true",
     "D == Shape::Dot" => "true",
 );
+
+// `bool` is the first opp: the built-in source's `impl Opp for bool` lets a
+// bool go wherever an `Opp` is expected -- through the same runtime dispatch
+// as an enum -- while `!b` stays the built-in op.
+test_run!(
+    bool_is_an_opp,
+    "opp Sky { Sun, Moon }
+     fn involutive(x: Opp) -> bool { !(!x) == x }
+     fn flips(x: Opp) -> bool { !x != x }",
+    "involutive(true) && involutive(false)" => "true",
+    "involutive(Sky::Sun) && involutive(true)" => "true",
+    "flips(false) && flips(Sky::Moon)" => "true",
+    "true.inv() == false" => "true",
+    "!true" => "false",
+    "!(1 < 2)" => "false",
+);

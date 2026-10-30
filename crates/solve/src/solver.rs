@@ -40,7 +40,7 @@ pub struct Solver {
     vids: IdVec<Vid, ()>,
     subs: IdVec<Vid, Option<Ty>>,
     node_visits: HashSet<NodeId>,
-    library: HashMap<String, AdtId>,
+    pub(crate) library: HashMap<String, AdtId>,
     pub(crate) root_modules: IndexMap<String, AdtId>,
     pub(crate) module_items: IndexMap<AdtId, IndexMap<String, DecId>>,
     pub(crate) sources: HashMap<FileId, NamedSource<Arc<str>>>,
@@ -250,6 +250,15 @@ impl Solver {
             })?
         }
         Ok(())
+    }
+
+    /// The primitive whose library adt `aid` is (`bool` for the `bool`
+    /// namespace) -- the reverse of [`Self::builtin_adt`] for the scalars.
+    pub(crate) fn primitive_of(&self, aid: AdtId) -> Option<Ty> {
+        [("int", Ty::Int), ("float", Ty::Float), ("str", Ty::Str), ("bool", Ty::Bool)]
+            .into_iter()
+            .find(|(name, _)| self.library.get(*name) == Some(&aid))
+            .map(|(_, ty)| ty)
     }
 
     pub(crate) fn builtin_adt(&self, ty: &Ty) -> Option<AdtId> {
@@ -2511,6 +2520,11 @@ impl Solver {
     /// `Pair<A, B>` with the adt's own params in scope, not any single instantiation.
     pub(crate) fn impl_target_ty(&self) -> Option<Ty> {
         let aid = self.impl_target()?;
+        // `impl Opp for bool`: inside, `Self` is the primitive, not the
+        // library's `bool` namespace adt
+        if let Some(prim) = self.primitive_of(aid) {
+            return Some(prim);
+        }
         let args = self.adts[aid]
             .type_params
             .iter()

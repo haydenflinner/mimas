@@ -274,6 +274,17 @@ A unit variant now prints as its bare name (`Sky::Moon`, not
 `library/tests/structs.rs` (`opp_declares_a_dichotomy`,
 `unary_operator_through_a_pact`).
 
+**`bool` is an opp.** The built-in source has `impl Opp for bool` (`inv` is
+`!self`), so a bool goes wherever an `Opp` is expected — `involutive(true)`
+— through the same runtime dispatch as an enum (a bool arm tests the value
+with `x == true || x == false`; there's no instance id to test). A pact
+may now be implemented for a primitive (`impl P for bool`; `bool` only for
+now), `Self` inside is the primitive, and a primitive satisfies a pact its
+library adt implements. A primitive's operators stay built in — `!b` is
+never dispatched to `inv` (which is `!self`, so it couldn't recurse) —
+and the same holds for every operator on `int`/`float`/`str`/`bool`
+(`bool_is_an_opp`).
+
 ## `check (expr)` opens a check
 
 Juxtaposition made `check (a * b).same(c)` the call `check(a * b)…`. A

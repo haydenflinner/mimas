@@ -198,6 +198,9 @@ pub(crate) fn op_dispatch(
         (lhs, names.0, right, false),
         (rhs, names.1, left, true),
     ] {
+        if is_primitive(recv_ty) {
+            continue;
+        }
         let (aid, args) = match recv_ty {
             Ty::Adt(a, args) | Ty::Identity(a, args) => (*a, args.clone()),
             other => match solver.builtin_adt(other) {
@@ -267,6 +270,12 @@ pub(crate) fn seq_op_dispatch(
     Ok(Some(Ty::array(inner.as_ref().clone())))
 }
 
+/// `int`/`float`/`str`/`bool`: their operators are built in, never dispatched
+/// to a method, even when a pact impl gives them one of those names.
+fn is_primitive(ty: &Ty) -> bool {
+    matches!(ty, Ty::Int | Ty::Float | Ty::Str | Ty::Bool)
+}
+
 /// `<op> a` → `a.<name>()` — the unary half of `op_dispatch`.
 fn unary_dispatch(
     solver: &mut Solver,
@@ -278,6 +287,12 @@ fn unary_dispatch(
 ) -> Result<Option<Ty>> {
     if let Ty::Pacts(pids) = ty {
         return Ok(pact_unary_dispatch(solver, id, name, ty, pids));
+    }
+    // a primitive's operators are built in -- `impl Opp for bool` gives `bool`
+    // an `inv`, but `!b` stays the bool op (and `!self` inside that `inv`
+    // can't recurse)
+    if is_primitive(ty) {
+        return Ok(None);
     }
     let (aid, args) = match ty {
         Ty::Adt(a, args) | Ty::Identity(a, args) => (*a, args.clone()),
@@ -1993,12 +2008,24 @@ impl Solve for If {
 
 impl Solve for Impl {
     fn solve(&self, _id: NodeId, _location: Location, solver: &mut Solver) -> Result<Ty> {
-        // Find our target
-        let Some(aid) = solver
-            .resolve_name(&self.target, self.target.location())?
-            .as_adt()
-            .copied()
-        else {
+        // Find our target -- a pact impl may name a primitive (`impl Opp for
+        // bool`), which lands on that primitive's library adt
+        let primitive = match self.target.lexeme.as_str() {
+            // `bool` only for now: a pact-typed call tests the value's kind at
+            // runtime, and only a bool has a cheap test (`x == true || x == false`)
+            "bool" if self.pact.is_some() => {
+                solver.library.get(self.target.lexeme.as_str()).copied()
+            }
+            _ => None,
+        };
+        let resolved = match primitive {
+            Some(aid) => Some(aid),
+            None => solver
+                .resolve_name(&self.target, self.target.location())?
+                .as_adt()
+                .copied(),
+        };
+        let Some(aid) = resolved else {
             Err(InvalidImplTarget {
                 src: solver.src(self.target.location()),
                 at: self.target.location().into(),
