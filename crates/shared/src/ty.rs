@@ -71,6 +71,12 @@ pub enum Ty {
     ///
     /// See more in the [book](https://mim.as/reference/basic-types.html#strings).
     Str,
+    /// A value of statically unknown shape — the payload side of a `raise`
+    /// (`absolve`'s handler binds `e: any` since a `raise` can carry
+    /// anything). `T` fulfills `any`; `any` fulfills only `any` — `match`
+    /// narrows it with runtime probes before treating it as something
+    /// concrete.
+    Any,
     /// A type variable: a type the solver hasn't narrowed yet. None should remain by the end of a
     /// successful compilation.
     Vid(Vid),
@@ -318,6 +324,7 @@ impl Ty {
             | Ty::Int
             | Ty::Float
             | Ty::Str
+            | Ty::Any
             | Ty::Vid(_)
             | Ty::Anon(_)
             | Ty::Param(_)
@@ -495,6 +502,7 @@ impl Ty {
             Ty::Int => "int".into(),
             Ty::Float => "float".into(),
             Ty::Str => "str".into(),
+            Ty::Any => "any".into(),
             Ty::Array(ty, Len::Unknown) => format!("[{}]", ty.display(names)),
             // adjacent fixed levels flatten back to the `[f32; 4, 8]` spelling
             Ty::Array(ty, Len::Const(n)) => {

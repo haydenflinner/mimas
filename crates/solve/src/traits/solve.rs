@@ -1520,6 +1520,13 @@ impl Solve for Equality {
                 }
             }
         }
+        // `==`/`!=` on `any` (a `raise` payload): structural eq is total at
+        // runtime, no static claim needed — `e == Order::Desc` just asks.
+        if matches!(self.op, EqualityOp::Equal | EqualityOp::NotEqual)
+            && (lhs_n == Ty::Any || rhs_n == Ty::Any)
+        {
+            return Ok(Ty::Bool);
+        }
         match (&lhs, &rhs) {
             (Ty::Null, Ty::Option(_)) | (Ty::Option(_), Ty::Null) => Ok(()),
             (l, r) if l.is_numeric() && r.is_numeric() => Ok(()),
@@ -2647,7 +2654,8 @@ impl Solve for parse::Raise {
         }
 
         // `raise` carries any value — the payload stays structured until a
-        // boundary stringifies it (`!` faults, `absolve`'s `str` handler).
+        // boundary stringifies it (`!` faults) or an `absolve` handler
+        // narrows it by `match`.
         self.value.query(solver)?;
         solver.control_flow.push(Flow::Return);
         Ok(Ty::Never)
@@ -2673,11 +2681,22 @@ impl Solve for parse::Absolve {
             })?
         };
         let inner = *inner;
+        // the handler sees the raised payload itself, not a stringified
+        // note — `e: any`, narrowed by `match` or formatted on use. seed the
+        // expected params before the closure solves (same as call-site args)
+        // or the body's own use would pin `e` to something concrete first.
         let handler_ty = Ty::Fn(FnHeader::new(
-            vec![FnParam::new(None, Ty::Str, false)],
+            vec![FnParam::new(None, Ty::Any, false)],
             inner.clone(),
             false,
         ));
+        if let ExprKind::Closure(_) = self.handler.kind()
+            && let Ty::Fn(h) = &handler_ty
+        {
+            solver
+                .expected_closures
+                .insert(self.handler.id(), h.parameters.clone());
+        }
         self.handler.fulfill_ty(handler_ty, solver)?;
         Ok(inner)
     }

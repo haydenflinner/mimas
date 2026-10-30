@@ -1537,7 +1537,16 @@ impl Emit for Match {
         // many things can "go wrong" that will make us fall back to a linear chain: for
         // example, the moment an if-guard gets introduced we're (as usual) screwed. when those
         // happen we'll just bail 'plan with a None and move on to our standard chain.
+        //
+        // a dynamic (`any`) scrutinee always bails: `Switch` indexes `Val::Int`
+        // payloads and instance struct ids into the *same* table, so `match e
+        // { 5 => .., Order::Asc => .. }` could send a raised `5` to the variant
+        // arm. the linear chain's per-pattern `is_instance`/eq probes are
+        // kind-correct on any payload.
         let switched: Option<(u32, Vec<BlockId>, BlockId)> = 'plan: {
+            if ir.resolutions.node_tys.get(&self.identity.id()) == Some(&Ty::Any) {
+                break 'plan None;
+            }
             /// identifies the tag we can use to represent this variant -- be it an adt variant or
             /// an integer
             fn variant_arm(ir: &Ir, pat: &Pat) -> Option<(u32, Vec<(u32, DecId)>)> {
@@ -1805,12 +1814,10 @@ impl Emit for Absolve {
         });
 
         let err_branch = ir.in_block(err_block, |b| {
+            // the handler's param is `any` — hand it the payload itself;
+            // narrowing happens in the handler's `match`, not here.
             let err = b.unwrap_raised(value);
-            // the handler's param is `str` — display-stringify the payload
-            // here, only on the raised path (the payload itself stays a
-            // structured `Val` everywhere else)
-            let msg = b.format(vec![FormatPart::Value(err)]);
-            let r = b.call(handler, vec![msg]);
+            let r = b.call(handler, vec![err]);
             let end = b.id();
             b.jump(merge);
             (end, r)

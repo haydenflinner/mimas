@@ -33,6 +33,12 @@ impl Unification {
             // Never is never checked
             (Ty::Never, _) | (_, Ty::Never) => Ok(Substitution::None),
 
+            // `any` accepts everything as an *expected* type — a `raise`
+            // payload lands in `absolve`'s handler with no statically-known
+            // shape. It never fulfills a concrete type itself (the arm below
+            // deliberately doesn't exist): `match` narrows it.
+            (_, Ty::Any) => Ok(Substitution::None),
+
             // Adts (or Identities) must point to the same definition, and every type argument
             // must unify pairwise -- `List<int>` vs `List<str>` is a mismatch, `List<?x>` binds.
             // arity mismatches on the same adt (`Adt(id, [])` vs `Adt(id, [T])`) fall through

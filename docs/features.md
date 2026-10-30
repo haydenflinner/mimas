@@ -209,7 +209,10 @@ source (`library/src/opp.mim`, via the new `Library::add_source`), on
 the opps themselves so they add no global names: `Order::Desc.rank(keys)`
 (indices, Desc the exact reverse of a stable Asc — `xs.reorder(...)`
 sorts by key), `Side::End.pad(xs, n, fill)` (extend any list — the
-zero-extend case) and `Side::Start.justify(s, width)` (align text). Each
+zero-extend case) and `Side::Start.justify(s, width)` (align text). A host asking a variant's value for a
+method (the debugger's `draw`, Nina's switch calling `inv`) finds the
+enum's impl: the host-facing method table registers an enum's methods
+under each variant's runtime id too. Each
 mirrors: `(!o).rank(k) == rev(o.rank(k))`, `(!Side::End).pad(xs, n, f) ==
 rev(Side::End.pad(rev(xs), n, f))` (`builtin_opp_operations_mirror`).
 Built-in and library sources solve first (their impls' consts are typed

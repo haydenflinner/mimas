@@ -57,7 +57,7 @@ test_run!(
 
 test_run!(
     process_run_nonzero_exit_error_mentions_cmd,
-    r#""false" in (std::process::run("false", [], null) absolve |e| e)"# => "true"
+    r#""false" in (std::process::run("false", [], null) absolve |e| f"{e}")"# => "true"
 );
 
 // spawn failure (binary not found) -> raised

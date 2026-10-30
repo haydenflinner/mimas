@@ -1103,6 +1103,7 @@ impl Solver {
             | Ty::Int
             | Ty::Float
             | Ty::Str
+            | Ty::Any
             | Ty::Vid(_)
             | Ty::Param(_)
             | Ty::Pacts(_)
@@ -1735,6 +1736,7 @@ impl Solver {
             | Ty::Int
             | Ty::Float
             | Ty::Str
+            | Ty::Any
             | Ty::Vid(_)
             | Ty::Anon(_)
             | Ty::Pacts(_)
@@ -1808,6 +1810,11 @@ impl Solver {
     /// this arm's own rib), so all alternatives share a single binding and its type. That sharing
     /// is what makes the payload types of `Foo::Bar(n) | Foo::Fizz(n)` unify.
     pub(crate) fn solve_match_pat(&mut self, pat: &Pat, ty: Ty, reuse: bool) -> Result<()> {
+        // `match` on a dynamic payload (`absolve`'s `any` arm): the pattern is
+        // a runtime probe, not a static claim — literal/variant arms skip the
+        // scrutinee unify but still resolve the variant and bind fields with
+        // member types (sound: the arm only runs when the probe passed).
+        let dynamic = matches!(ty.clone().normalized(self), Ty::Any);
         let pat_src = self.src(pat.location());
         let bad = |ty: &Ty| InvalidPattern {
             src: pat_src.clone(),
@@ -1834,6 +1841,12 @@ impl Solver {
             }
             PatKind::Ident(ident) => self.declare(ident, pat.id(), ty).map(|_| ()),
             PatKind::Poison(poison) => poison.escaped(),
+            PatKind::Literal(lit) if dynamic => {
+                // a literal on `any` is a runtime eq probe — `42`, `"x"`,
+                // `null` all compare fine against whatever was raised
+                let _ = lit;
+                Ok(())
+            }
             PatKind::Literal(lit) => unify(
                 self,
                 ty,
@@ -1863,12 +1876,17 @@ impl Solver {
             }
             PatKind::NullBind(inner_pat) => {
                 let normalized = ty.normalized(self);
-                let inner = match &normalized {
-                    Ty::Option(inner) | Ty::Result(inner) => inner.as_ref().clone(),
+                let (inner, probe) = match &normalized {
+                    Ty::Option(inner) | Ty::Result(inner) => {
+                        (inner.as_ref().clone(), normalized.clone())
+                    }
+                    // a non-null probe on `any`: `x?` binds whatever isn't
+                    // `null`, still `any` inside the arm
+                    Ty::Any => (Ty::Any, Ty::Option(Box::new(Ty::Any))),
                     _ => Err(bad(&normalized))?,
                 };
                 // the IR reads this node's ty to pick the success test (null vs raised)
-                self.shadow_expr_ty(pat.id(), normalized, pat.location())?;
+                self.shadow_expr_ty(pat.id(), probe, pat.location())?;
                 self.solve_match_pat(inner_pat, inner, reuse)
             }
             PatKind::Or(alts) => {
@@ -1952,10 +1970,18 @@ impl Solver {
 
                 // the pattern's own instantiation of the adt: unifying it against the scrutinee
                 // binds these fresh arg vids to the scrutinee's actual args (e.g. `int`), and
-                // `specialize` then plugs them into the variant's declared member types
+                // `specialize` then plugs them into the variant's declared member types.
+                // a dynamic scrutinee (`any`) skips the unify — the pattern is a
+                // runtime probe and the args stay the variant's declared types.
                 let ctor_ty = self.instantiated_adt(adt);
-                unify(self, ty, ctor_ty.clone(), pat.location())?;
+                if !dynamic {
+                    unify(self, ty, ctor_ty.clone(), pat.location())?;
+                }
                 let ctor_args: Vec<Ty> = match &ctor_ty {
+                    // a dynamic scrutinee pins none of the adt's args — the
+                    // probe proves the variant, not its parameters, so bound
+                    // members stay `any` rather than lingering as vids
+                    Ty::Adt(_, args) if dynamic => vec![Ty::Any; args.len()],
                     Ty::Adt(_, args) => args.clone(),
                     _ => vec![],
                 };
