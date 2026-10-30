@@ -18,8 +18,15 @@ use std::{cell::Cell, sync::Arc};
 /// space-separated row or a `2 x`-as-multiply mode would be another).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Juxta {
+    /// `x y` parses as `x(y)` -- a same-line atom after an expr applies.
     Apply,
+    /// Adjacency never applies -- the next token is the *next thing*:
+    /// `if`/`while`/`for` heads, `table` cells, `query` verbs.
     Off,
+    /// Inside a sequence (`[…]`, `f(…)`, `~{…}`): adjacency ends the
+    /// element, so commas are optional. Application needs `(…)` --
+    /// `[f x]` is `[f, x]`; `[f(x)]` applies.
+    Comma,
 }
 
 pub struct Parser<'s> {
@@ -1559,6 +1566,12 @@ impl<'s> Parser<'s> {
                 left = self.op_expr(BinaryOp::Eval(EvaluationOp::Xor), left, right, start);
                 continue;
             }
+            // in a comma-optional sequence a `-` glued to a number opens
+            // the next element: `[0 -1]` is `[0, -1]`, while `a - 1`
+            // and `a -x` keep the infix read
+            if self.juxta == Juxta::Comma && self.glued_minus() {
+                break;
+            }
             let Some((op, power)) = BinaryOp::of(self.peek()) else {
                 break;
             };
@@ -1847,16 +1860,20 @@ impl<'s> Parser<'s> {
             // todo: this might allow "hello"() or true[]" etc. only dot accesses are okay on lits"
             self.chain_accesses(expr)
         } else if self.eat(TokKind::LeftSquare) {
-            let elements = self.list(TokKind::RightSquare, TokKind::starts_expr, |p| {
-                p.struct_literals(true, Self::expr)
+            let elements = self.with_juxta(Juxta::Comma, |p| {
+                p.list(TokKind::RightSquare, TokKind::starts_expr, |p| {
+                    p.struct_literals(true, Self::expr)
+                })
             });
             let expr = self.new_expr(Literal::Array(elements), start);
             self.chain_accesses(expr)
         } else if self.eat(TokKind::TildeLeftBrace) {
-            let elements = self.list(TokKind::RightBrace, TokKind::is_ident, |p| {
-                let name = p.require_ident();
-                p.expect(TokKind::Equal);
-                (name, p.struct_literals(true, Self::expr))
+            let elements = self.with_juxta(Juxta::Comma, |p| {
+                p.list(TokKind::RightBrace, TokKind::is_ident, |p| {
+                    let name = p.require_ident();
+                    p.expect(TokKind::Equal);
+                    (name, p.struct_literals(true, Self::expr))
+                })
             });
             let expr = self.new_expr(Literal::Dictionary(elements), start);
             self.chain_accesses(expr)
@@ -2709,28 +2726,30 @@ impl<'s> Parser<'s> {
         self.bump(TokKind::LeftParenthesis);
         let mut named = false;
         let arguments = self.in_group(|p| {
-            p.list(TokKind::RightParenthesis, TokKind::starts_expr, |p| {
-                let value = p.struct_literals(true, Self::expr);
-                if !p.at(TokKind::Equal) {
-                    if named {
-                        p.error(NamedBeforePositional {
-                            src: p.src(),
-                            at: value.location().into(),
-                        });
+            p.with_juxta(Juxta::Comma, |p| {
+                p.list(TokKind::RightParenthesis, TokKind::starts_expr, |p| {
+                    let value = p.struct_literals(true, Self::expr);
+                    if !p.at(TokKind::Equal) {
+                        if named {
+                            p.error(NamedBeforePositional {
+                                src: p.src(),
+                                at: value.location().into(),
+                            });
+                        }
+                        return Argument { name: None, value };
                     }
-                    return Argument { name: None, value };
-                }
-                named = true;
-                let name = match value.kind() {
-                    ExprKind::Ident(ident) => Some(ident.clone()),
-                    _ => {
-                        p.error(p.unexpected_token());
-                        None
-                    }
-                };
-                p.bump(TokKind::Equal);
-                let value = p.expr();
-                Argument { name, value }
+                    named = true;
+                    let name = match value.kind() {
+                        ExprKind::Ident(ident) => Some(ident.clone()),
+                        _ => {
+                            p.error(p.unexpected_token());
+                            None
+                        }
+                    };
+                    p.bump(TokKind::Equal);
+                    let value = p.expr();
+                    Argument { name, value }
+                })
             })
         });
         self.new_expr(Call::new(left, arguments), start)
@@ -3194,8 +3213,9 @@ impl<'s> Parser<'s> {
     ) -> Vec<T> {
         self.sequence(closer, &starts, |p| {
             let parsed = element(p);
-            // a missing `,` right before another element is reported, and the list carries on
-            if !p.eat(TokKind::Comma) && starts(p.peek()) {
+            // a missing `,` right before another element is reported, and the list carries on --
+            // unless the sequence is comma-optional (`Juxta::Comma`), where it just separates
+            if !p.eat(TokKind::Comma) && starts(p.peek()) && p.juxta != Juxta::Comma {
                 p.expect(TokKind::Comma);
             }
             parsed
@@ -3545,6 +3565,27 @@ impl<'s> Parser<'s> {
     /// Whether the next token is the first on its line.
     fn at_line_start(&self) -> bool {
         self.src.inner()[self.cursor()..self.next_start()].contains('\n')
+    }
+
+    /// In a comma-optional sequence, a `-` glued to a numeric literal
+    /// starts the next element: `[0 -1]` is `[0, -1]`. A `-` spaced on
+    /// the right (`a - 1`) or glued on the left (`a -x`, `a-1`) keeps
+    /// the infix read.
+    fn glued_minus(&self) -> bool {
+        if self.peek() != TokKind::Minus {
+            return false;
+        }
+        let minus = self.tokens[self.next].span();
+        let glued_right = self
+            .tokens
+            .get(self.next + 1)
+            .is_some_and(|t| t.span().start() == minus.end());
+        glued_right
+            && matches!(
+                self.nth(1),
+                TokKind::Int(_) | TokKind::Float(_) | TokKind::Quantity(..)
+            )
+            && minus.start() != self.cursor()
     }
 
     /// End byte of the last token taken.
