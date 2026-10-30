@@ -11,6 +11,17 @@ use std::{cell::Cell, sync::Arc};
 
 /// Recursively descends mimas source, incrementally returning various
 /// statements and expressions.
+/// What `x y` — an expression followed by an atom on the same line —
+/// parses as. `Apply` is the language rule: `x y` is `x(y)`, and
+/// `f (x)` already meant exactly that. `Off` is for regions where
+/// whitespace already means "next item" (`table {}` cells today; a
+/// space-separated row or a `2 x`-as-multiply mode would be another).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Juxta {
+    Apply,
+    Off,
+}
+
 pub struct Parser<'s> {
     /// Always ends with an `Eof`.
     tokens: Vec<Tok<TokKind<'s>>>,
@@ -35,6 +46,12 @@ pub struct Parser<'s> {
     src: NamedSource<Arc<str>>,
     /// Off inside a condition, where a `{` opens the body.
     struct_literals: bool,
+    /// What `x y` — an expression followed by an atom on the same line —
+    /// parses as. `Apply` is the language rule: `x y` is `x(y)`. `Off`
+    /// keeps whitespace as a separator, which is what `table {}` cells
+    /// already mean — and what a juxtaposed argument parses under, so
+    /// `f x y` stays `(f x) y` rather than `f (x y)`.
+    juxta: Juxta,
     /// Inside a `(...)` group (call args, tuples, `#[tests]` lists), where an infix operator
     /// may bind across a newline.
     group_depth: usize,
@@ -128,6 +145,7 @@ impl<'s> Parser<'s> {
             file_name: lexer.file_name().into(),
             src,
             struct_literals: true,
+            juxta: Juxta::Apply,
             group_depth: 0,
             pct_marker: false,
             assert_id: 0,
@@ -237,6 +255,17 @@ impl<'s> Parser<'s> {
         let parsed = body(self);
         self.group_depth = saved;
         self.pct_marker = saved_pct;
+        parsed
+    }
+
+    /// Runs `body` with `x y` resolved the given way, then puts it back.
+    /// `Off` is what whitespace-separated regions (`table {}` cells) and
+    /// a juxtaposed argument itself parse under — `f x y` is `(f x) y`,
+    /// left-associative, never `f (x y)`.
+    fn with_juxta<T>(&mut self, mode: Juxta, body: impl FnOnce(&mut Self) -> T) -> T {
+        let saved = std::mem::replace(&mut self.juxta, mode);
+        let parsed = body(self);
+        self.juxta = saved;
         parsed
     }
 
@@ -1323,7 +1352,9 @@ impl<'s> Parser<'s> {
 
         let binding = self.pattern();
         self.expect(TokKind::In);
-        let iterator = self.struct_literals(false, |p| {
+        // `for x in xs y` -- `y` is the body, not `xs(y)`; the loop head
+        // disarms juxtaposition like an `if`/`while` condition
+        let iterator = self.with_juxta(Juxta::Off, |p| p.struct_literals(false, |p| {
             let iterator = p.expr();
             let inclusive = p.at(TokKind::DoubleDotEqual);
             if !p.infix_binds() || (!inclusive && !p.at(TokKind::DoubleDot)) {
@@ -1333,7 +1364,7 @@ impl<'s> Parser<'s> {
             let start = iterator.span().start();
             let end = p.expr();
             p.new_expr(Range::new(iterator, end, inclusive), start)
-        });
+        }));
         let body = self.block_body();
         self.new_expr(For::new(binding, iterator, body), start)
     }
@@ -1362,7 +1393,10 @@ impl<'s> Parser<'s> {
             self.expect(TokKind::Equal);
             binding
         });
-        let condition = self.struct_literals(false, Self::expr);
+        // what follows the condition is the body, never an argument —
+        // `if c "heads" else "tails"` can't read `"heads"` as `c("heads")`
+        let condition =
+            self.with_juxta(Juxta::Off, |p| p.struct_literals(false, Self::expr));
 
         // a trailing `= 5` or `and b` means the user reached for another language's syntax --
         // catch it before the body parse swallows the token. the rest of the condition gets
@@ -1886,6 +1920,12 @@ impl<'s> Parser<'s> {
     /// bigger in parentheses. It lowers to `__table_col(… __table_col(__table_new(), "a", [..]) …)`
     /// -- one call per column, so columns of different types need no shared element type.
     fn table_literal(&mut self) -> Expr {
+        // Cells are whitespace-separated — `1 2` is two cells, not
+        // `1(2)` — so juxtaposition stays a separator inside `table {}`.
+        self.with_juxta(Juxta::Off, Self::table_cells)
+    }
+
+    fn table_cells(&mut self) -> Expr {
         let start = self.next_start();
         self.advance(); // `table`
         self.bump(TokKind::LeftBrace);
@@ -1991,6 +2031,13 @@ impl<'s> Parser<'s> {
         let start = self.next_start();
         self.advance(); // `query`
         self.bump(TokKind::LeftBrace);
+        // every verb's operands are whitespace-separated -- `join fees
+        // delivery` must not read `fees(delivery)`; the block runs with
+        // juxtaposition disarmed, like `table` cells
+        self.with_juxta(Juxta::Off, |p| p.query_body(start))
+    }
+
+    fn query_body(&mut self, start: usize) -> Expr {
         if self.peek() == TokKind::Ident("from") {
             self.advance();
         }
@@ -2382,9 +2429,30 @@ impl<'s> Parser<'s> {
                     let scale = self.new_expr(Literal::Float(0.01), at);
                     self.new_expr(Evaluation::new(expr, EvaluationOp::Multiply, scale), at)
                 }
+                // `x y` — juxtaposition applies: `f x` is `f(x)`, the same
+                // call `f (x)` already was. Same-line only (the `(`/`[`/`!`
+                // rule), atoms only (`f - x` stays subtraction), and never
+                // inside a whitespace-separated region like `table {}`.
+                tok if !fresh_line
+                    && self.juxta == Juxta::Apply
+                    && tok.starts_juxta_arg() =>
+                {
+                    self.juxta_apply(expr)
+                }
                 _ => break expr,
             }
         }
+    }
+
+    /// `x y` — `x` applied to the atom that follows: `f x` is `f(x)`,
+    /// `up PADDLE_SPEED` the direction's own spelling. The argument is a
+    /// unary atom (a name with its own postfix chain, a literal, a
+    /// group) parsed with juxtaposition off, so `f x y` is `(f x) y`.
+    fn juxta_apply(&mut self, left: Expr) -> Expr {
+        let start = left.span().start();
+        let arg = self.with_juxta(Juxta::Off, Self::unary);
+        let arg = Argument { name: None, value: arg };
+        self.new_expr(Call::new(left, vec![arg]), start)
     }
 
     /// Postfix chaining for block expressions. `(` and `[` directly after a block are ambiguous
@@ -2716,22 +2784,26 @@ impl<'s> Parser<'s> {
         if !self.eat(TokKind::LeftParenthesis) {
             return self.block();
         }
+        // `(...)` is a fresh expression boundary: modes disarmed by an
+        // enclosing head (`if`, `for .. in`, `table`) re-arm inside
         self.in_group(|p| {
-            if p.eat(TokKind::RightParenthesis) {
-                return p.new_expr(Literal::Unit, start);
-            }
-            let first = p.struct_literals(true, Self::expr);
-            if !p.eat(TokKind::Comma) {
-                p.expect(TokKind::RightParenthesis);
-                return p.new_expr(Grouping::new(first), start);
-            }
-            let mut members = vec![first];
-            members.extend(
-                p.list(TokKind::RightParenthesis, TokKind::starts_expr, |p| {
-                    p.struct_literals(true, Self::expr)
-                }),
-            );
-            p.new_expr(Literal::Tuple(members), start)
+            p.with_juxta(Juxta::Apply, |p| {
+                if p.eat(TokKind::RightParenthesis) {
+                    return p.new_expr(Literal::Unit, start);
+                }
+                let first = p.struct_literals(true, Self::expr);
+                if !p.eat(TokKind::Comma) {
+                    p.expect(TokKind::RightParenthesis);
+                    return p.new_expr(Grouping::new(first), start);
+                }
+                let mut members = vec![first];
+                members.extend(
+                    p.list(TokKind::RightParenthesis, TokKind::starts_expr, |p| {
+                        p.struct_literals(true, Self::expr)
+                    }),
+                );
+                p.new_expr(Literal::Tuple(members), start)
+            })
         })
     }
 

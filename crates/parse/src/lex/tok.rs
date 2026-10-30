@@ -295,6 +295,21 @@ impl TokKind<'_> {
             )
     }
 
+    /// Whether this can open a juxtaposition argument — atoms only: a
+    /// name, a literal, or a parenthesised expression. `{`, `[`, `|`,
+    /// keyword-exprs and unary heads stay out, so `Foo {` keeps its
+    /// struct-literal read, `x [i]` stays an index, `f - x` stays
+    /// subtraction, and `x if` stays a stray token. `mod`/`xor` are
+    /// operator words, not atoms — `x mod 2` and `a xor b` stay infix.
+    pub(crate) fn starts_juxta_arg(self) -> bool {
+        !matches!(self, TokKind::Ident("mod") | TokKind::Ident("xor"))
+            && (Literal::try_from(self).is_ok()
+                || matches!(
+                    self,
+                    TokKind::Ident(_) | TokKind::SelfKeyword | TokKind::LeftParenthesis
+                ))
+    }
+
     /// Returns if this can start a pattern.
     pub(crate) fn starts_pattern(self) -> bool {
         Literal::try_from(self).is_ok()
