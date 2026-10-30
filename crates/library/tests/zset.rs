@@ -59,3 +59,20 @@ test_fail!(
     "let xs = [1, 2];
      xs !true",
 );
+
+// `?` demotes with the same hugging rule — `f ?x` was `(f?)(x)`.
+test_run!(
+    spaced_hook_is_not_demote,
+    "fn r() -> int! { 2 } fn boom() -> int! { raise(\"b\") }
+     fn d() -> int? { r()? } fn e() -> int? { boom()? }",
+    "d()" => "2",
+    "e()" => "null",
+    "[d()! d()!]" => "[2, 2]",
+);
+
+test_fail!(
+    spaced_hook_is_not_apply,
+    // `f ?x` is neither `f(x?)` nor `(f?)(x)`
+    "fn f(o: int?) -> int? { o }
+     let _v = f ?r();",
+);

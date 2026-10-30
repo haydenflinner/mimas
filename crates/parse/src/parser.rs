@@ -2458,7 +2458,10 @@ impl<'s> Parser<'s> {
                     self.assert_or_unwrap(expr)
                 }
                 TokKind::Bang if self.cursor() == self.next_start() => self.unwrap(expr),
-                TokKind::Hook => self.demote(expr),
+                // `?` hugs like `!`: `x?` demotes, a spaced `?` starts
+                // nothing (`?` opens no expression), so `f ?x` errors
+                // rather than silently reading `(f?)(x)`.
+                TokKind::Hook if self.cursor() == self.next_start() => self.demote(expr),
                 // `x%` hugs its operand and spells percent -- `50%` is `50 * 0.01`, the
                 // `pct` unit by another name. A spaced `%` is neither postfix nor modulo
                 // (`a mod b`); `binary` reports it. While a `±` tolerance parses the

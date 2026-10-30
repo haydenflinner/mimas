@@ -30,11 +30,13 @@ Postfix `!` now hugs its operand like `x%`: `x!` unwraps, but a *spaced*
 `!` starts the next thing — `[!a !b]` is `[!a, !b]` (the parse everyone
 meant), and `f !x` errors at the statement boundary rather than
 silently meaning `(f!)(x)`. Same rule Zig calls partial precedence:
-adjacency with two readings gets neither. The `?` demote shares the
-shape and still follows the old rule — a follow-up if `f ?x` ever bites.
+adjacency with two readings gets neither. `?` demote follows the same
+rule — `x?` needs the hug too, so `f ?x` errors rather than reading
+`(f?)(x)` (a spaced `?` opens nothing, so there's no second element
+to win; the win is purely that the silent misread is gone).
 
 Tests: `zset.rs` — arithmetic, `±=` forms, element/list-type rejection,
-the `[T; n]` guard, and the spaced-`!` parse both ways.
+the `[T; n]` guard, and the spaced-`!`/`?` parses both ways.
 
 ## `nand`/`nor` — the gate operators, word or glyph
 
