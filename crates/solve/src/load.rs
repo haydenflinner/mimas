@@ -24,6 +24,26 @@ pub struct Loaded {
     pub solver: Solver,
 }
 
+/// What every program has, in mimas source. `Opp` is the pact an `opp`
+/// declaration implements: two ends and a flip — `!x` is `x.inv()`, the
+/// other end, and `!(!x) == x`. `bool` is the first opp (its `!` is
+/// built in; `impl Opp for bool` waits on impls for primitive types); the
+/// rest are the pairs pages kept spelling as bools or ±1 — a shared
+/// vocabulary, so `Size::Big` on one page means what it means on the next.
+pub const BUILTIN_SRC: &str = "\
+pact Opp {
+    fn inv(self) -> Self;
+}
+opp Sign { Pos, Neg }
+opp Size { Big, Small }
+opp Shade { Light, Dark }
+opp Daytime { Day, Night }
+opp Flow { Push, Pull }
+opp Fill { Full, Empty }
+";
+/// The built-in source's file name.
+pub const BUILTIN_NAME: &str = "<builtin>";
+
 /// Parses and solves `files` (each a name and its text) against `library`. The solver can't
 /// take poison yet, so a parse error in any file skips the solve.
 pub fn load_files<'a>(
@@ -39,7 +59,10 @@ pub fn load_files<'a>(
     shared::units::clear();
     // and per-file shadowed operator words: a kit's `fn not` makes `not` a
     // name in the kit and in the files that `use` it, never upstream
-    let files: Vec<(&str, &str)> = files.into_iter().collect();
+    let mut files: Vec<(&str, &str)> = files.into_iter().collect();
+    // every program has the built-in source: last, so user files keep
+    // their file ids (the first is still 0)
+    files.push((BUILTIN_NAME, BUILTIN_SRC));
     let shadow = parse::lex::shadow_sets(&files);
     for (file_id, (name, text)) in files.into_iter().enumerate() {
         sources.insert(file_id, NamedSource::new(name, Arc::from(text)));

@@ -675,3 +675,25 @@ fn a_spliced_source_shadows_per_page() {
     assert!(at("fn not"), "the declaring page");
     assert!(at("not(1)"), "a page that uses it");
 }
+
+#[test]
+fn opp_is_an_enum_and_its_flip() {
+    // `opp Sky { Sun, Moon }` parses to the enum plus `impl Opp for
+    // Sky`, both at the declaration
+    let lexer = crate::lex::Lexer::new("opp Sky { Sun, Moon }\nlet x = 1;", 0, "test".into());
+    let ast = crate::Parser::new(lexer).try_into_ast().unwrap();
+    let kinds: Vec<String> = ast.stmts().iter().map(|s| s.to_string()).collect();
+    assert_eq!(kinds.len(), 3, "{kinds:?}");
+    assert!(kinds[0].starts_with("enum Sky"), "{kinds:?}");
+    assert!(kinds[1].starts_with("impl Opp for Sky"), "{kinds:?}");
+    // the word stays a name elsewhere
+    for src in ["let opp = 1;", "opp(2);", "opp.x;", "opp == 3;"] {
+        let lexer = crate::lex::Lexer::new(src, 0, "test".into());
+        assert!(crate::Parser::new(lexer).try_into_ast().is_ok(), "{src}");
+    }
+    // exactly two plain ends
+    for src in ["opp Tri { A, B, C }", "opp One { A }", "opp P { A(int), B }"] {
+        let lexer = crate::lex::Lexer::new(src, 0, "test".into());
+        assert!(crate::Parser::new(lexer).try_into_ast().is_err(), "{src}");
+    }
+}

@@ -637,14 +637,17 @@ impl<'gc> Ctx<'gc> {
                         let _ = write!(out, "@{}", inst.struct_id);
                     }
                 }
-                out.push_str(" { ");
-                for (i, &v) in inst.fields.iter().enumerate() {
-                    if i > 0 {
-                        out.push_str(", ");
+                // a unit variant (`Sky::Moon`) prints as its name alone
+                if !inst.fields.is_empty() {
+                    out.push_str(" { ");
+                    for (i, &v) in inst.fields.iter().enumerate() {
+                        if i > 0 {
+                            out.push_str(", ");
+                        }
+                        self.render_into(out, v, true, depth + 1, path)?;
                     }
-                    self.render_into(out, v, true, depth + 1, path)?;
+                    out.push_str(" }");
                 }
-                out.push_str(" }");
             }
             #[cfg(feature = "dataframe")]
             Val::DataFrame(d) => {

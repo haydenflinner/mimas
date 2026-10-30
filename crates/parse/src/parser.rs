@@ -77,6 +77,9 @@ pub struct Parser<'s> {
     /// The source's per-page shadow table (`Lexer::shadow_table`) — an
     /// f-string interpolation sublexer takes its page's set.
     shadow: Vec<(usize, [bool; 3])>,
+    /// Top-level statements a declaration synthesized alongside itself
+    /// (`opp`'s `impl Opp`), emitted right after it.
+    pending: Vec<Stmt>,
 }
 
 // Basic features
@@ -153,6 +156,7 @@ impl<'s> Parser<'s> {
             last_error: None,
             cut_short: lexer.cut_short(),
             shadow: lexer.shadow_table().to_vec(),
+            pending: Vec::new(),
             file_id: lexer.file_id(),
             file_name: lexer.file_name().into(),
             src,
@@ -175,6 +179,7 @@ impl<'s> Parser<'s> {
         while !self.at(TokKind::Eof) {
             if self.peek().starts_stmt() {
                 statements.push(self.stmt());
+                statements.append(&mut self.pending);
             } else {
                 self.reject_stmt(self.unexpected_token());
             }
@@ -366,6 +371,9 @@ impl<'s> Parser<'s> {
             TokKind::Ident("unit") if self.unit_intro() => {
                 BlockElement::Stmt(self.unit_stmt(start))
             }
+            // `opp Sky { Sun, Moon }` declares a dichotomy. Contextual: `opp`
+            // is a name anywhere a type name and `{` don't follow it.
+            TokKind::Ident("opp") if self.opp_intro() => BlockElement::Stmt(self.opp_stmt(start)),
             kind if kind.starts_item() => {
                 let item = self.item();
                 self.end_item(&item);
@@ -1107,6 +1115,19 @@ impl<'s> Parser<'s> {
         let head = self.require_ident();
         let type_params = self.type_params();
         let members = if self.expect(TokKind::LeftBrace) {
+            self.enum_members()
+        } else {
+            vec![]
+        };
+        Enum {
+            head,
+            type_params,
+            members,
+        }
+    }
+
+    /// An enum's `{ … }` members, after the `{`.
+    fn enum_members(&mut self) -> Vec<(Ident, Member)> {
             self.list(TokKind::RightBrace, TokKind::is_ident, |p| {
                 let name = p.require_ident();
                 let member = if p.eat(TokKind::LeftParenthesis) {
@@ -1127,14 +1148,113 @@ impl<'s> Parser<'s> {
                 };
                 (name, member)
             })
+    }
+
+    /// `opp Name {` — a type name and a brace after the word.
+    fn opp_intro(&self) -> bool {
+        matches!(self.nth(1), TokKind::Ident(_)) && matches!(self.nth(2), TokKind::LeftBrace)
+    }
+
+    /// `opp Sky { Sun, Moon }` — a dichotomy, as basic as an enum: two ends
+    /// and a flip. It is the enum of its two ends plus a synthesized `impl
+    /// Opp for Sky` (the pact every program has) whose `inv` swaps
+    /// them, so `!Sky::Sun == Sky::Moon` and `involutive`-style code over
+    /// `Opp` takes it. `bool` is the first opp. Top-level only.
+    fn opp_stmt(&mut self, start: usize) -> Stmt {
+        let kw = self.advance(); // `opp`
+        if self.depth > 0 {
+            self.error(Misdirection {
+                src: self.src(),
+                at: Location::from(kw.location()).into(),
+                msg: "`opp` decls are top-level only".into(),
+                label: "declare the pair at the top of the file".into(),
+            });
+        }
+        let head = self.require_ident();
+        let members = if self.expect(TokKind::LeftBrace) {
+            self.enum_members()
         } else {
             vec![]
         };
-        Enum {
-            head,
-            type_params,
-            members,
+        let pair = members.len() == 2
+            && members
+                .iter()
+                .all(|(_, m)| matches!(m, Member::Struct(fields) if fields.is_empty()));
+        if !pair {
+            self.error(Misdirection {
+                src: self.src(),
+                at: self.location(start).into(),
+                msg: "an `opp` has exactly two ends".into(),
+                label: "two plain names, opposite each other: `opp Sky { Sun, Moon }`".into(),
+            });
         }
+        if pair && self.depth == 0 {
+            let imp = self.opp_impl(&head, &members[0].0, &members[1].0, start);
+            self.pending.push(imp);
+        }
+        let item = Item::new(
+            Enum {
+                head,
+                type_params: vec![],
+                members,
+            }
+            .into(),
+            self.location(start),
+            false,
+        );
+        self.new_stmt(item, start)
+    }
+
+    /// `impl Opp for T { fn inv(self) -> T { match self { T::A => T::B,
+    /// T::B => T::A } } }`, every node located at the `opp` declaration.
+    fn opp_impl(&self, head: &Ident, a: &Ident, b: &Ident, start: usize) -> Stmt {
+        let at = self.location(start);
+        let id = |name: &str| Ident::new(name, at);
+        let case = |from: &Ident, to: &Ident| {
+            MatchCase::new(
+                Pat::new(PatKind::Variant(Box::new(self.opp_path(head, from, start))), at),
+                None,
+                self.opp_path(head, to, start),
+            )
+        };
+        let flip = Match::new(
+            self.new_expr(id("self"), start),
+            vec![case(a, b), case(b, a)],
+            false,
+        );
+        let body = self.new_expr(
+            Block {
+                body: vec![],
+                yielded_expr: Some(self.new_expr(flip, start)),
+            },
+            start,
+        );
+        let inv = Function {
+            name: id("inv"),
+            type_params: vec![],
+            parameters: vec![Binding::new(id("self"))],
+            wheres: vec![],
+            return_type: Some(Annotation::Ty(id(&head.lexeme))),
+            body,
+        };
+        let imp = Impl::new(
+            id(&head.lexeme),
+            Some(id("Opp")),
+            vec![Item::new(inv.into(), at, false)],
+        );
+        self.new_stmt(Item::new(imp.into(), at, false), start)
+    }
+
+    /// `T::V` as an expression, located at `start`'s declaration.
+    fn opp_path(&self, head: &Ident, member: &Ident, start: usize) -> Expr {
+        let at = self.location(start);
+        self.new_expr(
+            Access::DoubleColon {
+                left: self.new_expr(Ident::new(head.lexeme.clone(), at), start),
+                right: Ident::new(member.lexeme.clone(), at),
+            },
+            start,
+        )
     }
 
     fn impl_decl(&mut self) -> Impl {

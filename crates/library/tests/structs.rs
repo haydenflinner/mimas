@@ -42,24 +42,48 @@ test_run!(
     "{ let s = 0.0; for d in DIRS { s = s + d.dx + d.dy } s }" => "2",
 );
 
-// An operator through a pact: `pact Dichotomy { fn inv(self) -> Self; }`
-// declares `!`'s method, so `!x` on a `Dichotomy`-typed value calls
-// whichever implementer's `inv` the value turns out to be, at runtime --
-// the same dispatch `x.inv()` through the pact gets.
+// An operator through a pact: the built-in `pact Opp { fn inv(self)
+// -> Self; }` declares `!`'s method, so `!x` on a `Opp`-typed value
+// calls whichever implementer's `inv` the value turns out to be, at
+// runtime -- the same dispatch `x.inv()` through the pact gets.
 test_run!(
     unary_operator_through_a_pact,
-    "pact Dichotomy { fn inv(self) -> Self; }
-     struct Dial { lo: float, hi: float }
-     impl Dichotomy for Dial { fn inv(self) -> Dial { Dial { lo = self.hi, hi = self.lo } } }
+    "struct Dial { lo: float, hi: float }
+     impl Opp for Dial { fn inv(self) -> Dial { Dial { lo = self.hi, hi = self.lo } } }
      enum Sky { Sun, Moon }
-     impl Dichotomy for Sky {
+     impl Opp for Sky {
          fn inv(self) -> Sky { match self { Sky::Sun => Sky::Moon, Sky::Moon => Sky::Sun } }
      }
-     fn involutive(x: Dichotomy) -> bool { !(!x) == x }
-     fn flipped(x: Dichotomy) -> Dichotomy { !x }",
+     fn involutive(x: Opp) -> bool { !(!x) == x }
+     fn flipped(x: Opp) -> Opp { !x }",
     "involutive(Dial { lo = 5.0, hi = 95.0 })" => "true",
     "involutive(Sky::Sun)" => "true",
     "flipped(Sky::Sun) == Sky::Moon" => "true",
     "flipped(Dial { lo = 5.0, hi = 95.0 }) == Dial { lo = 95.0, hi = 5.0 }" => "true",
     "!true" => "false",
+);
+
+// `opp Sky { Sun, Moon }` declares a dichotomy: the enum of its two ends
+// plus a synthesized `impl Opp` whose `inv` swaps them. `opp` stays
+// an ordinary name anywhere a type name and `{` don't follow it, and a
+// unit variant prints as its bare name.
+test_run!(
+    opp_declares_a_dichotomy,
+    "opp Sky { Sun, Moon }
+     opp Side { Left, Right }
+     fn involutive(x: Opp) -> bool { !(!x) == x }
+     fn other(x: Opp) -> Opp { !x }
+     let opp = 3;",
+    "!Sky::Sun == Sky::Moon" => "true",
+    "not Side::Right == Side::Left" => "true",
+    "Sky::Moon.inv() == Sky::Sun" => "true",
+    "involutive(Sky::Sun) && involutive(Side::Right)" => "true",
+    "other(Side::Left) == Side::Right" => "true",
+    "match !Sky::Moon { Sky::Sun => 1, Sky::Moon => 2 }" => "1",
+    "f\"{!Sky::Sun}\"" => "\"Sky::Moon\"",
+    "opp + 1" => "4",
+    // the built-in pairs every program has
+    "!Size::Big == Size::Small && !Sign::Neg == Sign::Pos" => "true",
+    "!Fill::Full == Fill::Empty" => "true",
+    "involutive(Daytime::Night) && involutive(Flow::Push) && involutive(Shade::Dark)" => "true",
 );

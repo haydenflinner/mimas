@@ -144,6 +144,28 @@ Tests: `parse_validity::a_declared_fn_takes_back_an_operator_word`,
 `a_kits_shadowing_reaches_the_page_that_uses_it`),
 `parse_validity::a_spliced_source_shadows_per_page`.
 
+## `opp` — a dichotomy, as basic as an enum
+
+`opp Sky { Sun, Moon }` declares a type with exactly two ends, each the
+other's opposite: the enum of its two ends plus a synthesized `impl Opp
+for Sky` (built by the parser, every node located at the declaration)
+whose `inv` swaps them. So `!Sky::Sun == Sky::Moon`, `not` spells the
+same flip, and `fn involutive(x: Opp) -> bool { !(!x) == x }` takes any
+opp — `!` dispatches through the pact at runtime. Anything but two plain
+names is an error ("an `opp` has exactly two ends"); `opp` stays an
+ordinary name wherever a type name and `{` don't follow it.
+
+Every program has a small built-in source (`solve::BUILTIN_SRC`,
+appended last by `load_files` so user files keep their ids): the `Opp`
+pact itself and the pairs pages kept spelling as bools or ±1 —
+`Sign { Pos, Neg }`, `Size { Big, Small }`, `Shade { Light, Dark }`,
+`Daytime { Day, Night }`, `Flow { Push, Pull }`, `Fill { Full, Empty }`. `bool` is the first opp
+in spirit; `impl Opp for bool` waits on pact impls for primitive types.
+A unit variant now prints as its bare name (`Sky::Moon`, not
+`Sky::Moon {  }`). Tests: `parse_validity::opp_is_an_enum_and_its_flip`,
+`library/tests/structs.rs` (`opp_declares_a_dichotomy`,
+`unary_operator_through_a_pact`).
+
 ## `check (expr)` opens a check
 
 Juxtaposition made `check (a * b).same(c)` the call `check(a * b)…`. A
