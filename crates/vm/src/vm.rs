@@ -1340,7 +1340,7 @@ pub(crate) fn step_one<'gc>(
             match v {
                 Val::Null => return Err(RtErr::UnwrappedNull),
                 Val::Raised(err) => {
-                    return Err(RtErr::UnwrappedRaised(err.as_str().to_string()));
+                    return Err(RtErr::UnwrappedRaised(ctx.to_string(*err)?));
                 }
                 _ => wr!(regs, dst, v),
             }
@@ -2246,10 +2246,8 @@ pub fn cold_dispatch<'gc>(
         }
         OpCode::Raise => {
             let src = Reg::decode(code);
-            let Val::Str(err) = rd!(regs, src) else {
-                unreachable!("raise on a non-str value")
-            };
-            return Ok(Flow::Return(Val::Raised(err)));
+            let err = rd!(regs, src);
+            return Ok(Flow::Return(Val::Raised(Gc::new(ctx.mutation(), err))));
         }
         OpCode::IsRaised => {
             let dst = Reg::decode(code);
@@ -2263,7 +2261,7 @@ pub fn cold_dispatch<'gc>(
             let Val::Raised(err) = rd!(regs, src) else {
                 unreachable!("UnwrapRaised on non-raised value")
             };
-            wr!(regs, dst, Val::Str(err));
+            wr!(regs, dst, *err);
         }
         OpCode::UnwrapUnit => {
             // `()`'s repr is Null, so no null check; only Raised faults. Any
@@ -2272,7 +2270,7 @@ pub fn cold_dispatch<'gc>(
             let src = Reg::decode(code);
             match rd!(regs, src) {
                 Val::Raised(err) => {
-                    return Err(RtErr::UnwrappedRaised(err.as_str().to_string()));
+                    return Err(RtErr::UnwrappedRaised(ctx.to_string(*err)?));
                 }
                 _ => wr!(regs, dst, Val::Null),
             }

@@ -2646,7 +2646,9 @@ impl Solve for parse::Raise {
             })?
         }
 
-        self.value.fulfill_ty(Ty::Str, solver)?;
+        // `raise` carries any value — the payload stays structured until a
+        // boundary stringifies it (`!` faults, `absolve`'s `str` handler).
+        self.value.query(solver)?;
         solver.control_flow.push(Flow::Return);
         Ok(Ty::Never)
     }

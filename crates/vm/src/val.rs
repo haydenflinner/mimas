@@ -41,7 +41,13 @@ pub enum Val<'gc> {
     Dict(Dict<'gc>),
     Instance(Instance<'gc>),
     Closure(Closure<'gc>),
-    Raised(Str<'gc>),
+    /// A `raise`d value in flight — the payload is whatever `raise` was
+    /// handed (a `str` note, a dict of context, a resume token), boxed on
+    /// the heap since a `Val` can't hold a `Val` inline. Stringification
+    /// only happens at the cold boundaries (`!` faults, `absolve` handlers,
+    /// snapshotting); hosts reading `Flow::Return` or `Inspect::Raised` see
+    /// the structured payload.
+    Raised(Gc<'gc, Val<'gc>>),
     #[cfg(feature = "dataframe")]
     DataFrame(DataFrame<'gc>),
     /// A `polars::prelude::Expr` under construction -- `col("x")`, `col("x") > 5`, and so on all
@@ -101,7 +107,7 @@ impl<'gc> PartialEq for Val<'gc> {
                 }
             }
             (Val::Closure(a), Val::Closure(b)) => Gc::ptr_eq(a.0, b.0),
-            (Val::Raised(a), Val::Raised(b)) => a == b,
+            (Val::Raised(a), Val::Raised(b)) => *a == *b,
             // an in-progress Expr tree has no structural equality -- same handle only, like
             // Closure. (A DataFrame compares by content, below.)
             #[cfg(feature = "dataframe")]
@@ -260,9 +266,9 @@ impl<'gc> Val<'gc> {
     }
 
     #[inline]
-    pub fn as_raised(self) -> Option<Str<'gc>> {
+    pub fn as_raised(self) -> Option<Val<'gc>> {
         if let Val::Raised(s) = self {
-            Some(s)
+            Some(*s)
         } else {
             None
         }
@@ -909,7 +915,7 @@ pub enum Captured {
     Dict(Vec<(String, Captured)>),
     Instance(Vec<Captured>),
     Fn(BodyId),
-    Raised(String),
+    Raised(Box<Captured>),
     /// Catch-all for Fn / Closure -- these aren't expected to appear as test outputs, but
     /// if they do, comparing against `Other` will fail loudly rather than panic.
     Other,
@@ -1022,7 +1028,7 @@ impl std::fmt::Display for Captured {
                 f.write_str(" }")
             }
             Captured::Fn(body_id) => write!(f, "fn({})", body_id.index()),
-            Captured::Raised(s) => write!(f, "raised({s:?})"),
+            Captured::Raised(s) => write!(f, "raised({s})"),
             Captured::Other => f.write_str("<other>"),
             Captured::Cycle => f.write_str("∞"),
         }
@@ -1102,7 +1108,7 @@ impl<'gc> Val<'gc> {
                 )
             }),
             Val::Fn(body_id) => Captured::Fn(body_id),
-            Val::Raised(s) => Captured::Raised(s.as_str().to_string()),
+            Val::Raised(s) => Captured::Raised(Box::new((*s).capture_at(path))),
             Val::Closure(_) => Captured::Other,
             #[cfg(feature = "dataframe")]
             Val::DataFrame(_) | Val::PlExpr(_) | Val::GroupBy(_) => Captured::Other,
@@ -1134,7 +1140,7 @@ pub enum Inspect {
         fields: Vec<(String, Inspect)>,
     },
     Fn(BodyId),
-    Raised(String),
+    Raised(Box<Inspect>),
     /// A `DataFrame` flattened for display — column names plus up to
     /// [`INSPECT_TABLE_ROWS`] rows of typed cells. A host gets no raw
     /// frame handle, so a table it can typeset (or graph — cells keep
@@ -1246,7 +1252,11 @@ impl<'gc> Val<'gc> {
                 Inspect::Instance { type_name, fields }
             }),
             Val::Fn(body_id) => Inspect::Fn(body_id),
-            Val::Raised(s) => Inspect::Raised(s.as_str().to_string()),
+            Val::Raised(s) => Inspect::Raised(Box::new(guarded(
+                Gc::as_ptr(s) as *const (),
+                seen,
+                |seen| (*s).inspect(struct_names, field_names, seen),
+            ))),
             Val::Closure(_) => Inspect::Other,
             #[cfg(feature = "dataframe")]
             Val::DataFrame(d) => guarded(Gc::as_ptr(d.0) as *const (), seen, |_| {
@@ -1363,7 +1373,12 @@ impl<'gc> Val<'gc> {
                     })
                 }
                 Val::Fn(body_id) => Inspect::Fn(body_id),
-                Val::Raised(s) => Inspect::Raised(s.as_str().to_string()),
+                Val::Raised(s) => Inspect::Raised(Box::new(guarded(
+                    Gc::as_ptr(s) as *const (),
+                    seen,
+                    budget,
+                    |seen, budget| walk(*s, struct_names, field_names, seen, budget),
+                ))),
                 Val::Closure(_) => Inspect::Other,
                 #[cfg(feature = "dataframe")]
                 Val::DataFrame(d) => {

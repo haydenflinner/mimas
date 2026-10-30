@@ -536,6 +536,7 @@ impl<'gc> Ctx<'gc> {
             Val::IntArray(a) | Val::FloatArray(a) => Some(Gc::as_ptr(a.0) as *const ()),
             Val::Dict(d) => Some(Gc::as_ptr(d.0) as *const ()),
             Val::Instance(i) => Some(Gc::as_ptr(i.0) as *const ()),
+            Val::Raised(s) => Some(Gc::as_ptr(s) as *const ()),
             _ => None,
         };
         let Some(ptr) = ptr else {
@@ -626,7 +627,9 @@ impl<'gc> Ctx<'gc> {
                 );
             }
             Val::Raised(s) => {
-                let _ = write!(out, "<raised {:?}>", s.as_str());
+                out.push_str("<raised ");
+                self.render_into(out, *s, true, depth + 1, path)?;
+                out.push('>');
             }
             Val::Instance(i) => {
                 let inst = i.0.borrow();

@@ -1806,7 +1806,11 @@ impl Emit for Absolve {
 
         let err_branch = ir.in_block(err_block, |b| {
             let err = b.unwrap_raised(value);
-            let r = b.call(handler, vec![err]);
+            // the handler's param is `str` — display-stringify the payload
+            // here, only on the raised path (the payload itself stays a
+            // structured `Val` everywhere else)
+            let msg = b.format(vec![FormatPart::Value(err)]);
+            let r = b.call(handler, vec![msg]);
             let end = b.id();
             b.jump(merge);
             (end, r)

@@ -2,6 +2,7 @@
 mod vm_test_utils;
 
 use vm::Captured::*;
+use vm::Vm;
 
 test_vm!(
     coalesce,
@@ -192,3 +193,62 @@ test_fail!(
     result_unwrap_raised_errors,
     "fn foo() -> int! { raise \"bad\" }\nlet TEST_VALUE = foo()!;"
 );
+
+// `raise` carries any value — the payload stays a `Val` until something asks
+// for text. A raised call bound without `!`/`?`/`absolve` keeps its wrapper.
+test_vm!(
+    raise_any_value_keeps_payload,
+    "fn die() -> int! { raise 42 }
+     fn die_list() -> int! { raise [1, 2] }
+     fn die_dict() -> int! { raise ~{x = 9} }",
+    "die()" => Raised(Box::new(Int(42))),
+    "die_list()" => Raised(Box::new(array!(Int(1), Int(2)))),
+    "die_dict()" => Raised(Box::new(dict! { ~{x = Int(9)} })),
+);
+
+// `?` demotes a structured raise to null without touching the payload;
+// `absolve`'s str handler gets the display string, produced cold.
+test_vm!(
+    raise_any_value_boundaries,
+    "fn die() -> str! { raise 42 }
+     fn die_list() -> str! { raise [1, 2] }",
+    "die() absolve |e| f\"saw: {e}\"" => str!("saw: 42"),
+    "die_list() absolve |e| e" => str!("[1, 2]"),
+    "die()?" => Null,
+    "die_list()?" => Null,
+);
+
+test_vm!(
+    raise_nested_payload,
+    "fn inner() -> int! { raise 7 }
+     fn outer() -> str! { raise inner() }",
+    "outer() absolve |e| e" => str!("<raised 7>"),
+);
+
+test_fail!(
+    unwrap_raised_int_errors,
+    "fn foo() -> int! { raise 42 }\nlet TEST_VALUE = foo()!;"
+);
+
+test_fail!(
+    unwrap_raised_list_errors,
+    "fn foo() -> int! { raise [1, 2] }\nlet TEST_VALUE = foo()!;"
+);
+
+// a raised structured payload survives the heap snapshot intact — the
+// `SnapVal` tree recurses through the payload like any other value.
+#[test]
+fn raised_payload_survives_snapshot() {
+    let source = r#"
+fn die() -> int! { raise [1, 2] }
+let held = die();
+let TEST_VALUE = 0;
+"#;
+    let mut vm = Vm::execute(source, |_| {}).expect("compiled and ran");
+    let snap = vm.snapshot().expect("snapshot");
+    vm.restore(&snap).expect("restore");
+    assert_eq!(
+        vm.resolve_name("held"),
+        Some(Raised(Box::new(array!(Int(1), Int(2))))),
+    );
+}

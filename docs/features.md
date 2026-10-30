@@ -2,6 +2,45 @@
 
 Memorable additions to mimas beyond what the changelog tracks — newest first.
 
+## `raise` carries any value
+
+`raise` used to take only `str` — `Val::Raised` stored the note directly,
+and the solver rejected `raise 42`. Now the payload is any `Val`, boxed
+as `Raised(Gc<Val>)` so a `Val` never holds a `Val` inline: `raise 42`,
+`raise [1, 2]`, `raise ~{code = 7}` all work, and a raised value can even
+carry another raised value (`raise inner()` nests to `<raised 7>`).
+
+The point is *when* the text appears: the payload stays structured
+through `Flow::Return`, `is_raised`, `?` demotion, binding, and the
+snapshot/inspect/capture surfaces, and only stringifies at the cold
+boundaries that need a `str`:
+
+- `x!` and `()`-unwraps still fault `UnwrappedRaised(String)` — the
+  display render happens on the fault path, where it's already cold.
+- `absolve`'s handler stays `(str) -> T`: the compiler emits a `Format`
+  on the payload before the call, so `|e|` sees `"42"`/`"[1, 2]"`.
+- `Raisable<T>` keeps its `String` variant — native authors see no API
+  change; a raised payload crossing `from_value` renders (or reads
+  `<unprintable raise payload>`), and `into_value` wraps the message
+  `Str` in the structured payload.
+- `Captured::Raised`/`Inspect::Raised`/`SnapVal::Raised` all hold the
+  payload recursively (`Box<…>`), so the web host's `inspect_json` hands
+  JS a nested `{"$raised": …}` document — richer raise/resume context
+  without a flattening pass.
+
+Cycle protection rides along: the payload `Gc` joins the render path's
+pointer guard, capture/inspect `seen` sets, and snapshot node walk, so
+`raise` on a cyclic structure errors deep instead of recursing forever.
+
+The wasm backend needed nothing — `Val::Raised` there is already
+`tag|word` with the payload as a raw word. The JIT/bcgen helpers grew a
+`Ctx` arg only where cold-stringify lives (`unwrap`, `unwrap_unit`,
+`raise`); `unwrap_raised` still just moves the payload.
+
+Tests: `optionals.rs` — structured payloads (`int`/`[int]`/`dict`),
+`absolve`/`?`/`!` boundaries, nested raise, snapshot roundtrip;
+`solve_results.rs` — `raise` on non-`str` solves to `T!`.
+
 ## Z-set `+`/`-` on sequences + the glued-postfix rule
 
 `xs + x` appends one `x`, `xs - x` drops the first `==` match, `xs + ys`
