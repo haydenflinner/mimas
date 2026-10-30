@@ -770,6 +770,7 @@ macro_rules! wr {
 // load-bearing: it puts the cold call in tail position so the arm forwards the helper's
 // `RtResult<Flow>` verbatim -- no per-arm Err-widening, and the operands are consumed by value by
 // the cold fn and never read again here, so they never need a stack home across the tag check.
+// r[impl mimas.int.checked]
 macro_rules! int_arith {
     ($regs:ident, $code:ident, $ctx:ident, $checked:ident, $op:expr) => {{
         let dst = Reg::decode($code);

@@ -195,6 +195,7 @@ fn tests_list_keeps_expressions() {
 
 // `check <expr>` lines -- the literate spelling of a `#[tests]` case
 test_ok!(
+    // r[verify check.line]
     checks_ok,
     "check x == 1",
     "check f(2) == 3",
@@ -203,6 +204,8 @@ test_ok!(
     "check !done"
 );
 test_fail!(
+    // r[verify check.retired]
+    // r[verify check.contextual]
     checks_rejected,
     // the retired list forms -- `:`/`{` error but still recover
     "check:",

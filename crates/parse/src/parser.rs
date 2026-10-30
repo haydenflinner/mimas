@@ -356,6 +356,7 @@ impl<'s> Parser<'s> {
             // `check <expr>` -- the literate spelling of a `#[tests]` case. The word stays
             // contextual: it only opens a check when a same-line expr follows, so `check(x)`
             // or `check = 5` still parse as ordinary expressions.
+            // r[impl check.line]
             TokKind::Ident("check") if self.check_intro() => {
                 let item = Item::new(self.check_block().into(), self.location(start), false);
                 BlockElement::Stmt(self.new_stmt(item, start))
@@ -592,6 +593,7 @@ impl<'s> Parser<'s> {
     /// never taken — `check` alone on a line is an identifier, so `check\n    f()`
     /// doesn't steal the following statement. (A same-line `:`/`{` also routes here;
     /// the retired list forms get a pointed error, not a silent parse.)
+    // r[impl check.contextual]
     fn check_intro(&self) -> bool {
         let last = self.tokens.len() - 1;
         let kw_end = self.tokens[self.next.min(last)].span().end();
@@ -820,6 +822,7 @@ impl<'s> Parser<'s> {
         // `use "page-name";` asks the host for another script (see `Use::Host`)
         if let TokKind::String(lit) = self.peek() {
             self.advance();
+            // r[impl mimas.use.page]
             return Some(Use::Host(lit.trim_matches('"').to_string()));
         }
 

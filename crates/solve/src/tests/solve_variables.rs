@@ -117,6 +117,7 @@ test_ty!(
 
 // Shadowing
 test_ty!(
+    // r[verify mimas.let.type-fixed]
     let_shadowing,
     "let a: int = 0;
      let a: bool = false;",
@@ -227,6 +228,7 @@ test_ty!(
 test_fail!(const_array_with_local_ident, "let a = 1; const A = [a, 2];");
 test_fail!(non_const_array, "const A = [foo()];");
 test_fail!(
+    // r[verify mimas.const.compile-time]
     const_non_literal,
     "fn foo() -> int { 0 } const BUZZ = foo();"
 );

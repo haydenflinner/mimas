@@ -105,6 +105,7 @@ test_vm!(
 );
 
 test_vm!(
+    // r[verify mimas.num.div]
     arithmetic,
     r#""foo" + "bar""# => str!("foobar"),
     "0.5 + 0.5" => Float(1.0),
@@ -230,6 +231,7 @@ test_vm!(
 );
 
 test_vm!(
+    // r[verify mimas.int.range]
     hex_literals,
     "0xff" => Int(255),
     "0xFF" => Int(255),
@@ -239,6 +241,7 @@ test_vm!(
 );
 
 test_vm!(
+    // r[verify mimas.int.range]
     underscore_separators,
     "1_000" => Int(1000),
     "1_000_000" => Int(1000000),
@@ -325,6 +328,7 @@ test_vm!(
 test_vm!(
     fstring_brace_escapes,
     "let n = 3;",
+    // r[verify mimas.str.fstring]
     "f\"{{{n}}}\"" => str!(r#"{3}"#),
     "f\"{{x}}\"" => str!(r#"{x}"#),
 );

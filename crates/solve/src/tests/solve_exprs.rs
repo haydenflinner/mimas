@@ -236,10 +236,12 @@ test_ty!(
     "1 >> 1" => Int,
 );
 test_ty!(
+    // r[verify mimas.num.div]
     int_division_yields_float,
     "1 / 1" => Float,
 );
 test_ty!(
+    // r[verify mimas.num.promotion]
     int_float_mixed_arithmetic,
     "1 + 0.1" => Float,
     "1 - 0.1" => Float,
@@ -563,4 +565,5 @@ test_fail!(
     str_square_index_by_str,
     "let s = \"abc\"; let c = s[\"k\"];"
 );
+// r[verify mimas.str.index]
 test_fail!(string_index_assign, "let s = \"abc\"; s[0] = \"x\";");

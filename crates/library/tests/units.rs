@@ -3,6 +3,7 @@ mod test_runner;
 
 // a quantity is a float in base units; `to` reads it back in any unit of the same kind
 test_run!(
+    // r[verify mimas.unit.literal]
     unit_literals_are_base_unit_floats,
     "",
     "25kW.to(\"W\")" => "25000",
@@ -33,6 +34,7 @@ test_run!(
 // `x.to(unit)`: a literal unit the checker knows can't raise — plain `float`.
 // A computed unit string keeps the honest `float!` — `?`/`absolve`/`!` apply.
 test_run!(
+    // r[verify mimas.unit.to]
     to_returns_plain_float_for_literal_units,
     "let u = \"W\";
      let bad = \"watt?\";",
@@ -51,6 +53,7 @@ fn rejected(src: &str, needle: &str) {
     );
 }
 
+// r[verify mimas.unit.dimension]
 #[test]
 fn nonsense_arithmetic_is_rejected() {
     rejected("let a = 5kW + 3s;", "cannot add");
@@ -63,6 +66,7 @@ fn nonsense_arithmetic_is_rejected() {
     rejected("let a = f\"{5kW + 3s}\";", "cannot add");
 }
 
+// r[verify mimas.unit.graphics]
 #[test]
 fn mismatches_name_the_written_unit() {
     // `5ft` says `ft`, not the coherent `m`
@@ -80,6 +84,8 @@ fn mismatches_name_the_written_unit() {
     rejected("let a = 2px + -5ft;", "length (ft)");
 }
 
+// r[verify mimas.unit.declared]
+// r[verify mimas.unit.to]
 #[test]
 fn declared_dimensions_are_enforced() {
     // a plain float is dimensionless: a power isn't one
@@ -289,6 +295,7 @@ fn studio_units_are_dimension_checked() {
 // interconvert freely (`i += 1`, `i < xs.len()`, `f(i)` with a plain `3`).
 
 test_run!(
+    // r[verify mimas.unit.index]
     index_vars_behave_like_ints,
     "let xs = [\"a\", \"b\", \"c\"]
      let i: index = 1index

@@ -428,6 +428,8 @@ fn custom_name(slot: usize) -> Option<String> {
 
 /// Every unit name: (dimension, scale to the coherent base unit).
 /// Declared units answer alongside the builtins.
+// r[impl mimas.unit.literal]
+// r[impl mimas.unit.editor-list]
 pub fn lookup(name: &str) -> Option<(Dim, f64)> {
     lookup_builtin(name).or_else(|| CUSTOM.with(|c| c.borrow().names.get(name).copied()))
 }

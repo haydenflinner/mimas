@@ -87,6 +87,7 @@ test_fail!(
 // numbers 0, strs "", bools false, collections empty, options null, nested
 // structs defaulted recursively. an `impl` member named `default` shadows it.
 test_vm!(
+    // r[verify mimas.struct.default]
     default_ctor_all_member_kinds,
     "struct Foo { a: int, f: float, s: str, ok: bool, xs: [int], m: ~{int}, t: (int, str), maybe: int? }",
     "Foo::default()" => instance!(Foo {
