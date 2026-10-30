@@ -85,5 +85,6 @@ test_run!(
     // the built-in pairs every program has
     "!Size::Big == Size::Small && !Sign::Neg == Sign::Pos" => "true",
     "!Fill::Full == Fill::Empty" => "true",
+    "!Order::Asc == Order::Desc" => "true",
     "involutive(Daytime::Night) && involutive(Flow::Push) && involutive(Shade::Dark)" => "true",
 );

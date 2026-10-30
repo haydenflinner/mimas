@@ -40,6 +40,7 @@ opp Shade { Light, Dark }
 opp Daytime { Day, Night }
 opp Flow { Push, Pull }
 opp Fill { Full, Empty }
+opp Order { Asc, Desc }
 ";
 /// The built-in source's file name.
 pub const BUILTIN_NAME: &str = "<builtin>";

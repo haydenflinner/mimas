@@ -159,7 +159,8 @@ Every program has a small built-in source (`solve::BUILTIN_SRC`,
 appended last by `load_files` so user files keep their ids): the `Opp`
 pact itself and the pairs pages kept spelling as bools or ±1 —
 `Sign { Pos, Neg }`, `Size { Big, Small }`, `Shade { Light, Dark }`,
-`Daytime { Day, Night }`, `Flow { Push, Pull }`, `Fill { Full, Empty }`. `bool` is the first opp
+`Daytime { Day, Night }`, `Flow { Push, Pull }`, `Fill { Full, Empty }`, `Order { Asc, Desc }` (a
+sort's direction — std and pages take it instead of an `asc: bool`). `bool` is the first opp
 in spirit; `impl Opp for bool` waits on pact impls for primitive types.
 A unit variant now prints as its bare name (`Sky::Moon`, not
 `Sky::Moon {  }`). Tests: `parse_validity::opp_is_an_enum_and_its_flip`,
