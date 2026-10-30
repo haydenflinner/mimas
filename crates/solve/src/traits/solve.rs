@@ -216,11 +216,55 @@ pub(crate) fn op_dispatch(
             _ => continue,
         };
         let ret = f.return_ty.as_ref().clone();
-        arg.fulfill_ty(operand, solver)?;
+        // an arg that doesn't fit this candidate isn't an error — the
+        // search continues (`xs + ys` passes a list to `[T]::add`'s
+        // element slot and still has `union`/`radd` to try). Whatever
+        // nothing claims falls back to `eval`'s own diagnostics.
+        if arg.fulfill_ty(operand, solver).is_err() {
+            continue;
+        }
         solver.op_decs.insert(id, OpDispatch { dec, swap });
         return Ok(Some(ret));
     }
     Ok(None)
+}
+
+/// `xs + ys`/`xs - ys` — the Z-set list forms, dispatched to `[T]`'s
+/// `union`/`minus` natives when the rhs is a same-element list (the
+/// element shapes `add`/`sub` are `op_dispatch`'s business). `None`
+/// leaves `eval`'s diagnostics — `[int] - "a"` still errors.
+pub(crate) fn seq_op_dispatch(
+    solver: &mut Solver,
+    id: NodeId,
+    op: EvaluationOp,
+    right: &Expr,
+    lhs: &Ty,
+    rhs: &Ty,
+    location: Location,
+) -> Result<Option<Ty>> {
+    let name = match op {
+        EvaluationOp::Plus => "union",
+        EvaluationOp::Minus => "minus",
+        _ => return Ok(None),
+    };
+    let (Ty::Array(inner, _), Ty::Array(other, _)) = (lhs, rhs) else {
+        return Ok(None);
+    };
+    if other != inner {
+        return Ok(None);
+    }
+    let Some(aid) = solver.builtin_adt(lhs) else {
+        return Ok(None);
+    };
+    let Some((dec, f)) = op_method_sig(solver, aid, name, lhs, &[], location)? else {
+        return Ok(None);
+    };
+    let Some(operand) = f.parameters.first().map(|p| p.ty.clone()) else {
+        return Ok(None);
+    };
+    right.fulfill_ty(operand, solver)?;
+    solver.op_decs.insert(id, OpDispatch { dec, swap: false });
+    Ok(Some(Ty::array(inner.as_ref().clone())))
 }
 
 /// `<op> a` → `a.<name>()` — the unary half of `op_dispatch`.
@@ -1636,7 +1680,16 @@ impl Solve for Evaluation {
             &lhs_n,
             &rhs_n,
             location,
-        )? {
+        )?
+        .or(seq_op_dispatch(
+            solver,
+            id,
+            self.op,
+            &self.right,
+            &lhs_n,
+            &rhs_n,
+            location,
+        )?) {
             return Ok(ty);
         }
         eval(self.op, &lhs_n, &rhs_n, location, solver)

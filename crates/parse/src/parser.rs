@@ -2445,10 +2445,19 @@ impl<'s> Parser<'s> {
                 TokKind::LeftSquare | TokKind::HookLeftSquare => self.square_access(expr),
                 TokKind::DoubleColon => self.colon_access(expr),
                 TokKind::Dot | TokKind::HookDot => self.dot_access(expr),
-                TokKind::Bang if expr.as_ident().is_some_and(|i| i.lexeme == "assert") => {
+                // postfix `!` hugs its operand like `x%` — a spaced `!`
+                // is *not* an unwrap, it's the next thing: `[!a !b]` is
+                // `[!a, !b]` (the `!` starts a fresh element), and
+                // `f !x` errors at the statement boundary rather than
+                // silently meaning `(f!)(x)`. The `x !`-reads-unwrap
+                // spelling is `x!`.
+                TokKind::Bang
+                    if self.cursor() == self.next_start()
+                        && expr.as_ident().is_some_and(|i| i.lexeme == "assert") =>
+                {
                     self.assert_or_unwrap(expr)
                 }
-                TokKind::Bang => self.unwrap(expr),
+                TokKind::Bang if self.cursor() == self.next_start() => self.unwrap(expr),
                 TokKind::Hook => self.demote(expr),
                 // `x%` hugs its operand and spells percent -- `50%` is `50 * 0.01`, the
                 // `pct` unit by another name. A spaced `%` is neither postfix nor modulo

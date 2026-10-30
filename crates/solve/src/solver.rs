@@ -2090,6 +2090,22 @@ impl Solver {
                     // method (`x.add(v)`, or `v.radd(x)` when the rhs owns the
                     // impl) beats the plain same-type rule.
                     let place = left.query(self)?;
+                    // `xs += x`/`xs -= x` move the length — on a `[T; n]`
+                    // place that's the same refusal `push`/`pop`/`extend`
+                    // get. Checked outright rather than via the result
+                    // type so the message names the rule, not a mismatch.
+                    if matches!(
+                        *op,
+                        parse::AssignmentOp::PlusEqual | parse::AssignmentOp::MinusEqual
+                    ) && let Ty::Array(_, Len::Const(n)) = place.clone().normalized(self)
+                    {
+                        Err(crate::errors::SizedArrayMutation {
+                            src: self.src(left.location()),
+                            at: left.location().into(),
+                            method: op.to_string(),
+                            ty: format!("[_; {n}]"),
+                        })?;
+                    }
                     let dispatched = match crate::traits::op_assign_names(*op) {
                         Some(names) => {
                             let place_n = place.clone().normalized(self);
@@ -2110,7 +2126,40 @@ impl Solver {
                     match dispatched {
                         // the method's result still has to fit the place
                         Some(ret) => left.fulfill_ty(ret, self)?,
-                        None => right.fulfill_ty(place, self)?,
+                        None => {
+                            // `xs += ys`/`xs -= ys` — `add`/`sub` only take
+                            // elements, so a list rhs falls through here to
+                            // `union`/`minus`, the same call `xs + ys` makes.
+                            let op = match *op {
+                                parse::AssignmentOp::PlusEqual => {
+                                    Some(parse::EvaluationOp::Plus)
+                                }
+                                parse::AssignmentOp::MinusEqual => {
+                                    Some(parse::EvaluationOp::Minus)
+                                }
+                                _ => None,
+                            };
+                            let seq = match op {
+                                Some(op) => {
+                                    let place_n = place.clone().normalized(self);
+                                    let right_n = right.query(self)?.normalized(self);
+                                    crate::traits::seq_op_dispatch(
+                                        self,
+                                        stmt.id(),
+                                        op,
+                                        right,
+                                        &place_n,
+                                        &right_n,
+                                        left.location(),
+                                    )?
+                                }
+                                None => None,
+                            };
+                            match seq {
+                                Some(ret) => left.fulfill_ty(ret, self)?,
+                                None => right.fulfill_ty(place, self)?,
+                            }
+                        }
                     }
                 }
             }

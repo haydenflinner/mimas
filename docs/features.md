@@ -2,6 +2,40 @@
 
 Memorable additions to mimas beyond what the changelog tracks — newest first.
 
+## Z-set `+`/`-` on sequences + the glued-postfix rule
+
+`xs + x` appends one `x`, `xs - x` drops the first `==` match, `xs + ys`
+unions (concat), `xs - ys` removes each `y` in turn, and `xs += x` /
+`xs -= x` / `xs += ys` / `xs -= ys` come with them. This is the
+weight-±1 surface of the algebra `Change` already carries weighted —
+`xs + add(3)` and `xs + 3` now agree — and it replaces nothing anyone
+could write: `[T] ± T`/`[T] ± [T]` were type errors before (the VM's
+sequence broadcast arms were unreachable from solved code; `*`/`/`
+keep theirs).
+
+Two pieces worth knowing:
+
+- The point/extent choice is *type-directed*, resolved the same way an
+  `impl` would: `add`/`sub` are element-shaped natives, `union`/`minus`
+  are list-shaped ones, and `xs + ys` falls through `add`'s element
+  slot to `union` — so `[[1]] + [2]` appends `[2]` (it *is* a valid
+  element), while `[[1]] + [[2]]` concats. `op_dispatch` now treats an
+  arg that doesn't fit a candidate as "keep looking" instead of an
+  error, which is also what lets `xs + c` still reach `c.radd(xs)`.
+- `xs - x` is a quiet no-op when `x` isn't there — arrays can't hold
+  the negative multiplicities a `~{int}` Z-set can (`xs - xs` empties).
+  `[T; n]` places refuse `±=` like `push` does.
+
+Postfix `!` now hugs its operand like `x%`: `x!` unwraps, but a *spaced*
+`!` starts the next thing — `[!a !b]` is `[!a, !b]` (the parse everyone
+meant), and `f !x` errors at the statement boundary rather than
+silently meaning `(f!)(x)`. Same rule Zig calls partial precedence:
+adjacency with two readings gets neither. The `?` demote shares the
+shape and still follows the old rule — a follow-up if `f ?x` ever bites.
+
+Tests: `zset.rs` — arithmetic, `±=` forms, element/list-type rejection,
+the `[T; n]` guard, and the spaced-`!` parse both ways.
+
 ## `nand`/`nor` — the gate operators, word or glyph
 
 `a nand b` and `a ⍲ b` spell the same op; `a nor b`/`a ⍱ b` likewise

@@ -14,6 +14,14 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.mark_intrinsic(id, Intrinsic::Push);
     api.add_method(pop);
     api.add_method(shuffle);
+    // `xs + x`/`xs - x`/`xs + ys`/`xs - ys` — the Z-set surface of `+`/`-`
+    // on sequences. `add`/`sub` take an element (append / drop-first);
+    // `union`/`minus` take a same-element list (concat / drop-each) and
+    // are what `xs + ys`/`xs - ys` dispatch to when `add`/`sub` don't fit.
+    api.add_method(add);
+    api.add_method(union);
+    api.add_method(sub);
+    api.add_method(minus);
     api.add_method(extend);
     api.add_method(enumerate);
     api.add_method(flatten);
@@ -145,6 +153,89 @@ fn shuffle<'gc>(ctx: Ctx<'gc>, arr: &mut Vec<anon::T<'gc>>) {
         let j = (super::rng::unit(ctx) * (i as f64 + 1.0)) as usize;
         arr.swap(i, j.min(i));
     }
+}
+
+#[native]
+/// `xs + x` — one more `x`, as a new array (`xs.push` is the in-place
+/// form). This is the Z-set's +1 weight spelled arithmetically; `xs +
+/// ys` below is the union.
+///
+/// ```mimas
+/// let xs = [1, 2] + 3; // [1, 2, 3]
+/// ```
+fn add<'gc>(ctx: Ctx<'gc>, arr: &[anon::T<'gc>], val: anon::T<'gc>) -> Result<Vec<anon::T<'gc>>, RtErr> {
+    ctx.check_alloc_n(arr.len() + 1, std::mem::size_of::<Val>())?;
+    ctx.charge(std::mem::size_of::<Val>());
+    let mut out = arr.to_vec();
+    out.push(val);
+    Ok(out)
+}
+
+// `other` stays as the gc handle like `extend` — `xs + xs` would
+// double-borrow otherwise, and unioning a list with itself just doubles it.
+#[native]
+/// `xs + ys` — the union: every `y` after every `x`, one new array.
+///
+/// ```mimas
+/// let xs = [1, 2] + [3, 4]; // [1, 2, 3, 4]
+/// ```
+fn union<'gc>(
+    ctx: Ctx<'gc>,
+    arr: &[anon::T<'gc>],
+    other: Array<'gc>,
+) -> Result<Vec<anon::T<'gc>>, RtErr> {
+    let mut out = arr.to_vec();
+    let more: Vec<anon::T<'gc>> = match other.0.try_borrow() {
+        Ok(v) => v.iter().map(|x| anon::Anon(*x)).collect(),
+        Err(_) => out.clone(),
+    };
+    ctx.check_alloc_n(out.len().saturating_add(more.len()), std::mem::size_of::<Val>())?;
+    ctx.charge(more.len() * std::mem::size_of::<Val>());
+    out.extend(more);
+    Ok(out)
+}
+
+#[native]
+/// `xs - x` — the Z-set's -1: drops the first element `== x` (a quiet
+/// no-op when `x` isn't there; `~{int}` Z-sets can go negative, arrays
+/// can't). `xs - ys` below removes each `y` in turn.
+///
+/// ```mimas
+/// let xs = [1, 2, 1] - 1; // [2, 1]
+/// ```
+fn sub<'gc>(_ctx: Ctx<'gc>, arr: &[anon::T<'gc>], val: anon::T<'gc>) -> Vec<anon::T<'gc>> {
+    let mut out = arr.to_vec();
+    if let Some(i) = out.iter().position(|v| v.0 == val.0) {
+        out.remove(i);
+    }
+    out
+}
+
+#[native]
+/// `xs - ys` — drops the first `==` match of each `y`, in order.
+/// `xs - xs` empties.
+///
+/// ```mimas
+/// let xs = [1, 2, 3] - [3, 9]; // [1, 2]
+/// ```
+fn minus<'gc>(
+    _ctx: Ctx<'gc>,
+    arr: &[anon::T<'gc>],
+    other: Array<'gc>,
+) -> Vec<anon::T<'gc>> {
+    let mut out = arr.to_vec();
+    match other.0.try_borrow() {
+        Ok(v) => {
+            for d in v.iter() {
+                if let Some(i) = out.iter().position(|x| x.0 == *d) {
+                    out.remove(i);
+                }
+            }
+        }
+        // `xs - xs`: every element is a match — the list empties.
+        Err(_) => out.clear(),
+    }
+    out
 }
 
 // `other` stays as the gc handle because we already hold a borrow on `arr`. if `other`
