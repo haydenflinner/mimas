@@ -2,6 +2,7 @@
 mod test_runner;
 
 // integer overflow
+// r[verify mimas.int.checked]
 test_fail!(
     overflow_faults,
     "let x = 9223372036854775807 + 1; print(x);",

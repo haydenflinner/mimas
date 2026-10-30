@@ -423,3 +423,21 @@ test_run!(
 
 test_fail!(str_has_no_pop, r#""hi".pop();"#);
 test_fail!(str_has_no_flatten, r#""hi".flatten();"#);
+
+// Strings use double quotes only; there is no character type.
+// r[verify mimas.str.literal]
+test_fail!(
+    single_quotes_are_not_a_string,
+    "let a = 'x';",
+    "let a = 'hello';",
+);
+
+// r[verify mimas.str.literal]
+test_run!(
+    a_character_is_a_one_character_str_and_a_literal_may_span_lines,
+    "let c = \"é\";
+     let s = \"a
+b\";",
+    "c.len()" => "1",
+    "s.len()" => "3",
+);
