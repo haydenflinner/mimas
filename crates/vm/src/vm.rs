@@ -3556,9 +3556,9 @@ impl Vm {
         let mut asts = Vec::with_capacity(files.len());
         let mut sources = Sources::with_capacity(files.len());
         shared::units::clear();
-        let shadow = parse::lex::shadow_sets(files);
+        let inherited = parse::lex::inherited_shadow(files);
         for (file_id, (name, source)) in files.iter().enumerate() {
-            let lexer = Lexer::new(source, file_id, (*name).into()).with_shadowed(shadow[file_id]);
+            let lexer = Lexer::new(source, file_id, (*name).into()).with_inherited(inherited[file_id]);
             let ast = Parser::new_extending(lexer)
                 .try_into_ast()
                 .map_err(|mut errs| FunctionDataflowError::from(errs.swap_remove(0)))?;

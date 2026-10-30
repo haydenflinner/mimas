@@ -80,18 +80,6 @@ pub const PAGE_MARK: &str = "//# page: ";
 /// pages it `use "…"`s, transitively -- a declaration reaches downstream
 /// (its users), never upstream (its dependencies).
 pub fn shadow_sets(pages: &[(&str, &str)]) -> Vec<[bool; 3]> {
-    fn uses(text: &str) -> Vec<String> {
-        text.lines()
-            .filter_map(|l| {
-                let rest = l.trim().strip_prefix("use")?;
-                if !rest.starts_with([' ', '\t']) {
-                    return None;
-                }
-                let q = rest.trim_start().strip_prefix('"')?;
-                Some(q.split_once('"')?.0.trim().to_lowercase())
-            })
-            .collect()
-    }
     fn set_of(
         i: usize,
         pages: &[(&str, &str)],
@@ -121,6 +109,42 @@ pub fn shadow_sets(pages: &[(&str, &str)]) -> Vec<[bool; 3]> {
     let mut memo = vec![None; pages.len()];
     let mut busy = vec![false; pages.len()];
     (0..pages.len()).map(|i| set_of(i, pages, &mut memo, &mut busy)).collect()
+}
+
+/// The `use "…"` names `text` includes, lowercased.
+fn uses(text: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(|l| {
+            let rest = l.trim().strip_prefix("use")?;
+            if !rest.starts_with([' ', '\t']) {
+                return None;
+            }
+            let q = rest.trim_start().strip_prefix('"')?;
+            Some(q.split_once('"')?.0.trim().to_lowercase())
+        })
+        .collect()
+}
+
+/// What each file of a multi-file program inherits from the files it
+/// `use`s (their own declarations, transitively) -- ORed into the file's own
+/// per-page table (`Lexer::with_inherited`), never replacing it, so a
+/// spliced file's page marks still bound its own pages.
+pub fn inherited_shadow(files: &[(&str, &str)]) -> Vec<[bool; 3]> {
+    let sets = shadow_sets(files);
+    files
+        .iter()
+        .map(|(_, text)| {
+            let mut out = [false; 3];
+            for name in uses(text) {
+                if let Some(j) = files.iter().position(|(n, _)| n.to_lowercase() == name) {
+                    for k in 0..3 {
+                        out[k] |= sets[j][k];
+                    }
+                }
+            }
+            out
+        })
+        .collect()
 }
 
 /// `source` split at its `PAGE_MARK` lines into pages, each with its
@@ -264,6 +288,17 @@ impl<'s> Lexer<'s> {
     /// interpolation's slice (its page's set).
     pub fn with_shadowed(mut self, shadowed: [bool; 3]) -> Self {
         self.shadow = vec![(0, shadowed)];
+        self
+    }
+
+    /// OR `inherited` (what the files this one `use`s declare) into every page of this
+    /// lexer's own table.
+    pub fn with_inherited(mut self, inherited: [bool; 3]) -> Self {
+        for (_, set) in &mut self.shadow {
+            for k in 0..3 {
+                set[k] |= inherited[k];
+            }
+        }
         self
     }
 

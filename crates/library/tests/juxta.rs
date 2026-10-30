@@ -169,3 +169,14 @@ fn a_kits_shadowing_reaches_the_page_that_uses_it() {
     let audit = vm::Vm::audit_files(&files, library::std);
     assert!(audit.is_ok(), "{:?}", audit.err());
 }
+
+#[test]
+fn a_spliced_programs_page_marks_bound_shadowing() {
+    // one `<compile>` file, as a host splices it: the page marks keep n2t's
+    // `fn not` out of the kit that uses `not` as the operator
+    let src = "//# page: kit\nfn flip(b: bool) -> bool { not b }\n\n\
+               //# page: n2t\nfn not(a: int) -> int { 1 - a }\n\n\
+               //# page: \nuse \"n2t\";\nuse \"kit\";\nlet x = not(1);\nlet y = flip(true);\n";
+    let audit = vm::Vm::audit_files(&[("<compile>", src)], library::std);
+    assert!(audit.is_ok(), "{:?}", audit.err());
+}

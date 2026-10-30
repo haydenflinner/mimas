@@ -59,10 +59,10 @@ pub fn load_files<'a>(
     // then the mimas source the library carries (std's opp operations)
     let n_user = files.len() - 1;
     files.extend(library.sources().iter().copied());
-    let shadow = parse::lex::shadow_sets(&files);
+    let inherited = parse::lex::inherited_shadow(&files);
     for (file_id, (name, text)) in files.into_iter().enumerate() {
         sources.insert(file_id, NamedSource::new(name, Arc::from(text)));
-        let lexer = Lexer::new(text, file_id, name.to_owned()).with_shadowed(shadow[file_id]);
+        let lexer = Lexer::new(text, file_id, name.to_owned()).with_inherited(inherited[file_id]);
         let (ast, parse_errors) = Parser::new_extending(lexer).into_ast();
         errors.extend(parse_errors);
         asts.push(ast);
