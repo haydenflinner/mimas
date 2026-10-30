@@ -136,14 +136,16 @@ fn cmp_method_names(op: EqualityOp) -> Option<(&'static str, &'static str)> {
     })
 }
 
-/// `-a`/`+a`/`~a` ⇒ `a.neg()`/`a.pos()`/`a.bnot()`. `!` stays bool-only — `not`
-/// is a keyword and can't name a method.
+/// `-a`/`+a`/`~a`/`!a` ⇒ `a.neg()`/`a.pos()`/`a.bnot()`/`a.inv()`. `!`'s name is
+/// `inv`, not `not`: an ordinary identifier, so overloading `!` doesn't shadow
+/// the `not` operator word for the whole program the way a `fn not` would.
+/// Types without `inv` keep the bool-only rule — `!true` never dispatches.
 fn un_method_name(op: UnaryOp) -> Option<&'static str> {
     match op {
         UnaryOp::Negative => Some("neg"),
         UnaryOp::Positive => Some("pos"),
         UnaryOp::BitwiseNot => Some("bnot"),
-        UnaryOp::Not => None,
+        UnaryOp::Not => Some("inv"),
     }
 }
 

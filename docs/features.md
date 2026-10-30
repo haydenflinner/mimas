@@ -9,10 +9,13 @@ if it doesn't provide one the right operand's is asked for `radd` — so
 `s * v` finds `v.rmul(s)` with `self` always the operand that owns the
 implementation. The same naming covers the whole infix surface —
 `add sub mul div idiv rem band bor bxor shl shr` for `+ - * / ~/ mod &
-| ⊕ << >>`, `lt le gt ge` for the comparisons, `neg pos bnot` for prefix
-`- + ~` — plus `r`-prefixed reverse forms for every binary name. Names
-dodge the keywords (`rem` not `mod`, `bxor` not `xor`); `==`/`!=` stay
-structural and `&&`/`||`/`??` stay non-overloadable.
+| ⊕ << >>`, `lt le gt ge` for the comparisons, `neg pos bnot inv` for
+prefix `- + ~ !` — plus `r`-prefixed reverse forms for every binary
+name. Names dodge the keywords (`rem` not `mod`, `bxor` not `xor`) —
+and `!`'s is `inv`, an ordinary name, so overloading it never shadows
+the `not` operator word; types without `inv` keep `!` bool-only, and
+`not x` spells the same `x.inv()` call. `==`/`!=` stay structural and
+`&&`/`||`/`??` stay non-overloadable.
 
 Resolution is static and recorded: the solver writes an `OpDispatch`
 (`dec` + `swap`) into `Resolutions::op_decs` keyed by the operator node,

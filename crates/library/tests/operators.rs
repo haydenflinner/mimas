@@ -13,6 +13,7 @@ impl V {
     fn rmul(self, s: float) -> V { V { x = self.x * s, y = self.y * s } }
     fn rsub(self, s: float) -> V { V { x = s - self.x, y = s - self.y } }
     fn neg(self) -> V { V { x = -self.x, y = -self.y } }
+    fn inv(self) -> V { V { x = self.y, y = self.x } }
     fn lt(self, o: V) -> bool { self.x < o.x }
     fn band(self, o: V) -> V { self.add(o) }
     fn bor(self, o: V) -> V { self.sub(o) }
@@ -31,6 +32,11 @@ test_run!(
     "(a & b).x" => "4",
     "(a | b).y" => "-2",
     "(-a).y" => "-2",
+    // `!a` calls `a.inv()` — and `not a` spells the same call
+    "(!a).x" => "2",
+    "(not a).x" => "2",
+    // bool has no `inv`: `!` stays the builtin rule
+    "!false" => "true",
 );
 
 test_run!(
