@@ -22,6 +22,7 @@ mod std_lib {
     pub(crate) mod darkly;
     #[cfg(feature = "dataframe")]
     pub(crate) mod dataframe;
+    pub(crate) mod colrow;
     pub(crate) mod debug;
     pub(crate) mod fs;
     pub(crate) mod interval;
@@ -65,6 +66,7 @@ pub fn std<'gc>(api: &mut Api<'_, 'gc>) {
     std_lib::parquet::install(api);
     #[cfg(feature = "darkly")]
     std_lib::darkly::install(api);
+    std_lib::colrow::install(api);
     std_lib::debug::install(api);
     std_lib::fs::install(api);
     std_lib::interval::install(api);
