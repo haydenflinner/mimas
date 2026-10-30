@@ -90,8 +90,12 @@ pub trait Solve {
 /// The method names an infix `a <op> b` desugars to — `a.<name>(b)` when the left
 /// operand's type implements it, else `b.<rname>(a)` on the right's, the same
 /// left-to-right order the native `add_bin_op` dispatch uses. `self` always owns
-/// the impl, so `s - v` finds `v.rsub(s)` for `s - self`. Spellings avoid the
-/// word-operators — `mod`/`xor`/`and`/`or` can't name a method.
+/// the impl, so `s - v` finds `v.rsub(s)` for `s - self`. The dodged spellings
+/// (`rem`/`bxor`/`band`/`bor`/`inv`) keep call-space and op-space separate —
+/// `mod`/`xor` could name methods (`fn xor` is an ordinary declaration),
+/// `and`/`or`/`not` are shadowable words, and `inv` dodges `not`.
+/// `nand`/`nor` deliberately *don't* dodge: the word, the method and the op
+/// unify, so `a.nand(b)` and `a nand b` name the same call.
 fn op_method_names(op: EvaluationOp) -> (&'static str, &'static str) {
     match op {
         EvaluationOp::Plus => ("add", "radd"),
@@ -103,6 +107,8 @@ fn op_method_names(op: EvaluationOp) -> (&'static str, &'static str) {
         EvaluationOp::And => ("band", "rband"),
         EvaluationOp::Or => ("bor", "rbor"),
         EvaluationOp::Xor => ("bxor", "rbxor"),
+        EvaluationOp::Nand => ("nand", "rnand"),
+        EvaluationOp::Nor => ("nor", "rnor"),
         EvaluationOp::BitShiftLeft => ("shl", "rshl"),
         EvaluationOp::BitShiftRight => ("shr", "rshr"),
     }

@@ -1432,6 +1432,11 @@ pub fn bin<'gc>(this: Val<'gc>, ctx: Ctx<'gc>, other: Val<'gc>, op: BinOp) -> Rt
             BinOp::And | BinOp::BitAnd => Val::Bool(a && b),
             BinOp::Or | BinOp::BitOr => Val::Bool(a || b),
             BinOp::Xor | BinOp::BitXor => Val::Bool(a ^ b),
+            // `nand`/`nor` on bools are the eager forms — both operands were
+            // evaluated before `bin` ran, so unlike `&&`/`||` there is no
+            // short-circuit to model here, just the gate's truth table.
+            BinOp::Nand => Val::Bool(!(a && b)),
+            BinOp::Nor => Val::Bool(!(a || b)),
             BinOp::Identity => Val::Bool(a == b),
             BinOp::NotEqual => Val::Bool(a != b),
             _ => Err(RtErr::invalid_bin(Val::Bool(a), op, Val::Bool(b)))?,

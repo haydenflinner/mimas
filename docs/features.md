@@ -2,6 +2,40 @@
 
 Memorable additions to mimas beyond what the changelog tracks — newest first.
 
+## `nand`/`nor` — the gate operators, word or glyph
+
+`a nand b` and `a ⍲ b` spell the same op; `a nor b`/`a ⍱ b` likewise
+(the APL glyphs are canonical — the AST prints `⍲`/`⍱` as it does `⊕`).
+They sit with `&`/`|`/`⊕` in the bit/gate family: on bools they're the
+*eager* forms — `!(a && b)`/`!(a || b)` with both operands always
+evaluated, the parallel read where `&&`/`||` are the serial walk that
+may skip the tail — and on ints they run per bit-lane, `~(a & b)`/
+`~(a | b)`, a 64-wide gate array just as `&` is a 64-wide read.
+
+What makes them load-bearing rather than trivia: `nand`/`nor` are each
+functionally complete bases, and the choice between them is real —
+`nand` is the existential gate (`¬∀`, any low input settles it — the
+parallel-deciding shape, and in silicon literally a *parallel* pull-up
+pair), `nor` the universal (`¬∃`, every input must report — the serial
+one). `host/web/games/logic-kit.mimas` writes the whole story as `check`
+lines: the lazy/eager witness (a `log` counting operand reads),
+`nand = ¬all`/`nor = ¬any` over `[bool]`, `dual(f) = λ¬f(¬a,¬b)` as a
+higher-order fn (`dual(nand) = nor`, `dual(xor) = xnor`), sheffer
+completeness built from both bases, a Kleene three-valued `Tri`
+overloading the whole family, and the `span`/`points` fencepost split
+(half-open `a..b` holds `span(a,b)` points — Dijkstra's rule, the +1
+only appears when the extent is closed).
+
+Dispatch: `nand`/`nor` are the first operator words that also name
+methods — `mod`/`xor`/`and`/`or`/`not` are keywords or reserved infix
+spellings, but `fn nand` stays an ordinary declaration (contextual like
+`xor`), so `a.nand(b)` and `a nand b` are the same call. Overload names
+are `nand`/`rnand` and `nor`/`rnor`.
+
+Tests: `operators.rs` `nand_nor_builtin_gates` /
+`nand_nor_dispatch_to_impl_methods`; the kit's 13 `check` lines run in
+`logic_kit::logic_kit_check_lines_all_pass`.
+
 ## Operator overloading — operators resolve to ordinary methods
 
 `a + b` is a method call: the left operand's type is asked for `add`, and

@@ -3889,10 +3889,16 @@ impl BinaryOp {
         if matches!(kind, TokKind::In | TokKind::NotIn) {
             return Some((Self::In(kind == TokKind::In), 3));
         }
-        // `a xor b` — the word spelling of `⊕`, contextual like `mod`:
-        // an ordinary name everywhere else.
-        if matches!(kind, TokKind::Ident("xor")) {
-            return Some((Self::Eval(EvaluationOp::Xor), 4));
+        // `a xor b` — the word spellings of `⊕`/`⍲`/`⍱`, contextual like
+        // `mod`: ordinary names everywhere else.
+        let word_op = match kind {
+            TokKind::Ident("xor") => Some(EvaluationOp::Xor),
+            TokKind::Ident("nand") => Some(EvaluationOp::Nand),
+            TokKind::Ident("nor") => Some(EvaluationOp::Nor),
+            _ => None,
+        };
+        if let Some(op) = word_op {
+            return Some((Self::Eval(op), 4));
         }
         let op = EvaluationOp::try_from(kind).ok()?;
         let power = if op.is_binary() {

@@ -116,6 +116,11 @@ fn numeric_join(op: EvaluationOp, a: &Option<Ty>, b: &Option<Ty>) -> Option<Ty> 
             (Ty::Bool, Ty::Bool) => Some(Ty::Bool),
             _ => None,
         },
+        EvaluationOp::Nand | EvaluationOp::Nor => match (a, b) {
+            (Ty::Bool, Ty::Bool) => Some(Ty::Bool),
+            (Ty::Int, Ty::Int) => Some(Ty::Int),
+            _ => None,
+        },
         EvaluationOp::BitShiftLeft | EvaluationOp::BitShiftRight | EvaluationOp::Xor => {
             Some(Ty::Int)
         }

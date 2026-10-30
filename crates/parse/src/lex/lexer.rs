@@ -709,6 +709,10 @@ impl<'s> Lex<'s, Tok<TokKind<'s>>, TokKind<'s>> for Lexer<'s> {
                         TokKind::CircledPlus
                     }
                 }
+                // `⍲`/`⍱` — APL's nand/nor glyphs; `a nand b`/`a nor b` are
+                // the word spellings. No assignment forms.
+                '⍲' => TokKind::Nand,
+                '⍱' => TokKind::Nor,
                 '!' => {
                     // `!in` is the operator only when the `in` ends there: `!inside` is `!`
                     // `inside`
