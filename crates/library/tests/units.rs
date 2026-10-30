@@ -299,6 +299,8 @@ test_run!(
     "xs[i]" => "\"b\"",
     "xs[0index]" => "\"a\"",
     "xs[0idx]" => "\"a\"",
+    "xs[0_i]" => "\"a\"",
+    "xs[2_i]" => "\"c\"",
     "c.xs[c.i]" => "\"c\"",
     // plain ints step, compare and bind as indexes
     "i + 1" => "2",
@@ -321,6 +323,23 @@ test_run!(
     // `len()` is a plain int -- comparing against it is the point
     "at(xs, xs.len() - 1)" => "20",
     "if i == 0 { 1 } else { 0 }" => "1",
+);
+
+test_run!(
+    subscript_suffix_is_the_index_unit,
+    "let xs = [10, 20]
+     let i: _i = 0_i
+     let x_i = 5
+     let _i = 99
+     struct Cur { i: _i }",
+    "i" => "0",
+    "xs[1_i]" => "20",
+    "i + 1_i" => "1",
+    // `_i`/`x_i` as names are untouched — the suffix only rides numbers
+    "x_i" => "5",
+    "_i" => "99",
+    // the dim is still `index` — `_i` is a spelling, not a new unit
+    "i.to(\"index\")" => "0",
 );
 
 #[test]

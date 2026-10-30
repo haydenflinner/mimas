@@ -508,9 +508,11 @@ fn lookup_builtin(name: &str) -> Option<(Dim, f64)> {
         // index: an `int` position into a collection. its own dimension so a
         // quantity can never pass for one (`xs[i] + 3px` fails), but plain
         // ints still interconvert (`i += 1`, `i < xs.len()`) -- see
-        // `index_plain` in the dims pass
+        // `index_plain` in the dims pass. `_i` is the math notation
+        // spelling: `3_i` is `3index`, `i: _i` the annotated index.
         "idx" => (INDEX, 1.0),
         "index" => (INDEX, 1.0),
+        "_i" => (INDEX, 1.0),
         // data: `b` is the bit — the base unit. Byte spellings follow IEC
         // (`B`=8b, `kB`=10³B, `KiB`=2¹⁰B). The music stdlib also abuses
         // `b` for beats in its mini-notation — although it is notation

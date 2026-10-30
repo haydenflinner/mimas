@@ -51,15 +51,34 @@ impl<'s> Lexer<'s> {
     /// suffix and say so. Anything else after a number is left for the parser, as before.
     fn with_unit(&mut self, plain: TokKind<'s>, value: f64) -> TokKind<'s> {
         let source = self.source;
-        let rest = &source[self.char_stream.position()..];
-        let Some(len) = shared::units::scan_suffix(rest) else {
-            return plain;
-        };
-        let unit = &rest[..len];
-        for c in unit.chars() {
-            self.match_chomp(c);
+        let pos = self.char_stream.position();
+        let rest = &source[pos..];
+        if let Some(len) = shared::units::scan_suffix(rest) {
+            let unit = &rest[..len];
+            for c in unit.chars() {
+                self.match_chomp(c);
+            }
+            return TokKind::Quantity(value, unit);
         }
-        TokKind::Quantity(value, unit)
+        // `3_i` — the subscript-index suffix. The number scan already
+        // took the `_` as a digit separator, so it sits just before
+        // `rest`: reattach it as the unit iff the tail parses as one.
+        if pos > 0
+            && source.as_bytes()[pos - 1] == b'_'
+            && rest.starts_with(|c: char| c.is_ascii_alphabetic())
+        {
+            let ilen = rest
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .unwrap_or(rest.len());
+            let candidate = &source[pos - 1..pos + ilen];
+            if shared::units::parse(candidate).is_some() {
+                for c in candidate[1..].chars() {
+                    self.match_chomp(c);
+                }
+                return TokKind::Quantity(value, candidate);
+            }
+        }
+        plain
     }
 
     /// An `e[+-]?digits` exponent riding on a float's mantissa, chomped only when it's really
