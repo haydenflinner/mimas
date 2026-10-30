@@ -596,7 +596,7 @@ impl<'s> Parser<'s> {
         }
         match self.nth(1) {
             TokKind::Colon | TokKind::LeftBrace => true,
-            TokKind::Ident(_) | TokKind::FString(_) | TokKind::Bang => true,
+            TokKind::Ident(_) | TokKind::FString(_) | TokKind::Bang | TokKind::NotWord => true,
             kind => Literal::try_from(kind).is_ok(),
         }
     }
@@ -1405,15 +1405,12 @@ impl<'s> Parser<'s> {
         let condition =
             self.with_juxta(Juxta::Off, |p| p.struct_literals(false, Self::expr));
 
-        // a trailing `= 5` or `and b` means the user reached for another language's syntax --
+        // a trailing `= 5` means the user reached for another language's syntax --
         // catch it before the body parse swallows the token. the rest of the condition gets
         // taken too (so the body still parses) and the whole thing is poison
         let (msg, label) = match self.peek() {
             TokKind::Equal if binding.is_none() => {
                 ("invalid assignment in a condition", "did you mean `==`?")
-            }
-            TokKind::Ident(name @ ("and" | "or")) => {
-                foreign_spelling(name).expect("both are in there")
             }
             _ => return (binding, condition),
         };
@@ -1751,7 +1748,11 @@ impl<'s> Parser<'s> {
 
     fn unary(&mut self) -> Expr {
         let start = self.next_start();
-        let Ok(operator) = self.peek().try_into() else {
+        let operator = if self.at(TokKind::NotWord) {
+            UnaryOp::Not
+        } else if let Ok(op) = self.peek().try_into() {
+            op
+        } else {
             return self.fstring();
         };
         self.advance();
@@ -3626,8 +3627,6 @@ fn callee_holds_call(expr: &Expr) -> bool {
 /// Operators and keywords from other languages, with what to say about them.
 fn foreign_spelling(name: &str) -> Option<(&'static str, &'static str)> {
     match name {
-        "and" => Some(("unknown operator `and`", "mimas spells this `&&`")),
-        "or" => Some(("unknown operator `or`", "mimas spells this `||`")),
         "elif" => Some(("unknown keyword `elif`", "mimas spells this `else if`")),
         "as" => Some((
             "mimas has no `as` casts",

@@ -375,6 +375,13 @@ impl<'s> Lex<'s, Tok<TokKind<'s>>, TokKind<'s>> for Lexer<'s> {
                 "loop" => TokKind::Loop,
                 "while" => TokKind::While,
                 "use" => TokKind::Use,
+                // the word forms of the logical operators — the same tokens
+                // as the symbols (C++'s alternative tokens). Source canonically
+                // spells `&&`/`||`/`!`; the editor can show and accept the
+                // words (a per-person option, apart from the code style).
+                "and" => TokKind::DoubleAmpersand,
+                "or" => TokKind::DoublePipe,
+                "not" => TokKind::NotWord,
                 "int" => TokKind::TyKw(TyKw::Int),
                 "float" => TokKind::TyKw(TyKw::Float),
                 "str" => TokKind::TyKw(TyKw::Str),

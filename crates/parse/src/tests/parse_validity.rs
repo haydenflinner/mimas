@@ -386,11 +386,13 @@ test_fail!(
     "a = 5 as float;",
     "let x: float = 5 as float;"
 );
-test_fail!(
-    word_operators_not_parsed,
+// the word forms of the logical operators are the operators themselves
+test_ok!(
+    word_operators_parse,
     "a = true and false;",
     "a = true or false;",
-    "a = not true;"
+    "a = not true;",
+    "a = not x and (y or not z);"
 );
 test_fail!(
     elif_not_parsed,
@@ -560,8 +562,6 @@ test_fail!(doubled_option_annotation, "let a: int?? = 5;");
 
 // misdirection: common habits from other languages get a teaching error
 test_fail!(misdirect_elif, "if x == 1 {} elif x == 2 {}");
-test_fail!(misdirect_and, "if a and b {}");
-test_fail!(misdirect_or, "let c = a or b;");
 test_fail!(misdirect_as, "let y = x as float;");
 test_fail!(misdirect_if_assign, "if x = 5 {}");
 
@@ -585,11 +585,11 @@ test_fail!(
 
 #[test]
 fn misdirection_renders_spelling() {
-    let (_, errors) = crate::tests::utils::parse("if a and b {}");
+    let (_, errors) = crate::tests::utils::parse("let y = x as float;");
     let rendered = format!("{:?}", errors[0]);
     assert!(
-        rendered.contains("&&"),
-        "the `and` hint should teach `&&`: {rendered}"
+        rendered.contains("to_float"),
+        "the `as` hint should teach a conversion method: {rendered}"
     );
 }
 

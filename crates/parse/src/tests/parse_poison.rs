@@ -514,14 +514,6 @@ test_recover!(
 );
 
 test_recover!(
-    misdirected_and,
-    "if a and b {}
-     let c = 1;",
-    errors: ["unknown operator `and`"],
-    stmts: ["_", "let c = 1;"],
-);
-
-test_recover!(
     misdirected_as,
     "let x = a as int;
      let y = 2;",

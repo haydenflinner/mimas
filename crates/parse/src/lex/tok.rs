@@ -55,6 +55,9 @@ pub enum TokKind<'s> {
     /// `±` — the plus-minus interval literal, `x ± d` / `x ± d%`.
     PlusMinus,
     Bang,
+    /// The word `not` — prefix only, the same operator as a prefix `!`
+    /// (never a postfix unwrap). `and`/`or` lex straight to `&&`/`||`.
+    NotWord,
     Hook,
     DoubleHook,
     DoubleHookEqual,
@@ -165,6 +168,7 @@ impl Display for TokKind<'_> {
             TokKind::Minus => "-",
             TokKind::PlusMinus => "±",
             TokKind::Bang => "!",
+            TokKind::NotWord => "not",
             TokKind::Hook => "?",
             TokKind::DoubleHook => "??",
             TokKind::DoubleHookEqual => "??=",
@@ -272,6 +276,7 @@ impl TokKind<'_> {
             || matches!(
                 self,
                 TokKind::Ident(_)
+                    | TokKind::NotWord
                     | TokKind::SelfKeyword
                     | TokKind::TyKw(_)
                     | TokKind::FString(_)
@@ -402,13 +407,11 @@ impl TokKind<'_> {
     }
 }
 
-/// Words that read as operators — mimas's own infix words (`mod`, `xor`)
-/// and other languages' (`and`, `or`, `not`, `as`, `is`, `elif`, which
-/// get a teaching error). They never join a juxtaposition, as head or
-/// argument: `a and b` is not `a(and)(b)`, and `not x` is not `not(x)`.
+/// Words that read as operators but lex as names — mimas's own infix
+/// words (`mod`, `xor`) and other languages' (`as`, `is`, `elif`, which get
+/// a teaching error). They never join a juxtaposition, as head or
+/// argument. (`and`/`or`/`not` aren't names at all: they lex as the
+/// `&&`/`||`/prefix-`!` operators — see the lexer's keyword table.)
 pub(crate) fn is_operator_word(name: &str) -> bool {
-    matches!(
-        name,
-        "mod" | "xor" | "and" | "or" | "not" | "as" | "is" | "elif"
-    )
+    matches!(name, "mod" | "xor" | "as" | "is" | "elif")
 }

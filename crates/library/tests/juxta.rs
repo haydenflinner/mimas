@@ -43,6 +43,27 @@ test_run!(
     "{\n let f = |x: int| x + 1\n f\n 5 }" => "5",
 );
 
+// `and`/`or`/`not` are the logical operators in word form — the same
+// tokens as `&&`/`||`/`!` (C++'s alternative tokens), with the same
+// precedence: `not` binds as tightly as `!`. They are reserved words.
+test_run!(
+    word_operators_are_the_operators,
+    "let t = true
+     let f = false",
+    "t and f" => "false",
+    "t or f" => "true",
+    "not f" => "true",
+    "not t or t" => "true",
+    // mimas gives `&&` and `||` one precedence level, left to right, and
+    // the words are the same tokens: `t or f and f` is `(t || f) && f`
+    "t || f && f" => "false",
+    "t or f and f" => "false",
+    "not (t and f)" => "true",
+    "t && not f" => "true",
+    "!f and not f" => "true",
+    "if t and not f { 1 } else { 2 }" => "1",
+);
+
 // Inside a sequence (`[…]`, `f(…)`, `~{…}`) commas are optional --
 // adjacency ends the element instead. Applying inside one needs
 // parens, so `[f x]` is `[f, x]` while `[f(x)]` applies.
@@ -91,10 +112,8 @@ fn juxtaposition_errors_stay_errors() {
     rejected("let a = 3 b;", "cannot be called");
     // `x if` keeps its stray-token error — keywords are not arguments
     rejected("let a = 1 if true { 2 } else { 3 };", "expected");
-    // operator words never juxtapose — `a and b` is not `a(and)(b)`,
+    // operator words never juxtapose — `x as float` is not `x(as)(float)`,
     // so the other-language spellings keep their teaching errors
-    rejected("let t = true\nlet a = t and t;", "&&");
-    rejected("let t = true\nlet a = t or t;", "||");
     rejected("let x = 3\nlet a = x as float;", "no `as` casts");
     // `[add1 two]` is `[add1, two]` — elements, not `add1(two)`: the
     // fn and the int can't unify in one array, where an applied
