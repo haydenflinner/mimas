@@ -9,6 +9,8 @@ use miette::NamedSource;
 use shared::{FileId, Located, Location, Span, units::Dim};
 use std::{cell::Cell, sync::Arc};
 
+mod datalog;
+
 /// Recursively descends mimas source, incrementally returning various
 /// statements and expressions.
 /// What `x y` — an expression followed by an atom on the same line —
@@ -2030,6 +2032,12 @@ impl<'s> Parser<'s> {
             && self.nth(1) == TokKind::LeftBrace
         {
             let expr = self.query_literal();
+            self.chain_accesses(expr)
+        } else if self.struct_literals
+            && self.peek() == TokKind::Ident("datalog")
+            && self.nth(1) == TokKind::LeftBrace
+        {
+            let expr = self.datalog_literal();
             self.chain_accesses(expr)
         } else if self.at(TokKind::Dollar) {
             // `$expr` — a `query { }` splice: `expr` is a value from the

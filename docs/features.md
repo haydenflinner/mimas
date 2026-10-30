@@ -229,6 +229,40 @@ Tests: `parse_validity::a_declared_fn_takes_back_an_operator_word`,
 `a_kits_shadowing_reaches_the_page_that_uses_it`),
 `parse_validity::a_spliced_source_shadows_per_page`.
 
+## `datalog { … }` — Ascent's language, run in mimas
+
+A `datalog` block declares relations, facts and rules, evaluates them to a
+fixpoint, and yields the relations in declaration order (a tuple of arrays
+of tuples):
+
+```
+let (edge_, path_) = datalog {
+    relation edge(int, int) from pairs          // or `rel edge(a: int, b: int)`
+    relation path(int, int)
+    path(x, y) <-- edge(x, y)                    // or `if`
+    path(x, z) <-- edge(x, y), path(y, z)
+};
+```
+
+The language follows Ascent (the Rust Datalog crate) but runs in mimas,
+so rules can call the page's own functions and it works in the browser.
+A body holds atoms, conditions (`if cond` or bare), `let x = e`, `for x in
+e`, negation `!rel(args)` / `not rel(args)` (every variable bound to its
+left), and aggregates `agg x = f(e) in rel(args)` — `count()`, `sum`,
+`min`, `max`, `mean` (over no tuples only `count` derives). Rules are
+stratified the way Ascent's are: a head sits at least as high as every
+relation it reads and strictly higher than one it negates or aggregates,
+so that relation is complete when asked; depending on your own negation or
+aggregate is an error. Each stratum runs semi-naively to its own
+fixpoint.
+
+The parser lowers a block to plain mimas (`parse::parser::datalog`): one
+array per relation, a hash-bucketed dedup index, a `loop` per stratum
+whose rounds only revisit combinations touching last round's delta. No new
+runtime. Not yet: lattices, `if let`, several heads per rule. Tests:
+`library/tests/datalog.rs` (closure, seeds, filters, the carp-kit and
+learned lessons, Ascent spelling, negation, aggregates, errors).
+
 ## `opp` — a dichotomy, as basic as an enum
 
 `opp Sky { Sun, Moon }` declares a type with exactly two ends, each the
