@@ -19,6 +19,10 @@ pub struct Ir {
     pub bodies: IdVec<BodyId, Body>,
     pub str_interner: StrInterner,
     pub item_bodies: HashMap<DecId, BodyId>,
+    /// Names of functions marked `#[test]`, in source order -- the inspector (and anything else
+    /// that wants to run tests) looks these up in `Program::items` after compile.
+    pub tests: Vec<String>,
+    pub closure_bodies: HashMap<BodyId, NodeId>,
     pub(crate) resolutions: Resolutions,
     pub(crate) intrinsics: HashMap<NativeId, Intrinsic>,
 
@@ -40,6 +44,8 @@ impl Ir {
             current_body: BodyId::ZERO,
             body_stack: Vec::new(),
             item_bodies: HashMap::new(),
+            tests: Vec::new(),
+            closure_bodies: HashMap::new(),
             current_loc: Location::SYNTHETIC,
         }
     }
@@ -176,9 +182,9 @@ impl Ir {
     // inner adt.
     pub(crate) fn field_index(&self, receiver: NodeId, field: &str) -> usize {
         let adt = match self.resolutions.node_tys.get(&receiver) {
-            Some(Ty::Adt(adt)) | Some(Ty::Identity(adt)) => *adt,
+            Some(Ty::Adt(adt, _)) | Some(Ty::Identity(adt, _)) => *adt,
             Some(Ty::Option(inner)) => match inner.as_ref() {
-                Ty::Adt(adt) | Ty::Identity(adt) => *adt,
+                Ty::Adt(adt, _) | Ty::Identity(adt, _) => *adt,
                 other => panic!("field access on option of non-adt type: {other:?}"),
             },
             other => panic!("field access on non-adt type: {other:?}"),
@@ -190,17 +196,41 @@ impl Ir {
             .unwrap_or_else(|| panic!("no field `{field}` on adt"))
     }
 
-    // allocate-or-fetch this binding's slot within the current body
+    // allocate-or-fetch this binding's slot within its home body: the entry body for
+    // globals (a top-level `let` stores there no matter which body asks), the current body
+    // for everything else.
     pub(crate) fn local_for(&mut self, dec: DecId) -> Local {
-        if let Some(&local) = self.bodies[self.current_body].dec_to_local.get(&dec) {
+        self.local_in(dec, self.body_for_dec(dec))
+    }
+
+    /// The body that owns a dec's storage: globals live in the entry frame.
+    pub(crate) fn body_for_dec(&self, dec: DecId) -> BodyId {
+        match self.resolutions.decs[dec].kind {
+            solve::ResolvedDeclKind::Global => BodyId::ZERO,
+            _ => self.current_body,
+        }
+    }
+
+    fn local_in(&mut self, dec: DecId, body_id: BodyId) -> Local {
+        if let Some(&local) = self.bodies[body_id].dec_to_local.get(&dec) {
             return local;
         }
         let name = self.resolutions.decs[dec].name.to_string();
-        let body = &mut self.bodies[self.current_body];
+        let body = &mut self.bodies[body_id];
         let local = body.locals.push(dec);
         body.dec_to_local.insert(dec, local);
         body.artifacts.insert(local, name);
         local
+    }
+
+    /// Emits a read of `dec` in the current body. Globals reached from a non-entry body go
+    /// through the entry frame's registers; everything else is an ordinary local read.
+    pub(crate) fn read_binding(&mut self, dec: DecId) -> InstId {
+        let local = self.local_for(dec);
+        if self.body_for_dec(dec) != self.current_body {
+            return self.current().get_entry(local);
+        }
+        self.current().get_local(local)
     }
 
     pub(crate) fn synthetic_local(&mut self, name: &str) -> Local {
@@ -210,13 +240,36 @@ impl Ir {
         local
     }
 
-    // allocate-or-fetch the body associated with this dec
+    // allocate-or-fetch the body associated with this dec. A native has no lowered
+    // body, but `ref_body` still needs one when the native is used as a value
+    // (`let f = from_json`) -- synthesize a trampoline that forwards its params to
+    // CallNative. Call sites don't go through this (they emit CallNative directly).
     pub(crate) fn item_body_for(&mut self, dec: DecId) -> BodyId {
         if let Some(&bid) = self.item_bodies.get(&dec) {
             return bid;
         }
         let bid = self.bodies.push(Body::new());
         self.item_bodies.insert(dec, bid);
+        if let solve::ResolvedDeclKind::Item {
+            native: Some(native),
+            ..
+        } = &self.resolutions.decs[dec].kind
+        {
+            let native = *native;
+            let Ty::Fn(header) = &self.resolutions.decs[dec].ty else {
+                panic!("a native dec's ty is always a Ty::Fn")
+            };
+            let arity = header.parameters.len();
+            self.in_body(bid, |ir| {
+                let params: Vec<Local> = (0..arity)
+                    .map(|i| ir.synthetic_local(&format!("$trampoline_arg{i}")))
+                    .collect();
+                ir.current_body_mut().params = params.clone();
+                let args: Vec<InstId> = params.iter().map(|&p| ir.current().get_local(p)).collect();
+                let ret = ir.current().call_native(native, args);
+                ir.current().ret(ret);
+            });
+        }
         bid
     }
 

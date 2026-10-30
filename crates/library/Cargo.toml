@@ -1,6 +1,6 @@
 [package]
 name = "mimas-library"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Standard library for the mimas language. Internal to mimas; not intended for direct use."
 license.workspace = true
@@ -13,10 +13,10 @@ name = "library"
 path = "src/lib.rs"
 
 [dependencies]
-vm = { package = "mimas-vm", path = "../vm", version = "0.1.0" }
-api = { package = "mimas-api", path = "../api", version = "0.1.0" }
-shared = { package = "mimas-shared", path = "../shared", version = "0.1.0" }
-macros = { package = "mimas-macros", path = "../macros", version = "0.1.0" }
+vm = { package = "mimas-vm", path = "../vm", version = "0.2.0", default-features = false }
+api = { package = "mimas-api", path = "../api", version = "0.2.0" }
+shared = { package = "mimas-shared", path = "../shared", version = "0.2.0" }
+macros = { package = "mimas-macros", path = "../macros", version = "0.2.0" }
 chompy.workspace = true
 heck = "0.5.0"
 regex = "1.12.3"
@@ -25,9 +25,72 @@ rand.workspace = true
 camino = "1.2.2"
 serde_json = "1.0.145"
 walkdir.workspace = true
+# both optional, gated behind the `dataframe` feature below -- see the note on `vm`'s `polars` dep
+# for why `lazy`/`fmt`/`dtype-full` and not `streaming`. `pivot` (unlike `csv`) doesn't bundle
+# `streaming` at the umbrella-crate level, so it's safe to enable directly here -- needed for
+# `std_lib::dataframe::pivot`.
+# The `literate` fork carries wasm32 shims (inline block_on, byte_source
+# fallbacks) upstream lacks — required by hosts that compile `dataframe`
+# to wasm. Pinned to the rev the shim commits sit on.
+polars = { git = "https://github.com/haydenflinner/polars.git", rev = "4c06e6beae", optional = true, default-features = false, features = [
+    "lazy",
+    "fmt_no_tty",
+    "dtype-full",
+    "pivot",
+    "strings",
+    "regex",
+    # `Expr::diff`/`NullBehavior` for `col(..).diff(n)` and `query`'s `difference(..)`
+    "diff",
+    # `col("t").dt_month_start()`/`dt_month_end()` and `query`'s `month_start`/`month_end`
+    "month_start",
+    "month_end",
+    # `col("x").floor()`/`.ceil()`/`.abs()` and the same-named `query` functions
+    "round_series",
+    "abs",
+] }
+# depended on directly (not via `polars`'s own `csv` feature) for `CsvReadOptions`/`CsvReader`,
+# used by `std_lib::dataframe::from_csv` to read an in-memory CSV string into a `DataFrame`.
+# `polars`'s own `csv` feature unconditionally bundles in `streaming`, which this clone's
+# `polars-io` cloud module doesn't build against (an unrelated `object_store` version mismatch --
+# see the note on the `polars` dep above); `polars-io/csv` on its own pulls in neither. Same git
+# source as the `polars` dep above, so Cargo resolves this to the identical `DataFrame`/`Column`
+# types `polars::frame`/`polars::prelude` re-export, not a second copy.
+polars-io = { git = "https://github.com/haydenflinner/polars.git", rev = "4c06e6beae", optional = true, default-features = false, features = [
+    "csv",
+] }
+# `std_lib::darkly` (a `.darkly` file's own layer/manifest format, not a game-engine dependency):
+# `zip` unpacks the container, `serde`+`serde_json` deserialize `manifest.json` into local
+# structs. Both optional, gated behind the `darkly` feature below -- see the note on `vm`'s
+# `polars` dep for why this isn't just an unconditional dependency.
+zip = { version = "2", optional = true, default-features = false, features = ["deflate"] }
+serde = { version = "1", optional = true, features = ["derive"] }
+# `std::polars`'s parquet file I/O (`from_parquet`/`to_parquet`) rides the same `polars-io`
+# dep as `csv` -- `parquet` pulls `polars-parquet` and nothing else (no `streaming`, no cloud
+# module), so it's safe to enable directly here.
+# `std::polars`'s file-backed half: `from_xlsx` reads a worksheet into a `DataFrame` via
+# `calamine` (pure-Rust xlsx/xls/ods reader -- the same engine behind Python polars' `fastexcel`),
+# `df.to_xlsx(path)` exports one via `rust_xlsxwriter` (port of the author's own Python
+# `XlsxWriter`). `rust_xlsxwriter`'s `polars` feature stays off: it would resolve a *second*,
+# crates.io `polars` whose `DataFrame` type wouldn't unify with this workspace's path-dep clone,
+# so `to_xlsx` iterates `AnyValue`s itself. Both optional, gated behind the `xlsx` feature below.
+calamine = { version = "0.36.1", optional = true, features = ["chrono"] }
+rust_xlsxwriter = { version = "0.99.1", optional = true }
+
+[features]
+default = ["dataframe", "darkly", "xlsx", "parquet", "tensor"]
+dataframe = ["dep:polars", "dep:polars-io", "vm/dataframe"]
+darkly = ["dep:zip", "dep:serde", "vm/darkly"]
+xlsx = ["dataframe", "dep:calamine", "dep:rust_xlsxwriter"]
+parquet = ["dataframe", "polars-io/parquet"]
+# `std::tensor` -- an N-D `f32` tensor type (`Tensor` adt) + constructors (`tensor(..)`,
+# `zeros`/`randn`/`eye`/...) and methods (`.matmul`, `.softmax`, `.reshape`, ...) over a real
+# `Val::Tensor`, all implemented against Burn's backend-ops traits in `vm::tensor`. All burn
+# contact is on the `vm` side, so this feature only needs to enable the `Val` variant.
+tensor = ["vm/tensor"]
 
 [dev-dependencies]
-parse = { package = "mimas-parse", path = "../parse", version = "0.1.0" }
-solve = { package = "mimas-solve", path = "../solve", version = "0.1.0" }
-compile = { package = "mimas-compile", path = "../compile", version = "0.1.0" }
+parse = { package = "mimas-parse", path = "../parse", version = "0.2.0" }
+solve = { package = "mimas-solve", path = "../solve", version = "0.2.0" }
+compile = { package = "mimas-compile", path = "../compile", version = "0.2.0" }
+inventory = "0.3"
 pretty_assertions.workspace = true

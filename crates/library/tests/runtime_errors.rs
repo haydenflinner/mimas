@@ -2,6 +2,7 @@
 mod test_runner;
 
 // integer overflow
+// r[verify mimas.int.checked]
 test_fail!(
     overflow_faults,
     "let x = 9223372036854775807 + 1; print(x);",
@@ -24,8 +25,8 @@ test_fail!(
     div_mod_by_zero_faults,
     "print(5 ~/ 0);",
     "let d = 0; print(5 ~/ d);",
-    "print(5 % 0);",
-    "let d = 0; print(7 % d);"
+    "print(5 mod 0);",
+    "let d = 0; print(7 mod d);"
 );
 
 // array index out of bounds
@@ -49,7 +50,38 @@ test_fail!(
 test_fail!(
     unwrap_raised_result,
     "fn f() -> int! { raise \"e\" }
-     print(f()!);"
+     print(f()!);",
+    "fn f() -> ()! { raise \"e\" }
+     f()!;"
+);
+
+// ()! unwraps clean: ()'s repr is Null but the unwrap must not fault on success
+test_run!(
+    unwrap_unit_result,
+    "fn f() -> ()! { return () }",
+    "f()!" => "null",
+    "f() absolve |_| ()" => "null"
+);
+test_run!(
+    unwrap_unit_raised_absolve,
+    "fn f() -> ()! { raise \"e\" }",
+    "f() absolve |_| ()" => "null"
+);
+
+// expr? demotes T! to T? — a raise reads back as null instead of propagating
+test_run!(
+    demote_result_to_option,
+    "fn raises() -> int! { raise \"e\" }
+     fn gives() -> int! { return 5 }
+     let x: int? = raises()?;
+     let y: int? = null;",
+    "raises()?" => "null",
+    "gives()?" => "5",
+    // `let x: int? = raises()?` in the preamble proves the demote types as int?
+    "x" => "null",
+    // identity on T? and passthrough on plain T (trailing ? was a legal no-op)
+    "y?" => "null",
+    "5?" => "5"
 );
 
 // match panic terminator (trailing `!`) reached

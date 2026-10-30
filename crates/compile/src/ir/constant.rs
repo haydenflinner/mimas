@@ -127,15 +127,36 @@ impl Constant {
             unreachable!("emit_const_dec called on non-constant dec {dec:?}");
         };
         let lit = lit.clone();
-        match &lit {
-            Literal::Dictionary(_) | Literal::Struct(_) => {
-                use super::Emit;
-                lit.emit(id, ir)
-            }
-            _ => {
-                let constant = Self::from_literal(ir, lit);
-                Some(ir.current().constant(constant))
-            }
+        if Self::needs_alloc(ir, &lit) {
+            use super::Emit;
+            lit.emit(id, ir)
+        } else {
+            let constant = Self::from_literal(ir, lit);
+            Some(ir.current().constant(constant))
+        }
+    }
+
+    /// A const whose value holds a dict or struct -- itself, an element, or
+    /// through a const ref (`const DIRS4 = [RIGHT DOWN LEFT UP]` over struct
+    /// consts) -- has no scalar `Constant` form: each use site allocates it
+    /// fresh, the way a struct const already does.
+    pub(crate) fn needs_alloc(ir: &Ir, lit: &Literal) -> bool {
+        match lit {
+            Literal::Dictionary(_) | Literal::Struct(_) => true,
+            Literal::Array(es) | Literal::Tuple(es) => es.iter().any(|e| Self::expr_needs_alloc(ir, e)),
+            _ => false,
+        }
+    }
+
+    fn expr_needs_alloc(ir: &Ir, expr: &Expr) -> bool {
+        match expr.kind() {
+            ExprKind::Literal(lit) => Self::needs_alloc(ir, lit),
+            ExprKind::Grouping(g) => Self::expr_needs_alloc(ir, &g.inner),
+            ExprKind::Ident(_) => match &ir.resolutions.decs[ir.node_dec(expr.id())].kind {
+                solve::ResolvedDeclKind::Constant(lit) => Self::needs_alloc(ir, lit),
+                _ => false,
+            },
+            _ => false,
         }
     }
 

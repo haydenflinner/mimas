@@ -1,15 +1,17 @@
 use crate::{
     Result, Solver, Unification, UnificationError,
     components::AdtFlags,
-    errors::{FieldNotFound, NotAPact, NotAStruct, TypeHasNoFields},
+    errors::{FieldNotFound, NotAPact, NotAStruct, TypeHasNoFields, UnknownUnit},
     traits::Query,
 };
 use parse::{components::Annotation, lex::TyKw};
-pub use shared::{AdtId, FnHeader, FnParam, PactId, Ty, Vid};
+pub use shared::{AdtId, FnHeader, FnParam, Len, PactId, Ty, Vid};
 
 pub trait TyExt: Sized {
     fn occurs(&self, other: Vid, solver: &Solver) -> bool;
     fn from_annotation(annotation: Annotation, solver: &mut Solver) -> Result<Ty>;
+    /// Does `annotation` name a quantity (`kW`, `usd/kWh`) rather than an ordinary type?
+    fn is_unit_annotation(annotation: &Annotation, solver: &Solver) -> bool;
     fn coerce_option(a: Ty, b: Ty, solver: &mut Solver) -> Option<Ty>;
     fn coerce_pacts(a: Ty, b: Ty, solver: &mut Solver) -> Option<Ty>;
     fn fulfill_ty(
@@ -26,7 +28,7 @@ impl TyExt for Ty {
         match self {
             Ty::Vid(vid) if *vid == other => true,
             Ty::Vid(vid) => solver.sub(*vid).is_some_and(|v| v.occurs(other, solver)),
-            Ty::Array(ty) | Ty::Dict(ty) => ty.occurs(other, solver),
+            Ty::Array(ty, _) | Ty::Dict(ty) => ty.occurs(other, solver),
             Ty::Fn(fn_data) => {
                 fn_data
                     .parameters
@@ -35,15 +37,17 @@ impl TyExt for Ty {
                     || fn_data.return_ty.occurs(other, solver)
             }
             Ty::Tuple(members) => members.iter().any(|v| v.occurs(other, solver)),
-            // adt bodies are nominal: descending into their field types would loop forever on
-            // recursive adts (e.g. `enum Tree { Branch(Vec<Tree>) }`), and a vid inside a field
-            // type can't form an infinite type just by being bound to a `Ty::Adt(_)` -- the adt
-            // itself doesn't unfold.
-            Ty::Adt(_) => false,
+            // adt bodies are nominal: the type args are part of the *head*, so `X = List<X>`
+            // must fail the occurs check (it would form an infinite type), while a vid inside a
+            // field type can never form one -- the adt itself doesn't unfold.
+            Ty::Adt(_, args) | Ty::Identity(_, args) => {
+                args.iter().any(|a| a.occurs(other, solver))
+            }
             Ty::Option(inner) | Ty::Result(inner) => inner.occurs(other, solver),
-            Ty::Identity(_)
-            | Ty::Anon(_)
+            Ty::Anon(_)
+            | Ty::Param(_)
             | Ty::Pacts(_) // annotations always required, never holds vids
+            | Ty::Skolem(_)
             | Ty::Unit
             | Ty::Never
             | Ty::Null
@@ -75,7 +79,7 @@ impl TyExt for Ty {
     fn coerce_pacts(a: Ty, b: Ty, solver: &mut Solver) -> Option<Ty> {
         fn bounds(ty: &Ty, solver: &Solver) -> Option<Vec<PactId>> {
             match ty {
-                Ty::Adt(aid) | Ty::Identity(aid) => Some(
+                Ty::Adt(aid, _) | Ty::Identity(aid, _) => Some(
                     solver
                         .pact_impls
                         .iter()
@@ -83,8 +87,7 @@ impl TyExt for Ty {
                         .map(|(pid, _)| *pid)
                         .collect(),
                 ),
-                Ty::Pacts(pids) => Some(pids.clone()),
-                _ => None,
+                _ => ty.as_pacts(),
             }
         }
 
@@ -97,13 +100,40 @@ impl TyExt for Ty {
         (!shared.is_empty()).then(|| Ty::pacts(shared))
     }
 
+    /// A quantity annotation means "a number in this dimension" -- the dims pass owns
+    /// that check -- so its number type isn't pinned to `float`: `5.5kg.to_int()` is an
+    /// `int` in kg. Mirrors the unit-vs-type resolution inside `from_annotation`.
+    fn is_unit_annotation(annotation: &Annotation, solver: &Solver) -> bool {
+        match annotation {
+            Annotation::Ty(ident) => {
+                solver.type_param(ident).is_none()
+                    && solver.ribs.resolve(ident).is_none()
+                    && shared::units::lookup(&ident.lexeme).is_some()
+            }
+            Annotation::Quantity(_) => true,
+            _ => false,
+        }
+    }
+
     fn from_annotation(annotation: Annotation, solver: &mut Solver) -> Result<Ty> {
         match annotation {
             Annotation::Unit => Ok(Ty::Unit),
+            Annotation::Poison(poison) => poison.escaped(),
             Annotation::Kw(kw) => Ok(ty_from_kw(kw)),
             Annotation::Option(ty) => Ok(Ty::Option(Box::new(Ty::from_annotation(*ty, solver)?))),
             Annotation::Result(ty) => Ok(Ty::Result(Box::new(Ty::from_annotation(*ty, solver)?))),
-            Annotation::Array(ty) => Ok(Ty::Array(Box::new(Ty::from_annotation(*ty, solver)?))),
+            Annotation::Array(ty, dims) => {
+                let mut elem = Ty::from_annotation(*ty, solver)?;
+                // `[f32; 4, 8]` nests outermost-first into `[ [f32; 8]; 4 ]`
+                for d in dims.iter().rev() {
+                    elem = Ty::Array(Box::new(elem), Len::Const(*d));
+                }
+                Ok(if dims.is_empty() {
+                    Ty::Array(Box::new(elem), Len::Unknown)
+                } else {
+                    elem
+                })
+            }
             Annotation::Dictionary(ty) => Ok(Ty::Dict(Box::new(Ty::from_annotation(*ty, solver)?))),
             Annotation::Function(params, ret) => {
                 let parameters = params
@@ -119,16 +149,109 @@ impl TyExt for Ty {
                     .map(|v| Ty::from_annotation(v, solver))
                     .collect::<Result<_>>()?,
             )),
-            Annotation::Ty(ident) => ident.query(solver),
+            // a declared type param (`fn map<T>`, `struct Pair<A>`) -- looked up before
+            // anything else so a param named like a unit or a builtin still wins
+            Annotation::Ty(ident) if solver.type_param(&ident).is_some() => {
+                let ty = Ty::Param(solver.type_param(&ident).unwrap());
+                solver.note(&ident, ty.clone(), None);
+                Ok(ty)
+            }
+            // a unit written where a type goes (`kW`, `usd`) is a float whose dimension the
+            // checker tracks -- unless the program declares a type by that name, which wins.
+            // `index` is the exception: indexes are ints, or `xs[i]` could never take one
+            Annotation::Ty(ident)
+                if !names_a_type(solver, &ident)
+                    && shared::units::lookup(&ident.lexeme).is_some() =>
+            {
+                Ok(if shared::units::lookup(&ident.lexeme).unwrap().0 == shared::units::INDEX {
+                    Ty::Int
+                } else {
+                    Ty::Float
+                })
+            }
+            // `Pair<int, str>` (or `mod::Pair<int, str>`) applies a generic adt;
+            // `Interval<kW>` is an `Interval` to the type checker -- the unit is the
+            // dimension pass's
+            Annotation::Applied(ty, args) => {
+                let head_ann = if ty.len() == 1 {
+                    Annotation::Ty(ty[0].clone())
+                } else {
+                    Annotation::Path(ty.clone())
+                };
+                let name_ident = ty.last().expect("applied annotation has a head");
+                let head = Ty::from_annotation(head_ann, solver)?.normalized(solver);
+                let Some((aid, head_args)) = head.applied() else {
+                    Err(crate::errors::NotGeneric {
+                        src: solver.src(name_ident.location),
+                        at: name_ident.location.into(),
+                        name: name_ident.lexeme.clone(),
+                    })?
+                };
+                let expected = solver.adts[aid].type_params.len();
+                if expected == 0 {
+                    // a `<...>` on a non-generic type is the old unit-annotation syntax --
+                    // only allowed when every argument is a unit (`Interval<kW>`), not a type
+                    let all_units = args.iter().all(|a| match a {
+                        Annotation::Ty(ident) => {
+                            !names_a_type(solver, ident)
+                                && shared::units::lookup(&ident.lexeme).is_some()
+                        }
+                        Annotation::Quantity(_) => true,
+                        _ => false,
+                    });
+                    if all_units {
+                        return Ok(head);
+                    }
+                    Err(crate::errors::NotGeneric {
+                        src: solver.src(name_ident.location),
+                        at: name_ident.location.into(),
+                        name: name_ident.lexeme.clone(),
+                    })?
+                }
+                if args.len() != expected || !head_args.is_empty() {
+                    Err(crate::errors::GenericArity {
+                        src: solver.src(name_ident.location),
+                        at: name_ident.location.into(),
+                        name: solver.adts[aid].name.clone(),
+                        expected,
+                        found: args.len(),
+                    })?
+                }
+                let arg_tys = args
+                    .into_iter()
+                    .map(|a| Ty::from_annotation(a, solver))
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(Ty::Adt(aid, arg_tys))
+            }
+            Annotation::Quantity(parts) => {
+                for (unit, _) in &parts {
+                    if shared::units::lookup(&unit.lexeme).is_none() {
+                        Err(UnknownUnit {
+                            src: solver.src(unit.location),
+                            at: unit.location.into(),
+                            name: unit.lexeme.clone(),
+                        })?;
+                    }
+                }
+                Ok(Ty::Float)
+            }
+            Annotation::Ty(ident) => {
+                let ty = ident.query(solver)?;
+                let dec = solver.ribs.resolve(&ident);
+                solver.note(&ident, ty.clone(), dec);
+                Ok(ty)
+            }
             Annotation::Path(segments) => {
                 let mut iter = segments.into_iter();
                 let head = iter
                     .next()
                     .expect("path annotation has at least two segments");
                 let mut ty = head.query(solver)?;
+                let dec = solver.ribs.resolve(&head);
+                solver.note(&head, ty.clone(), dec);
                 for segment in iter {
                     let adt = match ty.clone().normalized(solver) {
-                        Ty::Adt(adt) | Ty::Identity(adt) => adt,
+                        Ty::Adt(adt, _) | Ty::Identity(adt, _) => adt,
                         other => Err(TypeHasNoFields {
                             src: solver.src(segment.location),
                             at: segment.location.into(),
@@ -152,6 +275,7 @@ impl TyExt for Ty {
                             at: segment.location.into(),
                             field_name: segment.lexeme.clone(),
                         })?;
+                    solver.note(&segment, field.ty.clone(), Some(field.dec));
                     ty = field.ty;
                 }
                 Ok(ty.normalized(solver))
@@ -160,6 +284,8 @@ impl TyExt for Ty {
                 let mut pacts = Vec::with_capacity(idents.len());
                 for ident in idents {
                     let ty = ident.query(solver)?;
+                    let dec = solver.ribs.resolve(&ident);
+                    solver.note(&ident, ty.clone(), dec);
                     let Some(pid) = ty.as_single_pact() else {
                         return Err(NotAPact {
                             src: solver.src(ident.location),
@@ -190,7 +316,7 @@ impl TyExt for Ty {
                 .sub(vid)
                 .map(|ty| ty.clone().normalized(solver))
                 .unwrap_or(Ty::Vid(vid)),
-            Ty::Array(ty) => Ty::Array(Box::new(ty.normalized(solver))),
+            Ty::Array(ty, len) => Ty::Array(Box::new(ty.normalized(solver)), len),
             Ty::Dict(ty) => Ty::Dict(Box::new(ty.normalized(solver))),
             Ty::Tuple(members) => {
                 Ty::Tuple(members.into_iter().map(|v| v.normalized(solver)).collect())
@@ -208,10 +334,18 @@ impl TyExt for Ty {
                 h.is_ctor = was_ctor;
                 Ty::Fn(h)
             }
-            Ty::Adt(adt) => Ty::Adt(adt),
+            Ty::Adt(adt, args) => Ty::Adt(
+                adt,
+                args.into_iter().map(|a| a.normalized(solver)).collect(),
+            ),
             Ty::Pacts(pacts) => Ty::Pacts(pacts),
+            Ty::Skolem(pid) => Ty::Skolem(pid),
             Ty::Anon(n) => Ty::Anon(n),
-            Ty::Identity(adt) => Ty::Identity(adt),
+            Ty::Param(pid) => Ty::Param(pid),
+            Ty::Identity(adt, args) => Ty::Identity(
+                adt,
+                args.into_iter().map(|a| a.normalized(solver)).collect(),
+            ),
             Ty::Option(inner) => {
                 if let Ty::Option(nested_inner) = *inner {
                     Ty::Option(Box::new(nested_inner.normalized(solver)))
@@ -225,10 +359,16 @@ impl TyExt for Ty {
 
     fn filter_adt(&self, adt: AdtId) -> Ty {
         match self {
-            Ty::Array(ty) => Ty::Array(Box::new(ty.filter_adt(adt))),
+            Ty::Array(ty, len) => Ty::Array(Box::new(ty.filter_adt(adt)), *len),
             Ty::Dict(ty) => Ty::Dict(Box::new(ty.filter_adt(adt))),
             Ty::Tuple(members) => Ty::Tuple(members.iter().map(|m| m.filter_adt(adt)).collect()),
-            Ty::Adt(this_adt) if *this_adt == adt => Ty::Identity(adt),
+            Ty::Adt(this_adt, args) if *this_adt == adt => {
+                Ty::Identity(adt, args.iter().map(|a| a.filter_adt(adt)).collect())
+            }
+            Ty::Adt(id, args) => Ty::Adt(*id, args.iter().map(|a| a.filter_adt(adt)).collect()),
+            Ty::Identity(id, args) => {
+                Ty::Identity(*id, args.iter().map(|a| a.filter_adt(adt)).collect())
+            }
             Ty::Fn(f) => {
                 let parameters: Vec<FnParam> = f
                     .parameters
@@ -241,10 +381,10 @@ impl TyExt for Ty {
             }
             Ty::Option(inner) => Ty::Option(Box::new(inner.filter_adt(adt))),
             Ty::Result(inner) => Ty::Result(Box::new(inner.filter_adt(adt))),
-            Ty::Adt(_)
-            | Ty::Pacts(_)
-            | Ty::Identity(_)
+            Ty::Pacts(_)
+            | Ty::Skolem(_)
             | Ty::Anon(_)
+            | Ty::Param(_)
             | Ty::Vid(_)
             | Ty::Unit
             | Ty::Never
@@ -264,4 +404,18 @@ pub(crate) fn ty_from_kw(kw: TyKw) -> Ty {
         TyKw::Str => Ty::Str,
         TyKw::Bool => Ty::Bool,
     }
+}
+
+/// Does `ident` name a *type* in scope -- a struct/enum/pact (imported or declared), so
+/// `x: S` means that type -- rather than a value binding like a `fn` or `let`? Units and
+/// type params are checked separately; this is what decides whether `-> inch` reads as
+/// the unit or `fn inch` leaks its `Ty::Fn` into annotation position.
+fn names_a_type(solver: &Solver, ident: &parse::Ident) -> bool {
+    let Some(dec) = solver.ribs.resolve(ident) else {
+        return false;
+    };
+    matches!(
+        Ty::Vid(solver.decs[dec].vid).normalized(solver),
+        Ty::Adt(..) | Ty::Identity(..) | Ty::Pacts(_)
+    )
 }

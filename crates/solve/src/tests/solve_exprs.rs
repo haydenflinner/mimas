@@ -227,19 +227,21 @@ test_ty!(
     "1 + 1" => Int,
     "1.0 * 1.0" => Float,
     "1.0 / 1.0" => Float,
-    "1 % 1" => Int,
+    "1 mod 1" => Int,
     "1 ~/ 1" => Int,
     "1 & 1" => Int,
     "1 | 1" => Int,
-    "1 ^ 1" => Int,
+    "1 ⊕ 1" => Int,
     "1 << 1" => Int,
     "1 >> 1" => Int,
 );
 test_ty!(
+    // r[verify mimas.num.div]
     int_division_yields_float,
     "1 / 1" => Float,
 );
 test_ty!(
+    // r[verify mimas.num.promotion]
     int_float_mixed_arithmetic,
     "1 + 0.1" => Float,
     "1 - 0.1" => Float,
@@ -253,8 +255,8 @@ test_ty!(
     "(0, 0) / (0, 0)" => tuple!(Float, Float),
     "(0, 0) * (0, 0)" => tuple!(Int, Int),
     "(0, 0) ~/ (0, 0)" => tuple!(Int, Int),
-    "(0, 0) % (0, 0)" => tuple!(Int, Int),
-    "(0, 0) ^ (0, 0)" => tuple!(Int, Int),
+    "(0, 0) mod (0, 0)" => tuple!(Int, Int),
+    "(0, 0) ⊕ (0, 0)" => tuple!(Int, Int),
     "(0, 0) << (0, 0)" => tuple!(Int, Int),
     "(0, 0) >> (0, 0)" => tuple!(Int, Int),
     "(0, 0.0) + (0.0, 0)" => tuple!(Float, Float),
@@ -444,7 +446,7 @@ test_fail!(
 
 // ice prevention
 test_fail!(div_by_zero, "const DIV_ZERO: int = 1 ~/ 0;");
-test_fail!(mod_by_zero, "const MOD_ZERO: int = 1 % 0;");
+test_fail!(mod_by_zero, "const MOD_ZERO: int = 1 mod 0;");
 test_fail!(negative_shift, "const SHIFT_NEG: int = 1 << -1;");
 test_fail!(
     giant_hex_const,
@@ -563,4 +565,5 @@ test_fail!(
     str_square_index_by_str,
     "let s = \"abc\"; let c = s[\"k\"];"
 );
+// r[verify mimas.str.index]
 test_fail!(string_index_assign, "let s = \"abc\"; s[0] = \"x\";");

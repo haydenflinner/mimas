@@ -1,0 +1,126 @@
+// g4 — three coins, one on a platform; flag gated on all 3.
+// Exercises everything: coin novelty, jump timing, the score-gate dec,
+// and the nested rect-overlap conj.
+const FX = 40.0px;
+const FY = 40.0px;
+const FW = 960.0px;
+const FH = 720.0px;
+const GRAV = 1800.0px/s^2;
+const JUMP_V = 560.0px/s;
+const RUN = 300.0px/s;
+const ACCEL = 2800.0px/s^2;
+const TERM = 980.0px/s;
+const PLAYER_W = 24.0px;
+const PLAYER_H = 36.0px;
+const PICK = 18.0;
+
+// one flat ground row; [x, top, w]
+const NEED = 3;
+const FLAGX = 900.0; const FLAGY = 476.0;
+const FLAGW = 20.0; const FLAGH = 84.0;
+
+fn level_plats() -> [float] { let p = []; p.push(40.0); p.push(640.0); p.push(920.0); p.push(560.0); p.push(560.0); p.push(380.0); p }
+fn level_coins() -> [float] { let c = []; c.push(300.0); c.push(590.0); c.push(620.0); c.push(536.0); c.push(830.0); c.push(536.0); c }
+
+struct W {
+    px: px, py: px, vx: px/s, vy: px/s,
+    face: float, grounded: bool,
+    got: [int], score: int, deaths: int,
+    won: bool, t: s,
+}
+
+fn init() -> W {
+    W { px = 70.0px, py = 604.0px, vx = 0.0px/s, vy = 0.0px/s,
+        face = 1.0, grounded = true, got = [], score = 0, deaths = 0,
+        won = false, t = 0.0s }
+}
+
+fn tick(w: W, inp: Input, evs: [Ev]) -> W {
+    let dt = inp.dt;
+    let px = w.px; let py = w.py;
+    let vx = w.vx; let vy = w.vy;
+    let grounded = w.grounded;
+    let face = w.face;
+    let t = w.t + dt;
+
+    if inp.held.contains("arrowleft") || inp.held.contains("a") {
+        vx = (vx - ACCEL * dt).max(-RUN); face = -1.0;
+    } else if inp.held.contains("arrowright") || inp.held.contains("d") {
+        vx = (vx + ACCEL * dt).min(RUN); face = 1.0;
+    } else {
+        vx = vx * (1.0 - 10.0Hz * dt);
+    }
+    if grounded && (inp.held.contains("arrowup") || inp.held.contains(" ") || inp.held.contains("w")) {
+        vy = -JUMP_V; grounded = false;
+    }
+    vy = (vy + GRAV * dt).min(TERM);
+
+    let old_bottom = py + PLAYER_H;
+    px = (px + vx * dt).max(FX).min(FX + FW - PLAYER_W);
+    py = py + vy * dt;
+    grounded = false;
+    let plats = level_plats();
+    let pi = 0;
+    while pi < plats.len() {
+        let top = plats[pi + 1] * 1.0px;
+        let sx = plats[pi] * 1.0px; let sw = plats[pi + 2] * 1.0px;
+        if vy >= 0.0px/s && old_bottom <= top + 1.0px && px + PLAYER_W > sx && px < sx + sw && py + PLAYER_H >= top && py + PLAYER_H <= top + 24.0px {
+            py = top - PLAYER_H; vy = 0.0px/s; grounded = true;
+        }
+        pi += 3;
+    }
+    if py > FY + FH + 200.0px {
+        return W { px = 70.0px, py = 604.0px, vx = 0.0px/s, vy = 0.0px/s,
+                   face = 1.0, grounded = false, got = w.got, score = w.score,
+                   deaths = w.deaths + 1, won = w.won, t = t };
+    }
+
+    // coins
+    let got = w.got;
+    let score = w.score;
+    let cc = level_coins();
+    let ci = 0; let cid = 0;
+    while ci < cc.len() {
+        if !got.contains(cid) {
+            let dx = (px + PLAYER_W / 2.0 - (cc[ci] + 10.0) * 1.0px).abs();
+            let dy = (py + PLAYER_H / 2.0 - (cc[ci + 1] + 10.0) * 1.0px).abs();
+            if dx < PICK * 1.0px + 8.0px && dy < PICK * 1.0px + 14.0px {
+                got.push(cid); score += 1;
+            }
+        }
+        ci += 2; cid += 1;
+    }
+
+    // the flag — only counts once every coin is pocketed
+    let won = w.won;
+    let fx = FLAGX * 1.0px; let fy = FLAGY * 1.0px;
+    let fw = FLAGW * 1.0px; let fh = FLAGH * 1.0px;
+    if !won && score == NEED {
+        if px + PLAYER_W > fx && px < fx + fw && py + PLAYER_H > fy && py < fy + fh {
+            won = true;
+        }
+    }
+
+    W { px = px, py = py, vx = vx, vy = vy, face = face,
+        grounded = grounded, got = got, score = score, deaths = w.deaths,
+        won = won, t = t }
+}
+
+fn draw(w: W) {
+    game::rect(FX, FY, FW, FH, "#0a0f1e", "#31506b", 3.0px);
+    game::rect(FLAGX * 1.0px, FLAGY * 1.0px, FLAGW * 1.0px, FLAGH * 1.0px, "#e03e1a", "#ff8c42", 2.0px);
+    game::rect(w.px, w.py, PLAYER_W, PLAYER_H, "#2f7", "#4fa", 1.0px);
+}
+
+
+
+fn game_loop<W>(world: W, tick: (W, Input, [Ev]) -> W, draw: (W) -> ()) {
+    let w = world;
+    while !game::quitting() {
+        w = tick(w, game::input(), game::events());
+        draw(w);
+        game::yield_frame();
+    }
+}
+
+game_loop(init(), tick, draw);

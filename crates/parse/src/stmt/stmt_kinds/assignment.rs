@@ -31,7 +31,7 @@ op!(
         MinusEqual => MinusEqual,
         StarEqual => StarEqual,
         SlashEqual => SlashEqual,
-        CaretEqual => XorEqual,
+        CircledPlusEqual => XorEqual,
         PipeEqual => OrEqual,
         AmpersandEqual => AndEqual,
         DoubleHookEqual => NullCoalescenceEqual,

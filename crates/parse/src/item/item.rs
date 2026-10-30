@@ -1,4 +1,4 @@
-use crate::{IntoStmt, NodeId, StmtKind};
+use crate::{Ident, IntoStmt, NodeId, StmtKind, components::Poison};
 
 use super::*;
 use shared::{Located, Location};
@@ -36,8 +36,16 @@ declare_item_kinds!(
         Impl,
         Const,
         Use,
+        Tests,
+        Poison,
     }
 );
+
+/// A `#[name]` marker on an item. Only `#[test]` and `#[tests]` are recognized today.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Attribute {
+    pub name: Ident,
+}
 
 /// A wrapper around an [ItemKind], containing additional information discovered while parsing.
 /// Visibility (`pub`) lives here uniformly, not duplicated across the inner kinds.
@@ -47,6 +55,7 @@ pub struct Item {
     id: NodeId,
     location: Location,
     public: bool,
+    attrs: Vec<Attribute>,
 }
 
 impl Item {
@@ -57,7 +66,20 @@ impl Item {
             id: NodeId::new(),
             location,
             public,
+            attrs: vec![],
         }
+    }
+
+    /// Attach outer `#[...]` attributes, replacing any previously set.
+    pub fn with_attrs(mut self, attrs: Vec<Attribute>) -> Self {
+        self.attrs = attrs;
+        self
+    }
+
+    /// Mark this item `pub`.
+    pub fn with_public(mut self) -> Self {
+        self.public = true;
+        self
     }
 
     /// Get a reference to the inner ItemKind.
@@ -73,6 +95,24 @@ impl Item {
     /// Whether this item is `pub`.
     pub fn public(&self) -> bool {
         self.public
+    }
+
+    /// Outer `#[...]` attributes on this item, in source order.
+    pub fn attrs(&self) -> &[Attribute] {
+        &self.attrs
+    }
+
+    /// Whether this item is marked `#[test]`.
+    pub fn is_test(&self) -> bool {
+        self.attrs.iter().any(|a| a.name.lexeme == "test")
+    }
+
+    /// The function this item declares, if it is one.
+    pub fn as_function(&self) -> Option<&Function> {
+        match self.kind() {
+            ItemKind::Function(f) => Some(f),
+            _ => None,
+        }
     }
 }
 
@@ -92,6 +132,9 @@ impl IntoStmt for Item {}
 #[mutants::skip]
 impl std::fmt::Display for Item {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for attr in &self.attrs {
+            write!(f, "#[{}] ", attr.name)?;
+        }
         if self.public {
             f.write_str("pub ")?;
         }
@@ -112,6 +155,6 @@ pub trait IntoItem: Sized + Into<ItemKind> {
 
 impl PartialEq<Item> for Item {
     fn eq(&self, other: &Item) -> bool {
-        self.kind == other.kind && self.public == other.public
+        self.kind == other.kind && self.public == other.public && self.attrs == other.attrs
     }
 }

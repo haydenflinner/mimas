@@ -32,7 +32,8 @@ declare_stmt_kinds!(
         Module,
         Assignment,
         Expr,
-        Item
+        Item,
+        Unit
     }
 );
 

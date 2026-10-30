@@ -3,8 +3,9 @@ use crate::{
     components::*,
     errors::{
         AssignToConst, AssignToLoopVar, AssignToStringIndex, BareNullBinding, ExtraTupleMembers,
-        FieldNotFound, InvalidAssignTarget, InvalidPattern, InvalidUseTarget, MissingTupleMembers,
-        MultipleConstDeclarations, NonConstantValue, NotFound, SelfOutOfContext,
+        FieldNotFound, InvalidAssignTarget, InvalidPattern, InvalidUseTarget, IteratingHere,
+        MissingTupleMembers, MultipleConstDeclarations, MutateWhileIterating, NonConstantValue,
+        NotFound, SelfOutOfContext,
     },
     traits::*,
 };
@@ -13,12 +14,13 @@ use indexmap::{IndexMap, IndexSet};
 use miette::NamedSource;
 use parse::{
     ExprKind,
-    components::{Binding, Pat, PatKind},
+    components::{Annotation, Binding, Pat, PatKind},
     *,
 };
-use shared::{FileId, IdVec, Literal as RawLiteral, Located, Location, PactId};
+use shared::{FileId, IdVec, Literal as RawLiteral, Located, Location, PactId, ParamId};
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
+    rc::Rc,
     sync::Arc,
 };
 
@@ -27,24 +29,97 @@ pub struct Solver {
     pub(crate) adts: IdVec<AdtId, Adt>,
     pub(crate) pacts: IdVec<PactId, shared::Pact>,
     pub(crate) pact_impls: HashSet<(PactId, AdtId)>,
-    pub(crate) pact_default_decs: HashMap<(PactId, String), DecId>,
+    pub(crate) pact_members: HashMap<(PactId, String), DecId>,
     pub(crate) pact_self: Option<PactId>,
     pub(crate) node_to_vid: IndexMap<NodeId, Vid>,
     pub(crate) node_decs: IndexMap<NodeId, DecId>,
+    pub(crate) op_decs: IndexMap<NodeId, crate::OpDispatch>,
+    pub(crate) pact_ops: IndexMap<NodeId, crate::PactOp>,
     pub(crate) closure_captures: IndexMap<NodeId, IndexSet<DecId>>,
     pub(crate) expected_closures: IndexMap<NodeId, Vec<FnParam>>,
     vids: IdVec<Vid, ()>,
     subs: IdVec<Vid, Option<Ty>>,
     node_visits: HashSet<NodeId>,
     library: HashMap<String, AdtId>,
-    sources: HashMap<FileId, NamedSource<Arc<str>>>,
+    pub(crate) root_modules: IndexMap<String, AdtId>,
+    pub(crate) module_items: IndexMap<AdtId, IndexMap<String, DecId>>,
+    pub(crate) sources: HashMap<FileId, NamedSource<Arc<str>>>,
 
     pub(crate) dec_to_native: HashMap<DecId, NativeBinding>,
+
+    // dataframe schemas (see frames.rs): a frame's Ty stays the nominal `DataFrame` while
+    // these carry its column map -- keyed by producing expr and by `let` binding.
+    pub(crate) frame_schemas: HashMap<NodeId, Rc<crate::frames::FrameSchema>>,
+    pub(crate) frame_decs: HashMap<DecId, Rc<crate::frames::FrameSchema>>,
+    /// `__q_group`/`group_by` results: `(input schema, key columns)` by expr/binding.
+    pub(crate) group_schemas: HashMap<NodeId, crate::frames::GroupInfo>,
+    pub(crate) group_decs: HashMap<DecId, crate::frames::GroupInfo>,
+    /// Unit dims of `25kW`-style literals, merged from every solved ast (`NodeId`s are
+    /// globally unique, so one map is collision-free).
+    pub(crate) ast_quantities: HashMap<NodeId, shared::units::Dim>,
+    /// The unit text as written for each literal in `ast_quantities`, so diagnostics can
+    /// name `ft` rather than collapsing it to `length (m)`.
+    pub(crate) ast_quantity_units: HashMap<NodeId, String>,
+    /// Every expression's computed dimension, recorded by the dims pass —
+    /// `b.x + 2.0px` is `px` here while its `node_tys` stays `Float`.
+    /// Surfaces on [`Resolutions::node_dims`](crate::Resolutions).
+    pub(crate) node_dims: IndexMap<NodeId, shared::units::Dim>,
+    /// The dimension each expr's context demanded (a call arg's declared param
+    /// dim) — an expr whose own dim is `Any` still knows the unit its slot wanted.
+    /// Surfaces on [`Resolutions::want_dims`](crate::Resolutions).
+    pub(crate) want_dims: IndexMap<NodeId, shared::units::Dim>,
+    /// `print`/`dbg`/`warn` call site → the dimension the pass computed for the printed
+    /// value — so the natives can render `25000 W` rather than a bare `25000`.
+    /// Keyed by call location, the same span the `Prints` fixture attributes.
+    /// Surfaces on [`Resolutions::print_dims`](crate::Resolutions).
+    pub(crate) print_dims: IndexMap<shared::Location, shared::units::Dim>,
+    /// Dimensions of api-adt fields (`Input.dt` is `s`): `(adt name, field name)`.
+    /// Populated by `install_user_adt` from `ApiVariantFields::Named` dims; the dims pass
+    /// consults it when a `.field` read isn't on a source-declared struct.
+    pub(crate) field_dims: HashMap<(String, String), shared::units::Dim>,
+    /// Declared unit of each source-struct member, through `?`/`[..]`:
+    /// `(struct name, field name)`. `next: index?` and `kids: [idx]` both
+    /// land as `INDEX`. Recorded by the dims pass; surfaces on
+    /// [`ResolvedAdt::member_dims`](crate::ResolvedAdt).
+    pub(crate) member_units: HashMap<(String, String), shared::units::Dim>,
+    /// Exprs that fulfill a `[T; n]` position with a length the compiler couldn't
+    /// prove -- emit wraps each in a runtime dim check (see `lens.rs`).
+    /// Surfaces on [`Resolutions::len_checks`](crate::Resolutions).
+    pub(crate) len_checks: IndexMap<NodeId, Vec<Option<usize>>>,
+    /// `S::default()` calls the solver blessed: call node → the struct's adt.
+    /// Emit lowers each to a `NewInstance` with every member set to its
+    /// type's default rather than a call.
+    pub(crate) default_ctors: IndexMap<NodeId, AdtId>,
+
+    /// Per-declaration read/write site counts, filled by the grades pass -- the `{0,1,ω}`
+    /// usage grades behind the lint suite. Surfaces on [`Resolutions::dec_uses`].
+    pub(crate) dec_uses: IndexMap<DecId, crate::grades::UseInfo>,
+    /// Inferred effect sets for each `fn` dec (`#[effects]`-declared natives seed the
+    /// fixpoint; user fns are the union of their callees). `Resolutions::fn_effects`.
+    pub(crate) fn_effects: IndexMap<DecId, shared::Fx>,
+    /// Effect set of each file's top-level statements, keyed by the ast's name. Script code
+    /// isn't a dec, so page-eval effects surface here for a host to check against its caps.
+    pub(crate) script_effects: IndexMap<String, shared::Fx>,
+    /// Per top-level statement: `(file name, site, inferred fx)` in source order. A host
+    /// that splices `use`-includes into one file maps each site back onto its include's
+    /// byte range -- how a peer page's contribution is attributed (and gated) separately.
+    pub(crate) script_segments: Vec<(String, shared::Location, shared::Fx)>,
+    /// Non-fatal diagnostics (the lint suite). Solve succeeds; hosts decide how to show them.
+    /// Surfaces on `Loaded::warnings` and `Resolutions::warnings`.
+    pub(crate) warnings: Vec<miette::Report>,
 
     pub(crate) control_flow: ControlFlow,
     pub(crate) ribs: Ribs,
     pub(crate) loop_stack: Vec<LoopRun>,
     pub(crate) fn_stack: Vec<FnRun>,
+    pub(crate) non_value: Option<NodeId>,
+    /// Collections a `for` loop is iterating, pushed for the duration of each body's solve.
+    pub(crate) iter_guards: Vec<IterGuard>,
+
+    /// In-scope declared type params (`fn map<T, U>`, `impl Pair` re-entering `Pair<A, B>`),
+    /// innermost last. `Ty::from_annotation` resolves a bare `T` through these before ribs,
+    /// units, or builtins. Entries persist only for the duration of one item's solve.
+    pub(crate) type_params: Vec<HashMap<String, ParamId>>,
 }
 
 // Public impls
@@ -57,10 +132,12 @@ impl Solver {
             adts: IdVec::new(),
             pacts: IdVec::new(),
             pact_impls: HashSet::new(),
-            pact_default_decs: HashMap::new(),
+            pact_members: HashMap::new(),
             pact_self: None,
             node_to_vid: IndexMap::new(),
             node_decs: IndexMap::new(),
+            op_decs: IndexMap::new(),
+            pact_ops: IndexMap::new(),
             closure_captures: IndexMap::new(),
             expected_closures: IndexMap::new(),
             control_flow: ControlFlow::new(),
@@ -69,11 +146,34 @@ impl Solver {
             loop_stack: vec![],
             fn_stack: vec![],
             library: HashMap::new(),
+            root_modules: IndexMap::new(),
+            module_items: IndexMap::new(),
             sources: HashMap::new(),
             dec_to_native: HashMap::new(),
+            frame_schemas: HashMap::new(),
+            frame_decs: HashMap::new(),
+            group_schemas: HashMap::new(),
+            group_decs: HashMap::new(),
+            ast_quantities: HashMap::new(),
+            ast_quantity_units: HashMap::new(),
+            node_dims: IndexMap::new(),
+            want_dims: IndexMap::new(),
+            print_dims: IndexMap::new(),
+            field_dims: HashMap::new(),
+            member_units: HashMap::new(),
+            len_checks: IndexMap::new(),
+            default_ctors: IndexMap::new(),
+            dec_uses: IndexMap::new(),
+            fn_effects: IndexMap::new(),
+            script_effects: IndexMap::new(),
+            script_segments: Vec::new(),
+            warnings: Vec::new(),
+            non_value: None,
+            iter_guards: vec![],
+            type_params: vec![],
         };
         solver.ribs.push_import();
-        solver.ribs.push_block();
+        solver.ribs.push_script();
 
         // todo, this is a bit brittle
         for name in ["int", "float", "str", "bool", "array", "dict"] {
@@ -123,13 +223,42 @@ impl Solver {
         Ok(())
     }
 
+    /// Errors if `path` off `dec` names a place a `for` loop is iterating -- the write or
+    /// mutating call at `at` would change the collection mid-loop. Guards compare on the
+    /// *resolved* root dec plus the access path, so shadowed names and sibling fields don't
+    /// false-positive. Deliberately not an alias analysis (see `IterGuard`).
+    pub(crate) fn check_iter_guard(
+        &self,
+        dec: DecId,
+        path: &[GuardSeg],
+        at: Location,
+    ) -> Result<()> {
+        if let Some(guard) = self
+            .iter_guards
+            .iter()
+            .find(|g| g.dec == dec && g.path == *path)
+        {
+            Err(MutateWhileIterating {
+                src: self.src(at),
+                at: at.into(),
+                name: guard.name.clone(),
+                iterating: vec![IteratingHere {
+                    src: self.src(guard.iterated_at),
+                    at: guard.iterated_at.into(),
+                    name: guard.name.clone(),
+                }],
+            })?
+        }
+        Ok(())
+    }
+
     pub(crate) fn builtin_adt(&self, ty: &Ty) -> Option<AdtId> {
         let name = match ty {
             Ty::Int => "int",
             Ty::Float => "float",
             Ty::Str => "str",
             Ty::Bool => "bool",
-            Ty::Array(_) => "array",
+            Ty::Array(..) => "array",
             Ty::Dict(_) => "dict",
             _ => return None,
         };
@@ -142,6 +271,13 @@ impl Solver {
 
     pub fn solve_all<'a>(&mut self, asts: impl IntoIterator<Item = &'a Ast>) -> Result<()> {
         let asts: Vec<_> = asts.into_iter().collect();
+        for ast in &asts {
+            self.ast_quantities.extend(ast.quantities());
+            self.ast_quantity_units.extend(
+                ast.quantity_units()
+                    .map(|(id, unit)| (id, unit.to_string())),
+            );
+        }
         let module_names: Vec<Option<String>> = asts
             .iter()
             .map(|ast| ast.module_name())
@@ -154,6 +290,8 @@ impl Solver {
             let segments: Vec<String> = name.split("::").map(str::to_string).collect();
             let id = self.ensure_module_path(&segments);
             module_adts.insert(name.clone(), id);
+            self.root_modules
+                .insert(segments[0].clone(), self.library[&segments[0]]);
         }
 
         // each ast's module rib accumulates across phases -- saved between visits
@@ -171,11 +309,11 @@ impl Solver {
                         .unwrap_or_else(|| Rib::new(RibKind::Module(module_adts[name])));
                     solver.ribs.push_rib(rib);
                     solver.ribs.push_import();
-                    solver.ribs.push_block();
+                    solver.ribs.push_script();
                 }
                 phase(solver, ast)?;
                 if let Some(name) = module {
-                    solver.ribs.pop_block();
+                    solver.ribs.pop_script();
                     solver.ribs.pop_import();
                     let rib = solver.ribs.pop_module();
                     solver.sync_module_adt(module_adts[name], &rib);
@@ -228,6 +366,10 @@ impl Solver {
         self.control_flow = ControlFlow::default();
         assert!(self.fn_stack.is_empty());
         assert!(self.loop_stack.is_empty());
+        // last, once every node has its type: do the units add up?
+        crate::dims::check(self, &asts)?;
+        // and, with decs resolved everywhere the walk reaches: the usage/effect grades
+        crate::grades::check(self, &asts)?;
         Ok(())
     }
 
@@ -308,6 +450,7 @@ impl Solver {
             match item.kind() {
                 ItemKind::Impl(i) => i.hoist(ctx),
                 ItemKind::Function(f) => f.hoist(ctx),
+                ItemKind::Tests(tests) => tests.hoist(ctx),
                 _ => Ok(()),
             }
         })
@@ -389,6 +532,39 @@ impl Solver {
             .count()
     }
 
+    /// `let`/`const` annotation enforcement: unify the binding's ty with the annotation's.
+    /// A unit annotation (`kg`, `usd/kWh`) is different from every other: it declares "a
+    /// quantity in this dimension" -- a check the dims pass owns -- while its number may
+    /// be an `int` (`5.5kg.to_int()` keeps the unit and is an `int`) as well as a `float`.
+    /// So for unit annotations the rhs solves first and any numeric result stands;
+    /// anything else gets the usual annotation mismatch.
+    fn fulfill_annotation(
+        &mut self,
+        ty: &mut Ty,
+        annotation: &Annotation,
+        right: &Expr,
+        at: Location,
+    ) -> Result<()> {
+        if Ty::is_unit_annotation(annotation, self) {
+            right.fulfill_ty(ty.clone(), self)?;
+            // `index` is the integer unit: an index that isn't an `int` can't index
+            // anything, so a float rhs gets the ordinary int mismatch
+            let integer_unit = matches!(annotation, Annotation::Ty(ident)
+                if shared::units::lookup(&ident.lexeme).is_some_and(|(d, _)| d == shared::units::INDEX));
+            return match ty.clone().normalized(self) {
+                Ty::Int => Ok(()),
+                _ if integer_unit => right.fulfill_ty(Ty::Int, self),
+                // a numeric rhs stands (an int quantity is an `int` here); the dims
+                // pass owns the dimension check itself
+                Ty::Float => Ok(()),
+                // anything else fails the annotation the ordinary way, at the rhs
+                _ => right.fulfill_ty(Ty::Float, self),
+            };
+        }
+        ty.fulfill_ty(&mut Ty::from_annotation(annotation.clone(), self)?, self)
+            .map_err(|e| e.into_type_mismatch(self, at))
+    }
+
     /// Solve a single `const` item's rhs and, if reducible, populate `DeclKind::Constant`'s
     /// payload with the literal. No-op for non-const items. Shared by the top-level fixpoint,
     /// impl associated consts, and block-scoped consts during body visits.
@@ -403,8 +579,7 @@ impl Solver {
         let mut ty = Ty::Vid(vid);
 
         if let Some(annotation) = &annotation {
-            ty.fulfill_ty(&mut Ty::from_annotation(annotation.clone(), self)?, self)
-                .map_err(|e| e.into_type_mismatch(self, left.location()))?;
+            self.fulfill_annotation(&mut ty, annotation, right, left.location())?;
         };
 
         // solve rhs first so inner idents land in `node_decs` before reduce_const_expr uses them
@@ -425,21 +600,102 @@ impl Solver {
             })?;
         }
 
-        if let (Some(lit), Some(dec)) = (
-            self.reduce_const_expr(right)?,
-            self.node_decs.get(&id).copied(),
-        ) && let DecKind::Constant(slot) = &mut self.decs[dec].kind
-        {
-            *slot = Some(lit);
+        // a destructuring const's leaf vids unify with the rhs tuple's element types
+        if left.as_ident().is_none() {
+            let rhs_ty = ty.clone().normalized(self);
+            self.bind_const_pat(left, rhs_ty)?;
+        }
+
+        if let Some(lit) = self.reduce_const_expr(right)? {
+            if left.as_ident().is_some() {
+                if let Some(dec) = self.node_decs.get(&id).copied()
+                    && let DecKind::Constant(slot) = &mut self.decs[dec].kind
+                {
+                    *slot = Some(lit);
+                }
+            } else {
+                self.fill_const_pat(left, &lit)?;
+            }
         }
 
         Ok(ty)
     }
 
+    /// The type half of a destructuring `const`: each leaf's vid unifies with the matching
+    /// element of the rhs's tuple type. Only idents and tuples of them are irrefutable, same
+    /// as `let` without an `else` -- anything else is an `InvalidPattern`.
+    fn bind_const_pat(&mut self, pat: &Pat, ty: Ty) -> Result<()> {
+        let ty = ty.normalized(self);
+        match (pat.kind(), &ty) {
+            (PatKind::Ident(_), _) => {
+                let Some(&dec) = self.node_decs.get(&pat.id()) else {
+                    return Ok(());
+                };
+                let mut leaf = Ty::Vid(self.decs[dec].vid);
+                leaf.fulfill_ty(&mut ty.clone(), self)
+                    .map_err(|e| e.into_type_mismatch(self, pat.location()))
+            }
+            (PatKind::Tuple(pats), Ty::Tuple(tys)) => match pats.len().cmp(&tys.len()) {
+                std::cmp::Ordering::Less => Err(MissingTupleMembers {
+                    src: self.src(pat.location()),
+                    at: pat.location().into(),
+                    ctor: None,
+                })?,
+                std::cmp::Ordering::Greater => Err(ExtraTupleMembers {
+                    src: self.src(pat.location()),
+                    at: pat.location().into(),
+                    ctor: None,
+                })?,
+                std::cmp::Ordering::Equal => pats
+                    .iter()
+                    .zip(tys.iter())
+                    .try_for_each(|(p, t)| self.bind_const_pat(p, t.clone())),
+            },
+            (PatKind::Poison(poison), _) => poison.escaped(),
+            _ => Err(InvalidPattern {
+                src: self.src(pat.location()),
+                at: pat.location().into(),
+                pattern: pat.to_string(),
+                ty: ty.to_string(),
+            })?,
+        }
+    }
+
+    /// The value half of a destructuring `const`: distributes a reduced rhs literal into the
+    /// leaf decs' `Constant` slots. Shape mismatches can't reach here -- `bind_const_pat`
+    /// rejects them first.
+    fn fill_const_pat(&mut self, pat: &Pat, lit: &Literal) -> Result<()> {
+        match (pat.kind(), lit) {
+            (PatKind::Ident(_), _) => {
+                if let Some(&dec) = self.node_decs.get(&pat.id())
+                    && let DecKind::Constant(slot) = &mut self.decs[dec].kind
+                {
+                    *slot = Some(lit.clone());
+                }
+                Ok(())
+            }
+            (PatKind::Tuple(pats), Literal::Tuple(exprs) | Literal::Array(exprs)) => {
+                for (pat, expr) in pats.iter().zip(exprs) {
+                    let Some(sub) = self.reduce_const_expr(expr)? else {
+                        continue;
+                    };
+                    self.fill_const_pat(pat, &sub)?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
     fn process_use(&mut self, us: &Use, location: Location) -> Result<()> {
+        // `use "page";` is the host's business (it splices that script in first)
+        if matches!(us, Use::Host(_)) {
+            return Ok(());
+        }
         let walk_segments: Vec<&Ident> = match us {
             Use::Singular(path, item) => path.iter().chain(std::iter::once(item)).collect(),
             Use::Multi(path, _) | Use::All(path) => path.iter().collect(),
+            Use::Host(_) => unreachable!("handled above"),
         };
 
         let first = *walk_segments.first().unwrap();
@@ -449,7 +705,7 @@ impl Solver {
                 .library
                 .get(&first.lexeme)
                 .cloned()
-                .map(Ty::Adt)
+                .map(Ty::adt)
                 .ok_or_else(|| NotFound {
                     src: self.src(first.location),
                     at: first.location.into(),
@@ -458,6 +714,7 @@ impl Solver {
             dec: None,
             constant: false,
         };
+        self.note(first, target.ty.clone(), None);
 
         for ident in walk_segments.iter().skip(1) {
             let Some(adt) = target.ty.as_adt().copied() else {
@@ -467,9 +724,11 @@ impl Solver {
                 })?
             };
             target = self.module_field(adt, ident)?;
+            self.note(ident, target.ty.clone(), target.dec);
         }
 
         let imports: Vec<ImportBinding> = match us {
+            Use::Host(_) => unreachable!("handled above"),
             Use::Singular(_, _) => vec![target],
             Use::Multi(_, items) => {
                 let Some(adt) = target.ty.as_adt().copied() else {
@@ -480,7 +739,11 @@ impl Solver {
                 };
                 items
                     .iter()
-                    .map(|i| self.module_field(adt, i))
+                    .map(|i| {
+                        let binding = self.module_field(adt, i)?;
+                        self.note(i, binding.ty.clone(), binding.dec);
+                        Ok(binding)
+                    })
                     .collect::<Result<Vec<_>>>()?
             }
             Use::All(_) => {
@@ -540,9 +803,20 @@ impl Solver {
             } else {
                 Vis::Private
             };
-            let dec = self.dec_id(left, Ty::Vid(vid), DecKind::Constant(None), vis);
-            self.node_decs.insert(item.id(), dec);
-            self.ribs.current_mut().insert(left.clone(), dec);
+            if let Some(ident) = left.as_ident() {
+                let dec = self.dec_id(ident, Ty::Vid(vid), DecKind::Constant(None), vis);
+                self.node_decs.insert(item.id(), dec);
+                self.ribs.current_mut().insert(ident.clone(), dec);
+                continue;
+            }
+            // destructuring const -- one Constant dec per bound name, keyed on the leaf pat
+            for leaf in left.bound_leaves() {
+                let ident = leaf.as_ident().expect("bound_leaves only yields idents");
+                let leaf_ty = Ty::Vid(self.vid());
+                let dec = self.dec_id(ident, leaf_ty, DecKind::Constant(None), vis);
+                self.node_decs.insert(leaf.id(), dec);
+                self.ribs.current_mut().insert(ident.clone(), dec);
+            }
         }
     }
 
@@ -626,17 +900,32 @@ impl Solver {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn declare_native_fn(
         &mut self,
         name: String,
         params: Vec<Option<Ty>>,
+        param_dims: Vec<Option<shared::units::Dim>>,
         return_ty: Option<Ty>,
+        return_dim: Option<shared::units::Dim>,
         native_id: NativeId,
+        validate: Option<api::LitValidator>,
+        src: Option<api::NativeSrc>,
+        doc: String,
+        effects: Option<shared::Fx>,
+        consumes: Vec<bool>,
+        must_use: bool,
     ) -> DecId {
         let sig = NativeFnSig {
             params,
+            param_dims,
             return_ty,
+            return_dim,
             recv: None,
+            effects,
+            consumes,
+            consumes_recv: false,
+            must_use,
         };
         // first instantiation fills the dec's vid, later ident resolutions detect that this is
         // a native and re-instantiate so each call gets its own type vars.
@@ -647,12 +936,25 @@ impl Solver {
         let dec_id = self.dec_id(
             &ident,
             initial,
-            DecKind::Item { defaults: vec![] },
+            DecKind::Item {
+                defaults: vec![],
+                wheres: vec![],
+            },
             Vis::Public,
         );
         self.ribs.module_mut().insert(ident, dec_id);
-        self.dec_to_native
-            .insert(dec_id, NativeBinding { id: native_id, sig });
+        self.dec_to_native.insert(
+            dec_id,
+            NativeBinding {
+                id: native_id,
+                sig,
+                takes_self: false,
+                mutates_recv: false,
+                validate,
+                src,
+                doc,
+            },
+        );
         dec_id
     }
 
@@ -699,30 +1001,54 @@ impl Solver {
     /// pollute the shared signature. A pact header holds vids minted once at hoist (notably the
     /// `self` slot, left unbound); without freshening, the first `impl Pact for A` binds those
     /// vids globally and a later `impl Pact for B` would unify against the stale binding.
-    pub(crate) fn instantiate_pact_fn(&mut self, header: &FnHeader) -> Ty {
+    ///
+    /// The header's `Self` becomes `self_ty` -- the impl target when checking or grafting an impl,
+    /// the bound when calling through one, or `Self` itself inside a default body.
+    pub(crate) fn instantiate_pact_fn(&mut self, header: &FnHeader, self_ty: &Ty) -> Ty {
         let mut memo: HashMap<Vid, Vid> = HashMap::new();
-        self.fresh_vids(&Ty::Fn(header.clone()), &mut memo)
+        self.fresh_vids(&Ty::Fn(header.clone()), self_ty, &mut memo)
     }
 
-    /// Normalize `t`, then replace any still-unbound vid with a fresh memoized one. Bound vids
-    /// resolve to their concrete types and stay put; only the open slots get fresh handles.
-    fn fresh_vids(&mut self, t: &Ty, memo: &mut HashMap<Vid, Vid>) -> Ty {
+    /// Normalize `t`, then replace any still-unbound vid with a fresh memoized one and any `Self`
+    /// with `self_ty`. Bound vids resolve to their concrete types and stay put; only the open
+    /// slots get fresh handles.
+    fn fresh_vids(&mut self, t: &Ty, self_ty: &Ty, memo: &mut HashMap<Vid, Vid>) -> Ty {
         match t.clone().normalized(self) {
             Ty::Vid(v) => Ty::Vid(*memo.entry(v).or_insert_with(|| self.vid())),
-            Ty::Array(inner) => Ty::Array(Box::new(self.fresh_vids(&inner, memo))),
-            Ty::Dict(inner) => Ty::Dict(Box::new(self.fresh_vids(&inner, memo))),
-            Ty::Option(inner) => Ty::Option(Box::new(self.fresh_vids(&inner, memo))),
-            Ty::Result(inner) => Ty::Result(Box::new(self.fresh_vids(&inner, memo))),
-            Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| self.fresh_vids(t, memo)).collect()),
+            Ty::Skolem(_) => self_ty.clone(),
+            Ty::Array(inner, len) => {
+                Ty::Array(Box::new(self.fresh_vids(&inner, self_ty, memo)), len)
+            }
+            Ty::Dict(inner) => Ty::Dict(Box::new(self.fresh_vids(&inner, self_ty, memo))),
+            Ty::Option(inner) => Ty::Option(Box::new(self.fresh_vids(&inner, self_ty, memo))),
+            Ty::Result(inner) => Ty::Result(Box::new(self.fresh_vids(&inner, self_ty, memo))),
+            Ty::Tuple(ts) => Ty::Tuple(
+                ts.iter()
+                    .map(|t| self.fresh_vids(t, self_ty, memo))
+                    .collect(),
+            ),
+            Ty::Adt(aid, args) => Ty::Adt(
+                aid,
+                args.iter()
+                    .map(|a| self.fresh_vids(a, self_ty, memo))
+                    .collect(),
+            ),
+            Ty::Identity(aid, args) => Ty::Identity(
+                aid,
+                args.iter()
+                    .map(|a| self.fresh_vids(a, self_ty, memo))
+                    .collect(),
+            ),
             Ty::Fn(h) => {
                 let parameters = h
                     .parameters
                     .iter()
                     .map(|p| {
-                        FnParam::new(p.name.clone(), self.fresh_vids(&p.ty, memo), p.has_default)
+                        let ty = self.fresh_vids(&p.ty, self_ty, memo);
+                        FnParam::new(p.name.clone(), ty, p.has_default)
                     })
                     .collect();
-                let return_ty = self.fresh_vids(&h.return_ty, memo);
+                let return_ty = self.fresh_vids(&h.return_ty, self_ty, memo);
                 Ty::Fn(FnHeader::new(parameters, return_ty, h.is_method))
             }
             other => other,
@@ -739,7 +1065,7 @@ impl Solver {
     pub(crate) fn substitute_anons(&mut self, t: &Ty, memo: &mut HashMap<u32, Vid>) -> Ty {
         match t {
             Ty::Anon(n) => Ty::Vid(*memo.entry(*n).or_insert_with(|| self.vid())),
-            Ty::Array(v) => Ty::Array(Box::new(self.substitute_anons(v, memo))),
+            Ty::Array(v, len) => Ty::Array(Box::new(self.substitute_anons(v, memo)), *len),
             Ty::Dict(v) => Ty::Dict(Box::new(self.substitute_anons(v, memo))),
             Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| self.substitute_anons(t, memo)).collect()),
             Ty::Option(inner) => Ty::Option(Box::new(self.substitute_anons(inner, memo))),
@@ -758,6 +1084,18 @@ impl Solver {
                 self.substitute_anons(&h.return_ty, memo),
                 h.is_method,
             )),
+            Ty::Adt(aid, args) => Ty::Adt(
+                *aid,
+                args.iter()
+                    .map(|a| self.substitute_anons(a, memo))
+                    .collect(),
+            ),
+            Ty::Identity(aid, args) => Ty::Identity(
+                *aid,
+                args.iter()
+                    .map(|a| self.substitute_anons(a, memo))
+                    .collect(),
+            ),
             Ty::Unit
             | Ty::Never
             | Ty::Null
@@ -766,9 +1104,9 @@ impl Solver {
             | Ty::Float
             | Ty::Str
             | Ty::Vid(_)
-            | Ty::Adt(_)
+            | Ty::Param(_)
             | Ty::Pacts(_)
-            | Ty::Identity(_) => t.clone(),
+            | Ty::Skolem(_) => t.clone(),
         }
     }
 
@@ -795,11 +1133,11 @@ impl Solver {
                 let id = self.push_adt(adt);
                 if let Some(parent_adt) = &parent {
                     let seg_ident = Ident::synthetic(segment.clone());
-                    let dec = self.dec_id(&seg_ident, Ty::Adt(id), DecKind::Adt(id), Vis::Public);
+                    let dec = self.dec_id(&seg_ident, Ty::adt(id), DecKind::Adt(id), Vis::Public);
                     self.adts[parent_adt].as_struct_mut().insert(
                         segment.clone(),
                         Field {
-                            ty: Ty::Adt(id),
+                            ty: Ty::adt(id),
                             constant: true,
                             declaration_location: location,
                             dec,
@@ -825,6 +1163,14 @@ impl Solver {
         let mut variants = IndexMap::new();
         for v in &api_adt.variants {
             let variant = self.build_variant(&v.fields);
+            if let ApiVariantFields::Named(named) = &v.fields {
+                for (name, _ty, dim) in named {
+                    if let Some(dim) = dim {
+                        self.field_dims
+                            .insert((api_adt.name.clone(), name.clone()), *dim);
+                    }
+                }
+            }
             let key = match api_adt.kind {
                 ApiAdtKind::Enum => v.name.clone(),
                 ApiAdtKind::Struct => Adt::STRUCT_VARIANT_NAME.to_string(),
@@ -833,12 +1179,19 @@ impl Solver {
         }
         let umbrella = Adt {
             name: api_adt.name.clone(),
+            // host/native adts never declare type params; generic signatures live on the
+            // host side as `Ty::Anon` slots instead
+            type_params: vec![],
             variants,
             impls: HashMap::new(),
             native_overloads: HashMap::new(),
             flags: match api_adt.kind {
                 ApiAdtKind::Enum => AdtFlags::IS_ENUM,
                 ApiAdtKind::Struct => AdtFlags::empty(),
+            } | if api_adt.op_overloads {
+                AdtFlags::HAS_OPS
+            } else {
+                AdtFlags::empty()
             },
         };
         let pushed = self.push_adt(umbrella);
@@ -857,7 +1210,7 @@ impl Solver {
                 let variant_ident = Ident::synthetic(qualified);
                 let dec = self.dec_id(
                     &variant_ident,
-                    Ty::Adt(api_adt.adt_id),
+                    Ty::adt(api_adt.adt_id),
                     DecKind::Variant {
                         parent: api_adt.adt_id,
                         layout: v.layout_id,
@@ -872,7 +1225,7 @@ impl Solver {
 
         if api_adt.module.is_empty() {
             let ident = Ident::synthetic(api_adt.name.clone());
-            let ty = Ty::Adt(api_adt.adt_id);
+            let ty = Ty::adt(api_adt.adt_id);
             let dec_id = self.dec_id(&ident, ty, DecKind::Adt(api_adt.adt_id), Vis::Public);
             self.ribs.module_mut().insert(ident, dec_id);
             self.library.insert(api_adt.name.clone(), api_adt.adt_id);
@@ -891,7 +1244,7 @@ impl Solver {
             }),
             ApiVariantFields::Named(named) => {
                 let mut fields_map = IndexMap::new();
-                for (name, ty) in named {
+                for (name, ty, _dim) in named {
                     let ident = Ident::synthetic(name.clone());
                     let dec = self.dec_id(&ident, ty.clone(), DecKind::Local, Vis::Public);
                     fields_map.insert(
@@ -919,14 +1272,14 @@ impl Solver {
             let ident = Ident::synthetic(adt.name.clone());
             let dec = self.dec_id(
                 &ident,
-                Ty::Adt(adt.adt_id),
+                Ty::adt(adt.adt_id),
                 DecKind::Adt(adt.adt_id),
                 Vis::Public,
             );
             self.adts[leaf].as_struct_mut().insert(
                 adt.name.clone(),
                 Field {
-                    ty: Ty::Adt(adt.adt_id),
+                    ty: Ty::adt(adt.adt_id),
                     constant: true,
                     declaration_location: Default::default(),
                     dec,
@@ -940,8 +1293,16 @@ impl Solver {
                     self.declare_native_fn(
                         f.name.clone(),
                         f.parameters.clone(),
+                        f.param_dims.clone(),
                         f.return_ty.clone(),
+                        f.return_dim,
                         id,
+                        f.validate,
+                        f.src,
+                        f.doc.clone(),
+                        f.effects,
+                        f.consumes.clone(),
+                        f.must_use,
                     );
                 }
                 // module-nested native fn
@@ -949,18 +1310,38 @@ impl Solver {
                     let leaf = self.ensure_module_path(&f.module);
                     let sig = NativeFnSig {
                         params: f.parameters.clone(),
+                        param_dims: f.param_dims.clone(),
                         return_ty: f.return_ty.clone(),
+                        return_dim: f.return_dim,
                         recv: None,
+                        effects: f.effects,
+                        consumes: f.consumes.clone(),
+                        consumes_recv: false,
+                        must_use: f.must_use,
                     };
                     let ident = Ident::synthetic(f.name.clone());
                     let ty = self.instantiate_native(&sig, None).expect("no recv");
                     let dec_id = self.dec_id(
                         &ident,
                         ty.clone(),
-                        DecKind::Item { defaults: vec![] },
+                        DecKind::Item {
+                            defaults: vec![],
+                            wheres: vec![],
+                        },
                         Vis::Public,
                     );
-                    self.dec_to_native.insert(dec_id, NativeBinding { id, sig });
+                    self.dec_to_native.insert(
+                        dec_id,
+                        NativeBinding {
+                            id,
+                            sig,
+                            takes_self: false,
+                            mutates_recv: false,
+                            validate: f.validate,
+                            src: f.src,
+                            doc: f.doc.clone(),
+                        },
+                    );
                     self.adts[leaf].as_struct_mut().insert(
                         f.name.clone(),
                         Field {
@@ -974,7 +1355,7 @@ impl Solver {
                 // native method or associated fn on a built-in
                 ApiEntry::Method(m) => {
                     let adt = match &m.recv_ty {
-                        Ty::Adt(id) => *id,
+                        Ty::Adt(id, _) => *id,
                         other => self.builtin_adt(other).unwrap_or_else(|| {
                             panic!("native method receiver must be a builtin Ty or registered adt; got {other:?}")
                         }),
@@ -984,18 +1365,38 @@ impl Solver {
                     // primitives like `Ty::Int` have nothing to unify, but it's harmless to pass.
                     let sig = NativeFnSig {
                         params: m.parameters.clone(),
+                        param_dims: m.param_dims.clone(),
                         return_ty: m.return_ty.clone(),
+                        return_dim: m.return_dim,
                         recv: Some(m.recv_ty.clone()),
+                        effects: m.effects,
+                        consumes: m.consumes.clone(),
+                        consumes_recv: m.consumes_recv,
+                        must_use: m.must_use,
                     };
                     let ident = Ident::synthetic(m.name.clone());
                     let ty = self.instantiate_native(&sig, None).expect("no recv check");
                     let dec_id = self.dec_id(
                         &ident,
                         ty.clone(),
-                        DecKind::Item { defaults: vec![] },
+                        DecKind::Item {
+                            defaults: vec![],
+                            wheres: vec![],
+                        },
                         Vis::Public,
                     );
-                    self.dec_to_native.insert(dec_id, NativeBinding { id, sig });
+                    self.dec_to_native.insert(
+                        dec_id,
+                        NativeBinding {
+                            id,
+                            sig,
+                            takes_self: m.takes_self,
+                            mutates_recv: m.mutates_recv,
+                            validate: m.validate,
+                            src: m.src,
+                            doc: m.doc.clone(),
+                        },
+                    );
                     let field = Field {
                         ty,
                         constant: true,
@@ -1035,7 +1436,7 @@ impl Solver {
                     // same slot a lang `impl` const hoists into
                     if let Some(recv) = &c.recv_ty {
                         let adt = match recv {
-                            Ty::Adt(id) => *id,
+                            Ty::Adt(id, _) => *id,
                             other => self.builtin_adt(other).unwrap_or_else(|| {
                                 panic!("assoc constant receiver must be a builtin Ty or registered adt; got {other:?}")
                             }),
@@ -1185,14 +1586,160 @@ impl Solver {
             }
         };
         let module = self.ribs.current_module();
-        self.decs.push(Dec {
+        let dec = self.decs.push(Dec {
             name: ident.lexeme.clone(),
             location: ident.location,
             kind,
             vid,
             vis,
             module,
-        })
+        });
+        self.note(ident, Ty::Vid(vid), Some(dec));
+        dec
+    }
+}
+
+// generic type params
+impl Solver {
+    /// The `ParamId` for one declared param ident (`T` in `fn map<T>`). Derived from the
+    /// ident's `NodeId` so hoisting and body-solving the same decl always agree on it; also
+    /// registers the display name so `Ty::Param` renders as `T`, not `<param>`.
+    pub(crate) fn param_id_of(ident: &Ident) -> ParamId {
+        let pid = ParamId::from(ident.id.index() as u32);
+        shared::name_param(pid.index(), &ident.lexeme);
+        pid
+    }
+
+    /// Push a type-parameter scope parsed off a generic item (`fn map<T, U>`). Each `ParamId`
+    /// is derived from the param ident's `NodeId`, so hoisting and body-solving the same
+    /// decl resolve `T` to the *same* id -- that's what lets a signature written once carry
+    /// rigid params through both phases.
+    pub(crate) fn push_type_params(&mut self, params: &[Ident]) {
+        let scope: HashMap<String, ParamId> = params
+            .iter()
+            .map(|i| (i.lexeme.clone(), Self::param_id_of(i)))
+            .collect();
+        self.type_params.push(scope);
+    }
+
+    /// Re-enter the parameter scope of an already-declared adt -- `impl List` sees `List<T>`'s
+    /// `T` with the same `ParamId` the enum's stored member types use.
+    pub(crate) fn push_adt_params(&mut self, adt: AdtId) {
+        let scope: HashMap<String, ParamId> = self.adts[adt].type_params.iter().cloned().collect();
+        self.type_params.push(scope);
+    }
+
+    pub(crate) fn pop_type_params(&mut self) {
+        self.type_params.pop();
+    }
+
+    /// Is `ident` one of the in-scope declared type params (`T` in `fn map<T>`)? Innermost
+    /// scope wins, so a fn param shadows an impl's adt param of the same name.
+    pub(crate) fn type_param(&self, ident: &Ident) -> Option<ParamId> {
+        self.type_params
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(&ident.lexeme))
+            .copied()
+    }
+
+    /// `Ty::Adt(aid, args)` with a fresh vid for every declared param -- what a ctor use
+    /// (`L::C`, `Pair { .. }`) starts from before unification pins the args down.
+    pub(crate) fn instantiated_adt(&mut self, aid: AdtId) -> Ty {
+        let arity = self.adts[aid].type_params.len();
+        let args = (0..arity).map(|_| Ty::Vid(self.vid())).collect();
+        Ty::Adt(aid, args)
+    }
+
+    /// A type stored inside a generic definition, read back at a use site: every `Ty::Param`
+    /// swapped for a fresh vid (consistent within this one call -- `T` in two places still maps
+    /// to the same var). This is the HM instantiation step: `map<T, U>` used once gives
+    /// `fn([?t], (?t) -> ?u) -> [?u]` which call-site unification specializes freely.
+    pub(crate) fn instantiate_params(&mut self, t: &Ty) -> Ty {
+        if !t.contains_params() {
+            return t.clone();
+        }
+        let mut map = HashMap::new();
+        self.substitute_params(t, &mut map)
+    }
+
+    /// `stored` is a member/variant/impl signature declared inside (possibly generic) adt
+    /// `aid`, being read through a `Ty::Adt(aid, args)`/`Identity(aid, args)`. Rebinds each
+    /// declared param to the corresponding arg; params with no matching arg get fresh vids,
+    /// so `specialize` on a non-generic adt is a no-op.
+    pub(crate) fn specialize(&mut self, stored: &Ty, aid: AdtId, args: &[Ty]) -> Ty {
+        if !stored.contains_params() {
+            return stored.clone();
+        }
+        let mut map: HashMap<ParamId, Ty> = self.adts[aid]
+            .type_params
+            .iter()
+            .map(|(_, pid)| *pid)
+            .zip(args.iter().cloned())
+            .collect();
+        self.substitute_params(stored, &mut map)
+    }
+
+    /// Walk `t` swapping each `Ty::Param` for `map[pid]`; missing entries mint a fresh vid
+    /// lazily (and memoize, so one param always gets one var per call). Recurses through every
+    /// composite, including adt/identity type args.
+    pub(crate) fn substitute_params(&mut self, t: &Ty, map: &mut HashMap<ParamId, Ty>) -> Ty {
+        match t {
+            Ty::Param(pid) => match map.get(pid) {
+                Some(ty) => ty.clone(),
+                None => {
+                    let ty = Ty::Vid(self.vid());
+                    map.insert(*pid, ty.clone());
+                    ty
+                }
+            },
+            Ty::Array(v, len) => Ty::Array(Box::new(self.substitute_params(v, map)), *len),
+            Ty::Dict(v) => Ty::Dict(Box::new(self.substitute_params(v, map))),
+            Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| self.substitute_params(t, map)).collect()),
+            Ty::Option(inner) => Ty::Option(Box::new(self.substitute_params(inner, map))),
+            Ty::Result(inner) => Ty::Result(Box::new(self.substitute_params(inner, map))),
+            Ty::Adt(aid, args) => Ty::Adt(
+                *aid,
+                args.iter()
+                    .map(|a| self.substitute_params(a, map))
+                    .collect(),
+            ),
+            Ty::Identity(aid, args) => Ty::Identity(
+                *aid,
+                args.iter()
+                    .map(|a| self.substitute_params(a, map))
+                    .collect(),
+            ),
+            Ty::Fn(h) => {
+                let mut header = FnHeader::new(
+                    h.parameters
+                        .iter()
+                        .map(|p| {
+                            FnParam::new(
+                                p.name.clone(),
+                                self.substitute_params(&p.ty, map),
+                                p.has_default,
+                            )
+                        })
+                        .collect(),
+                    self.substitute_params(&h.return_ty, map),
+                    h.is_method,
+                );
+                header.is_ctor = h.is_ctor;
+                Ty::Fn(header)
+            }
+            Ty::Unit
+            | Ty::Never
+            | Ty::Null
+            | Ty::Bool
+            | Ty::Int
+            | Ty::Float
+            | Ty::Str
+            | Ty::Vid(_)
+            | Ty::Anon(_)
+            | Ty::Pacts(_)
+            | Ty::Skolem(_) => t.clone(),
+        }
     }
 }
 
@@ -1207,10 +1754,12 @@ impl Solver {
                 std::cmp::Ordering::Less => Err(MissingTupleMembers {
                     src: self.src(pat.location()),
                     at: pat.location().into(),
+                    ctor: None,
                 })?,
                 std::cmp::Ordering::Greater => Err(ExtraTupleMembers {
                     src: self.src(pat.location()),
                     at: pat.location().into(),
+                    ctor: None,
                 })?,
                 std::cmp::Ordering::Equal => idents
                     .iter()
@@ -1234,15 +1783,17 @@ impl Solver {
         let mut stack = vec![pat];
         while let Some(pat) = stack.pop() {
             match pat.kind() {
-                PatKind::Ident(ident) => {
+                PatKind::Ident(ident) if ident.lexeme != "_" => {
                     out.insert(ident.lexeme.clone());
                 }
+                PatKind::Ident(_) => {}
                 PatKind::Tuple(pats) | PatKind::TupleVariant(_, pats) | PatKind::Or(pats) => {
                     stack.extend(pats);
                 }
                 PatKind::Struct(_, fields) => stack.extend(fields.values()),
                 PatKind::NullBind(inner) => stack.push(inner),
                 PatKind::Variant(_) | PatKind::Literal(_) => {}
+                PatKind::Poison(poison) => poison.escaped(),
             }
         }
         out
@@ -1271,7 +1822,7 @@ impl Solver {
         };
 
         match pat.kind() {
-            PatKind::Ident(ident) if reuse => {
+            PatKind::Ident(ident) if reuse && ident.lexeme != "_" => {
                 // the or-pattern already checked every alternative binds the same names, so the
                 // first alternative's dec is guaranteed present in this arm's rib.
                 let dec = self
@@ -1282,6 +1833,7 @@ impl Solver {
                 unify(self, Ty::Vid(self.decs[dec].vid), ty, pat.location())
             }
             PatKind::Ident(ident) => self.declare(ident, pat.id(), ty).map(|_| ()),
+            PatKind::Poison(poison) => poison.escaped(),
             PatKind::Literal(lit) => unify(
                 self,
                 ty,
@@ -1350,12 +1902,14 @@ impl Solver {
                 let (adt, variant_name) = match path.kind() {
                     ExprKind::Ident(ident) => {
                         let ty = self.resolve_name(ident, ident.location())?;
-                        let Ty::Adt(adt) = ty else { Err(bad(&ty))? };
+                        let Some(adt) = ty.as_adt().copied() else {
+                            Err(bad(&ty))?
+                        };
                         (adt, None)
                     }
                     ExprKind::Access(Access::DoubleColon { left, right }) => {
-                        let adt = match left.query(self)? {
-                            Ty::Adt(adt) | Ty::Identity(adt) => adt,
+                        let adt = match self.resolve_path_head(left)? {
+                            Ty::Adt(adt, _) | Ty::Identity(adt, _) => adt,
                             lty => Err(bad(&lty))?,
                         };
                         // module::struct -- treat as the inner struct adt
@@ -1370,7 +1924,7 @@ impl Solver {
                                     at: right.location.into(),
                                     field_name: right.lexeme.clone(),
                                 })?;
-                            let Ty::Adt(inner) = field.ty else {
+                            let Some(inner) = field.ty.as_adt().copied() else {
                                 Err(bad(&field.ty))?
                             };
                             (inner, None)
@@ -1383,6 +1937,8 @@ impl Solver {
                                     name: right.lexeme.clone(),
                                 })?
                             }
+                            let dec = self.adts[adt].variants[&right.lexeme].dec();
+                            self.note(right, Ty::adt(adt), dec);
                             (adt, Some(right.lexeme.clone()))
                         }
                     }
@@ -1394,25 +1950,35 @@ impl Solver {
                     })?,
                 };
 
-                unify(self, ty, Ty::Adt(adt), pat.location())?;
+                // the pattern's own instantiation of the adt: unifying it against the scrutinee
+                // binds these fresh arg vids to the scrutinee's actual args (e.g. `int`), and
+                // `specialize` then plugs them into the variant's declared member types
+                let ctor_ty = self.instantiated_adt(adt);
+                unify(self, ty, ctor_ty.clone(), pat.location())?;
+                let ctor_args: Vec<Ty> = match &ctor_ty {
+                    Ty::Adt(_, args) => args.clone(),
+                    _ => vec![],
+                };
+                let ctor_ty = ctor_ty.normalized(self);
                 let variant_key = variant_name
                     .unwrap_or_else(|| self.adts[adt].variants.keys().next().unwrap().clone());
                 let variant = self.adts[adt]
                     .variants
                     .get(&variant_key)
-                    .ok_or_else(|| bad(&Ty::Adt(adt)))?
+                    .ok_or_else(|| bad(&ctor_ty))?
                     .clone();
                 // shadow the path with the layout adt id (per-variant for enums, the parent for
                 // non-enum structs) so IR can read it to emit IsInstance / GetField.
                 let layout = variant.layout().unwrap_or(adt);
-                self.shadow_expr_ty(path.id(), Ty::Adt(layout), path.location())?;
+                self.shadow_expr_ty(path.id(), Ty::adt(layout), path.location())?;
                 match (pat.kind(), variant) {
                     (PatKind::Variant(_), _) => Ok(()),
                     (PatKind::TupleVariant(_, sub_pats), Variant::Tuple(tv)) => {
                         if tv.members.len() != sub_pats.len() {
-                            Err(bad(&Ty::Adt(adt)))?
+                            Err(bad(&ctor_ty))?
                         }
                         for (sp, mty) in sub_pats.iter().zip(tv.members) {
+                            let mty = self.specialize(&mty, adt, &ctor_args);
                             self.solve_match_pat(sp, mty, reuse)?;
                         }
                         Ok(())
@@ -1427,11 +1993,12 @@ impl Solver {
                                         field_name: name.clone(),
                                     }
                                 })?;
+                            let fty = self.specialize(&fty, adt, &ctor_args);
                             self.solve_match_pat(sub, fty, reuse)?;
                         }
                         Ok(())
                     }
-                    _ => Err(bad(&Ty::Adt(adt)))?,
+                    _ => Err(bad(&ctor_ty))?,
                 }
             }
         }
@@ -1463,6 +2030,9 @@ impl Solver {
                     at: root.location.into(),
                     name: root.lexeme.clone(),
                 })?;
+                // `x = v` doesn't *read* x, but the grades pass needs the target's dec to
+                // count the store -- same lookup as every other ident site
+                self.node_decs.insert(root.id, dec_id);
 
                 match self.decs[dec_id].kind {
                     DecKind::Constant(_) => Err(AssignToConst {
@@ -1480,6 +2050,15 @@ impl Solver {
                         })?
                     }
                     _ => {}
+                }
+
+                // `xs[i] = v` writes through the collection itself; if a `for` loop is
+                // iterating that exact place the write can skip/double-visit elements or
+                // never terminate.
+                if let ExprKind::Access(Access::Square { left: receiver, .. }) = left.kind()
+                    && let Some(path) = access_path(receiver)
+                {
+                    self.check_iter_guard(dec_id, &path, left.location())?;
                 }
 
                 if let ExprKind::Access(Access::Square { left: receiver, .. }) = left.kind() {
@@ -1507,7 +2086,32 @@ impl Solver {
                         })?,
                     }
                 } else {
-                    right.fulfill_ty(left.query(self)?, self)?
+                    // `x <op>= v` is `x = x <op> v`: an operand adt's operator
+                    // method (`x.add(v)`, or `v.radd(x)` when the rhs owns the
+                    // impl) beats the plain same-type rule.
+                    let place = left.query(self)?;
+                    let dispatched = match crate::traits::op_assign_names(*op) {
+                        Some(names) => {
+                            let place_n = place.clone().normalized(self);
+                            let right_n = right.query(self)?.normalized(self);
+                            crate::traits::op_dispatch(
+                                self,
+                                stmt.id(),
+                                names,
+                                left,
+                                right,
+                                &place_n,
+                                &right_n,
+                                left.location(),
+                            )?
+                        }
+                        None => None,
+                    };
+                    match dispatched {
+                        // the method's result still has to fit the place
+                        Some(ret) => left.fulfill_ty(ret, self)?,
+                        None => right.fulfill_ty(place, self)?,
+                    }
                 }
             }
             StmtKind::Let(Let {
@@ -1520,8 +2124,7 @@ impl Solver {
                 let mut ty = Ty::Vid(vid);
 
                 if let Some(annotation) = &annotation {
-                    ty.fulfill_ty(&mut Ty::from_annotation(annotation.clone(), self)?, self)
-                        .map_err(|e| e.into_type_mismatch(self, left.location()))?;
+                    self.fulfill_annotation(&mut ty, annotation, right, left.location())?;
                 };
 
                 right.fulfill_ty(ty.clone(), self)?;
@@ -1565,10 +2168,17 @@ impl Solver {
                         self.solve_match_pat(left, ty, false)?;
                     }
                 }
+
+                // a `table {}`/`query {}`/`.schema(…)`-typed RHS carries its column schema
+                // onto the binding, so `df.pull("x")` resolves through the name
+                self.propagate_frame_schemas(left, right);
             }
             StmtKind::Expr(expr) => expr.query(self).map(|_| ())?,
             StmtKind::Module(_) => {
                 // module decls are handled in the pre-pass of `solve`.
+            }
+            StmtKind::Unit(_) => {
+                // `unit` decls register into the units table at parse.
             }
             StmtKind::Item(item) => match item.kind() {
                 // block-scoped consts get solved here, top-level consts are handled by the
@@ -1577,6 +2187,7 @@ impl Solver {
                 // re-runs `process_use` so the imports land in the body-solve phase's fresh
                 // import rib (hoist_uses pushed them, but its rib was popped at phase end).
                 ItemKind::Use(us) => self.process_use(us, item.location())?,
+                ItemKind::Poison(poison) => poison.escaped(),
                 // all we need to do at this point is process the fn defaults
                 ItemKind::Pact(pact) => {
                     let Some(pid) = self
@@ -1589,9 +2200,9 @@ impl Solver {
                     for item in pact.items.iter() {
                         let PactItem::Fn {
                             default: Some(body),
-                            name: _,
                             parameters,
                             return_type,
+                            ..
                         } = item
                         else {
                             continue;
@@ -1623,6 +2234,26 @@ impl Solver {
                     }
                     self.pact_self = prev_self;
                 }
+                ItemKind::Tests(tests) => {
+                    for case in &tests.cases {
+                        if !self.touch_node(case.id) {
+                            continue;
+                        }
+                        self.ribs.push_function();
+                        self.fn_stack.push(FnRun {
+                            expected_ty: Ty::Bool,
+                        });
+                        self.control_flow.enter();
+                        case.expr.fulfill_ty(Ty::Bool, self)?;
+                        self.fn_stack.pop();
+                        self.control_flow.exit();
+                        self.ribs.pop();
+                        let ty = Ty::Fn(FnHeader::new(vec![], Ty::Bool, false));
+                        let vid = self.node_vid(case.id);
+                        self.register_sub(vid, ty)
+                            .map_err(|e| e.into_type_mismatch(self, case.expr.location()))?;
+                    }
+                }
                 // each of these needs its inner Solve impl run during the body pass -- that's
                 // where field-annotation unification (Struct/Enum), body type-checking
                 // (Function), and method-body solving (Impl) happens. mirrors `Query for Expr`'s
@@ -1651,50 +2282,94 @@ impl Solver {
         Ok(())
     }
 
+    /// Resolves the left of a `::` path (or a struct literal's name) at the type level. Unlike
+    /// [Solve for Ident], a bare ident here may name a module or a builtin namespace.
+    pub(crate) fn resolve_path_head(&mut self, expr: &parse::Expr) -> Result<Ty> {
+        match expr.kind() {
+            parse::ExprKind::Ident(ident) => self.resolve_name(ident, expr.location()),
+            _ => self.query_non_value(expr),
+        }
+    }
+
+    /// Queries `expr` somewhere it doesn't have to be a value. See [Self::non_value].
+    pub(crate) fn query_non_value(&mut self, expr: &parse::Expr) -> Result<Ty> {
+        let outer = self.non_value.replace(expr.id());
+        let ty = expr.query(self);
+        self.non_value = outer;
+        ty
+    }
+
     pub fn resolve_name(&mut self, ident: &Ident, read_location: Location) -> Result<Ty> {
-        if ident.is_identity() {
-            // inside a pact, both `self` and `Self` resolve to the pact itself (any impl type)
-            if let Some(pid) = self.pact_self {
-                return Ok(Ty::pacts(vec![pid]));
-            }
-            return self.impl_target().map(Ty::Adt).ok_or_else(|| {
-                SelfOutOfContext {
-                    src: self.src(read_location),
-                    at: read_location.into(),
-                }
-                .into()
-            });
-        }
-        match self.ribs.resolve(ident) {
-            Some(dec_id) => {
-                self.check_vis(dec_id, read_location)?;
-                // natives carry a fresh `Ty::Fn` per use so each call gets its own type vars;
-                // without this, two calls with different types unify and the second fails.
-                if let Some(binding) = self.dec_to_native.get(&dec_id) {
-                    let sig = NativeFnSig {
-                        params: binding.sig.params.clone(),
-                        return_ty: binding.sig.return_ty.clone(),
-                        recv: binding.sig.recv.clone(),
+        let (ty, dec) = if ident.is_identity() {
+            // inside a pact, both `self` and `Self` are the implementing type -- one fixed but
+            // unknown type, so two `Self`s are known to match (unlike two values of the bound)
+            let ty = match self.pact_self {
+                Some(pid) => Ty::Skolem(pid),
+                None => self.impl_target_ty().ok_or_else(|| {
+                    Error::from(SelfOutOfContext {
+                        src: self.src(read_location),
+                        at: read_location.into(),
+                    })
+                })?,
+            };
+            // `self` is still the method's declared parameter: link the use to its
+            // dec so the grades pass counts the read (`None` here left every `self`
+            // param looking unread, so `unused parameter self` fired on every impl
+            // method). `Self` and pact signatures bind nothing, so they keep `None`.
+            (ty, self.ribs.resolve(ident))
+        } else {
+            match self.ribs.resolve(ident) {
+                Some(dec_id) => {
+                    self.check_vis(dec_id, read_location)?;
+                    // natives carry a fresh `Ty::Fn` per use so each call gets its own type vars;
+                    // without this, two calls with different types unify and the second fails.
+                    let ty = if let Some(binding) = self.dec_to_native.get(&dec_id) {
+                        let sig = binding.sig.clone();
+                        self.instantiate_native(&sig, None)?
+                    } else {
+                        // a generic decl's stored signature holds `Ty::Param`s -- swap them
+                        // for fresh vars per use (the HM instantiation step), so each call
+                        // site can pick its own concrete types. value bindings are exempt:
+                        // a `fn` parameter or `let` is monomorphic, so `r: Rect<T>` must
+                        // read the *same* `T` every occurrence -- freshening per read would
+                        // mint unrelated vars and `r.x + r.w` would no longer see one type.
+                        let stored = Ty::Vid(self.decs[dec_id].vid).normalized(self);
+                        match self.decs[dec_id].kind {
+                            DecKind::Local | DecKind::Global | DecKind::LoopVar => stored,
+                            _ => self.instantiate_params(&stored),
+                        }
                     };
-                    return self.instantiate_native(&sig, None);
+                    (ty, Some(dec_id))
                 }
-                Ok(Ty::Vid(self.decs[dec_id].vid).normalized(self))
-            }
-            None if self.library.contains_key(&ident.lexeme) => {
-                Ok(Ty::Adt(self.library[&ident.lexeme]))
-            }
-            None => {
-                if let Some((pid, _)) = self.pacts.iter().find(|(_, p)| p.name == ident.lexeme) {
-                    return Ok(Ty::pacts(vec![pid]));
+                None if self.library.contains_key(&ident.lexeme) => {
+                    (Ty::adt(self.library[&ident.lexeme]), None)
                 }
-                Err(NotFound {
-                    src: self.src(read_location),
-                    at: read_location.into(),
-                    name: ident.lexeme.clone(),
+                None => {
+                    let pact = self.pacts.iter().find(|(_, p)| p.name == ident.lexeme);
+                    let Some((pid, _)) = pact else {
+                        Err(NotFound {
+                            src: self.src(read_location),
+                            at: read_location.into(),
+                            name: ident.lexeme.clone(),
+                        })?
+                    };
+                    (Ty::pacts(vec![pid]), None)
                 }
-                .into())
             }
+        };
+        self.note(ident, ty.clone(), dec);
+        Ok(ty)
+    }
+
+    /// Records what `ident` resolved to. This is only used by tooling.
+    pub(crate) fn note(&mut self, ident: &Ident, ty: Ty, dec: Option<DecId>) {
+        if let Some(dec) = dec {
+            self.node_decs.insert(ident.id, dec);
         }
+        let vid = self.node_vid(ident.id);
+        // a name resolved twice yields the same type both times (a fresh native instantiation
+        // just links to the earlier one), and nothing downstream depends on this vid
+        let _ = self.register_sub(vid, ty);
     }
 
     /// Const-folds an expr using the solver's dec/lit tables to resolve Ident leaves. Returns
@@ -1716,8 +2391,10 @@ impl Solver {
                 .node_decs
                 .get(&expr.id())
                 .is_some_and(|&dec| self.decs[dec].kind.is_constant()),
+            // elements may be anything const, structs and dicts included: an
+            // array holding one allocates at each use site (`emit_const_dec`)
             ExprKind::Literal(parse::Literal::Array(elems) | parse::Literal::Tuple(elems)) => {
-                elems.iter().all(|e| self.is_const_element(e))
+                elems.iter().all(|e| self.is_const_expr(e))
             }
             ExprKind::Literal(_) => true,
             ExprKind::Grouping(g) => self.is_const_expr(&g.inner),
@@ -1729,31 +2406,21 @@ impl Solver {
         }
     }
 
-    // const array/tuple elements must encode as a bytecode `Constant` (scalars or nested
-    // arrays/tuples of scalars). dict/struct consts only exist as use-site allocations
-    // (emit_const_dec), so they can't appear inside one -- directly or through a const ref.
-    fn is_const_element(&self, expr: &Expr) -> bool {
-        match expr.kind() {
-            ExprKind::Literal(parse::Literal::Dictionary(_) | parse::Literal::Struct(_)) => false,
-            ExprKind::Literal(parse::Literal::Array(es) | parse::Literal::Tuple(es)) => {
-                es.iter().all(|e| self.is_const_element(e))
-            }
-            ExprKind::Ident(_) => {
-                self.node_decs
-                    .get(&expr.id())
-                    .is_some_and(|&dec| match &self.decs[dec].kind {
-                        DecKind::Constant(Some(
-                            parse::Literal::Dictionary(_) | parse::Literal::Struct(_),
-                        )) => false,
-                        kind => kind.is_constant(),
-                    })
-            }
-            _ => self.is_const_expr(expr),
-        }
-    }
-
     pub(crate) fn impl_target(&self) -> Option<AdtId> {
         self.ribs.impl_target()
+    }
+
+    /// `Self` as a type inside an impl body: `Ty::Adt(target)` for a plain impl, or
+    /// `Adt(target, [Param A, Param B, ...])` for a generic one -- `impl Pair` implements
+    /// `Pair<A, B>` with the adt's own params in scope, not any single instantiation.
+    pub(crate) fn impl_target_ty(&self) -> Option<Ty> {
+        let aid = self.impl_target()?;
+        let args = self.adts[aid]
+            .type_params
+            .iter()
+            .map(|(_, pid)| Ty::Param(*pid))
+            .collect();
+        Some(Ty::Adt(aid, args))
     }
 
     /// Resolves a function/closure parameter's type into an `FnParam` for the `FnHeader`: takes
@@ -1776,9 +2443,8 @@ impl Solver {
         // writing `self: Self` explicitly. outside an impl, the body-pass declare leaves it as a
         // vid and SelfOutOfContext fires at first use.
         if ident.lexeme == "self"
-            && let Some(adt) = self.impl_target()
+            && let Some(mut target) = self.impl_target_ty()
         {
-            let mut target = Ty::Adt(adt);
             ty.fulfill_ty(&mut target, self)
                 .map_err(|e| e.into_type_mismatch(self, ident.location))?;
         }
@@ -1811,13 +2477,39 @@ impl Solver {
 
     fn declare_import(&mut self, import: ImportBinding) -> Result<Ty> {
         let ident = Ident::synthetic(import.name);
+        // A name this file declares itself always wins over one pulled in through `use`
+        // (singular, multi, or wildcard alike) -- mirrors a C++ using-directive: names it
+        // brings in are visible only where nothing declared directly in the importing scope
+        // already claims that name, so the file's own `fn square` can't be silently shadowed
+        // by an unrelated `img::square` just because `use img::*;` happens to come first (or
+        // second -- source order never mattered here, since Import and Module are sibling
+        // ribs, not nested lexical scopes; see `Ribs::resolve`).
+        //
+        // Checking (and, crucially, *removing*) rather than just skipping the insert: for a
+        // plain script file (no `module` decl), `run_phase` never pushes a fresh per-phase rib
+        // pair (that only happens for named modules -- see the `if let Some(name) = module`
+        // guard in `solve_all`), so every phase's `process_use` call writes into the *same*,
+        // never-popped Import rib. `hoist_callables` runs its own `process_use` pass *before*
+        // hoisting local `fn`/`impl` items (so an imported type can appear in a local
+        // signature), which means the very first time this runs, `square` isn't hoisted into
+        // the module rib yet -- `module_lookup` misses, the import goes in unshadowed, and
+        // every later pass (now correctly seeing the local decl) would just skip re-inserting,
+        // leaving that first pass's wrong entry sitting there uncorrected. Removing it here
+        // instead self-heals regardless of which pass got there first.
+        if self.ribs.module_lookup(&ident).is_some() {
+            self.ribs.import_mut().remove(&ident);
+            return Ok(import.ty);
+        }
         let dec_id = if let Some(dec) = import.dec {
             dec
         } else {
             let kind = if import.constant {
                 DecKind::Constant(None)
             } else {
-                DecKind::Item { defaults: vec![] }
+                DecKind::Item {
+                    defaults: vec![],
+                    wheres: vec![],
+                }
             };
             self.dec_id(&ident, import.ty.clone(), kind, Vis::Public)
         };
@@ -1829,7 +2521,14 @@ impl Solver {
         #[cfg(feature = "logging")]
         println!("{}", crate::utils::Printer::declare(ident, &ty));
 
-        let dec_id = self.dec_id(ident, ty.clone(), DecKind::Local, Vis::Public);
+        // a `let` declared in the file's top-level statement scope is a global: it stays
+        // visible across function boundaries and its storage lives in the entry frame. every
+        // other declaration context is an ordinary local.
+        let kind = match self.ribs.current_kind() {
+            RibKind::Script => DecKind::Global,
+            _ => DecKind::Local,
+        };
+        let dec_id = self.dec_id(ident, ty.clone(), kind, Vis::Public);
         if let Some(node_id) = node_id {
             self.node_decs.insert(node_id, dec_id);
         }
@@ -1870,10 +2569,17 @@ impl Solver {
         let kind = if constant {
             DecKind::Constant(None)
         } else {
-            DecKind::Item { defaults: vec![] }
+            DecKind::Item {
+                defaults: vec![],
+                wheres: vec![],
+            }
         };
         let dec_id = self.dec_id(ident, ty.clone(), kind, vis);
         self.ribs.module_mut().insert(ident.clone(), dec_id);
+        self.module_items
+            .entry(self.ribs.current_module())
+            .or_default()
+            .insert(ident.lexeme.clone(), dec_id);
 
         if let Some(node_id) = node_id {
             self.node_decs.insert(node_id, dec_id);
@@ -1951,15 +2657,108 @@ pub(crate) struct FnRun {
 // fresh vids per call site instead of sharing one set of inference variables. `recv` carries the
 // pattern type for the receiver (e.g. `[Anon(0)]` for `Vec<T>`) -- methods use it at dispatch to
 // reject receivers whose element type doesn't fit.
+#[derive(Clone)]
 pub(crate) struct NativeFnSig {
     pub params: Vec<Option<Ty>>,
+    /// Per-slot dimension from unit-carrying `MimasType`s, parallel to `params`. The dims
+    /// pass checks call args against it; `None` leaves the slot unchecked.
+    pub param_dims: Vec<Option<shared::units::Dim>>,
     pub return_ty: Option<Ty>,
+    /// Dimension of the return value, when it measures something.
+    pub return_dim: Option<shared::units::Dim>,
     pub recv: Option<Ty>,
+    /// The native's declared effect footprint (`#[effects(...)]`), read by the grades
+    /// pass. `None` = unannotated: inference treats the call as `Fx::unknown()`.
+    pub effects: Option<shared::Fx>,
+    /// Parallel to `params` (`#[consumes]`): passing a binding to a true slot
+    /// consumes it -- the grades pass kills the `DecId` at the call site.
+    pub consumes: Vec<bool>,
+    /// `#[consumes(self)]` on a method -- the receiver binding is consumed.
+    pub consumes_recv: bool,
+    /// `#[must_use]` -- the grades pass warns on a discarded result.
+    pub must_use: bool,
 }
 
 pub(crate) struct NativeBinding {
     pub id: NativeId,
     pub sig: NativeFnSig,
+    pub takes_self: bool,
+    /// From `ApiMethod::mutates_recv` -- lets `check_iter_guard` know a call mutates its
+    /// receiver. Always false for non-method natives.
+    pub mutates_recv: bool,
+    /// From `ApiMethod::validate`/`ApiFunction::validate` -- when every call argument is a
+    /// literal this proves the call can't raise (`frame_call` narrows `T!` to `T`) or reports
+    /// it definitely will (a compile error). See `api::LitValidator`.
+    pub validate: Option<api::LitValidator>,
+    /// Def site of the registered Rust fn (`file!()`/`line!()`), joined at install from
+    /// `vm::api::NativeSrc` submissions. Hosts use it to link a built-in's symbol menu to
+    /// its source.
+    pub src: Option<api::NativeSrc>,
+    /// The `///` docstring `#[native]`/`#[mimas]` harvested (`vm::api::NativeMeta`), so the
+    /// symbol menu can show a built-in's doc without leaving the page. Empty when none.
+    pub doc: String,
+}
+
+/// A collection an active `for` loop is iterating, expressed as the binding the iterator's
+/// root name resolved to plus the field/index path from there (`s.arr` guards `s` with path
+/// `[Field("arr")]`). A `Square` hop matches any index -- `xs[i]` vs `xs[j]` is beyond this
+/// check's remit.
+///
+/// This is a lint for the beginner trap of mutating a collection mid-loop, not an alias
+/// analysis: writes reached through a *different* binding (`let ys = xs; ys.push(..)`), a
+/// helper function's parameter, or a pact-bound method call are all knowingly missed.
+pub(crate) struct IterGuard {
+    pub dec: DecId,
+    pub path: Vec<GuardSeg>,
+    /// The `for` iterator expr's location, for the `IteratingHere` sub-diagnostic.
+    pub iterated_at: Location,
+    /// The iterator expr rendered, for messages.
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum GuardSeg {
+    Field(String),
+    Index,
+}
+
+/// Walks `expr`'s access spine to its root ident, returning it plus the field/index hops from
+/// there (`s.arr[i]` -> the `s` ident and `[Field("arr"), Index]`). `None` when `expr` isn't a
+/// place rooted at a name -- calls, literals, operator results all produce fresh values that
+/// can't alias an iterated collection in any way this check needs to know about.
+pub(crate) fn root_and_path(expr: &Expr) -> Option<(&Ident, Vec<GuardSeg>)> {
+    let mut path = Vec::new();
+    let mut cur = expr;
+    loop {
+        match cur.kind() {
+            ExprKind::Ident(ident) => {
+                path.reverse();
+                return Some((ident, path));
+            }
+            ExprKind::Access(Access::Dot { left, right, .. }) => {
+                path.push(GuardSeg::Field(right.as_ident()?.lexeme.clone()));
+                cur = left;
+            }
+            ExprKind::Access(Access::DoubleColon { left, right }) => {
+                path.push(GuardSeg::Field(right.lexeme.clone()));
+                cur = left;
+            }
+            ExprKind::Access(Access::Square { left, .. }) => {
+                path.push(GuardSeg::Index);
+                cur = left;
+            }
+            ExprKind::Grouping(g) => cur = &g.inner,
+            ExprKind::Unwrap(u) => cur = &u.expr,
+            ExprKind::Demote(d) => cur = &d.expr,
+            ExprKind::Absolve(a) => cur = &a.left,
+            _ => return None,
+        }
+    }
+}
+
+/// The access path of a place expr, dropping the root (already identified by its resolved dec).
+pub(crate) fn access_path(expr: &Expr) -> Option<Vec<GuardSeg>> {
+    root_and_path(expr).map(|(_, path)| path)
 }
 
 /// One module-nested native function, as handed to [`Solver::register_native_module`].

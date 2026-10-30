@@ -284,3 +284,18 @@ test_fail!(
     insert_rejects_wrong_value_type,
     r#"fn take(d: ~{int}) { d.insert("b", "oops"); } let d: ~{int} = ~{ a = 1 }; take(d);"#
 );
+
+// mutating the dict you're iterating is a compile error
+test_fail!(
+    mutate_iterated_dict,
+    r#"let d = ~{ a = 1 }; for (k, v) in d { d.insert("b", 1); }"#,
+    r#"let d = ~{ a = 1 }; for (k, v) in d { d.remove("a"); }"#,
+    r#"let d = ~{ a = 1 }; for (k, v) in d { d["b"] = 1; }"#,
+);
+test_run!(
+    reads_allowed_while_iterating,
+    "let d = ~{ a = 1, b = 2 };
+     let n = 0;
+     for p in d { n += p.1; }",
+    "n" => "3",
+);

@@ -156,14 +156,14 @@ test_reduction!(
     "10 / 4" => Float(2.5),
 );
 test_reduction!(integer_div, "10 ~/ 3" => Int(3));
-test_reduction!(modulo, "5 % 2" => Int(1));
+test_reduction!(modulo, "5 mod 2" => Int(1));
 
 // Bitwise
 test_reduction!(
     bitwise,
     "0xff & 0x0f" => Int(0x0f),
     "0x0f | 0xf0" => Int(0xff),
-    "0xff ^ 0xff" => Int(0),
+    "0xff ⊕ 0xff" => Int(0),
     "1 << 3" => Int(8),
     "8 >> 3" => Int(1),
 );

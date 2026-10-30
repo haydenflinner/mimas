@@ -1,16 +1,19 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, rc::Rc, sync::Arc};
 
+use api::Registry;
 use compile::{
-    AccessKind, BinOp, BodyId, Chunk, Constant, Decode, Decoder, OpCode, OpFormatPart, Program,
-    Reg, UnaryOp,
+    AccessKind, BinOp, BodyId, Chunk, Constant, Decode, Decoder, Function, Module, OpCode,
+    OpFormatPart, Program, Reg, UnaryOp,
 };
 use gc_arena::{Arena, Gc, Rootable};
-use shared::{Error, IdVec, StrInterner};
+use shared::{Error, FnHeader, IdVec, StrInterner};
 use smallvec::SmallVec;
 
 use crate::{
-    Closure, Ctx, DictMap, Fields, Frame, INLINE_FIELDS, LocatedRtErr, RtErr, RtResult, Sources,
-    State, ThreadState, Val,
+    Closure, Ctx, DictMap, Fields, Frame, INLINE_FIELDS, Inspect, LocatedRtErr, RtErr, RtResult,
+    Sources, Stashed, State, ThreadState, Val,
+    conversion::{Args, MimasType},
+    fixtures::DebugInfo,
 };
 
 const FUEL: usize = 1024;
@@ -42,15 +45,204 @@ mod op_count {
     }
 }
 
+/// Result of [`Vm::resolve_for_scene`]: either a value drew itself via `img::Draw`, or (no such
+/// method) the plain to-string fallback.
+#[derive(Debug)]
+pub enum SceneResult {
+    Drawn(Inspect),
+    Fallback(String),
+}
+
+/// One scalar in a host-built argument bag — [`Vm::resolve_for_call`] fills the callee's
+/// declared parameter shape from `&[(&str, ArgVal)]` field entries (a struct's declared
+/// field names, or a dict's keys).
+#[derive(Debug, Clone)]
+pub enum ArgVal {
+    Null,
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    Str(String),
+}
+
+/// A `DataFrame` flattened to display cells — column names plus up to
+/// `cap` rows of `AnyValue` display strings. [`Inspect`] flattens a frame to
+/// `Other`, so a host that typesets `show_*` results as tables reads the
+/// cells out with [`Vm::call_fn_read`] + [`table_data`]. Rows past `cap`
+/// fold into `dropped` rather than being read out.
+#[cfg(feature = "dataframe")]
+#[derive(Debug)]
+pub struct TableData {
+    pub cols: Vec<String>,
+    pub rows: Vec<Vec<String>>,
+    /// Rows the `cap` left unread.
+    pub dropped: usize,
+}
+
+/// [`TableData`] for a returned dataframe: strings come through unquoted,
+/// everything else as `AnyValue`'s own display form (the same text the
+/// frame's `Display` prints per cell).
+#[cfg(feature = "dataframe")]
+pub fn table_data(df: &crate::DataFrame<'_>, cap: usize) -> TableData {
+    use polars::prelude::AnyValue;
+    let borrowed = df.0.borrow();
+    let df = &borrowed.0;
+    let cols: Vec<String> = df
+        .get_column_names()
+        .iter()
+        .map(|n| n.as_str().to_string())
+        .collect();
+    let series: Vec<polars::prelude::Series> = df
+        .get_column_names()
+        .iter()
+        .filter_map(|n| df.column(n.as_str()).ok())
+        .map(|c| c.as_materialized_series().clone())
+        .collect();
+    let shown = df.height().min(cap);
+    let mut rows = Vec::with_capacity(shown);
+    for i in 0..shown {
+        rows.push(
+            series
+                .iter()
+                .map(|s| match s.get(i) {
+                    Ok(AnyValue::String(s)) => s.to_string(),
+                    Ok(AnyValue::StringOwned(s)) => s.as_str().to_string(),
+                    Ok(v) => format!("{v}"),
+                    Err(_) => String::new(),
+                })
+                .collect(),
+        );
+    }
+    TableData {
+        cols,
+        rows,
+        dropped: df.height() - shown,
+    }
+}
+
+/// One call-stack frame's introspectable state -- for debuggers/visualizers built on top of
+/// [`Vm`], not used by the interpreter itself. See [`Vm::frames`].
+#[derive(Debug)]
+pub struct FrameView {
+    /// Stable identity for this specific live call, for diffing two snapshots against each
+    /// other (see [`DebugEvent`]) -- unique among frames alive at once, since it's the frame's
+    /// register-window offset into `ThreadState.regs`, and never reused while the frame lives.
+    pub base: usize,
+    pub chunk: BodyId,
+    /// The source-level name of the function this frame is running, when it's a named
+    /// top-level item (see [`Vm::chunk_name`]) -- `None` for closures and other synthetic
+    /// chunks, which a coder-facing view has no source name to show anyway.
+    pub function_name: Option<String>,
+    pub ip: usize,
+    pub loc: shared::Location,
+    /// Every register in this frame's window, positional -- the raw, VM-shaped view. Meant
+    /// for a "see deeper" / internals panel, not the coder-facing default.
+    pub registers: Vec<Captured>,
+    /// The subset of `registers` that are named source locals (`let x = ...`, params), in
+    /// declaration order -- what a coder-facing view should actually show.
+    pub locals: Vec<(String, Captured)>,
+    /// `locals`, but name-labeled all the way down (struct name + field names, not positional)
+    /// -- what a structural inspector should show instead of `locals`'s flat `Captured` dump.
+    pub locals_inspect: Vec<(String, Inspect)>,
+}
+
+/// What changed on a single [`Vm::debug_step`], in source-level terms -- the vocabulary a
+/// coder-facing debugger/visualizer should drive its display from, rather than raw register
+/// writes. See [`Vm::debug_step_events`].
+#[derive(Debug, Clone)]
+pub enum DebugEvent {
+    /// A frame for `function_name` came into existence -- a call was made.
+    Called {
+        base: usize,
+        function_name: Option<String>,
+    },
+    /// A frame went out of existence -- it returned (or unwound via a raise).
+    Returned { base: usize },
+    /// A named local in a still-live frame took on a value it didn't have a moment ago --
+    /// freshly bound (`was: None`) or reassigned (`was: Some(..)`).
+    LocalChanged {
+        base: usize,
+        name: String,
+        was: Option<Captured>,
+        value: Captured,
+    },
+}
+
+/// Outcome of running one `#[test]` function via [`Vm::run_tests`]. `error` is `None` on pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TestResult {
+    pub name: String,
+    pub error: Option<String>,
+}
+
+impl TestResult {
+    pub fn passed(&self) -> bool {
+        self.error.is_none()
+    }
+}
+
+/// What `build_program` produces: the runnable program plus the
+/// grades-pass artifacts a host surfaces (lint warnings, effect footprint).
+struct BuiltProgram {
+    program: Program,
+    /// The compiler IR the program was lowered from — `compile` only drains
+    /// the pieces it serializes (`str_interner`, `resolutions.root`, tests,
+    /// `closure_bodies`); bodies/insts/type resolutions stay live for
+    /// consumers like wasmgen that want SSA structure rather than bytecode.
+    ir: compile::Ir,
+    sources: Sources,
+    warnings: Vec<miette::Report>,
+    /// `(file, inferred top-level Fx)` per solved file.
+    script_fx: Vec<(String, shared::Fx)>,
+    /// `(file, site, inferred Fx)` per top-level statement.
+    script_segments: Vec<(String, shared::Location, shared::Fx)>,
+}
+
 pub struct Vm {
     pub(crate) entry: BodyId,
     pub(crate) code: Decoder,
     pub(crate) chunks: IdVec<BodyId, Chunk>,
+    pub(crate) signatures: Rc<IdVec<BodyId, Option<Function>>>,
     /// as in, strings from the compiler, not "c string". i know this is dumb and yet here I am
     pub(crate) c_strs: StrInterner,
     pub(crate) arena: Arena<Rootable![State<'_>]>,
     pub(crate) sources: Sources,
+    /// Flattened `path::to::fn` -> `BodyId` view of `root`, kept for the call-path and
+    /// test-running consumers that predate the module tree.
     pub(crate) items: HashMap<String, BodyId>,
+    /// Functions marked `#[test]`, in source order. Each name is a key in `items`.
+    pub(crate) tests: Vec<String>,
+    /// `items` inverted, for labeling a frame with its source-level function name -- see
+    /// [`Vm::chunk_name`]. Rebuilt whenever `items` is (`load_program`).
+    pub(crate) chunk_names: HashMap<BodyId, String>,
+    /// Method name -> `BodyId` per struct, indexed by `struct_id` exactly like `struct_names`
+    /// (`State.struct_names`) is -- see [`Vm::call_method_on_first_instance`].
+    pub(crate) methods: Vec<HashMap<String, BodyId>>,
+    /// Declared field names per struct, indexed by `struct_id` like `methods` -- see
+    /// [`Val::inspect`] and [`Vm::frames`]'s `locals_inspect`.
+    pub(crate) field_names: Vec<Vec<String>>,
+    /// Declared unit per field, parallel to `field_names` -- see [`Vm::graph`].
+    pub(crate) field_dims: Vec<Vec<Option<shared::units::Dim>>>,
+    pub(crate) root: Rc<Module>,
+    pub(crate) registry: Registry,
+    /// bcgen-specialized body fns, one slot per `BodyId` (`None` = no generated
+    /// body, that chunk dispatches through `step_one` as usual). Installed via
+    /// [`Vm::install_bc`].
+    pub(crate) bc: Option<Vec<Option<crate::bc::BodyFn>>>,
+    /// Lint warnings the grades pass emitted while loading this program
+    /// (unused bindings, dead stores, `must_use` discards). Compile used to
+    /// drop them; a host renders them on the source cells instead.
+    pub(crate) warnings: Vec<miette::Report>,
+    /// `(file, inferred top-level Fx)` from the same load — the program's
+    /// effect footprint, for hosts that badge a page with what it may do.
+    pub(crate) script_fx: Vec<(String, shared::Fx)>,
+    /// `(file, site, inferred Fx)` per top-level statement from the same
+    /// load — a `check` line or `use`-spliced stmt's own footprint.
+    pub(crate) script_segments: Vec<(String, shared::Location, shared::Fx)>,
+    /// The program's `unit` declarations, installed into the live units
+    /// table at every dispatch entry — another program's compile between
+    /// this Vm's load and run must not make `.to("tile")` stop resolving.
+    pub(crate) units: std::rc::Rc<shared::units::CustomUnits>,
 }
 
 impl Vm {
@@ -66,32 +258,128 @@ impl Vm {
                 ip: 0,
             },
             chunks: IdVec::new(),
+            signatures: Rc::default(),
             c_strs: StrInterner::new(),
             arena,
             sources: Sources::new(),
             items: HashMap::default(),
+            tests: Vec::new(),
+            chunk_names: HashMap::default(),
+            methods: Vec::new(),
+            field_names: Vec::new(),
+            field_dims: Vec::new(),
+            root: Rc::default(),
+            registry: Registry::new(),
+            bc: None,
+            warnings: Vec::new(),
+            script_fx: Vec::new(),
+            script_segments: Vec::new(),
+            units: Default::default(),
         }
     }
 
+    /// Install bcgen-specialized body fns, one slot per `BodyId`. Bodies with a
+    /// `Some` entry dispatch through the generated fn instead of `step_one`;
+    /// generated code still produces the same `Flow`s, so calls, returns, fuel,
+    /// pauses and snapshots ride the usual machinery.
+    pub fn install_bc(&mut self, bodies: Vec<Option<crate::bc::BodyFn>>) {
+        self.bc = Some(bodies);
+    }
+
+    /// Load `program`, replacing whatever this Vm was running.
     pub fn load_program(&mut self, program: Program) {
         let Program {
             entry,
             chunks,
+            signatures,
             strs,
             bytes,
-            items,
+            root,
             struct_names,
+            methods,
+            field_names,
+            field_dims,
+            print_dims,
+            field_tys: _,
+            tests,
+            units,
         } = program;
+        self.units = units;
         self.entry = entry;
         self.code = Decoder { bytes, ip: 0 };
         self.chunks = chunks;
         self.c_strs = strs;
+        self.root = Rc::new(root);
+        self.install_signatures(signatures);
+
+        // flatten the module tree into the `items` map the pre-`root` consumers (call paths,
+        // chunk_names, tests) still read.
+        fn flatten(module: &Module, prefix: String, items: &mut HashMap<String, BodyId>) {
+            for (name, f) in &module.functions {
+                items.insert(format!("{prefix}{name}"), f.body);
+            }
+            for (name, m) in &module.modules {
+                flatten(m, format!("{prefix}{name}::"), items);
+            }
+        }
+        let mut items = HashMap::new();
+        flatten(&self.root, String::new(), &mut items);
+        self.chunk_names = items
+            .iter()
+            .map(|(name, &body)| (body, name.clone()))
+            .collect();
         self.items = items;
+        self.tests = tests;
+        self.methods = methods.into_values().collect();
+        let field_names: Vec<Vec<String>> = field_names.into_values().collect();
+        self.field_names = field_names.clone();
+        self.field_dims = field_dims.into_values().collect();
+        let chunks = &self.chunks;
+        let code_len = self.code.bytes.len();
+        self.arena.mutate(|mc, state| {
+            *state.struct_names.borrow_mut(mc) = struct_names.into_values().collect();
+            *state.field_names.borrow_mut(mc) = field_names;
+            // refresh the debug fixture's loc tables so `std::dbg` maps (chunk, ip) → loc
+            // against the program just loaded, never a stale one
+            let dbg = state.fixtures.get::<DebugInfo>();
+            *dbg.locs.borrow_mut() = chunks
+                .iter()
+                .map(|(_, chunk)| chunk.locs.clone())
+                .collect::<Vec<_>>()
+                .into();
+            *dbg.offsets.borrow_mut() = chunks
+                .iter()
+                .map(|(_, chunk)| chunk.offset as u32)
+                .collect::<Vec<_>>()
+                .into();
+            // the call-site unit table ships with the program — refresh it so
+            // `print`/`dbg`/`warn` of a quantity can name its unit (`25000 W`)
+            *state
+                .fixtures
+                .get::<crate::fixtures::PrintDims>()
+                .dims
+                .borrow_mut() = print_dims;
+            // fresh program = fresh trace: re-size the op counter to the
+            // new code length and drop edges that named dead BodyIds
+            let trace = state.fixtures.get::<crate::fixtures::Trace>();
+            *trace.hits.borrow_mut() = vec![0; code_len];
+            trace.calls.borrow_mut().clear();
+        });
+        self.reset_to_entry();
+    }
+
+    /// Rewind the thread to a fresh entry frame so a later `debug_step`/`run` starts at the
+    /// program root. Used after an injected call (`call_fn`, `run_tests`) that would otherwise
+    /// leave register 0 / extra frames dirty.
+    fn reset_to_entry(&mut self) {
         let entry_chunk = &self.chunks[self.entry];
         let regs_count = entry_chunk.regs as usize;
         let entry_offset = entry_chunk.offset;
         let entry_body = self.entry;
+        self.code.ip = entry_offset;
         self.arena.mutate(|mc, state| {
+            let ctx = state.ctx(mc);
+            ctx.reset_roots();
             let mut t = state.thread.borrow_mut(mc);
             t.regs.clear();
             t.regs.resize(regs_count, Val::Null);
@@ -102,11 +390,29 @@ impl Vm {
                 return_reg: 0,
                 base: 0,
             });
-            *state.struct_names.borrow_mut(mc) = struct_names.into_values().collect();
+        });
+    }
+
+    /// Install `signatures` as the loaded program's table.
+    fn install_signatures(&mut self, signatures: IdVec<BodyId, Option<Function>>) {
+        self.signatures = Rc::new(signatures);
+        let signatures = Rc::clone(&self.signatures);
+        self.arena.mutate(|mc, state| {
+            *state
+                .ctx(mc)
+                .fixture::<crate::heap::Signatures>()
+                .0
+                .borrow_mut() = signatures;
         });
     }
 
     pub fn set_sources(&mut self, sources: Sources) {
+        self.arena.mutate(|_, state| {
+            *state.fixtures.get::<DebugInfo>().sources.borrow_mut() = sources
+                .iter()
+                .map(|(id, src)| (*id, src.inner().clone()))
+                .collect();
+        });
         self.sources = sources;
     }
 
@@ -121,27 +427,274 @@ impl Vm {
         FixtureRef { ptr }
     }
 
+    /// Let the thread run at most `ops` more ops before `RtErr::OutOfFuel` (re-arm per entry:
+    /// per check, per live scene, per game frame). `u64::MAX` lifts the limit.
+    pub fn set_op_budget(&mut self, ops: u64) {
+        self.arena.mutate(|mc, state| {
+            state.thread.borrow_mut(mc).ops_left = ops;
+            // ops a native charged against the previous entry don't carry into this one
+            let m = &state.mem;
+            m.ops_debt.set(0);
+            m.signal.set(m.signal.get() & !crate::mem::SIG_OPS);
+        });
+    }
+
+    /// Let the heap hold at most `bytes` (see [`crate::mem`]); past it the program fails with
+    /// `RtErr::OutOfMemory`. [`crate::mem::UNLIMITED`] (the default) turns the budget off. Unlike
+    /// the op budget this is not re-armed per entry: it caps what the program holds over its
+    /// whole life.
+    pub fn set_mem_budget(&mut self, bytes: usize) {
+        self.arena.mutate(|_, state| {
+            let m = &state.mem;
+            m.limit.set(bytes);
+            m.signal.set(m.signal.get() & crate::mem::SIG_OPS);
+        });
+        if bytes != crate::mem::UNLIMITED {
+            self.mem_settle();
+        }
+    }
+
+    /// The limit [`set_mem_budget`](Self::set_mem_budget) set.
+    pub fn mem_budget(&self) -> usize {
+        self.arena.mutate(|_, state| state.mem.limit.get())
+    }
+
+    /// The budget's current upper bound on heap bytes: measured at the last settle plus charged
+    /// since.
+    pub fn mem_estimate(&self) -> usize {
+        self.arena.mutate(|_, state| state.mem.estimate())
+    }
+
+    /// Let the thread hold at most `frames` calls in progress; one more fails with
+    /// `RtErr::RecursionTooDeep`. Default [`crate::mem::DEFAULT_MAX_FRAMES`].
+    pub fn set_max_depth(&mut self, frames: usize) {
+        self.arena
+            .mutate(|mc, state| state.thread.borrow_mut(mc).max_frames = frames.max(1));
+    }
+
+    /// Calls in progress on the thread, the entry frame included (`1` between host calls once the
+    /// entry body has run).
+    pub fn depth(&self) -> usize {
+        self.arena.mutate(|_, state| state.thread.borrow().frames.len())
+    }
+
+    /// Collect fully and measure the live heap (see [`crate::mem`]): returns the live bytes. When
+    /// they pass the limit, the next op fails with `RtErr::OutOfMemory`.
+    pub fn mem_settle(&mut self) -> usize {
+        use gc_arena::arena::CollectionPhase;
+        // finish a cycle already in progress: its mark saw mutation, so its tally is not clean
+        if self.arena.collection_phase() != CollectionPhase::Sleeping {
+            self.arena.finish_cycle();
+        }
+        crate::mem::reset_traced();
+        let strings = match self.arena.finish_marking() {
+            Some(marked) => marked.finalize(|fc, root| root.strings.prune_dead(fc)),
+            None => 0,
+        };
+        let traced = crate::mem::take_traced();
+        self.arena.finish_cycle();
+        let boxes = self.arena.metrics().total_gc_count() * crate::mem::BOX_BYTES;
+        let live = traced.saturating_add(strings).saturating_add(boxes);
+        self.arena.mutate(|_, state| {
+            let m = &state.mem;
+            m.live.set(live);
+            m.since.set(0);
+            let ops = m.signal.get() & crate::mem::SIG_OPS;
+            let fatal = if live > m.limit.get() { crate::mem::SIG_FATAL } else { 0 };
+            m.signal.set(ops | fatal);
+        });
+        live
+    }
+
+    /// An entry boundary: settle when the budget asks for it (cheap otherwise).
+    pub(crate) fn mem_boundary(&mut self) {
+        if self.arena.mutate(|_, state| state.mem.wants_settle()) {
+            self.mem_settle();
+        }
+    }
+
+    /// Between dispatch batches: pay the arena's debt, then settle if the budget asks.
+    fn collect_boundary(&mut self) {
+        self.arena.collect_debt();
+        self.mem_boundary();
+    }
+
     pub fn run(&mut self) -> Result<(), Error> {
+        shared::units::install(&self.units);
+        self.mem_boundary();
         loop {
             let Vm {
                 code,
                 chunks,
+                signatures,
                 c_strs: strs,
                 arena,
                 sources,
+                bc,
                 ..
             } = self;
             let done = arena.mutate(|mc, state| {
                 let ctx = state.ctx(mc);
                 let mut thread = state.thread.borrow_mut(mc);
-                run_dispatch(ctx, code, chunks, strs, sources, &mut thread, FUEL, 1)
+                let done = run_dispatch(
+                    ctx,
+                    code,
+                    chunks,
+                    signatures,
+                    strs,
+                    sources,
+                    &mut thread,
+                    bc.as_deref(),
+                    FUEL,
+                    1,
+                )?;
+                // No frame host to hand control to — a pause native (a
+                // `use game` program run to completion) is a no-op here.
+                state.paused.set(false);
+                Ok::<bool, Error>(done)
             })?;
             if done {
                 #[cfg(feature = "op-count")]
                 op_count::report();
                 return Ok(());
             }
-            self.arena.collect_debt();
+            self.collect_boundary();
+        }
+    }
+
+    /// `run()` for cooperative frames: FUEL-batched dispatch until the
+    /// program ends, an error (including the host's op budget), or a
+    /// native pauses it. Returns `true` when the program finished.
+    /// `frame`-style hosts call this once per frame instead of stepping
+    /// op-by-op through [`Vm::debug_step`] — the `paused` flag costs one
+    /// predicted branch inside the dispatch loop rather than a full
+    /// `mutate`/`collect_debt` boundary per op. The flag is cleared on
+    /// entry; ops budgeted via [`Vm::set_op_budget`].
+    pub fn run_frame(&mut self) -> Result<bool, Error> {
+        shared::units::install(&self.units);
+        self.mem_boundary();
+        self.arena.mutate(|_, state| state.paused.set(false));
+        loop {
+            let Vm {
+                code,
+                chunks,
+                signatures,
+                c_strs: strs,
+                arena,
+                sources,
+                bc,
+                ..
+            } = self;
+            let (done, paused) = arena.mutate(|mc, state| {
+                let ctx = state.ctx(mc);
+                let mut thread = state.thread.borrow_mut(mc);
+                let done = run_dispatch(
+                    ctx,
+                    code,
+                    chunks,
+                    signatures,
+                    strs,
+                    sources,
+                    &mut thread,
+                    bc.as_deref(),
+                    FUEL,
+                    1,
+                )?;
+                Ok::<(bool, bool), Error>((done, state.paused.get()))
+            })?;
+            if done || paused {
+                return Ok(done);
+            }
+            self.collect_boundary();
+        }
+    }
+
+    /// Ops left on the entry budget set by [`Vm::set_op_budget`] —
+    /// `budget - ops_left()` is what the last entry consumed.
+    pub fn ops_left(&self) -> u64 {
+        self.arena
+            .mutate(|mc, state| state.thread.borrow_mut(mc).ops_left)
+    }
+
+    /// `pc → (fn, loc)` tables for the loaded program — one call per
+    /// compile. A [`trace_take`](Self::trace_take) `ip` is a byte offset
+    /// into the shared code bytes: subtract the owning chunk's `offset`
+    /// and binary-search `locs` (same rule as `Chunk::loc_at`) for its
+    /// `(file, span)`.
+    pub fn trace_map(&self) -> Vec<TraceMapChunk> {
+        self.chunks
+            .iter()
+            .map(|(body, chunk)| TraceMapChunk {
+                body: body.index(),
+                name: self
+                    .chunk_names
+                    .get(&body)
+                    .cloned()
+                    .unwrap_or_else(|| format!("body#{}", body.index())),
+                offset: chunk.offset as u32,
+                locs: chunk
+                    .locs
+                    .iter()
+                    .map(|(ip, loc)| {
+                        (*ip, loc.file_id as u32, loc.span.start as u32, loc.span.end as u32)
+                    })
+                    .collect(),
+            })
+            .collect()
+    }
+
+    /// Drain the [`Trace`](crate::fixtures::Trace) counters: flat
+    /// `(ip, count)…` op hits and `(caller_body, callee_body, count)…`
+    /// call edges since the last call — the sonifier's raw deltas. Empty
+    /// while nothing has run.
+    pub fn trace_take(&mut self) -> (Vec<u32>, Vec<u32>) {
+        self.arena.mutate(|_, state| {
+            let trace = state.fixtures.get::<crate::fixtures::Trace>();
+            let mut hits = Vec::new();
+            for (ip, n) in trace.take_hits() {
+                hits.push(ip);
+                hits.push(n);
+            }
+            let mut calls = Vec::new();
+            for (edge, n) in trace.take_calls() {
+                calls.push((edge >> 32) as u32);
+                calls.push(edge as u32);
+                calls.push(n);
+            }
+            (hits, calls)
+        })
+    }
+}
+
+/// One body's slice of [`Vm::trace_map`].
+#[derive(Debug)]
+pub struct TraceMapChunk {
+    /// The body's `BodyId` index — what call-edge tuples carry.
+    pub body: usize,
+    /// Source-level name (`update`, `helper::f`); unnamed bodies get
+    /// `body#N` so a host still has something to print.
+    pub name: String,
+    /// Byte offset of this body's code within the program's shared `bytes`.
+    pub offset: u32,
+    /// `(chunk-relative ip, file_id, span start, span end)` — sparse
+    /// ascending like `Chunk::locs`: an entry's loc applies until the next.
+    pub locs: Vec<(u32, u32, u32, u32)>,
+}
+
+/// What [`Vm::call_batched`] saved of the caller's frame.
+struct CallSlot {
+    caller_base: usize,
+    saved: Option<Stashed>,
+}
+
+impl CallSlot {
+    /// Put the caller's slot-0 value back.
+    fn restore<'gc>(self, ctx: Ctx<'gc>, thread: &mut ThreadState<'gc>) {
+        if let Some(saved) = self.saved
+            && ctx.holds(&saved)
+            && let Some(slot) = thread.regs.get_mut(self.caller_base)
+        {
+            *slot = ctx.fetch(&saved);
         }
     }
 }
@@ -171,7 +724,8 @@ impl<T: 'static> std::ops::Deref for FixtureRef<T> {
 
 /// What `step_one` hands back to the dispatch loop: keep going, or a frame transition that has
 /// to touch `thread` -- and so can only run once the register window borrow has been dropped.
-enum Flow<'gc> {
+/// `pub` for `bc`-generated bodies, which produce the same `Flow`s.
+pub enum Flow<'gc> {
     Next,
     Call {
         target: CallTarget<'gc>,
@@ -181,8 +735,10 @@ enum Flow<'gc> {
     Return(Val<'gc>),
 }
 
-enum CallTarget<'gc> {
+/// `pub` for `bc`-generated bodies — see [`Flow`].
+pub enum CallTarget<'gc> {
     Fn(BodyId),
+    Value(BodyId),
     Closure(Closure<'gc>),
 }
 
@@ -214,6 +770,7 @@ macro_rules! wr {
 // load-bearing: it puts the cold call in tail position so the arm forwards the helper's
 // `RtResult<Flow>` verbatim -- no per-arm Err-widening, and the operands are consumed by value by
 // the cold fn and never read again here, so they never need a stack home across the tag check.
+// r[impl mimas.int.checked]
 macro_rules! int_arith {
     ($regs:ident, $code:ident, $ctx:ident, $checked:ident, $op:expr) => {{
         let dst = Reg::decode($code);
@@ -403,7 +960,7 @@ macro_rules! branch_float_imm {
 /// resize `thread.regs` *inline* without a borrow conflict. The window is refreshed after every
 /// `thread.regs` mutation so the pointer never dangles and never overlaps another live borrow.
 /// `stop_depth` is the frame floor: returning out of frame `stop_depth` ends the dispatch.
-/// `Vm::run` passes 1 (the entry frame's own return is the end of the program); `Vm::call_fn`
+/// `Vm::run` passes 1 (the entry frame's own return is the end of the program); `Vm::call`
 /// passes the pre-call depth + 1 so dispatch stops -- result written, entry ip untouched --
 /// when the injected call returns, instead of running off the end of the entry's bytecode.
 #[allow(clippy::too_many_arguments)]
@@ -411,38 +968,143 @@ fn run_dispatch<'gc>(
     ctx: Ctx<'gc>,
     code: &mut Decoder,
     chunks: &IdVec<BodyId, Chunk>,
+    signatures: &IdVec<BodyId, Option<Function>>,
     strs: &StrInterner,
     sources: &Sources,
     thread: &mut ThreadState<'gc>,
+    bc: Option<&[Option<crate::bc::BodyFn>]>,
     mut fuel: usize,
     stop_depth: usize,
 ) -> Result<bool, Error> {
     let (mut regs_ptr, mut regs_len) = window(thread, chunks);
+    let trace = ctx.state().fixtures.get::<crate::fixtures::Trace>();
     loop {
+        // Cooperative pause (`yield_frame` and friends) — the native set
+        // `State::paused` rather than touching the thread, which the
+        // loop already holds borrowed. Top frame's `ip` is a save slot;
+        // sync it like `debug_step` does for callers between dispatches.
+        // Ordered before the fuel check so a pause landing on the exact
+        // batch boundary still leaves the save slot fresh.
+        if ctx.state().paused.get() {
+            if let Some(top) = thread.frames.last_mut() {
+                top.ip = code.ip;
+            }
+            return Ok(false);
+        }
         if fuel == 0 {
             return Ok(false);
         }
-        fuel -= 1;
-        let op_ip = code.ip;
-        #[cfg(feature = "op-count")]
-        op_count::COUNTS[code.bytes[op_ip] as usize]
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        // SAFETY: regs_ptr/regs_len describe the current top frame's window
-        // (regs[base..base+count]), refreshed after every resize/truncate below. No op between
-        // refreshes touches thread.regs, so the pointer stays valid and this is the only live
-        // reference into the window.
-        let regs = unsafe { std::slice::from_raw_parts_mut(regs_ptr, regs_len) };
-        match step_one(regs, code, ctx, strs) {
-            Ok(Flow::Next) => {}
+        // the memory budget (see `crate::mem`): a charge past the limit ends the batch so the
+        // entry can collect and measure, or fails where it can't collect
+        let mut mem_signal = ctx.state().mem.signal.get();
+        if mem_signal & crate::mem::SIG_OPS != 0 {
+            let m = &ctx.state().mem;
+            thread.ops_left = thread.ops_left.saturating_sub(m.ops_debt.replace(0));
+            mem_signal &= !crate::mem::SIG_OPS;
+            m.signal.set(mem_signal);
+            if thread.ops_left == 0 {
+                return Err(locate(RtErr::OutOfFuel, code.ip, thread, chunks, sources));
+            }
+        }
+        if mem_signal != 0 {
+            if mem_signal & crate::mem::SIG_FATAL != 0 || fuel == usize::MAX {
+                let limit = ctx.state().mem.limit.get();
+                return Err(locate(RtErr::OutOfMemory { limit }, code.ip, thread, chunks, sources));
+            }
+            if let Some(top) = thread.frames.last_mut() {
+                top.ip = code.ip;
+            }
+            return Ok(false);
+        }
+        // the host's budget for this entry (checks, live scenes, game frames): a loop with no
+        // end becomes an error instead of a hung page
+        if thread.ops_left == 0 {
+            return Err(locate(RtErr::OutOfFuel, code.ip, thread, chunks, sources));
+        }
+        // a body with a bcgen-generated fn runs it instead of `step_one` -- same
+        // `Flow` contract, plus the in-body call fast path (see `bc::BodyFn`).
+        // Looping bodies decrement fuel and ops_left themselves and report the
+        // faulting ip via `op_ip`.
+        let step = bc.and_then(|t| {
+            t.get(thread.frames.last().unwrap().chunk.index())
+                .copied()
+                .flatten()
+        });
+        let mut op_ip = code.ip;
+        trace.tick(op_ip);
+        let res = match step {
+            Some(f) => {
+                // The `BodyFn` ABI returns `RtResult<Flow>` through an out-slot
+                // (the enum has no stable/FFI-safe layout — JIT bodies fill it
+                // via `jit_*` shims, bcgen bodies via their extern-"C" shim).
+                // All other inputs are per-dispatch constants and ride the
+                // `BodyEnv` bundle — `out` is the only field refreshed per call.
+                // Seeded, not uninit: every writer stores via `*out = …`,
+                // which drops the previous occupant — the slot must always
+                // hold a valid `RtResult`. `Flow::Next` is payload-free, so
+                // those drops are free; `assume_init` reads the last write.
+                let mut slot = std::mem::MaybeUninit::new(Ok(Flow::Next));
+                let env = crate::bc::BodyEnv {
+                    thread,
+                    code,
+                    mutation: ctx.mutation(),
+                    state: ctx.state(),
+                    strs,
+                    chunks,
+                    signatures,
+                    fuel: &mut fuel,
+                    op_ip: &mut op_ip,
+                    out: slot.as_mut_ptr(),
+                };
+                // SAFETY: all pointers borrow live driver state; the BodyFn
+                // contract requires `*env.out` to be written before return.
+                unsafe {
+                    f(&env);
+                    slot.assume_init()
+                }
+            }
+            None => {
+                fuel -= 1;
+                thread.ops_left -= 1;
+                #[cfg(feature = "op-count")]
+                op_count::COUNTS[code.bytes[op_ip] as usize]
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                // SAFETY: regs_ptr/regs_len describe the current top frame's window
+                // (regs[base..base+count]), refreshed after every resize/truncate
+                // below. The pointer is the only live reference into the window.
+                let regs = unsafe { std::slice::from_raw_parts_mut(regs_ptr, regs_len) };
+                step_one(regs, code, ctx, strs, &thread.frames)
+            }
+        };
+        match res {
+            // a body that ran inline calls resized and re-truncated `thread.regs`
+            // mid-turn — the window pointer may dangle, so refresh it unconditionally
+            // before the next dispatch, whichever lane it lands in
+            Ok(Flow::Next) => {
+                (regs_ptr, regs_len) = window(thread, chunks);
+            }
             Ok(Flow::Call { target, dst, args }) => {
                 let (body, captures): (BodyId, &[Val<'gc>]) = match &target {
                     CallTarget::Fn(b) => (*b, &[]),
+                    CallTarget::Value(b) => {
+                        if signatures.get(*b).and_then(Option::as_ref).is_none() {
+                            let kind = not_callable(Val::Fn(*b));
+                            return Err(locate(kind, op_ip, thread, chunks, sources));
+                        }
+                        (*b, &[])
+                    }
                     CallTarget::Closure(c) => {
                         let data = Gc::as_ref(c.0);
                         (data.function, &data.captures)
                     }
                 };
-                enter_call(thread, code, chunks, body, dst, &args, captures);
+                trace.call(
+                    thread.frames.last().unwrap().chunk.index() as u32,
+                    body.index() as u32,
+                );
+                if let Err(kind) = enter_call(thread, code, chunks, body, dst, &args, captures) {
+                    Err(Error::msg(locate(kind, op_ip, thread, chunks, sources)))?;
+                }
                 (regs_ptr, regs_len) = window(thread, chunks);
             }
             Ok(Flow::Return(value)) => {
@@ -505,11 +1167,12 @@ fn window<'gc>(
 /// violation but aren't: their SmallVec is built straight into the `Flow` return slot, which
 /// lives in the caller's frame, not this one.)
 #[inline(never)]
-fn step_one<'gc>(
+pub(crate) fn step_one<'gc>(
     regs: &mut [Val<'gc>],
     code: &mut Decoder,
     ctx: Ctx<'gc>,
     strs: &StrInterner,
+    frames: &[Frame],
 ) -> RtResult<Flow<'gc>> {
     match OpCode::decode(code) {
         OpCode::LoadConst => {
@@ -522,6 +1185,27 @@ fn step_one<'gc>(
             let dst = Reg::decode(code);
             let src = Reg::decode(code);
             wr!(regs, dst, rd!(regs, src));
+        }
+        OpCode::LoadEntry => {
+            let dst = Reg::decode(code);
+            let slot = Reg::decode(code);
+            // `slot` is an absolute index into `thread.regs` -- the entry frame always sits
+            // at base 0. These ops are only emitted outside the entry body, so the window
+            // lies strictly above the slots they touch: `regs.as_ptr() - base` is
+            // `thread.regs[0]`, disjoint from the live `&mut [Val]` window.
+            let base = frames.last().map(|f| f.base).unwrap_or(0);
+            debug_assert!(base > 0, "entry-frame op ran in the entry frame");
+            let v = unsafe { *regs.as_ptr().sub(base).add(slot.index()) };
+            wr!(regs, dst, v);
+        }
+        OpCode::StoreEntry => {
+            let slot = Reg::decode(code);
+            let src = Reg::decode(code);
+            let base = frames.last().map(|f| f.base).unwrap_or(0);
+            debug_assert!(base > 0, "entry-frame op ran in the entry frame");
+            let v = rd!(regs, src);
+            // SAFETY: same disjointness argument as LoadEntry -- the slot is below the window.
+            unsafe { *regs.as_mut_ptr().sub(base).add(slot.index()) = v };
         }
         OpCode::Jump => {
             code.ip = code.u32() as usize;
@@ -577,7 +1261,12 @@ fn step_one<'gc>(
             let v = match receiver {
                 Val::Instance(i) => i.0.borrow().fields[slot],
                 Val::Array(a) => a.0.borrow()[slot],
-                _ => todo!(),
+                // positional `v.k` reads box the element back out
+                Val::IntArray(a) | Val::FloatArray(a) => a.0.borrow().at(slot),
+                Val::Null => return Err(RtErr::UnwrappedNull),
+                other => {
+                    return Err(RtErr::Custom(format!("no fields on {:?}", other.capture())));
+                }
             };
             wr!(regs, dst, v);
         }
@@ -590,25 +1279,44 @@ fn step_one<'gc>(
             match receiver {
                 Val::Instance(i) => i.0.borrow_mut(&ctx).fields[slot] = value,
                 Val::Array(a) => a.0.borrow_mut(&ctx)[slot] = value,
-                _ => todo!(),
+                Val::IntArray(a) | Val::FloatArray(a) => a.0.borrow_mut(&ctx).set(ctx, slot, value),
+                Val::Null => return Err(RtErr::UnwrappedNull),
+                other => {
+                    return Err(RtErr::Custom(format!("no fields on {:?}", other.capture())));
+                }
             }
         }
         OpCode::Push => {
             let array_reg = Reg::decode(code);
             let value_reg = Reg::decode(code);
-            let arr = rd!(regs, array_reg).as_array().unwrap();
             let value = rd!(regs, value_reg);
-            arr.0.borrow_mut(&ctx).push(value);
+            match rd!(regs, array_reg) {
+                Val::Array(a) => {
+                    ctx.charge(std::mem::size_of::<Val>());
+                    a.0.borrow_mut(&ctx).push(value)
+                }
+                // `IntArray`/`FloatArray`/`Anything` — typed push + demote,
+                // or the old `unwrap` panic for non-sequences
+                arr => seq_push(ctx, arr, value),
+            }
         }
         OpCode::Len => {
             let dst = Reg::decode(code);
             let src = Reg::decode(code);
             let len = match rd!(regs, src) {
                 Val::Array(a) => a.0.borrow().len(),
+                Val::IntArray(a) | Val::FloatArray(a) => a.0.borrow().len(),
                 Val::Dict(d) => d.0.borrow().len(),
                 Val::Str(s) => s.as_str().chars().count(),
                 Val::Int(i) => i as usize,
-                _ => todo!(),
+                // `null.len()` (a missing cell read as a string, say) is a runtime error, not a
+                // VM abort
+                other => {
+                    return Err(RtErr::Custom(format!(
+                        "len: {:?} has no length",
+                        other.capture()
+                    )));
+                }
             };
             wr!(regs, dst, Val::Int(len as i64));
         }
@@ -656,9 +1364,9 @@ fn step_one<'gc>(
             let callee = Reg::decode(code);
             let len = code.u8() as usize;
             let target = match rd!(regs, callee) {
-                Val::Fn(body) => CallTarget::Fn(body),
+                Val::Fn(body) => CallTarget::Value(body),
                 Val::Closure(closure) => CallTarget::Closure(closure),
-                _ => todo!(),
+                other => return Err(not_callable(other)),
             };
             let mut args = SmallVec::<[Val; 8]>::new();
             for _ in 0..len {
@@ -702,6 +1410,17 @@ fn step_one<'gc>(
                     .and_then(|o| o.as_ref())
                     .expect("native id has no installed entry")
             };
+            // refresh the debug mirror before the native runs: natives can't borrow `thread`
+            // (dispatch holds it for the whole run), so `std::dbg` reads this copy -- the top
+            // entry's ip sits just past this call op, which loc_at maps to the call's span
+            {
+                let mut stack = ctx.fixture::<DebugInfo>().stack.borrow_mut();
+                stack.clear();
+                stack.extend(frames.iter().map(|f| (f.chunk, f.ip as u32)));
+                if let Some(top) = stack.last_mut() {
+                    top.1 = code.ip as u32;
+                }
+            }
             let v = native.call(ctx, &args)?;
             wr!(regs, dst, v);
         }
@@ -829,10 +1548,65 @@ fn step_one<'gc>(
     Ok(Flow::Next)
 }
 
+/// Top-level binding `name`'s value — the receiver both
+/// `Vm::resolve_for_scene`/`resolve_for_call` call methods on.
+fn top_level_receiver<'gc>(
+    thread: &ThreadState<'gc>,
+    chunks: &IdVec<BodyId, Chunk>,
+    name: &str,
+) -> Option<Val<'gc>> {
+    let frame = thread.frames.first()?;
+    let reg = *chunks[frame.chunk].locals.get(name)?;
+    Some(*thread.regs.get(frame.base + reg.index())?)
+}
+
+/// Build the one argument [`Vm::resolve_for_call`] passes. The callee's declared parameter
+/// type drives the shape: an adt becomes an `Instance` whose declared fields fill by name
+/// (names the bag didn't supply land as `Null`), anything else a `~{…}` dict of the entries.
+fn arg_val<'gc>(
+    ctx: Ctx<'gc>,
+    field_names: &[Vec<String>],
+    ty: &shared::Ty,
+    fields: &[(&str, ArgVal)],
+) -> Val<'gc> {
+    let scalar = |v: &ArgVal| -> Val<'gc> {
+        match v {
+            ArgVal::Null => Val::Null,
+            ArgVal::Bool(b) => Val::Bool(*b),
+            ArgVal::Int(i) => Val::Int(*i),
+            ArgVal::Float(f) => Val::Float(*f),
+            ArgVal::Str(s) => Val::Str(ctx.intern(s)),
+        }
+    };
+    let (shared::Ty::Adt(aid, _) | shared::Ty::Identity(aid, _)) = ty else {
+        let map: DictMap = fields
+            .iter()
+            .map(|(k, v)| (ctx.intern(k), scalar(v)))
+            .collect();
+        return Val::Dict(ctx.new_dict(map));
+    };
+    let sid = aid.index();
+    let Some(names) = field_names.get(sid) else {
+        return Val::Null;
+    };
+    let vals: Vec<Val> = names
+        .iter()
+        .map(|n| {
+            fields
+                .iter()
+                .find(|(k, _)| *k == n.as_str())
+                .map(|(_, v)| scalar(v))
+                .unwrap_or(Val::Null)
+        })
+        .collect();
+    Val::Instance(ctx.new_instance(sid as u32, Fields::new(vals)))
+}
+
 /// Push a new frame for `body`: grow `regs`, copy args into the param registers and captures into
 /// the capture registers, save the caller's ip, and jump. The window pointer in `run_dispatch` is
 /// stale after the `resize` here, which is why the driver re-derives it on the next `'frame` pass.
-fn enter_call<'gc>(
+#[doc(hidden)] // `pub` for bcgen-specialized bodies — they run this inline for calls to specialized callees
+pub fn enter_call<'gc>(
     thread: &mut ThreadState<'gc>,
     code: &mut Decoder,
     chunks: &IdVec<BodyId, Chunk>,
@@ -840,10 +1614,22 @@ fn enter_call<'gc>(
     dst: Reg,
     args: &[Val<'gc>],
     captures: &[Val<'gc>],
-) {
+) -> Result<(), RtErr> {
     let chunk = &chunks[body];
-    debug_assert_eq!(args.len(), chunk.args as usize);
+    // a dynamic call reaches here with whatever the script had in hand, so this is a real check
+    // rather than an invariant -- entering with the wrong count would read foreign registers
+    if args.len() != chunk.args as usize {
+        return Err(RtErr::WrongArity {
+            wanted: chunk.args as usize,
+            got: args.len(),
+        });
+    }
     debug_assert_eq!(captures.len(), chunk.captures.len());
+    if thread.frames.len() >= thread.max_frames {
+        return Err(RtErr::RecursionTooDeep {
+            depth: thread.max_frames,
+        });
+    }
     let new_base = thread.regs.len();
     // hiiiiighwayyyyy toooo theeeee danger zone (be very careful now lol)
     thread
@@ -863,6 +1649,177 @@ fn enter_call<'gc>(
         base: new_base,
     });
     code.ip = chunk.offset;
+    Ok(())
+}
+
+/// `enter_call` for generated bodies: args are read straight out of the
+/// caller's register window (indices stay valid across the `resize` —
+/// the Vec may move but the slots don't), skipping the `SmallVec` a
+/// `Flow::Call` would need to carry. Same arity check, same copy order.
+#[doc(hidden)]
+pub fn enter_call_regs<'gc>(
+    thread: &mut ThreadState<'gc>,
+    code: &mut Decoder,
+    chunks: &IdVec<BodyId, Chunk>,
+    body: BodyId,
+    dst: Reg,
+    arg_regs: &[Reg],
+    captures: &[Val<'gc>],
+) -> Result<(), RtErr> {
+    let chunk = &chunks[body];
+    if arg_regs.len() != chunk.args as usize {
+        return Err(RtErr::WrongArity {
+            wanted: chunk.args as usize,
+            got: arg_regs.len(),
+        });
+    }
+    debug_assert_eq!(captures.len(), chunk.captures.len());
+    if thread.frames.len() >= thread.max_frames {
+        return Err(RtErr::RecursionTooDeep {
+            depth: thread.max_frames,
+        });
+    }
+    let caller_base = thread.frames.last().unwrap().base;
+    let new_base = thread.regs.len();
+    thread
+        .regs
+        .resize(new_base + chunk.regs as usize, Val::Null);
+    // the caller's window is below `new_base`, so each read is still a live
+    // slot even after the grow
+    for (param_reg, &arg) in chunk.params.iter().zip(arg_regs) {
+        thread.regs[new_base + param_reg.index()] = thread.regs[caller_base + arg.index()];
+    }
+    for (cap_reg, &cap) in chunk.captures.iter().zip(captures) {
+        thread.regs[new_base + cap_reg.index()] = cap;
+    }
+    thread.frames.last_mut().unwrap().ip = code.ip;
+    thread.frames.push(Frame {
+        chunk: body,
+        ip: chunk.offset,
+        return_reg: dst.index() as u32,
+        base: new_base,
+    });
+    code.ip = chunk.offset;
+    Ok(())
+}
+
+/// The callee of a dynamic call wasn't a fn or a closure. Cold so the `Call` arm's shared frame
+/// doesn't pay for the capture.
+#[cold]
+#[inline(never)]
+#[doc(hidden)]
+pub fn not_callable(callee: Val<'_>) -> RtErr {
+    RtErr::NotCallable {
+        callee: callee.capture(),
+    }
+}
+
+/// The argument values of a host call, with any trailing parameter the caller left off filled from
+/// the fn's own default.
+fn call_args<'gc>(
+    ctx: Ctx<'gc>,
+    strs: &StrInterner,
+    f: &Function,
+    args: impl Args,
+) -> Vec<Val<'gc>> {
+    let mut values = args.into_values(ctx);
+    for default in f.defaults.iter().skip(values.len()).flatten() {
+        values.push(constant_to_val(default.clone(), ctx, strs));
+    }
+    values
+}
+
+/// Run `body` to its return as if the entry frame had called it and hand back what it returned.
+/// A fault unwinds to the pre-call depth so the Vm is still usable afterwards.
+#[allow(clippy::too_many_arguments)]
+fn inject_call<'gc>(
+    ctx: Ctx<'gc>,
+    code: &mut Decoder,
+    chunks: &IdVec<BodyId, Chunk>,
+    signatures: &IdVec<BodyId, Option<Function>>,
+    strs: &StrInterner,
+    sources: &Sources,
+    thread_bc: Option<&[Option<crate::bc::BodyFn>]>,
+    body: BodyId,
+    values: &[Val<'gc>],
+    captures: &[Val<'gc>],
+) -> Result<Val<'gc>, Error> {
+    // each nested host-to-script call is Rust stack (a native that calls a closure that calls
+    // the native ...): stop before the host's stack does
+    let nested = &ctx.state().mem.nested;
+    if nested.get() >= crate::mem::MAX_NESTED_CALLS {
+        let depth = ctx.thread().borrow().frames.len();
+        return Err(Error::msg(RtErr::RecursionTooDeep { depth }));
+    }
+    nested.set(nested.get() + 1);
+    let out = inject_call_inner(
+        ctx, code, chunks, signatures, strs, sources, thread_bc, body, values, captures,
+    );
+    nested.set(nested.get() - 1);
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn inject_call_inner<'gc>(
+    ctx: Ctx<'gc>,
+    code: &mut Decoder,
+    chunks: &IdVec<BodyId, Chunk>,
+    signatures: &IdVec<BodyId, Option<Function>>,
+    strs: &StrInterner,
+    sources: &Sources,
+    thread_bc: Option<&[Option<crate::bc::BodyFn>]>,
+    body: BodyId,
+    values: &[Val<'gc>],
+    captures: &[Val<'gc>],
+) -> Result<Val<'gc>, Error> {
+    let mut thread = ctx.thread().borrow_mut(&ctx);
+    let base = thread.frames.last().unwrap().base;
+    let (depth, regs, ip) = (thread.frames.len(), thread.regs.len(), code.ip);
+    // the callee returns into r0 of the entry body, which still needs its own value
+    let r0 = thread.regs[base];
+    // nothing is mutated before this fails, so the thread is untouched and needs no unwinding
+    enter_call(&mut thread, code, chunks, body, Reg::ZERO, values, captures).map_err(Error::msg)?;
+    // A host-injected call isn't a frame: `paused` (yield_frame) must not
+    // stop it partway, or the read of `regs[base]` below picks up garbage.
+    // Run the callee to completion like `Vm::run` does — but if the callee
+    // itself yielded, relatch the flag on the way out so the pause still
+    // lands at the caller's next dispatch boundary.
+    ctx.state().paused.set(false);
+    let mut yielded = false;
+    let ran = loop {
+        let ran = run_dispatch(
+            ctx,
+            code,
+            chunks,
+            signatures,
+            strs,
+            sources,
+            &mut thread,
+            thread_bc,
+            usize::MAX,
+            depth + 1,
+        );
+        match ran {
+            Ok(false) => {
+                yielded = true;
+                ctx.state().paused.set(false);
+            }
+            _ => break ran,
+        }
+    };
+    if yielded {
+        ctx.state().paused.set(true);
+    }
+    // a fault returns without unwinding, so the callee's frames are still stacked
+    if ran.is_err() {
+        thread.frames.truncate(depth);
+        thread.regs.truncate(regs);
+        code.ip = ip;
+    }
+    let value = std::mem::replace(&mut thread.regs[base], r0);
+    drop(thread);
+    ran?;
+    Ok(value)
 }
 
 /// Attach a source location to a runtime fault. `op_ip` is the byte the faulting op was decoded
@@ -897,7 +1854,8 @@ fn locate(
 }
 
 #[inline(always)]
-fn get_index<'gc>(
+#[doc(hidden)]
+pub fn get_index<'gc>(
     ctx: Ctx<'gc>,
     set: Val<'gc>,
     index: Val<'gc>,
@@ -917,6 +1875,11 @@ fn get_index<'gc>(
         (Val::Array(a), Val::Int(i)) => {
             let v = a.0.borrow();
             v[pos(i, v.len())?]
+        }
+        // typed arrays read boxed — `a[i]` still yields `Val::Int`/`Val::Float`
+        (Val::IntArray(a) | Val::FloatArray(a), Val::Int(i)) => {
+            let v = a.0.borrow();
+            v.get(pos(i, v.len())?).unwrap()
         }
         (Val::Dict(d), Val::Str(key)) => d.0.borrow().get(&key).copied().unwrap_or(Val::Null),
         (Val::Dict(d), Val::Int(i)) => {
@@ -944,7 +1907,13 @@ fn get_index<'gc>(
 }
 
 #[inline(always)]
-fn set_index<'gc>(ctx: Ctx<'gc>, set: Val<'gc>, index: Val<'gc>, value: Val<'gc>) -> RtResult<()> {
+#[doc(hidden)]
+pub fn set_index<'gc>(
+    ctx: Ctx<'gc>,
+    set: Val<'gc>,
+    index: Val<'gc>,
+    value: Val<'gc>,
+) -> RtResult<()> {
     #[inline(always)]
     fn pos(i: i64, len: usize) -> RtResult<usize> {
         let u = usize::try_from(i).map_err(|_| RtErr::IndexOutOfBounds)?;
@@ -959,6 +1928,13 @@ fn set_index<'gc>(ctx: Ctx<'gc>, set: Val<'gc>, index: Val<'gc>, value: Val<'gc>
             let p = pos(i, v.len())?;
             v[p] = value;
         }
+        // typed write — stores the scalar in place, or demotes the whole
+        // sequence to `Vals` when `value` doesn't fit the backing kind
+        (Val::IntArray(a) | Val::FloatArray(a), Val::Int(i)) => {
+            let mut s = a.0.borrow_mut(&ctx);
+            let p = pos(i, s.len())?;
+            s.set(ctx, p, value);
+        }
         (Val::Dict(d), Val::Str(key)) => {
             d.0.borrow_mut(&ctx).insert(key, value);
         }
@@ -972,9 +1948,28 @@ fn set_index<'gc>(ctx: Ctx<'gc>, set: Val<'gc>, index: Val<'gc>, value: Val<'gc>
     Ok(())
 }
 
-fn contains<'gc>(needle: Val<'gc>, haystack: Val<'gc>, condition: bool) -> Val<'gc> {
+/// `Op::Push`'s shared body for generated/JIT code — and the interpreter's
+/// non-`Array` arm. A typed array pushes through its `ArrayStore` (picking
+/// the store kind on `Empty`, demoting through an incompatible element);
+/// anything that isn't a sequence at all is the old `as_array().unwrap()`
+/// panic, kept as an explicit message.
+#[doc(hidden)]
+pub fn seq_push<'gc>(ctx: Ctx<'gc>, arr: Val<'gc>, value: Val<'gc>) {
+    match arr {
+        Val::Array(a) => {
+            ctx.charge(std::mem::size_of::<Val>());
+            a.0.borrow_mut(&ctx).push(value)
+        }
+        Val::IntArray(a) | Val::FloatArray(a) => a.0.borrow_mut(&ctx).push(ctx, value),
+        _ => panic!("push: `array` register held a non-array"),
+    }
+}
+
+#[doc(hidden)]
+pub fn contains<'gc>(needle: Val<'gc>, haystack: Val<'gc>, condition: bool) -> Val<'gc> {
     let c = match haystack {
         Val::Array(a) => a.0.borrow().contains(&needle),
+        Val::IntArray(a) | Val::FloatArray(a) => a.0.borrow().contains(needle),
         Val::Dict(d) => {
             let Val::Str(key) = needle else { todo!() };
             d.0.borrow().contains_key(&key)
@@ -999,7 +1994,8 @@ fn contains<'gc>(needle: Val<'gc>, haystack: Val<'gc>, condition: bool) -> Val<'
 
 #[cold]
 #[inline(never)]
-fn bin_cold<'gc>(
+#[doc(hidden)]
+pub fn bin_cold<'gc>(
     regs: &mut [Val<'gc>],
     dst: Reg,
     left: Reg,
@@ -1014,7 +2010,8 @@ fn bin_cold<'gc>(
 
 #[cold]
 #[inline(never)]
-fn bin_cold_imm_int<'gc>(
+#[doc(hidden)]
+pub fn bin_cold_imm_int<'gc>(
     regs: &mut [Val<'gc>],
     dst: Reg,
     left: Reg,
@@ -1029,7 +2026,8 @@ fn bin_cold_imm_int<'gc>(
 
 #[cold]
 #[inline(never)]
-fn bin_cold_imm_float<'gc>(
+#[doc(hidden)]
+pub fn bin_cold_imm_float<'gc>(
     regs: &mut [Val<'gc>],
     dst: Reg,
     left: Reg,
@@ -1045,7 +2043,8 @@ fn bin_cold_imm_float<'gc>(
 #[cold]
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
-fn branch_cold<'gc>(
+#[doc(hidden)]
+pub fn branch_cold<'gc>(
     regs: &mut [Val<'gc>],
     code: &mut Decoder,
     target: usize,
@@ -1068,7 +2067,8 @@ fn branch_cold<'gc>(
 #[cold]
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
-fn branch_cold_imm_int<'gc>(
+#[doc(hidden)]
+pub fn branch_cold_imm_int<'gc>(
     regs: &mut [Val<'gc>],
     code: &mut Decoder,
     target: usize,
@@ -1091,7 +2091,8 @@ fn branch_cold_imm_int<'gc>(
 #[cold]
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
-fn branch_cold_imm_float<'gc>(
+#[doc(hidden)]
+pub fn branch_cold_imm_float<'gc>(
     regs: &mut [Val<'gc>],
     code: &mut Decoder,
     target: usize,
@@ -1116,7 +2117,8 @@ fn branch_cold_imm_float<'gc>(
 /// strictly a win. Reached via the wildcard arm with `return cold_dispatch(...)`.
 #[cold]
 #[inline(never)]
-fn cold_dispatch<'gc>(
+#[doc(hidden)]
+pub fn cold_dispatch<'gc>(
     code: &mut Decoder,
     regs: &mut [Val<'gc>],
     ctx: Ctx<'gc>,
@@ -1168,7 +2170,7 @@ fn cold_dispatch<'gc>(
         }
         OpCode::NewArray => {
             let dst = Reg::decode(code);
-            wr!(regs, dst, Val::Array(ctx.new_array(Vec::new())));
+            wr!(regs, dst, ctx.new_seq());
         }
         OpCode::NewDict => {
             let dst = Reg::decode(code);
@@ -1190,7 +2192,7 @@ fn cold_dispatch<'gc>(
             for _ in 0..len {
                 match OpFormatPart::decode(code) {
                     OpFormatPart::Literal(str_id) => text.push_str(strs.get(str_id)),
-                    OpFormatPart::Value(reg) => ctx.to_string_into(&mut text, rd!(regs, reg)),
+                    OpFormatPart::Value(reg) => ctx.to_string_into(&mut text, rd!(regs, reg))?,
                 }
             }
             wr!(regs, dst, Val::Str(ctx.intern(&text)));
@@ -1264,6 +2266,18 @@ fn cold_dispatch<'gc>(
             };
             wr!(regs, dst, Val::Str(err));
         }
+        OpCode::UnwrapUnit => {
+            // `()`'s repr is Null, so no null check; only Raised faults. Any
+            // other value reads back as unit.
+            let dst = Reg::decode(code);
+            let src = Reg::decode(code);
+            match rd!(regs, src) {
+                Val::Raised(err) => {
+                    return Err(RtErr::UnwrappedRaised(err.as_str().to_string()));
+                }
+                _ => wr!(regs, dst, Val::Null),
+            }
+        }
         _ => unreachable!("failed to find cold op"),
     }
 
@@ -1272,7 +2286,8 @@ fn cold_dispatch<'gc>(
 
 /// Convert a compile-time `Constant` into a runtime `Val<'gc>`. Str constants resolve
 /// through the chunk's string pool into the arena's interner.
-fn constant_to_val<'gc>(c: Constant, ctx: Ctx<'gc>, c_cstrs: &StrInterner) -> Val<'gc> {
+#[doc(hidden)]
+pub fn constant_to_val<'gc>(c: Constant, ctx: Ctx<'gc>, c_cstrs: &StrInterner) -> Val<'gc> {
     match c {
         Constant::Bool(b) => Val::Bool(b),
         Constant::Int(i) => Val::Int(i),
@@ -1283,10 +2298,55 @@ fn constant_to_val<'gc>(c: Constant, ctx: Ctx<'gc>, c_cstrs: &StrInterner) -> Va
                 .into_iter()
                 .map(|c| constant_to_val(c, ctx, c_cstrs))
                 .collect();
-            Val::Array(ctx.new_array(out))
+            ctx.array_val(out)
         }
         Constant::Null => Val::Null,
     }
+}
+
+/// The diff behind [`Vm::debug_step_events`]: which frames appeared/disappeared and which
+/// locals changed value, between two [`FrameView`] snapshots taken a single [`Vm::debug_step`]
+/// apart.
+///
+/// A newly-created frame reports every one of its named locals as changed, not just its
+/// parameters -- mimas pre-allocates all of a function's local registers at frame entry (there's
+/// no per-line "the register for this `let` now exists" event at the VM level), so a `let` not
+/// yet reached shows up bound to `null` immediately, then `LocalChanged` again for real once its
+/// assignment actually executes. That's the honest picture of what the VM did, not a gloss over
+/// it -- a presentation layer is free to wait for the second event before drawing anything.
+fn diff_frames(before: &[FrameView], after: &[FrameView]) -> Vec<DebugEvent> {
+    let mut events = Vec::new();
+    for a in after {
+        let matched = before.iter().find(|b| b.base == a.base);
+        if matched.is_none() {
+            events.push(DebugEvent::Called {
+                base: a.base,
+                function_name: a.function_name.clone(),
+            });
+        }
+        let before_locals: &[(String, Captured)] =
+            matched.map(|b| b.locals.as_slice()).unwrap_or(&[]);
+        for (name, value) in &a.locals {
+            let was = before_locals
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, v)| v.clone());
+            if was.as_ref() != Some(value) {
+                events.push(DebugEvent::LocalChanged {
+                    base: a.base,
+                    name: name.clone(),
+                    was,
+                    value: value.clone(),
+                });
+            }
+        }
+    }
+    for b in before {
+        if !after.iter().any(|a| a.base == b.base) {
+            events.push(DebugEvent::Returned { base: b.base });
+        }
+    }
+    events
 }
 
 impl Vm {
@@ -1317,41 +2377,948 @@ impl Vm {
         })
     }
 
+    /// Like [`Vm::resolve_name`], but renders the value through its real `Display` (the same
+    /// path `print` uses) instead of taking a [`Captured`] snapshot. `Captured` is a lossy,
+    /// escaped inspection format (e.g. `Captured::Other` for anything it can't see into, like
+    /// closures or a native `Val` variant that doesn't decompose into fields, and
+    /// `Captured::Str`'s `Display` debug-escapes newlines/quotes) -- this gives the value's
+    /// natural rendering instead, for callers (tests, mainly) that want to compare against what
+    /// a person would actually see.
+    pub fn resolve_name_to_string(&mut self, lexeme: &str) -> Option<RtResult<String>> {
+        let chunks = &self.chunks;
+        self.arena.mutate(|mc, state| {
+            let val = {
+                let t = state.thread.borrow();
+                let frame = t.frames.first()?;
+                let reg = *chunks[frame.chunk].locals.get(lexeme)?;
+                t.regs.get(frame.base + reg.index()).copied()?
+            };
+            Some(state.ctx(mc).to_string(val))
+        })
+    }
+
     /// Calls a function by name. Must be within the root of the program. Must require 0 arguments.
     pub fn call_fn(&mut self, name: &str) -> Option<Captured> {
-        let body_id = self.items.get(name).copied()?;
+        self.call_fn_result(name).ok()
+    }
 
+    /// [`Vm::call_fn`], but surfaces a runtime fault instead of swallowing it. A fault unwinds the
+    /// call's frames, so the thread (and every global the program holds) is usable for the next
+    /// call -- [`Vm::run_tests`] still resets afterwards so a debug session starts at program
+    /// entry.
+    pub fn call_fn_result(&mut self, name: &str) -> Result<Captured, Error> {
+        shared::units::install(&self.units);
+        self.mem_boundary();
+        let Some(body_id) = self.items.get(name).copied() else {
+            return Err(miette::miette!("no fn {name}"));
+        };
+        let (slot, ran) = self.call_batched(body_id)?;
+        self.arena.mutate(|mc, state| {
+            let ctx = state.ctx(mc);
+            let mut thread = state.thread.borrow_mut(mc);
+            let out = ran.map(|_| thread.regs[slot.caller_base].capture());
+            slot.restore(ctx, &mut thread);
+            out
+        })
+    }
+
+    /// Enter script fn `body` as a call from the current top frame and run it to its return in
+    /// FUEL batches, collecting (and settling the memory budget) between batches like
+    /// [`Vm::run`] does — a 40M-op check would otherwise run inside one arena mutation and keep
+    /// every byte of its garbage until it returned. The return lands in the caller's slot 0:
+    /// read it, then [`CallSlot::restore`] the caller's own value there. A fault unwinds the
+    /// callee's frames.
+    fn call_batched(&mut self, body_id: BodyId) -> Result<(CallSlot, Result<(), Error>), Error> {
+        let Vm {
+            code,
+            chunks,
+            arena,
+            ..
+        } = self;
+        let ip = code.ip;
+        let (caller_base, saved, stop_depth, regs_len) = arena.mutate(|mc, state| {
+            let ctx = state.ctx(mc);
+            let mut thread = state.thread.borrow_mut(mc);
+            // The callee's return lands in `dst` of the caller's window —
+            // Reg::ZERO is the caller frame's slot 0, a *live* register once
+            // the entry body has run (a top-level `let`'s slot). A check
+            // run after `run()` would otherwise clobber the first global
+            // for the next caller, so save it (stashed: it must outlive this
+            // mutation) and restore it afterwards.
+            let caller_base = thread.frames.last().unwrap().base;
+            let saved = thread.regs.get(caller_base).map(|&v| ctx.stash(v));
+            let stop_depth = thread.frames.len() + 1;
+            let regs_len = thread.regs.len();
+            enter_call(&mut thread, code, chunks, body_id, Reg::ZERO, &[], &[])
+                .map_err(Error::msg)?;
+            Ok::<_, Error>((caller_base, saved, stop_depth, regs_len))
+        })?;
+        let slot = CallSlot { caller_base, saved };
+        // a host call isn't a frame: a yield inside it doesn't stop it (as in `inject_call`),
+        // but the pause is relatched for the caller's next frame boundary
+        self.arena.mutate(|_, state| state.paused.set(false));
+        let mut yielded = false;
+        let ran = loop {
+            let Vm {
+                code,
+                chunks,
+                signatures,
+                c_strs: strs,
+                arena,
+                sources,
+                bc,
+                ..
+            } = self;
+            let step = arena.mutate(|mc, state| {
+                let ctx = state.ctx(mc);
+                let mut thread = state.thread.borrow_mut(mc);
+                let done = run_dispatch(
+                    ctx,
+                    code,
+                    chunks,
+                    signatures,
+                    strs,
+                    sources,
+                    &mut thread,
+                    bc.as_deref(),
+                    FUEL,
+                    stop_depth,
+                )?;
+                Ok::<_, Error>((done, state.paused.replace(false)))
+            });
+            match step {
+                Err(e) => break Err(e),
+                Ok((true, paused)) => {
+                    yielded |= paused;
+                    break Ok(());
+                }
+                Ok((false, paused)) => {
+                    yielded |= paused;
+                    self.collect_boundary();
+                }
+            }
+        };
+        if yielded {
+            self.arena.mutate(|_, state| state.paused.set(true));
+        }
+        // a fault returns without unwinding: drop the callee's frames, as `inject_call` does,
+        // so the thread is usable for the next call with the program's state intact
+        if ran.is_err() {
+            self.code.ip = ip;
+            self.arena.mutate(|mc, state| {
+                let mut thread = state.thread.borrow_mut(mc);
+                thread.frames.truncate(stop_depth - 1);
+                thread.regs.truncate(regs_len);
+            });
+        }
+        Ok((slot, ran))
+    }
+
+    /// The script's items as the host sees them: its fns, consts and types, and the same for
+    /// every module. Privacy is a rule for scripts, not for the host, so private items are here
+    /// too -- a `Type` carries its own `vis` if you care to check.
+    pub fn root(&self) -> &Module {
+        &self.root
+    }
+
+    /// The host types this program was compiled against, for turning a Rust type into its `Ty`.
+    pub fn registry(&self) -> &Registry {
+        &self.registry
+    }
+
+    /// The signature of a script fn or closure `body`, for a function value the host only knows
+    /// by its [`BodyId`]. `None` for a body with no fn type of its own.
+    pub fn signature(&self, body: BodyId) -> Option<&FnHeader> {
+        self.signatures.get(body)?.as_ref().map(|f| &f.header)
+    }
+
+    /// Calls a fn by `::` path (`"update"`, `"game::tick"`) once the program has [run](Self::run).
+    /// Arguments and `R` are checked against the signature first; trailing defaults may be left
+    /// out; a fault leaves the Vm usable.
+    pub fn call<R: for<'gc> MimasType<'gc>>(
+        &mut self,
+        path: &str,
+        args: impl Args,
+    ) -> Result<R, Error> {
+        self.call_then(path, args, |_| ()).map(|(value, ())| value)
+    }
+
+    /// [`call`](Self::call), then `then` with the arena still open -- the fn's frame is gone but
+    /// nothing has been collected yet, so whatever a native put aside during the call can still
+    /// be read. `then` doesn't run when the call faults.
+    pub fn call_then<R, T>(
+        &mut self,
+        path: &str,
+        args: impl Args,
+        then: impl for<'gc> FnOnce(Ctx<'gc>) -> T,
+    ) -> Result<(R, T), Error>
+    where
+        R: for<'gc> MimasType<'gc>,
+    {
+        let root = Rc::clone(&self.root);
+        let Some(f) = root.function(path) else {
+            return Err(miette::miette!("no fn `{path}` is reachable from the host"));
+        };
+        f.check(
+            path,
+            &args.tys(&self.registry),
+            R::mimas_ty(&self.registry).as_ref(),
+        )?;
+        self.call_function(f, args, then)
+    }
+
+    /// [`call_then`](Self::call_then) for a fn already looked up in [`root`](Self::root), without
+    /// checking `args` or `R` against its signature: [`Function::check`] once, then call as often
+    /// as needed. A fn from another Vm is a logic error.
+    pub fn call_function<R, T>(
+        &mut self,
+        f: &Function,
+        args: impl Args,
+        then: impl for<'gc> FnOnce(Ctx<'gc>) -> T,
+    ) -> Result<(R, T), Error>
+    where
+        R: for<'gc> MimasType<'gc>,
+    {
+        shared::units::install(&self.units);
+        self.mem_boundary();
+        let Vm {
+            code,
+            chunks,
+            signatures,
+            c_strs: strs,
+            arena,
+            sources,
+            bc,
+            ..
+        } = self;
+        let result = arena.mutate(|mc, state| {
+            let ctx = state.ctx(mc);
+            let values = call_args(ctx, strs, f, args);
+            let value = inject_call(
+                ctx,
+                code,
+                chunks,
+                signatures,
+                strs,
+                sources,
+                bc.as_deref(),
+                f.body,
+                &values,
+                &[],
+            )?;
+            let value = R::from_value(ctx, value).map_err(|err| Error::msg(RtErr::from(err)))?;
+            Ok((value, then(ctx)))
+        });
+        self.arena.collect_debt();
+        result
+    }
+
+    /// [`call_function`](Self::call_function) for a function value the script handed over through
+    /// [`Ctx::stash`] -- a fn, or a closure, which is called with whatever it captured. Argument
+    /// and return types aren't checked: read the shape with [`signature`](Self::signature) first
+    /// if the value came from somewhere the host doesn't control.
+    pub fn call_value<R: for<'gc> MimasType<'gc>>(
+        &mut self,
+        f: &Stashed,
+        args: impl Args,
+    ) -> Result<R, Error> {
+        self.call_value_then(f, args, |_| ())
+            .map(|(value, ())| value)
+    }
+
+    /// [`call_value`](Self::call_value), then `then` with the arena still open, the way
+    /// [`call_then`](Self::call_then) follows [`call`](Self::call).
+    pub fn call_value_then<R, T>(
+        &mut self,
+        f: &Stashed,
+        args: impl Args,
+        then: impl for<'gc> FnOnce(Ctx<'gc>) -> T,
+    ) -> Result<(R, T), Error>
+    where
+        R: for<'gc> MimasType<'gc>,
+    {
+        shared::units::install(&self.units);
+        self.mem_boundary();
         let Vm {
             code,
             chunks,
             c_strs: strs,
             arena,
             sources,
+            signatures,
+            bc,
+            ..
+        } = self;
+        let result = arena.mutate(|mc, state| {
+            let ctx = state.ctx(mc);
+            // a handle from a superseded program names a body that means something else now, so
+            // it's rejected here rather than left to `fetch`, which panics on one
+            if !ctx.holds(f) {
+                return Err(miette::miette!(
+                    "the host called a function value stashed against a program that is no longer \
+                     loaded"
+                ));
+            }
+            let (body, captures) = match ctx.fetch(f) {
+                Val::Fn(body) => (body, &[] as &[_]),
+                Val::Closure(closure) => (
+                    closure.0.function,
+                    Gc::as_ref(closure.0).captures.as_slice(),
+                ),
+                other => {
+                    return Err(miette::miette!(
+                        "the host called `{}`, which isn't a function",
+                        ctx.display(other).unwrap_or_else(|_| "?".into())
+                    ));
+                }
+            };
+            // a tuple struct's name is a `Val::Fn` too, carrying a header the solver synthesized
+            // and no body to enter -- having a signature is what tells a real fn apart
+            let Some(signature) = signatures.get(body).and_then(Option::as_ref) else {
+                return Err(miette::miette!(
+                    "the host called `{}`, which has no function body",
+                    ctx.display(ctx.fetch(f)).unwrap_or_else(|_| "?".into())
+                ));
+            };
+            // `enter_call` is what rejects a wrong argument count, for the host and script alike
+            let values = call_args(ctx, strs, signature, args);
+            let value = inject_call(
+                ctx,
+                code,
+                chunks,
+                signatures,
+                strs,
+                sources,
+                bc.as_deref(),
+                body,
+                &values,
+                captures,
+            )?;
+            let value = R::from_value(ctx, value).map_err(|err| Error::msg(RtErr::from(err)))?;
+            Ok((value, then(ctx)))
+        });
+        self.arena.collect_debt();
+        result
+    }
+
+    /// Functions marked `#[test]`, in source order.
+    pub fn tests(&self) -> &[String] {
+        &self.tests
+    }
+
+    /// Every top-level callable name (the `items` keys), sorted. Hosts that
+    /// dispatch on naming conventions — `live*` draw functions, `main` — use
+    /// this instead of re-parsing the source.
+    pub fn item_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.items.keys().cloned().collect();
+        names.sort();
+        names
+    }
+
+    /// [`Vm::call_fn_result`], but captures the result as a name-labeled
+    /// [`Inspect`] tree — for hosts that render a function's return value
+    /// (e.g. an `img::Draw` scene) rather than compare it in a test. A
+    /// runtime fault rewinds the thread to the entry frame (see
+    /// [`Vm::call_fn_read`]).
+    pub fn call_fn_inspect(&mut self, name: &str) -> Result<Inspect, Error> {
+        Ok(self.call_fn_read(name, |_| ())?.0)
+    }
+
+    /// [`Vm::call_fn_inspect`], plus `read` applied to the raw [`Val`] while
+    /// it's still inside the arena — for value kinds `Inspect` flattens (a
+    /// `DataFrame` reads as `Inspect::Other`; a host typesetting it needs the
+    /// cells, e.g. [`table_data`]). A faulting call rewinds the thread to the
+    /// entry frame first, so the next injected call doesn't read stale
+    /// registers — the same reset `run_tests` performs between cases.
+    pub fn call_fn_read<T>(
+        &mut self,
+        name: &str,
+        read: impl FnOnce(&Val<'_>) -> T,
+    ) -> Result<(Inspect, T), Error> {
+        shared::units::install(&self.units);
+        self.mem_boundary();
+        let Some(body_id) = self.items.get(name).copied() else {
+            return Err(miette::miette!("no fn {name}"));
+        };
+
+        // Live calls run back-to-back: `call_batched` saves and restores the caller's slot 0,
+        // or each call would read the previous call's return value as its first global.
+        let (slot, ran) = self.call_batched(body_id)?;
+        let field_names = &self.field_names;
+        let out = self.arena.mutate(|mc, state| {
+            let ctx = state.ctx(mc);
+            let val = {
+                let mut thread = state.thread.borrow_mut(mc);
+                let ret = thread.regs.get(slot.caller_base).copied();
+                slot.restore(ctx, &mut thread);
+                ret
+            };
+            ran?;
+            let val = val.unwrap_or(Val::Null);
+            let struct_names = state.struct_names.borrow();
+            let mut seen = std::collections::HashSet::new();
+            let extra = read(&val);
+            Ok((val.inspect(&struct_names, field_names, &mut seen), extra))
+        });
+        if out.is_err() {
+            self.reset_to_entry();
+        }
+        out
+    }
+
+    /// Runs every `#[test]` function and every `#[tests]` expression to completion (not through
+    /// `debug_step`). A panic or other runtime fault is a failure; a `false` bool is a failure
+    /// (for `#[tests]` checks); any other return is a pass. Resets the thread afterwards so a
+    /// debug session still starts at program entry.
+    ///
+    /// Cold-globals caveat: each body is injected via `call_fn_result` and the
+    /// thread is rewound with `reset_to_entry` after every test, so top-level
+    /// `let`s never execute — a test that reads one sees `Null`. The host's
+    /// check runner (literate-eval `run_top_level_for_checks`) inits the entry
+    /// chunk once up front instead; if `mimas test` needs the same, the fix is
+    /// a checkpoint reset — run the entry chunk once, snapshot
+    /// `regs.len()`/`frames`, and between tests truncate back to that instead
+    /// of `reset_to_entry` (heap mutations by tests still persist either way —
+    /// `Val` slots are shallow). Only faulted calls actually need the recovery;
+    /// successful ones already leave `frames == [entry]`.
+    pub fn run_tests(&mut self) -> Vec<TestResult> {
+        let names = self.tests.clone();
+        let mut results = Vec::with_capacity(names.len());
+        for name in names {
+            let error = match self.call_fn_result(&name) {
+                Err(e) => Some(format!("{e}")),
+                Ok(Captured::Bool(false)) => Some("assertion failed".into()),
+                // `true` for a check case, unit for a `#[test]` fn (which asserts or panics)
+                Ok(Captured::Bool(true) | Captured::Null) => None,
+                // anything else is a broken check, not a pass
+                Ok(other) => Some(format!("check produced {other:?}, expected a bool")),
+            };
+            self.reset_to_entry();
+            results.push(TestResult { name, error });
+        }
+        results
+    }
+
+    /// Finds the first live register (outermost frame first, then in register order) holding a
+    /// struct instance whose type implements `method_name`, calls that method with no arguments
+    /// beyond the implicit receiver, and returns the result -- or `None` if no such instance
+    /// exists, the call errors, or it needs more than a receiver.
+    ///
+    /// Meant for a debugger asking a live value to render itself via a user-defined pact (e.g.
+    /// `impl Typeset for Node { fn typeset(self) -> str { .. } }`), without that call needing to
+    /// be written into the script's own source. Unlike [`Vm::call_fn`] (which reuses register 0
+    /// of the frame it's invoked from -- fine between full runs, not fine mid-debug-session),
+    /// the injected call's return value lands in a register appended past everything currently
+    /// live, so this can't corrupt a real, still-paused program's state.
+    pub fn call_method_on_first_instance(&mut self, method_name: &str) -> Option<Captured> {
+        shared::units::install(&self.units);
+        let Vm {
+            code,
+            chunks,
+            c_strs: strs,
+            signatures,
+            arena,
+            sources,
+            methods,
+            bc,
             ..
         } = self;
         arena.mutate(|mc, state| {
             let ctx = state.ctx(mc);
-            // scope the borrow so it's released before we re-borrow to read the result.
-            {
-                let mut thread = state.thread.borrow_mut(mc);
-                let stop_depth = thread.frames.len() + 1;
-                enter_call(&mut thread, code, chunks, body_id, Reg::ZERO, &[], &[]);
-                run_dispatch(
+            let mut thread = state.thread.borrow_mut(mc);
+
+            let mut target = None;
+            'search: for frame in thread.frames.iter() {
+                let window_len = chunks[frame.chunk].regs as usize;
+                for reg in &thread.regs[frame.base..frame.base + window_len] {
+                    if let Val::Instance(inst) = reg {
+                        let struct_id = inst.0.borrow().struct_id as usize;
+                        if let Some(&body) = methods.get(struct_id).and_then(|m| m.get(method_name))
+                        {
+                            target = Some((body, *reg));
+                            break 'search;
+                        }
+                    }
+                }
+            }
+            let (body, receiver) = target?;
+
+            // a fresh register past everything currently live, so the injected call's return
+            // value can't land on top of (and corrupt) anything the paused program still needs.
+            let return_slot = thread.regs.len();
+            thread.regs.push(Val::Null);
+            let caller_base = thread.frames.last().unwrap().base;
+            let dst = Reg::from((return_slot - caller_base) as u32);
+
+            let stop_depth = thread.frames.len() + 1;
+            enter_call(&mut thread, code, chunks, body, dst, &[receiver], &[]).ok()?;
+            run_dispatch(
+                ctx,
+                code,
+                chunks,
+                signatures,
+                strs,
+                sources,
+                &mut thread,
+                bc.as_deref(),
+                usize::MAX,
+                stop_depth,
+            )
+            .ok()?;
+
+            let result = thread.regs[return_slot].capture();
+            thread.regs.truncate(return_slot);
+            Some(result)
+        })
+    }
+
+    /// Like [`Vm::call_method_on_first_instance`], but captures the result as a name-labeled
+    /// [`Inspect`] tree instead of [`Captured`] -- for a caller (a scene renderer, say) that has
+    /// to know *which* struct or enum variant a returned value is, not just its shape.
+    /// `Captured::Instance` is positional and name-free by design (it's for test equality,
+    /// independent of what a struct happens to be called); this is the counterpart for when the
+    /// name is exactly the thing you need, e.g. dispatching on an `img::Image` variant.
+    pub fn call_method_on_first_instance_inspect(&mut self, method_name: &str) -> Option<Inspect> {
+        shared::units::install(&self.units);
+        let Vm {
+            code,
+            chunks,
+            c_strs: strs,
+            signatures,
+            arena,
+            sources,
+            methods,
+            field_names,
+            bc,
+            ..
+        } = self;
+        arena.mutate(|mc, state| {
+            let ctx = state.ctx(mc);
+            let mut thread = state.thread.borrow_mut(mc);
+
+            let mut target = None;
+            'search: for frame in thread.frames.iter() {
+                let window_len = chunks[frame.chunk].regs as usize;
+                for reg in &thread.regs[frame.base..frame.base + window_len] {
+                    if let Val::Instance(inst) = reg {
+                        let struct_id = inst.0.borrow().struct_id as usize;
+                        if let Some(&body) = methods.get(struct_id).and_then(|m| m.get(method_name))
+                        {
+                            target = Some((body, *reg));
+                            break 'search;
+                        }
+                    }
+                }
+            }
+            let (body, receiver) = target?;
+
+            let return_slot = thread.regs.len();
+            thread.regs.push(Val::Null);
+            let caller_base = thread.frames.last().unwrap().base;
+            let dst = Reg::from((return_slot - caller_base) as u32);
+
+            let stop_depth = thread.frames.len() + 1;
+            enter_call(&mut thread, code, chunks, body, dst, &[receiver], &[]).ok()?;
+            run_dispatch(
+                ctx,
+                code,
+                chunks,
+                signatures,
+                strs,
+                sources,
+                &mut thread,
+                bc.as_deref(),
+                usize::MAX,
+                stop_depth,
+            )
+            .ok()?;
+
+            let struct_names = state.struct_names.borrow();
+            let mut seen = std::collections::HashSet::new();
+            let result = thread.regs[return_slot].inspect(&struct_names, field_names, &mut seen);
+            thread.regs.truncate(return_slot);
+            Some(result)
+        })
+    }
+
+    /// Resolves `name` as a top-level local and renders it for a hover/inspect popup: if its
+    /// type has a zero-arg method named `draw_method` (the `img::Draw` pact, in practice), calls
+    /// it and returns the resulting `Image` tree as an [`Inspect`] -- same mechanism as
+    /// [`Vm::call_method_on_first_instance_inspect`], except the receiver is *this specific*
+    /// value instead of a first-match search. Otherwise falls back to the value's own to-string
+    /// form (the same text `print` would show), so hovering *any* identifier shows something
+    /// instead of nothing. Returns `None` only when `name` isn't a live top-level local at all.
+    pub fn resolve_for_scene(&mut self, name: &str, draw_method: &str) -> Option<SceneResult> {
+        shared::units::install(&self.units);
+        let Vm {
+            code,
+            chunks,
+            c_strs: strs,
+            signatures,
+            arena,
+            sources,
+            methods,
+            field_names,
+            bc,
+            ..
+        } = self;
+        arena.mutate(|mc, state| {
+            let ctx = state.ctx(mc);
+            // Receiver and method look up under a short thread borrow —
+            // `inject_call` re-borrows it to dispatch.
+            let (receiver, body) = {
+                let thread = state.thread.borrow_mut(mc);
+                let receiver = top_level_receiver(&thread, chunks, name)?;
+                let body = if let Val::Instance(inst) = receiver {
+                    let sid = inst.0.borrow().struct_id as usize;
+                    methods.get(sid).and_then(|m| m.get(draw_method)).copied()
+                } else {
+                    None
+                };
+                (receiver, body)
+            };
+            if let Some(body) = body {
+                // `draw(self)` takes the receiver only — a fatter signature
+                // can't be injected (same `enter_call` arity refusal as
+                // before, just checked ahead of the call).
+                if chunks[body].args as usize != 1 {
+                    return None;
+                }
+                match inject_call(
                     ctx,
                     code,
                     chunks,
+                    signatures,
                     strs,
                     sources,
-                    &mut thread,
-                    usize::MAX,
-                    stop_depth,
-                )
-                .ok()?;
+                    bc.as_deref(),
+                    body,
+                    &[receiver],
+                    &[],
+                ) {
+                    Ok(result) => {
+                        let struct_names = state.struct_names.borrow();
+                        let mut seen = std::collections::HashSet::new();
+                        return Some(SceneResult::Drawn(result.inspect(
+                            &struct_names,
+                            field_names,
+                            &mut seen,
+                        )));
+                    }
+                    Err(_) => {}
+                }
             }
-
-            let t = state.thread.borrow();
-            Some(t.regs.first().unwrap().capture())
+            ctx.to_string(receiver).ok().map(SceneResult::Fallback)
         })
+    }
+
+    /// [`Vm::resolve_for_scene`]'s sibling for methods that take one argument beyond `self`:
+    /// resolves `name` as a top-level local, looks up `method` on the instance it holds, builds
+    /// the argument host-side from `fields` (a named-field bag — see [`ArgVal`]), calls, and
+    /// returns the result as an [`Inspect`]. For a livelit `respond(self, ev)` the host
+    /// synthesizes `ev` — the method's declared parameter type drives the shape: an adt becomes
+    /// an `Instance` whose declared fields fill by name (absent names land as `Null`), anything
+    /// else becomes a `~{…}` dict of the given entries. `None` when `name` isn't a live
+    /// instance-typed local, has no `method`, or `method` doesn't take exactly one parameter.
+    /// Faults unwind like any other [`inject_call`] — no injected frame is left behind.
+    pub fn resolve_for_call(
+        &mut self,
+        name: &str,
+        method: &str,
+        fields: &[(&str, ArgVal)],
+    ) -> Option<Inspect> {
+        shared::units::install(&self.units);
+        let Vm {
+            code,
+            chunks,
+            c_strs: strs,
+            signatures,
+            arena,
+            sources,
+            methods,
+            field_names,
+            bc,
+            ..
+        } = self;
+        arena.mutate(|mc, state| {
+            let ctx = state.ctx(mc);
+            // Receiver, method, and header look up under a short thread
+            // borrow — `inject_call` re-borrows it to dispatch.
+            let (receiver, body, arg) = {
+                let thread = state.thread.borrow_mut(mc);
+                let receiver = top_level_receiver(&thread, chunks, name)?;
+                let Val::Instance(inst) = receiver else {
+                    return None;
+                };
+                let sid = inst.0.borrow().struct_id as usize;
+                let body = *methods.get(sid)?.get(method)?;
+                // `self` *is* `parameters[0]` on a method header (the
+                // receiver fills its slot), so `respond(self, ev)` reads
+                // as `[self, ev]`.
+                let header = &signatures[body].as_ref()?.header;
+                if !header.is_method || header.parameters.len() != 2 {
+                    return None;
+                }
+                let arg = arg_val(ctx, field_names, &header.parameters[1].ty, fields);
+                (receiver, body, arg)
+            };
+            let result = inject_call(
+                ctx,
+                code,
+                chunks,
+                signatures,
+                strs,
+                sources,
+                bc.as_deref(),
+                body,
+                &[receiver, arg],
+                &[],
+            )
+            .ok()?;
+            let struct_names = state.struct_names.borrow();
+            // Literal-bound inspect: a shared acyclic subgraph (e.g. a
+            // deck's four `Suit` objects) expands per alias — `repr`
+            // can't spell aliasing — while a real cycle still marks
+            // `Cycle` for the printer to refuse.
+            Some(result.inspect_literal(&struct_names, field_names, 100_000))
+        })
+    }
+
+    /// Executes exactly one bytecode op and reports whether the program has finished. Meant for
+    /// single-step debuggers: reuses the same fuel mechanism `run` uses to yield control, just
+    /// with a budget of one op instead of [`FUEL`].
+    pub fn debug_step(&mut self) -> Result<bool, Error> {
+        shared::units::install(&self.units);
+        self.mem_boundary();
+        let Vm {
+            code,
+            chunks,
+            c_strs: strs,
+            signatures,
+            arena,
+            sources,
+            bc,
+            ..
+        } = self;
+        // A step is a fresh entry — clear `paused` or a prior yield would
+        // stop this step before it executes anything.
+        arena.mutate(|_, state| state.paused.set(false));
+        let done = arena.mutate(|mc, state| {
+            let ctx = state.ctx(mc);
+            let mut thread = state.thread.borrow_mut(mc);
+            let done = run_dispatch(
+                ctx,
+                code,
+                chunks,
+                signatures,
+                strs,
+                sources,
+                &mut thread,
+                bc.as_deref(),
+                1,
+                1,
+            )?;
+            // `run_dispatch` only writes `code.ip` back into the top frame when a return crosses
+            // `stop_depth` (see its Flow::Return arm) -- for every other stopping point (which is
+            // all of them, at fuel budget 1) the top frame's own `ip` is stale until we sync it
+            // here, same as `Vm::run` relies on for `resolve_name` between calls.
+            if let Some(top) = thread.frames.last_mut() {
+                top.ip = code.ip;
+            }
+            Ok(done)
+        });
+        // `run` pays the arena's allocation debt between FUEL batches; a stepped session (a game
+        // stepping frames, a debugger stepping ops) never crosses that boundary, so without a
+        // collection here its heap only ever grows. Cheap when nothing is owed: `collect_debt`
+        // returns after a metrics check while the allocation debt is still unpaid.
+        arena.collect_debt();
+        done
+    }
+
+    /// [`Vm::debug_step`], plus the source-level diff of what that one op did. Diffs two
+    /// [`Vm::frames`] snapshots by frame `base` (stable per live call) rather than hooking the
+    /// interpreter itself -- stays correct for free as the instruction set grows, at the cost of
+    /// an extra `frames()` pass per step. That's a fine trade for a debugger, not the VM itself.
+    pub fn debug_step_events(&mut self) -> Result<(bool, Vec<DebugEvent>), Error> {
+        let before = self.frames();
+        let done = self.debug_step()?;
+        let after = self.frames();
+        Ok((done, diff_frames(&before, &after)))
+    }
+
+    /// The innermost frame's `(chunk, ip, source location)`, with no register/local capture --
+    /// unlike [`Vm::frames`], safe to call once per op. Meant for a debugger's hot inner loop
+    /// (e.g. "run until the source line changes"), where capturing every register on every op
+    /// would be wasted work at best and, if a live value cycles through `Gc` handles (a
+    /// doubly-linked list, say), expensive at every single step -- each capture re-walks the
+    /// cycle up to `MAX_CAPTURE_DEPTH` deep.
+    pub fn current_position(&mut self) -> Option<(BodyId, usize, shared::Location)> {
+        let chunks = &self.chunks;
+        self.arena.mutate(|_mc, state| {
+            let t = state.thread.borrow();
+            let f = t.frames.last()?;
+            let chunk = &chunks[f.chunk];
+            let rel = u32::try_from(f.ip.saturating_sub(chunk.offset)).unwrap_or(0);
+            Some((f.chunk, f.ip, chunk.loc_at(rel)))
+        })
+    }
+
+    /// Live GC objects in the arena — the leak gauge for stepped sessions, whose heap must stay
+    /// bounded across a run, and for hosts charting allocation over time.
+    pub fn gc_count(&self) -> usize {
+        self.arena.metrics().total_gc_count()
+    }
+
+    /// Snapshots every live call frame (oldest/entry frame first, matching `ThreadState.frames`)
+    /// for a debugger to render. Not on any hot path -- allocates freely, and its per-register
+    /// `Captured` values pay the same cycle-guarded recursion cost `Vm::current_position` avoids.
+    pub fn frames(&mut self) -> Vec<FrameView> {
+        let chunks = &self.chunks;
+        let chunk_names = &self.chunk_names;
+        let field_names = &self.field_names;
+        self.arena.mutate(|_mc, state| {
+            let struct_names = state.struct_names.borrow();
+            let t = state.thread.borrow();
+
+            // the entry frame's named locals = the program's globals (top-level `let`s) --
+            // visible from every body, so deeper frames surface them too, sourced from
+            // `t.regs[0..]` rather than the frame's own window.
+            let (entry_base, entry_locals): (usize, Vec<(String, Reg)>) = t
+                .frames
+                .first()
+                .map(|f| {
+                    let mut locals: Vec<_> = chunks[f.chunk]
+                        .locals
+                        .iter()
+                        .map(|(name, &reg)| (name.clone(), reg))
+                        .collect();
+                    locals.sort_by_key(|(_, reg)| reg.index());
+                    (f.base, locals)
+                })
+                .unwrap_or_default();
+
+            t.frames
+                .iter()
+                .map(|f| {
+                    let chunk = &chunks[f.chunk];
+                    let rel = u32::try_from(f.ip.saturating_sub(chunk.offset)).unwrap_or(0);
+                    let window = &t.regs[f.base..f.base + chunk.regs as usize];
+                    let registers: Vec<Captured> =
+                        window.iter().copied().map(Val::capture).collect();
+
+                    // `chunk.locals` has no declared order (it's a name -> Reg map); sorting by
+                    // register index reads as "declaration order" for the common case, since
+                    // the compiler allocates locals' registers as it walks the source.
+                    let mut locals: Vec<(&String, Reg)> = chunk
+                        .locals
+                        .iter()
+                        .map(|(name, &reg)| (name, reg))
+                        .collect();
+                    locals.sort_by_key(|&(_, reg)| reg.index());
+                    // one `seen` set shared across every local in this frame (not reset between
+                    // them) -- so two locals that alias into the same structure (a doubly-linked
+                    // list's `a`/`b`/`c`, say) only get it expanded once between them, not once
+                    // per alias. See `Inspect::Cycle`.
+                    let mut seen = std::collections::HashSet::new();
+                    let mut locals_inspect: Vec<(String, Inspect)> = locals
+                        .iter()
+                        .map(|&(name, reg)| {
+                            let v = window[reg.index()];
+                            let mut i = v.inspect(&struct_names, field_names, &mut seen);
+                            if matches!(i, Inspect::Cycle) {
+                                // `v` only reads as a cycle because another
+                                // local already expanded this shared object —
+                                // not because it cycles through itself. Give
+                                // the alias its own pass so the name still
+                                // resolves to real content (e.g. `let w =
+                                // world` in game-kit's loop).
+                                let mut fresh = std::collections::HashSet::new();
+                                i = v.inspect(&struct_names, field_names, &mut fresh);
+                            }
+                            (name.clone(), i)
+                        })
+                        .collect();
+                    let mut locals: Vec<(String, Captured)> = locals
+                        .into_iter()
+                        .map(|(name, reg)| (name.clone(), registers[reg.index()].clone()))
+                        .collect();
+
+                    // a deeper frame's globals: entry-frame locals it doesn't shadow itself,
+                    // read out of `t.regs[0..]` where the entry frame lives.
+                    if f.base != 0 {
+                        for (name, reg) in &entry_locals {
+                            if locals.iter().any(|(n, _)| n == name) {
+                                continue;
+                            }
+                            let val = t.regs[entry_base + reg.index()];
+                            locals.push((name.clone(), val.capture()));
+                            locals_inspect.push((
+                                name.clone(),
+                                val.inspect(&struct_names, field_names, &mut seen),
+                            ));
+                        }
+                    }
+
+                    FrameView {
+                        base: f.base,
+                        chunk: f.chunk,
+                        function_name: chunk_names.get(&f.chunk).cloned(),
+                        ip: f.ip,
+                        loc: chunk.loc_at(rel),
+                        registers,
+                        locals,
+                        locals_inspect,
+                    }
+                })
+                .collect()
+        })
+    }
+
+    /// One live local by name — the innermost frame's own locals, then the
+    /// entry frame's globals, matching [`frames()`]'s `locals_inspect`
+    /// resolution — inspected with a fresh `seen` so an aliased local
+    /// always resolves to real content instead of [`Inspect::Cycle`].
+    /// The cheap single-name version for callers that read one path per
+    /// step and shouldn't pay to inspect every local of every frame.
+    pub fn local_inspect(&mut self, name: &str) -> Option<Inspect> {
+        let chunks = &self.chunks;
+        let field_names = &self.field_names;
+        self.arena.mutate(|_mc, state| {
+            let struct_names = state.struct_names.borrow();
+            let t = state.thread.borrow();
+            for f in t.frames.iter().rev() {
+                if let Some(&reg) = chunks[f.chunk].locals.get(name) {
+                    let v = t.regs[f.base + reg.index()];
+                    let mut seen = std::collections::HashSet::new();
+                    return Some(v.inspect(&struct_names, field_names, &mut seen));
+                }
+            }
+            None
+        })
+    }
+
+    /// Source-level name of a chunk, when it's a named top-level item -- `None` for closures
+    /// and other synthetic chunks.
+    pub fn chunk_name(&self, chunk: BodyId) -> Option<&str> {
+        self.chunk_names.get(&chunk).map(String::as_str)
+    }
+
+    /// Struct/variant names indexed by `struct_id`, for labeling instances in a debugger UI --
+    /// same table [`Ctx::display`] uses.
+    pub fn struct_names(&mut self) -> Vec<String> {
+        self.arena
+            .mutate(|_mc, state| state.struct_names.borrow().clone())
+    }
+
+    /// Field names indexed by `struct_id` then field slot — the second table
+    /// [`Val::inspect`] needs to label instance fields.
+    pub fn field_names(&self) -> Vec<Vec<String>> {
+        self.field_names.clone()
+    }
+
+    /// Raw source text for a file, for a debugger to highlight the active span against.
+    pub fn source_text(&self, file_id: shared::FileId) -> Option<Arc<str>> {
+        self.sources.get(&file_id).map(|s| s.inner().clone())
     }
 
     pub fn execute<F>(source: &str, install_lib: F) -> std::result::Result<Self, ExecuteError>
@@ -1392,14 +3359,213 @@ impl Vm {
     where
         F: for<'gc> FnOnce(&mut crate::api::Api<'_, 'gc>),
     {
+        Self::compile_files_gated(files, install_lib, None)
+    }
+
+    /// `compile_files` with an effect gate: each file's inferred top-level
+    /// `Fx` must fit `allowed` or the program refuses to build — the file
+    /// never reaches codegen, let alone a frame. `None` skips the check
+    /// (the host trusted the sources already).
+    ///
+    /// This is the load-time half of safely running peer code: `Fx` is a
+    /// property of the loaded source, checked once here, before execution.
+    /// `UNAUDITED`-flagged sets fit only grants that also carry the flag.
+    pub fn compile_files_gated<F>(
+        files: &[(&str, &str)],
+        install_lib: F,
+        allowed: Option<shared::Fx>,
+    ) -> std::result::Result<Self, ExecuteError>
+    where
+        F: for<'gc> FnOnce(&mut crate::api::Api<'_, 'gc>),
+    {
+        let mut vm = Self::new();
+        let library = vm.install_library(install_lib);
+        let built = Self::build_program(files, &library, allowed)?;
+
+        vm.warnings = built.warnings;
+        vm.script_fx = built.script_fx;
+        vm.script_segments = built.script_segments;
+        vm.load_program(built.program);
+        vm.set_sources(built.sources);
+        vm.registry = library.into_registry();
+        Ok(vm)
+    }
+
+    /// The lint warnings the grades pass emitted while this program loaded
+    /// (unused bindings, dead stores, `must_use` discards). Empty for
+    /// `load_prebuilt` Vms — `compile_parts` drops them.
+    pub fn warnings(&self) -> &[miette::Report] {
+        &self.warnings
+    }
+
+    /// `(file, inferred top-level Fx)` from this program's load — the
+    /// footprint a host badges a page with.
+    pub fn script_fx(&self) -> &[(String, shared::Fx)] {
+        &self.script_fx
+    }
+
+    /// `(file, site, inferred Fx)` per top-level statement from this
+    /// program's load — the segment-level footprint a host attributes back
+    /// to a `check` line or a `use`-spliced statement. Empty for
+    /// `load_prebuilt` Vms — `compile_parts` drops it like `warnings`.
+    pub fn script_segments(&self) -> &[(String, shared::Location, shared::Fx)] {
+        &self.script_segments
+    }
+
+    /// Solve `files` and stop before codegen, returning only what the grades
+    /// pass computed: each file's inferred `Fx` plus the lint warnings. The
+    /// audit a host runs to *show* a peer page's effect footprint (ShareReview,
+    /// cap admission) without executing anything.
+    pub fn audit_files<F>(
+        files: &[(&str, &str)],
+        install_lib: F,
+    ) -> std::result::Result<solve::GradeAudit, ExecuteError>
+    where
+        F: for<'gc> FnOnce(&mut crate::api::Api<'_, 'gc>),
+    {
+        let mut probe = Self::new();
+        let library = probe.install_library(install_lib);
+        let mut loaded = solve::load_files(files.iter().copied(), &library);
+        if !loaded.errors.is_empty() {
+            return Err(loaded.errors.swap_remove(0).into());
+        }
+        let resolutions = solve::Resolutions::from(loaded.solver);
+        Ok(solve::GradeAudit {
+            script_effects: resolutions.script_effects,
+            script_segments: resolutions.script_segments,
+            warnings: loaded.warnings,
+        })
+    }
+
+    /// Compile `files` into a reusable `(Program, Sources)` pair —
+    /// `compile_files` minus the Vm, for callers (sweeps, sims) that
+    /// instantiate the same program into many fresh Vms.
+    pub fn compile_parts<F>(
+        files: &[(&str, &str)],
+        install_lib: F,
+    ) -> std::result::Result<(compile::Program, Sources), ExecuteError>
+    where
+        F: for<'gc> FnOnce(&mut crate::api::Api<'_, 'gc>),
+    {
+        let mut probe = Self::new();
+        let library = probe.install_library(install_lib);
+        let built = Self::build_program(files, &library, None)?;
+        Ok((built.program, built.sources))
+    }
+
+    /// [`compile_parts`] that also hands back the compiler [`compile::Ir`]
+    /// the program was lowered from — the SSA `Body`s wasmgen's `emit_waffle_ir`
+    /// consumes instead of re-deriving dataflow from the flat bytecode.
+    pub fn compile_parts_ir<F>(
+        files: &[(&str, &str)],
+        install_lib: F,
+    ) -> std::result::Result<(compile::Program, compile::Ir, Sources), ExecuteError>
+    where
+        F: for<'gc> FnOnce(&mut crate::api::Api<'_, 'gc>),
+    {
+        let mut probe = Self::new();
+        let library = probe.install_library(install_lib);
+        let built = Self::build_program(files, &library, None)?;
+        Ok((built.program, built.ir, built.sources))
+    }
+
+    /// Load a [`compile_parts`] program into this Vm — same post-load
+    /// wiring as `compile_files`, with this Vm's arena installing the
+    /// natives fresh (natives live per-Vm, in State fixtures).
+    pub fn load_prebuilt<F>(&mut self, program: compile::Program, sources: Sources, install_lib: F)
+    where
+        F: for<'gc> FnOnce(&mut crate::api::Api<'_, 'gc>),
+    {
+        let library = self.install_library(install_lib);
+        self.load_program(program);
+        self.set_sources(sources);
+        self.registry = library.into_registry();
+    }
+
+    /// The entire compilation process -- parse, solve and compile `files` against `library`, which
+    /// is the set of natives the resulting program is built to line up with.
+    fn build_program(
+        files: &[(&str, &str)],
+        library: &::api::Library<()>,
+        allowed: Option<shared::Fx>,
+    ) -> std::result::Result<BuiltProgram, ExecuteError> {
+        use solve::Resolutions;
+
+        let mut loaded = solve::load_files(files.iter().copied(), library);
+        // todo: only the first error makes it out
+        if !loaded.errors.is_empty() {
+            return Err(loaded.errors.swap_remove(0).into());
+        }
+
+        let stmts: Vec<_> = loaded
+            .asts
+            .into_iter()
+            .flat_map(|ast| ast.unpack())
+            .collect();
+        let sources = loaded.sources;
+        let warnings = loaded.warnings;
+        let resolutions = Resolutions::from(loaded.solver);
+        let script_fx = resolutions.script_effects.iter().map(|(f, fx)| (f.clone(), *fx)).collect();
+        let script_segments = resolutions.script_segments.clone();
+        // The gate sits between solve and codegen: a file whose inferred
+        // effects escape `allowed` is refused before a single op is built.
+        if let Some(allowed) = allowed {
+            for (file, fx) in &resolutions.script_effects {
+                if !fx.fits(allowed) {
+                    let report: Error = solve::errors::FxGate {
+                        file: file.clone(),
+                        have: fx.to_string(),
+                        allowed: allowed.to_string(),
+                    }
+                    .into();
+                    return Err(report.into());
+                }
+            }
+        }
+        // todo: there's zero reason to clone this here, im just trying to get a working version --
+        // there's probably a much smoother way to get the intrinsics over here
+        let mut ir = compile::Ir::new(
+            resolutions,
+            library.intrinsics().iter().map(|(a, b)| (*a, *b)).collect(),
+        );
+        ir.lower(&stmts);
+        let program = compile::Compiler::new().compile(&mut ir);
+        Ok(BuiltProgram {
+            program,
+            ir,
+            sources,
+            warnings,
+            script_fx,
+            script_segments,
+        })
+    }
+
+    /// Extracts `function_name`'s pure dataflow graph -- see [`compile::function_dataflow`] --
+    /// without building a runnable `Vm`. Runs the same parse/solve/lower front end
+    /// `compile_files` does (a throwaway `Vm` is spun up only because that's currently the only
+    /// way to get a real, natives-registered `Library` for the solver to check calls against;
+    /// it's dropped once lowering is done).
+    pub fn function_dataflow<F>(
+        files: &[(&str, &str)],
+        install_lib: F,
+        function_name: &str,
+    ) -> std::result::Result<compile::DataflowGraph, FunctionDataflowError>
+    where
+        F: for<'gc> FnOnce(&mut crate::api::Api<'_, 'gc>),
+    {
         use parse::{Parser, lex::Lexer};
         use solve::{Resolutions, Solver};
 
         let mut asts = Vec::with_capacity(files.len());
         let mut sources = Sources::with_capacity(files.len());
+        shared::units::clear();
+        let shadow = parse::lex::shadow_sets(files);
         for (file_id, (name, source)) in files.iter().enumerate() {
-            let lexer = Lexer::new(source, file_id, (*name).into());
-            asts.push(Parser::new(lexer).into_ast()?);
+            let lexer = Lexer::new(source, file_id, (*name).into()).with_shadowed(shadow[file_id]);
+            let ast = Parser::new_extending(lexer)
+                .try_into_ast()
+                .map_err(|mut errs| FunctionDataflowError::from(errs.swap_remove(0)))?;
+            asts.push(ast);
             sources.insert(
                 file_id,
                 miette::NamedSource::new(*name, std::sync::Arc::from(*source)),
@@ -1411,23 +3577,18 @@ impl Vm {
 
         let mut solver = Solver::new();
         solver.install_library(&library);
-        solver.set_sources(sources.clone());
+        solver.set_sources(sources);
         solver.solve_all(asts.iter())?;
 
         let stmts: Vec<_> = asts.into_iter().flat_map(|ast| ast.unpack()).collect();
         let resolutions = Resolutions::from(solver);
-        // todo: there's zero reason to clone this here, im just trying to get a working version --
-        // there's probably a much smoother way to get the intrinsics over here
         let mut ir = compile::Ir::new(
             resolutions,
             library.intrinsics().iter().map(|(a, b)| (*a, *b)).collect(),
         );
         ir.lower(&stmts);
-        let program = compile::Compiler::new().compile(ir);
 
-        vm.load_program(program);
-        vm.set_sources(sources);
-        Ok(vm)
+        compile::function_dataflow(&ir, function_name).map_err(FunctionDataflowError::Dataflow)
     }
 }
 
@@ -1446,6 +3607,30 @@ impl From<Error> for ExecuteError {
 impl std::fmt::Display for ExecuteError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:?}", self.0)
+    }
+}
+
+/// Error surface for [`Vm::function_dataflow`]: either the source didn't parse/solve (same
+/// failure [`Vm::compile_files`] would hit), or it did but the requested function isn't a
+/// straight-line body a dataflow graph can represent.
+#[derive(Debug)]
+pub enum FunctionDataflowError {
+    Compile(ExecuteError),
+    Dataflow(compile::DataflowError),
+}
+
+impl From<Error> for FunctionDataflowError {
+    fn from(e: Error) -> Self {
+        Self::Compile(ExecuteError(e))
+    }
+}
+
+impl std::fmt::Display for FunctionDataflowError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Compile(e) => write!(f, "{e}"),
+            Self::Dataflow(e) => write!(f, "{e}"),
+        }
     }
 }
 

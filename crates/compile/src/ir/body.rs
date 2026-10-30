@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use shared::{IdVec, Location};
 use solve::components::DecId;
 
-use crate::{BlockId, Inst, InstId, Local, ir::LoopCtx};
+use crate::{BlockId, Inst, InstId, Local, OperandKind, ir::LoopCtx};
 
 #[derive(Debug)]
 pub struct Body {
@@ -15,6 +15,9 @@ pub struct Body {
     pub captures: Vec<Local>,
     pub locs: IdVec<InstId, Location>,
     pub artifacts: HashMap<Local, String>,
+    /// The solved type of each inst that lowered from an expr, by value class. Codegen
+    /// allocates registers per class from this.
+    pub kinds: HashMap<InstId, OperandKind>,
 
     pub(crate) current_block: BlockId,
     pub(crate) loop_stack: Vec<LoopCtx>,
@@ -38,6 +41,7 @@ impl Body {
             current_block: BlockId::ZERO,
             loop_stack: vec![],
             artifacts: HashMap::new(),
+            kinds: HashMap::new(),
 
             #[cfg(feature = "logging")]
             block_names: vec![(BlockId::ZERO, "root".to_string())]

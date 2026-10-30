@@ -50,6 +50,13 @@ impl Ribs {
         self.inner.push(Rib::new(RibKind::Block));
     }
 
+    /// The file's top-level statement scope: where `let` bindings declared at module level
+    /// live. Unlike an ordinary block it stays visible across function boundaries -- a fn
+    /// body reads the shared entry-frame slot rather than a dead local.
+    pub(crate) fn push_script(&mut self) {
+        self.inner.push(Rib::new(RibKind::Script));
+    }
+
     pub(crate) fn push_function(&mut self) {
         self.inner.push(Rib::new(RibKind::Function));
     }
@@ -165,11 +172,27 @@ impl Ribs {
         assert_eq!(block.kind, RibKind::Block);
         block
     }
+
+    pub(crate) fn pop_script(&mut self) -> Rib {
+        let script = self.pop();
+        assert_eq!(script.kind, RibKind::Script);
+        script
+    }
+
+    /// The rib declarations land in right now.
+    pub(crate) fn current_kind(&self) -> RibKind {
+        self.inner.last().map_or(RibKind::Block, |rib| rib.kind)
+    }
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct Rib {
     pub(crate) table: HashMap<String, DecId>,
+    /// Every declaration a module-level name has had, with where its name appears in the
+    /// source. A name declared more than once (two scripts each defining `struct Shape`)
+    /// resolves, at each use, to the most recent declaration that precedes it -- reading
+    /// order, so an include placed after your own struct wins from there on.
+    history: HashMap<String, Vec<(usize, DecId)>>,
     pub(crate) kind: RibKind,
 }
 
@@ -177,15 +200,44 @@ impl Rib {
     pub(crate) fn new(kind: RibKind) -> Self {
         Self {
             table: HashMap::new(),
+            history: HashMap::new(),
             kind,
         }
     }
 
     pub(crate) fn insert(&mut self, ident: Ident, dec_id: DecId) {
+        if matches!(self.kind, RibKind::Module(_)) {
+            self.history
+                .entry(ident.lexeme.clone())
+                .or_default()
+                .push((ident.location.span.start, dec_id));
+        }
         self.table.insert(ident.lexeme, dec_id);
     }
 
+    /// Removes a binding, if present. Used to undo an import that was wrongly inserted into
+    /// this rib before a same-named local declaration existed to shadow it -- see
+    /// `Solver::declare_import`.
+    pub(crate) fn remove(&mut self, ident: &Ident) {
+        self.table.remove(&ident.lexeme);
+    }
+
     fn get(&self, ident: &Ident) -> Option<DecId> {
+        // a redeclared module-level name: the latest declaration at or before this use
+        if let Some(decls) = self.history.get(&ident.lexeme)
+            && decls.len() > 1
+        {
+            let at = ident.location.span.start;
+            let mut best: Option<(usize, DecId)> = None;
+            for &(start, id) in decls {
+                if start <= at && best.is_none_or(|(b, _)| start >= b) {
+                    best = Some((start, id));
+                }
+            }
+            if let Some((_, id)) = best {
+                return Some(id);
+            }
+        }
         self.table.get(&ident.lexeme).copied()
     }
 }
@@ -201,6 +253,10 @@ pub(crate) enum RibKind {
     Import,
     /// An ordinary lexical scope: a block, loop, match arm, or closure body.
     Block,
+    /// A file's top-level statement scope -- holds its `let` bindings. Visible across
+    /// function boundaries (the bindings are backed by the entry frame's registers, so a fn
+    /// reads/writes the same storage). Nested blocks inside it stay ordinary `Block`s.
+    Script,
     /// A function body. Names bound outside it cannot be captured from within.
     Function,
     /// A closure body. Same visibility as a block, but identified so resolutions that cross it
@@ -212,7 +268,7 @@ pub(crate) enum RibKind {
 
 impl RibKind {
     fn visible_across_functions(self) -> bool {
-        matches!(self, Self::Module(_) | Self::Import)
+        matches!(self, Self::Module(_) | Self::Import | Self::Script)
     }
 }
 
@@ -231,8 +287,15 @@ pub struct Dec {
 #[derive(Debug, Clone, PartialEq)]
 pub enum DecKind {
     Local,
+    /// A `let` bound in the file's top-level statement scope. Runtime-mutable like a local,
+    /// but stored in the entry frame so function bodies can reach it. Never captured by
+    /// closures -- they address it directly, the same way fns do.
+    Global,
     Item {
         defaults: Vec<Option<parse::Literal>>,
+        /// `where` predicates from the fn decl, in source order. Stored unevaluated --
+        /// call sites re-derive provability against their own arguments.
+        wheres: Vec<parse::Expr>,
     },
     Constant(Option<parse::Literal>),
     Variant {

@@ -47,11 +47,49 @@ pub enum Commands {
         #[clap(last = true)]
         script_args: Vec<String>,
     },
+    /// Prints the content hash of every top-level fn in a mimas file.
+    Hash {
+        /// The .mim file to hash. Hashes every `.mim` under a directory if one
+        /// is provided; uses the current directory if not provided.
+        #[clap(parse(from_os_str))]
+        path: Option<PathBuf>,
+
+        /// Print the scoped hash instead: locals alpha-renamed, same-source
+        /// callee references replaced by the callee's content hash.
+        #[clap(long)]
+        scoped: bool,
+
+        /// Print each fn's dependency edges beneath it — the `@dep:` reloc
+        /// sites (written name → callee content hash) and `@self` recursion
+        /// points, in canonical order. Implies scoped hashes.
+        #[clap(long)]
+        deps: bool,
+    },
     /// Builds but does not run
     Build {
         /// The path to the project directory to run on. Uses the current directory if not
         /// provided.
         #[clap(parse(from_os_str))]
         path: Option<PathBuf>,
+    },
+    /// Transpiles a C++ file to mimas source and prints it, along with any
+    /// diagnostics. The result is what `mimas run file.cpp` would execute.
+    Cpp {
+        /// The .cpp file to transpile.
+        #[clap(parse(from_os_str))]
+        path: PathBuf,
+    },
+    /// Assemble a fn by scoped content address from a blob dir: fetch the
+    /// blob, follow its `@dep:` edges, rename markers, print the linked
+    /// module source. The read half of `host::publish`'s blob store.
+    Link {
+        /// The scoped address — a lone `S`, or `G:i` for a member of a
+        /// dependency cycle's group blob.
+        addr: String,
+
+        /// The blob dir — `blobs/` (its `blobs-scoped/` sibling is read)
+        /// or a `blobs-scoped/` dir directly. Defaults to `./blobs-scoped`.
+        #[clap(long, parse(from_os_str))]
+        blobs: Option<PathBuf>,
     },
 }

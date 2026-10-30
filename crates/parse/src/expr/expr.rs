@@ -1,4 +1,4 @@
-use crate::{IntoStmt, NodeId, StmtKind};
+use crate::{IntoStmt, NodeId, StmtKind, components::Poison};
 
 use super::*;
 use shared::{Located, Location};
@@ -50,12 +50,14 @@ declare_expr_kinds!(
         Loop,
         Match,
         Coalescence,
+        Demote,
         Raise,
         Range,
         Return,
         Unary,
         Unwrap,
         While,
+        Poison,
     }
 );
 
@@ -79,6 +81,12 @@ impl Expr {
     /// Get a reference to the inner ExprKind.
     pub fn kind(&self) -> &ExprKind {
         self.kind.as_ref()
+    }
+
+    /// Take the inner ExprKind, leaving the expr hollow — for rewrites
+    /// like `|>` that rebuild the node they parsed.
+    pub(crate) fn into_kind(self) -> ExprKind {
+        *self.kind
     }
 
     /// Get the expr's id.

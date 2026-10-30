@@ -1,0 +1,196 @@
+//! Automatic semicolon insertion (Go's rules, applied where mimas's own grammar already knows a
+//! `;` was mandatory -- see `Parser::newline_before_next` and its call sites in
+//! `crates/parse/src/parser.rs`). Infix operators also follow Go's "operand at end of line
+//! ends the expression" rule (`a\n- b` is not subtraction), except inside `()` which opt back
+//! into newline-crossing. These are end-to-end (compile + run) rather than parse-tree shape
+//! checks, since the point of the feature is that ordinary semicolon-free code behaves
+//! identically to its semicolon'd equivalent.
+
+#[macro_use]
+mod vm_test_utils;
+
+use vm::Captured::*;
+
+test_vm!(
+    sequential_statements_without_semicolons,
+    "{
+        let a = 1
+        let b = 2
+        a + b
+    }" => Int(3),
+);
+
+test_vm!(
+    // Go itself requires `} else {` cuddled onto one line: a lexer that blindly inserts a `;`
+    // after every trigger-token-then-newline would insert one right between the `}` and `else`,
+    // breaking the chain. `newline_before_next` is only ever consulted at an already-identified
+    // statement/item boundary (inside `semicolon_check`/`ok_if_semicolon`), and `if`/`else` are
+    // parsed as one expression at the grammar level regardless of what's between them -- so this
+    // was never at risk here to begin with. This test pins that down.
+    uncuddled_if_else_chain_without_semicolons,
+    "fn classify(n: int) -> int {
+        if n < 0 { 0 }
+        else if n == 0 { 1 }
+        else { 2 }
+    }",
+    "classify(-5)" => Int(0),
+    "classify(0)" => Int(1),
+    "classify(5)" => Int(2),
+);
+
+test_vm!(
+    // Regression: `break`/`return` with no value, as a block's last statement with no `;`,
+    // used to make `optional_expr` try to parse the following `}` as the start of a value
+    // expression -- see the fix in `Parser::optional_expr`.
+    bare_break_before_closing_brace,
+    "{
+        let i = 0
+        loop {
+            if i >= 3 {
+                break
+            }
+            i += 1
+        }
+        i
+    }" => Int(3),
+);
+
+test_vm!(
+    bare_return_before_closing_brace,
+    "fn f(x: int) -> int {
+        if x > 0 {
+            return x
+        }
+        0
+    }",
+    "f(5)" => Int(5),
+    "f(-5)" => Int(0),
+);
+
+test_vm!(
+    // A multi-line argument list's last argument, alone on its own line right before the
+    // closing `)`, must not have a semicolon inserted after it -- it's not even a statement
+    // boundary, so `newline_before_next` (only ever consulted at an *already-identified*
+    // statement/item boundary) never gets a chance to misfire here regardless.
+    multi_line_call_args_without_semicolons,
+    "fn add(a: int, b: int) -> int { a + b }",
+    "add(
+        1,
+        2
+    )" => Int(3),
+);
+
+test_vm!(
+    // A block's tail expression (no trailing `;`, yields the block's value) spanning its own
+    // line right before the closing `}` must keep yielding, not get treated as a
+    // semicolon-needing statement.
+    tail_expression_before_closing_brace_still_yields,
+    "fn add(a: int, b: int) -> int {
+        a + b
+    }",
+    "add(2, 3)" => Int(5),
+);
+
+test_vm!(
+    semicolon_consequences,
+    "let a = 1
+     let b = 2
+     let c: int? = null
+     let block = {
+        c = a
+        -b
+     }",
+     "c" => Int(1),
+     "block" => Int(-2),
+);
+
+test_vm!(
+    // Leading infix on the next line does not continue -- that's Go's rule, and what makes
+    // `semicolon_consequences` parse as assignment-then-unary rather than `c = a - b`.
+    infix_does_not_continue_after_newline,
+    "let first = 1
+     let second = 2
+     let total = first
+        + second",
+    "total" => Int(1),
+);
+
+test_vm!(
+    infix_continues_inside_parentheses,
+    "let first = 1
+     let second = 2
+     let third = 3
+     let total = (first
+        + second
+        + third)",
+    "total" => Int(6),
+);
+
+test_vm!(
+    // Operator at the end of the line still continues, same as Go -- no parens required.
+    infix_continues_when_operator_at_end_of_line,
+    "let first = 1
+     let second = 2
+     let third = 3
+     let total = first +
+        second +
+        third",
+    "total" => Int(6),
+);
+
+test_vm!(
+    infix_continues_inside_call_parens,
+    "fn add(a: int, b: int) -> int { a + b }",
+    "add(
+        1
+        + 2,
+        3
+    )" => Int(6),
+);
+
+// A statement as the last thing before a block's `}` needs no `;` -- Go's "a semicolon may be
+// omitted before a closing `}`" rule, and Rust's. It is still a statement, so the block yields
+// unit, exactly as if the `;` were written; only a bare value expression is a tail.
+
+test_vm!(
+    assignment_before_closing_brace_on_one_line,
+    "{
+        let x = 1
+        { x = 5 }
+        x
+    }" => Int(5),
+);
+
+test_vm!(
+    compound_assignment_before_closing_brace,
+    "{
+        let x = 1
+        if true { x += 41 }
+        x
+    }" => Int(42),
+);
+
+test_vm!(
+    while_body_assignment_without_semicolon,
+    "fn h() -> int {
+        let i = 0
+        while i < 5 { i = i + 1 }
+        i
+    }",
+    "h()" => Int(5),
+);
+
+test_vm!(
+    // the block's value is unit, the same as `{ let x = 0; x = 1; }`
+    statement_before_closing_brace_yields_unit,
+    "let a = { let x = 0; x = 1 }
+     let b = { let x = 0; x = 1; }",
+    "a" => Null,
+    "b" => Null,
+);
+
+test_vm!(
+    value_tail_before_closing_brace_still_yields,
+    "{ 41 + 1 }" => Int(42),
+    "{ let x = 40; x + 2 }" => Int(42),
+);

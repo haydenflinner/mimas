@@ -20,7 +20,9 @@ use proc_macro::TokenStream;
 use proc_macro_crate::{FoundCrate, crate_name};
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::{DeriveInput, Ident, parse_macro_input};
+use syn::{
+    DeriveInput, FnArg, Ident, Pat, Token, parse_macro_input, parse_quote, punctuated::Punctuated,
+};
 
 mod convert;
 mod derive;
@@ -33,11 +35,34 @@ mod register;
 #[proc_macro_attribute]
 pub fn native(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut input = parse_macro_input!(item as syn::ItemFn);
-    let submission = doc_submission(&input.sig.ident, &collect_doc(&input.attrs));
-    if let Err(e) = convert::expand_conversion(&mut input) {
-        return e.to_compile_error().into();
+    let src = src_submission(&input.sig.ident, input.sig.ident.span());
+    let effects = match effects_submission(&input.sig.ident, &mut input.attrs) {
+        Ok(effects) => effects,
+        Err(e) => return e.to_compile_error().into(),
+    };
+    match convert::expand_conversion(&mut input) {
+        Ok((_, mutating)) => {
+            // `submit!` expands to an unnamed const, which an `impl` block rejects -- the meta
+            // submission goes inside the fn body instead, so `#[native]` works on impl methods.
+            let params = param_names(&input.sig);
+            let grades = match grades(&mut input.attrs, &params) {
+                Ok(g) => g,
+                Err(e) => return e.to_compile_error().into(),
+            };
+            let meta = meta_submission(
+                &input.sig.ident,
+                &params,
+                &collect_doc(&input.attrs),
+                &grades,
+            );
+            if let Some(meta) = meta {
+                input.block.stmts.insert(0, meta);
+            }
+            let mutates = mutates_submissions(&input.sig.ident, &mutating);
+            TokenStream::from(quote!(#input #src #mutates #effects))
+        }
+        Err(e) => e.to_compile_error().into(),
     }
-    TokenStream::from(quote!(#input #submission))
 }
 
 /// Conversion **and** automatic registration -- no manual `api.add*` call.
@@ -64,7 +89,7 @@ pub fn mimas(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
-#[proc_macro_derive(MimasEnum)]
+#[proc_macro_derive(MimasEnum, attributes(mimas_dim))]
 pub fn derive_mimas_enum(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     match derive::expand_derive(&input, true) {
@@ -73,7 +98,7 @@ pub fn derive_mimas_enum(input: TokenStream) -> TokenStream {
     }
 }
 
-#[proc_macro_derive(MimasStruct)]
+#[proc_macro_derive(MimasStruct, attributes(mimas_dim))]
 pub fn derive_mimas_struct(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     match derive::expand_derive(&input, false) {
@@ -99,10 +124,23 @@ fn expand_mimas(attr: TokenStream, item: TokenStream) -> Result<TokenStream2, sy
 
     match syn::parse::<syn::Item>(item)? {
         syn::Item::Fn(mut function) => {
-            let submission = doc_submission(&function.sig.ident, &collect_doc(&function.attrs));
-            convert::expand_conversion(&mut function)?;
+            let src = src_submission(&function.sig.ident, function.sig.ident.span());
+            let effects = effects_submission(&function.sig.ident, &mut function.attrs)?;
+            let (_, mutating) = convert::expand_conversion(&mut function)?;
+            let params = param_names(&function.sig);
+            let grades = grades(&mut function.attrs, &params)?;
+            let meta = meta_submission(
+                &function.sig.ident,
+                &params,
+                &collect_doc(&function.attrs),
+                &grades,
+            );
+            if let Some(meta) = meta {
+                function.block.stmts.insert(0, meta);
+            }
+            let mutates = mutates_submissions(&function.sig.ident, &mutating);
             let registration = register::fn_registration(&function.sig.ident, module.as_deref());
-            Ok(quote!(#function #registration #submission))
+            Ok(quote!(#function #registration #src #mutates #effects))
         }
         // struct / enum: emit the same impls the derives would (so don't *also* `#[derive]`
         // them) plus the `add_adt` submission
@@ -188,21 +226,185 @@ fn collect_doc(attrs: &[syn::Attribute]) -> String {
     lines.join("\n")
 }
 
-/// Ships a doc-comment to install time keyed by the item's full Rust path, so `vm::api::doc_for`
-/// can join it onto the registered `ApiFunction`/`ApiMethod` (whose receiver/module are known
-/// only at the `api.add_*` call site, not here).
-fn doc_submission(fn_ident: &Ident, doc: &str) -> TokenStream2 {
-    if doc.is_empty() {
-        return TokenStream2::new();
+/// Ships a fn's parameter names and doc-comment to install time keyed by the item's full Rust
+/// path, so `vm::api::meta_for` can join them onto the registered `ApiFunction`/`ApiMethod`
+/// (whose receiver/module are known only at the `api.add_*` call site, not here). Callers
+/// insert the returned statement into the fn's body: `inventory::submit!` expands to an
+/// unnamed `const`, which an `impl` block rejects but a fn body accepts.
+/// `(consumes, must_use)` from `#[consumes(name, ...)]` / `#[must_use]` helper attrs.
+/// `consumes` names resolve to indices into `params` (the caller's choice of name list --
+/// for an `#[mimas]` impl method it's the declared params with the receiver as `"self"`).
+/// `#[consumes]` is drained (rustc wouldn't know it); `#[must_use]` is *kept* so rustc
+/// lints the Rust side too -- the same spelling means the same thing on both sides.
+pub(crate) fn grades(
+    attrs: &mut Vec<syn::Attribute>,
+    params: &[String],
+) -> Result<(Vec<usize>, bool), syn::Error> {
+    let mut consumes = Vec::new();
+    let mut must_use = false;
+    let mut kept = Vec::with_capacity(attrs.len());
+    for attr in std::mem::take(attrs) {
+        if attr.path().is_ident("consumes") {
+            let names =
+                attr.parse_args_with(Punctuated::<Ident, Token![,]>::parse_terminated)?;
+            for name in names {
+                let wanted = name.to_string();
+                match params.iter().position(|p| p == &wanted) {
+                    Some(i) => consumes.push(i),
+                    None => {
+                        return Err(syn::Error::new_spanned(
+                            name,
+                            "unknown parameter -- `#[consumes]` names the fn's own params",
+                        ));
+                    }
+                }
+            }
+        } else {
+            if attr.path().is_ident("must_use") {
+                must_use = true;
+            }
+            kept.push(attr);
+        }
+    }
+    *attrs = kept;
+    Ok((consumes, must_use))
+}
+
+fn meta_submission(
+    fn_ident: &Ident,
+    params: &[String],
+    doc: &str,
+    (consumes, must_use): &(Vec<usize>, bool),
+) -> Option<syn::Stmt> {
+    if doc.is_empty() && params.is_empty() && consumes.is_empty() && !must_use {
+        return None;
     }
     let vm = vm_path();
     let name = fn_ident.to_string();
-    quote! {
+    Some(parse_quote! {
         #vm::inventory::submit! {
-            #vm::api::NativeDoc {
+            #vm::api::NativeMeta {
                 path: ::std::concat!(::std::module_path!(), "::", #name),
+                parameters: &[#(#params),*],
                 doc: #doc,
+                consumes: &[#(#consumes),*],
+                must_use: #must_use,
             }
         }
+    })
+}
+
+/// Collects the identifiers used in a function signature's parameters, skipping `ctx`.
+fn param_names(sig: &syn::Signature) -> Vec<String> {
+    sig.inputs
+        .iter()
+        .skip(1)
+        .map(|arg| match arg {
+            FnArg::Typed(t) => match &*t.pat {
+                Pat::Ident(i) => i.ident.to_string(),
+                _ => "_".to_string(),
+            },
+            FnArg::Receiver(_) => "self".to_string(),
+        })
+        .collect()
+}
+
+/// Ships the definition site's `file!()`/`line!()` to install time, keyed by `key_ident`'s full
+/// Rust path exactly like [`doc_submission`]. `span` locates the recorded line -- a method
+/// passes its own ident's span so the link lands on the method, not the generated shim (which
+/// `key_ident` names, since install-time lookup happens by `type_name_of_val(&shim)`).
+pub(crate) fn src_submission(key_ident: &Ident, span: proc_macro2::Span) -> TokenStream2 {
+    let vm = vm_path();
+    let name = key_ident.to_string();
+    // `submit!` expands to an anonymous `const _` which impl bodies reject -- a named const
+    // wrapper keeps it legal there (in-impl `#[native]` methods) without changing behavior.
+    let holder = quote::format_ident!("__mimas_src_{name}");
+    let file = quote::quote_spanned!(span => ::std::file!());
+    let line = quote::quote_spanned!(span => ::std::line!());
+    quote! {
+        #[allow(non_upper_case_globals)]
+        const #holder: () = {
+            #vm::inventory::submit! {
+                #vm::api::NativeSrc {
+                    path: ::std::concat!(::std::module_path!(), "::", #name),
+                    file: #file,
+                    manifest: ::std::env!("CARGO_MANIFEST_DIR"),
+                    line: #line,
+                }
+            }
+        };
     }
+}
+
+/// Ships a fn's declared effect set to install time keyed by the item's full Rust path, for
+/// `vm::api::effects_for` to join onto the registered `ApiFunction`/`ApiMethod` (see
+/// `vm::api::NativeEffects`). The `#[effects(...)]` helper attribute is drained from `attrs`
+/// so it never reaches rustc. Effect names mirror `shared::Fx`: `doc`, `net`, `rng`,
+/// `yield`, `io`, `time`.
+///
+/// `#[effects]` with no list declares the pure set -- an explicit audit of "does nothing".
+pub(crate) fn effects_submission(
+    fn_ident: &Ident,
+    attrs: &mut Vec<syn::Attribute>,
+) -> Result<Option<TokenStream2>, syn::Error> {
+    // `yield` is an effect name but a Rust keyword, so effect lists parse with
+    // `Ident::parse_any` and compare the unraw text.
+    struct EffectIdent(Ident);
+    impl syn::parse::Parse for EffectIdent {
+        fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+            use syn::ext::IdentExt;
+            Ok(Self(input.call(Ident::parse_any)?.unraw()))
+        }
+    }
+    let Some(pos) = attrs.iter().position(|a| a.path().is_ident("effects")) else {
+        return Ok(None);
+    };
+    let attr = attrs.remove(pos);
+    let names = attr.parse_args_with(Punctuated::<EffectIdent, Token![,]>::parse_terminated)?;
+    let names = names.into_iter().map(|n| n.0);
+    let mut bits: u8 = 0;
+    for name in names {
+        bits |= match name.to_string().as_str() {
+            "doc" => 1 << 0,
+            "net" => 1 << 1,
+            "rng" => 1 << 2,
+            "yield" => 1 << 3,
+            "io" => 1 << 4,
+            "time" => 1 << 5,
+            _ => {
+                return Err(syn::Error::new_spanned(
+                    name,
+                    "unknown effect -- expected one of `doc`, `net`, `rng`, `yield`, `io`, `time`",
+                ));
+            }
+        };
+    }
+    let vm = vm_path();
+    let name = fn_ident.to_string();
+    Ok(Some(quote! {
+        #vm::inventory::submit! {
+            #vm::api::NativeEffects {
+                path: ::std::concat!(::std::module_path!(), "::", #name),
+                effects: #bits,
+            }
+        }
+    }))
+}
+
+/// Ships the indices of `&mut` params to install time keyed by the item's full Rust path, for
+/// `vm::api::mutates_recv` to join onto the registered `ApiMethod` (see `vm::api::NativeMutates`).
+pub(crate) fn mutates_submissions(fn_ident: &Ident, indices: &[usize]) -> TokenStream2 {
+    let vm = vm_path();
+    let name = fn_ident.to_string();
+    let submissions = indices.iter().map(|index| {
+        quote! {
+            #vm::inventory::submit! {
+                #vm::api::NativeMutates {
+                    path: ::std::concat!(::std::module_path!(), "::", #name),
+                    index: #index,
+                }
+            }
+        }
+    });
+    quote!(#(#submissions)*)
 }

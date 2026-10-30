@@ -15,7 +15,8 @@ macro_rules! stmt_test {
             let expected = kind.into_stmt();
             let lexer = crate::lex::Lexer::new($source, 0, "test".into());
             let mut parser = crate::Parser::new(lexer);
-            let output = parser.stmt().unwrap();
+            let output = parser.stmt();
+            assert!(parser.errors().is_empty(), "{:?}", parser.errors());
             assert_eq!(output.kind(), expected.kind(), "`{}` failed!", $source);
         }
     };
@@ -74,7 +75,10 @@ stmt_test!(
     Let::new(
         ident!("a").into(),
         Literal::Array(vec![int!(0)]).into_expr(),
-        Some(Annotation::Array(Box::new(Annotation::Kw(TyKw::Int)))),
+        Some(Annotation::Array(
+            Box::new(Annotation::Kw(TyKw::Int)),
+            vec![]
+        )),
     )
 );
 stmt_test!(
@@ -201,6 +205,56 @@ stmt_test!(
 );
 
 stmt_test!(
+    const_destructure_tuple,
+    "const (A, B) = c;",
+    Const::new(
+        Pat::new(
+            PatKind::Tuple(vec![
+                Pat::new(ident!("A").into(), shared::Location::default()),
+                Pat::new(ident!("B").into(), shared::Location::default()),
+            ]),
+            shared::Location::default()
+        ),
+        ident!("c").into_expr(),
+        None,
+    )
+    .into_item()
+);
+
+stmt_test!(
+    const_destructure_prefix,
+    "const FIELD_(X, Y) = c;",
+    Const::new(
+        Pat::new(
+            PatKind::Tuple(vec![
+                Pat::new(ident!("FIELD_X").into(), shared::Location::default()),
+                Pat::new(ident!("FIELD_Y").into(), shared::Location::default()),
+            ]),
+            shared::Location::default()
+        ),
+        ident!("c").into_expr(),
+        None,
+    )
+    .into_item()
+);
+
+stmt_test!(
+    let_destructure_prefix,
+    "let FIELD_(X, Y) = c;",
+    Let::new(
+        Pat::new(
+            PatKind::Tuple(vec![
+                Pat::new(ident!("FIELD_X").into(), shared::Location::default()),
+                Pat::new(ident!("FIELD_Y").into(), shared::Location::default()),
+            ]),
+            shared::Location::default()
+        ),
+        ident!("c").into_expr(),
+        None,
+    )
+);
+
+stmt_test!(
     assign_block,
     "let i = { 0 };",
     Let::new(
@@ -280,7 +334,10 @@ stmt_test!(
     Let::new(
         ident!("i").into(),
         int!(0),
-        Some(Annotation::Array(Box::new(Annotation::Kw(TyKw::Int)))),
+        Some(Annotation::Array(
+            Box::new(Annotation::Kw(TyKw::Int)),
+            vec![]
+        )),
     )
 );
 
@@ -351,20 +408,26 @@ stmt_test!(
     Let::new(
         ident!("i").into(),
         int!(0),
-        Some(Annotation::Array(Box::new(Annotation::Dictionary(
-            Box::new(Annotation::Function(
+        Some(Annotation::Array(
+            Box::new(Annotation::Dictionary(Box::new(Annotation::Function(
                 vec![
                     Annotation::Option(Box::new(Annotation::Kw(TyKw::Int))),
                     Annotation::Kw(TyKw::Str),
                     Annotation::Kw(TyKw::Int),
                 ],
-                Box::new(Annotation::Option(Box::new(Annotation::Array(Box::new(
-                    Annotation::Array(Box::new(Annotation::Array(Box::new(Annotation::Kw(
-                        TyKw::Int
-                    )))))
-                )))))
-            ))
-        )))),
+                Box::new(Annotation::Option(Box::new(Annotation::Array(
+                    Box::new(Annotation::Array(
+                        Box::new(Annotation::Array(
+                            Box::new(Annotation::Kw(TyKw::Int)),
+                            vec![]
+                        )),
+                        vec![]
+                    )),
+                    vec![]
+                ))))
+            )))),
+            vec![]
+        )),
     )
 );
 
@@ -537,9 +600,19 @@ stmt_test!(
 
 stmt_test!(
     xor_equal,
-    "foo ^= 1;",
+    "foo ⊕= 1;",
     Assignment::new(ident_expr!("foo"), AssignmentOp::XorEqual, int!(1),)
 );
+
+// `^=` retired with `^` — report and parse on as `⊕=`.
+#[test]
+fn caret_equal_is_old_xor_assign() {
+    let lexer = crate::lex::Lexer::new("foo ^= 1;", 0, "test".into());
+    let mut parser = crate::Parser::new(lexer);
+    let stmt = parser.stmt();
+    assert_eq!(stmt.to_string(), "foo ⊕= 1");
+    assert_eq!(parser.errors().len(), 1);
+}
 
 stmt_test!(
     mod_equal,
@@ -646,6 +719,7 @@ stmt_test!(
             parameters: vec![],
             return_type: None,
             default: None,
+            location: shared::Location::default(),
         }]
     )
     .into_item()
@@ -661,6 +735,7 @@ stmt_test!(
             parameters: vec![],
             return_type: Some(Annotation::Unit),
             default: None,
+            location: shared::Location::default(),
         }]
     )
     .into_item()
@@ -676,6 +751,7 @@ stmt_test!(
             parameters: vec![],
             return_type: None,
             default: Some(Block::new_with_yield(vec![], int!(0)).into_expr()),
+            location: shared::Location::default(),
         }]
     )
     .into_item()
@@ -688,7 +764,8 @@ stmt_test!(
         ident!("Foo"),
         vec![PactItem::Const {
             name: ident!("FOO"),
-            annotation: Annotation::Kw(TyKw::Int)
+            annotation: Annotation::Kw(TyKw::Int),
+            location: shared::Location::default(),
         }]
     )
     .into_item()
@@ -703,18 +780,21 @@ stmt_test!(
             PactItem::Const {
                 name: ident!("ID"),
                 annotation: Annotation::Kw(TyKw::Int),
+                location: shared::Location::default(),
             },
             PactItem::Fn {
                 name: ident!("name"),
                 parameters: vec![],
                 return_type: Some(Annotation::Kw(TyKw::Str)),
                 default: None,
+                location: shared::Location::default(),
             },
             PactItem::Fn {
                 name: ident!("cost"),
                 parameters: vec![],
                 return_type: Some(Annotation::Kw(TyKw::Int)),
                 default: None,
+                location: shared::Location::default(),
             },
         ]
     )
@@ -761,9 +841,10 @@ stmt_test!(
     Let::new(
         ident!("i").into(),
         Literal::Null.into_expr(),
-        Some(Annotation::Option(Box::new(Annotation::Array(Box::new(
-            Annotation::Kw(TyKw::Int)
-        ))))),
+        Some(Annotation::Option(Box::new(Annotation::Array(
+            Box::new(Annotation::Kw(TyKw::Int)),
+            vec![]
+        )))),
     )
 );
 
@@ -950,10 +1031,33 @@ stmt_test!(
 );
 
 stmt_test!(
+    test_attribute,
+    "#[test] fn foo() {}",
+    Function::new(ident!("foo"), vec![], None, block!())
+        .into_item()
+        .with_attrs(vec![Attribute {
+            name: ident!("test"),
+        }])
+);
+
+stmt_test!(
+    test_attribute_before_pub,
+    "#[test] pub fn foo() {}",
+    Function::new(ident!("foo"), vec![], None, block!())
+        .into_item()
+        .with_attrs(vec![Attribute {
+            name: ident!("test"),
+        }])
+        .with_public()
+);
+
+stmt_test!(
     method,
     "fn foo(self) {}",
     Function {
         name: ident!("foo"),
+        type_params: vec![],
+        wheres: vec![],
         parameters: vec![Binding::new(ident!("self"))],
         return_type: None,
         body: block!(),
@@ -1033,3 +1137,153 @@ stmt_test!(
     )
     .into_item()
 );
+
+stmt_test!(
+    comment_ignored,
+    "// hello!
+     let a = 0;",
+    Let::new(ident!("a").into(), int!(0), None)
+);
+
+// `use "page";` is a request to the host, kept as an item
+#[test]
+fn use_a_host_script_by_name() {
+    let ast = crate::Parser::new(crate::lex::Lexer::new("use \"dcic-kit\";", 0, "t".into()))
+        .try_into_ast()
+        .unwrap();
+    assert_eq!(ast.stmts().len(), 1);
+}
+
+// a struct literal straight after `match`/`if` needs parentheses; say so
+#[test]
+fn head_struct_literal_gets_a_pointed_error() {
+    {
+        let src = "fn a() { match P { n = 7 } { _ => 1 } }";
+        let err = crate::Parser::new(crate::lex::Lexer::new(src, 0, "t".into()))
+            .try_into_ast()
+            .unwrap_err();
+        let text = format!("{err:?}");
+        assert!(
+            text.contains("struct literals need parentheses"),
+            "{src}: {text}"
+        );
+    }
+}
+
+// -- generics -------------------------------------------------------------------
+
+stmt_test!(
+    function_generic_single_param,
+    "fn id<T>(x: T) -> T {}",
+    Function {
+        name: ident!("id"),
+        type_params: vec![ident!("T")],
+        wheres: vec![],
+        parameters: vec![Binding::new(ident!("x")).with_annotation(Annotation::Ty(ident!("T")))],
+        return_type: Some(Annotation::Ty(ident!("T"))),
+        body: block!(),
+    }
+    .into_item()
+);
+
+stmt_test!(
+    function_generic_two_params,
+    "fn map<T, U>(xs: [T]) {}",
+    Function {
+        name: ident!("map"),
+        type_params: vec![ident!("T"), ident!("U")],
+        wheres: vec![],
+        parameters: vec![
+            Binding::new(ident!("xs")).with_annotation(Annotation::Array(
+                Box::new(Annotation::Ty(ident!("T"))),
+                vec![]
+            ))
+        ],
+        return_type: None,
+        body: block!(),
+    }
+    .into_item()
+);
+
+stmt_test!(
+    struct_generic,
+    "struct Pair<A, B> { first: A, second: B }",
+    Struct {
+        name: ident!("Pair"),
+        type_params: vec![ident!("A"), ident!("B")],
+        fields: vec![
+            StructField {
+                name: FieldKey::Ident(ident!("first")),
+                annotation: Annotation::Ty(ident!("A")),
+                location: shared::Location::default(),
+                public: false,
+            },
+            StructField {
+                name: FieldKey::Ident(ident!("second")),
+                annotation: Annotation::Ty(ident!("B")),
+                location: shared::Location::default(),
+                public: false,
+            },
+        ],
+    }
+    .into_item()
+);
+
+stmt_test!(
+    enum_generic,
+    "enum List<T> { E, C { first: T, rest: List<T> } }",
+    Enum {
+        head: ident!("List"),
+        type_params: vec![ident!("T")],
+        members: vec![
+            (ident!("E"), Member::Struct(vec![])),
+            (
+                ident!("C"),
+                Member::Struct(vec![
+                    StructField {
+                        name: FieldKey::Ident(ident!("first")),
+                        annotation: Annotation::Ty(ident!("T")),
+                        location: shared::Location::default(),
+                        public: true,
+                    },
+                    StructField {
+                        name: FieldKey::Ident(ident!("rest")),
+                        annotation: Annotation::Applied(
+                            vec![ident!("List")],
+                            vec![Annotation::Ty(ident!("T"))],
+                        ),
+                        location: shared::Location::default(),
+                        public: true,
+                    },
+                ]),
+            ),
+        ],
+    }
+    .into_item()
+);
+
+stmt_test!(
+    applied_annotation,
+    "let p: Pair<int, str> = x;",
+    Let::new(
+        ident!("p").into(),
+        ident_expr!("x"),
+        Some(Annotation::Applied(
+            vec![ident!("Pair")],
+            vec![Annotation::Kw(TyKw::Int), Annotation::Kw(TyKw::Str)],
+        )),
+    )
+);
+
+// ...but an `if`/`while` body may begin with an assignment
+#[test]
+fn if_body_starting_with_an_assignment_is_fine() {
+    for src in [
+        "fn a() { let x = 0; if true { x = 1; } }",
+        "fn a() { let x = 0; while x < 3 { x = x + 1; } }",
+    ] {
+        crate::Parser::new(crate::lex::Lexer::new(src, 0, "t".into()))
+            .try_into_ast()
+            .unwrap_or_else(|e| panic!("{src}: {e:?}"));
+    }
+}

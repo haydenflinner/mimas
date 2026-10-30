@@ -1,5 +1,9 @@
+use macros::native;
 use shared::{Literal, Ty};
-use vm::api::Api;
+use vm::{
+    api::Api,
+    glam::{Quat, Vec2, Vec3},
+};
 
 pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     let mut m = api.module("std::math");
@@ -7,6 +11,310 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
         "PI",
         Ty::Float,
         Literal::Float(std::f64::consts::PI),
-        "the ratio of a circle's circumference to its diameter",
+        "The ratio of a circle's circumference to its diameter, about `3.14159`. An angle of `PI` \
+         radians is half a turn.",
     );
+    m.constant(
+        "TAU",
+        Ty::Float,
+        Literal::Float(std::f64::consts::TAU),
+        "A full turn in radians, equal to `2.0 * PI` (about `6.28319`).",
+    );
+    m.constant(
+        "E",
+        Ty::Float,
+        Literal::Float(std::f64::consts::E),
+        "Euler's number, the base of the natural logarithm, about `2.71828`.",
+    );
+    m.add_adt::<Vec2>();
+    m.add_adt::<Vec3>();
+    m.add_adt::<Quat>();
+    api.add_assoc_of::<Vec2, _, _>("new", vec2_new);
+    api.add_assoc_of::<Vec2, _, _>("from_angle", vec2_from_angle);
+    api.add_method_named("length", vec2_length);
+    api.add_method_named("normalize", vec2_normalize);
+    api.add_method_named("add", vec2_add);
+    api.add_method_named("sub", vec2_sub);
+    api.add_method_named("scale", vec2_scale);
+    // the `*`, `/` and unary `-` operators — `mul`/`rmul` cover `v * s` and
+    // `s * v`, `div` is `v / s`, `neg` is `-v` (see `op_method_names` in solve)
+    api.add_method_named("mul", vec2_scale);
+    api.add_method_named("rmul", vec2_scale);
+    api.add_method_named("div", vec2_div);
+    api.add_method_named("neg", vec2_neg);
+    api.add_method_named("dot", vec2_dot);
+    api.add_method_named("distance", vec2_distance);
+    api.add_method_named("angle", vec2_angle);
+    api.add_method_named("lerp", vec2_lerp);
+    api.add_method_named("length", vec3_length);
+    api.add_method_named("normalize", vec3_normalize);
+    api.add_method_named("mul", vec3_scale);
+    api.add_method_named("rmul", vec3_scale);
+    api.add_method_named("div", vec3_div);
+    api.add_method_named("neg", vec3_neg);
+    api.add_assoc_of::<Quat, _, _>("from_rotation_z", quat_from_rotation_z);
+    api.add_method_named("rotate_z", quat_rotate_z);
+}
+
+/// Creates a vector from its `x` and `y` components. A struct literal such as
+/// `Vec2 { x = 3.0, y = 4.0 }` does the same.
+///
+/// ```mimas
+/// use std::math::Vec2;
+///
+/// let v = Vec2::new(3.0, 4.0);
+/// let y = v.y; // 4.0
+/// ```
+#[native]
+fn vec2_new(x: f32, y: f32) -> Vec2 {
+    Vec2::new(x, y)
+}
+
+/// Creates a vector of length `1.0` pointing at an angle of `radians`, measured from the positive
+/// x axis toward the positive y axis. Its components are the angle's cosine and sine.
+///
+/// ```mimas
+/// use std::math::Vec2;
+///
+/// let right = Vec2::from_angle(0.0);
+/// let x = right.x; // 1.0
+/// ```
+#[native]
+fn vec2_from_angle(radians: f32) -> Vec2 {
+    Vec2::from_angle(radians)
+}
+
+/// Returns the vector's straight-line length, `sqrt(x * x + y * y)`.
+///
+/// ```mimas
+/// use std::math::Vec2;
+///
+/// let d = Vec2::new(3.0, 4.0).length(); // 5.0
+/// ```
+#[native]
+fn vec2_length(v: Vec2) -> f32 {
+    v.length()
+}
+
+/// Returns the vector scaled to length `1.0`, keeping its direction. A zero vector stays zero.
+///
+/// ```mimas
+/// use std::math::Vec2;
+///
+/// let u = Vec2::new(3.0, 4.0).normalize();
+/// let d = u.length(); // 1.0
+/// ```
+#[native]
+fn vec2_normalize(v: Vec2) -> Vec2 {
+    v.normalize_or_zero()
+}
+
+/// Returns the sum of the two vectors, adding them component by component.
+///
+/// ```mimas
+/// use std::math::Vec2;
+///
+/// let v = Vec2::new(3.0, 4.0).add(Vec2::new(1.0, 1.0));
+/// let x = v.x; // 4.0
+/// ```
+#[native]
+fn vec2_add(v: Vec2, other: Vec2) -> Vec2 {
+    v + other
+}
+
+/// Returns this vector minus `other`, component by component. `b.sub(a)` is the vector that
+/// points from `a` to `b`.
+///
+/// ```mimas
+/// use std::math::Vec2;
+///
+/// let player = Vec2::new(1.0, 1.0);
+/// let enemy = Vec2::new(4.0, 5.0);
+/// let offset = enemy.sub(player);
+/// let x = offset.x; // 3.0
+/// ```
+#[native]
+fn vec2_sub(v: Vec2, other: Vec2) -> Vec2 {
+    v - other
+}
+
+/// Returns the vector with both components multiplied by `by`.
+///
+/// ```mimas
+/// use std::math::Vec2;
+///
+/// let half = Vec2::new(3.0, 4.0).scale(0.5);
+/// let x = half.x; // 1.5
+/// ```
+#[native]
+fn vec2_scale(v: Vec2, by: f32) -> Vec2 {
+    v * by
+}
+
+/// `v / by` — componentwise division. `v.div(2.0)` is also the `/` operator's method,
+/// so `v / 2.0` spells the same thing.
+///
+/// ```mimas
+/// use std::math::Vec2;
+///
+/// let half = Vec2::new(3.0, 4.0) / 2.0;
+/// let x = half.x; // 1.5
+/// ```
+#[native]
+fn vec2_div(v: Vec2, by: f32) -> Vec2 {
+    v / by
+}
+
+/// `-v` — the unary `-` operator's method.
+///
+/// ```mimas
+/// use std::math::Vec2;
+///
+/// let backwards = -Vec2::new(1.0, 0.0); // Vec2(-1, 0)
+/// ```
+#[native]
+fn vec2_neg(v: Vec2) -> Vec2 {
+    -v
+}
+
+/// `Vec3`'s `*` — `v * s` and `s * v` (`rmul`) both land here.
+///
+/// ```mimas
+/// use std::math::Vec3;
+///
+/// let dbl = Vec3 { x = 1.0, y = 0.0, z = 2.0 } * 2.0;
+/// ```
+#[native]
+fn vec3_scale(v: Vec3, by: f32) -> Vec3 {
+    v * by
+}
+
+/// `Vec3`'s `/` — `v / s`.
+///
+/// ```mimas
+/// use std::math::Vec3;
+///
+/// let half = Vec3 { x = 1.0, y = 0.0, z = 2.0 } / 2.0;
+/// ```
+#[native]
+fn vec3_div(v: Vec3, by: f32) -> Vec3 {
+    v / by
+}
+
+/// `Vec3`'s unary `-`.
+///
+/// ```mimas
+/// use std::math::Vec3;
+///
+/// let down = -Vec3 { x = 0.0, y = 0.0, z = 1.0 };
+/// ```
+#[native]
+fn vec3_neg(v: Vec3) -> Vec3 {
+    -v
+}
+
+/// Returns the dot product, `x * other.x + y * other.y`. For two vectors of length `1.0` it's the
+/// cosine of the angle between them, and a result of `0.0` means they're perpendicular.
+///
+/// ```mimas
+/// use std::math::Vec2;
+///
+/// let a = Vec2::new(3.0, 4.0).dot(Vec2::new(1.0, 0.0)); // 3.0
+/// ```
+#[native]
+fn vec2_dot(v: Vec2, other: Vec2) -> f32 {
+    v.dot(other)
+}
+
+/// Returns the straight-line distance between the two points.
+///
+/// ```mimas
+/// use std::math::Vec2;
+///
+/// let d = Vec2::new(0.0, 0.0).distance(Vec2::new(3.0, 4.0)); // 5.0
+/// ```
+#[native]
+fn vec2_distance(v: Vec2, other: Vec2) -> f32 {
+    v.distance(other)
+}
+
+/// Returns the angle of the vector in radians, measured from the positive x axis toward the
+/// positive y axis. The result is between `-PI` and `PI`. `Vec2::from_angle` goes the other way.
+///
+/// ```mimas
+/// use std::math::Vec2;
+///
+/// let a = Vec2::new(1.0, 0.0).angle(); // 0.0
+/// ```
+#[native]
+fn vec2_angle(v: Vec2) -> f32 {
+    v.to_angle()
+}
+
+/// Returns the point that is `t` of the way from this vector to `other`, so `0.5` gives the
+/// midpoint. `t` isn't limited to `0.0` through `1.0`: `1.5` goes past `other` by half the
+/// distance again.
+///
+/// ```mimas
+/// use std::math::Vec2;
+///
+/// let start = Vec2::new(0.0, 0.0);
+/// let end = Vec2::new(10.0, 20.0);
+/// let quarter = start.lerp(end, 0.25);
+/// let y = quarter.y; // 5.0
+/// ```
+#[native]
+fn vec2_lerp(v: Vec2, other: Vec2, t: f32) -> Vec2 {
+    v.lerp(other, t)
+}
+
+/// Returns the vector's straight-line length, `sqrt(x * x + y * y + z * z)`.
+///
+/// ```mimas
+/// use std::math::Vec3;
+///
+/// let d = Vec3 { x = 2.0, y = 3.0, z = 6.0 }.length(); // 7.0
+/// ```
+#[native]
+fn vec3_length(v: Vec3) -> f32 {
+    v.length()
+}
+
+/// Returns the vector scaled to length `1.0`, keeping its direction. A zero vector stays zero.
+///
+/// ```mimas
+/// use std::math::Vec3;
+///
+/// let u = Vec3 { x = 0.0, y = 0.0, z = 5.0 }.normalize();
+/// let z = u.z; // 1.0
+/// ```
+#[native]
+fn vec3_normalize(v: Vec3) -> Vec3 {
+    v.normalize_or_zero()
+}
+
+/// Creates a rotation of `radians` around the z axis. For 2D work, this is a turn within the x-y
+/// plane.
+///
+/// ```mimas
+/// use std::math::{PI, Quat};
+///
+/// let quarter_turn = Quat::from_rotation_z(PI / 2.0);
+/// ```
+#[native]
+fn quat_from_rotation_z(radians: f32) -> Quat {
+    Quat::from_rotation_z(radians)
+}
+
+/// Returns the rotation turned a further `radians` around its own z axis.
+///
+/// ```mimas
+/// use std::math::{PI, Quat};
+///
+/// let facing = Quat::from_rotation_z(0.0);
+/// let turned = facing.rotate_z(PI / 2.0); // a quarter turn
+/// ```
+#[native]
+fn quat_rotate_z(q: Quat, radians: f32) -> Quat {
+    q * Quat::from_rotation_z(radians)
 }

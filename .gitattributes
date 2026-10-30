@@ -1,0 +1,12 @@
+# Other languages' versions of the benchmark scripts
+benchmarks/**/*.dyon linguist-detectable=false
+benchmarks/**/*.gml  linguist-detectable=false
+benchmarks/**/*.js   linguist-detectable=false
+benchmarks/**/*.koto linguist-detectable=false
+benchmarks/**/*.lua  linguist-detectable=false
+benchmarks/**/*.py   linguist-detectable=false
+benchmarks/**/*.rhai linguist-detectable=false
+benchmarks/**/*.rn   linguist-detectable=false
+benchmarks/**/*.scm  linguist-detectable=false
+
+book/** linguist-documentation

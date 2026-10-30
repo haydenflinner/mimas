@@ -1,24 +1,193 @@
 use std::collections::HashMap;
 
 use api::NativeId;
+use indexmap::IndexMap;
 use parse::AccessKind;
-use shared::{IdVec, Location, StrId, StrInterner};
-use solve::components::AdtId;
+use shared::{Error, FnHeader, IdVec, Location, Result, StrId, StrInterner};
+pub use shared::Ty;
+pub use solve::components::AdtId;
+pub use solve::components::Vis;
 
 use crate::{
-    BinOp, BlockTarget, BodyId, Constant, ConstantCode, OpCode, OpFormatPart, OpFormatPartCode,
-    Reg, UnaryOp,
+    BinOp, BlockTarget, BodyId, Constant, ConstantCode, Op, OpCode, OpFormatPart, OpFormatPartCode,
+    OperandKind, Reg, UnaryOp,
 };
 
+#[derive(Clone)]
 pub struct Program {
     pub entry: BodyId,
     pub chunks: IdVec<BodyId, Chunk>,
+    pub signatures: IdVec<BodyId, Option<Function>>,
     pub strs: StrInterner,
     pub bytes: Vec<u8>,
-    pub items: HashMap<String, BodyId>,
+    pub root: Module,
     /// Struct/variant names, indexed by the same `AdtId`/`struct_id` that `NewInstance` and
     /// runtime instances carry -- lets `print`/`display` show `Node { .. }` instead of `@3 { .. }`.
     pub struct_names: IdVec<AdtId, String>,
+    /// Method name -> `BodyId`, indexed the same way as `struct_names` -- lets a host call an
+    /// instance method by name from outside the running program (a debugger asking a live value
+    /// to render itself via a user-defined pact, say) without the call needing to be written
+    /// into the script's own source. Not used by the interpreter itself: every in-script method
+    /// call already resolves straight to a `CallDirect` (monomorphic) or a compiled `IsInstance`
+    /// chain (dispatch through a pact-typed value) at compile time, neither of which needs a
+    /// runtime table -- see `emit_pact_dispatch`.
+    pub methods: IdVec<AdtId, HashMap<String, BodyId>>,
+    /// Declared field names in slot order, indexed the same way as `struct_names` -- lets a
+    /// host label an instance's fields by name instead of position (a debugger's structural
+    /// inspector, say). Tuple-struct members show up as their positional index stringified
+    /// ("0", "1", ..), matching `solve::ResolvedAdt::fields`, which this is copied from.
+    pub field_names: IdVec<AdtId, Vec<String>>,
+    /// Declared unit per field, parallel to `field_names` -- copied from
+    /// `solve::ResolvedAdt::member_dims`. A host's value diagram reads
+    /// `index` fields as pointers into an array.
+    pub field_dims: IdVec<AdtId, Vec<Option<shared::units::Dim>>>,
+    /// `print`/`dbg`/`warn` call site -> the dimension of the reported value, computed by
+    /// the dims pass — the natives append it so `print(25kW)` reads `25000 W`
+    /// rather than a bare `25000`. Keyed by the same call `Location` the `Prints`
+    /// fixture attributes; empty in programs a loader didn't solve.
+    pub print_dims: HashMap<Location, shared::units::Dim>,
+    /// Declared member types, parallel to `field_names` -- copied from
+    /// `solve::ResolvedAdt::member_tys`. `Ty::Param`s stand for the adt's
+    /// own params (see `member_tys`), so generic fields stay generic until
+    /// a host substitutes call-site args. This is the heap-walker's real
+    /// type table: it replaces per-field *value* inference (a field read
+    /// as Int everywhere may still declare `float`) and lets snapshot
+    /// marking follow exactly the fields that can hold heap pointers.
+    pub field_tys: IdVec<AdtId, Vec<Ty>>,
+    /// Functions marked `#[test]`, in source order. Each name is a fn path in `root`.
+    pub tests: Vec<String>,
+    /// The program's `unit` declarations, snapshotted when it finished
+    /// parsing — the names `18tile`-style literals were lexed against.
+    /// A `Vm` installs them before dispatch so `.to("tile")` still resolves
+    /// after a different program compiled in between.
+    pub units: std::rc::Rc<shared::units::CustomUnits>,
+}
+
+/// Everything a script declares, in declaration order: the fns, consts, types, and modules of
+/// each scope.
+#[derive(Debug, Clone, Default)]
+pub struct Module {
+    pub functions: IndexMap<String, Function>,
+    pub constants: IndexMap<String, Constant>,
+    pub types: IndexMap<String, Type>,
+    pub modules: IndexMap<String, Module>,
+}
+
+impl Module {
+    /// Looks a fn up by `::` path from this module, so `"tick"` and `"game::tick"` both work.
+    pub fn function(&self, path: &str) -> Option<&Function> {
+        match path.rsplit_once("::") {
+            Some((module, name)) => self.module(module)?.functions.get(name),
+            None => self.functions.get(path),
+        }
+    }
+
+    /// Looks a type up by `::` path, so `"Foo"` and `"game::Foo"` both work.
+    pub fn ty(&self, path: &str) -> Option<&Type> {
+        match path.rsplit_once("::") {
+            Some((module, name)) => self.module(module)?.types.get(name),
+            None => self.types.get(path),
+        }
+    }
+
+    /// Looks a method up by `::` path, so `"Foo::bar"` and `"game::Foo::bar"` both work.
+    pub fn method(&self, path: &str) -> Option<&Function> {
+        let (ty, name) = path.rsplit_once("::")?;
+        self.ty(ty)?.methods.get(name)
+    }
+
+    pub fn module(&self, path: &str) -> Option<&Module> {
+        path.split("::")
+            .try_fold(self, |module, name| module.modules.get(name))
+    }
+}
+
+impl Program {
+    /// Decode one body/chunk's op stream into `(offset, op)` pairs — offsets are
+    /// absolute into [`Self::bytes`] (so `BlockTarget::ByteOffset` targets and
+    /// generated `code.ip` writes line up). The chunk's stream ends at the next
+    /// chunk's offset or the end of `bytes`.
+    pub fn ops(&self, body: BodyId) -> Vec<(usize, Op)> {
+        let chunk = &self.chunks[body];
+        let end = self
+            .chunks
+            .iter()
+            .map(|(_, c)| c.offset)
+            .filter(|o| *o > chunk.offset)
+            .min()
+            .unwrap_or(self.bytes.len());
+        let mut decoder = Decoder {
+            bytes: self.bytes.clone(),
+            ip: chunk.offset,
+        };
+        let mut out = Vec::new();
+        while decoder.ip < end {
+            let offset = decoder.ip;
+            out.push((offset, Op::decode(&mut decoder)));
+        }
+        out
+    }
+}
+
+/// A struct or enum the script declared with whatever its `impl` blocks put on it.
+#[derive(Debug, Clone, Default)]
+pub struct Type {
+    pub vis: Vis,
+    /// Field names in declaration order, or the indices of a tuple struct. Empty for an enum.
+    pub fields: Vec<String>,
+    /// Sorted by name, since the solver doesn't keep impls in declaration order.
+    pub methods: IndexMap<String, Function>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Function {
+    pub body: BodyId,
+    pub vis: Vis,
+    pub header: FnHeader,
+    pub defaults: Vec<Option<Constant>>,
+}
+
+impl Function {
+    /// Checks a host call against the signature. `given` are the argument types (`None` for a
+    /// non-mimas type, trailing defaulted parameters may be left out) and `returns` is what the
+    /// host expects back.
+    pub fn check(&self, path: &str, given: &[Option<Ty>], returns: Option<&Ty>) -> Result<()> {
+        let params = &self.header.parameters;
+        let required = params
+            .iter()
+            .position(|p| p.has_default)
+            .unwrap_or(params.len());
+        if !(required..=params.len()).contains(&given.len()) {
+            let takes = if required == params.len() {
+                params.len().to_string()
+            } else {
+                format!("{required} to {}", params.len())
+            };
+            return Err(Error::msg(format!(
+                "`{path}` takes {takes} arguments, got {}",
+                given.len()
+            )));
+        }
+        for (i, (param, ty)) in params.iter().zip(given).enumerate() {
+            if ty.as_ref() != Some(&param.ty) {
+                return Err(Error::msg(format!(
+                    "argument {} of `{path}` is `{}`, but a `{}` was passed",
+                    i + 1,
+                    param.ty,
+                    ty.as_ref()
+                        .map_or("non-mimas type".to_string(), Ty::to_string)
+                )));
+            }
+        }
+        if returns != Some(&*self.header.return_ty) {
+            return Err(Error::msg(format!(
+                "`{path}` returns `{}`, but the host asked for `{}`",
+                self.header.return_ty,
+                returns.map_or("a non-mimas type".to_string(), Ty::to_string)
+            )));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -33,6 +202,10 @@ pub struct Chunk {
     // sorted and deduped against the previous loc -- hermes/v8-style sparse table. consult via
     // `loc_at`; an empty table or an ip before the first entry resolves to `Location::SYNTHETIC`.
     pub locs: Vec<(u32, Location)>,
+    /// Value class of each register, indexed by `Reg`. Registers are only reused within one
+    /// class (`Str`/`Generic` share a class and widen to `Generic`), so every write to a
+    /// register holds a value of its kind. The VM ignores this; wasm lowering reads it.
+    pub kinds: Vec<OperandKind>,
 }
 
 impl Chunk {

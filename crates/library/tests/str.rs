@@ -243,13 +243,26 @@ test_run!(
     r#""12-34".find("(\\d+)-(\\d+)")"# => r#"["12-34", "12", "34"]"#,
 );
 
-// invalid regex returns null (the .ok()? path), not a fault
+// a literal pattern that doesn't compile is rejected at solve time — the
+// validator proves the raise, so it never reaches runtime
+#[test]
+fn find_invalid_literal_regex_is_compile_error() {
+    let err = crate::test_runner::try_execute(r#"let x = "abc".find("(");"#)
+        .expect_err("bad literal regex should fail to compile");
+    let text = format!("{err:?}");
+    assert!(text.contains("unclosed"), "{text}");
+}
+
+// a *computed* pattern can't be checked at solve time — the raise is still
+// the honest `[str]?!` and absolve/`?`/`!` handle it
 test_run!(
-    find_invalid_regex_null,
-    r#""abc".find("(")"# => "null",
+    find_computed_regex_raises,
+    r#"let re = "(";"#,
+    r#""abc".find(re) absolve |_| null"# => "null",
+    r#""abc".find(re)?"# => "null",
 );
 
-// find_all: every match; each element is the captures of one match. [[str]]? null on bad regex
+// find_all: every match; each element is the captures of one match
 test_run!(
     find_all_multiple,
     r#""a1b2c3".find_all("[0-9]")"# => r#"[["1"], ["2"], ["3"]]"#,
@@ -265,10 +278,21 @@ test_run!(
     r#""a1 b2".find_all("([a-z])([0-9])")"# => r#"[["a1", "a", "1"], ["b2", "b", "2"]]"#,
 );
 
+// literal patterns are proven at solve time: `find_all` narrows from
+// `[str]?!` to `[str]?`, so `??`/`!` apply directly without `?`/`absolve`
 test_run!(
-    find_all_invalid_regex_null,
-    r#""abc".find_all("(")"# => "null",
+    find_all_literal_regex_is_proven,
+    r#""abc".find_all(".") ?? []"# => r#"[["a"], ["b"], ["c"]]"#,
+    r#""abc".find_all("[0-9]") ?? []"# => "[]",
 );
+
+#[test]
+fn find_all_invalid_literal_regex_is_compile_error() {
+    let err = crate::test_runner::try_execute(r#"let x = "abc".find_all("(");"#)
+        .expect_err("bad literal regex should fail to compile");
+    let text = format!("{err:?}");
+    assert!(text.contains("unclosed"), "{text}");
+}
 
 // lines: split on newlines
 test_run!(
@@ -399,3 +423,21 @@ test_run!(
 
 test_fail!(str_has_no_pop, r#""hi".pop();"#);
 test_fail!(str_has_no_flatten, r#""hi".flatten();"#);
+
+// Strings use double quotes only; there is no character type.
+// r[verify mimas.str.literal]
+test_fail!(
+    single_quotes_are_not_a_string,
+    "let a = 'x';",
+    "let a = 'hello';",
+);
+
+// r[verify mimas.str.literal]
+test_run!(
+    a_character_is_a_one_character_str_and_a_literal_may_span_lines,
+    "let c = \"é\";
+     let s = \"a
+b\";",
+    "c.len()" => "1",
+    "s.len()" => "3",
+);

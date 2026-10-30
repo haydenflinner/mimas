@@ -1,0 +1,491 @@
+#[macro_use]
+mod test_runner;
+
+// a quantity is a float in base units; `to` reads it back in any unit of the same kind
+test_run!(
+    // r[verify mimas.unit.literal]
+    unit_literals_are_base_unit_floats,
+    "",
+    "25kW.to(\"W\")" => "25000",
+    "(25kW * 4h).to(\"kWh\")" => "100",
+    "(25kW * 4h).to(\"J\")" => "360000000",
+    "(0.14usd/kWh * 100kWh).to(\"usd\")" => "14",
+    "90deg.to(\"rad\") > 1.57" => "true",
+    "((6pct * 200.0) * 100.0).round()" => "1200",
+    "(0.7prob * 100.0).round()" => "70",
+    "(25bp * 200.0 * 100.0).round()" => "50",
+    "(2.2logit > 2.0 && 2.2logit < 2.5)" => "true",
+    "(3km / 2h).to(\"m/s\") < 0.42" => "true",
+    "5kW.to(\"W\") == 5000.0" => "true",
+);
+
+test_run!(
+    quantities_flow_through_functions,
+    "fn energy(p: kW, t: h) -> kWh { p * t }
+     fn cost(e: kWh, price: usd/kWh) -> usd { e * price }
+     struct Plan { load: kW, tariff: usd/kWh }
+     const LOAD = 25kW
+     let plan = Plan { load = LOAD, tariff = 0.14usd/kWh };",
+    "cost(energy(plan.load, 8h), plan.tariff).to(\"usd\") < 28.01" => "true",
+    "cost(energy(plan.load, 8h), plan.tariff).to(\"usd\") > 27.99" => "true",
+    "(plan.load * 2.0).to(\"kW\")" => "50",
+);
+
+// `x.to(unit)`: a literal unit the checker knows can't raise — plain `float`.
+// A computed unit string keeps the honest `float!` — `?`/`absolve`/`!` apply.
+test_run!(
+    // r[verify mimas.unit.to]
+    to_returns_plain_float_for_literal_units,
+    "let u = \"W\";
+     let bad = \"watt?\";",
+    "25kW.to(\"W\")" => "25000",
+    "25kW.to(u)?" => "25000",
+    "5.0.to(bad)?" => "null",
+    "25kW.to(bad) absolve |_| -1.0" => "-1",
+);
+
+fn rejected(src: &str, needle: &str) {
+    let err = test_runner::try_execute(src).expect_err(&format!("`{src}` should be rejected"));
+    let text = format!("{err:?}");
+    assert!(
+        text.contains(needle),
+        "`{src}`: expected `{needle}` in:\n{text}"
+    );
+}
+
+// r[verify mimas.unit.dimension]
+#[test]
+fn nonsense_arithmetic_is_rejected() {
+    rejected("let a = 5kW + 3s;", "cannot add");
+    rejected("let a = 5kW - 3s;", "cannot subtract");
+    rejected("let a = 5kW > 3s;", "cannot order");
+    rejected("let a = 5kW == 3m;", "cannot compare");
+    rejected("let a = [5kW, 3s];", "a list mixes");
+    rejected("let a = if true { 5kW } else { 3s };", "branches disagree");
+    // inside an f-string interpolation too
+    rejected("let a = f\"{5kW + 3s}\";", "cannot add");
+}
+
+// r[verify mimas.unit.graphics]
+#[test]
+fn mismatches_name_the_written_unit() {
+    // `5ft` says `ft`, not the coherent `m`
+    rejected(
+        "let a = 2px + 5ft;",
+        "cannot add pixels (px) and length (ft)",
+    );
+    rejected(
+        "let a = 5kWh == 3usd;",
+        "cannot compare energy (kWh) and money (usd)",
+    );
+    // a computed value still falls back to the coherent unit
+    rejected("let x = 5s * 2; let a = x + 3m;", "time (s)");
+    // a negated literal keeps its written unit too
+    rejected("let a = 2px + -5ft;", "length (ft)");
+}
+
+// r[verify mimas.unit.declared]
+// r[verify mimas.unit.to]
+#[test]
+fn declared_dimensions_are_enforced() {
+    // a plain float is dimensionless: a power isn't one
+    rejected("let a: float = 5kW;", "declared type doesn't match");
+    rejected(
+        "fn f(x: float) -> float { x }\nlet a = f(5kW);",
+        "argument `x` of `f`",
+    );
+    rejected(
+        "fn f(p: kW) -> kW { p }\nlet a = f(5s);",
+        "argument `p` of `f`",
+    );
+    rejected("fn f(p: kW) -> s { p }", "returns the wrong dimension");
+    rejected("struct S { p: kW }\nlet a = S { p = 5s };", "field `p`");
+    rejected("let a: kW = 5.0;", "declared type doesn't match");
+    rejected("let a = 5kW;\nlet b = a.to(\"s\");", "cannot express");
+    rejected("let a = 5kW.sin();", "needs a plain number");
+    rejected("let a = 5m.sqrt();", "square root");
+}
+
+#[test]
+fn unknown_units_are_named() {
+    // a lone unknown name is just an unknown type, as ever
+    rejected("fn f(x: bogus) {}", "bogus");
+    rejected("fn f(x: m/bogus) {}", "isn't a unit");
+}
+
+#[test]
+fn plain_numbers_scale_and_units_combine() {
+    let fine = [
+        "let a = 2.0 * 5kW;",
+        "let a = 5kW / 2;",
+        "let a: kWh = 5kW * 2h;",
+        "let a: usd = 2kWh * 0.14usd/kWh;",
+        "let a: m = (3m * 3m / 1m) + 2m;",
+        "let a: m = (4m * 4m).sqrt();",
+        "let a = 5kW > 0;",
+        "let a = 5kW * 0 == 0;",
+        "let a: float = 5kW / 2kW;",
+        "let a: kW = 5kW.abs().max(2kW).min(9kW);",
+        "let a: usd/kWh = 1usd / 1kWh;",
+        "let a: m/s^2 = 9.81m / 1s / 1s;",
+        // untyped code is unaffected
+        "fn f(x: float) -> float { x * 2.0 } let a = f(3.0);",
+        "let a = [1.0, 2.0].sum();",
+    ];
+    for src in fine {
+        test_runner::try_execute(src).unwrap_or_else(|e| panic!("`{src}` should pass: {e:?}"));
+    }
+}
+
+#[test]
+fn a_declared_type_named_like_a_unit_wins() {
+    // programs that already have a `struct W` keep it
+    test_runner::try_execute(
+        "struct W { x: int }\nfn f(w: W) -> int { w.x }\nlet a = f(W { x = 1 });",
+    )
+    .unwrap();
+}
+
+// ---- intervals keep their units
+
+test_run!(
+    interval_arithmetic_carries_units,
+    "fn saved() -> Interval<usd> { Interval::pm(30000.0usd, 0.1) * 1.0 }
+     let g = Interval::pm(2kW, 0.5) * Interval::pm(4h, 0.25);",
+    "saved().lo.to(\"usd\")" => "27000",
+    "g.mid.to(\"kWh\")" => "8",
+    "g.hi.to(\"kWh\") > 11.2" => "true",
+    "(g * 2.0).width().to(\"kWh\") > 0.0" => "true",
+);
+
+#[test]
+fn intervals_are_dimension_checked() {
+    let fine = [
+        "let a: Interval<kW> = Interval::pm(5kW, 0.1);",
+        "let a: Interval<kWh> = Interval::pm(5kW, 0.1) * Interval::pm(2h, 0.1);",
+        "let a: Interval<usd> = Interval::span(1usd, 3usd) + 2usd;",
+        "let a: kW = Interval::pm(5kW, 0.1).hi;",
+        "let a: kW = Interval::pm(5kW, 0.1).sample(0.5);",
+        "let a = Interval::pm(5kW, 0.1) < 9kW;",
+        "let a: Interval<m> = Interval::of(1m, 2m, 4m);",
+        // an unannotated Interval is unchecked, as ever
+        "let a = Interval::pm(10.0, 0.1) + Interval::pm(3.0, 0.1);",
+    ];
+    for src in fine {
+        test_runner::try_execute(src).unwrap_or_else(|e| panic!("`{src}` should pass: {e:?}"));
+    }
+    rejected(
+        "let a = Interval::pm(5kW, 0.1) + Interval::pm(3s, 0.1);",
+        "cannot add",
+    );
+    rejected("let a = Interval::pm(5kW, 0.1) + 3s;", "cannot add");
+    rejected(
+        "let a: Interval<s> = Interval::pm(5kW, 0.1);",
+        "declared type doesn't match",
+    );
+    rejected(
+        "let a: s = Interval::pm(5kW, 0.1).hi;",
+        "declared type doesn't match",
+    );
+    rejected("let a = Interval::pm(5kW, 0.1) < 3s;", "cannot order");
+    rejected("let a = Interval::span(1m, 2s);", "need the same dimension");
+    rejected("let a = Interval::pm(5kW, 3s);", "plain fraction");
+    rejected(
+        "fn f(x: Interval<kW>) {}\nlet a = f(Interval::pm(5s, 0.1));",
+        "argument `x` of `f`",
+    );
+}
+
+// ---- data columns with units
+#[cfg(feature = "dataframe")]
+test_run!(
+    pulled_columns_are_quantities,
+    "use std::polars::*;
+     let df = from_csv(\"month,kwh\\njan,7400\\nfeb,6900\\n\")!;
+     let xs = df.pull_as(\"kwh\", \"kWh\")!;
+     let total: kWh = xs.sum();",
+    "total.to(\"kWh\")" => "14300",
+    "xs[0].to(\"MJ\")" => "26640",
+);
+
+#[cfg(feature = "dataframe")]
+#[test]
+fn pulled_columns_are_dimension_checked() {
+    let head = "use std::polars::*;\nlet df = from_csv(\"a,b\\n1,2\\n\")!;\n";
+    let ok = format!(
+        "{head}let e: kWh = df.pull_as(\"a\", \"kWh\")![0]; let p: [kW] = df.pull_as(\"b\", \"kW\")!;"
+    );
+    test_runner::try_execute(&ok).unwrap_or_else(|e| panic!("should pass: {e:?}"));
+    rejected(
+        &format!("{head}let t = df.pull_as(\"a\", \"kW\")![0] + 3s;"),
+        "cannot add",
+    );
+    rejected(
+        &format!("{head}let t = df.pull_as(\"a\", \"bogus\")!;"),
+        "isn't a unit",
+    );
+    rejected(
+        &format!("{head}let t: [s] = df.pull_as(\"a\", \"kW\")!;"),
+        "declared type doesn't match",
+    );
+}
+
+// ---- `.to_int()` keeps the unit ------------------------------------------------------
+// `5.5kg.to_int()` is an `int` that still measures mass: a unit annotation accepts it
+// (a quantity's number may be an `int` as well as a `float`), int's own `.to(unit)`
+// reads it back in any unit of the same kind, and the dims pass still checks it.
+
+test_run!(
+    to_int_keeps_the_unit,
+    "let q = 5.5kg.to_int();
+     let x: kg = q;",
+    "q" => "5",
+    "x.to(\"g\")" => "5000",
+    "q.to(\"kg\")" => "5",
+    // a plain float's to_int is untouched -- still a dimensionless int
+    "3.7.to_int() + 1" => "4",
+);
+
+#[test]
+fn to_int_quantities_are_still_dimension_checked() {
+    rejected("let a: s = 5.5kg.to_int();", "declared type doesn't match");
+    rejected("let a = 5.5kg.to_int().to(\"s\");", "cannot express");
+    rejected("let a = 5.5kg.to_int() + 3s;", "cannot add");
+    // an int quantity can't smuggle into a plain `int` slot either
+    rejected(
+        "fn f(x: int) -> int { x }\nlet a = f(5.5kg.to_int());",
+        "argument `x` of `f`",
+    );
+    // and a unit annotation still refuses a non-numeric rhs the ordinary way
+    rejected("let a: kg = \"nope\";", "expected float but found str");
+}
+
+// ---- studio units: beats, measures, pitch, data --------------------------------------
+// `beat` is musical time, a dimension apart from `s` until a tempo converts it; `meas`/
+// `phrase`/`bpm`/`cpm` are the band-facing spellings and `st`/`oct` measure pitch. `b` is
+// the bit — it never moonlights as a beat in real code, whatever the music strings say.
+
+test_run!(
+    studio_units,
+    "",
+    "4b.to(\"bit\")" => "4",
+    "2meas.to(\"beat\")" => "8",
+    "(1phrase).to(\"beat\")" => "16",
+    "(120bpm * 30s).to(\"beat\")" => "60",
+    "(30cpm * 1min).to(\"meas\")" => "30",
+    "132bpm.to(\"beat/s\")" => "2.2",
+    "(1oct).to(\"st\")" => "12",
+    "(1KiB).to(\"bit\")" => "8192",
+    "(1B).to(\"bit\")" => "8",
+);
+
+#[test]
+fn studio_units_are_dimension_checked() {
+    rejected("let a = 4beat + 2s;", "cannot add");
+    rejected("let a = 120bpm + 2Hz;", "cannot add");
+    rejected("let a = 4b + 2beat;", "cannot add");
+    rejected("let a = 2meas + 3st;", "cannot add");
+    rejected("let a: beat = 3s;", "declared type doesn't match");
+    rejected("let a: Hz = 4b;", "declared type doesn't match");
+}
+
+// ---- `index`/`idx`: an `int` position into a collection -------------------
+// Its own dimension, so a quantity can never pass for one -- but unlike every
+// other unit it annotates as `int` (`xs[i]` needs one) and plain numbers
+// interconvert freely (`i += 1`, `i < xs.len()`, `f(i)` with a plain `3`).
+
+test_run!(
+    // r[verify mimas.unit.index]
+    index_vars_behave_like_ints,
+    "let xs = [\"a\", \"b\", \"c\"]
+     let i: index = 1index
+     let j: index = 0
+     j += 1
+     struct Cur { i: index, xs: [str] }
+     let c = Cur { i = 2, xs = xs }",
+    "xs[i]" => "\"b\"",
+    "xs[0index]" => "\"a\"",
+    "xs[0idx]" => "\"a\"",
+    "xs[0_i]" => "\"a\"",
+    "xs[2_i]" => "\"c\"",
+    "c.xs[c.i]" => "\"c\"",
+    // plain ints step, compare and bind as indexes
+    "i + 1" => "2",
+    "j" => "1",
+    "i < xs.len()" => "true",
+    // index arithmetic keeps the dim; a ratio of indexes is a plain number
+    "(i * 2).to(\"idx\")" => "2",
+    "i / i" => "1",
+    // reading one back as a plain number
+    "i.to(\"index\")" => "1",
+);
+
+test_run!(
+    plain_numbers_convert_to_index,
+    "fn at(xs: [int], i: index) -> int { xs[i] }
+     let xs = [10, 20]
+     let i: index = 0",
+    "at(xs, 1)" => "20",
+    "at(xs, 0index)" => "10",
+    // `len()` is a plain int -- comparing against it is the point
+    "at(xs, xs.len() - 1)" => "20",
+    "if i == 0 { 1 } else { 0 }" => "1",
+);
+
+test_run!(
+    subscript_suffix_is_the_index_unit,
+    "let xs = [10, 20]
+     let i: _i = 0_i
+     let x_i = 5
+     let _i = 99
+     struct Cur { i: _i }",
+    "i" => "0",
+    "xs[1_i]" => "20",
+    "i + 1_i" => "1",
+    // `_i`/`x_i` as names are untouched — the suffix only rides numbers
+    "x_i" => "5",
+    "_i" => "99",
+    // the dim is still `index` — `_i` is a spelling, not a new unit
+    "i.to(\"index\")" => "0",
+);
+
+#[test]
+fn index_never_mixes_with_quantities() {
+    // a quantity literal isn't even an `int` -- the type check fires first
+    rejected("let i: index = 5kg;", "expected int but found float");
+    rejected("let i = 1index + 3px;", "cannot add");
+    // `2s` isn't even an int -- the type check fires before the dim one
+    rejected("let i: index = 0;\ni += 2s;", "expected int but found float");
+    rejected("let i = 1index == 3usd;", "cannot compare");
+    rejected("let i = [0index, 2m.to_int()];", "a list mixes");
+    rejected("let a: index = 5kW;", "expected int but found float");
+    rejected(
+        "fn f(i: index) -> int { i }\nlet a = f(3px);",
+        "expected int but found float",
+    );
+    // an int *quantity* passes the type check but is still not an index
+    rejected(
+        "fn f(i: index) -> int { i }\nlet a = f(3px.to_int());",
+        "argument `i` of `f`",
+    );
+    rejected("struct S { i: index }\nlet s = S { i = 2m };", "expected int but found float");
+    // an index can't flow into a quantity slot either
+    rejected("let i: index = 0;\nlet p: px = i;", "declared type doesn't match");
+}
+
+#[test]
+fn index_stays_int_or_nothing() {
+    // `index` annotates as `int`: a float rhs is a type error, not a dim one
+    rejected("let i: index = 1.5;", "expected int but found float");
+    // and a fractional literal can't pretend -- `xs[2.5index]` is a float key
+    rejected("let xs = [1];\nlet a = xs[2.5index];", "cannot be indexed");
+}
+
+// ---- user units: `unit` declarations -------------------------------------------------
+// `unit tile;` claims a base dimension of its own -- a quantity that can't mix with `m`
+// or `px` or `s`; `unit league = 3mi;` names a scale of units that already exist.
+// Declarations are top-level statements and apply to the whole program.
+
+test_run!(
+    declared_units_carry_and_convert,
+    "unit tile;
+     unit league = 3mi;
+     unit sprint = 2tile;
+     unit dozen = 12;
+     const W = 18tile;",
+    "W" => "18",
+    "(W + 2tile)" => "20",
+    "(3league).to(\"mi\")" => "9",
+    "((1league).to(\"m\") > 4828 && (1league).to(\"m\") < 4829)" => "true",
+    "(W / 2.0).to(\"tile\")" => "9",
+    "(1sprint).to(\"tile\")" => "2",
+    // a custom unit converts between its own spellings
+    "(9mi).to(\"league\")" => "3",
+    "2dozen" => "24",
+);
+
+#[test]
+fn declared_units_are_dimension_checked() {
+    // two fresh dims don't mix, and neither mixes with builtins
+    rejected("unit tile; unit elixir; let a = 4tile + 2elixir;", "cannot add");
+    rejected("unit tile; let a = 4tile + 2px;", "cannot add");
+    rejected("unit tile; let a = 4tile + 2.0;", "cannot add");
+    rejected("unit tile; let a: tile = 5px;", "declared type doesn't match");
+    rejected("unit tile; let a: px = 5tile;", "declared type doesn't match");
+    rejected("unit tile; fn f(x: tile) -> tile { x }\nlet a = f(3s);", "argument `x` of `f`");
+    // a derived unit is exactly its dimension
+    rejected("unit league = 3mi; let a = 1league + 1s;", "cannot add");
+    rejected("unit tile; let a = 2tile.to(\"px\");", "cannot express");
+    rejected("unit tile; let a = 2tile.to(\"bogus\");", "isn't a unit");
+}
+
+#[test]
+fn declared_units_flow_through_types() {
+    let fine = [
+        "unit tile; let a: tile = 18tile;",
+        "unit tile; fn f(x: tile) -> tile { x * 2.0 }\nlet a = f(9tile);",
+        "unit tile; struct S { w: tile }\nlet a = S { w = 3tile };",
+        "unit tile; unit elixir; let a = 4tile / 2elixir;",
+        "unit tile; let a: tile = (2tile * 3tile / 1tile);",
+        // the same declaration twice is a no-op, not an error
+        "unit tile;\nunit tile;\nlet a = 3tile;",
+        // products and powers of customs
+        "unit tile; let a: tile^2 = 3tile * 4tile;",
+        "unit tile; let a = (3tile * 3tile).sqrt();",
+        // custom spec spelled with `*` and `/` and `^`
+        "unit speed = 1tile/s;\nunit tile;\nlet a = 3speed;",
+        "unit tile;\nunit speed = 1tile/s;\nlet a = 3speed;",
+        "unit tile;\nunit speed = 1 tile / s;\nlet a = 3speed;",
+        "unit dozen = 12;\nlet a = 2dozen;",
+    ];
+    for src in fine {
+        test_runner::try_execute(src).unwrap_or_else(|e| panic!("`{src}` should pass: {e:?}"));
+    }
+}
+
+#[test]
+fn declared_units_compose_in_derived_decls() {
+    test_runner::try_execute(
+        "unit tile;\nunit speed = 1tile/s;\nlet a: speed = 3tile / 1s;",
+    )
+    .unwrap();
+    test_runner::try_execute(
+        "unit tile;\nunit room = 1tile*tile;\nlet a: room = 3tile * 2tile;",
+    )
+    .unwrap();
+}
+
+#[test]
+fn unit_decl_errors() {
+    // builtins can't be redeclared
+    rejected("unit m;", "builtin unit already");
+    rejected("unit s = 2m;", "builtin unit already");
+    // conflicting redeclarations
+    rejected("unit tile; unit tile = 3m;", "already declared");
+    rejected("unit tile = 3m; unit tile = 4m;", "already declared");
+    // a bad spec is a bad spec
+    rejected("unit tile = bogus;", "isn't a quantity");
+    rejected("unit tile =;", "isn't a quantity");
+    // only nine fresh dims fit
+    rejected(
+        "unit a; unit b2; unit c2; unit d2; unit e2; unit f2; unit g2; unit h2; unit i2;",
+        "at most 8",
+    );
+    // not inside a block or an interpolation
+    rejected("if true { unit tile; }", "top-level");
+    rejected("fn f() { unit tile; }", "top-level");
+}
+
+#[test]
+fn unit_keyword_stays_contextual() {
+    // `unit` is still an ordinary name everywhere else
+    let fine = [
+        "let unit = 5; let a = unit + 1;",
+        "fn unit(x: int) -> int { x } let a = unit(3);",
+        "let unit = [1,2]; let a = unit[0];",
+        "let unit = 4; unit = 5; let a = unit;",
+    ];
+    for src in fine {
+        test_runner::try_execute(src).unwrap_or_else(|e| panic!("`{src}` should pass: {e:?}"));
+    }
+}

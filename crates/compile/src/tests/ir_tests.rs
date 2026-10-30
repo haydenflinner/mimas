@@ -165,10 +165,10 @@ fn const_fold_int_ops() {
     folds_to("7 - 3", Int(4));
     folds_to("7 * 3", Int(21));
     folds_to("7 ~/ 3", Int(2));
-    folds_to("7 % 3", Int(1));
+    folds_to("7 mod 3", Int(1));
     folds_to("6 & 3", Int(2));
     folds_to("6 | 1", Int(7));
-    folds_to("6 ^ 3", Int(5));
+    folds_to("6 ⊕ 3", Int(5));
     folds_to("1 << 4", Int(16));
     folds_to("32 >> 2", Int(8));
     folds_to("3 < 5", Bool(true));

@@ -22,9 +22,8 @@ pub struct LexError {
     #[source_code]
     pub src: NamedSource<Arc<str>>,
     pub diag: chompy::diagnostics::DiagBox,
-    // None when the diag's location is synthetic
     #[label("here")]
-    pub at: Option<SourceSpan>,
+    pub at: SourceSpan,
 }
 
 impl LexError {
@@ -65,13 +64,15 @@ pub struct MissingSemiColon {
     pub at: SourceSpan,
 }
 
+/// Something the grammar needs next (an expression, a pattern, ...) isn't there.
 #[derive(Error, Debug, Diagnostic)]
-#[error("expected identifier")]
-pub struct ExpectedIdentifier {
+#[error("expected {what}")]
+pub struct Expected {
     #[source_code]
     pub src: NamedSource<Arc<str>>,
-    #[label("expected an identifier in this position")]
+    #[label("expected {what} here")]
     pub at: SourceSpan,
+    pub what: &'static str,
 }
 
 #[derive(Error, Debug, Diagnostic)]
@@ -104,16 +105,6 @@ pub struct SingleTypeParens {
 }
 
 #[derive(Error, Debug, Diagnostic)]
-#[error("expected either")]
-pub struct ExpectedPossibleTokens {
-    #[source_code]
-    pub src: NamedSource<Arc<str>>,
-    #[label("expected this to be one of the following toks: {options}")]
-    pub at: SourceSpan,
-    pub options: String,
-}
-
-#[derive(Error, Debug, Diagnostic)]
 #[error("doubled option")]
 pub struct DoubledOption {
     #[source_code]
@@ -127,7 +118,7 @@ pub struct DoubledOption {
 pub struct NestingTooDeep {
     #[source_code]
     pub src: NamedSource<Arc<str>>,
-    #[label("code can nest at most 64 levels deep")]
+    #[label("this is nested too deeply to parse")]
     pub at: SourceSpan,
 }
 
@@ -224,16 +215,6 @@ pub struct ExpectedToken {
 }
 
 #[derive(Error, Debug, Diagnostic)]
-#[error("parser misdirection")]
-pub struct ParserMisdirection {
-    #[source_code]
-    pub src: NamedSource<Arc<str>>,
-    #[label("the parser was confident `{expected}` would be here -- this is a bug!")]
-    pub at: SourceSpan,
-    pub expected: String,
-}
-
-#[derive(Error, Debug, Diagnostic)]
 #[error("unexpected end of input")]
 pub struct UnexpectedEnd {
     #[source_code]
@@ -266,5 +247,104 @@ pub struct PactSigDefaultParam {
     #[source_code]
     pub src: NamedSource<Arc<str>>,
     #[label("pact method signatures cannot give parameters default values")]
+    pub at: SourceSpan,
+}
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("type parameters are not allowed here")]
+#[diagnostic(help("only `fn`, `struct`, `enum`, and `impl` items declare type parameters"))]
+pub struct GenericsNotAllowed {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("unexpected `<...>`")]
+    pub at: SourceSpan,
+}
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("unknown attribute")]
+#[diagnostic(help("supported attributes are `#[test]` and `#[tests]`"))]
+pub struct UnknownAttribute {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("`{name}` is not a known attribute")]
+    pub at: SourceSpan,
+    pub name: String,
+}
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("duplicate attribute")]
+pub struct DuplicateAttribute {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("`#[{name}]` was already specified")]
+    pub at: SourceSpan,
+    pub name: String,
+}
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("`#[{name}]` is only valid on functions")]
+pub struct AttributeNotOnFunction {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("this attribute cannot go on this item")]
+    pub at: SourceSpan,
+    pub name: String,
+}
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("`#[test]` functions cannot take parameters")]
+pub struct TestTakesParameters {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("a test is called with no arguments")]
+    pub at: SourceSpan,
+}
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("`#[test]` cannot annotate a method")]
+pub struct TestOnMethod {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("tests must be free functions")]
+    pub at: SourceSpan,
+}
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("`assert!` takes exactly one expression")]
+#[diagnostic(help("write `assert!(add(1, 2) == 3)`"))]
+pub struct AssertArity {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("`assert!` is not a call -- it wraps a single expression")]
+    pub at: SourceSpan,
+}
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("`#[tests]` annotates a list of expressions")]
+#[diagnostic(help(
+    "write `#[tests] [ add(1, 2) == 3, add(0, 0) == 0 ]`, or mark a function `#[test]`"
+))]
+pub struct TestsNeedsList {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("expected `[` here")]
+    pub at: SourceSpan,
+}
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("`#[tests]` list cannot be empty")]
+pub struct TestsEmpty {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("add at least one expression")]
+    pub at: SourceSpan,
+}
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("`#[tests]` cannot be `pub`")]
+pub struct TestsNotPublic {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("test lists are not part of a module's public API")]
     pub at: SourceSpan,
 }

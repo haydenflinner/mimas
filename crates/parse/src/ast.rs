@@ -1,9 +1,13 @@
 use std::sync::Arc;
 
+use hashbrown::HashMap;
 use miette::NamedSource;
-use shared::Result;
+use shared::{Located, Result, Span, units::Dim};
 
-use crate::{Expr, Stmt, StmtKind, errors::AlreadyInsideModule};
+use crate::{
+    Expr, Ident, Stmt, StmtKind, components::Pat, errors::AlreadyInsideModule, visit::Visitor,
+    walk_stmts,
+};
 
 /// A collection of statements.
 #[derive(Debug, Clone)]
@@ -13,11 +17,54 @@ pub struct Ast {
     /// from post-parse checks (e.g. [`Self::module_name`]) so they render with snippets.
     src: NamedSource<Arc<str>>,
     stmts: Vec<Stmt>,
+    /// Doc comments without their slashes, keyed by where the token after each starts.
+    docs: HashMap<usize, String>,
+    /// Dimension of every unit-suffixed number literal (`25kW`), by node. The literal's value is
+    /// already in coherent base units; this is what the dimension checker reads.
+    quantities: HashMap<NodeId, Dim>,
+    /// The unit text as written for each literal in `quantities` (`5ft` -> `"ft"`), kept so
+    /// diagnostics can name the unit the user typed rather than its coherent form.
+    quantity_units: HashMap<NodeId, String>,
 }
 impl Ast {
     /// Creates a new Ast with the given statements.
-    pub(crate) fn new(name: String, src: NamedSource<Arc<str>>, stmts: Vec<Stmt>) -> Self {
-        Self { name, src, stmts }
+    pub(crate) fn new(
+        name: String,
+        src: NamedSource<Arc<str>>,
+        stmts: Vec<Stmt>,
+        docs: HashMap<usize, String>,
+        quantities: HashMap<NodeId, Dim>,
+        quantity_units: HashMap<NodeId, String>,
+    ) -> Self {
+        Self {
+            name,
+            src,
+            stmts,
+            docs,
+            quantities,
+            quantity_units,
+        }
+    }
+
+    /// The dimension of the unit-suffixed literal `id`, when it is one.
+    pub fn quantity(&self, id: NodeId) -> Option<Dim> {
+        self.quantities.get(&id).copied()
+    }
+
+    /// Every `(node, dim)` pair in `quantities` -- the solver merges these per file so
+    /// `table { kwh\n 5kWh }` columns can carry their unit into the schema.
+    pub fn quantities(&self) -> impl Iterator<Item = (NodeId, Dim)> + '_ {
+        self.quantities.iter().map(|(id, dim)| (*id, *dim))
+    }
+
+    /// The unit text as written for the quantity literal `id` (`5ft` -> `"ft"`), if it is one.
+    pub fn quantity_unit(&self, id: NodeId) -> Option<&str> {
+        self.quantity_units.get(&id).map(String::as_str)
+    }
+
+    /// Every `(node, unit-text)` pair in `quantity_units`, for the solver merge.
+    pub fn quantity_units(&self) -> impl Iterator<Item = (NodeId, &str)> + '_ {
+        self.quantity_units.iter().map(|(id, u)| (*id, u.as_str()))
     }
 
     /// Consumes the Ast into its inner collection of statements.
@@ -37,6 +84,52 @@ impl Ast {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// The innermost node whose span covers `offset` (a byte offset into the source), with that
+    /// span. Idents count as nodes, so a name wins over the expr or pat it sits in.
+    pub fn node_at(&self, offset: usize) -> Option<(NodeId, Span)> {
+        struct Innermost {
+            offset: usize,
+            found: Option<(NodeId, Span)>,
+        }
+        impl Innermost {
+            fn consider(&mut self, id: NodeId, span: Span) {
+                let covers = span.start <= self.offset && self.offset < span.end;
+                let tighter = self
+                    .found
+                    .is_none_or(|(_, found)| span.len() <= found.len());
+                if covers && tighter {
+                    self.found = Some((id, span));
+                }
+            }
+        }
+        impl Visitor for Innermost {
+            fn expr(&mut self, expr: &Expr) {
+                self.consider(expr.id(), expr.span());
+            }
+
+            fn pat(&mut self, pat: &Pat) {
+                self.consider(pat.id(), pat.span());
+            }
+
+            fn ident(&mut self, ident: &Ident) {
+                self.consider(ident.id, ident.span());
+            }
+        }
+
+        let mut innermost = Innermost {
+            offset,
+            found: None,
+        };
+        walk_stmts(&self.stmts, &mut innermost);
+        innermost.found
+    }
+
+    /// The doc comment above the token starting at `position` (a byte offset into the source),
+    /// without its slashes. An item's doc is at the start of its span.
+    pub fn docs_for(&self, position: usize) -> Option<&str> {
+        self.docs.get(&position).map(String::as_str)
     }
 
     pub fn module_name(&self) -> Result<Option<String>> {
@@ -81,5 +174,11 @@ impl NodeId {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(1);
         Self(COUNTER.fetch_add(1, Ordering::Relaxed))
+    }
+
+    /// The counter value this node was minted with. Stable across solver phases for the same
+    /// ast node, so the checker derives ids from it (e.g. `ParamId` for `<T>` type params).
+    pub fn index(self) -> u64 {
+        self.0
     }
 }

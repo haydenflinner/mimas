@@ -1,0 +1,603 @@
+use cov; use std::polars::*;
+fn data(name: str) -> DataFrame! {
+    cov::hit(0); std::polars::from_csv("id,kind,x,y,w,h\ng0,ground,40,700,960,20\np01,plat,120,640,100,16\np02,plat,260,580,100,16\np03,plat,400,525,100,16\np04,plat,540,470,100,16\np05,plat,680,420,100,16\np06,plat,820,370,100,16\np07,plat,660,290,100,16\np08,plat,510,265,100,16\np09,plat,360,265,100,16\np10,plat,210,290,100,16\np11,plat,60,340,100,16\np12,plat,200,430,90,16\np13,plat,340,480,90,16\np14,plat,480,440,90,16\np15,plat,640,500,90,16\np16,plat,800,560,110,16\nflag,goal,880,496,12,64\nspawn,spawn,70,664,24,36\nhz1,lava,380,684,120,16\ngm1,goomba,560,676,90,24\ngm2,goomba,270,556,80,24\nc001,coin,136,598,20,20\nc002,coin,170,588,20,20\nc003,coin,204,598,20,20\nc004,coin,276,538,20,20\nc005,coin,310,528,20,20\nc006,coin,344,538,20,20\nc007,coin,416,483,20,20\nc008,coin,450,473,20,20\nc009,coin,484,483,20,20\nc010,coin,556,428,20,20\nc011,coin,590,418,20,20\nc012,coin,624,428,20,20\nc013,coin,696,378,20,20\nc014,coin,730,368,20,20\nc015,coin,764,378,20,20\nc016,coin,836,328,20,20\nc017,coin,870,318,20,20\nc018,coin,904,328,20,20\nc019,coin,676,248,20,20\nc020,coin,710,238,20,20\nc021,coin,744,248,20,20\nc022,coin,526,223,20,20\nc023,coin,560,213,20,20\nc024,coin,594,223,20,20\nc025,coin,376,223,20,20\nc026,coin,410,213,20,20\nc027,coin,444,223,20,20\nc028,coin,226,248,20,20\nc029,coin,260,238,20,20\nc030,coin,294,248,20,20\nc031,coin,76,298,20,20\nc032,coin,110,288,20,20\nc033,coin,144,298,20,20\nc034,coin,211,388,20,20\nc035,coin,245,378,20,20\nc036,coin,279,388,20,20\nc037,coin,351,438,20,20\nc038,coin,385,428,20,20\nc039,coin,419,438,20,20\nc040,coin,491,398,20,20\nc041,coin,525,388,20,20\nc042,coin,559,398,20,20\nc043,coin,651,458,20,20\nc044,coin,685,448,20,20\nc045,coin,719,458,20,20\nc046,coin,821,518,20,20\nc047,coin,855,508,20,20\nc048,coin,889,518,20,20\nc049,coin,222,514,20,20\nc050,coin,258,514,20,20\nc051,coin,362,459,20,20\nc052,coin,398,459,20,20\nc053,coin,502,404,20,20\nc054,coin,538,404,20,20\nc055,coin,642,354,20,20\nc056,coin,678,354,20,20\nc057,coin,782,304,20,20\nc058,coin,818,304,20,20\nc059,coin,772,224,20,20\nc060,coin,808,224,20,20\nc061,coin,617,199,20,20\nc062,coin,653,199,20,20\nc063,coin,467,199,20,20\nc064,coin,503,199,20,20\nc065,coin,317,199,20,20\nc066,coin,353,199,20,20\nc067,coin,167,224,20,20\nc068,coin,203,224,20,20\nc069,coin,162,274,20,20\nc070,coin,198,274,20,20\nc071,coin,297,364,20,20\nc072,coin,333,364,20,20\nc073,coin,437,374,20,20\nc074,coin,473,374,20,20\nc075,coin,587,374,20,20\nc076,coin,623,374,20,20\nc077,coin,747,434,20,20\nc078,coin,783,434,20,20\nc079,coin,80,660,20,20\nc080,coin,120,640,20,20\nc081,coin,208,660,20,20\nc082,coin,248,640,20,20\nc083,coin,336,660,20,20\nc084,coin,376,640,20,20\nc085,coin,464,660,20,20\nc086,coin,504,640,20,20\nc087,coin,592,660,20,20\nc088,coin,632,640,20,20\nc089,coin,720,660,20,20\nc090,coin,760,640,20,20\nc091,coin,848,660,20,20\nc092,coin,888,640,20,20\nc093,coin,870,480,20,20\nc094,coin,945,480,20,20\nc095,coin,880,430,20,20\nc096,coin,935,430,20,20\nc097,coin,305,210,20,20\nc098,coin,457,210,20,20\nc099,coin,610,240,20,20\nc100,coin,763,250,20,20\n")!
+}
+use game;
+use music;
+use "img";
+use "game-kit";
+
+// Mimo — a literate platformer. The level is a [[#]] `level` data cell:
+// one row per platform, coin, hazard, spawn and flag. This program reads
+// it with `data("level")`, runs it as physics, and — because the level is
+// data — *proves things about it*: `beatable()` below is a little solver
+// that flood-fills every surface the jump physics can actually reach.
+// `live_solve` paints that proof on the canvas every edit; `check
+// beatable()` gates it. Drag a coin row's `y` out of reach and both go
+// red in the same keystroke.
+//
+// `← →` run, `↑`/`space` jump, `r` restarts. Goombas walk, lava burns.
+// Grab every coin, then touch the flag.
+
+const FX = 40.0px;
+const FY = 40.0px;
+const FW = 960.0px;
+const FH = 720.0px;
+
+// §physics ------------------------------------------------------------
+const GRAV = 1800.0px/s^2;
+const JUMP_V = 560.0px/s;
+const RUN = 300.0px/s;
+const ACCEL = 2800.0px/s^2;
+const TERM = 980.0px/s;
+const PLAYER_W = 24.0px;
+const PLAYER_H = 36.0px;
+
+// §the level is data ---------------------------------------------------
+// One row per feature: kind ∈ {ground, plat, coin, lava, goomba, goal,
+// spawn}. The `level` data cell renders as the editable table on the
+// canvas — dragging a row's numbers *is* editing the level.
+struct LRow { id: str, kind: str, x: float, y: float, w: float, h: float }
+
+fn level() -> [LRow] {
+    // CSV ints arrive as `int` and `700 != 700.0` — `==` doesn't coerce.
+    // Normalize the numeric fields to float once, at the boundary, so a
+    // table full of integers can't poison the math below.
+    cov::hit(1); let out: [LRow] = [];
+    cov::hit(2); let r: [LRow] = cov::pass(3, data("level"))!.rows()!;
+    cov::hit(4); for row in r {
+        cov::hit(5); out.push(LRow { id = cov::pass(6, cov::pass(7, row.id)), kind = cov::pass(8, cov::pass(9, row.kind)),
+            x = cov::pass(10, cov::pass(11, row.x) + 0.0), y = cov::pass(12, cov::pass(13, row.y) + 0.0), w = cov::pass(14, cov::pass(15, row.w) + 0.0), h = cov::pass(16, cov::pass(17, row.h) + 0.0) });
+    }
+    cov::hit(18); out
+}
+// The parsed rows live on the world (`w.lv`) — init parses once and
+// every per-frame consumer reads that. Parsers stay for the solver and
+// checks, which run on demand, and for `r` — a reset re-reads the table.
+fn rows_of(lv: [LRow], k: str) -> [LRow] {
+    cov::hit(19); let out: [LRow] = [];
+    cov::hit(20); for r in lv { cov::hit(21); if cov::dec(0, cov::begin(0) && (cov::cmp(0, 0, 0, cov::lhs(cov::pass(22, r.kind)) == cov::rhs(k)))) { cov::hit(23); out.push(r); } }
+    cov::hit(24); out
+}
+fn solids(lv: [LRow]) -> [LRow] {
+    cov::hit(25); let out: [LRow] = [];
+    cov::hit(26); for r in lv {
+        cov::hit(27); if cov::dec(1, cov::begin(1) && (cov::cmp(1, 0, 0, cov::lhs(cov::pass(28, r.kind)) == cov::rhs("plat")) || cov::cmp(1, 1, 0, cov::lhs(cov::pass(29, r.kind)) == cov::rhs("ground")))) { cov::hit(30); out.push(r); }
+    }
+    cov::hit(31); out
+}
+fn coins(lv: [LRow]) -> [LRow] { cov::hit(32); cov::pass(33, rows_of(lv, "coin")) }
+fn first_row(lv: [LRow], k: str) -> LRow! {
+    cov::hit(34); for r in lv { cov::hit(35); if cov::dec(2, cov::begin(2) && (cov::cmp(2, 0, 0, cov::lhs(cov::pass(36, r.kind)) == cov::rhs(k)))) { cov::hit(37); return r; } }
+    cov::hit(38); raise "level has no '" + k + "' row";
+}
+fn spawn_row(lv: [LRow]) -> LRow! { cov::hit(39); cov::pass(40, first_row(lv, "spawn")) }
+fn goal_row(lv: [LRow]) -> LRow! { cov::hit(41); cov::pass(42, first_row(lv, "goal")) }
+
+// §the solver ----------------------------------------------------------
+// A level is "beatable" when every coin and the flag is reachable by
+// real jump arcs. Nodes are horizontal spans: a platform's top edge, a
+// coin's grab box, the flag's base. An edge a→b exists when a jump (or
+// falling drop) from anywhere on a can land on b — same numbers the
+// physics below uses, no hand-tuned fudge. It is a *movement* proof:
+// hazards are dodgeable, so the solver ignores them.
+struct N { top: float, l: float, r: float, id: str }
+
+const PICK = 18.0; // coin grab radius, px (float — solver math)
+
+fn nodes(lv: [LRow]) -> [N] {
+    cov::hit(43); let out: [N] = [];
+    cov::hit(44); for s in cov::pass(45, solids(lv)) {
+        cov::hit(46); out.push(N { top = cov::pass(47, cov::pass(48, s.y)), l = cov::pass(49, cov::pass(50, s.x)), r = cov::pass(51, cov::pass(52, s.x) + cov::pass(53, s.w)), id = cov::pass(54, cov::pass(55, s.id)) });
+    }
+    cov::hit(56); for c in cov::pass(57, coins(lv)) {
+        cov::hit(58); let cx = cov::pass(59, c.x) + cov::pass(60, c.w) / 2.0;
+        cov::hit(61); let cy = cov::pass(62, c.y) + cov::pass(63, c.h) / 2.0;
+        cov::hit(64); out.push(N { top = cov::pass(65, cy), l = cov::pass(66, cx - PICK), r = cov::pass(67, cx + PICK), id = cov::pass(68, cov::pass(69, c.id)) });
+    }
+    cov::hit(70); let g = cov::pass(71, goal_row(lv))!;
+    cov::hit(72); out.push(N { top = cov::pass(73, cov::pass(74, g.y) + cov::pass(75, g.h)), l = cov::pass(76, cov::pass(77, g.x) - 20.0), r = cov::pass(78, cov::pass(79, g.x) + cov::pass(80, g.w) + 20.0), id = cov::pass(81, cov::pass(82, g.id)) });
+    cov::hit(83); out
+}
+
+// Longest flight from a's top to b's top: rising arc while dy ≤ apex,
+// free drop below. Landing needs the falling branch, so take the + root.
+fn can_jump(a: N, b: N) -> bool {
+    cov::hit(84); let jv = JUMP_V.to("px/s");
+    cov::hit(85); let g = GRAV.to("px/s^2");
+    cov::hit(86); let run = RUN.to("px/s");
+    cov::hit(87); let dy = cov::pass(88, a.top) - cov::pass(89, b.top);
+    cov::hit(90); if cov::dec(3, cov::begin(3) && (cov::cmp(3, 0, 2, cov::lhs(dy) > cov::rhs(jv * jv / (2.0 * g))))) { cov::hit(91); return false; } // above jump apex
+    cov::hit(92); let disc = jv * jv - 2.0 * g * dy;
+    cov::hit(93); if cov::dec(4, cov::begin(4) && (cov::cmp(4, 0, 4, cov::lhs(disc) < cov::rhs(0.0)))) { cov::hit(94); return false; }
+    cov::hit(95); let t = (jv + disc.sqrt()) / g;
+    cov::hit(96); let gap = (cov::pass(97, b.l) - cov::pass(98, a.r)).max(cov::pass(99, a.l) - cov::pass(100, b.r)).max(0.0);
+    cov::hit(101); gap + 4.0 <= run * t
+}
+
+fn reach(lv: [LRow]) -> [str] {
+    cov::hit(102); let ns = cov::pass(103, nodes(lv));
+    cov::hit(104); let s = cov::pass(105, spawn_row(lv))!;
+    cov::hit(106); let got: [str] = [];
+    // the surface the spawn cell stands on seeds the flood
+    cov::hit(107); for n in ns {
+        cov::hit(108); if cov::dec(5, cov::begin(5) && (cov::cmp(5, 0, 3, cov::lhs(cov::pass(109, s.x) + 12.0) >= cov::rhs(cov::pass(110, n.l))) && cov::cmp(5, 1, 5, cov::lhs(cov::pass(111, s.x) + 12.0) <= cov::rhs(cov::pass(112, n.r))) && cov::cmp(5, 2, 4, cov::lhs((cov::pass(113, n.top) - cov::pass(114, s.y) - cov::pass(115, s.h)).abs()) < cov::rhs(4.0)))) {
+            cov::hit(116); got.push(cov::pass(117, n.id));
+        }
+    }
+    cov::hit(118); let grew = true;
+    cov::hit(119); while cov::dec(6, cov::begin(6) && (cov::cond(6, 0, grew))) {
+        cov::hit(120); grew = false;
+        cov::hit(121); for a in ns {
+            cov::hit(122); if cov::dec(7, cov::begin(7) && (cov::cond(7, 0, cov::pass(123, got.contains(cov::pass(124, a.id)))))) {
+                cov::hit(125); for b in ns {
+                    cov::hit(126); if cov::dec(8, cov::begin(8) && (cov::cond(8, 0, !cov::pass(127, got.contains(cov::pass(128, b.id)))) && cov::cond(8, 1, cov::pass(129, can_jump(a, b))))) {
+                        cov::hit(130); got.push(cov::pass(131, b.id));
+                        cov::hit(132); grew = true;
+                    }
+                }
+            }
+        }
+    }
+    cov::hit(133); got
+}
+
+// First thing a given flood can't reach — coin id, 'flag', or '' when
+// the whole level clears. `blocker`/`live_solve` share one `reach()`.
+fn blocker_of(lv: [LRow], got: [str]) -> str {
+    cov::hit(134); for c in cov::pass(135, coins(lv)) { cov::hit(136); if cov::dec(9, cov::begin(9) && (cov::cond(9, 0, !cov::pass(137, got.contains(cov::pass(138, c.id)))))) { cov::hit(139); return cov::pass(140, c.id); } }
+    cov::hit(141); if cov::dec(10, cov::begin(10) && (cov::cond(10, 0, !cov::pass(142, got.contains("flag"))))) { cov::hit(143); return "flag"; }
+    cov::hit(144); ""
+}
+fn blocker(lv: [LRow]) -> str { cov::hit(145); cov::pass(146, blocker_of(lv, cov::pass(147, reach(lv)))) }
+fn beatable(lv: [LRow]) -> bool { cov::hit(148); cov::pass(149, blocker(lv)) == "" }
+
+// Which collectible the canvas points at: the blocker when there is
+// one, else the 50th coin — the "watch" row of the table.
+fn watch_id(lv: [LRow]) -> str {
+    cov::hit(150); let b = cov::pass(151, blocker(lv));
+    cov::hit(152); if cov::dec(11, cov::begin(11) && (cov::cmp(11, 0, 1, cov::lhs(b) != cov::rhs("")))) { cov::hit(153); b } else { cov::hit(154); "c050" }
+}
+
+fn show_watch() -> DataFrame! {
+    cov::hit(155); cov::pass(156, data("level"))!.filter(col("id") == lit(cov::pass(157, watch_id(cov::pass(158, level())))))
+}
+
+// The solver's readout — repaints on every edit. A verdict strip under
+// the field (one dot per coin, reachable = gold, stuck = red) and a
+// ring around the watch coin's spot *in the level*.
+fn live_solve() -> [Img] {
+    cov::hit(159); let lv = cov::pass(160, level());
+    cov::hit(161); let got = cov::pass(162, reach(lv));
+    cov::hit(163); let b = cov::pass(164, blocker_of(lv, got));
+    cov::hit(165); let ok = b == "";
+    cov::hit(166); let wid = if cov::dec(12, cov::begin(12) && (cov::cond(12, 0, ok))) { cov::hit(167); "c050" } else { cov::hit(168); b };
+    cov::hit(169); let cs = cov::pass(170, coins(lv));
+    cov::hit(171); let parts: [Img] = [];
+    cov::hit(172); let y0 = FY + FH + 30.0px;
+    cov::hit(173); parts.push(Img::Text {
+        x = cov::pass(174, FX), y = cov::pass(175, y0 + 26.0px), size = cov::pass(176, 22.0px),
+        fill = cov::pass(177, if cov::dec(13, cov::begin(13) && (cov::cond(13, 0, ok))) { cov::hit(178); G_CYAN } else { cov::hit(179); G_RED }),
+        text = cov::pass(180, if cov::dec(14, cov::begin(14) && (cov::cond(14, 0, ok))) {
+            cov::hit(181); f"solver · {cs.len()}/{cs.len()} coins in jump range — level beatable ✓"
+        } else {
+            cov::hit(182); f"solver · {b} unreachable — level NOT beatable ✗"
+        }),
+    });
+    // 10×10 dot grid — the whole table's reachability at a glance
+    cov::hit(183); let i = 0;
+    cov::hit(184); for c in cs {
+        cov::hit(185); let gx = FX + 260.0px + (i mod 20).to_float() * 20.0px;
+        cov::hit(186); let gy = y0 + 12.0px + (i / 20).floor() * 20.0px;
+        cov::hit(187); let hot = cov::pass(188, c.id) == wid;
+        cov::hit(189); parts.push(Img::Ellipse {
+            x = cov::pass(190, gx), y = cov::pass(191, gy), w = cov::pass(192, 14.0px), h = cov::pass(193, 14.0px),
+            fill = cov::pass(194, if cov::dec(15, cov::begin(15) && (cov::cond(15, 0, cov::pass(195, got.contains(cov::pass(196, c.id)))))) { cov::hit(197); G_GOLD } else { cov::hit(198); G_RED }),
+            stroke = cov::pass(199, if cov::dec(16, cov::begin(16) && (cov::cond(16, 0, hot))) { cov::hit(200); G_WHITE } else { cov::hit(201); "" }),
+            stroke_w = cov::pass(202, 2.0px),
+        });
+        cov::hit(203); i += 1;
+    }
+    // ring the watch coin where it sits in the level
+    cov::hit(204); for c in cs {
+        cov::hit(205); if cov::dec(17, cov::begin(17) && (cov::cmp(17, 0, 0, cov::lhs(cov::pass(206, c.id)) == cov::rhs(wid)))) {
+            cov::hit(207); let cx = (cov::pass(208, c.x) + cov::pass(209, c.w) / 2.0) * 1.0px;
+            cov::hit(210); let cy = (cov::pass(211, c.y) + cov::pass(212, c.h) / 2.0) * 1.0px;
+            cov::hit(213); parts.push(Img::Ellipse {
+                x = cov::pass(214, cx - 22.0px), y = cov::pass(215, cy - 22.0px), w = cov::pass(216, 44.0px), h = cov::pass(217, 44.0px),
+                fill = cov::pass(218, ""), stroke = cov::pass(219, if cov::dec(18, cov::begin(18) && (cov::cond(18, 0, ok))) { cov::hit(220); G_CYAN } else { cov::hit(221); G_RED }),
+                stroke_w = cov::pass(222, 3.0px),
+            });
+            cov::hit(223); parts.push(Img::Text {
+                x = cov::pass(224, cx + 28.0px), y = cov::pass(225, cy + 6.0px), size = cov::pass(226, 16.0px),
+                fill = cov::pass(227, if cov::dec(19, cov::begin(19) && (cov::cond(19, 0, ok))) { cov::hit(228); G_CYAN } else { cov::hit(229); G_RED }),
+                text = cov::pass(230, f"{cov::pass(231, c.id)}"),
+            });
+        }
+    }
+    cov::hit(232); parts
+}
+
+// §sfx -----------------------------------------------------------------
+fn sfxCoin() -> Voice {
+    cov::hit(233); music::synth(0.0, 0.0, 0s, 0.05s, 1.0, 0.12s, 0Hz)
+        .vol(0.4).freq(1320Hz).slide(0.4)
+}
+fn sfxJump() -> Voice {
+    cov::hit(234); music::synth(0.0, 0.0, 0s, 0.03s, 1.0, 0.1s, 0Hz)
+        .vol(0.35).freq(420Hz).slide(0.5)
+}
+fn sfxDie() -> Voice {
+    cov::hit(235); music::synth(0.0, 0.0, 0s, 0.2s, 1.0, 0.3s, 0Hz)
+        .vol(0.7).freq(220Hz).slide(-0.8).noise(0.4)
+}
+fn sfxWin() -> Voice {
+    cov::hit(236); music::synth(0.0, 0.0, 0s, 0.3s, 1.0, 0.4s, 0Hz)
+        .vol(0.6).jitter(0.1).freq(660Hz).slide(0.5)
+}
+
+// §the game ------------------------------------------------------------
+struct W {
+    px: px, py: px, vx: px/s, vy: px/s,
+    face: float, grounded: bool,
+    got: [str], score: int, deaths: int,
+    won: bool, t: s, lv: [LRow],
+}
+
+fn init() -> W {
+    cov::hit(237); let lv = cov::pass(238, level());
+    cov::hit(239); let s = cov::pass(240, spawn_row(lv))!;
+    cov::hit(241); W { px = cov::pass(242, cov::pass(243, s.x) * 1.0px), py = cov::pass(244, cov::pass(245, s.y) * 1.0px), vx = cov::pass(246, 0.0px/s), vy = cov::pass(247, 0.0px/s),
+        face = cov::pass(248, 1.0), grounded = cov::pass(249, false), got = cov::pass(250, []), score = cov::pass(251, 0), deaths = cov::pass(252, 0),
+        won = cov::pass(253, false), t = cov::pass(254, 0.0s), lv = cov::pass(255, lv) }
+}
+
+// One-way platforms: you fall onto tops, never bump a side or a head —
+// which is exactly the world the solver models.
+fn tick(w: W, inp: Input, evs: [Ev]) -> W {
+    cov::hit(256); if cov::dec(20, cov::begin(20) && (cov::cond(20, 0, cov::pass(257, inp.held.contains("r"))))) { cov::hit(258); return cov::pass(259, init()); }
+    cov::hit(260); let dt = inp.dt;
+    cov::hit(261); let lv = cov::pass(262, w.lv);
+    cov::hit(263); let px = cov::pass(264, w.px); cov::hit(265); let py = cov::pass(266, w.py);
+    cov::hit(267); let vx = cov::pass(268, w.vx); cov::hit(269); let vy = cov::pass(270, w.vy);
+    cov::hit(271); let grounded = cov::pass(272, w.grounded);
+    cov::hit(273); let face = cov::pass(274, w.face);
+    cov::hit(275); let t = cov::pass(276, w.t) + dt;
+
+    // run
+    cov::hit(277); if cov::dec(21, cov::begin(21) && (cov::cond(21, 0, cov::pass(278, inp.held.contains("arrowleft"))) || cov::cond(21, 1, cov::pass(279, inp.held.contains("a"))))) {
+        cov::hit(280); vx = (vx - ACCEL * dt).max(-RUN); cov::hit(281); face = -1.0;
+    } else if cov::dec(22, cov::begin(22) && (cov::cond(22, 0, cov::pass(282, inp.held.contains("arrowright"))) || cov::cond(22, 1, cov::pass(283, inp.held.contains("d"))))) {
+        cov::hit(284); vx = (vx + ACCEL * dt).min(RUN); cov::hit(285); face = 1.0;
+    } else {
+        cov::hit(286); vx = vx * (1.0 - 10.0Hz * dt);
+    }
+    // jump
+    cov::hit(287); if cov::dec(23, cov::begin(23) && (cov::cond(23, 0, grounded) && (cov::cond(23, 1, cov::pass(288, inp.held.contains("arrowup"))) || cov::cond(23, 2, cov::pass(289, inp.held.contains(" "))) || cov::cond(23, 3, cov::pass(290, inp.held.contains("w")))))) {
+        cov::hit(291); vy = -JUMP_V; cov::hit(292); grounded = false;
+        cov::hit(293); music::sfx(cov::pass(294, sfxJump()));
+    }
+    cov::hit(295); vy = (vy + GRAV * dt).min(TERM);
+
+    // integrate + land on tops (only while falling)
+    cov::hit(296); let old_bottom = py + PLAYER_H;
+    cov::hit(297); px = (px + vx * dt).max(FX).min(FX + FW - PLAYER_W);
+    cov::hit(298); py = py + vy * dt;
+    cov::hit(299); grounded = false;
+    cov::hit(300); for s in cov::pass(301, solids(lv)) {
+        cov::hit(302); let top = cov::pass(303, s.y) * 1.0px;
+        cov::hit(304); let sx = cov::pass(305, s.x) * 1.0px; cov::hit(306); let sw = cov::pass(307, s.w) * 1.0px;
+        cov::hit(308); if cov::dec(24, cov::begin(24) && (cov::cmp(24, 0, 3, cov::lhs(vy) >= cov::rhs(0.0px/s)) && cov::cmp(24, 1, 5, cov::lhs(old_bottom) <= cov::rhs(top + 1.0px)) && cov::cmp(24, 2, 2, cov::lhs(px + PLAYER_W) > cov::rhs(sx)) && cov::cmp(24, 3, 4, cov::lhs(px) < cov::rhs(sx + sw)) && cov::cmp(24, 4, 3, cov::lhs(py + PLAYER_H) >= cov::rhs(top)) && cov::cmp(24, 5, 5, cov::lhs(py + PLAYER_H) <= cov::rhs(top + 24.0px)))) {
+            cov::hit(309); py = top - PLAYER_H; cov::hit(310); vy = 0.0px/s; cov::hit(311); grounded = true;
+        }
+    }
+    cov::hit(312); if cov::dec(25, cov::begin(25) && (cov::cmp(25, 0, 2, cov::lhs(py) > cov::rhs(FY + FH + 200.0px)))) {
+        // fell out of the world — respawn
+        cov::hit(313); music::sfx(cov::pass(314, sfxDie()));
+        cov::hit(315); let s0 = cov::pass(316, spawn_row(lv))!;
+        cov::hit(317); return W { px = cov::pass(318, cov::pass(319, s0.x) * 1.0px), py = cov::pass(320, cov::pass(321, s0.y) * 1.0px), vx = cov::pass(322, 0.0px/s),
+                   vy = cov::pass(323, 0.0px/s), face = cov::pass(324, 1.0), grounded = cov::pass(325, false),
+                   got = cov::pass(326, cov::pass(327, w.got)), score = cov::pass(328, cov::pass(329, w.score)), deaths = cov::pass(330, cov::pass(331, w.deaths) + 1),
+                   won = cov::pass(332, cov::pass(333, w.won)), t = cov::pass(334, t), lv = cov::pass(335, lv) };
+    }
+
+    // hazards — goombas patrol their row's span, lava just burns
+    cov::hit(336); for h in lv {
+        cov::hit(337); if cov::dec(26, cov::begin(26) && (cov::cmp(26, 0, 0, cov::lhs(cov::pass(338, h.kind)) == cov::rhs("goomba")) || cov::cmp(26, 1, 0, cov::lhs(cov::pass(339, h.kind)) == cov::rhs("lava")))) {
+            cov::hit(340); let hx = cov::pass(341, h.x) * 1.0px; cov::hit(342); let hy = cov::pass(343, h.y) * 1.0px;
+            cov::hit(344); let hw = cov::pass(345, h.w) * 1.0px; cov::hit(346); let hh = cov::pass(347, h.h) * 1.0px;
+            cov::hit(348); let ox = if cov::dec(27, cov::begin(27) && (cov::cmp(27, 0, 0, cov::lhs(cov::pass(349, h.kind)) == cov::rhs("goomba")))) {
+                cov::hit(350); let span = (hw - 24.0px).max(0.0px);
+                cov::hit(351); let ph = (t.to("s") * 60.0 / span.to("px").max(1.0)) mod 2.0;
+                cov::hit(352); hx + (if cov::dec(28, cov::begin(28) && (cov::cmp(28, 0, 4, cov::lhs(ph) < cov::rhs(1.0)))) { cov::hit(353); ph } else { cov::hit(354); 2.0 - ph }) * span
+            } else { cov::hit(355); hx };
+            cov::hit(356); let ow = if cov::dec(29, cov::begin(29) && (cov::cmp(29, 0, 0, cov::lhs(cov::pass(357, h.kind)) == cov::rhs("goomba")))) { cov::hit(358); 24.0px } else { cov::hit(359); hw };
+            cov::hit(360); let mhh = if cov::dec(30, cov::begin(30) && (cov::cmp(30, 0, 0, cov::lhs(cov::pass(361, h.kind)) == cov::rhs("goomba")))) { cov::hit(362); 24.0px } else { cov::hit(363); hh };
+            cov::hit(364); if cov::dec(31, cov::begin(31) && (cov::cmp(31, 0, 2, cov::lhs(px + PLAYER_W) > cov::rhs(ox)) && cov::cmp(31, 1, 4, cov::lhs(px) < cov::rhs(ox + ow)) && cov::cmp(31, 2, 2, cov::lhs(py + PLAYER_H) > cov::rhs(hy)) && cov::cmp(31, 3, 4, cov::lhs(py) < cov::rhs(hy + mhh)))) {
+                cov::hit(365); music::sfx(cov::pass(366, sfxDie()));
+                cov::hit(367); let s0 = cov::pass(368, spawn_row(lv))!;
+                cov::hit(369); return W { px = cov::pass(370, cov::pass(371, s0.x) * 1.0px), py = cov::pass(372, cov::pass(373, s0.y) * 1.0px), vx = cov::pass(374, 0.0px/s),
+                           vy = cov::pass(375, 0.0px/s), face = cov::pass(376, 1.0), grounded = cov::pass(377, false),
+                           got = cov::pass(378, cov::pass(379, w.got)), score = cov::pass(380, cov::pass(381, w.score)), deaths = cov::pass(382, cov::pass(383, w.deaths) + 1),
+                           won = cov::pass(384, cov::pass(385, w.won)), t = cov::pass(386, t), lv = cov::pass(387, lv) };
+            }
+        }
+    }
+
+    // coins
+    cov::hit(388); let got = cov::pass(389, w.got);
+    cov::hit(390); let score = cov::pass(391, w.score);
+    cov::hit(392); for c in cov::pass(393, coins(lv)) {
+        cov::hit(394); if cov::dec(32, cov::begin(32) && (cov::cond(32, 0, !cov::pass(395, got.contains(cov::pass(396, c.id)))))) {
+            cov::hit(397); let dx = (px + PLAYER_W / 2.0 - (cov::pass(398, c.x) + cov::pass(399, c.w) / 2.0) * 1.0px).abs();
+            cov::hit(400); let dy = (py + PLAYER_H / 2.0 - (cov::pass(401, c.y) + cov::pass(402, c.h) / 2.0) * 1.0px).abs();
+            cov::hit(403); if cov::dec(33, cov::begin(33) && (cov::cmp(33, 0, 4, cov::lhs(dx) < cov::rhs(PICK * 1.0px + 8.0px)) && cov::cmp(33, 1, 4, cov::lhs(dy) < cov::rhs(PICK * 1.0px + 14.0px)))) {
+                cov::hit(404); got.push(cov::pass(405, c.id)); cov::hit(406); score += 1; cov::hit(407); fuzz::set(cov::pass(408, c.id));
+                cov::hit(409); music::sfx(cov::pass(410, sfxCoin()));
+            }
+        }
+    }
+
+    // the flag — only counts once every coin is pocketed
+    cov::hit(411); let won = cov::pass(412, w.won);
+    cov::hit(413); if cov::dec(34, cov::begin(34) && (cov::cond(34, 0, !won) && cov::cmp(34, 1, 0, cov::lhs(score) == cov::rhs(cov::pass(414, coins(lv)).len())))) {
+        cov::hit(415); let g = cov::pass(416, goal_row(lv))!;
+        cov::hit(417); let gx = cov::pass(418, g.x) * 1.0px; cov::hit(419); let gy = cov::pass(420, g.y) * 1.0px;
+        cov::hit(421); let gw = cov::pass(422, g.w) * 1.0px; cov::hit(423); let gh = cov::pass(424, g.h) * 1.0px;
+        cov::hit(425); if cov::dec(35, cov::begin(35) && (cov::cmp(35, 0, 2, cov::lhs(px + PLAYER_W) > cov::rhs(gx)) && cov::cmp(35, 1, 4, cov::lhs(px) < cov::rhs(gx + gw)) && cov::cmp(35, 2, 2, cov::lhs(py + PLAYER_H) > cov::rhs(gy)) && cov::cmp(35, 3, 4, cov::lhs(py) < cov::rhs(gy + gh)))) {
+            cov::hit(426); won = true; cov::hit(427); music::sfx(cov::pass(428, sfxWin()));
+        }
+    }
+
+    cov::hit(429); W { px = cov::pass(430, px), py = cov::pass(431, py), vx = cov::pass(432, vx), vy = cov::pass(433, vy), face = cov::pass(434, face),
+        grounded = cov::pass(435, grounded), got = cov::pass(436, got), score = cov::pass(437, score), deaths = cov::pass(438, cov::pass(439, w.deaths)),
+        won = cov::pass(440, won), t = cov::pass(441, t), lv = cov::pass(442, cov::pass(443, w.lv)) }
+}
+
+// §follow-cam ----------------------------------------------------------
+// The field is bigger than a screenful — `game::cam` centres the camera
+// on the player at ZOOM× for every world draw after it, clamped so the
+// view never leaves the field. `game::text` is screen-space, so the HUD
+// stays pinned; `cam_reset` would free field-space HUD geometry anyway.
+const ZOOM = 2.2;
+
+fn follow(px: px, py: px) {
+    // half the 1280×720 view, in world px, at this zoom
+    cov::hit(444); let hw = 640.0px / ZOOM;
+    cov::hit(445); let hh = 360.0px / ZOOM;
+    cov::hit(446); game::cam(
+        px.max(FX + hw).min(FX + FW - hw),
+        py.max(FY + hh).min(FY + FH - hh),
+        ZOOM,
+    );
+}
+
+fn draw(w: W) {
+    cov::hit(447); cov::pass(448, follow(cov::pass(449, w.px) + PLAYER_W / 2.0, cov::pass(450, w.py) + PLAYER_H / 2.0));
+    cov::hit(451); game::rect(FX, FY, FW, FH, "#0a0f1e", "#31506b", 3.0px);
+    cov::hit(452); game::tile("clouds", FX, FY, FW, FH * 0.4, 220.0px);
+    cov::hit(453); for r in cov::pass(454, w.lv) {
+        cov::hit(455); let x = cov::pass(456, r.x) * 1.0px; cov::hit(457); let y = cov::pass(458, r.y) * 1.0px;
+        cov::hit(459); let wd = cov::pass(460, r.w) * 1.0px; cov::hit(461); let ht = cov::pass(462, r.h) * 1.0px;
+        cov::hit(463); if cov::dec(36, cov::begin(36) && (cov::cmp(36, 0, 0, cov::lhs(cov::pass(464, r.kind)) == cov::rhs("ground")))) {
+            cov::hit(465); game::rect(x, y, wd, ht, "#3b2f23", "#6b5335", 2.0px);
+        } else if cov::dec(37, cov::begin(37) && (cov::cmp(37, 0, 0, cov::lhs(cov::pass(466, r.kind)) == cov::rhs("plat")))) {
+            cov::hit(467); game::sprite("block", x, y, wd, ht, 0.0);
+        } else if cov::dec(38, cov::begin(38) && (cov::cmp(38, 0, 0, cov::lhs(cov::pass(468, r.kind)) == cov::rhs("coin")))) {
+            cov::hit(469); if cov::dec(39, cov::begin(39) && (cov::cond(39, 0, !cov::pass(470, w.got.contains(cov::pass(471, r.id)))))) {
+                cov::hit(472); game::sprite("coin", x, y, wd, ht, 0.0);
+            }
+        } else if cov::dec(40, cov::begin(40) && (cov::cmp(40, 0, 0, cov::lhs(cov::pass(473, r.kind)) == cov::rhs("lava")))) {
+            cov::hit(474); game::rect(x, y, wd, ht, "#e03e1a", "#ff8c42", 2.0px);
+        } else if cov::dec(41, cov::begin(41) && (cov::cmp(41, 0, 0, cov::lhs(cov::pass(475, r.kind)) == cov::rhs("goomba")))) {
+            cov::hit(476); let span = (wd - 24.0px).max(0.0px);
+            cov::hit(477); let ph = (w.t.to("s") * 60.0 / span.to("px").max(1.0)) mod 2.0;
+            cov::hit(478); let gx = x + (if cov::dec(42, cov::begin(42) && (cov::cmp(42, 0, 4, cov::lhs(ph) < cov::rhs(1.0)))) { cov::hit(479); ph } else { cov::hit(480); 2.0 - ph }) * span;
+            cov::hit(481); game::sprite("goomba", gx, y, 24.0px, 24.0px, 0.0);
+        } else if cov::dec(43, cov::begin(43) && (cov::cmp(43, 0, 0, cov::lhs(cov::pass(482, r.kind)) == cov::rhs("goal")))) {
+            cov::hit(483); game::sprite("flag", x, y, wd.max(48.0px), ht.max(64.0px), 0.0);
+        }
+    }
+    cov::hit(484); game::sprite("mimo", cov::pass(485, w.px) - 6.0px, cov::pass(486, w.py) - 4.0px, 36.0px, 44.0px, cov::pass(487, w.face) * 6deg);
+    cov::hit(488); game::cam_reset();
+    cov::hit(489); let sc = cov::pass(490, w.score); cov::hit(491); let dn = cov::pass(492, w.deaths);
+    cov::hit(493); game::text(60.0px, 62.0px, f"◉ {sc}/{cov::pass(494, coins(cov::pass(495, w.lv))).len()}", 22.0px, G_GOLD);
+    cov::hit(496); game::text(860.0px, 62.0px, f"✗ {dn}", 22.0px, G_DIM);
+    cov::hit(497); game::ctext(520.0px, FY + FH + 26.0px,
+        "← → run   ·   ↑ jump   ·   r restart   ·   the level is the table — edit it",
+        20.0px, G_DIM);
+    cov::hit(498); if cov::dec(44, cov::begin(44) && (cov::cond(44, 0, cov::pass(499, w.won)))) {
+        cov::hit(500); game::ctext(520.0px, 380.0px, f"★ you cleared it — {sc}/{cov::pass(501, coins(cov::pass(502, w.lv))).len()} ★",
+            42.0px, G_GOLD);
+    }
+}
+
+// §asset panels ---------------------------------------------------------
+// Each `live_<name>` is the vector base of `game::sprite("<name>")` —
+// and the [[#]] sprite cell of the same name frames it on the canvas,
+// so ink drawn there bakes into every stamp. A little sprite sheet.
+fn live_mimo() -> [Img] {
+    cov::hit(503); [
+        Img::Rect { x = cov::pass(504, 60.0px), y = cov::pass(505, 905.0px), w = cov::pass(506, 24.0px), h = cov::pass(507, 10.0px),
+                    fill = cov::pass(508, "#d43a2f"), stroke = cov::pass(509, ""), stroke_w = cov::pass(510, 0.0px) },
+        Img::Rect { x = cov::pass(511, 62.0px), y = cov::pass(512, 913.0px), w = cov::pass(513, 20.0px), h = cov::pass(514, 14.0px),
+                    fill = cov::pass(515, "#f2c19b"), stroke = cov::pass(516, ""), stroke_w = cov::pass(517, 0.0px) },
+        Img::Rect { x = cov::pass(518, 60.0px), y = cov::pass(519, 927.0px), w = cov::pass(520, 24.0px), h = cov::pass(521, 16.0px),
+                    fill = cov::pass(522, "#2f5fd4"), stroke = cov::pass(523, ""), stroke_w = cov::pass(524, 0.0px) },
+    ]
+}
+fn live_coin() -> [Img] {
+    cov::hit(525); [
+        Img::Ellipse { x = cov::pass(526, 130.0px), y = cov::pass(527, 905.0px), w = cov::pass(528, 28.0px), h = cov::pass(529, 28.0px),
+                       fill = cov::pass(530, G_GOLD), stroke = cov::pass(531, "#a07c12"), stroke_w = cov::pass(532, 2.0px) },
+        Img::Ellipse { x = cov::pass(533, 137.0px), y = cov::pass(534, 912.0px), w = cov::pass(535, 14.0px), h = cov::pass(536, 14.0px),
+                       fill = cov::pass(537, "#fde047"), stroke = cov::pass(538, ""), stroke_w = cov::pass(539, 0.0px) },
+    ]
+}
+fn live_block() -> [Img] {
+    cov::hit(540); [
+        Img::Rect { x = cov::pass(541, 190.0px), y = cov::pass(542, 905.0px), w = cov::pass(543, 40.0px), h = cov::pass(544, 24.0px),
+                    fill = cov::pass(545, "#7a5a34"), stroke = cov::pass(546, "#54390f"), stroke_w = cov::pass(547, 2.0px) },
+        Img::Rect { x = cov::pass(548, 194.0px), y = cov::pass(549, 909.0px), w = cov::pass(550, 32.0px), h = cov::pass(551, 6.0px),
+                    fill = cov::pass(552, "#a87f4a"), stroke = cov::pass(553, ""), stroke_w = cov::pass(554, 0.0px) },
+    ]
+}
+fn live_goomba() -> [Img] {
+    cov::hit(555); [
+        Img::Ellipse { x = cov::pass(556, 260.0px), y = cov::pass(557, 905.0px), w = cov::pass(558, 30.0px), h = cov::pass(559, 24.0px),
+                       fill = cov::pass(560, "#8a4b2a"), stroke = cov::pass(561, "#5c3018"), stroke_w = cov::pass(562, 2.0px) },
+        Img::Ellipse { x = cov::pass(563, 266.0px), y = cov::pass(564, 912.0px), w = cov::pass(565, 5.0px), h = cov::pass(566, 6.0px),
+                       fill = cov::pass(567, G_WHITE), stroke = cov::pass(568, ""), stroke_w = cov::pass(569, 0.0px) },
+        Img::Ellipse { x = cov::pass(570, 279.0px), y = cov::pass(571, 912.0px), w = cov::pass(572, 5.0px), h = cov::pass(573, 6.0px),
+                       fill = cov::pass(574, G_WHITE), stroke = cov::pass(575, ""), stroke_w = cov::pass(576, 0.0px) },
+    ]
+}
+fn live_flag() -> [Img] {
+    cov::hit(577); [
+        Img::Line { x = cov::pass(578, 340.0px), y = cov::pass(579, 896.0px), x2 = cov::pass(580, 340.0px), y2 = cov::pass(581, 960.0px),
+                    stroke = cov::pass(582, G_DIM), stroke_w = cov::pass(583, 3.0px) },
+        Img::Path { points = cov::pass(584, [[340.0px, 898.0px], [374.0px, 908.0px], [340.0px, 918.0px]]),
+                    closed = cov::pass(585, true), fill = cov::pass(586, G_CYAN), stroke = cov::pass(587, ""), stroke_w = cov::pass(588, 0.0px) },
+    ]
+}
+fn live_clouds() -> [Img] {
+    cov::hit(589); [
+        Img::Ellipse { x = cov::pass(590, 420.0px), y = cov::pass(591, 900.0px), w = cov::pass(592, 46.0px), h = cov::pass(593, 20.0px),
+                       fill = cov::pass(594, "#22314d"), stroke = cov::pass(595, ""), stroke_w = cov::pass(596, 0.0px) },
+        Img::Ellipse { x = cov::pass(597, 432.0px), y = cov::pass(598, 890.0px), w = cov::pass(599, 26.0px), h = cov::pass(600, 20.0px),
+                       fill = cov::pass(601, "#22314d"), stroke = cov::pass(602, ""), stroke_w = cov::pass(603, 0.0px) },
+    ]
+}
+
+check coins(level()).len() == 100
+check solids(level()).len() >= 10
+check beatable(level())
+
+cov::hit(604); cov::pass(605, game_loop(cov::pass(606, init()), tick, draw));
+
+
+// img — the scene vocabulary. A page draws *values*: `game::draw`,
+// `game::bounds`, the `live_*` fns, and the debugger's hover-draw all
+// walk a returned tree into vector prims by reading each node's
+// variant name (`Img::Rect` is the "rect" kind) and fields — so this
+// enum is the checked spelling of that contract: a typo'd field or
+// variant name is a compile error here, not a silent no-op. Include
+// it with `use "img";`.
+//
+// `stroke = ""` means none. `Group`'s `at` translates its children
+// (and is the only `at`-carrying node). The enum is the typed path,
+// not the only one — a `~{kind = "…", …}` dict or your own
+// identically-named struct walks the same way.
+//
+// Every geometric field is `px` — the renderer works in pixel space,
+// so passing a quantity (or a bare literal suffixed `px`) is checked
+// rather than silently rescaled. A `float` helper can put the unit
+// on at the boundary with `v * 1.0px`.
+enum Img {
+    Rect { x: px, y: px, w: px, h: px, fill: str, stroke: str, stroke_w: px },
+    Ellipse { x: px, y: px, w: px, h: px, fill: str, stroke: str, stroke_w: px },
+    Line { x: px, y: px, x2: px, y2: px, stroke: str, stroke_w: px },
+    Path { points: [[px]], closed: bool, fill: str, stroke: str, stroke_w: px },
+    Text { x: px, y: px, text: str, size: px, fill: str },
+    Prose { x: px, y: px, w: px, text: str },
+    Group { at: [px], children: [Img] },
+}
+
+/// The debugger's draw pact: hover a value and the inspector calls its
+/// `draw` for the scene — `impl Draw for W` makes that checked.
+pact Draw {
+    fn draw(self) -> [Img];
+}
+
+
+// game-kit — the shared scaffold for `use game` pages. Include it with
+// `use "game-kit";` (the host splices this page's source in, like
+// `use "img";`).
+//
+// Two things every game page kept repeating:
+//   · the frame loop at the bottom — `game_loop`/`time_loop` say it once
+//   · the palette — every page spelled the same hexes out by hand
+
+// ---- the loop -------------------------------------------------------
+//
+// A game is three pieces: `init` makes the starting world, `tick`
+// steps it on the frame's input and events, `draw` paints it. The
+// loop that turns those into a running game is always the same — one
+// `yield_frame` per pass until the host quits — so say it once and
+// hand the pieces in: `game_loop(init(), tick, draw)`, or skip the
+// init fn and pass the literal — `game_loop(W { t = 0.0 }, tick, draw)`.
+// `W` is the game's own state type; generic, so the kit doesn't pin it.
+// Note `tick` *gets* the frame's events — `game::events()` drains its
+// queue on read, so take `evs` as a param rather than re-reading it.
+fn game_loop<W>(world: W, tick: (W, Input, [Ev]) -> W, draw: (W) -> ()) {
+    cov::hit(607); let w = world;
+    cov::hit(608); while cov::dec(45, cov::begin(45) && (cov::cond(45, 0, !game::quitting()))) {
+        cov::hit(609); w = cov::pass(610, tick(w, game::input(), game::events()));
+        cov::hit(611); cov::pass(612, draw(w));
+        cov::hit(613); game::yield_frame();
+    }
+}
+
+// The animation flavor for pages that only need the frame's `dt`.
+// NOT `game_loop` underneath — `game::events()` drains its queue when
+// read, so fetching it here would starve a `tick` that reads events
+// itself. Input snapshots are safe to double-read; events are not.
+fn time_loop<W>(world: W, tick: (W, s) -> W, draw: (W) -> ()) {
+    cov::hit(614); let w = world;
+    cov::hit(615); while cov::dec(46, cov::begin(46) && (cov::cond(46, 0, !game::quitting()))) {
+        cov::hit(616); w = cov::pass(617, tick(w, game::input().dt));
+        cov::hit(618); cov::pass(619, draw(w));
+        cov::hit(620); game::yield_frame();
+    }
+}
+
+// ---- geometry -------------------------------------------------------
+//
+// `Rect<T>` is a plain positioned box, generic over the unit: `Rect<px>`
+// is a screen-space region (hit tests, layout), but `Rect<inch>` in a
+// carpentry spec or `Rect<float>` on a dimless field work the same way —
+// the methods only need `T + T` and `T <= T`, which unify when every
+// side is the same param. (Distinct units in one rect — `Rect{ x: px,
+// w: inch }` — are a type error: the methods would be unsound.)
+struct Rect<T> {
+    x: T,
+    y: T,
+    w: T,
+    h: T,
+}
+impl Rect {
+    fn right(self) -> T { cov::hit(621); cov::pass(622, self.x) + cov::pass(623, self.w) }
+    fn bottom(self) -> T { cov::hit(624); cov::pass(625, self.y) + cov::pass(626, self.h) }
+    fn cx(self) -> float { cov::hit(627); (cov::pass(628, self.x) + cov::pass(629, self.x) + cov::pass(630, self.w)) / 2.0 }
+    fn cy(self) -> float { cov::hit(631); (cov::pass(632, self.y) + cov::pass(633, self.y) + cov::pass(634, self.h)) / 2.0 }
+    fn contains(self, x: T, y: T) -> bool {
+        cov::hit(635); cov::dec(47, cov::begin(47) && (cov::cmp(47, 0, 3, cov::lhs(x) >= cov::rhs(cov::pass(636, self.x))) && cov::cmp(47, 1, 5, cov::lhs(x) <= cov::rhs(cov::pass(637, self.right()))) && cov::cmp(47, 2, 3, cov::lhs(y) >= cov::rhs(cov::pass(638, self.y))) && cov::cmp(47, 3, 5, cov::lhs(y) <= cov::rhs(cov::pass(639, self.bottom())))))
+    }
+    fn inflate(self, d: T) -> Rect<T> {
+        cov::hit(640); Rect { x = cov::pass(641, cov::pass(642, self.x) - d), y = cov::pass(643, cov::pass(644, self.y) - d),
+            w = cov::pass(645, cov::pass(646, self.w) + d + d), h = cov::pass(647, cov::pass(648, self.h) + d + d) }
+    }
+    fn move_to(self, x: T, y: T) -> Rect<T> {
+        cov::hit(649); Rect { x = cov::pass(650, x), y = cov::pass(651, y), w = cov::pass(652, cov::pass(653, self.w)), h = cov::pass(654, cov::pass(655, self.h)) }
+    }
+    fn intersects(self, r: Rect<T>) -> bool {
+        cov::hit(656); cov::dec(48, cov::begin(48) && (cov::cmp(48, 0, 4, cov::lhs(cov::pass(657, self.x)) < cov::rhs(cov::pass(658, r.right()))) && cov::cmp(48, 1, 4, cov::lhs(cov::pass(659, r.x)) < cov::rhs(cov::pass(660, self.right()))) && cov::cmp(48, 2, 4, cov::lhs(cov::pass(661, self.y)) < cov::rhs(cov::pass(662, r.bottom()))) && cov::cmp(48, 3, 4, cov::lhs(cov::pass(663, r.y)) < cov::rhs(cov::pass(664, self.bottom())))))
+    }
+}
+
+// ---- the palette ----------------------------------------------------
+// The slate ramp for surfaces and text (deep → ink), then the accent
+// hues. `G_` keeps them out of the way of a game's own COLOR_* roles:
+// name the role in your page, point it at the shared hue —
+//     const COLOR_(LEFT, RIGHT) = (G_CYAN, G_PINK);
+// A soft halo is the hue plus an alpha tail — `G_CYAN + "2a"`.
+const G_(DEEP, BG, PANEL) = ("#0b1020", "#0f172a", "#1e293b");
+const G_(EDGE, MID) = ("#334155", "#475569");
+const G_(FAINT, DIM, INK) = ("#64748b", "#94a3b8", "#e2e8f0");
+const G_WHITE = "#ffffff";
+const G_(CYAN, SKY, BLUE) = ("#22d3ee", "#38bdf8", "#60a5fa");
+const G_(VIOLET, PINK) = ("#a78bfa", "#f472b6");
+const G_(RED, ROSE) = ("#f43f5e", "#f87171");
+const G_(ORANGE, AMBER) = ("#f0a03c", "#fbbf24");
+const G_(GOLD, YELLOW) = ("#facc15", "#fde047");
+const G_GREEN = "#4ade80";

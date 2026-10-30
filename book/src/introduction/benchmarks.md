@@ -9,54 +9,54 @@ The [home page](../introduction.md) measures mimas against the other pure-Rust s
 <!-- benchmark start -->
 <div class="bench"><h4><a href="https://github.com/imlazyeye/mimas/tree/main/benchmarks/strings">strings</a> <small>string formatting, builtin methods</small></h4>
 <table class="charts-css bar show-labels data-spacing-4"><tbody>
-<tr><th scope="row">mimas</th><td class="me" style="--size:0.19999999999999998"><span class="data">435ms</span></td></tr>
-<tr><th scope="row">luau</th><td style="--size:0.2755700568569622"><span class="data">599ms</span></td></tr>
-<tr><th scope="row">rune</th><td style="--size:0.7838977513861158"><span class="data">1.70s</span></td></tr>
-<tr><th scope="row">rhai</th><td class="overflow" style="--size:1"><span class="data">3.46s</span></td></tr>
+<tr><th scope="row">mimas</th><td class="me" style="--size:0.2"><span class="data">586ms</span></td></tr>
+<tr><th scope="row">luau</th><td style="--size:0.2907539935853691"><span class="data">852ms</span></td></tr>
+<tr><th scope="row">rune</th><td style="--size:0.9699791581820661"><span class="data">2.84s</span></td></tr>
+<tr><th scope="row">rhai</th><td class="overflow" style="--size:1"><span class="data">4.19s</span></td></tr>
 </tbody></table></div>
 <div class="bench"><h4><a href="https://github.com/imlazyeye/mimas/tree/main/benchmarks/physics">physics</a> <small>struct field access, float math</small></h4>
 <table class="charts-css bar show-labels data-spacing-4"><tbody>
-<tr><th scope="row">luau</th><td style="--size:0.2"><span class="data">738ms</span></td></tr>
-<tr><th scope="row">mimas</th><td class="me" style="--size:0.2515440196783615"><span class="data">928ms</span></td></tr>
-<tr><th scope="row">rune</th><td style="--size:0.7608911885143665"><span class="data">2.81s</span></td></tr>
-<tr><th scope="row">rhai</th><td class="overflow" style="--size:1"><span class="data">12.68s</span></td></tr>
+<tr><th scope="row">mimas</th><td class="me" style="--size:0.19999999999999998"><span class="data">1.01s</span></td></tr>
+<tr><th scope="row">luau</th><td style="--size:0.23568158914203627"><span class="data">1.19s</span></td></tr>
+<tr><th scope="row">rune</th><td style="--size:0.6570300847483682"><span class="data">3.33s</span></td></tr>
+<tr><th scope="row">rhai</th><td class="overflow" style="--size:1"><span class="data">13.83s</span></td></tr>
 </tbody></table></div>
 <div class="bench"><h4><a href="https://github.com/imlazyeye/mimas/tree/main/benchmarks/mandelbrot">mandelbrot</a> <small>scalar float throughput, tight loops</small></h4>
 <table class="charts-css bar show-labels data-spacing-4"><tbody>
-<tr><th scope="row">luau</th><td style="--size:0.2"><span class="data">291ms</span></td></tr>
-<tr><th scope="row">mimas</th><td class="me" style="--size:0.5103224270211949"><span class="data">744ms</span></td></tr>
-<tr><th scope="row">rune</th><td style="--size:0.9629611783520491"><span class="data">1.40s</span></td></tr>
-<tr><th scope="row">rhai</th><td class="overflow" style="--size:1"><span class="data">7.56s</span></td></tr>
+<tr><th scope="row">luau</th><td style="--size:0.19999999999999998"><span class="data">656ms</span></td></tr>
+<tr><th scope="row">mimas</th><td class="me" style="--size:0.2929852734705673"><span class="data">961ms</span></td></tr>
+<tr><th scope="row">rune</th><td style="--size:0.49400376934431595"><span class="data">1.62s</span></td></tr>
+<tr><th scope="row">rhai</th><td class="overflow" style="--size:1"><span class="data">7.72s</span></td></tr>
 </tbody></table></div>
 <div class="bench"><h4><a href="https://github.com/imlazyeye/mimas/tree/main/benchmarks/prime_numbers">prime numbers</a> <small>array indexing, tight integer loops</small></h4>
 <table class="charts-css bar show-labels data-spacing-4"><tbody>
-<tr><th scope="row">luau</th><td style="--size:0.19999999999999998"><span class="data">485ms</span></td></tr>
-<tr><th scope="row">mimas</th><td class="me" style="--size:0.2462706938756661"><span class="data">597ms</span></td></tr>
-<tr><th scope="row">rune</th><td style="--size:0.8791234714169606"><span class="data">2.13s</span></td></tr>
-<tr><th scope="row">rhai</th><td class="overflow" style="--size:1"><span class="data">4.82s</span></td></tr>
+<tr><th scope="row">luau</th><td style="--size:0.2"><span class="data">548ms</span></td></tr>
+<tr><th scope="row">mimas</th><td class="me" style="--size:0.22780955901402458"><span class="data">624ms</span></td></tr>
+<tr><th scope="row">rune</th><td class="overflow" style="--size:1"><span class="data">3.28s</span></td></tr>
+<tr><th scope="row">rhai</th><td class="overflow" style="--size:1"><span class="data">5.88s</span></td></tr>
 </tbody></table></div>
 <div class="bench"><h4><a href="https://github.com/imlazyeye/mimas/tree/main/benchmarks/fibonacci">fibonacci</a> <small>function-call overhead, recursion</small></h4>
 <table class="charts-css bar show-labels data-spacing-4"><tbody>
-<tr><th scope="row">luau</th><td style="--size:0.2"><span class="data">384ms</span></td></tr>
-<tr><th scope="row">mimas</th><td class="me" style="--size:0.609375"><span class="data">1.17s</span></td></tr>
-<tr><th scope="row">rune</th><td style="--size:0.734375"><span class="data">1.41s</span></td></tr>
-<tr><th scope="row">rhai</th><td class="overflow" style="--size:1"><span class="data">5.87s</span></td></tr>
+<tr><th scope="row">luau</th><td style="--size:0.2"><span class="data">748ms</span></td></tr>
+<tr><th scope="row">mimas</th><td class="me" style="--size:0.2521430248150973"><span class="data">943ms</span></td></tr>
+<tr><th scope="row">rune</th><td style="--size:0.5341929692842271"><span class="data">2.00s</span></td></tr>
+<tr><th scope="row">rhai</th><td class="overflow" style="--size:1"><span class="data">7.63s</span></td></tr>
 </tbody></table></div>
 <div class="bench"><h4><a href="https://github.com/imlazyeye/mimas/tree/main/benchmarks/eval">eval</a> <small>enum match dispatch, recursion</small></h4>
 <table class="charts-css bar show-labels data-spacing-4"><tbody>
-<tr><th scope="row">luau</th><td style="--size:0.2"><span class="data">634ms</span></td></tr>
-<tr><th scope="row">mimas</th><td class="me" style="--size:0.4065280195144396"><span class="data">1.29s</span></td></tr>
-<tr><th scope="row">rune</th><td style="--size:0.41117610869959026"><span class="data">1.30s</span></td></tr>
-<tr><th scope="row">rhai</th><td class="overflow" style="--size:1"><span class="data">38.82s</span></td></tr>
+<tr><th scope="row">luau</th><td style="--size:0.19999999999999998"><span class="data">627ms</span></td></tr>
+<tr><th scope="row">mimas</th><td class="me" style="--size:0.4005564748247162"><span class="data">1.26s</span></td></tr>
+<tr><th scope="row">rune</th><td style="--size:0.5927080326341394"><span class="data">1.86s</span></td></tr>
+<tr><th scope="row">rhai</th><td class="overflow" style="--size:1"><span class="data">64.26s</span></td></tr>
 </tbody></table></div>
 <div class="bench"><h4><a href="https://github.com/imlazyeye/mimas/tree/main/benchmarks/collections">collections</a> <small>dict insert + lookup, string keys</small></h4>
 <table class="charts-css bar show-labels data-spacing-4"><tbody>
-<tr><th scope="row">luau</th><td style="--size:0.19999999999999998"><span class="data">229ms</span></td></tr>
-<tr><th scope="row">mimas</th><td class="me" style="--size:0.31979550674570245"><span class="data">366ms</span></td></tr>
-<tr><th scope="row">rune</th><td class="overflow" style="--size:1"><span class="data">1.81s</span></td></tr>
-<tr><th scope="row">rhai</th><td class="overflow" style="--size:1"><span class="data">2.85s</span></td></tr>
+<tr><th scope="row">luau</th><td style="--size:0.2"><span class="data">356ms</span></td></tr>
+<tr><th scope="row">mimas</th><td class="me" style="--size:0.23424209379640878"><span class="data">416ms</span></td></tr>
+<tr><th scope="row">rune</th><td class="overflow" style="--size:1"><span class="data">2.87s</span></td></tr>
+<tr><th scope="row">rhai</th><td class="overflow" style="--size:1"><span class="data">3.37s</span></td></tr>
 </tbody></table></div>
-<p class="bench-legend"><a href="https://github.com/imlazyeye/mimas">mimas</a> v0.1.0 · <a href="https://github.com/rune-rs/rune">Rune</a> v0.14.2 · <a href="https://github.com/rhaiscript/rhai">Rhai (perf)</a> v1.26.0 · <a href="https://github.com/luau-lang/luau">Luau (mlua)</a> v0.11.4 -- measured on an AMD Ryzen 7 9800X3D running Linux. Bars are scaled within each test. Results slower than 5x of the fastest result are faded and not factored into the scaling.</p>
+<p class="bench-legend"><a href="https://github.com/imlazyeye/mimas">mimas</a> v0.2.0 · <a href="https://github.com/rune-rs/rune">Rune</a> v0.14.2 · <a href="https://github.com/rhaiscript/rhai">Rhai (perf)</a> v1.26.0 · <a href="https://github.com/luau-lang/luau">Luau (mlua)</a> v0.11.4 -- measured on an AMD Ryzen 7 9800X3D running Linux. Bars are scaled within each test. Results slower than 5x of the fastest result are faded and not factored into the scaling.</p>
 <!-- benchmark end -->
 
 ````admonish info title="What these actually reflect"

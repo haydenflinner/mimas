@@ -20,7 +20,7 @@ fn build(depth: int) -> Expr {
     if depth <= 1 {
         return Expr::Num(depth + 1);
     }
-    match depth % 4 {
+    match depth mod 4 {
         0 => Expr::Add(build(depth - 1), build(depth - 2)),
         1 => Expr::Sub(build(depth - 1), build(depth - 2)),
         2 => Expr::Neg(build(depth - 1)),

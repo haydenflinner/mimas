@@ -1,19 +1,19 @@
 use crate::{
     OperandKind,
-    ir::{BinOp, BlockId, BodyId, Constant, FormatPart, InstId, Ir, LoopCtx, Place},
+    ir::{BinOp, BlockId, BodyId, Constant, FormatPart, Inst, InstId, Ir, Local, LoopCtx, Place},
 };
 use api::NativeId;
 use parse::{
     Absolve, Access, AccessKind, Block, Break, Call, Closure, Coalescence, Collect, Continue,
-    Equality, Evaluation, Expr, ExprKind, FString, FStringPart, For, Grouping, Ident, If, In,
-    Literal, Logical, Loop, Match, MatchCase, NodeId, Raise, Range, Return, Stmt, StmtKind, Unary,
-    Unwrap, While,
+    Demote, Equality, Evaluation, Expr, ExprKind, FString, FStringPart, For, Grouping, Ident, If,
+    In, Literal, Logical, Loop, Match, MatchCase, NodeId, Raise, Range, Return, Stmt, StmtKind,
+    Unary, Unwrap, While,
     components::{Binding, Pat, PatKind},
 };
-use shared::{Located, PactId};
+use shared::{Located, PactId, ParamId};
 use solve::{
-    ResolvedDeclKind,
-    components::{DecId, FnHeader, Ty},
+    OpDispatch, ResolvedDeclKind,
+    components::{AdtId, DecId, FnHeader, Ty},
 };
 
 // per-kind worker -- mirrors `Solve`. source location is ambient on `Ir.current_loc`,
@@ -54,12 +54,24 @@ impl Ir {
                 }
                 Some(())
             }
-            StmtKind::Module(_) => Some(()),
+            StmtKind::Module(_) | StmtKind::Unit(_) => Some(()),
             StmtKind::Item(item) => {
                 match item.kind() {
+                    parse::ItemKind::Poison(poison) => poison.escaped(),
                     // function bodies need to be lowered into their own Body
                     parse::ItemKind::Function(f) => {
+                        if item.is_test() {
+                            ir.tests.push(f.name.lexeme.clone());
+                        }
                         let _ = f.emit(item.id(), ir);
+                    }
+                    parse::ItemKind::Tests(tests) => {
+                        for case in &tests.cases {
+                            ir.tests.push(case.name.lexeme.clone());
+                            let dec = ir.node_dec(case.id);
+                            let bid = ir.item_body_for(dec);
+                            ir.in_body(bid, |ir| ir.lower_fn_body(&[], &[], &case.expr));
+                        }
                     }
                     // impl walks its inner items
                     parse::ItemKind::Impl(i) => {
@@ -78,7 +90,7 @@ impl Ir {
                             {
                                 let dec = ir.node_dec(body.id());
                                 let bid = ir.item_body_for(dec);
-                                ir.in_body(bid, |ir| ir.lower_fn_body(parameters, body));
+                                ir.in_body(bid, |ir| ir.lower_fn_body(parameters, &[], body));
                             }
                         }
                     }
@@ -95,12 +107,21 @@ impl Ir {
                 let value = match ass.op.into() {
                     BinOp::Identity => ass.right.lower(ir)?,
                     op => {
-                        // the compound op's result type is the place's type (a typed lvalue); a
-                        // mismatched runtime operand falls back to the generic op.
-                        let kind = num_kind(ir, stmt.id(), &ass.left, &ass.right);
-                        let lhs = place.load(ir);
-                        let rhs = ass.right.lower(ir)?;
-                        ir.current().bin(op, lhs, rhs, kind)
+                        if let Some(&d) = ir.resolutions.op_decs.get(&stmt.id()) {
+                            // `x <op>= v` desugared to `x.<op>(v)` — or
+                            // `v.r<op>(x)` when the right side owns the impl
+                            let lhs = place.load(ir);
+                            let rhs = ass.right.lower(ir)?;
+                            let (recv, arg) = if d.swap { (rhs, lhs) } else { (lhs, rhs) };
+                            emit_op_call(ir, d, vec![recv, arg])?
+                        } else {
+                            // the compound op's result type is the place's type (a typed lvalue); a
+                            // mismatched runtime operand falls back to the generic op.
+                            let kind = num_kind(ir, stmt.id(), &ass.left, &ass.right);
+                            let lhs = place.load(ir);
+                            let rhs = ass.right.lower(ir)?;
+                            ir.current().bin(op, lhs, rhs, kind)
+                        }
                     }
                 };
                 place.store(ir, value);
@@ -123,7 +144,7 @@ impl Ir {
     /// Binds parameters as locals of the current body and lowers `body`, emitting a trailing
     /// null-return if control flow reached the end without an explicit terminator. Used by both
     /// function and closure emit; the caller picks the body id and any captures.
-    pub(crate) fn lower_fn_body(&mut self, parameters: &[Binding], body: &Expr) {
+    pub(crate) fn lower_fn_body(&mut self, parameters: &[Binding], wheres: &[Expr], body: &Expr) {
         let params: Vec<_> = parameters
             .iter()
             .map(|b| {
@@ -131,7 +152,8 @@ impl Ir {
                 self.local_for(dec)
             })
             .collect();
-        self.current_body_mut().params = params;
+        self.current_body_mut().params = params.clone();
+        self.emit_entry_checks(parameters, &params, wheres);
 
         // check termination *before* synthesizing a null -- a return-terminated body already
         // emitted its return; don't add a dead const + second ret
@@ -139,6 +161,99 @@ impl Ir {
         if !self.is_terminated() {
             let value = body_value.unwrap_or_else(|| self.current().constant(Constant::Null));
             self.current().ret(value);
+        }
+    }
+
+    /// The function's contract prologue: `[T; n]` params re-assert their lengths
+    /// (unification admits unknown-length arguments against them) and each `where`
+    /// predicate runs its check. Failures go through the `panic` native when it's
+    /// installed, falling back to a bare `Panic` inst otherwise.
+    fn emit_entry_checks(&mut self, parameters: &[Binding], locals: &[Local], wheres: &[Expr]) {
+        for (binding, &local) in parameters.iter().zip(locals) {
+            let Some(dec) = self.try_node_dec(binding.left.id()) else {
+                continue;
+            };
+            let dims = self.resolutions.decs[dec].ty.fixed_dims();
+            if dims.iter().any(Option::is_some) {
+                let value = self.current().get_local(local);
+                // failure underlines the parameter it was pinned on
+                self.with_loc(binding.location(), |ir| {
+                    ir.emit_dim_contract(value, &dims, 0)
+                });
+            }
+        }
+        for w in wheres {
+            // the failing check underlines the predicate's own source text
+            self.with_loc(w.location(), |ir| {
+                if let Some(cond) = w.lower(ir) {
+                    ir.emit_contract_check(cond, &format!("where `{w}` failed"), None);
+                }
+            });
+        }
+    }
+
+    /// `if !(cond) { __contract_fail(msg, got) }` at the current point. `got` is
+    /// the runtime value that broke the check (the length that arrived, say) --
+    /// the native appends it to the message when present.
+    fn emit_contract_check(&mut self, cond: InstId, msg: &str, got: Option<InstId>) {
+        let ok = self.push_block("contract_ok");
+        let fail = self.push_block("contract_fail");
+        self.current().jump_if_false(cond, fail);
+        self.current().jump(ok);
+
+        self.target(fail);
+        let msg = self.intern_str(msg);
+        let msg = self.current().constant(Constant::Str(msg));
+        // `__contract_fail` renders the message as the diagnostic title itself;
+        // `panic` (one-arg) is the fallback for pre-contract stdlibs, `Panic`
+        // for no-stdlib embeds
+        match (
+            self.resolutions.contract_native,
+            self.resolutions.panic_native,
+        ) {
+            (Some(nid), _) => {
+                let got = got.unwrap_or_else(|| self.current().constant(Constant::Null));
+                self.current().call_native(nid, vec![msg, got]);
+                // the native never returns -- the terminator only exists for the
+                // IR's sake; codegen never reaches it past the call
+                self.current().panic();
+            }
+            (None, Some(nid)) => {
+                self.current().call_native(nid, vec![msg]);
+                self.current().panic();
+            }
+            (None, None) => {
+                self.current().panic();
+            }
+        }
+        self.target(ok);
+    }
+
+    /// Re-asserts a value's `Some(n)` dims at runtime -- the outer level by a
+    /// direct `len` check, deeper levels by walking elements recursively.
+    /// `depth` names the dimension in the message so a matrix's wrong row reads
+    /// as such, and the actual length goes along so the user sees what arrived.
+    fn emit_dim_contract(&mut self, value: InstId, dims: &[Option<usize>], depth: usize) {
+        let Some((first, rest)) = dims.split_first() else {
+            return;
+        };
+        if let Some(n) = first {
+            let len = self.current().len(value);
+            let want = self.current().constant(*n);
+            let right_len = self
+                .current()
+                .bin(BinOp::Identity, len, want, OperandKind::Int);
+            let msg = match depth {
+                0 => format!("expected an array of length {n}"),
+                d => format!("expected an array of length {n} at dimension {d}"),
+            };
+            self.emit_contract_check(right_len, &msg, Some(len));
+        }
+        if rest.iter().any(Option::is_some) {
+            let exit = emit_array_walk(self, value, |ir, elem, _i, _latch| {
+                ir.emit_dim_contract(elem, rest, depth + 1);
+            });
+            self.target(exit);
         }
     }
 
@@ -231,7 +346,9 @@ impl Emit for Access {
                     ResolvedDeclKind::Adt(_) => unreachable!(
                         "`::` resolved to an adt-dec directly -- should only be possible for variants"
                     ),
-                    ResolvedDeclKind::Local => unreachable!("`::` never resolves to a local"),
+                    ResolvedDeclKind::Local | ResolvedDeclKind::Global => {
+                        unreachable!("`::` never resolves to a local")
+                    }
                     ResolvedDeclKind::Pact(_) => todo!(),
                 }
             }
@@ -301,7 +418,7 @@ impl Emit for Break {
 }
 
 impl Emit for Call {
-    fn emit(&self, _id: NodeId, ir: &mut Ir) -> Option<InstId> {
+    fn emit(&self, id: NodeId, ir: &mut Ir) -> Option<InstId> {
         fn fill_call_args(
             ir: &mut Ir,
             fn_ty: &FnHeader,
@@ -362,6 +479,313 @@ impl Emit for Call {
             .unwrap_or_default()
         }
 
+        fn emit_intrinsic(
+            ir: &mut Ir,
+            intrinsic: api::Intrinsic,
+            args: &[InstId],
+            call: &Call,
+            call_id: NodeId,
+        ) -> InstId {
+            match intrinsic {
+                api::Intrinsic::Len => ir.current().len(args[0]),
+                api::Intrinsic::In => ir.current().check_in(args[1], args[0], true),
+                api::Intrinsic::Push => {
+                    ir.current().push(args[0], args[1]);
+                    ir.current().constant(Constant::Null)
+                }
+                api::Intrinsic::ToFloat => ir.current().to_float(args[0]),
+                api::Intrinsic::Sqrt => ir.current().sqrt(args[0]),
+                api::Intrinsic::File => {
+                    let name = ir
+                        .resolutions
+                        .sources
+                        .get(&call.left.location().file_id)
+                        .unwrap()
+                        .name()
+                        .to_string();
+                    let path = std::fs::canonicalize(&name)
+                        .map_or(name, |path| path.to_string_lossy().into_owned());
+                    let path = ir.intern_str(&path);
+                    ir.current().constant(Constant::Str(path))
+                }
+                // the higher-order array methods can't be `#[native]` bodies (a native runs
+                // synchronously and can't call back into the VM), so the intrinsic lowers the
+                // call to a generated loop that `Call`s the closure per element. args is
+                // [receiver, ..declared params]: map/filter/find/any/all take `f` at [1],
+                // fold takes `init, f` at [1], [2].
+                api::Intrinsic::Map => {
+                    let out = ir.current().new_array();
+                    let exit = emit_array_walk(ir, args[0], |ir, elem, _i, _latch| {
+                        let mapped = ir.current().call(args[1], vec![elem]);
+                        ir.current().push(out, mapped);
+                    });
+                    ir.target(exit);
+                    out
+                }
+                api::Intrinsic::Filter => {
+                    let out = ir.current().new_array();
+                    let exit = emit_array_walk(ir, args[0], |ir, elem, _i, latch| {
+                        let keep = ir.current().call(args[1], vec![elem]);
+                        ir.current().jump_if_false(keep, latch);
+                        ir.current().push(out, elem);
+                    });
+                    ir.target(exit);
+                    out
+                }
+                api::Intrinsic::Fold => {
+                    let acc = ir.synthetic_local("$fold_acc");
+                    ir.current().set_local(acc, args[1]);
+                    let exit = emit_array_walk(ir, args[0], |ir, elem, _i, _latch| {
+                        let cur = ir.current().get_local(acc);
+                        let next = ir.current().call(args[2], vec![cur, elem]);
+                        ir.current().set_local(acc, next);
+                    });
+                    ir.target(exit);
+                    ir.current().get_local(acc)
+                }
+                api::Intrinsic::Find => {
+                    let merge = ir.push_block("find_merge");
+                    let mut branches = Vec::new();
+                    let exit = emit_array_walk(ir, args[0], |ir, elem, _i, latch| {
+                        let hit = ir.current().call(args[1], vec![elem]);
+                        ir.current().jump_if_false(hit, latch);
+                        let end = ir.current_block_id();
+                        ir.current().jump(merge);
+                        branches.push((end, elem));
+                    });
+                    ir.target(exit);
+                    let null = ir.current().constant(Constant::Null);
+                    let end = ir.current_block_id();
+                    ir.current().jump(merge);
+                    branches.push((end, null));
+                    merge_branches(ir, merge, branches)
+                        .expect("find always emits hit and exhausted edges")
+                }
+                api::Intrinsic::Any => {
+                    let merge = ir.push_block("any_merge");
+                    let mut branches = Vec::new();
+                    let exit = emit_array_walk(ir, args[0], |ir, elem, _i, latch| {
+                        let hit = ir.current().call(args[1], vec![elem]);
+                        ir.current().jump_if_false(hit, latch);
+                        let yes = ir.current().constant(true);
+                        let end = ir.current_block_id();
+                        ir.current().jump(merge);
+                        branches.push((end, yes));
+                    });
+                    ir.target(exit);
+                    let no = ir.current().constant(false);
+                    let end = ir.current_block_id();
+                    ir.current().jump(merge);
+                    branches.push((end, no));
+                    merge_branches(ir, merge, branches)
+                        .expect("any always emits hit and exhausted edges")
+                }
+                api::Intrinsic::All => {
+                    let miss = ir.push_block("all_miss");
+                    let merge = ir.push_block("all_merge");
+                    let mut branches = Vec::new();
+                    let exit = emit_array_walk(ir, args[0], |ir, elem, _i, _latch| {
+                        let ok = ir.current().call(args[1], vec![elem]);
+                        ir.current().jump_if_false(ok, miss);
+                    });
+                    ir.target(miss);
+                    let no = ir.current().constant(false);
+                    let end = ir.current_block_id();
+                    ir.current().jump(merge);
+                    branches.push((end, no));
+                    ir.target(exit);
+                    let yes = ir.current().constant(true);
+                    let end = ir.current_block_id();
+                    ir.current().jump(merge);
+                    branches.push((end, yes));
+                    merge_branches(ir, merge, branches)
+                        .expect("all always emits miss and exhausted edges")
+                }
+                api::Intrinsic::FlatMap => {
+                    let out = ir.current().new_array();
+                    let exit = emit_array_walk(ir, args[0], |ir, elem, _i, _latch| {
+                        let inner = ir.current().call(args[1], vec![elem]);
+                        let inner_exit = emit_array_walk(ir, inner, |ir, ielem, _ii, _ilatch| {
+                            ir.current().push(out, ielem);
+                        });
+                        ir.target(inner_exit);
+                    });
+                    ir.target(exit);
+                    out
+                }
+                api::Intrinsic::MapI => {
+                    let out = ir.current().new_array();
+                    let exit = emit_array_walk(ir, args[0], |ir, elem, i, _latch| {
+                        let mapped = ir.current().call(args[1], vec![i, elem]);
+                        ir.current().push(out, mapped);
+                    });
+                    ir.target(exit);
+                    out
+                }
+                api::Intrinsic::FoldI => {
+                    let acc = ir.synthetic_local("$fold_acc");
+                    ir.current().set_local(acc, args[1]);
+                    let exit = emit_array_walk(ir, args[0], |ir, elem, i, _latch| {
+                        let cur = ir.current().get_local(acc);
+                        let next = ir.current().call(args[2], vec![i, cur, elem]);
+                        ir.current().set_local(acc, next);
+                    });
+                    ir.target(exit);
+                    ir.current().get_local(acc)
+                }
+                // `under(t, f, x)` — transform `x` forward through `t`, apply `f`,
+                // then map back through `t`'s inverse/update. `t`'s slot 0 tag picks
+                // the convention: iso (`from(f(to(x)))`) or lens
+                // (`undo(ctx, f(focus))` where `do(x)` returned `(focus, ctx)`).
+                // The curried `under(t, f)` synthesizes `|x| under(t, f, x)`.
+                api::Intrinsic::Under => {
+                    let t = args[0];
+                    let f = args[1];
+                    if call.arguments.len() == 3 {
+                        emit_under_apply(ir, t, f, args[2])
+                    } else {
+                        let bid = ir.bodies.push(crate::ir::Body::new());
+                        ir.in_body(bid, |ir| {
+                            let x = ir.synthetic_local("$under_x");
+                            let t_cap = ir.synthetic_local("$under_t");
+                            let f_cap = ir.synthetic_local("$under_f");
+                            ir.current_body_mut().params = vec![x];
+                            ir.current_body_mut().captures = vec![t_cap, f_cap];
+                            let x = ir.current().get_local(x);
+                            let t = ir.current().get_local(t_cap);
+                            let f = ir.current().get_local(f_cap);
+                            let r = emit_under_apply(ir, t, f, x);
+                            ir.current().ret(r);
+                        });
+                        ir.current().make_closure(bid, vec![t, f])
+                    }
+                }
+                // `at(i)` — the index lens: synthesize `do: |src| (src[i], src)` and
+                // `undo: |ctx, focus| shallow_copy(ctx) with [i] = focus`, then build
+                // the `Iso` instance directly. Fields are [kind=1, do, undo] — see
+                // `std_lib::iso`'s layout doc.
+                api::Intrinsic::At => {
+                    let iso_adt = match ir.resolutions.node_tys.get(&call_id) {
+                        Some(Ty::Adt(id, _)) => *id,
+                        other => panic!("`at`'s return type isn't an `Iso`: {other:?}"),
+                    };
+                    let idx = args[0];
+
+                    let do_bid = ir.bodies.push(crate::ir::Body::new());
+                    ir.in_body(do_bid, |ir| {
+                        let src = ir.synthetic_local("$at_src");
+                        let i = ir.synthetic_local("$at_i");
+                        ir.current_body_mut().params = vec![src];
+                        ir.current_body_mut().captures = vec![i];
+                        let src = ir.current().get_local(src);
+                        let i = ir.current().get_local(i);
+                        let focus = ir.current().get_index(src, i, AccessKind::Direct);
+                        let pair = ir.current().new_array();
+                        ir.current().push(pair, focus);
+                        ir.current().push(pair, src);
+                        ir.current().ret(pair);
+                    });
+                    let do_clo = ir.current().make_closure(do_bid, vec![idx]);
+
+                    // undo: |ctx, focus| -- copy ctx element-wise (shallow: a lens
+                    // rebuilds the container, it doesn't deep-copy the world), then
+                    // `out[i] = focus`.
+                    let undo_bid = ir.bodies.push(crate::ir::Body::new());
+                    ir.in_body(undo_bid, |ir| {
+                        let ctx = ir.synthetic_local("$at_ctx");
+                        let focus = ir.synthetic_local("$at_focus");
+                        let i = ir.synthetic_local("$at_i");
+                        ir.current_body_mut().params = vec![ctx, focus];
+                        ir.current_body_mut().captures = vec![i];
+                        let ctx = ir.current().get_local(ctx);
+                        let focus = ir.current().get_local(focus);
+                        let i = ir.current().get_local(i);
+                        let out = ir.current().new_array();
+                        let exit = emit_array_walk(ir, ctx, |ir, elem, _i, _latch| {
+                            ir.current().push(out, elem);
+                        });
+                        ir.target(exit);
+                        ir.current().set_index(out, i, focus);
+                        ir.current().ret(out);
+                    });
+                    let undo_clo = ir.current().make_closure(undo_bid, vec![idx]);
+
+                    let kind = ir.current().constant(1);
+                    ir.current()
+                        .new_instance(iso_adt, vec![kind, do_clo, undo_clo])
+                }
+                // `recv.m(a.., f)` → `merge(recv, f(recv), a..)` — the closure
+                // runs in generated code (a native can't re-enter the VM),
+                // and the merge native gets [recv, transformed, ..middle args].
+                api::Intrinsic::ApplyMerge(merge) => {
+                    let f = *args.last().unwrap();
+                    let mut m_args = Vec::with_capacity(args.len());
+                    m_args.push(args[0]);
+                    m_args.push(ir.current().call(f, vec![args[0]]));
+                    m_args.extend_from_slice(&args[1..args.len() - 1]);
+                    ir.current().call_native(merge, m_args)
+                }
+                // `sim::seeds(n, prop)` — property-check loop: `prop(i)` for i in
+                // 0..n. First `false` raises "sim seed i failed"; a Raised out of
+                // `prop` itself re-raises unchanged so run errors keep their own
+                // message.
+                api::Intrinsic::SimSeeds => {
+                    let n = args[0];
+                    let prop = args[1];
+
+                    let header = ir.push_block("seeds_header");
+                    let pass = ir.push_block("seeds_pass");
+                    let latch = ir.push_block("seeds_latch");
+                    let prop_err = ir.push_block("seeds_prop_err");
+                    let fail = ir.push_block("seeds_fail");
+                    let done = ir.push_block("seeds_done");
+
+                    let idx = ir.synthetic_local("$seed_idx");
+                    let zero = ir.current().constant(0);
+                    ir.current().set_local(idx, zero);
+                    let entered = ir.current().bin(BinOp::LessThan, zero, n, OperandKind::Int);
+                    ir.current().jump_if_false(entered, done);
+                    ir.current().jump(header);
+
+                    ir.target(header);
+                    let i = ir.current().get_local(idx);
+                    let r = ir.current().call(prop, vec![i]);
+                    let raised = ir.current().is_raised(r);
+                    ir.current().jump_if_false(raised, pass);
+                    ir.current().jump(prop_err);
+
+                    ir.target(pass);
+                    ir.current().jump_if_false(r, fail);
+                    ir.current().jump(latch);
+
+                    ir.target(latch);
+                    let i = ir.current().get_local(idx);
+                    ir.current().for_next(i, n, header);
+                    ir.current().jump(done);
+
+                    ir.target(prop_err);
+                    let err = ir.current().unwrap_raised(r);
+                    ir.current().raise(err);
+                    ir.current().jump(done);
+
+                    ir.target(fail);
+                    let i = ir.current().get_local(idx);
+                    let pre = ir.intern_str("sim seed ");
+                    let post = ir.intern_str(" failed");
+                    let msg = ir.current().format(vec![
+                        FormatPart::Literal(pre),
+                        FormatPart::Value(i),
+                        FormatPart::Literal(post),
+                    ]);
+                    ir.current().raise(msg);
+                    ir.current().jump(done);
+
+                    ir.target(done);
+                    ir.current().constant(Constant::Bool(true))
+                }
+            }
+        }
+
         // pact-typed receiver dispatch: a runtime IsInstance chain over implementors of the bound,
         // each arm CallDirect-ing that adt's body for the method. one implementor => skip the test.
         fn emit_pact_dispatch(
@@ -375,50 +799,19 @@ impl Emit for Call {
             let recv = receiver.lower(ir)?;
             // lower args once -- fill_call_args evaluates them, so per-arm calls re-run side
             // effects.
-            let args = fill_call_args(ir, fn_ty, &[], arguments, Some(recv))?;
+            let args = fill_call_args(ir, fn_ty, &[], arguments, fn_ty.is_method.then_some(recv))?;
 
-            let candidates: Vec<_> = ir
-                .resolutions
-                .adts
-                .iter()
-                .filter(|(_, adt)| pids.iter().all(|p| adt.implements.contains(p)))
-                .map(|(_, adt)| (adt.methods[method], adt.dispatch_ids.clone()))
-                .collect();
-            let candidates: Vec<_> = candidates
-                .into_iter()
-                .map(|(dec, ids)| (ir.item_body_for(dec), ids))
-                .collect();
+            dispatch_pact_method(ir, recv, args, pids, method)
+        }
 
-            if let [(body, _)] = candidates.as_slice() {
-                return Some(ir.current().call_direct(*body, args));
-            }
-
-            let merge = ir.push_block("pact_merge");
-            let mut branches = Vec::new();
-            for (body, ids) in candidates {
-                for id in ids {
-                    let hit = ir.push_block("pact_hit");
-                    let next = ir.push_block("pact_next");
-                    let is_inst = ir.current().is_instance(recv, id);
-                    ir.in_current(|block| {
-                        block.jump_if_false(is_inst, next);
-                        block.jump(hit);
-                    });
-                    ir.target(hit);
-                    let value = ir.current().call_direct(body, args.clone());
-                    let end = ir.current_block_id();
-                    ir.current().jump(merge);
-                    branches.push((end, value));
-                    ir.target(next);
-                }
-            }
-            // unreachable: the receiver's pact type guarantees one arm matches.
-            ir.current().panic();
-            merge_branches(ir, merge, branches)
+        // `S::default()` — the implicit memberwise-default constructor:
+        // no callee, no args, just a `NewInstance` of defaults.
+        if ir.resolutions.default_ctors.contains_key(&id) {
+            return default_instance(ir, id);
         }
 
         let callee_ty = ir.resolutions.node_tys.get(&self.left.id());
-        if let Some(Ty::Adt(adt) | Ty::Identity(adt)) = callee_ty {
+        if let Some(Ty::Adt(adt, _) | Ty::Identity(adt, _)) = callee_ty {
             let adt = *adt;
             let mut args = Vec::with_capacity(self.arguments.len());
             for arg in &self.arguments {
@@ -432,7 +825,7 @@ impl Emit for Call {
         // it'd otherwise dispatch through doesn't exist.
         if let Some(Ty::Fn(header)) = callee_ty
             && header.is_ctor
-            && let Ty::Adt(adt) | Ty::Identity(adt) = header.return_ty.as_ref()
+            && let Ty::Adt(adt, _) | Ty::Identity(adt, _) = header.return_ty.as_ref()
         {
             let adt = *adt;
             let mut args = Vec::with_capacity(self.arguments.len());
@@ -460,10 +853,12 @@ impl Emit for Call {
             // pact-typed receiver (`g: Greet`): no single concrete callee, so dispatch at runtime
             // over every implementor of the bound. a grafted default lands in each impl's table,
             // so default methods dispatch here for free.
-            let pact_pids = match ir.resolutions.node_tys.get(&left.id()) {
-                Some(Ty::Pacts(pids)) => Some(pids.clone()),
-                _ => None,
-            };
+            // `self` inside a default body counts too: one implementer, decided at runtime
+            let pact_pids = ir
+                .resolutions
+                .node_tys
+                .get(&left.id())
+                .and_then(Ty::as_pacts);
             if let Some(pids) = pact_pids {
                 let method = right
                     .as_ident()
@@ -475,7 +870,9 @@ impl Emit for Call {
 
             let access_id = self.left.id();
             if let Some(&dec) = ir.resolutions.node_decs.get(&access_id)
-                && let ResolvedDeclKind::Item { native, .. } = ir.resolutions.decs[dec].kind
+                && let ResolvedDeclKind::Item {
+                    native, takes_self, ..
+                } = ir.resolutions.decs[dec].kind
             {
                 let native_id = native;
                 let body = (native_id.is_none()).then(|| ir.item_body_for(dec));
@@ -483,27 +880,13 @@ impl Emit for Call {
                 let receiver = left.lower(ir)?;
 
                 let do_call = |ir: &mut Ir, receiver: InstId| -> Option<InstId> {
-                    let args =
-                        fill_call_args(ir, &fn_ty, &defaults, &self.arguments, Some(receiver))?;
+                    let receiver = takes_self.then_some(receiver);
+                    let args = fill_call_args(ir, &fn_ty, &defaults, &self.arguments, receiver)?;
                     Some(match (native_id, body) {
-                        (Some(id), _) => {
-                            if let Some(i) = ir.intrinsics.get(&id) {
-                                match i {
-                                    api::Intrinsic::Len => ir.current().len(args[0]),
-                                    api::Intrinsic::In => {
-                                        ir.current().check_in(args[1], args[0], true)
-                                    }
-                                    api::Intrinsic::Push => {
-                                        ir.current().push(args[0], args[1]);
-                                        ir.current().constant(Constant::Null)
-                                    }
-                                    api::Intrinsic::ToFloat => ir.current().to_float(args[0]),
-                                    api::Intrinsic::Sqrt => ir.current().sqrt(args[0]),
-                                }
-                            } else {
-                                ir.current().call_native(id, args)
-                            }
-                        }
+                        (Some(nid), _) => match ir.intrinsics.get(&nid) {
+                            Some(&i) => emit_intrinsic(ir, i, &args, self, id),
+                            None => ir.current().call_native(nid, args),
+                        },
                         (None, Some(body)) => ir.current().call_direct(body, args),
                         _ => unreachable!(),
                     })
@@ -573,7 +956,10 @@ impl Emit for Call {
 
         Some(match static_callee {
             Some(StaticCallee::Body(body)) => ir.current().call_direct(body, args),
-            Some(StaticCallee::Native(id)) => ir.current().call_native(id, args),
+            Some(StaticCallee::Native(nid)) => match ir.intrinsics.get(&nid) {
+                Some(&i) => emit_intrinsic(ir, i, &args, self, id),
+                None => ir.current().call_native(nid, args),
+            },
             None => {
                 let callee = self.left.lower(ir)?;
                 ir.current().call(callee, args)
@@ -601,11 +987,12 @@ impl Emit for Closure {
             .collect();
 
         let bid = ir.bodies.push(crate::ir::Body::new());
+        ir.closure_bodies.insert(bid, id);
 
         ir.in_body(bid, |ir| {
             let capture_locals: Vec<_> = captured_decs.iter().map(|&d| ir.local_for(d)).collect();
             ir.current_body_mut().captures = capture_locals;
-            ir.lower_fn_body(&self.parameters, &self.body);
+            ir.lower_fn_body(&self.parameters, &[], &self.body);
         });
 
         Some(ir.current().make_closure(bid, capture_insts))
@@ -699,8 +1086,10 @@ impl Emit for Evaluation {
 impl Lower for Expr {
     fn lower(&self, ir: &mut Ir) -> Option<InstId> {
         let id = self.id();
-        ir.with_loc(self.location(), |ir| match self.kind() {
+        let out = ir.with_loc(self.location(), |ir| match self.kind() {
+            ExprKind::Poison(poison) => poison.escaped(),
             ExprKind::Absolve(absolve) => absolve.emit(id, ir),
+            ExprKind::Demote(demote) => demote.emit(id, ir),
             ExprKind::Access(access) => access.emit(id, ir),
             ExprKind::Block(block) => block.emit(id, ir),
             ExprKind::Break(b) => b.emit(id, ir),
@@ -729,7 +1118,24 @@ impl Lower for Expr {
             ExprKind::Unary(unary) => unary.emit(id, ir),
             ExprKind::Unwrap(un) => un.emit(id, ir),
             ExprKind::While(while_expr) => while_expr.emit(id, ir),
-        })
+        });
+        if let Some(iid) = out {
+            let kind = num_kind_of(ir, id);
+            let slot = ir.current_body_mut().kinds.entry(iid).or_insert(kind);
+            if *slot == OperandKind::Generic {
+                *slot = kind;
+            }
+        }
+        // the solver marked this expr as fulfilling a `[T; n]` slot it couldn't
+        // prove -- re-assert the dims on the value now (see lens.rs). Inside the
+        // expr's own loc so a failure underlines the argument, not the caller.
+        if let Some(v) = out
+            && let Some(dims) = ir.resolutions.len_checks.get(&id)
+        {
+            let dims = dims.clone();
+            ir.with_loc(self.location(), |ir| ir.emit_dim_contract(v, &dims, 0));
+        }
+        out
     }
 }
 
@@ -857,7 +1263,9 @@ impl Emit for parse::Function {
     fn emit(&self, id: NodeId, ir: &mut Ir) -> Option<InstId> {
         let dec = ir.node_dec(id);
         let bid = ir.item_body_for(dec);
-        ir.in_body(bid, |ir| ir.lower_fn_body(&self.parameters, &self.body));
+        ir.in_body(bid, |ir| {
+            ir.lower_fn_body(&self.parameters, &self.wheres, &self.body)
+        });
         None
     }
 }
@@ -888,10 +1296,7 @@ impl Emit for Ident {
     fn emit(&self, id: NodeId, ir: &mut Ir) -> Option<InstId> {
         let dec = ir.node_dec(id);
         match &ir.resolutions.decs[dec].kind {
-            ResolvedDeclKind::Local => {
-                let local = ir.local_for(dec);
-                Some(ir.current().get_local(local))
-            }
+            ResolvedDeclKind::Local | ResolvedDeclKind::Global => Some(ir.read_binding(dec)),
             ResolvedDeclKind::Item { .. } => {
                 let body = ir.item_body_for(dec);
                 Some(ir.current().ref_body(body))
@@ -1000,7 +1405,7 @@ impl Emit for Literal {
                     .or_else(|| ir.resolutions.node_tys.get(&id))
                     .unwrap()
                 {
-                    Ty::Adt(adt) | Ty::Identity(adt) => *adt,
+                    Ty::Adt(adt, _) | Ty::Identity(adt, _) => *adt,
                     _ => unreachable!(),
                 };
 
@@ -1149,7 +1554,7 @@ impl Emit for Match {
                     _ => return None,
                 };
                 let layout = match ir.resolutions.node_tys.get(&path.id())? {
-                    Ty::Adt(adt) | Ty::Identity(adt) => *adt,
+                    Ty::Adt(adt, _) | Ty::Identity(adt, _) => *adt,
                     _ => return None,
                 };
                 let ident_dec = |sub: &Pat| match sub.kind() {
@@ -1310,8 +1715,14 @@ impl Emit for Return {
 }
 
 impl Emit for Unary {
-    fn emit(&self, _id: NodeId, ir: &mut Ir) -> Option<InstId> {
+    fn emit(&self, id: NodeId, ir: &mut Ir) -> Option<InstId> {
         let right = self.right.lower(ir)?;
+        if let Some(&d) = ir.resolutions.op_decs.get(&id) {
+            return emit_op_call(ir, d, vec![right]);
+        }
+        if let Some(p) = ir.resolutions.pact_ops.get(&id).cloned() {
+            return dispatch_pact_method(ir, right, vec![right], &p.pids, &p.method);
+        }
         Some(ir.current().unary(self.op.into(), right))
     }
 }
@@ -1319,6 +1730,14 @@ impl Emit for Unary {
 impl Emit for Unwrap {
     fn emit(&self, _id: NodeId, ir: &mut Ir) -> Option<InstId> {
         let value = self.expr.lower(ir)?;
+        // `()!` unwraps against Null-as-unit: `()`'s repr is Val::Null, so the
+        // ordinary null check would fault on success. Raised still faults.
+        if matches!(
+            ir.resolutions.node_tys.get(&self.expr.id()),
+            Some(Ty::Result(inner)) if matches!(inner.as_ref(), Ty::Unit)
+        ) {
+            return Some(ir.current().unwrap_unit(value));
+        }
         Some(ir.current().unwrap(value))
     }
 }
@@ -1328,6 +1747,45 @@ impl Emit for Raise {
         let value = self.value.lower(ir)?;
         ir.current().raise(value);
         None
+    }
+}
+
+impl Emit for Demote {
+    fn emit(&self, _id: NodeId, ir: &mut Ir) -> Option<InstId> {
+        let value = self.expr.lower(ir)?;
+        // Only `T!` can carry a Raised — `T?` and plain values pass through.
+        if !matches!(
+            ir.resolutions.node_tys.get(&self.expr.id()),
+            Some(Ty::Result(_))
+        ) {
+            return Some(value);
+        }
+
+        let err_block = ir.push_block("demote_err");
+        let ok_block = ir.push_block("demote_ok");
+        let merge = ir.push_block("demote_merge");
+
+        let is_raised = ir.current().is_raised(value);
+        ir.in_current(|b| {
+            b.jump_if_false(is_raised, ok_block);
+            b.jump(err_block);
+        });
+
+        let err_branch = ir.in_block(err_block, |b| {
+            let null = b.constant(Constant::Null);
+            let end = b.id();
+            b.jump(merge);
+            (end, null)
+        });
+
+        let ok_end = ir.in_block(ok_block, |b| {
+            let end = b.id();
+            b.jump(merge);
+            end
+        });
+
+        ir.target(merge);
+        Some(ir.current().phi(vec![err_branch, (ok_end, value)]))
     }
 }
 
@@ -1431,6 +1889,73 @@ impl Emit for While {
     }
 }
 
+/// `a <op> b` the checker desugared to an operator method — `a.add(b)`, or
+/// `b.rsub(a)` when the right operand owns the impl (`swap`). Emits the method
+/// call the solver's `op_dispatch` already vetted: source `fn`s go `call_direct`
+/// like any method, `#[native]`s `call_native` with the receiver first.
+/// Runtime dispatch over the implementers of `pids` for `method`: an
+/// `IsInstance` chain, each arm `CallDirect`-ing that adt's body (one
+/// implementer skips the test). `args` already holds the receiver first.
+/// Shared by method calls through a pact and operators on pact-typed values.
+fn dispatch_pact_method(
+    ir: &mut Ir,
+    recv: InstId,
+    args: Vec<InstId>,
+    pids: &[PactId],
+    method: &str,
+) -> Option<InstId> {
+    let candidates: Vec<_> = ir
+        .resolutions
+        .adts
+        .iter()
+        .filter(|(_, adt)| pids.iter().all(|p| adt.implements.contains(p)))
+        .map(|(_, adt)| (adt.methods[method], adt.dispatch_ids.clone()))
+        .collect();
+    let candidates: Vec<_> = candidates
+        .into_iter()
+        .map(|(dec, ids)| (ir.item_body_for(dec), ids))
+        .collect();
+
+    if let [(body, _)] = candidates.as_slice() {
+        return Some(ir.current().call_direct(*body, args));
+    }
+
+    let merge = ir.push_block("pact_merge");
+    let mut branches = Vec::new();
+    for (body, ids) in candidates {
+        for id in ids {
+            let hit = ir.push_block("pact_hit");
+            let next = ir.push_block("pact_next");
+            let is_inst = ir.current().is_instance(recv, id);
+            ir.in_current(|block| {
+                block.jump_if_false(is_inst, next);
+                block.jump(hit);
+            });
+            ir.target(hit);
+            let value = ir.current().call_direct(body, args.clone());
+            let end = ir.current_block_id();
+            ir.current().jump(merge);
+            branches.push((end, value));
+            ir.target(next);
+        }
+    }
+    // unreachable: the receiver's pact type guarantees one arm matches.
+    ir.current().panic();
+    merge_branches(ir, merge, branches)
+}
+
+fn emit_op_call(ir: &mut Ir, d: OpDispatch, args: Vec<InstId>) -> Option<InstId> {
+    let ResolvedDeclKind::Item { native, .. } = ir.resolutions.decs[d.dec].kind else {
+        return None;
+    };
+    let body = (native.is_none()).then(|| ir.item_body_for(d.dec));
+    Some(match (native, body) {
+        (Some(nid), _) => ir.current().call_native(nid, args),
+        (None, Some(b)) => ir.current().call_direct(b, args),
+        _ => unreachable!(),
+    })
+}
+
 fn emit_bin_op(
     ir: &mut Ir,
     id: NodeId,
@@ -1438,6 +1963,13 @@ fn emit_bin_op(
     op: impl Into<BinOp>,
     right: &Expr,
 ) -> Option<InstId> {
+    if let Some(&d) = ir.resolutions.op_decs.get(&id) {
+        // operands keep source order — only the call's receiver flips
+        let left = left.lower(ir)?;
+        let right = right.lower(ir)?;
+        let (recv, arg) = if d.swap { (right, left) } else { (left, right) };
+        return emit_op_call(ir, d, vec![recv, arg]);
+    }
     let kind = num_kind(ir, id, left, right);
     let left = left.lower(ir)?;
     let right = right.lower(ir)?;
@@ -1482,9 +2014,114 @@ fn merge_branches(
     Some(ir.current().phi(branches))
 }
 
+/// The generated-loop skeleton behind the higher-order array intrinsics (`map`, `filter`,
+/// `fold`, `find`, `any`, `all`). Mirrors `For::emit`: an index local, a header that loads
+/// `arr[i]` into `per_elem`, a latch that increments and compares against `len arr`, and an
+/// `empty` shortcut so a zero-length receiver skips the header entirely.
+///
+/// The bound is *frozen* up front, like `for`'s `frozen_bound` path: a callback that grows
+/// the receiver mid-walk can't extend the iteration (that would loop forever on a `push`
+/// per element), and one that shrinks it faults cleanly -- `get_index` on a stale index is
+/// an ordinary out-of-bounds `RtErr`, not a silent skip.
+///
+/// `per_elem` emits the per-element logic into the header block, given the loaded element and
+/// the latch's `BlockId` for "skip to next iteration" edges. If it leaves the current block
+/// without a terminating `Jump` the helper wires the fall-through into the latch -- a body
+/// that exits early (find/any/all) caps its own edge with `Jump` to its merge block instead.
+/// Returns the exit block, left untargeted for the caller to fill (e.g. an exhausted edge).
+fn emit_array_walk(
+    ir: &mut Ir,
+    arr: InstId,
+    per_elem: impl FnOnce(&mut Ir, InstId, InstId, BlockId),
+) -> BlockId {
+    let header = ir.push_block("hof_header");
+    let latch = ir.push_block("hof_latch");
+    let empty = ir.push_block("hof_empty");
+    let exit = ir.push_block("hof_exit");
+
+    let idx = ir.synthetic_local("$hof_idx");
+    let zero = ir.current().constant(0);
+    ir.current().set_local(idx, zero);
+    let bound = ir.current().len(arr);
+    let entered = ir
+        .current()
+        .bin(BinOp::LessThan, zero, bound, OperandKind::Int);
+    ir.current().jump_if_false(entered, empty);
+    ir.current().jump(header);
+
+    ir.target(empty);
+    ir.current().jump(exit);
+
+    ir.target(header);
+    let i = ir.current().get_local(idx);
+    let elem = ir.current().get_index(arr, i, AccessKind::Direct);
+    per_elem(ir, elem, i, latch);
+    let capped = matches!(
+        ir.current_body()
+            .current_stream()
+            .last()
+            .map(|iid| &ir.current_body().instructions[*iid]),
+        Some(Inst::Jump { .. })
+    );
+    if !capped {
+        ir.current().jump(latch);
+    }
+
+    ir.target(latch);
+    let i = ir.current().get_local(idx);
+    ir.current().for_next(i, bound, header);
+    ir.current().jump(exit);
+
+    exit
+}
+
 fn loop_result(ir: &mut Ir, exit: BlockId, branches: Vec<(BlockId, InstId)>) -> Option<InstId> {
     ir.target(exit);
     Some(ir.current().phi(branches))
+}
+
+/// The applied half of `Intrinsic::Under`: `under(t, f, x)`. Slot 0 of `t` tags the
+/// convention -- iso (0) stores `to`/`from` and computes `from(f(to(x)))`; lens (1)
+/// stores `do`/`undo` and computes `undo(ctx, f(focus))` from `do(x)`'s
+/// `(focus, ctx)` pair. `t`'s declared `Iso` param type means the solver has already
+/// rejected non-`Iso` callers, so the fields are trusted.
+fn emit_under_apply(ir: &mut Ir, t: InstId, f: InstId, x: InstId) -> InstId {
+    let kind = ir.current().get_field(t, 0, AccessKind::Direct);
+    let a = ir.current().get_field(t, 1, AccessKind::Direct);
+    let b = ir.current().get_field(t, 2, AccessKind::Direct);
+    let zero = ir.current().constant(0);
+    let is_iso = ir
+        .current()
+        .bin(BinOp::Identity, kind, zero, OperandKind::Int);
+
+    let iso_blk = ir.push_block("under_iso");
+    let lens_blk = ir.push_block("under_lens");
+    let merge = ir.push_block("under_merge");
+    ir.in_current(|block| {
+        block.jump_if_false(is_iso, lens_blk);
+        block.jump(iso_blk);
+    });
+
+    ir.target(iso_blk);
+    let to_x = ir.current().call(a, vec![x]);
+    let edited = ir.current().call(f, vec![to_x]);
+    let r_iso = ir.current().call(b, vec![edited]);
+    let iso_end = ir.current_block_id();
+    ir.current().jump(merge);
+
+    ir.target(lens_blk);
+    let pair = ir.current().call(a, vec![x]);
+    let zero = ir.current().constant(0);
+    let one = ir.current().constant(1);
+    let focus = ir.current().get_index(pair, zero, AccessKind::Direct);
+    let ctx = ir.current().get_index(pair, one, AccessKind::Direct);
+    let edited = ir.current().call(f, vec![focus]);
+    let r_lens = ir.current().call(b, vec![ctx, edited]);
+    let lens_end = ir.current_block_id();
+    ir.current().jump(merge);
+
+    merge_branches(ir, merge, vec![(iso_end, r_iso), (lens_end, r_lens)])
+        .expect("under always emits iso and lens edges")
 }
 
 /// whether an `if let` / `while let` binding needs the implicit null short-circuit: true when the
@@ -1515,7 +2152,9 @@ fn loop_collects(expr: &Expr) -> bool {
 /// Conservative guard for the Len-hoist: true if the loop body might change the iterated
 /// collection's length. We currently bail on _any_ call, which is enormously limiting, but it's a
 /// pretty big lift to do more intelligent scanning and the performance we're leaving on the table
-/// is real, but not worth this much work in the compiler (at least for now).
+/// is real, but not worth this much work in the compiler (at least for now). Direct mid-loop
+/// mutation is rejected earlier, in solve (`MutateWhileIterating`) -- this heuristic only has to
+/// stay honest about the aliased/indirect writes that check can't see.
 fn body_may_mutate_len(expr: &Expr, dict_iter: bool) -> bool {
     let see = |e| body_may_mutate_len(e, dict_iter);
     match expr.kind() {
@@ -1534,6 +2173,7 @@ fn body_may_mutate_len(expr: &Expr, dict_iter: bool) -> bool {
         ExprKind::Coalescence(c) => see(&c.left) || see(&c.right),
         ExprKind::Unary(u) => see(&u.right),
         ExprKind::Unwrap(u) => see(&u.expr),
+        ExprKind::Demote(d) => see(&d.expr),
         ExprKind::Grouping(g) => see(&g.inner),
         ExprKind::Access(Access::Dot { left, right, .. }) => see(left) || see(right),
         ExprKind::Access(Access::Square { left, key, .. }) => see(left) || see(key),
@@ -1556,4 +2196,89 @@ fn stmt_may_mutate_len(stmt: &Stmt, dict_iter: bool) -> bool {
         }
         _ => true,
     }
+}
+
+/// `S::default()` — implicit memberwise-default construction. The call's
+/// solved type carries the concrete instantiation (`Pair<int>`); member
+/// types are read off the adt's declaration with `Ty::Param`s swapped
+/// for those args. The solver already vetted every member for
+/// defaultability — a `None` here is an emit gap, not a user error.
+fn default_instance(ir: &mut Ir, call: NodeId) -> Option<InstId> {
+    let (adt, args) = match ir.resolutions.node_tys.get(&call) {
+        Some(Ty::Adt(adt, args)) | Some(Ty::Identity(adt, args)) => (*adt, args.clone()),
+        _ => (ir.resolutions.default_ctors[&call], Vec::new()),
+    };
+    default_adt(ir, adt, &args)
+}
+
+/// `NewInstance` of `adt` whose members are each type's default. `args`
+/// is the call's instantiation, substituted for the declared params.
+fn default_adt(ir: &mut Ir, adt: AdtId, args: &[Ty]) -> Option<InstId> {
+    let (member_tys, params) = {
+        let resolved = &ir.resolutions.adts[adt];
+        (resolved.member_tys.clone(), resolved.type_params.clone())
+    };
+    let mut insts = Vec::with_capacity(member_tys.len());
+    for member in &member_tys {
+        insts.push(default_inst(ir, &subst_params(member, &params, args))?);
+    }
+    Some(ir.current().new_instance(adt, insts))
+}
+
+/// A `Ty::Param` stands for the declaring adt's own param — swap it for
+/// the call site's arg (positionally); anything unmapped stays a param.
+fn subst_params(ty: &Ty, params: &[ParamId], args: &[Ty]) -> Ty {
+    match ty {
+        Ty::Param(pid) => params
+            .iter()
+            .position(|p| p == pid)
+            .and_then(|i| args.get(i).cloned())
+            .unwrap_or_else(|| ty.clone()),
+        Ty::Array(inner, len) => Ty::Array(Box::new(subst_params(inner, params, args)), *len),
+        Ty::Dict(inner) => Ty::Dict(Box::new(subst_params(inner, params, args))),
+        Ty::Option(inner) => Ty::Option(Box::new(subst_params(inner, params, args))),
+        Ty::Result(inner) => Ty::Result(Box::new(subst_params(inner, params, args))),
+        Ty::Tuple(members) => Ty::Tuple(
+            members
+                .iter()
+                .map(|m| subst_params(m, params, args))
+                .collect(),
+        ),
+        Ty::Adt(adt, tys) => Ty::Adt(
+            *adt,
+            tys.iter().map(|t| subst_params(t, params, args)).collect(),
+        ),
+        Ty::Identity(adt, tys) => Ty::Identity(
+            *adt,
+            tys.iter().map(|t| subst_params(t, params, args)).collect(),
+        ),
+        _ => ty.clone(),
+    }
+}
+
+/// One member's default value: `0`, `""`, `[]`, `~{}`, `null`, or a
+/// nested default instance.
+fn default_inst(ir: &mut Ir, ty: &Ty) -> Option<InstId> {
+    Some(match ty {
+        Ty::Unit | Ty::Null | Ty::Option(_) => ir.current().constant(Constant::Null),
+        Ty::Bool => ir.current().constant(Constant::Bool(false)),
+        Ty::Int => ir.current().constant(Constant::Int(0)),
+        Ty::Float => ir.current().constant(Constant::Float(0.0)),
+        Ty::Str => {
+            let s = ir.intern_str("");
+            ir.current().constant(Constant::Str(s))
+        }
+        Ty::Array(..) => ir.current().new_array(),
+        Ty::Dict(_) => ir.current().new_dict(),
+        Ty::Tuple(members) => {
+            let tuple = ir.current().new_array();
+            for member in members {
+                let v = default_inst(ir, member)?;
+                ir.current().push(tuple, v);
+            }
+            tuple
+        }
+        Ty::Adt(inner, iargs) | Ty::Identity(inner, iargs) => default_adt(ir, *inner, iargs)?,
+        _ => return None,
+    })
 }

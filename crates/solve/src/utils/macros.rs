@@ -4,7 +4,7 @@
 macro_rules! array {
     ($ty:expr) => {{
         use $crate::components::Ty;
-        Ty::Array(Box::new($ty))
+        Ty::array($ty)
     }};
 }
 

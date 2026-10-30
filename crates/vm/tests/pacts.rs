@@ -186,3 +186,73 @@ test_vm!(
      }",
     "render_all([Square { s = 1 }, Circle { r = 2 }])" => str!("sqci")
 );
+
+// regression check for #10
+test_vm!(
+    pact_assoc_fn_via_value,
+    "pact Maker { fn make(n: int) -> int; }
+    struct A;
+    impl Maker for A { fn make(n: int) -> int { n + 1 } }
+    fn run(m: Maker) -> int { m.make(10) }
+    let a = A;",
+    "a.make(1)" => Int(2),
+    "run(a)" => Int(11),
+);
+
+test_vm!(
+    pact_self_param_concrete_call,
+    "pact Plus {
+         fn plus(self, other: Self) -> Self;
+     }
+
+     struct V { x: int }
+
+     impl Plus for V {
+         fn plus(self, other: V) -> V {
+             V { x = self.x + other.x }
+         }
+     }",
+    "V { x = 1 }.plus(V { x = 2 }).x" => Int(3)
+);
+
+test_vm!(
+    pact_default_passes_self_as_self,
+    "pact Plus {
+         fn plus(self, other: Self) -> Self;
+         fn value(self) -> int;
+
+         fn double(self) -> Self {
+             self.plus(self)
+         }
+     }
+
+     struct V { x: int }
+     struct W { y: int }
+
+     impl Plus for V {
+         fn plus(self, other: V) -> V {
+             V { x = self.x + other.x }
+         }
+
+         fn value(self) -> int {
+             self.x
+         }
+     }
+
+     impl Plus for W {
+         fn plus(self, other: W) -> W {
+             W { y = self.y + other.y }
+         }
+
+         fn value(self) -> int {
+             self.y
+         }
+     }
+
+     fn dbl(p: Plus) -> int {
+         p.double().value()
+     }",
+    "V { x = 3 }.double().x" => Int(6),
+    "dbl(V { x = 3 })" => Int(6),
+    "dbl(W { y = 4 })" => Int(8)
+);

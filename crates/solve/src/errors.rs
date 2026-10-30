@@ -15,6 +15,34 @@ pub struct BareNullBinding {
     pub at: SourceSpan,
 }
 
+/// `Foo<int>` where `Foo` was declared without type params (and the args aren't units, as in
+/// `Interval<kW>`).
+#[derive(Error, Debug, Diagnostic)]
+#[error("`{name}` is not generic")]
+#[diagnostic(help(
+    "declare it with parameters, e.g. `struct {name}<T>` -- or drop the `<...>`; only unit names may go there"
+))]
+pub struct NotGeneric {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("no type arguments allowed on `{name}`")]
+    pub at: SourceSpan,
+    pub name: String,
+}
+
+/// `Pair<int>` where `Pair` wants two type arguments.
+#[derive(Error, Debug, Diagnostic)]
+#[error("wrong number of type arguments")]
+pub struct GenericArity {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("`{name}` takes {expected} type argument(s) but {found} were supplied")]
+    pub at: SourceSpan,
+    pub name: String,
+    pub expected: usize,
+    pub found: usize,
+}
+
 #[derive(Error, Debug, Diagnostic)]
 #[error("mismatched types")]
 pub struct TypeMismatch {
@@ -275,6 +303,25 @@ pub struct PactConstantNotDispatchable {
     pub via: String,
 }
 
+/// Calling a pact method that takes `Self` through the abstract pact type. `Self` is the
+/// receiver's concrete type, which a bound doesn't pin down, so any implementer would satisfy the
+/// parameter and the callee would read another type's fields by slot.
+#[derive(Error, Debug, Diagnostic)]
+#[error("pact method `{member}` can't be called through `{via}`")]
+#[diagnostic(help(
+    "`{member}` takes `{param}`, which must be the receiver's concrete type -- call it on a \
+     concrete type instead"
+))]
+pub struct PactMethodNotDispatchable {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("the receiver is only known as `{via}` here, so `Self` isn't decided yet")]
+    pub at: SourceSpan,
+    pub member: String,
+    pub param: String,
+    pub via: String,
+}
+
 #[derive(Error, Debug, Diagnostic)]
 #[error("'{member}' is declared by more than one pact in this bound")]
 #[diagnostic(help("a `+` bound can't combine pacts that share a member name -- rename one"))]
@@ -305,6 +352,8 @@ pub struct EnumNotConstructable {
     #[label("pick a variant of `{name}`")]
     pub at: SourceSpan,
     pub name: String,
+    #[help]
+    pub variants: String,
 }
 
 #[derive(Error, Debug, Diagnostic)]
@@ -315,6 +364,8 @@ pub struct ExpectedTupleStruct {
     #[label("'{ty}' cannot be constructed as a tuple struct")]
     pub at: SourceSpan,
     pub ty: String,
+    #[help]
+    pub ctor: String,
 }
 
 #[derive(Error, Debug, Diagnostic)]
@@ -325,6 +376,20 @@ pub struct FieldNotFound {
     #[label("no field or method named '{field_name}'")]
     pub at: SourceSpan,
     pub field_name: String,
+}
+
+/// `S::default()` where the adt or one of its members can't be
+/// defaulted. `at` is the member's declaration when a member is the
+/// problem, else the `default` at the call.
+#[derive(Error, Debug, Diagnostic)]
+#[error("`{name}::default()` can't be built")]
+pub struct NoDefault {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("{reason}")]
+    pub at: SourceSpan,
+    pub name: String,
+    pub reason: String,
 }
 
 #[derive(Error, Debug, Diagnostic)]
@@ -473,6 +538,10 @@ pub struct MissingTupleMembers {
     pub src: NamedSource<Arc<str>>,
     #[label("tuple is missing required members")]
     pub at: SourceSpan,
+    /// the ctor spelling when the arity mismatch is at a call site -- a
+    /// destructuring pattern has no ctor to suggest, so it stays `None`
+    #[help]
+    pub ctor: Option<String>,
 }
 
 #[derive(Error, Debug, Diagnostic)]
@@ -482,6 +551,8 @@ pub struct ExtraTupleMembers {
     pub src: NamedSource<Arc<str>>,
     #[label("tuple has more members than possible")]
     pub at: SourceSpan,
+    #[help]
+    pub ctor: Option<String>,
 }
 
 #[derive(Error, Debug, Diagnostic)]
@@ -493,6 +564,18 @@ pub struct MultipleConstDeclarations {
     pub at: SourceSpan,
     pub name: String,
     // the original may live in another file, so it gets its own sub-diagnostic
+    #[related]
+    pub original: Vec<ConstDefinedHere>,
+}
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("type declared multiple times")]
+pub struct MultipleTypeDeclarations {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("'{name}' is already defined as a type")]
+    pub at: SourceSpan,
+    pub name: String,
     #[related]
     pub original: Vec<ConstDefinedHere>,
 }
@@ -536,6 +619,34 @@ pub struct AssignToLoopVar {
     #[source_code]
     pub src: NamedSource<Arc<str>>,
     #[label("'{name}' is a loop iterator and cannot be manually mutated")]
+    pub at: SourceSpan,
+    pub name: String,
+}
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("cannot mutate `{name}` while iterating over it")]
+#[diagnostic(help(
+    "collect what you need during the loop and apply the changes after it, or loop over a snapshot (`for x in xs collect x`)"
+))]
+pub struct MutateWhileIterating {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label(
+        "this mutates `{name}` mid-loop, so elements can be skipped, visited twice, or looped forever"
+    )]
+    pub at: SourceSpan,
+    pub name: String,
+    #[related]
+    pub iterating: Vec<IteratingHere>,
+}
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("`{name}` is being iterated")]
+#[diagnostic(severity(Advice))]
+pub struct IteratingHere {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("the loop holds `{name}` for the whole body")]
     pub at: SourceSpan,
     pub name: String,
 }
@@ -621,6 +732,25 @@ pub struct PactIsNotAValue {
     #[source_code]
     pub src: NamedSource<Arc<str>>,
     #[label("a pact names a behavior, not a value -- bind a type that implements it instead")]
+    pub at: SourceSpan,
+}
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("`{name}` is not a value")]
+pub struct NotAValue {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("this names a module or a type -- reach into it with `::` instead")]
+    pub at: SourceSpan,
+    pub name: String,
+}
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("methods are not values")]
+pub struct MethodIsNotAValue {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("call it -- a method can't be bound or passed around on its own")]
     pub at: SourceSpan,
 }
 
@@ -787,4 +917,238 @@ pub(crate) fn elide(s: String) -> String {
     } else {
         format!("{}...", s.chars().take(MAX).collect::<String>())
     }
+}
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("unknown unit")]
+#[diagnostic(help(
+    "units are things like m, s, kg, W, kWh, usd -- see the Units page of the book"
+))]
+pub struct UnknownUnit {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("`{name}` isn't a unit")]
+    pub at: SourceSpan,
+    pub name: String,
+}
+
+/// Dimensional analysis: two quantities that don't agree, or a quantity where a plain number (or
+/// another dimension) was declared.
+#[derive(Error, Debug, Diagnostic)]
+#[error("{what}")]
+#[diagnostic(help("{help}"))]
+pub struct DimensionMismatch {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("{label}")]
+    pub at: SourceSpan,
+    pub what: String,
+    pub label: String,
+    pub help: String,
+}
+
+/// `df.pull("revnue")` on a frame whose columns the checker knows (a `table {}` literal, a
+/// `.schema("…")` declaration, or a `query {}` result) -- a typo'd name is a check-time
+/// error, not a runtime raise.
+#[derive(Error, Debug, Diagnostic)]
+#[error("no column `{name}`")]
+#[diagnostic(help("this dataframe's columns: {columns}"))]
+pub struct NoSuchColumn {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("there's no `{name}` here")]
+    pub at: SourceSpan,
+    pub name: String,
+    pub columns: String,
+}
+
+/// A native's literal validator rejected the call -- e.g. `s.find("(")` where the regex
+/// doesn't compile. The validator supplies the message; see `api::LitValidator`.
+#[derive(Error, Debug, Diagnostic)]
+#[error("invalid literal argument")]
+pub struct BadLiteralArg {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("{msg}")]
+    pub at: SourceSpan,
+    pub msg: String,
+}
+
+/// A `.schema("…")` spec that doesn't parse (`fare:floatt`, a missing `:`, an unknown
+/// type or unit).
+#[derive(Error, Debug, Diagnostic)]
+#[error("bad schema spec")]
+#[diagnostic(help(
+    "a spec looks like `zone:int fare:float kwh:kWh` -- `int`, `float`, `str`, `bool`, or a unit"
+))]
+pub struct BadSchemaSpec {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("{msg}")]
+    pub at: SourceSpan,
+    pub msg: String,
+}
+
+/// An expr fulfills a `[T; n]` position but carries a statically known length that
+/// disagrees -- e.g. a two-element literal into a `len == 4` slot. Unproven lengths
+/// don't reach this error: they lower to a runtime check instead.
+#[derive(Error, Debug, Diagnostic)]
+#[error("array size mismatch")]
+pub struct ArrayLenMismatch {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("expected {expected} but this is provably {found}")]
+    pub at: SourceSpan,
+    pub expected: String,
+    pub found: String,
+}
+
+/// A call site provably violates a `where` predicate on the callee -- the args are
+/// concrete enough to show it can never hold, so it fails now rather than at the
+/// function's entry check.
+#[derive(Error, Debug, Diagnostic)]
+#[error("`where` clause cannot hold")]
+pub struct WhereViolation {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("`{fn_name}` requires `{predicate}`, which is false for these arguments")]
+    pub at: SourceSpan,
+    pub fn_name: String,
+    pub predicate: String,
+}
+
+/// `push`/`pop`/`extend` on a `[T; n]` -- the type pins the length, so
+/// length-changing methods are rejected outright (in-place permutations like
+/// `sort` stay legal).
+#[derive(Error, Debug, Diagnostic)]
+#[error("cannot change a fixed-size array's length")]
+pub struct SizedArrayMutation {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("`{method}` changes the length of `{ty}`")]
+    pub at: SourceSpan,
+    pub method: String,
+    pub ty: String,
+}
+
+// ---- grade-pass warnings (`grades.rs`) -- lints, not errors: they collect on
+// `Solver::warnings`/`Resolutions::warnings` and never fail a solve
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("unused variable `{name}`")]
+#[diagnostic(
+    severity(Warning),
+    help("prefix the name with `_` if the binding is intentional (`let _{name} = ...`)")
+)]
+pub struct UnusedBinding {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("`{name}` is bound here but never read")]
+    pub at: SourceSpan,
+    pub name: String,
+}
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("unused parameter `{name}`")]
+#[diagnostic(
+    severity(Warning),
+    help("prefix the name with `_` if the parameter is intentional")
+)]
+pub struct UnusedParam {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("`{name}` is declared but never read in the body")]
+    pub at: SourceSpan,
+    pub name: String,
+}
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("this store to `{name}` is never read")]
+#[diagnostic(
+    severity(Warning),
+    help("the value stored here is overwritten or goes out of scope before any read")
+)]
+pub struct DeadStore {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("this value is never used")]
+    pub at: SourceSpan,
+    pub name: String,
+}
+
+// ---- grade-pass refusals (Stage 1 `consuming`) -- these fail the solve: a
+// consumed binding has been given away and the program must not pretend it
+// still has it.
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("`{name}` was consumed by `{by}` and can't be used again")]
+#[diagnostic(help("rebind `{name}` if you need to keep using a value here"))]
+pub struct UseAfterConsume {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("`{name}` is used after being consumed")]
+    pub at: SourceSpan,
+    #[label("consumed by `{by}` here")]
+    pub consumed_at: SourceSpan,
+    pub name: String,
+    pub by: String,
+}
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("`{name}` can't be consumed here")]
+pub struct ConsumeForbidden {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("{why}")]
+    pub at: SourceSpan,
+    pub name: String,
+    pub why: String,
+}
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("the result of `{name}` is `must_use` and can't be discarded")]
+#[diagnostic(
+    severity(Warning),
+    help("bind it (`let x = {name}(...)`) or handle what it returns")
+)]
+pub struct MustUseResult {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("this return value must not be dropped")]
+    pub at: SourceSpan,
+    pub name: String,
+}
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("`fn {name}` shadows the word operator `{name}` (`{symbol}`)")]
+#[diagnostic(
+    code(shadowed_builtin),
+    severity(Warning),
+    help(
+        "on this source `{name}` is now your fn -- `{name}(x)` calls it and `{name}` passes it; \
+         spell the operator `{symbol}`. Hosts can allow this per page (Nina: page property \
+         `allow` = `shadowed_builtin`)"
+    )
+)]
+pub struct ShadowedBuiltin {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("`{name}` names this fn here, not the operator")]
+    pub at: SourceSpan,
+    pub name: String,
+    pub symbol: &'static str,
+}
+
+// ---- effect gate (`Vm::compile_files_gated`) -- a refusal, not a lint: the
+// file's inferred effects exceed what the host granted, so it never runs.
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("refused: `{file}` needs effects {have} beyond the granted {allowed}")]
+#[diagnostic(help(
+    "grant the missing effects, or remove the natives producing them from `{file}`"
+))]
+pub struct FxGate {
+    pub file: String,
+    pub have: String,
+    pub allowed: String,
 }

@@ -12,12 +12,18 @@ use shared::Location;
 #[derive(Debug, PartialEq, Clone)]
 pub struct Struct {
     pub name: Ident,
+    /// The declared type parameters, `<A, B>` after the name. Empty for non-generic structs.
+    pub type_params: Vec<Ident>,
     pub fields: Vec<StructField>,
 }
 impl Struct {
     #[cfg(test)]
     pub(crate) fn new(name: Ident, fields: Vec<StructField>) -> Self {
-        Self { name, fields }
+        Self {
+            name,
+            type_params: vec![],
+            fields,
+        }
     }
 }
 
@@ -55,8 +61,13 @@ impl std::fmt::Display for FieldKey {
 #[mutants::skip]
 impl std::fmt::Display for Struct {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let generics = if self.type_params.is_empty() {
+            String::new()
+        } else {
+            format!("<{}>", self.type_params.iter().join(", "))
+        };
         f.pad(&format!(
-            "struct {} {{ {} }}",
+            "struct {}{generics} {{ {} }}",
             self.name,
             self.fields
                 .iter()

@@ -40,6 +40,7 @@ test_multi_file!(
 );
 
 test_multi_file!(
+    // r[verify mimas.use.forms]
     singular_import_visible_in_function,
     foo => "module @; pub const BAR: int = 0;",
     fizz => "module @; use foo::BAR; pub fn buzz() -> int { BAR }";
@@ -55,6 +56,7 @@ test_multi_file!(
 );
 
 test_multi_file!(
+    // r[verify mimas.use.forms]
     multi_import_visible_in_function,
     foo => "module @; pub const BAR: int = 0; pub const BAZ: str = \"\";",
     fizz => "module @; use foo::{ BAR, BAZ }; pub fn bar() -> int { BAR } pub fn baz() -> str { BAZ }";
@@ -71,6 +73,7 @@ test_multi_file!(
 );
 
 test_multi_file!(
+    // r[verify mimas.use.forms]
     glob_import_visible_in_function,
     foo => "module @; pub const BAR: int = 0; pub const BAZ: str = \"\";",
     fizz => "module @; use foo::*; pub fn bar() -> int { BAR } pub fn baz() -> str { BAZ }";
@@ -109,6 +112,7 @@ test_multi_file!(
 );
 
 test_multi_file_fail!(
+    // r[verify mimas.module.privacy]
     private_const_cross_module,
     foo => "module @; const SECRET: int = 0;",
     main => "let x = foo::SECRET;";
@@ -127,12 +131,14 @@ test_multi_file_fail!(
 );
 
 test_multi_file_fail!(
+    // r[verify mimas.module.privacy]
     private_via_use_still_errors,
     foo => "module @; const SECRET: int = 0;",
     main => "use foo::SECRET; let x = SECRET;";
 );
 
 test_multi_file_fail!(
+    // r[verify mimas.module.privacy]
     private_method_cross_module,
     foo => "module @; pub struct Bar { x: int } impl Bar { fn secret(self) -> int { 0 } }",
     main => "let b = foo::Bar { x = 0 }; let v = b.secret();";
@@ -156,4 +162,16 @@ test_multi_file_fail!(
     match_imported_enum_non_exhaustive,
     foo => "module @; pub enum Color { Red, Blue, Green }",
     fizz => "module @; use foo::Color; pub fn pick(c: Color) -> int { match c { Color::Red => 0, Color::Blue => 1 } }";
+);
+
+test_multi_file_fail!(
+    module_is_not_a_value,
+    foo => "module @; pub const BAR: int = 0;",
+    fizz => "module @; pub fn buzz() { let x = foo; }";
+);
+
+test_multi_file_fail!(
+    imported_module_is_not_a_value,
+    foo => "module @; pub const BAR: int = 0;",
+    fizz => "module @; use foo; pub fn buzz() { let x = foo; }";
 );

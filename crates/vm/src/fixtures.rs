@@ -39,14 +39,305 @@
 
 use std::{
     any::{Any, TypeId},
-    cell::RefCell,
-    collections::HashMap,
+    cell::{Cell, RefCell},
+    collections::{HashMap, VecDeque},
+    sync::Arc,
 };
+
+use shared::{BodyId, FileId, IdVec, Location};
 
 /// Marker for types that can live as a per-Vm fixture. Must be `Default`-constructible and
 /// `'static` -- see the module docs for why both bounds are load-bearing.
 pub trait Fixture: Default + Any + 'static {}
 impl<T: Default + Any + 'static> Fixture for T {}
+
+/// Debug info for the loaded program: per-chunk loc tables (indexed by `BodyId`) and each
+/// file's source text. `Vm::load_program`/`Vm::set_sources` refresh it so `std::dbg` natives
+/// can map a live frame's `(chunk, ip)` back to a source line -- natives see only a `Ctx`,
+/// never the `Vm`, so this is where the mapping has to live.
+///
+/// `stack` mirrors the live `(chunk, ip)` of every frame. The dispatch loop holds `thread`
+/// mutably borrowed for the whole run, so a native can never read the real stack; the
+/// `CallNative` arm re-syncs this copy instead (parents' ips are their frozen return-site
+/// saves, the top entry gets the ip just past the call op).
+#[derive(Default)]
+pub struct DebugInfo {
+    pub locs: RefCell<IdVec<BodyId, Vec<(u32, Location)>>>,
+    /// Each chunk's byte offset into the shared program bytes -- `Frame::ip` is absolute, the
+    /// loc tables are chunk-relative, so callers subtract this before probing them.
+    pub offsets: RefCell<IdVec<BodyId, u32>>,
+    pub sources: RefCell<HashMap<FileId, Arc<str>>>,
+    pub stack: RefCell<Vec<(BodyId, u32)>>,
+}
+
+impl DebugInfo {
+    /// The innermost frame's source location. Inside a native that's the
+    /// call site — the stack mirror's top ip sits just *past* the call
+    /// op, so step back one byte to land inside the call op's own span
+    /// (otherwise a statement whose trailing op carries the next
+    /// statement's loc attributes one call site late).
+    pub fn top_loc(&self) -> Option<Location> {
+        let stack = self.stack.borrow();
+        let &(body, ip) = stack.last()?;
+        let locs = self.locs.borrow();
+        let offsets = self.offsets.borrow();
+        let rel = ip.checked_sub(*offsets.get(body)?)?.saturating_sub(1);
+        let entries = locs.get(body)?;
+        let i = entries.partition_point(|(off, _)| *off <= rel);
+        (i > 0).then(|| entries[i - 1].1)
+    }
+}
+
+/// Execution trace counters — the sonification/profiling substrate.
+/// `run_dispatch` bumps `hits[ip]` once per dispatched op (`ip` is a byte
+/// offset into the program's shared code `bytes` — operand bytes simply
+/// never rise) and `calls` on every `Flow::Call` edge the driver takes.
+/// Hosts drain per frame/step via `Vm::trace_take`; counts are deltas
+/// since the last drain, not cumulative, so each read is "what ran in
+/// this slice of time".
+///
+/// Always on: one indexed increment per op is lost in dispatch noise, and
+/// keeping it unconditional means `take` works on any Vm — no recompile
+/// to start listening.
+#[derive(Default)]
+pub struct Trace {
+    /// `hits[i]` = ops dispatched at byte offset `i` since the last
+    /// `take_hits`. Sized to the program's code length on `load_program`.
+    pub hits: RefCell<Vec<u32>>,
+    /// `(caller_body << 32) | callee_body` → count since the last
+    /// `take_calls`. Only the `Flow::Call` driver arm records — calls
+    /// inlined inside bcgen bodies bypass it, the same observability
+    /// trade the debugger makes.
+    pub calls: RefCell<HashMap<u64, u32>>,
+}
+
+impl Trace {
+    /// One dispatched op at byte offset `ip`. The borrow is held only for
+    /// the increment — a native that re-enters `run_dispatch` (injected
+    /// calls) must never hit a live `RefMut` and panic.
+    #[inline]
+    pub fn tick(&self, ip: usize) {
+        if let Some(h) = self.hits.borrow_mut().get_mut(ip) {
+            *h = h.wrapping_add(1);
+        }
+    }
+
+    /// One call edge taken: `caller` (the frame on top at dispatch) →
+    /// `callee`. Packed into a u64 so the map key is a plain int.
+    pub fn call(&self, caller: u32, callee: u32) {
+        *self
+            .calls
+            .borrow_mut()
+            .entry(((caller as u64) << 32) | callee as u64)
+            .or_default() += 1;
+    }
+
+    /// Sparse `(ip, count)` pairs since the last take, zeroing as it
+    /// reads. O(code size), called at frame cadence at most.
+    pub fn take_hits(&self) -> Vec<(u32, u32)> {
+        let mut hits = self.hits.borrow_mut();
+        let mut out = Vec::new();
+        for (i, h) in hits.iter_mut().enumerate() {
+            if *h != 0 {
+                out.push((i as u32, *h));
+                *h = 0;
+            }
+        }
+        out
+    }
+
+    /// The call-edge deltas since the last take: `(packed_edge, count)`.
+    pub fn take_calls(&self) -> Vec<(u64, u32)> {
+        std::mem::take(&mut *self.calls.borrow_mut())
+            .into_iter()
+            .collect()
+    }
+}
+
+pub type OutSink = Box<dyn FnMut(&str)>;
+
+/// Where `print`/`dbg` and friends send their lines. The default sink is
+/// the process's stdout; an embedder (a repl, the wasm eval worker) swaps
+/// in a capture with [`Out::set`] and drains it after the run. Each call
+/// gets one line's text — the trailing newline is the sink's business.
+pub struct Out(pub RefCell<OutSink>);
+
+impl Default for Out {
+    fn default() -> Self {
+        Self(RefCell::new(Box::new(|line| println!("{line}"))))
+    }
+}
+
+impl Out {
+    /// Emit one line to the current sink.
+    pub fn write(&self, line: &str) {
+        (self.0.borrow_mut())(line);
+    }
+
+    /// Swap the sink. The old one is dropped — this is a one-way trip per
+    /// Vm, which is all capture-style embedders need (a Vm is one session).
+    pub fn set(&self, sink: impl FnMut(&str) + 'static) {
+        *self.0.borrow_mut() = Box::new(sink);
+    }
+}
+
+/// What a line recorded at a call site is: `Print` is program output
+/// (`print`/`dbg`/`warn`); `Warn` is a non-fatal diagnostic — something was
+/// skipped or defaulted, the run kept going, and the host gets a span to
+/// point at. A warning also reaches `Out`; a print never does the reverse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrintKind {
+    Print,
+    Warn,
+}
+
+/// Every `print`/`dbg`/`warn` line, keyed by call site — a rich host (the lit
+/// page) hovers a `print(x)` and shows what it printed, or underlines a call
+/// that warned; outside a host nothing reads this and `Out` is all a print is.
+/// Capped so a print in a per-frame game loop can't grow without bound —
+/// overflow lands in `dropped` (and still reaches `Out`). Warns are also
+/// deduped per `(site, text)`: the same problem reported every frame is one
+/// warning, not sixty.
+#[derive(Default)]
+pub struct Prints {
+    /// `(call site, kind, rendered line)` in emit order.
+    pub lines: RefCell<Vec<(Location, PrintKind, String)>>,
+    /// Warn sites already reported — survives `take`, so a warn inside a
+    /// game loop reports once per session, not once per frame. `pub(crate)`
+    /// for `snapshot`: the dedupe set rides a checkpoint restore so a warn
+    /// that fired before the snapshot doesn't re-fire after it.
+    pub(crate) warned: RefCell<std::collections::HashSet<(Location, String)>>,
+    /// Lines past [`Prints::CAP`] — counted so a host can say "…N more".
+    pub dropped: Cell<usize>,
+}
+
+impl Prints {
+    pub const CAP: usize = 256;
+
+    pub fn push(&self, loc: Location, text: String) {
+        let mut lines = self.lines.borrow_mut();
+        if lines.len() < Self::CAP {
+            lines.push((loc, PrintKind::Print, text));
+        } else {
+            self.dropped.set(self.dropped.get() + 1);
+        }
+    }
+
+    /// Record a non-fatal diagnostic at `loc`. Repeats of the same
+    /// `(site, text)` are suppressed — the host still holds the first.
+    /// Returns whether the warning was new (the caller may still want to
+    /// echo it to `Out` only then).
+    pub fn push_warn(&self, loc: Location, text: String) -> bool {
+        if !self.warned.borrow_mut().insert((loc, text.clone())) {
+            return false;
+        }
+        let mut lines = self.lines.borrow_mut();
+        if lines.len() < Self::CAP {
+            lines.push((loc, PrintKind::Warn, text));
+        } else {
+            self.dropped.set(self.dropped.get() + 1);
+        }
+        true
+    }
+
+    /// Drain the recorded lines (leaves `dropped` and the warn dedup —
+    /// they're per-Vm history).
+    pub fn take(&self) -> Vec<(Location, PrintKind, String)> {
+        std::mem::take(&mut *self.lines.borrow_mut())
+    }
+}
+
+/// `print`/`dbg`/`warn` call site → the dimension the dims pass computed for the
+/// reported value — `print(25kW)` writes `25000 W`, not a bare `25000`. The
+/// table ships on the `Program` and `load_program` refreshes it, so a Vm that
+/// swaps programs never attributes a unit to a call site that didn't earn one.
+/// Keyed by the same call `Location` `DebugInfo::top_loc` reports, which is
+/// also what `Prints` records.
+#[derive(Default)]
+pub struct PrintDims {
+    pub dims: RefCell<HashMap<Location, shared::units::Dim>>,
+}
+
+impl PrintDims {
+    /// The unit a `print`/`dbg`/`warn` call at `loc` should append (`m/px`, `W`),
+    /// `None` for a plain number or a site the checker couldn't follow.
+    pub fn at(&self, loc: Location) -> Option<shared::units::Dim> {
+        self.dims.borrow().get(&loc).copied()
+    }
+}
+
+/// Per-Vm random stream behind `float::random`/`int::random`/`bool::random`/
+/// `arr.shuffle`/`arr.choose` (and anything else that draws): the one place
+/// nondeterminism enters a program, so a host that seeds it gets a replayable
+/// run. `None` (the default) means each draw takes fresh entropy, same as
+/// `rand::rng()` did before; `seed` installs a xorshift64* stream — the same
+/// algorithm the headless `mrt` runtime uses, so an interpreter seeded `s`
+/// and a transpiled run seeded `s` produce identical sequences.
+///
+/// `script` is the other half of the story — the hookable read. A sim
+/// harness queues exact unit values for upcoming draws ("the third
+/// `float::random` returns exactly 0.25"), taking manual control of a
+/// specific nondet point instead of the whole stream. Scripted draws
+/// *replace* the stream value at that position — the stream still
+/// advances — so unscripted draws replay at identical indices either
+/// way and neighbors are untouched.
+#[derive(Default)]
+pub struct Rng {
+    /// `Some` = seeded xorshift64* state; `None` = entropy per draw.
+    state: Cell<Option<u64>>,
+    /// Exact `[0,1)` values queued for the next draws.
+    script: RefCell<VecDeque<f64>>,
+}
+
+impl Rng {
+    /// Install the deterministic stream — a sim harness calls this before
+    /// the program's first random op. `0` is legal but degenerate
+    /// (xorshift64* pins at 0 → every draw 0.0); callers wanting
+    /// "0 means unseeded" semantics guard before calling.
+    pub fn seed(&self, seed: u64) {
+        self.state.set(Some(seed));
+    }
+
+    /// The live stream state — `None` while unseeded. A host snapshots
+    /// this into checkpoints the way `mrt::random_seed` does, so a
+    /// resumed run continues the same sequence rather than restarting.
+    pub fn state(&self) -> Option<u64> {
+        self.state.get()
+    }
+
+    /// Queue exact unit values for the next `values.len()` draws — the
+    /// specific-read hook: override *these* draws, leave the rest of the
+    /// stream untouched. Out-of-`[0,1)` values are clamped into it.
+    pub fn script(&self, values: impl IntoIterator<Item = f64>) {
+        self.script.borrow_mut().extend(values);
+    }
+
+    /// How many scripted draws are left — a test asserts the program
+    /// consumed exactly what was queued.
+    pub fn scripted(&self) -> usize {
+        self.script.borrow().len()
+    }
+
+    /// One `[0, 1)` draw — the xorshift64* step (bit-identical to
+    /// `mrt::random`'s stream), or `None` when unseeded and the caller
+    /// falls back to its entropy source; a queued script value replaces
+    /// whatever the stream produced at this position. Every random op
+    /// draws through here, so `shuffle`, `choose`, and the `random`s
+    /// share one composable stream.
+    pub fn next_unit(&self) -> Option<f64> {
+        let stream = self.state.get().map(|mut x| {
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            self.state.set(Some(x));
+            (x.wrapping_mul(0x2545F4914F6CDD1D) >> 11) as f64 / (1u64 << 53) as f64
+        });
+        if let Some(u) = self.script.borrow_mut().pop_front() {
+            return Some(u.clamp(0.0, 1.0 - f64::EPSILON));
+        }
+        stream
+    }
+}
 
 /// Per-Vm type-keyed storage for host-shared state. Lazily creates entries on first access via
 /// `T::default()`. Designed to hold things like [FreezeCell](crate::freeze::FreezeCell)s that

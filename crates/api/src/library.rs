@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use shared::IdVec;
+use shared::{AdtId, IdVec};
 
 use crate::{ApiAdt, ApiConstant, ApiEntry, ApiFunction, ApiMethod, Intrinsic, NativeId, Registry};
 
@@ -37,8 +37,18 @@ impl<C> Library<C> {
         &mut self.registry
     }
 
+    pub fn into_registry(self) -> Registry {
+        self.registry
+    }
+
     pub fn push_adt(&mut self, adt: ApiAdt) {
         self.adts.push(adt);
+    }
+
+    /// `adt_id`s are globally allocated (builtins own the low ids), so the
+    /// vec position isn't the id — scan.
+    pub fn adt_mut(&mut self, id: AdtId) -> Option<&mut ApiAdt> {
+        self.adts.iter_mut().find(|a| a.adt_id == id)
     }
 
     pub fn function(&mut self, f: ApiFunction<C>) -> NativeId {

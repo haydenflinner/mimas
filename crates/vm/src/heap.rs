@@ -1,15 +1,29 @@
 use api::AdtBinding;
-use compile::BodyId;
-use gc_arena::{Collect, Gc, GcWeak, Mutation, lock::RefLock};
+use compile::{BodyId, Function};
+use gc_arena::{
+    Collect, DynamicRoot, DynamicRootSet, Gc, GcWeak, Mutation, Rootable,
+    lock::{Lock, RefLock},
+};
 use rustc_hash::FxHashMap;
-use std::{any::TypeId, fmt::Write as _, ops, sync::Arc};
+use shared::{FnHeader, IdVec};
+use std::{
+    any::TypeId,
+    cell::{Cell, Ref, RefCell},
+    fmt::Write as _,
+    ops,
+    rc::Rc,
+    sync::Arc,
+};
 
 use crate::{
-    Fields,
+    Fields, RtErr, RtResult,
     val::{
-        Array, Closure, ClosureData, Dict, DictMap, Instance, InstanceData, SharedStr, Str, Val,
+        Array, ArrayStore, Closure, ClosureData, Dict, DictMap, FloatArray, Instance, InstanceData,
+        IntArray, Seq, SharedStr, Str, Val,
     },
 };
+
+const MAX_DISPLAY_DEPTH: usize = 1000;
 
 #[derive(Default, Debug)]
 pub struct MimasBindings(pub FxHashMap<TypeId, AdtBinding>);
@@ -28,11 +42,27 @@ pub struct Frame {
     pub base: usize,
 }
 
-#[derive(Collect)]
-#[collect(no_drop)]
 pub struct ThreadState<'gc> {
     pub regs: Vec<Val<'gc>>,
     pub frames: Vec<Frame>,
+    /// Ops this thread may still run before `RtErr::OutOfFuel`; the host re-arms it per entry
+    /// (`Vm::set_op_budget`). `u64::MAX` (the default) is effectively unlimited.
+    pub ops_left: u64,
+    /// Frames the thread may hold before a call fails with `RtErr::RecursionTooDeep`
+    /// (`Vm::set_max_depth`).
+    pub max_frames: usize,
+}
+
+// Manual so a full mark can tally the register stack's bytes for the memory budget (see
+// `crate::mem`); otherwise the same trace the derive wrote.
+unsafe impl<'gc> Collect<'gc> for ThreadState<'gc> {
+    fn trace<T: gc_arena::collect::Trace<'gc>>(&self, cc: &mut T) {
+        crate::mem::note_traced(
+            self.regs.capacity() * std::mem::size_of::<Val>()
+                + self.frames.capacity() * std::mem::size_of::<Frame>(),
+        );
+        cc.trace(&self.regs);
+    }
 }
 
 pub type Thread<'gc> = Gc<'gc, RefLock<ThreadState<'gc>>>;
@@ -46,20 +76,37 @@ impl<'gc> InternedStrings<'gc> {
         InternedStrings(Gc::new(mc, RefLock::new(FxHashMap::default())))
     }
 
-    pub fn intern(self, mc: &Mutation<'gc>, s: &str) -> Str<'gc> {
+    /// The interned `Str` for `s`, and whether this call allocated it.
+    pub fn intern(self, mc: &Mutation<'gc>, s: &str) -> (Str<'gc>, bool) {
         if let Some(weak) = self.0.borrow().get(s)
             && let Some(gc) = weak.upgrade(mc)
         {
-            return Str(gc);
+            return (Str(gc), false);
         }
         let shared: SharedStr = Arc::from(s);
         let gc = Gc::new(mc, shared.clone());
         self.0.borrow_mut(mc).insert(shared, Gc::downgrade(gc));
-        Str(gc)
+        (Str(gc), true)
+    }
+
+    /// Drop the table entries of strings the finished mark found dead, and return the byte total
+    /// of the strings still live. Without this the table's own `Arc` keeps every string the
+    /// program ever made in memory.
+    pub(crate) fn prune_dead(self, fc: &gc_arena::Finalization<'gc>) -> usize {
+        let mut live = 0usize;
+        self.0.borrow_mut(fc).retain(|k, weak| {
+            if weak.is_dead(fc) {
+                false
+            } else {
+                live += k.len() + std::mem::size_of::<SharedStr>() * 2;
+                true
+            }
+        });
+        live
     }
 }
 
-#[derive(Copy, Clone, Collect)]
+#[derive(Clone, Collect)]
 #[collect(no_drop)]
 pub struct State<'gc> {
     pub strings: InternedStrings<'gc>,
@@ -71,6 +118,23 @@ pub struct State<'gc> {
     /// rendering instances as `Name { .. }` instead of `@id { .. }`. Filled in by
     /// `Vm::load_program`.
     pub struct_names: Gc<'gc, RefLock<Vec<String>>>,
+    /// Declared field names per struct, indexed by `struct_id` like `struct_names` -- a duplicate
+    /// of `Vm::field_names` (which natives can't reach; they only ever see a `Ctx`, never the
+    /// outer `Vm`), kept in the arena so a native fn can do name-aware reflection over an
+    /// `Instance` (e.g. `to_dataframe`, converting an array of structs into DataFrame columns
+    /// named after their declared fields). Filled in by `Vm::load_program`.
+    pub field_names: Gc<'gc, RefLock<Vec<Vec<String>>>>,
+    /// Swapped for a fresh set every time a program is loaded, which is what invalidates the
+    /// handles the host took out against the previous one -- see `Ctx::reset_roots`.
+    pub roots: Gc<'gc, Lock<DynamicRootSet<'gc>>>,
+    /// Cooperative pause, set by `yield_frame`-style natives. Lives on `State` (not
+    /// `ThreadState`) because the dispatch loop holds `thread.borrow_mut` for the whole
+    /// run -- a native writing thread state mid-op would double-borrow and panic. The
+    /// dispatch loop reads it per op like a second fuel line.
+    pub paused: Cell<bool>,
+    /// The memory budget and the nested-call count — see [`crate::mem`].
+    #[collect(require_static)]
+    pub mem: crate::mem::MemBudget,
 }
 
 impl<'gc> State<'gc> {
@@ -80,12 +144,15 @@ impl<'gc> State<'gc> {
             RefLock::new(ThreadState {
                 regs: Vec::new(),
                 frames: Vec::new(),
+                ops_left: u64::MAX,
+                max_frames: crate::mem::DEFAULT_MAX_FRAMES,
             }),
         );
         let natives = Gc::new(mc, RefLock::new(Vec::new()));
         let mimas_bindings = Gc::new(mc, RefLock::new(MimasBindings::default()));
         let fixtures = Gc::new(mc, crate::fixtures::Fixtures::default());
         let struct_names = Gc::new(mc, RefLock::new(Vec::new()));
+        let field_names = Gc::new(mc, RefLock::new(Vec::new()));
         State {
             strings: InternedStrings::new(mc),
             thread,
@@ -93,6 +160,10 @@ impl<'gc> State<'gc> {
             mimas_bindings,
             fixtures,
             struct_names,
+            field_names,
+            roots: Gc::new(mc, Lock::new(DynamicRootSet::new(mc))),
+            paused: Cell::new(false),
+            mem: crate::mem::MemBudget::default(),
         }
     }
 
@@ -104,7 +175,10 @@ impl<'gc> State<'gc> {
     }
 }
 
+// `repr(C)` so `Ctx` can ride the `extern "C"` `bc::BodyFn` ABI by value:
+// two pointers, defined order — JIT bodies take it as two machine words.
 #[derive(Copy, Clone)]
+#[repr(C)]
 pub struct Ctx<'gc> {
     mutation: &'gc Mutation<'gc>,
     state: &'gc State<'gc>,
@@ -118,6 +192,22 @@ impl<'gc> ops::Deref for Ctx<'gc> {
 }
 
 impl<'gc> Ctx<'gc> {
+    /// Rebuild a `Ctx` from its two machine words. `bc::jit` shims take the
+    /// pair split into two params: AAPCS64 never splits a composite across the
+    /// register/stack boundary, so a by-value `Ctx` at argument position ≥ 7
+    /// lands *entirely* on the stack while the emitter's flat signature sends
+    /// the first word in a register — a corrupting ABI mismatch.
+    #[doc(hidden)]
+    pub unsafe fn from_parts(mutation: *const Mutation<'gc>, state: *const State<'gc>) -> Ctx<'gc> {
+        // SAFETY: callers pass the two words of a live `Ctx` verbatim.
+        unsafe {
+            Ctx {
+                mutation: &*mutation,
+                state: &*state,
+            }
+        }
+    }
+
     pub fn state(self) -> &'gc State<'gc> {
         self.state
     }
@@ -127,7 +217,43 @@ impl<'gc> Ctx<'gc> {
     }
 
     pub fn intern(self, s: &str) -> Str<'gc> {
-        self.state.strings.intern(self.mutation, s)
+        let (str, fresh) = self.state.strings.intern(self.mutation, s);
+        if fresh {
+            self.charge(s.len() + crate::mem::BOX_BYTES);
+        }
+        str
+    }
+
+    /// Count `bytes` of new heap against the memory budget (see [`crate::mem`]). The Vm's own
+    /// constructors charge for themselves; a native that grows a container in place charges for
+    /// the growth. Never fails here: the dispatch loop stops the program at its next op.
+    #[inline]
+    pub fn charge(self, bytes: usize) {
+        self.state.mem.charge(bytes);
+    }
+
+    /// Count `ops` against the running entry's op budget — for a native that runs work the
+    /// dispatch loop can't see (a nested Vm). Taken off at the next op; an entry whose budget
+    /// it exhausts fails with `RtErr::OutOfFuel` there.
+    #[inline]
+    pub fn charge_ops(self, ops: u64) {
+        self.state.mem.charge_ops(ops);
+    }
+
+    /// Fail before allocating one string or array of `bytes` that is bigger than the budget allows
+    /// for a single value. Use it where a size comes from a script integer.
+    pub fn check_alloc(self, bytes: usize) -> RtResult<()> {
+        let limit = crate::mem::max_object_bytes(self.state.mem.limit.get());
+        if bytes > limit {
+            Err(RtErr::TooLarge { limit })
+        } else {
+            Ok(())
+        }
+    }
+
+    /// [`check_alloc`](Self::check_alloc) for `count` items of `size` bytes each.
+    pub fn check_alloc_n(self, count: usize, size: usize) -> RtResult<()> {
+        self.check_alloc(count.checked_mul(size).unwrap_or(usize::MAX))
     }
 
     /// Fetch the per-Vm fixture of type `T`, creating it on first access -- see the
@@ -136,19 +262,155 @@ impl<'gc> Ctx<'gc> {
         self.state.fixtures.get::<T>()
     }
 
+    /// Emit a non-fatal diagnostic at the current call site: the host gets a
+    /// `(call site, text)` pair through [`Prints`](crate::fixtures::Prints)
+    /// (same pipeline as `print` popovers, tagged `Warn`), and `warning: …`
+    /// reaches the `Out` sink too. Repeated reports of the same message from
+    /// the same site are suppressed, so a warn inside a per-frame loop is safe.
+    pub fn warn(self, msg: &str) {
+        use crate::fixtures::{DebugInfo, Out, Prints};
+        let fresh = match self.fixture::<DebugInfo>().top_loc() {
+            Some(loc) => self.fixture::<Prints>().push_warn(loc, msg.to_string()),
+            // no call-site loc (native driven from outside a run) — can't
+            // dedupe, so let it through
+            None => true,
+        };
+        if fresh {
+            self.fixture::<Out>().write(&format!("warning: {msg}"));
+        }
+    }
+
     pub fn thread(self) -> Thread<'gc> {
         self.state.thread
     }
 
+    /// Hand a value to the host. The returned handle has no `'gc` of its own, so it can be held
+    /// across collections and later read back with [`Ctx::fetch`] or called with
+    /// [`Vm::call_value`](crate::Vm::call_value). It keeps the value -- and, for a closure,
+    /// everything it captured -- alive for as long as it lives.
+    pub fn stash(self, value: Val<'gc>) -> Stashed {
+        let rooted = Gc::new(self.mutation, value);
+        Stashed(
+            self.state
+                .roots
+                .get()
+                .stash::<Rootable![Val<'_>]>(self.mutation, rooted),
+        )
+    }
+
+    /// Read a [`Stashed`] value back. Panics if the handle isn't one this Vm can still honor --
+    /// either it was stashed into a different Vm, or the program it was taken against has since
+    /// been replaced by [`Vm::load_program`](crate::Vm::load_program). Check
+    /// [`holds`](Self::holds) first when the handle's provenance isn't certain.
+    pub fn fetch(self, stashed: &Stashed) -> Val<'gc> {
+        match self.state.roots.get().try_fetch(&stashed.0) {
+            Ok(value) => *value,
+            // gc-arena's own panic just says "mismatched root set", which doesn't hint at the
+            // reload -- by far the likelier of the two ways to get here
+            Err(_) => panic!(
+                "stashed handle doesn't belong to this Vm's loaded program: it was stashed into \
+                 another Vm, or taken against a program that has since been replaced"
+            ),
+        }
+    }
+
+    /// Whether [`fetch`](Self::fetch) would still honor `stashed`. False for a handle from another
+    /// Vm, and for one taken against a program that has since been replaced.
+    pub fn holds(self, stashed: &Stashed) -> bool {
+        self.state.roots.get().contains(&stashed.0)
+    }
+
+    /// Drop every root, invalidating all outstanding [`Stashed`] handles. A handle names a body in
+    /// the program it was taken against, which means something else entirely in the next one, so
+    /// loading a program resets the set rather than letting stale handles index into it.
+    pub(crate) fn reset_roots(self) {
+        self.state
+            .roots
+            .set(self.mutation, DynamicRootSet::new(self.mutation));
+    }
+
+    /// The signature of a script fn or closure `body`. `None` for a body with no fn type of its
+    /// own. Given a function value rather than a `BodyId`, reach for [`Val::signature`] instead.
+    pub fn signature(self, body: BodyId) -> Option<Ref<'gc, FnHeader>> {
+        let table = self.fixture::<Signatures>().0.borrow();
+        Ref::filter_map(table, |table| table.get(body)?.as_ref().map(|f| &f.header)).ok()
+    }
+
+    /// The binding for a Rust type registered with `add_adt`, by its `TypeId`. It's borrowed, so
+    /// don't hold onto it.
+    pub fn binding(self, type_id: TypeId) -> Option<Ref<'gc, AdtBinding>> {
+        Ref::filter_map(self.state.mimas_bindings.borrow(), |bindings| {
+            bindings.0.get(&type_id)
+        })
+        .ok()
+    }
+
     pub fn new_array(self, items: Vec<Val<'gc>>) -> Array<'gc> {
-        Array(Gc::new(self.mutation, RefLock::new(items)))
+        self.charge(crate::mem::BOX_BYTES + items.capacity() * std::mem::size_of::<Val>());
+        Array(Gc::new(self.mutation, RefLock::new(items.into())))
+    }
+
+    /// The `[]` op's result: an empty sequence in `ArrayStore::Empty`, which
+    /// picks `Ints`/`Floats`/`Vals` from its first pushed element. Semantically
+    /// indistinguishable from an empty `Val::Array` (`[] == []`, prints `[]`),
+    /// but the hot `arr = []; for .. arr.push(i)` loop never allocates per
+    /// element's 16-byte tag.
+    pub fn new_seq(self) -> Val<'gc> {
+        self.charge(crate::mem::BOX_BYTES);
+        Val::IntArray(Seq(Gc::new(self.mutation, RefLock::new(ArrayStore::Empty))))
+    }
+
+    /// Wrap `items` in the cheapest sequence shape that holds them: all-`Int`
+    /// becomes `IntArray(Ints)`, all-`Float` becomes `FloatArray(Floats)`, and
+    /// anything else stays an ordinary `Val::Array`. (Promotion only ever
+    /// happens at construction — see [`ArrayStore`].)
+    pub fn array_val(self, items: Vec<Val<'gc>>) -> Val<'gc> {
+        if items.iter().all(|v| matches!(v, Val::Int(_))) {
+            let ints = items
+                .into_iter()
+                .map(|v| match v {
+                    Val::Int(i) => i,
+                    _ => unreachable!(),
+                })
+                .collect();
+            Val::IntArray(self.new_int_array(ints))
+        } else if items.iter().all(|v| matches!(v, Val::Float(_))) {
+            let floats = items
+                .into_iter()
+                .map(|v| match v {
+                    Val::Float(f) => f,
+                    _ => unreachable!(),
+                })
+                .collect();
+            Val::FloatArray(self.new_float_array(floats))
+        } else {
+            Val::Array(self.new_array(items))
+        }
+    }
+
+    pub fn new_int_array(self, items: Vec<i64>) -> IntArray<'gc> {
+        self.charge(crate::mem::BOX_BYTES + items.capacity() * 8);
+        Seq(Gc::new(
+            self.mutation,
+            RefLock::new(ArrayStore::Ints(items)),
+        ))
+    }
+
+    pub fn new_float_array(self, items: Vec<f64>) -> FloatArray<'gc> {
+        self.charge(crate::mem::BOX_BYTES + items.capacity() * 8);
+        Seq(Gc::new(
+            self.mutation,
+            RefLock::new(ArrayStore::Floats(items)),
+        ))
     }
 
     pub fn new_dict(self, items: DictMap<'gc>) -> Dict<'gc> {
+        self.charge(crate::mem::BOX_BYTES + items.heap_bytes());
         Dict(Gc::new(self.mutation, RefLock::new(items)))
     }
 
     pub fn new_instance(self, struct_id: u32, fields: Fields<'gc>) -> Instance<'gc> {
+        self.charge(crate::mem::BOX_BYTES + fields.heap_bytes());
         Instance(Gc::new(
             self.mutation,
             RefLock::new(InstanceData { struct_id, fields }),
@@ -156,7 +418,33 @@ impl<'gc> Ctx<'gc> {
     }
 
     pub fn new_closure(self, function: BodyId, captures: Vec<Val<'gc>>) -> Closure<'gc> {
+        self.charge(crate::mem::BOX_BYTES + captures.capacity() * std::mem::size_of::<Val>());
         Closure(Gc::new(self.mutation, ClosureData { function, captures }))
+    }
+
+    #[cfg(feature = "dataframe")]
+    pub fn new_dataframe(self, df: polars::frame::DataFrame) -> crate::val::DataFrame<'gc> {
+        crate::val::DataFrame(Gc::new(self.mutation, RefLock::new(gc_arena::Static(df))))
+    }
+
+    #[cfg(feature = "dataframe")]
+    pub fn new_plexpr(self, expr: polars::prelude::Expr) -> crate::val::PlExpr<'gc> {
+        crate::val::PlExpr(Gc::new(self.mutation, gc_arena::Static(expr)))
+    }
+
+    #[cfg(feature = "dataframe")]
+    pub fn new_group_by(self, gb: polars::prelude::LazyGroupBy) -> crate::val::GroupBy<'gc> {
+        crate::val::GroupBy(Gc::new(self.mutation, gc_arena::Static(gb)))
+    }
+
+    #[cfg(feature = "darkly")]
+    pub fn new_darkly_image(self, image: crate::val::RawImage) -> crate::val::DarklyImage<'gc> {
+        crate::val::DarklyImage(Gc::new(self.mutation, gc_arena::Static(image)))
+    }
+
+    #[cfg(feature = "tensor")]
+    pub fn new_tensor(self, t: crate::tensor::Prim) -> crate::val::Tensor<'gc> {
+        crate::val::Tensor(Gc::new(self.mutation, gc_arena::Static(t)))
     }
 
     // fresh allocation per container so the result shares no mutable state with `value`. scalars,
@@ -169,6 +457,24 @@ impl<'gc> Ctx<'gc> {
                     a.0.borrow().iter().map(|&v| self.deep_clone(v)).collect();
                 Val::Array(self.new_array(items))
             }
+            // clone keeps the backing kind: a typed array deep-clones into a
+            // fresh typed array (demoted `Vals` stores re-box through
+            // `array_val`, re-promoting if the contents happen to be
+            // homogeneous again — invisible either way).
+            Val::IntArray(a) | Val::FloatArray(a) => match &*a.0.borrow() {
+                ArrayStore::Empty => self.new_seq(),
+                ArrayStore::Ints(v) => Val::IntArray(self.new_int_array(v.clone())),
+                ArrayStore::Floats(v) => Val::FloatArray(self.new_float_array(v.clone())),
+                ArrayStore::Vals(inner) => {
+                    let items: Vec<Val<'gc>> = inner
+                        .0
+                        .borrow()
+                        .iter()
+                        .map(|&v| self.deep_clone(v))
+                        .collect();
+                    self.array_val(items)
+                }
+            },
             Val::Dict(d) => {
                 let items: DictMap<'gc> =
                     d.0.borrow()
@@ -192,30 +498,73 @@ impl<'gc> Ctx<'gc> {
 
     /// Render a value being *shown* -- strings are quoted (`"x"`). Use this for anything
     /// inspection-shaped: dbg output, test harnesses, error reports.
-    pub fn display(self, value: Val<'gc>) -> String {
+    ///
+    /// Fails with [`RtErr::DisplayTooDeep`] if `value` nests (or cycles through arrays,
+    /// dicts, or instances) past [`MAX_DISPLAY_DEPTH`] -- see that constant's docs.
+    pub fn display(self, value: Val<'gc>) -> RtResult<String> {
         let mut out = String::new();
-        self.render_into(&mut out, value, true);
-        out
+        self.render_into(&mut out, value, true, 0, &mut Vec::new())?;
+        Ok(out)
     }
 
     /// Render a value as *text* -- a string yields its own contents, unquoted. This is what
     /// f-strings and `print` use; every non-string renders the same as [Ctx::display].
-    pub fn to_string(self, value: Val<'gc>) -> String {
+    pub fn to_string(self, value: Val<'gc>) -> RtResult<String> {
         let mut out = String::new();
-        self.render_into(&mut out, value, false);
-        out
+        self.render_into(&mut out, value, false, 0, &mut Vec::new())?;
+        Ok(out)
     }
 
     /// [Ctx::to_string], appending into an existing buffer (the f-string builder).
-    pub fn to_string_into(self, out: &mut String, value: Val<'gc>) {
-        self.render_into(out, value, false);
+    pub fn to_string_into(self, out: &mut String, value: Val<'gc>) -> RtResult<()> {
+        self.render_into(out, value, false, 0, &mut Vec::new())
     }
 
-    fn render_into(self, out: &mut String, value: Val<'gc>, quote: bool) {
+    /// `path` holds the containers being rendered around `value`: meeting one again is a
+    /// reference cycle, which fails at once rather than recursing to [`MAX_DISPLAY_DEPTH`]
+    /// (deep enough to overflow a small host stack -- a wasm tab hovering a `prev` link).
+    fn render_into(
+        self,
+        out: &mut String,
+        value: Val<'gc>,
+        quote: bool,
+        depth: usize,
+        path: &mut Vec<*const ()>,
+    ) -> RtResult<()> {
+        let ptr = match value {
+            Val::Array(a) => Some(Gc::as_ptr(a.0) as *const ()),
+            Val::IntArray(a) | Val::FloatArray(a) => Some(Gc::as_ptr(a.0) as *const ()),
+            Val::Dict(d) => Some(Gc::as_ptr(d.0) as *const ()),
+            Val::Instance(i) => Some(Gc::as_ptr(i.0) as *const ()),
+            _ => None,
+        };
+        let Some(ptr) = ptr else {
+            return self.render_node(out, value, quote, depth, path);
+        };
+        if path.contains(&ptr) {
+            return Err(RtErr::DisplayTooDeep);
+        }
+        path.push(ptr);
+        let r = self.render_node(out, value, quote, depth, path);
+        path.pop();
+        r
+    }
+
+    fn render_node(
+        self,
+        out: &mut String,
+        value: Val<'gc>,
+        quote: bool,
+        depth: usize,
+        path: &mut Vec<*const ()>,
+    ) -> RtResult<()> {
+        if depth > MAX_DISPLAY_DEPTH {
+            return Err(RtErr::DisplayTooDeep);
+        }
         match value {
             Val::Null => out.push_str("null"),
             Val::Bool(b) => out.push_str(if b { "true" } else { "false" }),
-            // — alloc
+            // -- alloc
             Val::Int(i) => out.push_str(itoa::Buffer::new().format(i)),
             Val::Float(f) => {
                 let _ = write!(out, "{f}");
@@ -235,19 +584,35 @@ impl<'gc> Ctx<'gc> {
                     if i > 0 {
                         out.push_str(", ");
                     }
-                    self.render_into(out, v, true);
+                    self.render_into(out, v, true, depth + 1, path)?;
+                }
+                out.push(']');
+            }
+            // identical rendering to `Val::Array` — `[1, 2]` is `[1, 2]`
+            // however it's backed. Elements box out one at a time so the
+            // borrow drops before the recursive render.
+            Val::IntArray(a) | Val::FloatArray(a) => {
+                let n = a.0.borrow().len();
+                out.push('[');
+                for i in 0..n {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    let v = a.0.borrow().at(i);
+                    self.render_into(out, v, true, depth + 1, path)?;
                 }
                 out.push(']');
             }
             Val::Dict(d) => {
-                // todo: this is still allocing
-                let entries =
-                    d.0.borrow()
-                        .iter()
-                        .map(|(k, v)| format!("{} = {}", k.as_str(), self.display(*v)))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                let _ = write!(out, "~{{{entries}}}");
+                out.push_str("~{");
+                for (i, (k, v)) in d.0.borrow().iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    let _ = write!(out, "{} = ", k.as_str());
+                    self.render_into(out, *v, true, depth + 1, path)?;
+                }
+                out.push('}');
             }
             Val::Fn(b) => {
                 let _ = write!(out, "<fn @{}>", b.index());
@@ -265,23 +630,62 @@ impl<'gc> Ctx<'gc> {
             }
             Val::Instance(i) => {
                 let inst = i.0.borrow();
-                let entries = inst
-                    .fields
-                    .iter()
-                    .copied()
-                    .map(|v| self.display(v))
-                    .collect::<Vec<_>>()
-                    .join(", ");
                 let names = self.state.struct_names.borrow();
                 match names.get(inst.struct_id as usize) {
-                    Some(name) => {
-                        let _ = write!(out, "{name} {{ {entries} }}");
-                    }
+                    Some(name) => out.push_str(name),
                     None => {
-                        let _ = write!(out, "@{} {{ {} }}", inst.struct_id, entries);
+                        let _ = write!(out, "@{}", inst.struct_id);
                     }
                 }
+                out.push_str(" { ");
+                for (i, &v) in inst.fields.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    self.render_into(out, v, true, depth + 1, path)?;
+                }
+                out.push_str(" }");
+            }
+            #[cfg(feature = "dataframe")]
+            Val::DataFrame(d) => {
+                // polars' own Display (the "fmt" feature) -- a real formatted table, not just a
+                // shape summary.
+                let _ = write!(out, "{}", d.0.borrow().0);
+            }
+            #[cfg(feature = "dataframe")]
+            Val::PlExpr(e) => {
+                let _ = write!(out, "{}", e.0.0);
+            }
+            // LazyGroupBy has no Display of its own (it's an uncollected plan, nothing to show
+            // rows/columns for) -- same placeholder style as Closure's `<closure @..>`.
+            #[cfg(feature = "dataframe")]
+            Val::GroupBy(_) => out.push_str("<group_by>"),
+            // raw pixel bytes have no meaningful text rendering -- dims are the useful summary.
+            #[cfg(feature = "darkly")]
+            Val::DarklyImage(img) => {
+                let _ = write!(out, "<image {}x{}>", img.0.0.width, img.0.0.height);
+            }
+            #[cfg(feature = "tensor")]
+            Val::Tensor(t) => {
+                let _ = write!(out, "{}", crate::tensor::render(&t.0.0));
             }
         }
+        Ok(())
     }
 }
+
+/// A [`Val`] the host is holding onto, from [`Ctx::stash`]. Dropping it lets the value be
+/// collected again.
+///
+/// A handle belongs to the program it was taken against. Loading another one invalidates every
+/// outstanding handle, and fetching or calling a stale one fails rather than reaching into
+/// whatever the new program happens to have at that body.
+pub struct Stashed(DynamicRoot<Rootable![Val<'_>]>);
+
+/// The loaded program's per-body signatures, shared between the Vm and any native that gets handed
+/// a function value. A per-Vm fixture, so a native can reach it from a [`Ctx`] alone.
+///
+/// The Vm holds the same `Rc`, and both are written only by `Vm::install_signatures` -- reading a
+/// table here that the Vm has moved on from would mean natives reporting the wrong signatures.
+#[derive(Default)]
+pub(crate) struct Signatures(pub RefCell<Rc<IdVec<BodyId, Option<Function>>>>);

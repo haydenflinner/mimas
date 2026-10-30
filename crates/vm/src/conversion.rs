@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use api::Registry;
-use shared::Ty;
+use shared::{FnHeader, FnParam, Ty, units::Dim};
 
 use crate::{Array, Ctx, Dict, DictMap, Instance, RtErr, RtResult, Str, Val};
 
@@ -19,6 +19,11 @@ impl From<TypeError> for RtErr {
 
 pub trait MimasType<'gc>: Sized {
     fn mimas_ty(reg: &Registry) -> Option<Ty>;
+    /// The dimension the checker should track for this slot, when the type stands for a
+    /// measured quantity (`Secs` -> `s`). `None` means unchecked, the same as before.
+    fn mimas_dim(_: &Registry) -> Option<Dim> {
+        None
+    }
     fn from_value(ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError>;
     fn into_value(self, ctx: Ctx<'gc>) -> Val<'gc>;
 }
@@ -28,6 +33,11 @@ pub trait MimasType<'gc>: Sized {
 /// this trait so users don't need to pick a different registration path just to be able to fail.
 pub trait IntoNativeResult<'gc> {
     fn return_ty(reg: &Registry) -> Option<Ty>;
+    /// The dimension the return value carries, when it stands for a measured quantity.
+    fn return_dim(reg: &Registry) -> Option<Dim> {
+        let _ = reg;
+        None
+    }
     fn into_native_result(self, ctx: Ctx<'gc>) -> RtResult<Val<'gc>>;
 }
 
@@ -37,6 +47,9 @@ where
 {
     fn return_ty(reg: &Registry) -> Option<Ty> {
         <T as MimasType<'gc>>::mimas_ty(reg)
+    }
+    fn return_dim(reg: &Registry) -> Option<Dim> {
+        <T as MimasType<'gc>>::mimas_dim(reg)
     }
     fn into_native_result(self, ctx: Ctx<'gc>) -> RtResult<Val<'gc>> {
         Ok(self.into_value(ctx))
@@ -50,6 +63,9 @@ where
 {
     fn return_ty(reg: &Registry) -> Option<Ty> {
         <T as MimasType<'gc>>::mimas_ty(reg)
+    }
+    fn return_dim(reg: &Registry) -> Option<Dim> {
+        <T as MimasType<'gc>>::mimas_dim(reg)
     }
     fn into_native_result(self, ctx: Ctx<'gc>) -> RtResult<Val<'gc>> {
         self.map(|v| v.into_value(ctx)).map_err(Into::into)
@@ -181,10 +197,13 @@ impl<'gc> MimasType<'gc> for &'gc str {
 
 impl<'gc> MimasType<'gc> for Array<'gc> {
     fn mimas_ty(_: &Registry) -> Option<Ty> {
-        Some(Ty::Array(Box::new(Ty::Anon(0))))
+        Some(Ty::array(Ty::Anon(0)))
     }
-    fn from_value(_ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError> {
-        v.as_array().ok_or_else(|| ty_error("array", v))
+    fn from_value(ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError> {
+        // `as_untyped_array` demotes a typed array in place and hands back its
+        // inner `Array`, so a mutating native writes through to the same
+        // elements the script's `IntArray`/`FloatArray` still points at.
+        v.as_untyped_array(ctx).ok_or_else(|| ty_error("array", v))
     }
     fn into_value(self, _ctx: Ctx<'gc>) -> Val<'gc> {
         Val::Array(self)
@@ -203,6 +222,184 @@ impl<'gc> MimasType<'gc> for Dict<'gc> {
     }
 }
 
+// ----- DataFrame / PlExpr -----------------------------------------------------------------------
+//
+// Unlike a `#[mimas] struct`, these are real `Val` variants (see `val::DataFrame`/`val::PlExpr`),
+// not `Val::Instance`s decomposed field-by-field -- there's no way to fit an opaque, `Arc`-backed
+// `polars::frame::DataFrame` through `Val`'s closed set of field types otherwise. But the type
+// checker still wants a `Ty::Adt(AdtId)` to hang parameter/return types off of, so these two
+// lifetime-free marker types exist purely to be `add_adt`'d (by `library::std_lib::dataframe`) and
+// hand out an `AdtId` -- they carry no data of their own and are never constructed.
+#[cfg(feature = "dataframe")]
+pub struct DataFrameTy;
+#[cfg(feature = "dataframe")]
+impl crate::adt::MimasAdt for DataFrameTy {
+    fn descriptor(_reg: &Registry) -> crate::adt::ApiAdtDescriptor {
+        crate::adt::ApiAdtDescriptor {
+            name: "DataFrame",
+            module: &["std", "polars"],
+            kind: api::ApiAdtKind::Struct,
+            doc: "A polars DataFrame -- a column-oriented, `Arc`-backed table.",
+            variants: vec![crate::adt::ApiVariantShape {
+                name: "DataFrame".into(),
+                doc: "",
+                fields: api::ApiVariantFields::Unit,
+            }],
+        }
+    }
+}
+
+#[cfg(feature = "dataframe")]
+pub struct PlExprTy;
+#[cfg(feature = "dataframe")]
+impl crate::adt::MimasAdt for PlExprTy {
+    fn descriptor(_reg: &Registry) -> crate::adt::ApiAdtDescriptor {
+        crate::adt::ApiAdtDescriptor {
+            name: "PlExpr",
+            module: &["std", "polars"],
+            kind: api::ApiAdtKind::Struct,
+            doc: "A polars expression tree, e.g. `col(\"age\") > 30`.",
+            variants: vec![crate::adt::ApiVariantShape {
+                name: "PlExpr".into(),
+                doc: "",
+                fields: api::ApiVariantFields::Unit,
+            }],
+        }
+    }
+}
+
+#[cfg(feature = "dataframe")]
+impl<'gc> MimasType<'gc> for crate::val::DataFrame<'gc> {
+    fn mimas_ty(reg: &Registry) -> Option<Ty> {
+        Some(Ty::adt(reg.get::<DataFrameTy>()?.adt_id))
+    }
+    fn from_value(_ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError> {
+        v.as_dataframe().ok_or_else(|| ty_error("DataFrame", v))
+    }
+    fn into_value(self, _ctx: Ctx<'gc>) -> Val<'gc> {
+        Val::DataFrame(self)
+    }
+}
+
+#[cfg(feature = "dataframe")]
+impl<'gc> MimasType<'gc> for crate::val::PlExpr<'gc> {
+    fn mimas_ty(reg: &Registry) -> Option<Ty> {
+        Some(Ty::adt(reg.get::<PlExprTy>()?.adt_id))
+    }
+    fn from_value(_ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError> {
+        v.as_plexpr().ok_or_else(|| ty_error("PlExpr", v))
+    }
+    fn into_value(self, _ctx: Ctx<'gc>) -> Val<'gc> {
+        Val::PlExpr(self)
+    }
+}
+
+#[cfg(feature = "dataframe")]
+pub struct GroupByTy;
+#[cfg(feature = "dataframe")]
+impl crate::adt::MimasAdt for GroupByTy {
+    fn descriptor(_reg: &Registry) -> crate::adt::ApiAdtDescriptor {
+        crate::adt::ApiAdtDescriptor {
+            name: "GroupBy",
+            module: &["std", "polars"],
+            kind: api::ApiAdtKind::Struct,
+            doc: "The result of `DataFrame::group_by`, before `.agg([..])`.",
+            variants: vec![crate::adt::ApiVariantShape {
+                name: "GroupBy".into(),
+                doc: "",
+                fields: api::ApiVariantFields::Unit,
+            }],
+        }
+    }
+}
+
+#[cfg(feature = "dataframe")]
+impl<'gc> MimasType<'gc> for crate::val::GroupBy<'gc> {
+    fn mimas_ty(reg: &Registry) -> Option<Ty> {
+        Some(Ty::adt(reg.get::<GroupByTy>()?.adt_id))
+    }
+    fn from_value(_ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError> {
+        v.as_group_by().ok_or_else(|| ty_error("GroupBy", v))
+    }
+    fn into_value(self, _ctx: Ctx<'gc>) -> Val<'gc> {
+        Val::GroupBy(self)
+    }
+}
+
+// ----- Tensor ------------------------------------------------------------------------------
+//
+// Same shape as `DataFrameTy`: the payload lives in a real `Val` variant (`val::Tensor`), and
+// this marker exists purely to be `add_adt`'d so `Tensor` works in mimas annotations.
+#[cfg(feature = "tensor")]
+pub struct TensorTy;
+#[cfg(feature = "tensor")]
+impl crate::adt::MimasAdt for TensorTy {
+    fn descriptor(_reg: &Registry) -> crate::adt::ApiAdtDescriptor {
+        crate::adt::ApiAdtDescriptor {
+            name: "Tensor",
+            module: &["std", "tensor"],
+            kind: api::ApiAdtKind::Struct,
+            doc: "An N-D `f32` tensor on the Burn NdArray backend (std::tensor).",
+            variants: vec![crate::adt::ApiVariantShape {
+                name: "Tensor".into(),
+                doc: "",
+                fields: api::ApiVariantFields::Unit,
+            }],
+        }
+    }
+}
+
+#[cfg(feature = "tensor")]
+impl<'gc> MimasType<'gc> for crate::val::Tensor<'gc> {
+    fn mimas_ty(reg: &Registry) -> Option<Ty> {
+        Some(Ty::adt(reg.get::<TensorTy>()?.adt_id))
+    }
+    fn from_value(_ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError> {
+        v.as_tensor().ok_or_else(|| ty_error("Tensor", v))
+    }
+    fn into_value(self, _ctx: Ctx<'gc>) -> Val<'gc> {
+        Val::Tensor(self)
+    }
+}
+
+// ----- DarklyImage -------------------------------------------------------------------------
+//
+// Same reasoning as DataFrame/PlExpr above: a decoded pixel buffer doesn't fit Val's closed set
+// of field types, so it's a real Val variant with a marker adt to hang a Ty off of, not a
+// `#[mimas] struct`.
+#[cfg(feature = "darkly")]
+pub struct DarklyImageTy;
+#[cfg(feature = "darkly")]
+impl crate::adt::MimasAdt for DarklyImageTy {
+    fn descriptor(_reg: &Registry) -> crate::adt::ApiAdtDescriptor {
+        crate::adt::ApiAdtDescriptor {
+            name: "DarklyImage",
+            module: &["std", "darkly"],
+            kind: api::ApiAdtKind::Struct,
+            doc: "Decoded pixel bytes from a `.darkly` raster/mask layer.",
+            variants: vec![crate::adt::ApiVariantShape {
+                name: "DarklyImage".into(),
+                doc: "",
+                fields: api::ApiVariantFields::Unit,
+            }],
+        }
+    }
+}
+
+#[cfg(feature = "darkly")]
+impl<'gc> MimasType<'gc> for crate::val::DarklyImage<'gc> {
+    fn mimas_ty(reg: &Registry) -> Option<Ty> {
+        Some(Ty::adt(reg.get::<DarklyImageTy>()?.adt_id))
+    }
+    fn from_value(_ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError> {
+        v.as_darkly_image()
+            .ok_or_else(|| ty_error("DarklyImage", v))
+    }
+    fn into_value(self, _ctx: Ctx<'gc>) -> Val<'gc> {
+        Val::DarklyImage(self)
+    }
+}
+
 impl<'gc> MimasType<'gc> for Instance<'gc> {
     fn mimas_ty(_: &Registry) -> Option<Ty> {
         None
@@ -218,6 +415,9 @@ impl<'gc> MimasType<'gc> for Instance<'gc> {
 impl<'gc, T: MimasType<'gc>> MimasType<'gc> for Option<T> {
     fn mimas_ty(reg: &Registry) -> Option<Ty> {
         T::mimas_ty(reg).map(|i| Ty::Option(Box::new(i)))
+    }
+    fn mimas_dim(reg: &Registry) -> Option<Dim> {
+        T::mimas_dim(reg)
     }
     fn from_value(ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError> {
         if v == Val::Null {
@@ -252,6 +452,9 @@ impl<'gc, T: MimasType<'gc>> MimasType<'gc> for Raisable<T> {
     fn mimas_ty(reg: &Registry) -> Option<Ty> {
         T::mimas_ty(reg).map(|i| Ty::Result(Box::new(i)))
     }
+    fn mimas_dim(reg: &Registry) -> Option<Dim> {
+        T::mimas_dim(reg)
+    }
     fn from_value(ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError> {
         match v {
             Val::Raised(s) => Ok(Raisable::Raised(s.as_str().to_string())),
@@ -272,16 +475,18 @@ impl<'gc, T: MimasType<'gc>> MimasType<'gc> for Raisable<T> {
 
 impl<'gc, T: MimasType<'gc>> MimasType<'gc> for Vec<T> {
     fn mimas_ty(reg: &Registry) -> Option<Ty> {
-        T::mimas_ty(reg).map(|i| Ty::Array(Box::new(i)))
+        T::mimas_ty(reg).map(|i| Ty::array(i))
     }
     fn from_value(ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError> {
-        let arr = v.as_array().ok_or_else(|| ty_error("array", v))?;
+        let arr = v
+            .as_untyped_array(ctx)
+            .ok_or_else(|| ty_error("array", v))?;
         let items: Vec<Val<'gc>> = arr.0.borrow().iter().copied().collect();
         items.into_iter().map(|v| T::from_value(ctx, v)).collect()
     }
     fn into_value(self, ctx: Ctx<'gc>) -> Val<'gc> {
         let out: Vec<Val<'gc>> = self.into_iter().map(|v| v.into_value(ctx)).collect();
-        Val::Array(ctx.new_array(out))
+        ctx.array_val(out)
     }
 }
 
@@ -324,10 +529,10 @@ impl<'gc, const N: u32> MimasType<'gc> for crate::anon::Anon<'gc, N> {
 
 impl<'gc, const N: u32> MimasType<'gc> for crate::anon::ArrayOf<'gc, N> {
     fn mimas_ty(_: &Registry) -> Option<Ty> {
-        Some(Ty::Array(Box::new(Ty::Anon(N))))
+        Some(Ty::array(Ty::Anon(N)))
     }
-    fn from_value(_ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError> {
-        v.as_array()
+    fn from_value(ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError> {
+        v.as_untyped_array(ctx)
             .map(crate::anon::ArrayOf)
             .ok_or_else(|| ty_error("array", v))
     }
@@ -350,6 +555,72 @@ impl<'gc, const N: u32> MimasType<'gc> for crate::anon::DictOf<'gc, N> {
     }
 }
 
+impl<'gc, A: MimasType<'gc>, R: MimasType<'gc>> MimasType<'gc> for crate::anon::Fn1<'gc, A, R> {
+    fn mimas_ty(reg: &Registry) -> Option<Ty> {
+        Some(Ty::Fn(FnHeader::new(
+            vec![FnParam::new(None, A::mimas_ty(reg)?, false)],
+            R::mimas_ty(reg)?,
+            false,
+        )))
+    }
+    fn from_value(_ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError> {
+        Ok(crate::anon::Fn1(v, std::marker::PhantomData))
+    }
+    fn into_value(self, _ctx: Ctx<'gc>) -> Val<'gc> {
+        self.0
+    }
+}
+
+impl<'gc, A, B, R> MimasType<'gc> for crate::anon::Fn2<'gc, A, B, R>
+where
+    A: MimasType<'gc>,
+    B: MimasType<'gc>,
+    R: MimasType<'gc>,
+{
+    fn mimas_ty(reg: &Registry) -> Option<Ty> {
+        Some(Ty::Fn(FnHeader::new(
+            vec![
+                FnParam::new(None, A::mimas_ty(reg)?, false),
+                FnParam::new(None, B::mimas_ty(reg)?, false),
+            ],
+            R::mimas_ty(reg)?,
+            false,
+        )))
+    }
+    fn from_value(_ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError> {
+        Ok(crate::anon::Fn2(v, std::marker::PhantomData))
+    }
+    fn into_value(self, _ctx: Ctx<'gc>) -> Val<'gc> {
+        self.0
+    }
+}
+
+impl<'gc, A, B, C, R> MimasType<'gc> for crate::anon::Fn3<'gc, A, B, C, R>
+where
+    A: MimasType<'gc>,
+    B: MimasType<'gc>,
+    C: MimasType<'gc>,
+    R: MimasType<'gc>,
+{
+    fn mimas_ty(reg: &Registry) -> Option<Ty> {
+        Some(Ty::Fn(FnHeader::new(
+            vec![
+                FnParam::new(None, A::mimas_ty(reg)?, false),
+                FnParam::new(None, B::mimas_ty(reg)?, false),
+                FnParam::new(None, C::mimas_ty(reg)?, false),
+            ],
+            R::mimas_ty(reg)?,
+            false,
+        )))
+    }
+    fn from_value(_ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError> {
+        Ok(crate::anon::Fn3(v, std::marker::PhantomData))
+    }
+    fn into_value(self, _ctx: Ctx<'gc>) -> Val<'gc> {
+        self.0
+    }
+}
+
 macro_rules! impl_tuple {
     () => {};
     ($head:ident $(, $tail:ident)*) => {
@@ -366,7 +637,9 @@ macro_rules! impl_tuple {
             }
             #[allow(non_snake_case)]
             fn from_value(ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError> {
-                let arr = v.as_array().ok_or_else(|| ty_error("tuple", v))?;
+                let arr = v
+                    .as_untyped_array(ctx)
+                    .ok_or_else(|| ty_error("tuple", v))?;
                 let items: Vec<Val<'gc>> = arr.0.borrow().iter().copied().collect();
                 let mut it = items.into_iter();
                 let $head = <$head as MimasType<'gc>>::from_value(
@@ -388,7 +661,7 @@ macro_rules! impl_tuple {
                     <$head as MimasType<'gc>>::into_value($head, ctx),
                     $(<$tail as MimasType<'gc>>::into_value($tail, ctx),)*
                 ];
-                Val::Array(ctx.new_array(items))
+                ctx.array_val(items)
             }
         }
         impl_tuple!($($tail),*);
@@ -403,3 +676,75 @@ pub(crate) fn ty_error<'gc>(expected: &str, got: Val<'gc>) -> TypeError {
         got: format!("{got:?}"),
     }
 }
+
+/// One argument of a host call: any [`MimasType`], plus `&str`, which is only a `MimasType` for
+/// the arena's own lifetime.
+pub trait Arg {
+    fn arg_ty(reg: &Registry) -> Option<Ty>;
+    fn into_arg<'gc>(self, ctx: Ctx<'gc>) -> Val<'gc>;
+}
+
+impl<T: for<'gc> MimasType<'gc>> Arg for T {
+    fn arg_ty(reg: &Registry) -> Option<Ty> {
+        T::mimas_ty(reg)
+    }
+
+    fn into_arg<'gc>(self, ctx: Ctx<'gc>) -> Val<'gc> {
+        self.into_value(ctx)
+    }
+}
+
+impl Arg for &str {
+    fn arg_ty(_: &Registry) -> Option<Ty> {
+        Some(Ty::Str)
+    }
+
+    fn into_arg<'gc>(self, ctx: Ctx<'gc>) -> Val<'gc> {
+        Val::Str(ctx.intern(self))
+    }
+}
+
+/// Passing back a value the host was handed earlier, which is the only way to reach one whose type
+/// only exists in the script -- a struct it declared, say.
+impl Arg for &crate::Stashed {
+    fn arg_ty(_: &Registry) -> Option<Ty> {
+        None
+    }
+
+    fn into_arg<'gc>(self, ctx: Ctx<'gc>) -> Val<'gc> {
+        ctx.fetch(self)
+    }
+}
+
+/// The arguments of a host call into a script, as a tuple of [`Arg`]s: `()`, `(a,)`, `(a, b)`,
+/// up to eight.
+pub trait Args {
+    fn tys(&self, reg: &Registry) -> Vec<Option<Ty>>;
+    fn into_values<'gc>(self, ctx: Ctx<'gc>) -> Vec<Val<'gc>>;
+}
+
+macro_rules! impl_args {
+    ($($t:ident),*) => {
+        impl<$($t: Arg),*> Args for ($($t,)*) {
+            fn tys(&self, _reg: &Registry) -> Vec<Option<Ty>> {
+                vec![$($t::arg_ty(_reg)),*]
+            }
+
+            #[allow(non_snake_case)]
+            fn into_values<'gc>(self, _ctx: Ctx<'gc>) -> Vec<Val<'gc>> {
+                let ($($t,)*) = self;
+                vec![$($t.into_arg(_ctx)),*]
+            }
+        }
+    };
+}
+
+impl_args!();
+impl_args!(A);
+impl_args!(A, B);
+impl_args!(A, B, C);
+impl_args!(A, B, C, D);
+impl_args!(A, B, C, D, E);
+impl_args!(A, B, C, D, E, F);
+impl_args!(A, B, C, D, E, F, G);
+impl_args!(A, B, C, D, E, F, G, H);

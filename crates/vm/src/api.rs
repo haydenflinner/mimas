@@ -1,15 +1,19 @@
+use std::{any::TypeId, rc::Rc};
+
 use api::{
     AdtBinding, ApiAdt, ApiAdtKind, ApiConstant, ApiFunction, ApiMethod, ApiVariant, Intrinsic,
-    Library, NativeId,
+    Library, NativeId, Registry,
 };
-use shared::{Literal, Ty};
+use compile::{BinOp, UnaryOp};
+use shared::{Fx, Literal, Ty};
 
 use crate::{
-    RtErr,
-    adt::MimasAdt,
+    RtErr, RtResult, Val,
+    adt::{ApiAdtDescriptor, MimasAdt},
     conversion::{IntoNativeResult, MimasType},
     heap::Ctx,
     native::{NativeRef, make_native},
+    val::InstanceOps,
 };
 
 /// A single native-registration request, emitted by the `#[mimas]` attribute macro and
@@ -37,22 +41,98 @@ impl MimasReg {
 
 inventory::collect!(MimasReg);
 
-/// A doc-comment harvested from a `#[native]` / `#[mimas]` item, submitted via [`inventory`] and
-/// keyed by the item's full Rust path (`concat!(module_path!(), "::", <ident>)`). The install path
-/// joins these onto the [`ApiFunction`]/[`ApiMethod`] it builds by matching the path against
+/// Metadata harvested from a `#[native]` / `#[mimas]` item -- its doc comment and the identifiers
+/// of its declared parameters -- submitted via [`inventory`] and keyed by the item's full Rust
+/// path (`concat!(module_path!(), "::", <ident>)`). The install path joins these onto the
+/// [`ApiFunction`]/[`ApiMethod`] it builds by matching the path against
 /// [`std::any::type_name_of_val`] of the registered fn, so the receiver/module -- known only at the
 /// `api.add_*` call site, not the macro -- never has to travel with the doc.
 ///
+/// `parameters` holds every declared parameter after `ctx`, including a method's receiver --
+/// consumers skip the leading slots their `parameters`/`param_dims` vecs don't cover.
+///
 /// Like every inventory registry this is subject to the link-pruning footgun (a submission in an
 /// unreferenced object file can be dropped under `codegen-units > 1`). That only affects the
-/// doc-generation build, which we own and can pin to `codegen-units = 1`; missing a doc degrades to
-/// an empty string, never a wrong signature.
-pub struct NativeDoc {
+/// doc-generation build, which we own and can pin to `codegen-units = 1`; missing metadata
+/// degrades to `arg{i}` names and an empty doc, never a wrong signature.
+pub struct NativeMeta {
     pub path: &'static str,
+    pub parameters: &'static [&'static str],
     pub doc: &'static str,
+    /// Indices into `parameters` (receiver counts) named by `#[consumes(...)]` --
+    /// the grades pass kills the binding passed to one of these slots.
+    pub consumes: &'static [usize],
+    /// `#[must_use]` on the item -- discarding the return warns.
+    pub must_use: bool,
 }
 
-inventory::collect!(NativeDoc);
+inventory::collect!(NativeMeta);
+
+/// Marks a parameter of a `#[native]` / `#[mimas]` fn as `&mut`, submitted via [`inventory`]
+/// and keyed by the item's full Rust path exactly like [`NativeMeta`]. `index` counts from the
+/// receiver: 0 is `self` (or the first param of a free fn), 1.. are the declared params.
+///
+/// Only `index == 0` is consumed today, joined onto [`ApiMethod::mutates_recv`] at
+/// `install_method` time so the solver can reject mutating a collection mid-`for`. Mutating
+/// *non-receiver* params (a `&mut` collection passed to a free fn) are recorded for the same
+/// check to grow into later.
+///
+/// Subject to the same link-pruning footgun as [`NativeMeta`]: a pruned submission degrades to
+/// `mutates_recv: false` -- it can only ever weaken the lint, never corrupt a signature.
+pub struct NativeMutates {
+    pub path: &'static str,
+    pub index: usize,
+}
+
+inventory::collect!(NativeMutates);
+
+/// A literal-call validator for a `#[native]` / `#[mimas]` fn, submitted via [`inventory`] and
+/// keyed by the item's full Rust path exactly like [`NativeMeta`]. When every call argument is a
+/// literal the solver runs `validate` on them: `Ok` proves the call can't raise so a `T!`
+/// return narrows to `T`; `Err(msg)` becomes a compile error. See [`api::LitValidator`].
+///
+/// Subject to the same link-pruning footgun as [`NativeMeta`]: a pruned submission degrades to
+/// `validate: None` -- the call just keeps its honest `T!`, never a wrong one.
+pub struct NativeValidator {
+    pub path: &'static str,
+    pub validate: api::LitValidator,
+}
+
+inventory::collect!(NativeValidator);
+
+/// A native's definition site (`file!()`/`line!()` at the item), submitted via [`inventory`]
+/// and keyed by the item's full Rust path exactly like [`NativeMeta`]. The install path joins
+/// it onto [`ApiFunction::src`]/[`ApiMethod::src`] so a host can link a built-in's symbol menu
+/// straight to its source.
+///
+/// Subject to the same link-pruning footgun as [`NativeMeta`]: a pruned submission degrades to
+/// `src: None` -- the menu just keeps its old "no source here" line.
+pub struct NativeSrc {
+    pub path: &'static str,
+    /// `file!()` at the def site -- relative to the workspace root the crate compiled under.
+    pub file: &'static str,
+    /// `env!("CARGO_MANIFEST_DIR")` of the defining crate -- locates which workspace `file` is
+    /// relative to.
+    pub manifest: &'static str,
+    pub line: u32,
+}
+
+inventory::collect!(NativeSrc);
+
+/// A native's declared side-effect footprint, submitted via [`inventory`] and keyed by the
+/// item's full Rust path exactly like [`NativeMutates`]. `#[effects(net, io)]` on a
+/// `#[native]`/`#[mimas]` fn emits this; the install path joins it onto
+/// [`ApiFunction::effects`]/[`ApiMethod::effects`]. `effects` packs [`shared::Fx`] bits.
+///
+/// Subject to the same link-pruning footgun as [`NativeMeta`]: a pruned submission degrades
+/// to `effects: None`, which inference reads as `Fx::unknown()` -- fails closed, never
+/// wrong.
+pub struct NativeEffects {
+    pub path: &'static str,
+    pub effects: u8,
+}
+
+inventory::collect!(NativeEffects);
 
 pub type NativeFnReg = for<'a, 'gc> fn(&mut Api<'a, 'gc>);
 
@@ -61,23 +141,131 @@ pub struct Api<'a, 'gc> {
     pub library: &'a mut Library<()>,
 }
 
-/// Look up the doc-comment for a native by its full Rust path (`type_name_of_val(&f)`). Empty when
-/// the item carried no `///` -- or when the submission was pruned (see [`NativeDoc`]).
-fn doc_for(path: &str) -> String {
-    inventory::iter::<NativeDoc>
+/// The inventory registries are static once the binary links, but each
+/// install asked them four linear questions per registered fn -- an
+/// O(n²) scan over every `#[mimas]` submission, repeated on every Vm
+/// spawn (a fuzz sweep spawns thousands). Index each registry once per
+/// process instead.
+static META_BY_PATH: std::sync::LazyLock<
+    std::collections::HashMap<&'static str, &'static NativeMeta>,
+> = std::sync::LazyLock::new(|| {
+    inventory::iter::<NativeMeta>
         .into_iter()
-        .find(|d| d.path == path)
-        .map(|d| d.doc.to_string())
-        .unwrap_or_default()
+        .map(|m| (m.path, m))
+        .collect()
+});
+static SRC_BY_PATH: std::sync::LazyLock<
+    std::collections::HashMap<&'static str, &'static NativeSrc>,
+> = std::sync::LazyLock::new(|| {
+    inventory::iter::<NativeSrc>
+        .into_iter()
+        .map(|s| (s.path, s))
+        .collect()
+});
+static MUTATES_RECV: std::sync::LazyLock<std::collections::HashSet<&'static str>> =
+    std::sync::LazyLock::new(|| {
+        inventory::iter::<NativeMutates>
+            .into_iter()
+            .filter(|m| m.index == 0)
+            .map(|m| m.path)
+            .collect()
+    });
+static VALIDATOR_BY_PATH: std::sync::LazyLock<
+    std::collections::HashMap<&'static str, api::LitValidator>,
+> = std::sync::LazyLock::new(|| {
+    inventory::iter::<NativeValidator>
+        .into_iter()
+        .map(|v| (v.path, v.validate))
+        .collect()
+});
+static EFFECTS_BY_PATH: std::sync::LazyLock<std::collections::HashMap<&'static str, Fx>> =
+    std::sync::LazyLock::new(|| {
+        inventory::iter::<NativeEffects>
+            .into_iter()
+            .map(|e| (e.path, Fx::from_bits_truncate(e.effects)))
+            .collect()
+    });
+
+/// Look up what `#[native]`/`#[mimas]` submitted for the fn at `path` (`type_name_of_val(&f)`)
+/// and pair `arity` slots with their declared names, dropping the `skip` leading ones the arity
+/// doesn't cover (a method's receiver). Missing or mismatched submissions degrade to `arg{i}`
+/// names and an empty doc (see [`NativeMeta`]).
+/// `#[native]` submits `module::name` from inside the fn body, but a method on
+/// `impl T` registers under `type_name`'s `module::T::name` -- on a miss, retry
+/// with the penultimate (impl-name) segment out.
+fn meta_entry(path: &str) -> Option<&'static NativeMeta> {
+    META_BY_PATH.get(path).copied().or_else(|| {
+        let (rest, last) = path.rsplit_once("::")?;
+        let (head, _) = rest.rsplit_once("::")?;
+        let stripped = format!("{head}::{last}");
+        META_BY_PATH.get(stripped.as_str()).copied()
+    })
+}
+
+fn meta_for(path: &str, skip: usize, arity: usize) -> (String, Vec<String>) {
+    let meta = meta_entry(path);
+    let names = meta
+        .and_then(|m| m.parameters.get(skip..))
+        .filter(|names| names.len() == arity);
+    let param_names = (0..arity)
+        .map(|i| names.map_or_else(|| format!("arg{i}"), |names| names[i].to_string()))
+        .collect();
+    let doc = meta.map(|m| m.doc.to_string()).unwrap_or_default();
+    (doc, param_names)
+}
+
+/// The def-site `(file, manifest, line)` submitted for `path` -- see [`NativeSrc`].
+fn src_for(path: &str) -> Option<api::NativeSrc> {
+    SRC_BY_PATH.get(path).map(|s| (s.file, s.manifest, s.line))
+}
+
+/// Whether `path` was submitted as mutating its receiver -- see [`NativeMutates`].
+fn mutates_recv(path: &str) -> bool {
+    MUTATES_RECV.contains(path)
+}
+
+/// The literal-call validator for `path` if one was submitted -- see [`NativeValidator`].
+fn validator_for(path: &str) -> Option<api::LitValidator> {
+    VALIDATOR_BY_PATH.get(path).copied()
+}
+
+/// The declared effect set for `path` if one was submitted -- see [`NativeEffects`]. `None`
+/// means unannotated: effect inference reads the call as `Fx::unknown()`.
+fn effects_for(path: &str) -> Option<Fx> {
+    EFFECTS_BY_PATH.get(path).copied()
+}
+
+/// `(consumes, consumes_recv, must_use)` for `path`: the `consumes` indices of
+/// [`NativeMeta`] re-based by `skip` onto the entry's `parameters` (indices
+/// under `skip` -- a method's receiver at 0 -- come back as `consumes_recv`).
+/// Missing meta degrades to all-false -- never a consume check that was never
+/// declared.
+fn grades_for(path: &str, skip: usize, arity: usize) -> (Vec<bool>, bool, bool) {
+    let Some(meta) = meta_entry(path) else {
+        return (vec![false; arity], false, false);
+    };
+    let mut consumes = vec![false; arity];
+    let mut consumes_recv = false;
+    for &i in meta.consumes {
+        match i.checked_sub(skip) {
+            Some(j) => {
+                if let Some(slot) = consumes.get_mut(j) {
+                    *slot = true;
+                }
+            }
+            None => consumes_recv = true,
+        }
+    }
+    (consumes, consumes_recv, meta.must_use)
 }
 
 impl<'a, 'gc> Api<'a, 'gc> {
-    pub fn add<F, Marker>(&mut self, f: F)
+    pub fn add<F, Marker>(&mut self, f: F) -> NativeId
     where
         F: IntoFn<'gc, Marker>,
     {
         let name = short_name_of_val(&f);
-        f.install(self, name, Vec::new());
+        f.install(self, name, Vec::new())
     }
 
     pub fn add_named<F, Marker>(&mut self, name: impl Into<String>, f: F)
@@ -130,6 +318,66 @@ impl<'a, 'gc> Api<'a, 'gc> {
         f.install_assoc(self, recv_ty, name.into());
     }
 
+    /// `a <op> b` for `T` instances — `f` receives both operands as `Val`s
+    /// in source order plus the `op`, and declines shapes/ops it doesn't
+    /// handle via `RtErr::invalid_bin`. Dispatch consults the LHS's type
+    /// first, then the RHS's, so one impl can cover `v * s` and `s * v`.
+    /// `==`/`!=` can't be overridden — instance equality is structural and
+    /// is handled before this dispatch.
+    ///
+    /// Panics if `add_adt::<T>()` hasn't run yet.
+    pub fn add_bin_op<T, F>(&mut self, f: F)
+    where
+        T: MimasType<'gc> + 'static,
+        F: for<'g> Fn(Ctx<'g>, Val<'g>, Val<'g>, BinOp) -> RtResult<Val<'g>> + 'static,
+    {
+        let f = Rc::new(f);
+        let ops = &self.ctx.fixture::<InstanceOps>().bin;
+        for sid in self.layout_ids::<T>("add_bin_op") {
+            ops.borrow_mut().insert(sid, f.clone());
+        }
+        self.mark_op_overloads::<T>();
+    }
+
+    /// `-a`/`+a`/`!a`/`~a` for `T` instances — see [`Self::add_bin_op`];
+    /// decline via `RtErr::InvalidUnaryOperand`.
+    ///
+    /// Panics if `add_adt::<T>()` hasn't run yet.
+    pub fn add_unary_op<T, F>(&mut self, f: F)
+    where
+        T: MimasType<'gc> + 'static,
+        F: for<'g> Fn(Ctx<'g>, Val<'g>, UnaryOp) -> RtResult<Val<'g>> + 'static,
+    {
+        let f = Rc::new(f);
+        let ops = &self.ctx.fixture::<InstanceOps>().unary;
+        for sid in self.layout_ids::<T>("add_unary_op") {
+            ops.borrow_mut().insert(sid, f.clone());
+        }
+        self.mark_op_overloads::<T>();
+    }
+
+    /// Flag the adt so the solver accepts infix/unary ops on it — the
+    /// operand shapes themselves stay a runtime concern of the impl.
+    fn mark_op_overloads<T: MimasType<'gc> + 'static>(&mut self) {
+        let adt = self.library.registry().get::<T>().expect("adt").adt_id;
+        if let Some(a) = self.library.adt_mut(adt) {
+            a.op_overloads = true;
+        }
+    }
+
+    /// The `struct_id`s an instance of `T` can carry — one for structs, one
+    /// per variant for enums.
+    fn layout_ids<T: MimasType<'gc> + 'static>(&self, api: &str) -> Vec<u32> {
+        self.library
+            .registry()
+            .get::<T>()
+            .unwrap_or_else(|| panic!("{api} requires add_adt::<T>() first"))
+            .variant_layout_ids
+            .iter()
+            .map(|id| u32::from(*id))
+            .collect()
+    }
+
     pub fn mark_intrinsic(&mut self, nid: NativeId, i: Intrinsic) {
         self.library.mark_instrinsic(nid, i);
     }
@@ -139,17 +387,35 @@ impl<'a, 'gc> Api<'a, 'gc> {
     //
     // todo, make this order independent
     pub fn add_adt<T: MimasAdt>(&mut self) {
-        self.add_adt_in::<T>(None);
+        self.add_adt_in(TypeId::of::<T>(), None, T::descriptor);
     }
 
-    fn add_adt_in<T: MimasAdt>(&mut self, module: Option<Vec<String>>) {
+    /// Registers a type whose shape is only known at runtime, such as one described through
+    /// reflection. `type_id` keys it the way [`Self::add_adt`] keys a Rust type.
+    pub fn add_adt_described(
+        &mut self,
+        type_id: TypeId,
+        describe: impl FnOnce(&Registry) -> ApiAdtDescriptor,
+    ) -> AdtBinding {
+        self.add_adt_in(type_id, None, describe)
+    }
+
+    fn add_adt_in(
+        &mut self,
+        type_id: TypeId,
+        module: Option<Vec<String>>,
+        describe: impl FnOnce(&Registry) -> ApiAdtDescriptor,
+    ) -> AdtBinding {
         let adt_id = self.library.registry_mut().alloc();
-        // pre-bind T so that it can be self-referential
-        self.library.registry_mut().bind::<T>(AdtBinding {
-            adt_id,
-            variant_layout_ids: Vec::new(),
-        });
-        let desc = T::descriptor(self.library.registry());
+        // pre-bind so the type can be self-referential
+        self.library.registry_mut().bind_id(
+            type_id,
+            AdtBinding {
+                adt_id,
+                variant_layout_ids: Vec::new(),
+            },
+        );
+        let desc = describe(self.library.registry());
         let variant_layout_ids: Vec<_> = match desc.kind {
             ApiAdtKind::Enum => desc
                 .variants
@@ -158,10 +424,13 @@ impl<'a, 'gc> Api<'a, 'gc> {
                 .collect(),
             ApiAdtKind::Struct => vec![adt_id],
         };
-        self.library.registry_mut().bind::<T>(AdtBinding {
+        let binding = AdtBinding {
             adt_id,
             variant_layout_ids: variant_layout_ids.clone(),
-        });
+        };
+        self.library
+            .registry_mut()
+            .bind_id(type_id, binding.clone());
 
         let variants = desc
             .variants
@@ -184,14 +453,46 @@ impl<'a, 'gc> Api<'a, 'gc> {
             adt_id,
             doc: desc.doc.to_string(),
             variants,
+            op_overloads: false,
         });
 
-        let binding = AdtBinding {
-            adt_id,
-            variant_layout_ids,
-        };
         let mut bindings = self.ctx.state().mimas_bindings.borrow_mut(&self.ctx);
-        bindings.0.insert(std::any::TypeId::of::<T>(), binding);
+        bindings.0.insert(type_id, binding.clone());
+        binding
+    }
+
+    /// An associated fn whose signature is only known at runtime. `call` receives the arguments
+    /// in order, and it has to be `'static`, so it can't hold on to anything the Vm collects.
+    pub fn add_assoc_described(
+        &mut self,
+        recv_ty: Ty,
+        name: impl Into<String>,
+        parameters: Vec<Ty>,
+        return_ty: Ty,
+        call: impl for<'g> Fn(Ctx<'g>, &[Val<'g>]) -> RtResult<Val<'g>> + 'static,
+    ) {
+        let native = make_native(&self.ctx, move |ctx, args| call(ctx, args));
+        let id = self.library.method(ApiMethod {
+            recv_ty,
+            name: name.into(),
+            param_dims: vec![None; parameters.len()],
+            param_names: (0..parameters.len()).map(|i| format!("arg{i}")).collect(),
+            parameters: parameters.into_iter().map(Some).collect(),
+            return_ty: Some(return_ty),
+            return_dim: None,
+            takes_self: false,
+            mutates_recv: false,
+            // described fns have no Rust path to join effects metadata on -- unaudited
+            effects: None,
+            consumes: Vec::new(),
+            consumes_recv: false,
+            must_use: false,
+            doc: String::new(),
+            validate: None,
+            src: None,
+            call: (),
+        });
+        self.store_native(id, native);
     }
 
     /// Prelude-level constant (no module). The module-scoped counterpart is
@@ -253,12 +554,12 @@ pub struct ModuleApi<'b, 'a, 'gc> {
 }
 
 impl<'b, 'a, 'gc> ModuleApi<'b, 'a, 'gc> {
-    pub fn add<F, Marker>(&mut self, f: F)
+    pub fn add<F, Marker>(&mut self, f: F) -> NativeId
     where
         F: IntoFn<'gc, Marker>,
     {
         let name = short_name_of_val(&f);
-        f.install(self.parent, name, self.path.clone());
+        f.install(self.parent, name, self.path.clone())
     }
 
     pub fn add_named<F, Marker>(&mut self, name: impl Into<String>, f: F)
@@ -269,7 +570,40 @@ impl<'b, 'a, 'gc> ModuleApi<'b, 'a, 'gc> {
     }
 
     pub fn add_adt<T: MimasAdt>(&mut self) {
-        self.parent.add_adt_in::<T>(Some(self.path.clone()));
+        self.parent
+            .add_adt_in(TypeId::of::<T>(), Some(self.path.clone()), T::descriptor);
+    }
+
+    /// A module fn whose signature is only known at runtime, like [`Api::add_assoc_described`].
+    /// A `None` parameter takes any value, the way `print` does.
+    /// Returns the [`NativeId`] so the caller can `mark_intrinsic` it.
+    pub fn add_described(
+        &mut self,
+        name: impl Into<String>,
+        parameters: Vec<Option<Ty>>,
+        return_ty: Ty,
+        call: impl for<'g> Fn(Ctx<'g>, &[Val<'g>]) -> RtResult<Val<'g>> + 'static,
+    ) -> NativeId {
+        let native = make_native(&self.parent.ctx, move |ctx, args| call(ctx, args));
+        let id = self.parent.library.function(ApiFunction {
+            name: name.into(),
+            module: self.path.clone(),
+            param_dims: vec![None; parameters.len()],
+            param_names: (0..parameters.len()).map(|i| format!("arg{i}")).collect(),
+            parameters,
+            return_ty: Some(return_ty),
+            return_dim: None,
+            // described fns have no Rust path to join effects metadata on -- unaudited
+            effects: None,
+            consumes: Vec::new(),
+            must_use: false,
+            doc: String::new(),
+            validate: None,
+            src: None,
+            call: (),
+        });
+        self.parent.store_native(id, native);
+        id
     }
 
     pub fn constant(
@@ -316,8 +650,20 @@ macro_rules! impl_into_fn {
             fn install(self, api: &mut Api<'_, 'gc>, name: String, module: Vec<String>) -> NativeId {
                 let reg = api.library.registry();
                 let parameters = vec![$(<$arg as MimasType<'gc>>::mimas_ty(reg),)*];
+                let param_dims = vec![$(<$arg as MimasType<'gc>>::mimas_dim(reg),)*];
                 let return_ty = <R as IntoNativeResult<'gc>>::return_ty(reg);
-                let doc = doc_for(std::any::type_name_of_val(&self));
+                let return_dim = <R as IntoNativeResult<'gc>>::return_dim(reg);
+                let (doc, param_names) = meta_for(
+                    std::any::type_name_of_val(&self),
+                    0,
+                    parameters.len(),
+                );
+                let src = src_for(std::any::type_name_of_val(&self));
+                let (consumes, _, must_use) = grades_for(
+                    std::any::type_name_of_val(&self),
+                    0,
+                    parameters.len(),
+                );
                 let native = make_native(&api.ctx, move |ctx, args| {
                     let mut it = args.iter().copied();
                     $(let $arg = <$arg as MimasType<'gc>>::from_value(
@@ -327,7 +673,20 @@ macro_rules! impl_into_fn {
                     self(ctx $(, $arg)*).into_native_result(ctx)
                 });
                 let id = api.library.function(ApiFunction {
-                    name, module, parameters, return_ty, doc, call: (),
+                    name,
+                    module,
+                    parameters,
+                    param_dims,
+                    param_names,
+                    return_ty,
+                    return_dim,
+                    effects: effects_for(std::any::type_name_of_val(&self)),
+                    consumes,
+                    must_use,
+                    doc,
+                    validate: validator_for(std::any::type_name_of_val(&self)),
+                    src,
+                    call: (),
                 });
                 api.store_native(id, native);
                 id
@@ -337,8 +696,20 @@ macro_rules! impl_into_fn {
             fn install_assoc(self, api: &mut Api<'_, 'gc>, recv_ty: Ty, name: String) {
                 let reg = api.library.registry();
                 let parameters = vec![$(<$arg as MimasType<'gc>>::mimas_ty(reg),)*];
+                let param_dims = vec![$(<$arg as MimasType<'gc>>::mimas_dim(reg),)*];
                 let return_ty = <R as IntoNativeResult<'gc>>::return_ty(reg);
-                let doc = doc_for(std::any::type_name_of_val(&self));
+                let return_dim = <R as IntoNativeResult<'gc>>::return_dim(reg);
+                let (doc, param_names) = meta_for(
+                    std::any::type_name_of_val(&self),
+                    0,
+                    parameters.len(),
+                );
+                let src = src_for(std::any::type_name_of_val(&self));
+                let (consumes, consumes_recv, must_use) = grades_for(
+                    std::any::type_name_of_val(&self),
+                    0,
+                    parameters.len(),
+                );
                 let native = make_native(&api.ctx, move |ctx, args| {
                     let mut it = args.iter().copied();
                     $(let $arg = <$arg as MimasType<'gc>>::from_value(
@@ -351,9 +722,19 @@ macro_rules! impl_into_fn {
                     recv_ty,
                     name,
                     parameters,
+                    param_dims,
+                    param_names,
                     return_ty,
+                    return_dim,
                     takes_self: false,
+                    mutates_recv: false,
+                    effects: effects_for(std::any::type_name_of_val(&self)),
+                    consumes,
+                    consumes_recv,
+                    must_use,
                     doc,
+                    validate: validator_for(std::any::type_name_of_val(&self)),
+                    src,
                     call: (),
                 });
                 api.store_native(id, native);
@@ -388,8 +769,19 @@ macro_rules! impl_into_method {
                 let recv_ty = <Recv as MimasType<'gc>>::mimas_ty(reg)
                     .expect("native method receiver must have a concrete Ty");
                 let parameters = vec![$(<$arg as MimasType<'gc>>::mimas_ty(reg),)*];
+                let param_dims = vec![$(<$arg as MimasType<'gc>>::mimas_dim(reg),)*];
                 let return_ty = <R as IntoNativeResult<'gc>>::return_ty(reg);
-                let doc = doc_for(std::any::type_name_of_val(&self));
+                let return_dim = <R as IntoNativeResult<'gc>>::return_dim(reg);
+                let (doc, param_names) = meta_for(
+                    std::any::type_name_of_val(&self),
+                    1,
+                    parameters.len(),
+                );
+                let (consumes, consumes_recv, must_use) = grades_for(
+                    std::any::type_name_of_val(&self),
+                    1,
+                    parameters.len(),
+                );
                 let native = make_native(&api.ctx, move |ctx, args| {
                     let mut it = args.iter().copied();
                     let recv = <Recv as MimasType<'gc>>::from_value(
@@ -406,9 +798,19 @@ macro_rules! impl_into_method {
                     recv_ty,
                     name,
                     parameters,
+                    param_dims,
+                    param_names,
                     return_ty,
+                    return_dim,
                     takes_self: true,
+                    mutates_recv: mutates_recv(std::any::type_name_of_val(&self)),
+                    effects: effects_for(std::any::type_name_of_val(&self)),
+                    consumes,
+                    consumes_recv,
+                    must_use,
                     doc,
+                    validate: validator_for(std::any::type_name_of_val(&self)),
+                    src: src_for(std::any::type_name_of_val(&self)),
                     call: (),
                 });
                 api.store_native(id, native);

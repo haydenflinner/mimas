@@ -4,38 +4,153 @@ use vm::{
     anon::{self},
     api::Api,
     conversion::NeverReturn,
+    fixtures::{DebugInfo, Out, PrintDims, Prints},
 };
+
+/// The ` {unit}` a `print`/`dbg`/`warn` appends when the dims pass proved the value's
+/// dimension (`print(25kW)` writes `25000 W`). Empty for plain numbers, for
+/// sites the checker couldn't follow, and when there's no call-site loc.
+fn unit_suffix(ctx: Ctx<'_>, loc: Option<shared::Location>) -> String {
+    loc.and_then(|loc| ctx.fixture::<PrintDims>().at(loc))
+        .filter(|d| !d.is_none())
+        .map(|d| format!(" {}", d.name()))
+        .unwrap_or_default()
+}
 
 pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add(print);
+    api.add(warn);
     api.add(panic);
     api.add(todo);
     api.add(dbg);
+    api.add(__contract_fail);
 }
 
 #[native]
-fn print<'gc>(ctx: Ctx<'gc>, msg: Val<'gc>) {
-    println!("{}", ctx.to_string(msg));
+#[effects(io)]
+/// Writes `value` to standard output, followed by a newline. A string prints as its plain text,
+/// and any other value prints the same way it would inside an f-string.
+///
+/// A quantity prints with its unit — `print(25kW)` writes `25000 W`.
+///
+/// ```mimas
+/// print("hello");           // hello
+/// print([1, 2, 3]);         // [1, 2, 3]
+/// print(f"{1 + 2} apples"); // 3 apples
+/// ```
+fn print<'gc>(ctx: Ctx<'gc>, msg: Val<'gc>) -> Result<(), RtErr> {
+    let loc = ctx.fixture::<DebugInfo>().top_loc();
+    let suffix = unit_suffix(ctx, loc);
+    let line = ctx.to_string(msg)?;
+    ctx.fixture::<Out>().write(&format!("{line}{suffix}"));
+    // `display` (quoted strings, structured values) is the richer read
+    // a host tooltip wants; the plain line above is all `print` is
+    // without one.
+    if let Some(loc) = loc {
+        let text = ctx.display(msg).unwrap_or(line);
+        ctx.fixture::<Prints>().push(loc, format!("{text}{suffix}"));
+    }
+    Ok(())
+}
+
+/// A non-fatal diagnostic: the host marks this call site with the message,
+/// `warning: …` reaches the out sink, and the run continues — the reporting
+/// side of "skip the bit that's in err". Repeats from the same site are
+/// suppressed, so `warn` inside a loop doesn't flood.
+///
+/// A quantity warns with its unit — `warn(25kW)` writes `warning: 25000 W`.
+#[native]
+#[effects(io)]
+fn warn<'gc>(ctx: Ctx<'gc>, msg: Val<'gc>) -> Result<(), RtErr> {
+    let loc = ctx.fixture::<DebugInfo>().top_loc();
+    let suffix = unit_suffix(ctx, loc);
+    let line = ctx.to_string(msg)?;
+    ctx.warn(&format!("{line}{suffix}"));
+    Ok(())
 }
 
 #[native]
+/// Stops the script with a runtime error. The error reads `panic: ` followed by `msg`, or
+/// `explicit panic` when there's no message.
+///
+/// `panic` never returns, and its [never type](../reference/special-types.md) lets it stand in for
+/// a value of any type:
+///
+/// ```mimas
+/// let config = ~{ port = 8080 };
+/// let port = config["port"] ?? panic("no port configured");
+/// ```
+///
+/// For a failure the caller should be able to recover from, return a
+/// [result](../reference/error-handling.md#results) and `raise` instead.
+#[effects()]
 fn panic<'gc>(ctx: Ctx<'gc>, msg: Option<anon::T<'gc>>) -> Result<NeverReturn, RtErr> {
-    Err(RtErr::Custom(
-        msg.map(|msg| format!("panic: {}", ctx.to_string(msg.0)))
-            .unwrap_or_else(|| "explicit panic".into()),
-    ))
+    let text = match msg {
+        Some(msg) => format!("panic: {}", ctx.to_string(msg.0)?),
+        None => "explicit panic".to_string(),
+    };
+    Err(RtErr::Custom(text))
 }
 
 #[native]
+/// Stops the script with a runtime error that marks unfinished code. The error reads `todo: `
+/// followed by `msg`, or just `todo` when there's no message.
+///
+/// Like [`panic`](#panic), it never returns, and it can stand in for a body you haven't written
+/// yet:
+///
+/// ```mimas
+/// fn load_save(path: str) -> ~{int} {
+///     todo("read the save format")
+/// }
+/// ```
+#[effects()]
 fn todo<'gc>(ctx: Ctx<'gc>, msg: Option<anon::T<'gc>>) -> Result<NeverReturn, RtErr> {
     Err(match msg {
-        Some(m) => RtErr::Custom(format!("todo: {}", ctx.to_string(m.0))),
+        Some(m) => RtErr::Custom(format!("todo: {}", ctx.to_string(m.0)?)),
         None => RtErr::Custom("todo".into()),
     })
 }
 
+/// Compiler-emitted contract check (`[T; n]` dims, `where` predicates). Its message is the
+/// diagnostic title as authored at emit -- no `panic:`-style prefix -- carried on
+/// `RtErr::Contract`. Not for user code; the `__` marks it internal.
 #[native]
-fn dbg<'gc>(ctx: Ctx<'gc>, val: anon::T<'gc>) -> anon::T<'gc> {
-    println!("dbg value: {}", ctx.display(val.0));
-    val
+fn __contract_fail<'gc>(
+    ctx: Ctx<'gc>,
+    msg: Option<anon::T<'gc>>,
+    got: Option<anon::T<'gc>>,
+) -> Result<NeverReturn, RtErr> {
+    let mut text = match msg {
+        Some(msg) => ctx.to_string(msg.0)?,
+        None => "contract failed".to_string(),
+    };
+    // the value that broke the check, when the check has one -- the length that
+    // arrived against the one that was pinned, say
+    if let Some(got) = got {
+        text = format!("{text}, got {}", ctx.to_string(got.0)?);
+    }
+    Err(RtErr::Contract(text))
+}
+
+#[native]
+#[effects(io)]
+/// Prints `value` to standard output in its debug form, then returns it. The line starts with
+/// `dbg value:`, and strings keep their quotes.
+///
+/// Since it returns its argument, `dbg` can wrap any expression without changing the result:
+///
+/// ```mimas
+/// let total = dbg(2 + 3) * 10; // prints `dbg value: 5`, and total is 50
+/// let name = dbg("ada");       // prints `dbg value: "ada"`
+/// ```
+fn dbg<'gc>(ctx: Ctx<'gc>, val: anon::T<'gc>) -> Result<anon::T<'gc>, RtErr> {
+    let loc = ctx.fixture::<DebugInfo>().top_loc();
+    let suffix = unit_suffix(ctx, loc);
+    let text = format!("dbg value: {}{}", ctx.display(val.0)?, suffix);
+    ctx.fixture::<Out>().write(&text);
+    if let Some(loc) = loc {
+        ctx.fixture::<Prints>().push(loc, text);
+    }
+    Ok(val)
 }

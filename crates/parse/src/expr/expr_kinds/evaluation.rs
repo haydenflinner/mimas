@@ -31,10 +31,10 @@ op!(
         Slash => Divide,
         Star => Multiply,
         TildeSlash => Div,
-        Percent => Modulo,
+        Ident("mod") => Modulo,
         Ampersand => And,
         Pipe => Or,
-        Caret => Xor,
+        CircledPlus => Xor,
         DoubleLeftCaret => BitShiftLeft,
         DoubleRightCaret => BitShiftRight,
     }
@@ -61,16 +61,6 @@ impl EvaluationOp {
 
     pub(crate) fn is_additive(&self) -> bool {
         matches!(self, EvaluationOp::Plus | EvaluationOp::Minus)
-    }
-
-    pub(crate) fn is_multiplicative(&self) -> bool {
-        matches!(
-            self,
-            EvaluationOp::Divide
-                | EvaluationOp::Multiply
-                | EvaluationOp::Div
-                | EvaluationOp::Modulo
-        )
     }
 }
 

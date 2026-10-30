@@ -35,13 +35,20 @@ pub mod utils {
 }
 
 mod exhaustion;
+mod frames;
+mod lens;
+mod load;
 mod resolutions;
 mod solver;
 mod unify;
+pub use load::*;
 pub use resolutions::*;
 pub use solver::*;
 use unify::*;
 
+mod dims;
+mod grades;
+pub use grades::{Use, UseInfo};
 pub mod errors;
 pub use errors::{Error, Result};
 
@@ -51,9 +58,13 @@ mod tests {
     pub mod solve_test_utils;
 
     mod reduce_exprs;
+    mod solve_audit;
+    mod solve_contracts;
     mod solve_enums;
     mod solve_exprs;
     mod solve_functions;
+    mod solve_generics;
+    mod solve_grades;
     mod solve_match;
     mod solve_modules;
     mod solve_options;

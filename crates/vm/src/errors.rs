@@ -68,14 +68,52 @@ pub enum RtErr {
     #[error("integer arithmetic overflowed")]
     IntegerOverflow,
 
+    #[error("value nesting is too deep to display (possible reference cycle)")]
+    DisplayTooDeep,
+
     #[error("user-triggered panic")]
     UserPanic,
+
+    #[error(
+        "this program ran too long (its op budget ran out) -- is there a loop that never ends?"
+    )]
+    OutOfFuel,
+
+    /// The heap passed the host's memory budget (`Vm::set_mem_budget`).
+    #[error(
+        "this program used more than {} MB of memory -- does a string, array or dict keep growing?",
+        crate::mem::mib(*limit)
+    )]
+    OutOfMemory { limit: usize },
+
+    /// One string or array would be bigger than the budget allows for a single value.
+    #[error("this value would be bigger than {} MB, the largest one string or array may be", crate::mem::mib(*limit))]
+    TooLarge { limit: usize },
+
+    /// More calls in progress than the thread allows (`Vm::set_max_depth`). Distinct from
+    /// `OutOfFuel`: deep recursion is not an endless loop.
+    #[error(
+        "recursion is too deep: more than {depth} calls are in progress -- does a function call itself with no base case?"
+    )]
+    RecursionTooDeep { depth: usize },
+
+    #[error("called a value that isn't a function")]
+    NotCallable { callee: Captured },
+
+    #[error("this fn takes {wanted} arguments, got {got}")]
+    WrongArity { wanted: usize, got: usize },
 
     #[error("{0}")]
     InvalidArgument(String),
 
     #[error("{0}")]
     Custom(String),
+
+    /// A `[T; n]` or `where` contract the compiler couldn't prove failed at
+    /// runtime. Unlike `Custom`, the message is the whole diagnostic title --
+    /// authored at emit, no `panic:`/`todo:`-style prefix.
+    #[error("{0}")]
+    Contract(String),
 }
 
 impl RtErr {
@@ -98,8 +136,16 @@ impl RtErr {
             Self::UnwrappedRaised(_) => "this unwrap found a raised error".to_string(),
             Self::InvalidUnaryOperand => "this operand does not support the operator".to_string(),
             Self::IntegerOverflow => "this arithmetic overflows a 64 bit integer".to_string(),
+            Self::DisplayTooDeep => "nesting exceeds the display depth limit here".to_string(),
             Self::UserPanic => "panicked here".to_string(),
+            Self::OutOfFuel => "ran out of steps here".to_string(),
+            Self::OutOfMemory { .. } => "memory ran out here".to_string(),
+            Self::TooLarge { .. } => "this value is too big".to_string(),
+            Self::RecursionTooDeep { .. } => "this call is one too many".to_string(),
+            Self::NotCallable { callee } => format!("`{callee}` cannot be called"),
+            Self::WrongArity { got, .. } => format!("this call passes {got}"),
             Self::InvalidArgument(_) | Self::Custom(_) => "here".to_string(),
+            Self::Contract(_) => "the contract fails here".to_string(),
         }
     }
 }

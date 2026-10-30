@@ -211,6 +211,46 @@ test_ty!(
     "|a: int| -> int { a }" => func!((Int) -> Int),
 );
 test_ty!(
+    closure_without_parameters_with_return_type_annotation,
+    "|| -> int { 1 }" => func!(() -> Int),
+);
+test_ty!(
+    closure_annotation_with_early_return,
+    "|n: int| -> int {
+         if n > 0 {
+             return 1;
+         }
+         2
+     }" => func!((Int) -> Int),
+);
+test_ty!(
+    closure_return_infers_type,
+    "|n: int| {
+         return n;
+     }" => func!((Int) -> Int),
+);
+test_ty!(
+    closure_raise_with_result_annotation,
+    r#"|n: int| -> int! {
+           if n < 0 {
+               raise "negative";
+           }
+           n
+       }"# => func!((Int) -> result!(Int)),
+);
+test_ty!(
+    closure_in_loop_keeps_outer_break,
+    "let a = loop {
+         let f = || {
+             loop {
+                 break 1;
+             }
+         };
+         break f();
+     };",
+    "a" => Int,
+);
+test_ty!(
     named_args_all_by_name,
     "fn foo(a: int, b: int, c: int = 0) -> int { a + b + c }",
     "foo(b=2, a=1)" => Int
@@ -262,6 +302,71 @@ test_fail!(extra_argument, "fn foo() {}; foo(0);");
 test_fail!(missing_argument, "fn foo(a: int) {}; foo();");
 test_fail!(mismatched_argument, "fn foo(a: int) {}; foo(true);");
 test_fail!(
+    closure_annotation_mismatch,
+    "let f = |n: int| -> str { n };",
+);
+test_fail!(
+    closure_annotation_not_all_paths_return,
+    "let pairs = |n: int| -> [int] {
+         for i in [n, n + 1] collect i;
+     };",
+);
+test_fail!(
+    closure_partial_return,
+    "fn outer() -> int {
+         let f = |n: int| {
+             if n > 0 {
+                 return 1;
+             }
+         };
+         0
+     }",
+);
+test_fail!(
+    closure_return_does_not_return_outer_fn,
+    "fn outer() -> int {
+         let f = || {
+             return 5;
+         };
+     }",
+);
+test_success!(
+    closure_return_ignores_outer_fn_type,
+    "fn outer() -> int {
+         let f = || {
+             return true;
+         };
+         0
+     }"
+);
+test_fail!(
+    closure_break_does_not_break_outer_loop,
+    "for x in [1, 2] {
+         let f = || {
+             break;
+         };
+         f();
+     }",
+);
+test_fail!(
+    closure_continue_does_not_continue_outer_loop,
+    "for x in [1, 2] {
+         let f = || {
+             continue;
+         };
+         f();
+     }",
+);
+test_fail!(
+    closure_collect_does_not_collect_outer_loop,
+    "let xs = for x in [1, 2] {
+         let f = || {
+             collect x;
+         };
+         f();
+     };",
+);
+test_fail!(
     optional_params_before_required,
     "fn foo(a: int, b: int = 0, c: int) {}"
 );
@@ -271,7 +376,15 @@ test_fail!(
     foo(0, b=3);"
 );
 
-test_fail!(fn_does_not_hoist_local, "let a = 0; fn c() -> int { a }");
+// top-level `let`s are globals: fns see them, sharing the entry-frame slot
+test_ty!(fn_reads_global_let, "let a = 0; fn c() -> int { a }", "c" => func!(() -> Int));
+// ...but only at top level: a `let` in a nested block stays block-scoped
+test_fail!(
+    fn_does_not_hoist_block_local,
+    "{ let a = 0; } fn c() -> int { a }"
+);
+// and scoping stays sequential -- a `let` below the fn isn't visible inside it
+test_fail!(fn_cant_see_later_global, "fn c() -> int { a } let a = 0;");
 test_ty!(closure_captures_local, "let a = 0; let b = || a;", "b" => func!(() -> Int));
 test_ty!(
     fn_sees_const_and_items,
@@ -391,3 +504,11 @@ test_fail!(
     "fn outer() { fn inner() {} }",
     "fn outer() { { fn inner() {} } }",
 );
+
+test_ty!(
+    tests_list_typechecks,
+    "fn add(a: int, b: int) -> int { a + b }
+     #[tests] [ add(1, 2) == 3, true ]",
+    "add" => func!((Int, Int) -> Int)
+);
+test_fail!(tests_list_requires_bool, "#[tests] [ 1 ]");

@@ -30,6 +30,9 @@ fn main() {
             input.dump_ir,
             input.time,
         ),
+        Some(Commands::Hash { path, scoped, deps }) => hash(path, scoped || deps, deps),
+        Some(Commands::Link { addr, blobs }) => link(&addr, blobs),
+        Some(Commands::Cpp { path }) => cpp_dump(&path),
         Some(Commands::Run { path, script_args }) => build(
             path,
             script_args,
@@ -86,6 +89,175 @@ fn check(path: Option<PathBuf>, color: bool) -> i32 {
     i32::from(summary.had_errors())
 }
 
+/// `mimas hash`: content-hash the top-level fns of a `.mim` file (or every
+/// `.mim` under a directory) and print `fn <name>  L<line>  <blake3>` per item.
+/// `--scoped` prints the scoped hash instead — alpha-renamed locals, dep-hash
+/// callee references — a different hash namespace than the token-level one.
+/// `--deps` additionally indents each item's relocation sites beneath it:
+/// `-> <name>  <dep hash>` per `@dep:` edge, `-> @self` for recursion.
+fn hash(path: Option<PathBuf>, scoped: bool, deps: bool) -> i32 {
+    let path = resolve_path(path);
+    let (paths, io_errors) = if path.is_file() {
+        (vec![path], vec![])
+    } else {
+        solve::mim_files(&path)
+    };
+    let mut io_errors = io_errors;
+    let mut n_items = 0usize;
+    for file_path in &paths {
+        let source = match std::fs::read_to_string(file_path) {
+            Ok(s) => s,
+            Err(e) => {
+                io_errors.push(std::io::Error::new(
+                    e.kind(),
+                    format!("{}: {e}", file_path.display()),
+                ));
+                continue;
+            }
+        };
+        let items = hash::extract(&source);
+        // `use "name";` resolves to a sibling `<name>.mim` — the same
+        // page-include BFS the lit host runs.
+        let dir = file_path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_default();
+        let globals = scoped.then(|| {
+            hash::Globals::for_page(&source, |name| {
+                if name.contains('/') || name.contains('\\') {
+                    return None;
+                }
+                std::fs::read_to_string(dir.join(format!("{name}.mim"))).ok()
+            })
+        });
+        let prefix = if paths.len() > 1 {
+            format!("{}: ", file_path.display())
+        } else {
+            String::new()
+        };
+        for item in &items {
+            let digest = match &globals {
+                Some(globals) => item.scoped_hash(globals),
+                None => item.hash(),
+            };
+            println!(
+                "{prefix}fn {}  L{}  {}",
+                item.name,
+                item.line(&source),
+                digest
+            );
+            if deps && let Some(globals) = &globals {
+                for reloc in item.relocs(globals).unwrap_or_default() {
+                    match reloc {
+                        hash::Reloc::Dep { name, hash, .. } => {
+                            println!("{prefix}  -> {name}  {hash}");
+                        }
+                        hash::Reloc::SelfRef { .. } => {
+                            println!("{prefix}  -> @self");
+                        }
+                    }
+                }
+            }
+            n_items += 1;
+        }
+    }
+    if !io_errors.is_empty() {
+        println!(
+            "\n{}: The following errors occurred while trying to read files...",
+            "error".bright_red().bold()
+        );
+        io_errors.iter().for_each(|error| {
+            println!("{error}");
+        });
+        return 1;
+    }
+    if n_items == 0 {
+        println!("no fn items");
+    }
+    0
+}
+
+/// `mimas link <addr> [--blobs <dir>]` — assemble the module a scoped
+/// address names: fetch its blob, follow `@dep:` edges breadth-first,
+/// patch the markers, print the self-contained source. `--blobs` names
+/// the base dir (`<dir>-scoped` is read) or a scoped dir outright.
+fn link(addr: &str, blobs: Option<PathBuf>) -> i32 {
+    let dir = match scoped_dir(blobs) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+    let fetch = |key: &str| {
+        let path = dir.join(key);
+        std::fs::read_to_string(&path).ok()
+    };
+    match hash::link::link(addr, fetch) {
+        Ok(linked) => {
+            print!("{}", linked.source);
+            if !linked.source.ends_with('\n') {
+                println!();
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("link {addr}: {e}");
+            1
+        }
+    }
+}
+
+/// `mimas cpp <file>` — transpile a C++ file to mimas source and print it.
+/// Diagnostics go to stderr so the emitted `.mim` can be piped.
+fn cpp_dump(path: &std::path::Path) -> i32 {
+    let source = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("{}: {e}", path.display());
+            return 2;
+        }
+    };
+    match cpp::transpile(&source) {
+        Ok(out) => {
+            for diag in &out.diagnostics {
+                eprintln!("{diag}");
+            }
+            print!("{}", out.source);
+            0
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            1
+        }
+    }
+}
+
+/// `--blobs` (or its default) → the scoped blob dir: `<dir>-scoped` when
+/// the name isn't already scoped, `./blobs-scoped` when no flag is given.
+fn scoped_dir(blobs: Option<PathBuf>) -> Result<PathBuf, String> {
+    let base = blobs.unwrap_or_else(|| PathBuf::from("blobs"));
+    let scoped = if base
+        .file_name()
+        .is_some_and(|n| n.to_string_lossy().ends_with("-scoped"))
+    {
+        base.clone()
+    } else {
+        let mut name = base.as_os_str().to_os_string();
+        name.push("-scoped");
+        PathBuf::from(name)
+    };
+    if scoped.is_dir() {
+        Ok(scoped)
+    } else {
+        Err(format!(
+            "no scoped blob dir at {} (looked next to {})",
+            scoped.display(),
+            base.display()
+        ))
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build(
     path: Option<PathBuf>,
@@ -132,7 +304,7 @@ fn build(
         compile::Compiler::new()
             .with_disasm(disasm)
             .with_sources(srcs)
-            .compile(ir)
+            .compile(&mut ir)
     }) {
         Ok(p) => p,
         Err(report) => {
@@ -195,7 +367,7 @@ fn build(
 // bare `mimas foo.mim` means `mimas run foo.mim`; inject `run` when the first
 // positional isn't already a subcommand. `mimas` alone still falls through to help.
 fn massage_args(mut args: Vec<String>) -> Vec<String> {
-    const SUBCOMMANDS: [&str; 4] = ["check", "build", "run", "help"];
+    const SUBCOMMANDS: [&str; 7] = ["check", "build", "hash", "run", "link", "cpp", "help"];
     if let Some(idx) = args.iter().skip(1).position(|a| !a.starts_with('-')) {
         let idx = idx + 1;
         if !SUBCOMMANDS.contains(&args[idx].as_str()) {

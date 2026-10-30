@@ -1,0 +1,98 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>mimo solver watch — H³</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #14161c; color: #cfd3dc;
+    font: 12px/1.45 ui-monospace, Menlo, monospace; }
+  #wrap { display: flex; height: 100%; }
+  #left { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  #stage { position: relative; flex: 1; display: flex; min-height: 0; }
+  #cv { flex: 1; width: 100%; touch-action: none; }
+  #map { position: absolute; left: 10px; bottom: 10px; z-index: 5;
+    pointer-events: none; opacity: .9; }
+  #lvl { position: absolute; right: 10px; bottom: 10px; z-index: 5;
+    pointer-events: none; opacity: .92; border: 1px solid #2a2e3a;
+    border-radius: 4px; display: none; }
+  #legend { position: absolute; left: 10px; top: 6px; z-index: 5;
+    pointer-events: none; font-size: 11px; line-height: 1.6;
+    color: #aab2c5; text-shadow: 0 1px 3px #000; }
+  #bar { display: flex; gap: 8px; align-items: center; padding: 6px 10px;
+    background: #1b1e26; border-bottom: 1px solid #2a2e3a; flex-wrap: wrap; }
+  #bar button, #bar input, #bar select { background: #262a36; color: #cfd3dc;
+    border: 1px solid #3a3f4e; border-radius: 4px; padding: 3px 10px;
+    font: inherit; cursor: pointer; }
+  #bar input[type=number] { width: 70px; cursor: text; }
+  #scrub { flex: 1; min-width: 80px; }
+  #side { width: 330px; border-left: 1px solid #2a2e3a; background: #191c24;
+    display: flex; flex-direction: column; overflow: hidden; }
+  #side section { padding: 8px 12px; border-bottom: 1px solid #232734; }
+  #side h3 { margin: 0 0 6px; font-size: 11px; text-transform: uppercase;
+    letter-spacing: .08em; color: #8b93a5; }
+  #finds { flex: 1; overflow-y: auto; min-height: 80px; }
+  .kv { color: #8b93a5; } .kv b { color: #e6e9f0; font-weight: 600; }
+  .cand { padding: 2px 6px; border-radius: 3px; white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis; }
+  .find { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .find .ln { color: #6f7789; }
+  #err { color: #ff8f8f; white-space: pre-wrap; }
+  #mode { color: #8b93a5; }
+  a { color: #6ea8ff; }
+</style>
+<script type="importmap">
+{ "imports": { "three": "/three/build/three.module.js",
+               "three/addons/": "/three/examples/jsm/" } }
+</script>
+<div id="wrap">
+  <div id="left">
+    <div id="bar">
+      <button id="run">run wasm</button>
+      budget <input id="budget" type="number" value="6000" step="1000">
+      <select id="strategy">
+        <option value="directed">directed</option>
+        <option value="goexplore">goexplore</option>
+      </select>
+      rollout <input id="gedepth" type="number" value="500" step="50" style="width:60px">
+      <button id="tail">tail fuzzer</button>
+      <input id="logpath" type="text" value="/tmp/mimo-fuzz.jsonl" style="width:170px">
+      <button id="play" disabled>pause</button>
+      speed <input id="speed" type="range" min="1" max="8" value="4" style="width:80px">
+      <input id="scrub" type="range" min="0" max="0" value="0">
+      <button id="modebtn">ball/fly</button>
+      <select id="colby">
+        <option value="px">px</option>
+        <option value="kind">kind</option>
+        <option value="depth">depth</option>
+      </select>
+      <a href="./watch.html">2d</a>
+      <span id="evpos" class="kv">0/0</span>
+    </div>
+    <div id="bar"><span id="mode"></span></div>
+    <div id="stage">
+      <canvas id="cv"></canvas>
+      <canvas id="map" width="170" height="170"></canvas>
+      <canvas id="lvl"></canvas>
+      <div id="legend"></div>
+    </div>
+  </div>
+  <div id="side">
+    <section>
+      <h3>status</h3>
+      <div id="status" class="kv">idle — drop a .jsonl, tail a FUZZ_WATCH, or run wasm</div>
+      <div id="err"></div>
+    </section>
+    <section>
+      <h3>decision</h3>
+      <div id="decision" class="kv">—</div>
+      <div id="cands"></div>
+    </section>
+    <section>
+      <h3>node</h3>
+      <div id="node" class="kv">click a dot</div>
+    </section>
+    <section id="finds">
+      <h3>finds</h3>
+      <div id="findlist"></div>
+    </section>
+  </div>
+</div>
+<script type="module" src="./watch3d.mjs"></script>

@@ -31,6 +31,23 @@ test_ty!(
     coerce_from_if,
     "if true { 0 } else { null }" => option!(Int)
 );
+// an else arm that fails to *solve* must surface its error -- the
+// option-coercion retry used to re-query the half-solved node, get a
+// memoized Ok, and swallow it, leaving unresolved idents that panicked
+// the emitter (fuzz: `x.year year < y.year` parses `year < y.year{...}`
+// as the if's unbraced body).
+test_fail!(
+    else_arm_solve_error_not_swallowed,
+    "struct S { year: int }
+     fn f(first: S) -> S? {
+         if true {
+             null
+         } else {
+             let s: S? = null;
+             if s!.year year < first.year { s } else { first }
+         }
+     }"
+);
 test_ty!(
     coerce_from_loop,
     "loop { break 0; break null; }" => option!(Int)

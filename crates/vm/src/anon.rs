@@ -1,3 +1,5 @@
+use std::marker::PhantomData;
+
 use crate::{Array, Dict, DictMap, Val};
 
 /// Placeholder parameter slots for native sigs. Each unique `Anon<N>` in a sig is freshened to a
@@ -53,6 +55,24 @@ pub fn as_dict_mut<'a, 'gc, const N: u32>(
     // SAFETY: as in `as_dict_ref`; preserves the borrow.
     unsafe { &mut *(d as *mut DictMap<'gc> as *mut DictMap<'gc, Anon<'gc, N>>) }
 }
+
+/// Placeholder for a one-argument callable in a native signature: `Fn1<'gc, A, R>` registers as
+/// `(A) -> R`, where `A` and `R` are any [`MimasType`](crate::conversion::MimasType) --
+/// [`Anon`] slots for genericity (`map`'s `Fn1<T, U>`), or concrete types (`mapi`'s
+/// `Fn2<i64, T, U>` pins the index param to `int`).
+///
+/// The runtime value is the `Val` itself (`Val::Fn` / `Val::Closure`). Natives that take these
+/// are intrinsics -- compile lowers the method call to a loop that emits the calls itself -- so
+/// the signature is the entire point of the marker; `from_value` never needs to decompose it.
+pub struct Fn1<'gc, A, R>(pub Val<'gc>, pub PhantomData<fn(A) -> R>);
+
+/// Two-argument variant of [`Fn1`]: registers as `(A, B) -> R` -- e.g. `fold`'s
+/// `(acc, elem) -> acc` written `Fn2<U, T, U>`.
+pub struct Fn2<'gc, A, B, R>(pub Val<'gc>, pub PhantomData<fn(A, B) -> R>);
+
+/// Three-argument variant of [`Fn1`]: registers as `(A, B, C) -> R` -- e.g. `foldi`'s
+/// `(i, acc, elem) -> acc` written `Fn3<i64, U, T, U>`.
+pub struct Fn3<'gc, A, B, C, R>(pub Val<'gc>, pub PhantomData<fn(A, B, C) -> R>);
 
 /// Placeholder parameter type for native signatures. Can represent any type but must be the same as
 /// every other `T` within the context of this specific signature.

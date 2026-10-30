@@ -61,6 +61,46 @@ fn style(text: str, bold=false, italic=false, size=12) {}
 style("hi", size=18, bold=true); // skip `italic`, set the other two
 ```
 
+## Tests
+
+A function marked `#[test]` is a check the inspector runs when it loads the file -- it is not part of the script's top-to-bottom execution. Tests take no parameters and are called with none; a panic (or any other runtime error) is a failure, anything else is a pass.
+
+```mimas
+fn add(a: int, b: int) -> int {
+    a + b
+}
+
+#[test]
+fn add_works() {
+    assert!(add(1, 2) == 3)
+}
+```
+
+`assert!(expr)` is rewritten at parse time into an `if`/`panic` check. Comparisons (`==`, `!=`, `<`, `>`, `<=`, `>=`) and membership (`in`, `!in`) evaluate each side once and interpolate the values into the panic message, pytest-style; any other expression becomes `if !expr { panic("assertion failed: ...") }`. `assert` is a normal name -- only `assert!(...)` is special.
+
+`#[test]` sits in front of `pub` when both are present (`#[test] pub fn ...`). It is only valid on free functions -- not methods, and not other items.
+
+A `#[tests]` list is a compact form of the same thing -- a list of boolean expressions the inspector evaluates when it loads the file. `true` is a pass; `false` or a panic is a failure. The check's source is its name.
+
+```mimas
+fn add(a: int, b: int) -> int { a + b }
+
+#[tests] [
+    add(1, 2) == 3,
+    add(0, 0) == 0,
+]
+```
+
+The literate spelling of the same thing is a `check` line, which lowers to a `#[tests]` case. Each `check` is one expression on one line; `,` chains another.
+
+```mimas
+fn add(a: int, b: int) -> int { a + b }
+
+check add(1, 2) == 3
+check add(0, 0) == 0
+check add(-1, 1) == 0, add(2, 2) == 4
+```
+
 ## Closures
 
 A closure is an inline, anonymous function written with pipes. Its return type is optional and inferred when left off.
@@ -78,9 +118,19 @@ A no-argument closure uses an empty pair of pipes:
 let now = || current_time();
 ```
 
-```admonish note
-Functions cannot currently be passed to native functions and called. This is a high priority to be added after `v0.1.0`.
+````admonish note title="Handing a function to the host"
+A native can take a function or a closure, keep it, and call it later. A host that offers one registers whatever it wants run, rather than the script having to declare functions under names the host already knows.
+
+```mimas
+fn on_tick(n: int) { print(f"tick {n}"); }
+
+every_tick(on_tick);                  // a function by name
+every_tick(Counter::bump);            // a method, `self` filled like any parameter
+every_tick(|n: int| { print(n); });   // or a closure
 ```
+
+Whether a native does anything with a function you give it is up to the host. Writing that side is covered in [Function Values](../extension/function-values.md).
+````
 
 ### Closures vs. functions
 

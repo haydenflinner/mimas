@@ -11,22 +11,45 @@ pub use val::*;
 pub mod adt;
 pub mod anon;
 pub mod api;
+pub mod bc;
 pub mod conversion;
 pub mod freeze;
 mod heap;
 pub use heap::*;
+pub mod mem;
 mod native;
 pub use native::*;
 pub mod fixtures;
 pub use fixtures::*;
+mod snapshot;
+pub use snapshot::*;
+mod rebind;
+pub use rebind::*;
+mod graph;
+pub use graph::*;
+mod math;
+#[cfg(feature = "tensor")]
+pub mod tensor;
+pub mod units;
+pub use ::glam;
+pub use units::{Beats, Bits, Hz, Px, PxS, PxS2, Secs, St, Tempo};
 
 // re-exports the MimasEnum / MimasStruct derives resolve against -- saves user crates from
 // depending on mimas-api / mimas-shared directly.
 pub use ::api::{AdtBinding, ApiAdtKind, ApiVariantFields, Registry};
+pub use ::compile::{Constant, Function, Module, Type, Vis};
 pub use ::macros::{MimasEnum, MimasStruct, mimas, native};
-pub use ::shared::{Literal, Ty};
+pub use ::shared::{BodyId, FnHeader, Literal, Ty};
+pub use conversion::{Arg, Args};
 
 // the `#[mimas]` attribute macro expands to `vm::inventory::submit!{ ... }`, so the inventory
 // crate has to be reachable through `vm`. re-exporting it here means downstream crates that
 // author natives only need a `vm` dependency, never a direct `inventory` one.
 pub use ::inventory;
+
+// `Vm::function_dataflow`'s return type -- re-exported so a `vm`-only dependent (the inspector,
+// say) can name `vm::DataflowGraph` etc. without also depending on `mimas-compile` directly.
+// `BinOp`/`UnaryOp` join them: `Api::add_bin_op`/`add_unary_op` take them as args.
+pub use ::compile::{
+    BinOp, DataflowEdge, DataflowError, DataflowGraph, DataflowNode, NodeKind, Program, UnaryOp,
+};

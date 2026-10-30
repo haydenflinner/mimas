@@ -13,15 +13,30 @@ mod methods {
     pub(crate) mod dict;
     pub(crate) mod float;
     pub(crate) mod int;
+    pub(crate) mod rng;
     pub(crate) mod str;
 }
 
 mod std_lib {
+    #[cfg(feature = "darkly")]
+    pub(crate) mod darkly;
+    #[cfg(feature = "dataframe")]
+    pub(crate) mod dataframe;
+    pub(crate) mod colrow;
+    pub(crate) mod debug;
     pub(crate) mod fs;
+    pub(crate) mod interval;
+    pub(crate) mod iso;
     pub(crate) mod math;
+    #[cfg(feature = "parquet")]
+    pub(crate) mod parquet;
     pub(crate) mod parse;
     pub(crate) mod process;
     pub(crate) mod sys;
+    #[cfg(feature = "tensor")]
+    pub(crate) mod tensor;
+    #[cfg(feature = "xlsx")]
+    pub(crate) mod xlsx;
 }
 
 mod prelude;
@@ -40,7 +55,22 @@ pub fn std<'gc>(api: &mut Api<'_, 'gc>) {
     methods::int::install(api);
     methods::str::install(api);
     methods::bool::install(api);
+    methods::rng::install(api);
+    #[cfg(feature = "dataframe")]
+    std_lib::dataframe::install(api);
+    #[cfg(feature = "tensor")]
+    std_lib::tensor::install(api);
+    #[cfg(feature = "xlsx")]
+    std_lib::xlsx::install(api);
+    #[cfg(feature = "parquet")]
+    std_lib::parquet::install(api);
+    #[cfg(feature = "darkly")]
+    std_lib::darkly::install(api);
+    std_lib::colrow::install(api);
+    std_lib::debug::install(api);
     std_lib::fs::install(api);
+    std_lib::interval::install(api);
+    std_lib::iso::install(api);
     std_lib::math::install(api);
     std_lib::parse::install(api);
     std_lib::process::install(api);

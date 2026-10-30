@@ -117,6 +117,7 @@ test_ty!(
 
 // Shadowing
 test_ty!(
+    // r[verify mimas.let.type-fixed]
     let_shadowing,
     "let a: int = 0;
      let a: bool = false;",
@@ -227,6 +228,7 @@ test_ty!(
 test_fail!(const_array_with_local_ident, "let a = 1; const A = [a, 2];");
 test_fail!(non_const_array, "const A = [foo()];");
 test_fail!(
+    // r[verify mimas.const.compile-time]
     const_non_literal,
     "fn foo() -> int { 0 } const BUZZ = foo();"
 );
@@ -242,6 +244,98 @@ test_fail!(
 );
 test_fail!(const_redeclared, "const A = 0; const A = 1;");
 test_fail!(const_references_local, "let a = 0; const B = a;");
+test_ty!(
+    const_tuple_destructure,
+    "const (A, B) = (1, 2);",
+    "A" => Int,
+    "B" => Int,
+);
+test_ty!(
+    const_tuple_destructure_mixed,
+    r#"const (S, N, F) = ("hi", 42, 1.5);"#,
+    "S" => Str,
+    "N" => Int,
+    "F" => Float,
+);
+test_ty!(
+    const_tuple_destructure_nested,
+    "const ((A, B), C) = ((1, 2), 3);",
+    "A" => Int,
+    "B" => Int,
+    "C" => Int,
+);
+test_ty!(
+    const_destructure_of_const,
+    "const T = (1, 2);
+     const (A, B) = T;",
+    "A" => Int,
+    "B" => Int,
+);
+test_ty!(
+    const_destructure_composed,
+    "const X = 1;
+     const (A, B) = (X + 1, X + 2);",
+    "A" => Int,
+    "B" => Int,
+);
+test_ty!(
+    const_destructure_visible_in_fn,
+    "const (A, B) = (1, 2);
+     fn sum() -> int { A + B }",
+    "sum()" => Int,
+);
+test_ty!(
+    const_destructure_block_scoped,
+    "fn f() -> int { const (A, B) = (3, 4); A * B }",
+    "f()" => Int,
+);
+test_fail!(
+    const_destructure_missing_member,
+    "const (A, B, C) = (1, 2);"
+);
+test_fail!(const_destructure_extra_member, "const (A) = (1, 2);");
+test_fail!(const_destructure_non_tuple, "const (A, B) = 5;");
+test_fail!(
+    const_destructure_non_const_rhs,
+    "fn f() -> int { 1 } const (A, B) = (f(), 2);"
+);
+test_fail!(const_destructure_literal_pat, "const 1 = 1;");
+test_fail!(const_destructure_redundant_name, "const (A, A) = (1, 2);");
+test_ty!(
+    const_prefix_destructure,
+    "const FIELD_(X, Y, W, H) = (40.0, 40.0, 960.0, 720.0);",
+    "FIELD_X" => Float,
+    "FIELD_Y" => Float,
+    "FIELD_W" => Float,
+    "FIELD_H" => Float,
+);
+test_ty!(
+    const_prefix_destructure_nested,
+    "const A_(X, B_(Y, Z)) = (1, (2, 3));",
+    "A_X" => Int,
+    "A_B_Y" => Int,
+    "A_B_Z" => Int,
+);
+test_ty!(
+    const_prefix_destructure_mixed,
+    r#"const C_(S, N) = ("hi", 42);"#,
+    "C_S" => Str,
+    "C_N" => Int,
+);
+test_fail!(
+    const_prefix_destructure_wrong_arity,
+    "const A_(X, Y, Z) = (1, 2);"
+);
+// `Foo(X)` without the `_` stays a real variant pattern -- only `Foo_(X)`
+// is prefix sugar -- so const still rejects it as unbindable.
+test_fail!(const_variant_pat_is_not_prefix, "const Foo(X) = (1,);");
+// the same sugar works in `let`, `match`, `for` -- every pattern position
+test_ty!(
+    let_prefix_destructure,
+    "let P_(X, B_(Y)) = (1.0, (2.0,));",
+    "P_X" => Float,
+    "P_B_Y" => Float,
+);
 test_fail!(
     const_cycle,
     "const A: int = B; const B: int = A;",
@@ -253,6 +347,66 @@ test_fail!(
     assign_to_loop_var,
     "for i in [1, 2] { i = 0; }",
     "for c in \"abc\" { c = \"x\"; }",
+);
+
+// Mutating the iterated collection mid-loop
+test_fail!(
+    index_write_to_iterated_array,
+    "let xs = [1, 2];
+     for x in xs { xs[0] = 0; }",
+    "let xs = [1, 2];
+     for x in xs { xs[0] += 1; }",
+    "let xs = [1, 2];
+     for x in xs { let i = 0; xs[i] = 0; }",
+);
+test_fail!(
+    index_write_to_iterated_dict,
+    "let d = ~{};
+     for (k, v) in d { d[\"a\"] = 1; }",
+);
+test_fail!(
+    index_write_through_iterated_field,
+    "struct Wrap { arr: [int] }
+     let w = Wrap { arr = [1] };
+     for x in w.arr { w.arr[0] = 0; }",
+);
+test_fail!(
+    nested_loop_outer_mutation,
+    "let xs = [1];
+     for a in xs {
+         for b in xs { xs[0] = 0; }
+     }",
+);
+test_fail!(
+    closure_mutating_iterated_collection,
+    "let xs = [1];
+     for x in xs { let f = || { xs[0] = 0; }; }",
+);
+// rebinding is not mutation, sibling writes are fine, element writes are fine, and
+// shadowed names resolve to a different binding
+test_ty!(
+    assign_iterated_after_loop,
+    "let xs = [1]; for x in xs {} xs[0] = 0;"
+);
+test_ty!(
+    rebind_iterated_inside_loop,
+    "let xs = [1]; for x in xs { xs = []; }",
+);
+test_ty!(
+    index_write_to_other_collection_in_loop,
+    "let xs = [1]; let ys = [2];
+     for x in xs { ys[0] = 0; }",
+);
+test_ty!(
+    index_write_shadowed_in_loop,
+    "let xs = [1];
+     for x in xs { let xs = [2]; xs[0] = 0; }",
+);
+test_ty!(
+    index_write_to_sibling_field_in_loop,
+    "struct Wrap { arr: [int], n: int }
+     let w = Wrap { arr = [1], n = 0 };
+     for x in w.arr { w.n = 1; }",
 );
 
 // Patterns
@@ -359,11 +513,16 @@ test_fail!(
 
 test_fail!(
     const_min_div_rem_overflow_ices,
-    "const A: int = (-9223372036854775807 - 1) % -1;",
+    "const A: int = (-9223372036854775807 - 1) mod -1;",
     "const B: int = (-9223372036854775807 - 1) ~/ -1;"
 );
 
-test_fail!(
-    const_struct_in_array_ices,
+// an array holding structs allocates at each use site, like a struct const
+test_success!(
+    const_struct_in_array,
     "struct P { x: int } const A = [P { x = 1 }];"
+);
+test_success!(
+    const_array_of_struct_consts,
+    "struct P { x: int } const R = P { x = 1 }; const L = P { x = -1 }; const BOTH = [R L];"
 );

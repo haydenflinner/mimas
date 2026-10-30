@@ -1,0 +1,455 @@
+# Features
+
+Memorable additions to mimas beyond what the changelog tracks — newest first.
+
+## Operator overloading — operators resolve to ordinary methods
+
+`a + b` is a method call: the left operand's type is asked for `add`, and
+if it doesn't provide one the right operand's is asked for `radd` — so
+`s * v` finds `v.rmul(s)` with `self` always the operand that owns the
+implementation. The same naming covers the whole infix surface —
+`add sub mul div idiv rem band bor bxor shl shr` for `+ - * / ~/ mod &
+| ⊕ << >>`, `lt le gt ge` for the comparisons, `neg pos bnot inv` for
+prefix `- + ~ !` — plus `r`-prefixed reverse forms for every binary
+name. Names dodge the keywords (`rem` not `mod`, `bxor` not `xor`) —
+and `!`'s is `inv`, an ordinary name, so overloading it never shadows
+the `not` operator word; types without `inv` keep `!` bool-only, and
+`not x` spells the same `x.inv()` call. `==`/`!=` stay structural and
+`&&`/`||`/`??` stay non-overloadable.
+
+Resolution is static and recorded: the solver writes an `OpDispatch`
+(`dec` + `swap`) into `Resolutions::op_decs` keyed by the operator node,
+and codegen lowers to an ordinary direct/native call — receiver first,
+operand second — rather than a generic `Bin`. An operator-shaped method
+must take exactly one operand (zero for unary); a `fn add(self, o, k)`
+is just a method and `a + b` keeps its plain invalid-op error. Compound
+assignments ride the same dispatch: `x += y` calls `x.add(y)` and stores
+the result — `??=` keeps its option semantics.
+
+Two consequences fell out of making it ordinary methods:
+
+- **Vectors, tensors and deltas speak infix.** `std::math`'s `Vec2`/`Vec3`
+  ship `mul`/`rmul`/`div`/`neg`, so `v * 2.0`, `2.0 * v`, `v / 2.0` and
+  `-v` all work (`add`/`sub` were already methods — `v + w` arrived
+  free). In game-kit, `Change<T>` gets `radd`/`rsub`, so `xs += add 3`
+  applies a delta and `xs -= remove 2` applies its undo.
+- **CUE-style unification is a library.** `host/web/games/cue-kit.mimas`
+  defines a `CVal` ADT (top/bottom/atoms/lists/structs/disjunctions/
+  bounds/defaults) and implements `band`/`bor` as `meet`/`join`, so a
+  config schema reads `~{port = ge(1024) & le(65535)}` and `schema &
+  record` unifies fieldwise with `⊥` propagating. The lattice laws are
+  `check` lines run by `cue_kit::cue_kit_check_lines_all_pass`.
+
+`crates/library/tests/operators.rs` pins the contract: left dispatch,
+reverse dispatch, non-bool comparisons, compound assign, structural
+equality untouched, and arity/type rejections.
+
+## `and`/`or`/`not` — the logical operators in word form
+
+C++-style alternative tokens: `and` and `or` lex straight to
+`DoubleAmpersand`/`DoublePipe`, and `not` lexes to a new `NotWord` token
+that parses as prefix `!` (never a postfix unwrap — `x!` stays `Bang`
+territory). Same precedence, same short-circuit; `t or f and f` is
+`(t || f) && f`. Source canonically spells `&&`/`||`/`!` — the words
+exist so the editor can show and accept them as a per-person reading
+option, and so `not x` stops being a foreign-spelling teaching error.
+
+**A source can take a word back.** A file that declares `fn not` (or
+`fn and`/`fn or`, `pub` or not) gets that word as a plain name: the
+lexer's pre-scan (`lex::shadowed_words`) sees the declaration and lexes
+the word as an `Ident` in that page, so `not(a)`, `map1(a, not)` and
+`not a` all call the fn, and the operator is spelled with its symbol.
+The reach is directional: a declaration covers its own page and the
+pages that `use` it, never the pages it uses (`lex::shadow_sets`) — so
+n2t-lib's `fn not(a: int)` reaches n2t-gates but not game-kit's
+`not UP`. Per file in `load_files`; in one spliced source the host's
+splice writes a `//# page: name` line (`lex::PAGE_MARK`) at each page's
+start and `lex::shadow_table` bounds pages there. The
+grades pass warns at the declaration — `shadowed_builtin`, a stable
+miette code a host can filter on (Nina hides it per page with the
+`allow` page property). nand2tetris's gate lib is the motivating page.
+Tests: `parse_validity::a_declared_fn_takes_back_an_operator_word`,
+`library/tests/juxta.rs` (`a_declared_fn_shadows_its_operator_word`,
+`shadowing_an_operator_word_warns_with_a_code`,
+`a_kits_shadowing_reaches_the_page_that_uses_it`),
+`parse_validity::a_spliced_source_shadows_per_page`.
+
+## `check (expr)` opens a check
+
+Juxtaposition made `check (a * b).same(c)` the call `check(a * b)…`. A
+gap after the word now opens a check before `(`, `[`, `~{` and `-`, as
+it always did before a name or literal; `check(x)` and `check[i]`
+touching the word stay a call and an index
+(`parse_validity::check_opens_before_a_spaced_paren_bracket_or_minus`).
+
+## Const arrays may hold structs
+
+`const DIRS4 = [RIGHT DOWN LEFT UP]` over struct consts used to be
+"non-constant" (and `[P { x = 1 }]` an ICE): only scalar arrays have a
+bytecode `Constant` form. A const array/tuple that holds a struct or
+dict — directly, nested, or through a const ref — now allocates at each
+use site, the way a struct const already did (`Constant::needs_alloc`
+in `emit_const_dec` and the module-constant export), so a write into
+one use never reaches the next. Tests:
+`solve_variables::{const_struct_in_array, const_array_of_struct_consts}`,
+`library/tests/structs.rs::const_array_of_struct_consts`.
+
+## Typed arrays — `IntArray`/`FloatArray` backing stores — branch `typed-arrays`
+
+Homogeneous `[int]`/`[float]` sequences stop paying `Vec<Val>`'s 16-byte
+tagged cells (and a GC trace per element): they get a structure-of-arrays
+backing instead — `Gc<RefLock<ArrayStore>>` where `ArrayStore` is
+`Empty | Ints(Vec<i64>) | Floats(Vec<f64>) | Vals(Array)` (`val.rs`).
+
+**Distinct `Val` tags on purpose.** `Val::IntArray`/`Val::FloatArray` are
+separate discriminants, so every existing `Val::Array` pattern — including
+the bcgen-generated and JIT-inlined fast paths that borrow the `Vec<Val>`
+directly — *misses* typed arrays and falls through to the helpers that box
+elements back out. That's the safety property; no inline path can misread a
+`Vec<i64>` as `Vec<Val>`. The JIT needed zero changes: `GetIndex`/`SetIndex`/
+`GetField`/`SetField` tag-compare against `t_array` before touching the vec
+layout, and `Push`/`NewArray`/`Len` were already helper-backed (`bc.rs`'s
+`jit::*` shims now share the same `seq_push`/`new_seq` bodies).
+
+**Promotion/demotion policy.** `[]` (`Ctx::new_seq`) starts `Empty`; the
+first `Push` of an int/float picks `Ints`/`Floats`. `Ctx::array_val` maps an
+all-`Int`/`Float` `Vec<Val>` to the typed tags (constants, `collect`
+results, native `Vec<T>` returns — tuples like `(1,2,3)` included).
+Promotion happens *only* at construction — an existing `Val::Array` never
+upgrades. Any write that doesn't fit demotes in place: `set`/`push` box the
+store into `Vals`, which holds a real `Array` handle so a native that took
+`as_untyped_array` keeps mutating the very contents the typed `Val` still
+observes. The tag is a birth hint; the store is the truth (an
+`IntArray`-tagged value can hold `Floats`).
+
+**Everywhere else it's just an array.** Reads box to `Val::Int`/`Val::Float`;
+`==`, `display`, `capture`/`inspect`, iteration, `in`, `len`, broadcast
+`bin`/`unary`, deep-clone, snapshots (`SnapNode::IntArray/FloatArray` ride
+unboxed) and rebind all go through `ArrayStore`'s boxed accessors, so
+semantics — including cross-representation equality between a typed array
+and a `Vec<Val>` array — are identical. `crates/vm/tests/typed_arrays.rs`
+pins both halves of that contract.
+
+## `|>` — why the pipe operator is worth keeping
+
+The TODO asked the honest question: nobody who doesn't write pipelines uses it, so what
+does `|>` offer over `.`? Here is what it actually does, where it earns its keep, and
+where `.` is the right tool instead.
+
+**What it lowers to.** `|>` is pure sugar at parse time — there is no `ExprKind` for it.
+`x |> f(a, b)` becomes the plain call `f(x, a, b)`; `x |> f` becomes `f(x)`. The piped
+value is inserted as the *first argument of a free call*, which is the entire semantics.
+It is also the loosest operator in the grammar (`a + b |> f` is `f(a + b)`), and it is
+the one infix exempt from the newline cutoff, because a line can't start with `|>` —
+that is what makes the vertical, one-verb-per-line style parse:
+
+```mimas
+samples
+|> arrange(["rider", "clock"], [false, false])!
+|> mutate([when(col("rider") == col("rider").shift(1),
+               col("clock").diff(1),
+               col("clock") - lit(START)).alias("laptime")])!
+|> select_names(["rider", "laptime"])!
+```
+
+Two subtleties worth knowing: `x |> f(1)!.g(2)` puts `x` into the *first* call of the
+postfix chain (`f(x, 1)!.g(2)`, not `(f(1)!.g)(x, 2)`), so `!` unwraps per-step inside a
+pipeline. And `x |> n.f(1)` pipes into `n.f(x, 1)` — the callee can be any expression
+that calls, not just a bare ident.
+
+**What it buys over `.`.** `.` is member access: `x.f(a)` only resolves when `f` is a
+method on `x`'s type (or a field). `|>` doesn't dispatch at all — `x |> f(a)` calls the
+*free function* `f(x, a)`. So `|>` is the only way to put a value through functions that
+aren't, and can't be, methods:
+
+- functions on types you don't own — you can't `impl` methods onto builtin `[T]`, `str`,
+  or a `DataFrame` type declared by a library;
+- ordinary `fn`s written without thinking about receivers — `x |> clean(2)` for any
+  `fn clean(x, k)`;
+- the `std::polars` verbs, which are deliberately registered *both* as methods and as
+  module functions (see `dataframe.rs::install`) precisely so `df |> filter(..)!` and
+  `df.filter(..)!` both resolve — the pipeline style for data transforms was the original
+  motivation (tidy/PRQL, commit `8767a67`).
+
+The secondary benefit is visual: a pipeline lines its steps up vertically and reads as a
+recipe, and `|>` being loosest means `expr |> f` grabs the whole expression to its left —
+usually what you want.
+
+**When `.` is better.** Almost everywhere else. `.` is how you read fields, index, and
+call *methods* — including the mutating ones: `xs.push(0)` takes `&mut self`, and
+`xs |> push(0)` desugars to a *call* `push(xs, 0)`, which doesn't resolve because `push`
+isn't a free function. `|>` passes the value by first-argument position; it cannot reach
+`&mut self` receivers. If a name is only a method, it won't resolve under `|>` — that is
+the main footgun, and the reason polars verbs are dual-registered.
+
+**Verdict: keep.** The `.` operator covers methods; `|>` covers the one thing `.` can't —
+threading a value through free functions in reading order — and it costs almost nothing:
+a desugar in `Parser::binary`/`pipe` (~50 lines), no new AST, no runtime, no type-system
+surface. Nothing about it is mandatory; code that never pipelines never sees it. The cost
+it does impose is a second spelling for call chains (`x.f()` vs `x |> f()` when `f` is
+dual-registered), and the resolution surprise when a method-only name doesn't exist as a
+free function. Both are documented above; the upside is that the tidy surface reads like
+tidy, which was the point.
+
+## Units across the native boundary — `param_dims` / `return_dim` on native signatures
+
+Natives used to be `Any` at the boundary: `music::play_for(t, n, amp, 0.5s, 1200Hz)`
+in the wrong order compiled fine because no argument dimension ever reached the
+checker. Now a native parameter declared as a unit-carrying Rust type —
+`Secs`, `Hz`, `Beats`, `St`, `Tempo`, `Bits` (thin `f64` newtypes in
+`mimas::vm::units`) — lands its `Dim` on `ApiFunction`/`ApiMethod`
+(`param_dims`, `return_dim`), parallel to the `Vec<Option<Ty>>` slots that
+`MimasType::mimas_ty` already produced. `MimasType` gains `mimas_dim`,
+`IntoNativeResult` gains `return_dim`; `Option<T>`/`Raisable<T>` forward the
+inner dim.
+
+- The dims pass resolves the call's `DecId` through `node_decs` (all three
+  call shapes — ident, `x.m()`, `mod::f()` — record it) into `dec_to_native`,
+  then checks each arg positionally against `param_dims` and returns
+  `D::Q(return_dim)`. Undeclared slots stay `None` = unchecked, and a native
+  declaring *no* dims falls through to `builtin`'s special cases (`pull`,
+  `to`, `pow`, …) untouched.
+- The check rejects *known* mismatches — a plain `0.4` or `1200Hz` into a
+  `secs` slot errors — while `Any` (other natives' returns, dynamic values)
+  still flows. So adopting a unit on one slot never breaks callers that
+  produce the value dynamically.
+- `music::synth`/`adsr` take `Secs`/`Hz`, `play_for`/`play_with` take
+  `Hz`/`Secs`, `transpose`/`rate` take `St`, `hz` returns `Hz`. zzfx tables
+  stay plain by contract — feed a measured value into a slot list with
+  `.to("Hz")`, which is exactly the conversion the checker asks for.
+- `Dim`'s arithmetic (`mul`/`div`/`powi`/`sqrt`) is `const` now, so a wrapper
+  can spell its dimension as a `const` (`Tempo::DIM = BEAT.div(TIME)`).
+
+## `warn` — a non-fatal, source-located diagnostic channel
+
+`Ctx::warn(msg)` records a line on `Prints` like `print` does, but kinded
+`Warn` and carrying the call site's `Location` via `DebugInfo::top_loc()`; a
+`warn(...)` builtin gives userland the same channel. Entries dedupe on
+`(loc, text)` so a warn inside a per-frame loop doesn't flood. Eval reports
+them as `warn: true` lines and the web editor renders them amber with the
+span marked, a game session accumulates them across frames and clears on
+start/stop/replay.
+
+- This is the livecoding answer to Raisable: a bad note in a pattern warns
+  and plays silence; the run continues. Music natives (`midi`, `pattern`,
+  `pat`, `mask`, …) warn through it; genuinely unrecoverable failures still
+  raise.
+- `Prints` entries are `(Location, PrintKind, String)` — every consumer of
+  `take()` handles the kind.
+
+## DataFrame rows as records — `df.row(i)` / `df.rows()`
+
+`df.row(i)!` hands back one row as an instance of the declared struct whose
+fields are exactly the frame's columns, filled by name; `df.rows()!` gives them
+all in order. The point is `cleared_1k(shuttle().row(2)!)` — a real table row
+going straight into a function typed on the record.
+
+- The struct resolves by field-name *shape*, not by name: zero matching structs
+  and several matching structs both raise (`row: no declared struct has fields
+  […]`, `… match more than one declared struct (…)`). Out-of-bounds raises.
+  Missing cells materialize as `null`.
+- Two paths to the record type: the declared return is `anon` (`Anon`/`ArrayOf`
+  slot 0) and unifies wherever the row is used — that's the only path for an
+  opaque frame (`from_csv`). For a closed-schema frame (`table {}` literal,
+  `.schema("…")`, or a schema-propagating op) the solver's `frame_method_call`
+  finds the adt up front via `record_adt_for`, so `df.row(0)!.riders` type-checks
+  directly without annotation.
+- `to_dataframe` is the exact inverse: array-of-structs in, struct-rows out.
+- Both are free fns and `DataFrame` methods in `std::polars`; `row` is also how
+  `query`-derived frames read back — any frame whose columns match a declared
+  struct's fields decomposes, so `derive`d extra columns need a wider struct or
+  a `select` first.
+
+## xlsx spreadsheet I/O — `std::polars`
+
+`from_xlsx(path, sheet?)` reads a worksheet into a `DataFrame` via calamine;
+`df.to_xlsx(path, sheet?)` exports one via rust_xlsxwriter (new files only —
+no editing existing workbooks). Behind the default-on `xlsx` feature on
+`library`/`mimas`, same opt-out story as `dataframe`/`darkly`.
+
+- Type inference on read: whole numbers `i64`, any decimal widens `f64`,
+  bools `bool`, Excel datetimes `datetime[μs]`, mixed columns fall back to
+  per-cell `str`, Excel errors preserved as text, empty cells null. Formulas
+  read cached values, never evaluated.
+- `rust_xlsxwriter`'s `polars` feature stays off — it would resolve a second,
+  crates.io `polars` that doesn't unify with the workspace's path-dep clone.
+- Deferred: in-place workbook editing → `umya-spreadsheet` if the need ever
+  shows up. SheetJS and the C `xlsxwriter` bindings were ruled out.
+
+## Cranelift JIT tier — `mimas-jit` (branch `jit-cranelift`)
+
+Second Futamura projection: `jit::compile(&program)` emits one native function
+per bytecode chunk with Cranelift (`FunctionBuilder`, dense op dispatch through
+`br_table` on a byte-offset→op-index map) and returns a `Vec<Option<BodyFn>>`
+for `Vm::install_bc` — the same slot bcgen bodies use, so interpreter/JIT
+bodies interleave freely.
+
+- Scalar int/float registers live in SSA vars ("shadows" with ok-flags) inside
+  a body; they flush to the register window before any call that observes it.
+  Unsupported ops delegate to `bc::jit::step_at` (= the interpreter's own
+  `step_one`), so semantics can't drift — only speed can.
+- `vm::bc::jit` is the `extern "C"` helper layer bound via `JITBuilder::symbol`
+  (`mj_*` names in `crates/jit/src/lib.rs::SPECS`, `H` indexes it 1:1).
+  **ABI gotcha:** `Ctx` is a repr(C) 2-pointer struct; under AAPCS64 a composite
+  that doesn't fully fit in remaining arg registers goes *wholly* to the stack,
+  while a flat Cranelift signature would split it — so `call_native` (ctx at
+  arg slot 7) takes `mc`/`st` as two pointers and rebuilds via
+  `Ctx::from_parts`. Any new helper with `Ctx` past arg 6 must do the same.
+- Calls: `CallDirect`/dynamic `Call` run inline below `INLINE_CALL_DEPTH` via
+  `jit::enter` (=`enter_call`) + a direct/indirect call into the callee body
+  (fn-ptr table in JIT module data), `pop_return` on `Flow::Return`; deeper
+  frames return `Flow::Call` to the driver as before.
+- Parity: `mimas-jit-test` runs each fixture under both lanes and diffs
+  `TEST_VALUE` + `keep` log + error — including op-budget *counts*, fuel
+  windows, pause/resume (`run_frame`), snapshot/restore, and GC pressure.
+- Bench (bc-bench `jit` lane, M-series arm64): fib_iter jit 172ms vs bc 254ms,
+  mandelbrot 519 vs 710 — beats pre-tuning bcgen on scalar loops; fib_rec
+  2313 vs 1089 and physics 2897 vs 704 lose (call-shim + flush overhead is the
+  known gap vs the batched-quota/loop-form bcgen on `bcgen-tuning`).
+
+## bcgen second specialization pass — branch `bcgen-perf`
+
+On top of `bcgen-tuning`'s scalar shadows and batched quota gates:
+
+- **Sparse multi-block loop wrapping** (`emit_body` + `grow_region` in
+  `crates/bcgen/src/lib.rs`): a bounded DFS grows a loop region over
+  continuation edges — jump targets first, then conditional fallthrough —
+  backtracking on dead ends. Regions stay ascending and validate iff every
+  interior edge lands on the head (`continue`), the next emitted op, or
+  outside the region (`code.ip` + `break`). Handles `while A && B`
+  short-circuit re-entry (mandelbrot's inner loop) and physics' 13-block
+  loop; `Switch` regions are rejected outright.
+- **Bool shadows**: `W::Bool` joins int/float in `analyze` — comparisons,
+  `JumpIf` conditions and `Constant::Bool` keep a native `bool` + ok flag
+  instead of boxing `Val::Bool` per write. `Unary::Not` emits a direct
+  `Val::Bool(b) => !b` arm, generic `unary` otherwise.
+- **Typed (Array, Int) indexing**: `GetIndex`/`SetIndex` inline the
+  bounds-checked `borrow`/`borrow_mut(&ctx)` path; every other
+  collection/index combo keeps the `get_index`/`set_index` helpers, so the
+  `IndexOutOfBounds`/`Option`-Null error contract is identical.
+
+Measured (`bc-bench` bc lane vs the pre-pass tree, best-of ≥20): mandelbrot
+190→86–104ms (bool shadows alone ≈ −17%, the rest mostly the loop form),
+prime_numbers 245→196–210ms (typed indexing ≈ −10%), physics ~unchanged,
+fib_iter/fib_rec unchanged. Rejected along the way: contiguous gap-fill of
+sparse regions (regressed hot inner loops) and `_vN` write-forwarding locals
+(the extra copies cost more than the `rd` slot loads they saved — +6–7%).
+
+## JIT round-2 perf — branch `jit-perf` (PR haydenflinner/mimas#7)
+
+Four layered optimizations over the tier above, all semantics-preserving
+(helpers/`estep` still provide the ground truth):
+
+- **Quota batching (M1):** CLIF `bcn`/`bcn0` vars mirror bcgen's
+  `settle!`/`gateq!`/`gatep!`: each op decrements a batched counter; pause,
+  fuel-out and ops_left exhaustion escape through cold gate trampolines;
+  `settle` runs at every observable boundary (calls, helper ops, exits).
+- **Bulk shadow flush (M2):** one `mj_flush` FFI call drains a packed
+  `FlushEnt` list — replaces per-register `wr_i`/`wr_f` calls.
+- **Megacalls (M3):** `mj_call_body`/`mj_call_dyn` fold callee resolution,
+  `enter_call_regs` frame push, callee `BodyFn` invocation, and the
+  `Flow::Return` pop/truncate/dst writeback into one FFI hop, returning the
+  rebuilt caller-window pointer for re-pinning.
+- **Direct `Val` access (M4):** `bc::jit::layout()` probes the live layout —
+  discriminant position/width, `Int`/`Float`/`Bool`/`Fn` payload offsets,
+  `ThreadState`/`Frame`/`Decoder` fields, `Vec` header order — by semantic
+  round-trip (mutate bytes of a known `Val`, `ptr::read` it back and compare
+  `discriminant()`; invalid patterns decode as "other", never abort).
+  Emitted code then does tag compares + payload loads/stores inline —
+  `ri`/`rf`/`rval`/`wr_*` FFI calls vanish from hot paths.
+  **Gotcha:** `size_of::<Discriminant<Val>>` (8) is the *token* width, not
+  the field width — rustc leaves stale bytes in discriminant padding, so
+  the probe tries widths smallest-first and emits 1-byte tag compares.
+- Result (release): mandelbrot jit 117ms vs bc 199ms (**jit wins x1.7**);
+  fib_iter 89 vs 60; prime_numbers 334 vs 255; fib_rec 1006 vs 723 and
+  physics 1065 vs 273 — call-heavy still trails; next lever is inlining /
+  direct body dispatch to skip the megacall FFI hop.
+
+## bcgen generated call path — branch `bcgen-calls2`
+
+Recursive `CallDirect` was ~330x rustgen on `fib_rec`. Profiling the
+generated call path found the costs in order: (1) `Val`'s derived
+`PartialEq` never inlines, so `rd(regs, r) == Val::Bool(x)` on `JumpIf`
+conditions without a bool shadow compiled to a *call* per branch — two per
+mandelbrot inner iteration and one per `fib` call frame; (2) full
+`Vec::resize(..., Val::Null)` + `enter_call_regs` bookkeeping on every
+generated-to-generated call; (3) `RtResult<Flow>` construction on every
+return and quota settle/re-arm at each boundary.
+
+- **Const-folded `enter_call_regs`** (`emit_call_fast`): snapshots args,
+  writes the callee window into spare capacity directly, Null-fills only
+  uncovered slots, emits a literal `Frame`; generic helper stays as the
+  capacity/dynamic-call fallback.
+- **`u8` return tag**: successful inline returns run `gen_return_pop`
+  (frame pop, `regs.truncate`, IP restore, dst writeback) and yield 0;
+  tag 1 means `io.out` holds the callee's `RtResult<Flow>` verbatim.
+- **`GenIo` boundary bundle**: `out`/`fuel`/`op_ip`/quota-pair/`inl` move
+  into one struct — the inner ABI drops from 11 params to 7 (no AArch64
+  stack spill) and `[bcn0, bcn]` rides the same `io` across inline calls,
+  so quota settles once per propagating exit instead of once per call.
+- **`gbail` cold exit**: all tag-1 exits funnel the `io.out` write through
+  a `#[cold]` helper — keeps big call-free bodies small enough that LLVM
+  stops spilling loop-carried shadows.
+- **`matches!` discriminant checks**: `JumpIf` and `GetField` option-null
+  checks emit `matches!(v, Val::Bool(..)/Val::Null)` — same predicate,
+  no `Val::eq` call.
+- Debug `INLINE_CALL_DEPTH` is 48 (release 256): generated debug frames
+  are ~7.7KB, so ~96 nested inline calls overflowed the parity thread's
+  stack.
+
+Measured (`bc-bench` bc lane, min-of-5, vs `e5b6214` binary): fib_rec
+714→534ms (−25%), mandelbrot 90→54ms (−40%), prime_numbers ~202ms flat,
+fib_iter ~56ms flat, physics ~268→280ms (+4.5%, regalloc noise). rustgen
+`fib_rec` is ~2.2ms — still ~245x ahead.
+
+## JIT round-4 runtime specialization — branch `jit-spec`
+
+Observe the live VM, recompile with what was seen, reinstall — no VM
+surgery: `jit::JitSession::observe(&mut vm, &program)` installs one
+profiling `BodyFn` shim per body through the ordinary `install_bc` table
+(each dispatch runs the interpreter's own `step_at`, so observation costs
+interpreter speed, not correctness); `session.facts()` snapshots a `Facts`
+struct; `session.specialize` recompiles via `jit::compile_with` and swaps
+the bodies in mid-run.
+
+- **`Facts`/`BodyFacts`** (`crates/jit/src/lib.rs`): per-body `entry[r]`
+  merged `Obs` (tag + stable GC payload ptr), `calls` (call-site resume ip
+  → the one callee `BodyId` ever seen), and `sites[ip]` (the merged
+  *receiver operand* of each `GetIndex`/`GetField` — sees mid-body values
+  `entry` can't, e.g. a global `LoadEntry`'d config dict). `Obs` merges
+  decay to `Mixed`/`ptr=0` on disagreement, so polymorphism degrades
+  gracefully.
+- **Forced entry shadows**: an `entry` tag of `Int`/`Float` puts the reg
+  in the scalar-shadow set unconditionally; the entry probe's ok-flag is
+  the runtime guard and every write site refreshes or clears the shadow,
+  so a wrong observation only ever deopts through `estep` — never
+  miscomputes (`spec.rs::wrong_entry_facts_deopt_not_break` feeds a lying
+  `Float` claim at an `Int` param and still gets 42).
+- **Monomorphic call ICs** (`emit_call_ic`): `Op::Call` sites with a single
+  observed callee emit two guard arms — `Val::Fn` tag + body-id compare,
+  `Val::Closure` tag + guarded `cl_func` deref + `captures.len` match —
+  each routing through `call_gates`/`inline_enter_run` (the refactored
+  `emit_call_direct_inline` core). Any miss runs `mj_call_dyn`, which
+  reproduces `not_callable`/`WrongArity`/`Flow::Call` verbatim.
+- **Frozen-constant baking**: `Facts::frozen` maps a `Gc::as_ptr` payload
+  address to `{kind, unguarded}` — a host promise of immutability for the
+  bodies' install lifetime (break it and you get stale reads, not
+  crashes). `Dict` bakes entries into a key-pointer compare chain (cap 32,
+  `Str` equality is pointer equality); `Array`/`Seq`/`Instance` fold to a
+  compile-time `(base, len)` view; `GetField` bakes `fields[slot]` to an
+  immediate `Val` when it's a scalar/primitive. Every site still
+  tag+pointer-guards `regs[r]` unless `unguarded` (honored only for regs
+  never re-seated in the body).
+- Bench (`jit-test --example specbench`, release, M-series arm64 —
+  `run(500_000)` where `tick` reads `CFG["rate"]`/`["scale"]`/`["bias"]`
+  per call): interp 127.5ms → jit generic 95.7ms (1.33x) → jit + facts
+  **32.9ms (2.91x vs generic, 3.87x vs interp)** — frozen-dict reads turn
+  ~50% of the loop body's runtime constant traffic into immediates.
+- Tests: `jit-test/tests/spec.rs` — IC hit/reseat-miss, polymorphic site
+  staying generic, frozen config bake from a `LoadEntry`'d global, wrong
+  facts deopting, `specialize_now` parity.
+
+Host-facing quirk to know: `Vm::call` uses entry reg 0 as its return
+scratch and restores it afterwards, so a callee's `StoreEntry` to global
+slot 0 inside an injected call is silently restored away — keep mutable
+globals out of slot 0 (see `call_ic_hit_and_miss`'s `pad`).

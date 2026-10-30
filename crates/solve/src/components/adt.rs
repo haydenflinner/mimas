@@ -7,6 +7,7 @@ use bitflags::bitflags;
 use indexmap::IndexMap;
 use itertools::Itertools;
 use shared::Location;
+use shared::ParamId;
 use std::{
     collections::HashMap,
     ops::{Deref, DerefMut},
@@ -17,6 +18,11 @@ pub use shared::AdtId;
 #[derive(Debug, Clone)]
 pub(crate) struct Adt {
     pub name: String,
+    /// The declared type parameters (`struct Pair<A, B>`), in order, with names so an `impl`
+    /// block can re-enter the same parameter scope. Stored types inside `variants`/`impls`
+    /// reference them as `Ty::Param` -- every *use* of the adt instantiates them (see
+    /// `Solver::instantiated_adt`/`specialize`). Empty for non-generic types.
+    pub type_params: Vec<(String, ParamId)>,
     pub variants: IndexMap<String, Variant>,
     pub impls: HashMap<String, Field>,
     pub native_overloads: HashMap<String, Vec<Field>>,
@@ -28,6 +34,7 @@ impl Adt {
     pub fn new_struct(name: String) -> Self {
         Self {
             name,
+            type_params: vec![],
             variants: vec![(
                 Self::STRUCT_VARIANT_NAME.into(),
                 Variant::Struct(StructVariant::default()),
@@ -43,6 +50,7 @@ impl Adt {
     pub fn new_enum(name: String, variants: IndexMap<String, Variant>) -> Self {
         Self {
             name,
+            type_params: vec![],
             variants,
             impls: HashMap::new(),
             native_overloads: HashMap::new(),
@@ -55,6 +63,7 @@ impl Adt {
     pub(crate) fn new_tuple_struct(name: String, members: Vec<Ty>) -> Self {
         Self {
             name,
+            type_params: vec![],
             variants: std::iter::once((
                 Self::STRUCT_VARIANT_NAME.into(),
                 Variant::Tuple(TupleVariant {
@@ -67,6 +76,11 @@ impl Adt {
             native_overloads: HashMap::new(),
             flags: AdtFlags::empty(),
         }
+    }
+
+    /// Whether this adt was declared with type parameters (`enum List<T>`).
+    pub(crate) fn is_generic(&self) -> bool {
+        !self.type_params.is_empty()
     }
 
     pub(crate) fn new_variant_layout(name: String, variant: &Variant) -> Self {
@@ -279,6 +293,36 @@ impl Variant {
             Variant::Struct(s) => s.fields.is_empty(),
         }
     }
+
+    /// The spelling that constructs this variant — `Name(<t>, ..)` for tuple
+    /// members, `Name { f = <t>, .. }` for named fields — for the constructor
+    /// suggestions ctor-mismatch errors carry. Member types show as `<ty>`
+    /// placeholders; field lists past five truncate.
+    pub(crate) fn ctor(&self, name: &str) -> String {
+        // a self-referencing member stores `Self` -- surface the concrete
+        // name instead (`List::Cons { tail = <Self?> }` -> `<List?>`)
+        let self_name = name.split("::").next().unwrap_or(name);
+        let ph = |ty: &Ty| format!("<{}>", ty.to_string().replace("Self", self_name));
+        match self {
+            Variant::Tuple(t) => format!(
+                "{name}({})",
+                t.members.iter().map(|m| ph(m)).join(", ")
+            ),
+            Variant::Struct(s) if s.fields.is_empty() => format!("{name} {{}}"),
+            Variant::Struct(s) => {
+                let mut shown = s
+                    .fields
+                    .iter()
+                    .take(5)
+                    .map(|(n, f)| format!("{n} = {}", ph(&f.ty)))
+                    .join(", ");
+                if s.fields.len() > 5 {
+                    shown.push_str(", …");
+                }
+                format!("{name} {{ {shown} }}")
+            }
+        }
+    }
 }
 
 #[mutants::skip]
@@ -363,5 +407,9 @@ bitflags! {
         const IS_ENUM = 1 << 0;
         const IS_MODULE = 1 << 1;
         const IS_BUILTIN = 1 << 2;
+        /// `Api::add_bin_op`/`add_unary_op` registered runtime impls — infix
+        /// and unary ops on this adt typecheck against the impl's operand
+        /// shapes at runtime instead of failing at solve time.
+        const HAS_OPS = 1 << 3;
     }
 }

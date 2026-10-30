@@ -172,7 +172,7 @@ macro_rules! enum_tuple {
 /// Creates a dedicated set of operators stemming from various TokKinds.
 #[macro_export]
 macro_rules! op {
-    (#[doc = $doc:expr]$name:ident { $($tok:ident => $op:ident), * $(,)? }) => {
+    (#[doc = $doc:expr]$name:ident { $($tok:ident $( ( $arg:literal ) )? => $op:ident), * $(,)? }) => {
         #[doc = $doc]
         #[derive(Debug, PartialEq, Clone, Copy)]
         pub enum $name {
@@ -186,7 +186,7 @@ macro_rules! op {
 
             fn try_from(value: $crate::lex::TokKind<'_>) -> Result<Self, Self::Error> {
                 match value {
-                    $($crate::lex::TokKind::$tok => Ok($name::$op),)*
+                    $($crate::lex::TokKind::$tok $( ( $arg ) )? => Ok($name::$op),)*
                     _ => Err(()),
                 }
             }
@@ -195,7 +195,7 @@ macro_rules! op {
         impl<'s> From<$name> for $crate::lex::TokKind<'s> {
             fn from(value: $name) -> Self {
                 match value {
-                    $($name::$op => $crate::lex::TokKind::$tok,)*
+                    $($name::$op => $crate::lex::TokKind::$tok $( ( $arg ) )?,)*
                 }
             }
         }

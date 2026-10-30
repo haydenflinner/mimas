@@ -1,4 +1,6 @@
-use crate::{collect_doc, convert::expand_conversion, doc_submission, register::submission};
+use crate::{
+    collect_doc, convert::expand_conversion, meta_submission, param_names, register::submission,
+};
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::{
@@ -6,7 +8,7 @@ use syn::{
     visit_mut::VisitMut,
 };
 
-pub fn expand_impl(block: ItemImpl) -> Result<TokenStream2, syn::Error> {
+pub fn expand_impl(mut block: ItemImpl) -> Result<TokenStream2, syn::Error> {
     if let Some((_, path, _)) = &block.trait_ {
         return Err(syn::Error::new_spanned(
             path,
@@ -29,12 +31,42 @@ pub fn expand_impl(block: ItemImpl) -> Result<TokenStream2, syn::Error> {
 
     let mut out = TokenStream2::new();
     let mut adds = TokenStream2::new();
-    for item in &block.items {
+    for item in &mut block.items {
         match item {
             ImplItem::Fn(method) => {
-                let (shim, add) = method_shim(&self_ident, method)?;
-                let doc = doc_submission(&shim.sig.ident, &collect_doc(&method.attrs));
-                out.extend(quote!(#shim #doc));
+                let (mut shim, muts, add) = method_shim(&self_ident, method)?;
+                // `#[consumes]` names resolve in the method's declared order -- `self`
+                // first, the typed params after it -- which matches the shim's param
+                // order (its receiver lands at index 0 either way)
+                let declared: Vec<String> = method
+                    .sig
+                    .inputs
+                    .iter()
+                    .map(|arg| match arg {
+                        FnArg::Receiver(_) => "self".to_string(),
+                        FnArg::Typed(t) => match &*t.pat {
+                            Pat::Ident(p) => p.ident.to_string(),
+                            _ => "_".to_string(),
+                        },
+                    })
+                    .collect();
+                let grades = crate::grades(&mut method.attrs, &declared)?;
+                // the shim is the registered fn, so it submits the method's meta -- inside its
+                // body, since `submit!` expands to an unnamed const (see `meta_submission`)
+                let meta = meta_submission(
+                    &shim.sig.ident,
+                    &param_names(&shim.sig),
+                    &collect_doc(&method.attrs),
+                    &grades,
+                );
+                if let Some(meta) = meta {
+                    shim.block.stmts.insert(0, meta);
+                }
+                let src = crate::src_submission(&shim.sig.ident, method.sig.ident.span());
+                // `#[effects]` keys on the shim's path too -- install looks the registered
+                // fn (the shim) up, not the method's own name
+                let effects = crate::effects_submission(&shim.sig.ident, &mut method.attrs)?;
+                out.extend(quote!(#shim #src #muts #effects));
                 adds.extend(add);
             }
             ImplItem::Const(c) => {
@@ -70,7 +102,7 @@ pub fn expand_impl(block: ItemImpl) -> Result<TokenStream2, syn::Error> {
 fn method_shim(
     self_ident: &Ident,
     method: &ImplItemFn,
-) -> Result<(ItemFn, TokenStream2), syn::Error> {
+) -> Result<(ItemFn, TokenStream2, TokenStream2), syn::Error> {
     let name = &method.sig.ident;
     let name_str = name.to_string();
     if method
@@ -130,7 +162,7 @@ fn method_shim(
     }
     ReplaceSelf(self_ident).visit_signature_mut(&mut shim.sig);
 
-    let ctx = expand_conversion(&mut shim)?;
+    let (ctx, mut mutating) = expand_conversion(&mut shim)?;
     let vm = crate::vm_path();
     let body: Vec<syn::Stmt> = match &receiver {
         None => parse_quote!(return #self_ident::#name( #(#call_args),* );),
@@ -169,13 +201,24 @@ fn method_shim(
     };
     shim.block.stmts.extend(body);
 
+    // NativeMutates indices count from the receiver: `&mut self` is index 0, and `&mut`
+    // params shift one slot when a receiver was stripped off the shim's signature -- so
+    // shift first, *then* mark the receiver, or `&mut self` would land on index 1
     let shim_ident = &shim.sig.ident;
+    if receiver.is_some() {
+        mutating.iter_mut().for_each(|i| *i += 1);
+        if receiver.as_ref().is_some_and(|r| r.mutability.is_some()) {
+            mutating.push(0);
+        }
+    }
+    let mut_submissions = crate::mutates_submissions(shim_ident, &mutating);
+
     let add = if receiver.is_some() {
         quote!(api.add_method_named(#name_str, #shim_ident);)
     } else {
         quote!(api.add_assoc_of::<#self_ident, _, _>(#name_str, #shim_ident);)
     };
-    Ok((shim, add))
+    Ok((shim, mut_submissions, add))
 }
 
 struct ReplaceSelf<'a>(&'a Ident);

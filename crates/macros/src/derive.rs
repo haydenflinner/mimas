@@ -80,8 +80,9 @@ pub fn expand_derive(input: &DeriveInput, is_enum: bool) -> Result<TokenStream2,
 
         impl<'gc> #vm::conversion::MimasType<'gc> for #name {
             fn mimas_ty(reg: &#vm::Registry) -> ::std::option::Option<#vm::Ty> {
-                let binding = reg.get::<Self>().expect(#missing_build);
-                ::std::option::Option::Some(#vm::Ty::Adt(binding.adt_id))
+                ::std::option::Option::Some(
+                    reg.ty_of_id(::std::any::TypeId::of::<Self>()).expect(#missing_build),
+                )
             }
 
             fn from_value(
@@ -99,15 +100,9 @@ pub fn expand_derive(input: &DeriveInput, is_enum: bool) -> Result<TokenStream2,
                     let b = inst.0.borrow();
                     (b.struct_id, b.fields.clone())
                 };
-                let binding = ctx
-                    .state()
-                    .mimas_bindings
-                    .borrow()
-                    .0
-                    .get(&::std::any::TypeId::of::<Self>())
+                let disc = ctx
+                    .binding(::std::any::TypeId::of::<Self>())
                     .expect(#missing_runtime)
-                    .clone();
-                let disc = binding
                     .variant_layout_ids
                     .iter()
                     .position(|id| (id.index() as u32) == struct_id)
@@ -125,18 +120,13 @@ pub fn expand_derive(input: &DeriveInput, is_enum: bool) -> Result<TokenStream2,
             }
 
             fn into_value(self, ctx: #vm::Ctx<'gc>) -> #vm::Val<'gc> {
-                let binding = ctx
-                    .state()
-                    .mimas_bindings
-                    .borrow()
-                    .0
-                    .get(&::std::any::TypeId::of::<Self>())
-                    .expect(#missing_runtime)
-                    .clone();
                 let (disc, fields): (usize, ::std::vec::Vec<#vm::Val<'gc>>) = match self {
                     #(#into_arms,)*
                 };
-                let layout_id = binding.variant_layout_ids[disc];
+                let layout_id = ctx
+                    .binding(::std::any::TypeId::of::<Self>())
+                    .expect(#missing_runtime)
+                    .variant_layout_ids[disc];
                 #vm::Val::Instance(ctx.new_instance(layout_id.index() as u32, #vm::Fields::new(fields)))
             }
         }
@@ -166,6 +156,35 @@ fn variant_tokens(
             f.named.iter().map(|f| &f.ty).collect(),
         ),
     };
+    // `#[mimas_dim("s")]` on a field declares its unit for the checker's dims pass; the
+    // Rust type stays `f64`, only the descriptor carries the `Dim`. A field typed `Secs`/
+    // `Px`/… instead picks its dim up from the wrapper's `MimasType`.
+    let dims: Vec<TokenStream2> = match fields {
+        Fields::Named(f) => f
+            .named
+            .iter()
+            .map(
+                |f| match f.attrs.iter().find(|a| a.path().is_ident("mimas_dim")) {
+                    Some(attr) => match attr.parse_args::<syn::LitStr>() {
+                        Ok(lit) => {
+                            let name = lit.value();
+                            quote!(::std::option::Option::Some(
+                            #vm::units::dim_of(#lit)
+                                .expect(concat!("unknown unit in #[mimas_dim]: ", #name))))
+                        }
+                        Err(_) => quote! {
+                            compile_error!("#[mimas_dim(\"unit\")] needs a unit string")
+                        },
+                    },
+                    None => {
+                        let ty = &f.ty;
+                        quote!(<#ty as #vm::conversion::MimasType<'static>>::mimas_dim(reg))
+                    }
+                },
+            )
+            .collect(),
+        _ => vec![],
+    };
     let pattern = match fields {
         Fields::Unit => quote!(#ctor),
         Fields::Unnamed(_) => quote!(#ctor( #(#names),* )),
@@ -184,6 +203,7 @@ fn variant_tokens(
                 #field_names.to_string(),
                 <#tys as #vm::conversion::MimasType<'static>>::mimas_ty(reg)
                     .expect("field type has no concrete Ty"),
+                #dims,
             )),* ]))
         }
     };

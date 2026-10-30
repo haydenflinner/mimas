@@ -21,9 +21,11 @@ pub mod components {
     mod binding;
     mod macros;
     mod pat;
+    mod poison;
     pub use annotation::*;
     pub use binding::*;
     pub use pat::*;
+    pub use poison::*;
 }
 
 pub mod expr {
@@ -40,6 +42,7 @@ pub mod expr {
         mod coalescence;
         mod collect;
         mod r#continue;
+        mod demote;
         mod equality;
         mod evaluation;
         mod r#for;
@@ -67,6 +70,7 @@ pub mod expr {
         pub use coalescence::*;
         pub use collect::*;
         pub use r#continue::*;
+        pub use demote::*;
         pub use equality::*;
         pub use evaluation::*;
         pub use r#for::*;
@@ -97,9 +101,11 @@ pub mod stmt {
         mod assignment;
         mod r#let;
         mod module;
+        mod unit;
         pub use assignment::*;
         pub use r#let::*;
         pub use module::*;
+        pub use unit::*;
     }
     pub use stmt_kinds::*;
 }
@@ -115,6 +121,7 @@ pub mod item {
         mod r#impl;
         mod pact;
         mod r#struct;
+        mod tests;
         mod r#use;
         pub use r#const::*;
         pub use r#enum::*;
@@ -122,6 +129,7 @@ pub mod item {
         pub use r#impl::*;
         pub use pact::*;
         pub use r#struct::*;
+        pub use tests::*;
         pub use r#use::*;
     }
     pub use item_kinds::*;
@@ -130,11 +138,13 @@ pub mod item {
 mod ast;
 pub mod errors;
 mod parser;
+pub mod visit;
 pub use ast::*;
 pub use expr::*;
 pub use item::*;
 pub use parser::*;
 pub use stmt::*;
+pub use visit::*;
 
 #[cfg(test)]
 mod tests {
@@ -142,8 +152,11 @@ mod tests {
     mod utils;
 
     mod autogen_tok_tests;
+    mod docs_for;
     mod lex_tokens;
+    mod node_at;
     mod parse_exprs;
+    mod parse_poison;
     mod parse_stmts;
     mod parse_validity;
 }

@@ -5,6 +5,7 @@
   "scopeName": "source.mim",
   "patterns": [
     { "include": "#comments" },
+    { "include": "#attributes" },
     { "include": "#fstring" },
     { "include": "#string" },
     { "include": "#declarations" },
@@ -40,6 +41,15 @@
           "name": "comment.line.double-slash.mim"
         }
       ]
+    },
+    "attributes": {
+      "match": "(#\\[)([A-Za-z_][A-Za-z0-9_-]*)(\\])",
+      "name": "meta.attribute.mim",
+      "captures": {
+        "1": { "name": "punctuation.definition.annotation.mim" },
+        "2": { "name": "storage.modifier.mim" },
+        "3": { "name": "punctuation.definition.annotation.mim" }
+      }
     },
     "string": {
       "begin": "\\\"",
@@ -403,6 +413,10 @@
       "patterns": [
         {
           "match": "\\b(print|panic|todo)\\s*(?=\\()",
+          "name": "entity.name.function.mim"
+        },
+        {
+          "match": "\\b(assert)!\\s*(?=\\()",
           "name": "entity.name.function.mim"
         }
       ]

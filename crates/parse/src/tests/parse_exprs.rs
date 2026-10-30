@@ -13,7 +13,8 @@ macro_rules! expr_test {
             let expected: crate::expr::Expr = crate::expr::ExprKind::from($expected).into_expr();
             let lexer = crate::lex::Lexer::new($source, 0, "test".into());
             let mut parser = crate::Parser::new(lexer);
-            let output = parser.expr().unwrap();
+            let output = parser.expr();
+            assert!(parser.errors().is_empty(), "{:?}", parser.errors());
             if output.kind() != expected.kind() {
                 assert_eq!(output.to_string(), expected.to_string());
                 assert_eq!(output.kind(), expected.kind());
@@ -320,7 +321,7 @@ expr_test!(
         binding: Some(Pat::new(
             PatKind::NullBind(Box::new(Pat::new(
                 PatKind::Struct(Box::new(ident_expr!("Pair")), {
-                    let mut m = hashbrown::HashMap::new();
+                    let mut m = indexmap::IndexMap::new();
                     m.insert("a".into(), Pat::from(ident!("a")));
                     m
                 }),
@@ -357,7 +358,7 @@ expr_test!(
         else_expr: None,
         binding: Some(Pat::new(
             PatKind::Struct(Box::new(ident_expr!("Pair")), {
-                let mut m = hashbrown::HashMap::new();
+                let mut m = indexmap::IndexMap::new();
                 m.insert("a".into(), Pat::from(ident!("a")));
                 m.insert("b".into(), Pat::from(ident!("b")));
                 m
@@ -441,7 +442,7 @@ expr_test!(
                     .into_expr(),
                 ),
                 {
-                    let mut m = hashbrown::HashMap::new();
+                    let mut m = indexmap::IndexMap::new();
                     m.insert("x".into(), Pat::from(ident!("x")));
                     m.insert("y".into(), Pat::from(ident!("y")));
                     m
@@ -558,6 +559,42 @@ expr_test!(
 );
 
 expr_test!(
+    semicolon_consequences_block,
+    "{
+        c = a
+        -b
+    }",
+    Block::new_with_yield(
+        vec![
+            Assignment::new(ident_expr!("c"), AssignmentOp::Identity, ident_expr!("a")).into_stmt()
+        ],
+        Unary::new(UnaryOp::Negative, ident_expr!("b")).into_expr(),
+    )
+);
+
+expr_test!(
+    infix_continues_inside_parens,
+    "(1
+        + 2
+        + 3)",
+    Grouping::new(
+        Evaluation::new(
+            Evaluation::new(int!(1), EvaluationOp::Plus, int!(2)).into_expr(),
+            EvaluationOp::Plus,
+            int!(3),
+        )
+        .into_expr(),
+    )
+);
+
+expr_test!(
+    infix_continues_when_operator_at_end_of_line,
+    "1 +
+        2",
+    Evaluation::new(int!(1), EvaluationOp::Plus, int!(2))
+);
+
+expr_test!(
     block_in_block,
     "{{0}}",
     Block::new_with_yield(vec![], Block::new_with_yield(vec![], int!(0)).into_expr())
@@ -606,7 +643,7 @@ expr_test!(
 
 expr_test!(
     modulo,
-    "1 % 1",
+    "1 mod 1",
     Evaluation::new(int!(1), EvaluationOp::Modulo, int!(1))
 );
 
@@ -640,9 +677,74 @@ expr_test!(
 
 expr_test!(
     bitwise_xor,
-    "1 ^ 1",
+    "1 ⊕ 1",
     Evaluation::new(int!(1), EvaluationOp::Xor, int!(1))
 );
+
+// `⊻` is the same operator — lexed to the same token.
+expr_test!(
+    bitwise_xor_alt_glyph,
+    "1 ⊻ 1",
+    Evaluation::new(int!(1), EvaluationOp::Xor, int!(1))
+);
+
+// `xor` is the word spelling — contextual like `mod`, so `let xor = …`
+// still binds an ordinary name.
+expr_test!(
+    xor_word,
+    "a xor b",
+    Evaluation::new(ident_expr!("a"), EvaluationOp::Xor, ident_expr!("b"))
+);
+
+// `^` joined identifier continuation: `x^2` is one name (the editor
+// typesets it raised), not `x` xor `2`.
+expr_test!(
+    caret_joins_ident,
+    "x^2 + 1",
+    Evaluation::new(ident_expr!("x^2"), EvaluationOp::Plus, int!(1),)
+);
+
+// The retired spellings report a misdirection and parse on as xor.
+#[test]
+fn spaced_caret_is_old_xor() {
+    let lexer = crate::lex::Lexer::new("a ^ b", 0, "test".into());
+    let mut parser = crate::Parser::new(lexer);
+    let expr = parser.expr();
+    assert_eq!(expr.to_string(), "a ⊕ b");
+    assert_eq!(parser.errors().len(), 1);
+}
+
+// `lit ^ lit` reads as a power — both sides are const, so the fold
+// happens at desugar and no error fires.
+expr_test!(caret_folds_lit_pow, "2^10", Literal::Int(1024));
+expr_test!(
+    caret_folds_float_pow,
+    "2.0 ^ 0.5",
+    Literal::Float(std::f64::consts::SQRT_2)
+);
+expr_test!(caret_folds_neg_exp, "2^-1", Literal::Float(0.5));
+expr_test!(
+    caret_folds_overflow_to_float,
+    "2^63",
+    Literal::Float(9.223372036854776e18)
+);
+// `-2^2` reads as `-(2^2)` per math convention; the parenthesized
+// `(-2)^2` squares the negative.
+expr_test!(caret_neg_base_hoists, "-2^2", Literal::Int(-4));
+expr_test!(caret_paren_neg_base, "(-2)^2", Literal::Int(4));
+expr_test!(caret_paren_neg_cube, "(-2)^3", Literal::Int(-8));
+
+// With a non-literal side the `^` still reads as the retired xor — the
+// diagnostic points at `.pow`, and recovery parses on as xor.
+#[test]
+fn caret_after_number_suggests_pow() {
+    let lexer = crate::lex::Lexer::new("2 ^ x", 0, "test".into());
+    let mut parser = crate::Parser::new(lexer);
+    let expr = parser.expr();
+    assert_eq!(expr.to_string(), "2 ⊕ x");
+    assert_eq!(parser.errors().len(), 1);
+    assert!(parser.errors()[0].to_string().contains("pow"));
+}
 
 expr_test!(
     dot_access_bitwise,
@@ -957,6 +1059,16 @@ expr_test!(
 expr_test!(closure, "|| {}", Closure::new(vec![], block!()));
 
 expr_test!(
+    closure_without_parameters_with_return_type,
+    "|| -> int { 1 }",
+    Closure {
+        parameters: vec![],
+        body: Block::new_with_yield(vec![], int!(1)).into_expr(),
+        return_type: Some(Annotation::Kw(TyKw::Int)),
+    }
+);
+
+expr_test!(
     closure_with_parameters,
     "|a: int, b| {}",
     Closure::new(
@@ -1024,11 +1136,7 @@ expr_test!(
     "self.bar()",
     Call::new(
         Access::Dot {
-            left: Ident {
-                lexeme: "self".into(),
-                location: Default::default(),
-            }
-            .into_expr(),
+            left: Ident::new("self", Default::default()).into_expr(),
             right: ident_expr!("bar"),
             kind: AccessKind::Direct,
         }
@@ -1160,11 +1268,7 @@ expr_test!(
     identity_access,
     "self.bar",
     Access::Dot {
-        left: Ident {
-            lexeme: "self".into(),
-            location: Default::default(),
-        }
-        .into_expr(),
+        left: Ident::new("self", Default::default()).into_expr(),
         right: ident_expr!("bar"),
         kind: AccessKind::Direct,
     }
@@ -1662,3 +1766,250 @@ expr_test!(
 expr_test!(membership, "1 in 1", In::new(int!(1), int!(1), true));
 
 expr_test!(not_membership, "1 !in 1", In::new(int!(1), int!(1), false));
+
+expr_test!(
+    membership_before_or,
+    "1 in 1 || 1 !in 1",
+    Logical::new(
+        In::new(int!(1), int!(1), true).into_expr(),
+        LogicalOp::Or,
+        In::new(int!(1), int!(1), false).into_expr(),
+    )
+);
+
+fn parse_expr(source: &str) -> String {
+    let lexer = crate::lex::Lexer::new(source, 0, "test".into());
+    crate::Parser::new(lexer).expr().to_string()
+}
+
+#[test]
+fn assert_eq_rewrites_to_inverted_if() {
+    let text = parse_expr("assert!(1 == 2)");
+    assert!(text.contains("__assert_left_1"), "{text}");
+    assert!(text.contains("__assert_right_1"), "{text}");
+    assert!(text.contains("!="), "{text}");
+    assert!(text.contains("=="), "{text}");
+    assert!(text.contains("panic"), "{text}");
+    assert!(text.contains("assertion failed:"), "{text}");
+}
+
+#[test]
+fn assert_grouped_eq_still_rewrites() {
+    let text = parse_expr("assert!((1 == 2))");
+    assert!(text.contains("!="), "{text}");
+    assert!(text.contains("panic"), "{text}");
+}
+
+#[test]
+fn assert_in_rewrites_to_not_in() {
+    let text = parse_expr("assert!(1 in xs)");
+    assert!(text.contains("!in"), "{text}");
+    assert!(text.contains("panic"), "{text}");
+}
+
+#[test]
+fn assert_bool_rewrites_to_not() {
+    let text = parse_expr("assert!(ready)");
+    assert!(
+        text.contains("!ready") || text.contains("! ready"),
+        "{text}"
+    );
+    assert!(text.contains("panic"), "{text}");
+    assert!(text.contains("assertion failed:"), "{text}");
+}
+
+#[test]
+fn nested_asserts_get_distinct_temps() {
+    let text = parse_expr("assert!(assert!(1 == 1) == ())");
+    assert!(text.contains("__assert_left_1"), "{text}");
+    assert!(text.contains("__assert_left_2"), "{text}");
+}
+
+#[test]
+fn other_ident_bang_call_is_still_unwrap() {
+    let text = parse_expr("foo!(1)");
+    assert!(
+        text.contains("foo?!"),
+        "expected unwrap-then-call, got {text}"
+    );
+}
+
+// — `|>` pipe: the loosest infix, desugared to a leading call argument —
+
+expr_test!(
+    pipe_bare_callee,
+    "x |> f",
+    Call::new(ident_expr!("f"), vec![Argument::new(ident_expr!("x"))])
+);
+
+expr_test!(
+    pipe_call,
+    "x |> f(1, 2)",
+    Call::new(
+        ident_expr!("f"),
+        vec![
+            Argument::new(ident_expr!("x")),
+            Argument::new(int!(1)),
+            Argument::new(int!(2)),
+        ]
+    )
+);
+
+expr_test!(
+    pipe_chains_left,
+    "x |> f |> g(2)",
+    Call::new(
+        ident_expr!("g"),
+        vec![
+            Argument::new(
+                Call::new(ident_expr!("f"), vec![Argument::new(ident_expr!("x"))]).into_expr(),
+            ),
+            Argument::new(int!(2)),
+        ]
+    )
+);
+
+expr_test!(
+    pipe_looser_than_everything,
+    "a + b |> f",
+    Call::new(
+        ident_expr!("f"),
+        vec![Argument::new(
+            Evaluation::new(ident_expr!("a"), EvaluationOp::Plus, ident_expr!("b")).into_expr(),
+        )]
+    )
+);
+
+expr_test!(
+    pipe_onto_access_call,
+    "x |> n.f(1)",
+    Call::new(
+        Access::Dot {
+            left: ident_expr!("n"),
+            right: ident_expr!("f"),
+            kind: AccessKind::Direct,
+        }
+        .into_expr(),
+        vec![Argument::new(ident_expr!("x")), Argument::new(int!(1))]
+    )
+);
+
+expr_test!(
+    pipe_call_then_unwrap,
+    "x |> f(1)!",
+    Unwrap {
+        expr: Call::new(
+            ident_expr!("f"),
+            vec![Argument::new(ident_expr!("x")), Argument::new(int!(1))],
+        )
+        .into_expr(),
+    }
+);
+
+expr_test!(
+    pipe_into_first_call_of_chain,
+    "x |> f(1)!.g(2)",
+    Call::new(
+        Access::Dot {
+            left: Unwrap {
+                expr: Call::new(
+                    ident_expr!("f"),
+                    vec![Argument::new(ident_expr!("x")), Argument::new(int!(1))],
+                )
+                .into_expr(),
+            }
+            .into_expr(),
+            right: ident_expr!("g"),
+            kind: AccessKind::Direct,
+        }
+        .into_expr(),
+        vec![Argument::new(int!(2))]
+    )
+);
+
+expr_test!(
+    pipe_continues_on_next_line,
+    "x\n  |> f\n  |> g(2)",
+    Call::new(
+        ident_expr!("g"),
+        vec![
+            Argument::new(
+                Call::new(ident_expr!("f"), vec![Argument::new(ident_expr!("x"))]).into_expr(),
+            ),
+            Argument::new(int!(2)),
+        ]
+    )
+);
+
+// `x ± d` desugars to `Interval::within(x * 1.0, d * 1.0)`; `x ± d%` to
+// `Interval::pm(x * 1.0, d * 0.01)`.
+#[test]
+fn plus_minus_absolute() {
+    assert_eq!(parse_expr("x ± 0.5"), "Interval::within(x * 1, 0.5 * 1)");
+}
+
+#[test]
+fn plus_minus_relative() {
+    assert_eq!(
+        parse_expr("30000 ± 10%"),
+        "Interval::pm(30000 * 1, 10 * 0.01)"
+    );
+    assert_eq!(parse_expr("a ± b %"), "Interval::pm(a * 1, b * 0.01)");
+}
+
+#[test]
+fn plus_minus_binds_like_additive() {
+    // `±` sits with `+`/`-`: its left side takes the whole sum to the left,
+    // its right side takes one multiplicative run.
+    assert_eq!(
+        parse_expr("a + b ± c * 2"),
+        "Interval::within(a + b * 1, c * 2 * 1)"
+    );
+    assert_eq!(
+        parse_expr("x ± d + e"),
+        "Interval::within(x * 1, d * 1) + e"
+    );
+    assert_eq!(
+        parse_expr("x ± d * e"),
+        "Interval::within(x * 1, d * e * 1)"
+    );
+}
+
+#[test]
+fn plus_minus_tolerance_may_be_complex() {
+    assert_eq!(parse_expr("x ± f(1)"), "Interval::within(x * 1, f(1) * 1)");
+    assert_eq!(parse_expr("x ± -d"), "Interval::within(x * 1, -d * 1)");
+    // a `%` in the tolerance is the literal's percent marker, so `mod` needs parens
+    assert_eq!(
+        parse_expr("x ± (a mod b)"),
+        "Interval::within(x * 1, (a mod b) * 1)"
+    );
+    assert_eq!(
+        parse_expr("x ± (a mod b)%"),
+        "Interval::pm(x * 1, (a mod b) * 0.01)"
+    );
+}
+
+// `x%` hugs its operand and spells percent — `50%` is `50 * 0.01`. A spaced `%`
+// isn't postfix or modulo — `binary` reports it and parses on as `mod`.
+#[test]
+fn percent_postfix() {
+    assert_eq!(parse_expr("50%"), "50 * 0.01");
+    assert_eq!(parse_expr("rate%"), "rate * 0.01");
+    assert_eq!(parse_expr("f(50%)"), "f(50 * 0.01)");
+    assert_eq!(parse_expr("10%.abs()"), "10 * 0.01.abs()");
+    // inside a `±` tolerance's parens, `%` is postfix again
+    assert_eq!(
+        parse_expr("x ± (50%)"),
+        "Interval::within(x * 1, (50 * 0.01) * 1)"
+    );
+}
+
+#[test]
+fn spaced_percent_is_old_modulo() {
+    let lexer = crate::lex::Lexer::new("a % b", 0, "test".into());
+    let mut parser = crate::Parser::new(lexer);
+    let expr = parser.expr();
+    assert_eq!(expr.to_string(), "a mod b");
+    assert_eq!(parser.errors().len(), 1);
+}

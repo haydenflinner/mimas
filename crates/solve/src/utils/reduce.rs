@@ -101,7 +101,9 @@ pub fn reduce<F: Fn(&Expr) -> Option<Literal>>(
                 _ => None,
             })
         }
-        _ => Ok(None),
+        // anything without an arm above (calls like `xs.len()`, accesses, ...) still gets a
+        // shot through `resolve` -- callers without an opinion answer `None` as before.
+        _ => Ok(resolve(expr)),
     }
 }
 

@@ -36,6 +36,16 @@ impl StrInterner {
         &self.strings[id.index()]
     }
 
+    pub fn len(&self) -> usize {
+        self.strings.len()
+    }
+
+    /// The string at index `i` — the same read `get` does, for hosts
+    /// that hold raw ids rather than `StrId`s.
+    pub fn id_at(&self, i: usize) -> Option<&str> {
+        self.strings.get(i).map(|s| &**s)
+    }
+
     pub fn id(&self, value: &str) -> Option<StrId> {
         self.ids.get(value).copied()
     }

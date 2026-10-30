@@ -36,6 +36,17 @@ test_vm!(
 );
 
 test_vm!(
+    // `-` continues an identifier (kebab-case) only when it sits directly between two identifier
+    // chars with no whitespace on either side -- that's what disambiguates it from subtraction,
+    // which needs spaces around the `-`. See crates/parse/src/tests/lex_tokens.rs for the
+    // lexer-level cases this rests on.
+    kebab_case_identifiers,
+    "let my-var = 5; let other-var = 3;",
+    "my-var" => Int(5),
+    "my-var - other-var" => Int(2),
+);
+
+test_vm!(
     block,
     "{ 0 }" => Int(0),
     "{ let a = 0; { let b = 1; a + b } }" => Int(1),
@@ -94,6 +105,7 @@ test_vm!(
 );
 
 test_vm!(
+    // r[verify mimas.num.div]
     arithmetic,
     r#""foo" + "bar""# => str!("foobar"),
     "0.5 + 0.5" => Float(1.0),
@@ -105,7 +117,7 @@ test_vm!(
     "0 - 1" => Int(-1),
     "0 * 2" => Int(0),
     "5 ~/ 2" => Int(2),
-    "5 % 2" => Int(1),
+    "5 mod 2" => Int(1),
     "-5 + 3" => Int(-2),
     "5 + -3" => Int(2),
     "-1.0 + 2.0" => Float(1.0),
@@ -158,15 +170,15 @@ test_vm!(
     "r > 1.0e9 || r == r" => Bool(true),
 );
 
-// `%` sign follows the lhs
+// `mod` sign follows the lhs
 test_vm!(
     mod_sign_follows_lhs,
-    "5 % 2" => Int(1),
-    "-5 % 3" => Int(-2),
-    "5 % -3" => Int(2),
-    "-5 % -3" => Int(-2),
-    "-5.0 % 3.0" => Float(-2.0),
-    "5.0 % -3.0" => Float(2.0),
+    "5 mod 2" => Int(1),
+    "-5 mod 3" => Int(-2),
+    "5 mod -3" => Int(2),
+    "-5 mod -3" => Int(-2),
+    "-5.0 mod 3.0" => Float(-2.0),
+    "5.0 mod -3.0" => Float(2.0),
 );
 
 test_vm!(
@@ -177,13 +189,13 @@ test_vm!(
     "(0.5, 5.0) * (2.0, 4.0)" => array!(Float(1.0), Float(20.0)),
     "(2.0, 3.0) / (2.0, 0.5)" => array!(Float(1.0), Float(6.0)),
     "(5.0, 5.0) ~/ (2.0, 3.0)" => array!(Float(2.0), Float(1.0)),
-    "(5, 5) % (2, 3)" => array!(Int(1), Int(2)),
+    "(5, 5) mod (2, 3)" => array!(Int(1), Int(2)),
     "(0, 0) + (1, 2)" => array!(Int(1), Int(2)),
     "(5, 4) - (1, 2)" => array!(Int(4), Int(2)),
     "(0, 1) * (2, 5)" => array!(Int(0), Int(5)),
     "(2, 4) / (2, 1)" => array!(Float(1.0), Float(4.0)),
     "(5, 10) ~/ (2, 2)" => array!(Int(2), Int(5)),
-    "(5, 10) % (2, 1)" => array!(Int(1), Int(0)),
+    "(5, 10) mod (2, 1)" => array!(Int(1), Int(0)),
     "(10, 10) * 2" => array!(Int(20), Int(20)),
     "(10, 10) / 2" => array!(Float(5.0), Float(5.0)),
 );
@@ -208,7 +220,7 @@ test_vm!(
 test_vm!(
     bit_ops_combined,
     "(0xff & 0xf0) | 0x0f" => Int(0xff),
-    "0xff ^ 0xff" => Int(0),
+    "0xff ⊕ 0xff" => Int(0),
 );
 
 test_vm!(
@@ -219,6 +231,7 @@ test_vm!(
 );
 
 test_vm!(
+    // r[verify mimas.int.range]
     hex_literals,
     "0xff" => Int(255),
     "0xFF" => Int(255),
@@ -228,6 +241,7 @@ test_vm!(
 );
 
 test_vm!(
+    // r[verify mimas.int.range]
     underscore_separators,
     "1_000" => Int(1000),
     "1_000_000" => Int(1000000),
@@ -314,6 +328,7 @@ test_vm!(
 test_vm!(
     fstring_brace_escapes,
     "let n = 3;",
+    // r[verify mimas.str.fstring]
     "f\"{{{n}}}\"" => str!(r#"{3}"#),
     "f\"{{x}}\"" => str!(r#"{x}"#),
 );
@@ -412,4 +427,64 @@ test_vm!(
      let a = Outer { i = Inner { v = 5 } };
      let b = Outer { i = Inner { v = 5 } };",
     "a == b" => Bool(true),
+);
+
+// `==` is structural (one bool) on every type — it used to broadcast over lists
+test_vm!(
+    list_equality_is_structural,
+    "[1, 2] == [1, 2]" => Bool(true),
+    "[1, 2] == [5, 6]" => Bool(false),
+    "[1, 2] == [2, 1]" => Bool(false),
+    "[[1], [2]] == [[1], [2]]" => Bool(true),
+    "[1, 2] != [1, 2]" => Bool(false)
+);
+
+// a type error inside a later match arm nested in another match arm is reported, not swallowed
+// into an emitter panic
+test_fail!(
+    nested_match_arm_error_is_reported,
+    "fn h() -> int? { null }\nfn g(l: int, a: int) -> int? { match l { 0 => null, _ => { match h() { null => a, m => if a > m { a } else { m } } } } }"
+);
+
+// `len` on a value without one is a runtime error, not a VM abort
+test_fail!(
+    len_of_null_is_an_error,
+    "let x: str? = null; let n = x!.len();",
+    "fn f(s: str?) -> int { s.len() }"
+);
+
+// reading or writing a field of `null` is a runtime error, not a VM abort
+test_fail!(
+    field_of_null_is_an_error,
+    "struct P { a: int }\nlet p: P? = null;\nlet x = p!.a;",
+    "struct P { a: int }\nlet p: P? = null;\np!.a = 1;"
+);
+
+// a type name declared twice (two scripts each defining `Shape`) resolves, at each use, to the most
+// recent declaration before it -- reading order
+test_vm!(
+    redeclared_types_resolve_by_reading_order,
+    "struct P { a: int }
+     fn first() -> int { let p = P { a = 1 }; p.a }
+     struct P { b: int }
+     fn second() -> int { let p = P { b = 2 }; p.b }",
+    "first()" => Int(1),
+    "second()" => Int(2)
+);
+
+test_vm!(
+    a_later_enum_shadows_an_earlier_struct,
+    "struct S { a: int }
+     fn old() -> int { let s = S { a = 5 }; s.a }
+     enum S { X, Y { n: int } }
+     fn new() -> int { let v = S::Y { n = 7 }; match v { S::X => 0, S::Y { n } => n } }",
+    "old()" => Int(5),
+    "new()" => Int(7)
+);
+
+// `use "page";` compiles (the host splices that script in beforehand); the compiler ignores it
+test_vm!(
+    use_a_host_script_is_accepted,
+    "use \"some-page\";\nfn f() -> int { 3 }",
+    "f()" => Int(3)
 );

@@ -1,7 +1,10 @@
 use crate::lex::TyKw;
 use itertools::Itertools;
 
-use crate::expr::Ident;
+use crate::{
+    components::{POISON, Poison},
+    expr::Ident,
+};
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Annotation {
@@ -10,12 +13,23 @@ pub enum Annotation {
     Option(Box<Annotation>),
     Result(Box<Annotation>),
     Tuple(Vec<Annotation>),
-    Array(Box<Annotation>),
+    /// `[T]`, or a fixed-size `[T; n]` / `[T; m, n]`. The dims list is empty for a
+    /// growable array; each `n` pins one level's length, outermost first -- so
+    /// `[f32; 4, 8]` reads as "4 rows of `[f32; 8]`".
+    Array(Box<Annotation>, Vec<usize>),
     Dictionary(Box<Annotation>),
     Function(Vec<Annotation>, Box<Annotation>),
     Ty(Ident),
     Path(Vec<Ident>),
     Bounds(Vec<Ident>),
+    /// A compound unit, `usd/kWh` or `m/s^2`: each unit with its signed exponent. Whether the
+    /// names are units is for the checker to say. (A lone unit name is a plain `Ty`.)
+    Quantity(Vec<(Ident, i8)>),
+    /// A type applied to arguments in `<>`, `Pair<A, B>` or `mod::Pair<A, B>`: either real
+    /// type arguments for a generic type, or a single unit (`Interval<kW>`) -- the checker
+    /// knows which the head is.
+    Applied(Vec<Ident>, Vec<Annotation>),
+    Poison(Poison),
 }
 
 #[mutants::skip]
@@ -30,7 +44,8 @@ impl std::fmt::Display for Annotation {
                 "({})",
                 members.iter().map(|p| p.to_string()).join(", "),
             )),
-            Annotation::Array(e) => f.pad(&format!("[{e}]")),
+            Annotation::Array(e, dims) if dims.is_empty() => f.pad(&format!("[{e}]")),
+            Annotation::Array(e, dims) => f.pad(&format!("[{e}; {}]", dims.iter().join(", "))),
             Annotation::Dictionary(e) => f.pad(&format!("~{{{e}}}")),
             Annotation::Function(params, ret) => f.pad(&format!(
                 "({}) -> {ret}",
@@ -39,6 +54,26 @@ impl std::fmt::Display for Annotation {
             Annotation::Ty(ident) => f.pad(&format!("{ident}")),
             Annotation::Path(idents) => f.pad(&idents.iter().map(|i| i.to_string()).join("::")),
             Annotation::Bounds(idents) => f.pad(&idents.iter().map(|i| i.to_string()).join(" + ")),
+            Annotation::Quantity(parts) => f.pad(
+                &parts
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (unit, exp))| match (i, exp) {
+                        (0, 1) => unit.to_string(),
+                        (0, e) => format!("{unit}^{e}"),
+                        (_, 1) => format!("*{unit}"),
+                        (_, -1) => format!("/{unit}"),
+                        (_, e) if *e > 0 => format!("*{unit}^{e}"),
+                        (_, e) => format!("/{unit}^{}", -e),
+                    })
+                    .join(""),
+            ),
+            Annotation::Applied(ty, args) => f.pad(&format!(
+                "{}<{}>",
+                ty.iter().map(|i| i.to_string()).join("::"),
+                args.iter().join(", ")
+            )),
+            Annotation::Poison(_) => f.pad(POISON),
         }
     }
 }

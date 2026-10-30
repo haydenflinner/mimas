@@ -16,6 +16,11 @@ pub enum Inst {
     Constant(Constant),
     SetLocal(Local, InstId),
     GetLocal(Local),
+    /// Like `GetLocal`/`SetLocal`, but the local belongs to the *entry* body -- the storage
+    /// of a top-level `let`. Emitted by non-entry bodies only: inside the entry body itself
+    /// the same slot is reached with plain Get/SetLocal.
+    SetEntry(Local, InstId),
+    GetEntry(Local),
     BinOp {
         left: InstId,
         op: BinOp,
@@ -80,6 +85,9 @@ pub enum Inst {
     ToFloat(InstId),
     Sqrt(InstId),
     Unwrap(InstId),
+    /// `expr!` on a `()!` — `()`'s runtime repr is `Null`, so the Null check
+    /// can't run; Raised still faults, anything else reads back as Null.
+    UnwrapUnit(InstId),
     In(InstId, InstId, bool),
     Format(Vec<FormatPart>),
     RefBody(BodyId),
@@ -147,6 +155,7 @@ impl Inst {
         match self {
             // mutations, calls, and control flow: must run regardless of whether a result is used.
             Inst::SetLocal(..)
+            | Inst::SetEntry(..)
             | Inst::SetIndex { .. }
             | Inst::SetField { .. }
             | Inst::Push { .. }
@@ -164,6 +173,7 @@ impl Inst {
             // pure value producers: droppable when their result is unused.
             Inst::Constant(..)
             | Inst::GetLocal(..)
+            | Inst::GetEntry(..)
             | Inst::BinOp { .. }
             | Inst::UnaryOp { .. }
             | Inst::Phi(..)
@@ -175,6 +185,7 @@ impl Inst {
             | Inst::ToFloat(..)
             | Inst::Sqrt(..)
             | Inst::Unwrap(..)
+            | Inst::UnwrapUnit(..)
             | Inst::In(..)
             | Inst::Format(..)
             | Inst::RefBody(..)
@@ -200,6 +211,7 @@ impl Inst {
             | Inst::SetIndex { .. }
             | Inst::GetIndex { .. }
             | Inst::Unwrap(..)
+            | Inst::UnwrapUnit(..)
             | Inst::UnwrapRaised(..)
             | Inst::Call { .. }
             | Inst::CallDirect { .. }
@@ -210,6 +222,8 @@ impl Inst {
             Inst::Constant(..)
             | Inst::SetLocal(..)
             | Inst::GetLocal(..)
+            | Inst::SetEntry(..)
+            | Inst::GetEntry(..)
             | Inst::Phi(..)
             | Inst::NewArray
             | Inst::NewDict
@@ -252,6 +266,8 @@ impl IrDisplay for Inst {
                 format!("set {variable}: {inst}")
             }
             Inst::GetLocal(variable) => format!("get {variable}"),
+            Inst::SetEntry(variable, inst) => format!("set! {variable}: {inst}"),
+            Inst::GetEntry(variable) => format!("get! {variable}"),
             Inst::BinOp {
                 left,
                 op,
@@ -309,6 +325,7 @@ impl IrDisplay for Inst {
             Inst::ToFloat(inst_id) => format!("to_float {inst_id}"),
             Inst::Sqrt(inst_id) => format!("sqrt {inst_id}"),
             Inst::Unwrap(inst_id) => format!("unwrap {inst_id}"),
+            Inst::UnwrapUnit(inst_id) => format!("unwrap_unit {inst_id}"),
             Inst::Raise(inst_id) => format!("raise {inst_id}"),
             Inst::IsRaised(inst_id) => format!("is_raised {inst_id}"),
             Inst::UnwrapRaised(inst_id) => format!("unwrap_raised {inst_id}"),
@@ -397,6 +414,7 @@ impl BlockWriter<'_> {
         fail_block: BlockId,
     ) -> Option<()> {
         match pat.kind() {
+            PatKind::Poison(poison) => poison.escaped(),
             PatKind::Ident(_) => {
                 let dec = self.ir.node_dec(pat.id());
                 let local = self.ir.local_for(dec);
@@ -545,7 +563,7 @@ impl BlockWriter<'_> {
     /// Reads the layout adt id that the solver shadowed onto a pattern's path expression.
     fn layout_adt(&self, path: &parse::Expr) -> AdtId {
         match self.ir.resolutions.node_tys.get(&path.id()) {
-            Some(Ty::Adt(adt) | Ty::Identity(adt)) => *adt,
+            Some(Ty::Adt(adt, _) | Ty::Identity(adt, _)) => *adt,
             other => panic!("solver should have shadowed path with an adt type, got {other:?}",),
         }
     }
@@ -564,6 +582,16 @@ impl BlockWriter<'_> {
 
     pub(crate) fn get_local(&mut self, variable: Local) -> InstId {
         self.instruct(Inst::GetLocal(variable))
+    }
+
+    /// `set_local`/`get_local` for an entry-body local -- a top-level `let`. Only valid from
+    /// non-entry bodies; `Ir::read_binding`/`write_binding` pick the right pair for a dec.
+    pub(crate) fn set_entry(&mut self, variable: Local, inst: InstId) -> InstId {
+        self.instruct(Inst::SetEntry(variable, inst))
+    }
+
+    pub(crate) fn get_entry(&mut self, variable: Local) -> InstId {
+        self.instruct(Inst::GetEntry(variable))
     }
 
     pub(crate) fn bin(
@@ -677,6 +705,10 @@ impl BlockWriter<'_> {
 
     pub(crate) fn unwrap(&mut self, value: InstId) -> InstId {
         self.instruct(Inst::Unwrap(value))
+    }
+
+    pub(crate) fn unwrap_unit(&mut self, value: InstId) -> InstId {
+        self.instruct(Inst::UnwrapUnit(value))
     }
 
     pub(crate) fn raise(&mut self, value: InstId) -> InstId {

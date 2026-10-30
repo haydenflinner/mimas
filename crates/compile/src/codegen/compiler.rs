@@ -1,14 +1,19 @@
 use shared::IdVec;
 
 use colored::Colorize;
-use shared::{FileId, Location};
+use shared::{FileId, Location, Ty};
+use solve::{
+    ResolvedDeclKind, ResolvedModule,
+    components::{DecId, Vis},
+};
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
 };
 
 use crate::{
-    BinOp, BlockId, BlockTarget, BodyId, Constant, Inst, InstId, Ir, Local, Op, OperandKind,
+    BinOp, BlockId, BlockTarget, BodyId, Constant, Function, Inst, InstId, Ir, Local, Module, Op,
+    OperandKind, UnaryOp,
     codegen::{
         clean::{self, uses},
         program::{Chunk, Encoder, Program},
@@ -61,7 +66,7 @@ impl Compiler {
         self
     }
 
-    pub fn compile(&mut self, ir: Ir) -> Program {
+    pub fn compile(&mut self, ir: &mut Ir) -> Program {
         let mut bytes = Encoder::new();
 
         // body -> source name, for the --disasm dump only
@@ -74,21 +79,140 @@ impl Compiler {
             HashMap::new()
         };
 
-        for (body_id, mut body) in ir.bodies {
-            clean::clean(&mut body);
+        /// A dec the host can call: everything but a native, which has no body of its own. Hands
+        /// back the `Function` already built for `signatures` instead of building a second one, so
+        /// the two views of the same dec can't drift apart.
+        fn exported_fn(
+            ir: &Ir,
+            signatures: &IdVec<BodyId, Option<Function>>,
+            dec: DecId,
+        ) -> Option<Function> {
+            let body = *ir.item_bodies.get(&dec)?;
+            signatures.get(body)?.clone()
+        }
 
-            let mut regs: IdVec<Reg, ()> = IdVec::new();
+        fn export(
+            ir: &mut Ir,
+            signatures: &IdVec<BodyId, Option<Function>>,
+            module: ResolvedModule,
+        ) -> Module {
+            let mut out = Module::default();
+            for (name, dec) in module.items {
+                match ir.resolutions.decs[dec].kind.clone() {
+                    ResolvedDeclKind::Item { .. } => {
+                        let f = exported_fn(ir, signatures, dec)
+                            .unwrap_or_else(|| unreachable!("item `{name}` is not a callable fn"));
+                        out.functions.insert(name, f);
+                    }
+                    // dicts and structs (and arrays holding them) have no constant
+                    // form, see `Constant::emit_const_dec`
+                    ResolvedDeclKind::Constant(lit) if !Constant::needs_alloc(ir, &lit) => {
+                        out.constants.insert(name, Constant::from_literal(ir, lit));
+                    }
+                    ResolvedDeclKind::Adt(adt) => {
+                        let resolved = &ir.resolutions.adts[adt];
+                        let fields = resolved.fields.clone();
+                        // the solver keeps impls in a `HashMap`, whose order is randomized per
+                        // process -- sort so the export reads the same on every run
+                        let mut methods: Vec<(String, DecId)> = resolved
+                            .methods
+                            .iter()
+                            .map(|(name, &dec)| (name.clone(), dec))
+                            .collect();
+                        methods.sort_by(|(a, _), (b, _)| a.cmp(b));
+                        let methods = methods
+                            .into_iter()
+                            .filter_map(|(name, dec)| {
+                                Some((name, exported_fn(ir, signatures, dec)?))
+                            })
+                            .collect();
+                        out.types.insert(
+                            name,
+                            crate::Type {
+                                vis: ir.resolutions.decs[dec].vis,
+                                fields,
+                                methods,
+                            },
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            for (name, module) in module.modules {
+                out.modules.insert(name, export(ir, signatures, module));
+            }
+            out
+        }
+        // every body's own signature keyed by body rather than by dec so a function value can be
+        // called from a `BodyId` alone. a closure's defaults are never reachable from a call site
+        // that only has the value, so it reports none -- same as what a dynamic call lowers to.
+        let mut signatures: IdVec<BodyId, Option<Function>> = vec![None; ir.bodies.len()].into();
+        // read rather than drained -- `export` still needs `item_bodies` to find each dec's body
+        let item_bodies: Vec<(DecId, BodyId)> = ir
+            .item_bodies
+            .iter()
+            .map(|(&dec, &body)| (dec, body))
+            .collect();
+        for (dec, body) in item_bodies {
+            let ResolvedDeclKind::Item { defaults, .. } = ir.resolutions.decs[dec].kind.clone()
+            else {
+                continue;
+            };
+            let Ty::Fn(header) = ir.resolutions.decs[dec].ty.clone() else {
+                continue;
+            };
+            let vis = ir.resolutions.decs[dec].vis;
+            let defaults = defaults
+                .into_iter()
+                .map(|d| d.map(|lit| Constant::from_literal(ir, lit)))
+                .collect();
+            signatures[body] = Some(Function {
+                body,
+                vis,
+                header,
+                defaults,
+            });
+        }
+        for (body, node) in std::mem::take(&mut ir.closure_bodies) {
+            let Some(Ty::Fn(header)) = ir.resolutions.node_tys.get(&node).cloned() else {
+                continue;
+            };
+            let defaults = vec![None; header.parameters.len()];
+            signatures[body] = Some(Function {
+                body,
+                vis: Vis::Private,
+                header,
+                defaults,
+            });
+        }
+
+        let root = std::mem::take(&mut ir.resolutions.root);
+        let root = export(ir, &signatures, root);
+
+        // the entry body's local->reg map, captured when body 0 compiles -- non-entry bodies
+        // need it to turn a global's `Local` into its absolute (base-0) entry-frame register.
+        let mut entry_to_reg: IdVec<Local, Reg> = IdVec::new();
+
+        for (body_id, body) in ir.bodies.iter_mut() {
+            clean::clean(body);
+
+            let local_kinds = local_kinds(&body, &ir.resolutions);
+            let kinds = inst_kinds(&body, &local_kinds);
+            let mut regs: IdVec<Reg, OperandKind> = IdVec::new();
             let mut local_to_reg: IdVec<Local, Reg> = IdVec::new();
-            let cross = clean::cross_block_iids(&body);
+            let cross = clean::cross_block_iids(body);
             let last_use_by_block: HashMap<BlockId, HashMap<InstId, InstId>> = body
                 .blocks
                 .iter()
-                .map(|(bid, _)| (bid, clean::last_uses(&body, bid)))
+                .map(|(bid, _)| (bid, clean::last_uses(body, bid)))
                 .collect();
 
-            body.locals.iter().for_each(|_| {
-                local_to_reg.push(regs.push(()));
-            });
+            for kind in local_kinds.values() {
+                local_to_reg.push(regs.push(*kind));
+            }
+            if body_id == BodyId::ZERO {
+                entry_to_reg = local_to_reg.clone();
+            }
 
             let mut inst_to_reg: IdVec<InstId, Option<Reg>> =
                 vec![None; body.instructions.len()].into();
@@ -98,7 +222,7 @@ impl Compiler {
             for (_, block) in body.blocks.iter() {
                 for &iid in &block.stream {
                     if let Inst::Phi(branches) = &body.instructions[iid] {
-                        let dst = regs.push(());
+                        let dst = regs.push(kinds[iid]);
                         inst_to_reg[iid] = Some(dst);
                         for &(pred, value) in branches {
                             phi_copies.entry(pred).or_default().push((dst, value));
@@ -128,7 +252,7 @@ impl Compiler {
                 for (_, block) in body.blocks.iter() {
                     for &iid in &block.stream {
                         let inst = &body.instructions[iid];
-                        let absorbs = imm_binop(&body, inst).map(|(_, con, _, _, _)| con);
+                        let absorbs = imm_binop(body, inst).map(|(_, con, _, _, _)| con);
                         for u in uses(inst) {
                             if matches!(
                                 body.instructions[u],
@@ -173,7 +297,9 @@ impl Compiler {
                         && let Some(con) = con.cached()
                         && !absorbed.contains(&iid)
                     {
-                        constants.entry(con).or_insert_with(|| regs.push(()));
+                        constants
+                            .entry(con)
+                            .or_insert_with(|| regs.push(kinds[iid]));
                         if constants.len() >= 12 {
                             break 'outer;
                         }
@@ -284,8 +410,10 @@ impl Compiler {
                             if clean_is_safe(iid, *v)
                                 && !constants.values().any(|&r| r == src)
                                 && body_ops.last().and_then(Op::reg) == Some(src)
+                                && same_class(regs[src], regs[dst])
                             {
                                 body_ops.last_mut().unwrap().set_reg(dst);
+                                regs[dst] = widen(regs[dst], regs[src]);
                                 inst_to_reg[v] = Some(dst);
                                 free.push(src);
                                 continue;
@@ -350,13 +478,15 @@ impl Compiler {
 
                     // fuse an int arith/comparison op with a constant operand into its immediate
                     // form, inlining the value instead of reading it from a register.
-                    if let Some((non_const, _con, val, op, kind)) = imm_binop(&body, inst) {
+                    if let Some((non_const, _con, val, op, kind)) = imm_binop(body, inst) {
                         let (left, dst) = {
                             let mut ctx = Ctx {
                                 inst_to_reg: &inst_to_reg,
                                 local_to_reg: &local_to_reg,
+                                entry_to_reg: &entry_to_reg,
                                 regs: &mut regs,
                                 free: &mut free,
+                                kind: kinds[iid],
                             };
                             (ctx.i2r(&non_const), ctx.reg())
                         };
@@ -401,8 +531,10 @@ impl Compiler {
                         let ctx = Ctx {
                             inst_to_reg: &inst_to_reg,
                             local_to_reg: &local_to_reg,
+                            entry_to_reg: &entry_to_reg,
                             regs: &mut regs,
                             free: &mut free,
+                            kind: kinds[iid],
                         };
 
                         Op::from_inst(inst, ctx)
@@ -483,6 +615,7 @@ impl Compiler {
                 .map(|(local, name)| (name.clone(), local_to_reg[*local]))
                 .collect();
             let args = u16::try_from(body.params.len()).unwrap();
+            let reg_kinds: Vec<OperandKind> = regs.values().copied().collect();
             let regs = u16::try_from(regs.len()).unwrap();
 
             if self.disasm {
@@ -532,6 +665,7 @@ impl Compiler {
                 captures,
                 locals,
                 locs,
+                kinds: reg_kinds,
             });
 
             for op in body_ops.iter().cloned() {
@@ -539,12 +673,6 @@ impl Compiler {
             }
             self.ops.extend(body_ops);
         }
-
-        let items: HashMap<String, BodyId> = ir
-            .item_bodies
-            .iter()
-            .map(|(&dec, &body)| (ir.resolutions.decs[dec].name.clone(), body))
-            .collect();
 
         let struct_names: IdVec<_, String> = ir
             .resolutions
@@ -554,13 +682,66 @@ impl Compiler {
             .collect::<Vec<_>>()
             .into();
 
+        let methods: IdVec<_, HashMap<String, BodyId>> = ir
+            .resolutions
+            .adts
+            .values()
+            .map(|adt| {
+                adt.methods
+                    .iter()
+                    .filter_map(|(name, &dec)| {
+                        ir.item_bodies.get(&dec).map(|&body| (name.clone(), body))
+                    })
+                    .collect()
+            })
+            .collect::<Vec<_>>()
+            .into();
+
+        let field_names: IdVec<_, Vec<String>> = ir
+            .resolutions
+            .adts
+            .values()
+            .map(|adt| adt.fields.clone())
+            .collect::<Vec<_>>()
+            .into();
+
+        let field_dims: IdVec<_, Vec<Option<shared::units::Dim>>> = ir
+            .resolutions
+            .adts
+            .values()
+            .map(|adt| adt.member_dims.clone())
+            .collect::<Vec<_>>()
+            .into();
+
+        let field_tys: IdVec<_, Vec<Ty>> = ir
+            .resolutions
+            .adts
+            .values()
+            .map(|adt| adt.member_tys.clone())
+            .collect::<Vec<_>>()
+            .into();
+
+        let tests = std::mem::take(&mut ir.tests);
+
+        let print_dims = std::mem::take(&mut ir.resolutions.print_dims)
+            .into_iter()
+            .collect();
+
         Program {
             entry: BodyId::ZERO,
+            root,
             chunks: std::mem::replace(&mut self.chunks, IdVec::new()),
-            strs: ir.str_interner,
+            signatures,
+            strs: std::mem::take(&mut ir.str_interner),
             bytes: bytes.finish(),
-            items,
             struct_names,
+            methods,
+            field_names,
+            field_dims,
+            print_dims,
+            field_tys,
+            tests,
+            units: shared::units::snapshot(),
         }
     }
 }
@@ -574,13 +755,30 @@ impl Default for Compiler {
 pub(crate) struct Ctx<'a> {
     pub inst_to_reg: &'a IdVec<InstId, Option<Reg>>,
     pub local_to_reg: &'a IdVec<Local, Reg>,
-    pub regs: &'a mut IdVec<Reg, ()>,
+    /// The entry body's local->reg map. Its registers are the global slots (`t.regs[0..]`,
+    /// base 0) that `GetEntry`/`SetEntry` insts address.
+    pub entry_to_reg: &'a IdVec<Local, Reg>,
+    pub regs: &'a mut IdVec<Reg, OperandKind>,
     pub free: &'a mut Vec<Reg>,
+    /// Value class of the inst being lowered -- `reg` only recycles a register of this class.
+    pub kind: OperandKind,
 }
 
 impl Ctx<'_> {
     pub fn reg(&mut self) -> Reg {
-        self.free.pop().unwrap_or_else(|| self.regs.push(()))
+        let kind = self.kind;
+        match self
+            .free
+            .iter()
+            .rposition(|&r| same_class(self.regs[r], kind))
+        {
+            Some(at) => {
+                let r = self.free.remove(at);
+                self.regs[r] = widen(self.regs[r], kind);
+                r
+            }
+            None => self.regs.push(kind),
+        }
     }
 
     pub fn i2r(&self, iid: &InstId) -> Reg {
@@ -637,4 +835,134 @@ fn imm_binop(body: &Body, inst: &Inst) -> Option<(InstId, InstId, i64, BinOp, Op
         _ => return None,
     };
     Some((non_const, con, val, op, kind))
+}
+
+/// Registers are recycled only within one class: `Str` and `Generic` values are both opaque
+/// words and share one; each scalar kind is its own.
+fn same_class(a: OperandKind, b: OperandKind) -> bool {
+    use OperandKind::{Generic, Str};
+    a == b || matches!((a, b), (Str | Generic, Str | Generic))
+}
+
+fn widen(a: OperandKind, b: OperandKind) -> OperandKind {
+    if a == b { a } else { OperandKind::Generic }
+}
+
+fn ty_kind(ty: &Ty) -> OperandKind {
+    match ty {
+        Ty::Bool => OperandKind::Bool,
+        Ty::Int => OperandKind::Int,
+        Ty::Float => OperandKind::Float,
+        Ty::Str => OperandKind::Str,
+        _ => OperandKind::Generic,
+    }
+}
+
+/// Each local's class: its declared type, or for synthetic locals (no dec) the class every
+/// write to it agrees on.
+fn local_kinds(body: &Body, res: &solve::Resolutions) -> IdVec<Local, OperandKind> {
+    let mut kinds: IdVec<Local, OperandKind> = body
+        .locals
+        .values()
+        .map(|&dec| {
+            if dec == DecId::DANGLING {
+                OperandKind::Generic
+            } else {
+                ty_kind(&res.decs[dec].ty)
+            }
+        })
+        .collect::<Vec<_>>()
+        .into();
+    let mut written: HashMap<Local, Option<OperandKind>> = HashMap::new();
+    for (_, block) in body.blocks.iter() {
+        for &iid in &block.stream {
+            if let Inst::SetLocal(l, v) = &body.instructions[iid]
+                && body.locals[*l] == DecId::DANGLING
+            {
+                let k = fixed_kind(body, *v, &kinds);
+                let slot = written.entry(*l).or_insert(k);
+                if *slot != k {
+                    *slot = None;
+                }
+            }
+        }
+    }
+    for (l, k) in written {
+        if let Some(k) = k {
+            kinds[l] = k;
+        }
+    }
+    kinds
+}
+
+/// The class an inst's result has without looking through phis: fixed by the op where the op
+/// decides it, else the solved type of the expr it lowered from.
+fn fixed_kind(body: &Body, iid: InstId, locals: &IdVec<Local, OperandKind>) -> Option<OperandKind> {
+    use BinOp::*;
+    use OperandKind as K;
+    let fixed = match &body.instructions[iid] {
+        Inst::Constant(c) => Some(match c {
+            Constant::Bool(_) => K::Bool,
+            Constant::Int(_) => K::Int,
+            Constant::Float(_) => K::Float,
+            Constant::Str(_) => K::Str,
+            Constant::Array(_) | Constant::Null => K::Generic,
+        }),
+        Inst::BinOp { op, kind, .. } => match op {
+            Identity | NotEqual | LessThan | LessEqual | GreaterThan | GreaterEqual => {
+                Some(K::Bool)
+            }
+            Add | Sub | Mult | Mod if matches!(kind, K::Int | K::Float) => Some(*kind),
+            Div if *kind == K::Float => Some(K::Float),
+            _ => None,
+        },
+        Inst::UnaryOp {
+            op: UnaryOp::Not, ..
+        } => Some(K::Bool),
+        Inst::ToFloat(_) | Inst::Sqrt(_) => Some(K::Float),
+        Inst::Len(_) => Some(K::Int),
+        Inst::In(..) | Inst::IsInstance { .. } | Inst::IsRaised(_) => Some(K::Bool),
+        Inst::GetLocal(l) => Some(locals[*l]),
+        Inst::Phi(_) => None,
+        _ => Some(K::Generic),
+    };
+    match fixed {
+        Some(K::Generic) | None => body.kinds.get(&iid).copied().or(fixed),
+        k => k,
+    }
+}
+
+/// Every inst's result class. A phi without a solved type takes the class its incoming values
+/// agree on.
+fn inst_kinds(body: &Body, locals: &IdVec<Local, OperandKind>) -> IdVec<InstId, OperandKind> {
+    let mut known: Vec<Option<OperandKind>> = (0..body.instructions.len())
+        .map(|i| fixed_kind(body, InstId::from(i as u32), locals))
+        .collect();
+    loop {
+        let mut changed = false;
+        for (iid, inst) in body.instructions.iter() {
+            let Inst::Phi(branches) = inst else { continue };
+            if known[iid.index()].is_some() {
+                continue;
+            }
+            let mut agreed: Option<OperandKind> = None;
+            for &(_, v) in branches {
+                if let Some(k) = known[v.index()] {
+                    agreed = Some(agreed.map_or(k, |a| widen(a, k)));
+                }
+            }
+            if agreed.is_some() {
+                known[iid.index()] = agreed;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    known
+        .into_iter()
+        .map(|k| k.unwrap_or(OperandKind::Generic))
+        .collect::<Vec<_>>()
+        .into()
 }

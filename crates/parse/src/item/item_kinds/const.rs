@@ -1,14 +1,15 @@
 use crate::{
-    Expr, Ident,
-    components::Annotation,
+    Expr,
+    components::{Annotation, Pat},
     item::{IntoItem, ItemKind},
 };
 
 /// `const` declaration -- a name bound to a compile-time-foldable expression. Visibility lives
-/// on the wrapping [Item].
+/// on the wrapping [Item]. The left side takes the same irrefutable patterns as `let` (idents and
+/// tuples thereof), so `const (A, B) = (1, 2);` declares two constants.
 #[derive(Debug, PartialEq, Clone)]
 pub struct Const {
-    pub left: Ident,
+    pub left: Pat,
     pub annotation: Option<Annotation>,
     pub right: Expr,
 }
@@ -16,9 +17,9 @@ pub struct Const {
 impl Const {
     /// Creates a new const declaration.
     #[cfg(test)]
-    pub(crate) fn new(left: Ident, right: Expr, annotation: Option<Annotation>) -> Self {
+    pub(crate) fn new(left: impl Into<Pat>, right: Expr, annotation: Option<Annotation>) -> Self {
         Self {
-            left,
+            left: left.into(),
             right,
             annotation,
         }

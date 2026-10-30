@@ -10,6 +10,8 @@ use itertools::Itertools;
 #[derive(Debug, PartialEq, Clone)]
 pub struct Enum {
     pub head: Ident,
+    /// The declared type parameters, `<T>` after the name. Empty for non-generic enums.
+    pub type_params: Vec<Ident>,
     /// The members of this enum.
     pub members: Vec<(Ident, Member)>,
 }
@@ -18,6 +20,7 @@ impl Enum {
     pub(crate) fn new(name: Ident, members: Vec<(Ident, Member)>) -> Self {
         Self {
             head: name,
+            type_params: vec![],
             members,
         }
     }
@@ -33,8 +36,13 @@ impl IntoItem for Enum {}
 #[mutants::skip]
 impl std::fmt::Display for Enum {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let generics = if self.type_params.is_empty() {
+            String::new()
+        } else {
+            format!("<{}>", self.type_params.iter().join(", "))
+        };
         f.pad(&format!(
-            "enum {} {{ {} }}",
+            "enum {}{generics} {{ {} }}",
             self.head,
             self.members
                 .iter()

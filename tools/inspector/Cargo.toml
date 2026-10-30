@@ -1,0 +1,37 @@
+[workspace]
+
+[package]
+name = "mimas-inspector"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+mimas = { path = "../../crates/mimas" }
+# just for pulling `composite.png` (a plain, already-rendered PNG) out of a `.darkly` file's zip
+# container for `darkly_view`'s preview image -- unrelated to (and much lighter than) the actual
+# `darkly` GPU paint engine. `std::darkly` itself has no concept of the composite; it's an
+# inspector-only convenience, not something a game loading layer data needs.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+# default-features off + this curated list keeps the build to what an inspector actually needs
+# (no scene notation, no feathers widgets, no non-macOS windowing backends).
+bevy = { version = "0.19.0", default-features = false, features = [
+  "bevy_ui",
+  "bevy_ui_render",
+  "bevy_render",
+  "bevy_log",
+  "bevy_window",
+  "bevy_winit",
+  "bevy_text",
+  "bevy_input_focus",
+  "bevy_ui_widgets",
+  "bevy_picking",
+  "ui_picking",
+  "bevy_image",
+  "default_font",
+  "png",
+] }
+# Pinned upstream — the checkout is at `main` tip `1ba98ca` (v0.8.0,
+# unreleased; crates.io tops out at 0.5.x).
+bevy_immediate = { git = "https://github.com/PPakalns/bevy_immediate.git", rev = "1ba98ca3" }
