@@ -80,3 +80,29 @@ test_fail!(
     "Col2::new(1.0, 2.0).outer(Row3::new(1.0, 2.0, 3.0))",
     "Col2::new(1.0, 2.0) + Col4::new(1.0, 2.0, 3.0, 4.0)",
 );
+
+// `Axis::row`/`Axis::col` are the bare atoms; `Row`/`Col` are index
+// newtypes. Same nominal story at table scale: `cell(c, r)` is a
+// compile error, and `==`/`!=` come free — structural on ADTs.
+test_run!(
+    axes_atoms_and_handles,
+    "let a = Axis::row; let r = Row::new(3); let c = Col { ix = 0 };",
+    "a.other() == Axis::col" => "true",
+    "Axis::row.name()" => "\"row\"",
+    "Axis::col.name()" => "\"col\"",
+    "Axis::row == Axis::row" => "true",
+    "Axis::row == Axis::col" => "false",
+    "r.ix" => "3",
+    "c.ix" => "0",
+    "r == Row { ix = 3 }" => "true",
+    "r == Row { ix = 2 }" => "false",
+    "match a { Axis::row => 1, Axis::col => 2 }" => "1",
+);
+
+test_fail!(
+    axes_keep_their_slots,
+    "fn cell(r: Row, c: Col) -> int { r.ix + c.ix } let _y = cell(Col::new(0), Row::new(3));",
+    "fn take_axis(a: Axis) -> str { a.name() } let _y = take_axis(Row::new(1));",
+    "Row::new(1) + Col::new(2)",
+    "Row::new(1) == Col::new(1)",
+);

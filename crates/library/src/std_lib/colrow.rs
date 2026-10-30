@@ -15,8 +15,15 @@
 //! or a matrix could never infix honestly. The real products have
 //! names instead: `row.inner(col) -> float` and
 //! `col.outer(row) -> [[float]]`.
+//!
+//! Three more names round out the vocabulary, atom-first for tables
+//! and anywhere else an axis needs naming: `Axis::row`/`Axis::col`
+//! are the bare markers ("which way does this run"), while `Row` and
+//! `Col` are index newtypes — `Row { ix = 3 }` — so a table coordinate
+//! can never sit in the wrong slot. All nominal, all structural under
+//! `==`/`!=`, all usable wherever a type name goes.
 
-use macros::{MimasStruct, native};
+use macros::{MimasEnum, MimasStruct, native};
 use vm::conversion::MimasType;
 use vm::{BinOp, Ctx, RtErr, RtResult, UnaryOp, Val, api::Api};
 
@@ -249,6 +256,66 @@ pub struct Row4 {
     pub w: f64,
 }
 
+/// Which way a table — or anything two-dimensional — runs. The bare
+/// atoms: `Axis::row` / `Axis::col`.
+#[derive(Debug, Clone, Copy, PartialEq, MimasEnum)]
+#[allow(non_camel_case_types)]
+pub enum Axis {
+    /// The row axis.
+    row,
+    /// The column axis.
+    col,
+}
+/// A row position. Nominal — a `Col` can't sit in a `Row` slot.
+#[derive(Debug, Clone, Copy, Default, PartialEq, MimasStruct)]
+pub struct Row {
+    pub ix: i64,
+}
+/// A column position.
+#[derive(Debug, Clone, Copy, Default, PartialEq, MimasStruct)]
+pub struct Col {
+    pub ix: i64,
+}
+
+mod ax {
+    use super::*;
+
+    /// `Axis::row.other()` → `Axis::col` — the other axis.
+    #[native]
+    #[effects()]
+    pub fn other<'gc>(_ctx: Ctx<'gc>, a: Axis) -> Axis {
+        match a {
+            Axis::row => Axis::col,
+            Axis::col => Axis::row,
+        }
+    }
+
+    /// `Axis::row.name()` → `"row"` — for labels and messages.
+    #[native]
+    #[effects()]
+    pub fn name<'gc>(_ctx: Ctx<'gc>, a: Axis) -> String {
+        match a {
+            Axis::row => "row",
+            Axis::col => "col",
+        }
+        .to_string()
+    }
+
+    /// `Row::new(3)` — same as the `Row { ix = 3 }` literal.
+    #[native]
+    #[effects()]
+    pub fn new_row<'gc>(_ctx: Ctx<'gc>, ix: i64) -> Row {
+        Row { ix }
+    }
+
+    /// `Col::new(0)` — same as the `Col { ix = 0 }` literal.
+    #[native]
+    #[effects()]
+    pub fn new_col<'gc>(_ctx: Ctx<'gc>, ix: i64) -> Col {
+        Col { ix }
+    }
+}
+
 vecfam!(c2, col, Col2, Row2, (x, y));
 vecfam!(c3, col, Col3, Row3, (x, y, z));
 vecfam!(c4, col, Col4, Row4, (x, y, z, w));
@@ -268,6 +335,13 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add_adt::<Row2>();
     api.add_adt::<Row3>();
     api.add_adt::<Row4>();
+    api.add_adt::<Axis>();
+    api.add_adt::<Row>();
+    api.add_adt::<Col>();
+    api.add_assoc_of::<Row, _, _>("new", ax::new_row);
+    api.add_assoc_of::<Col, _, _>("new", ax::new_col);
+    api.add_method(ax::other);
+    api.add_method(ax::name);
     macro_rules! reg {
         ($V:ident, $m:ident, $prod:ident) => {
             api.add_assoc_of::<$V, _, _>("new", $m::new);
