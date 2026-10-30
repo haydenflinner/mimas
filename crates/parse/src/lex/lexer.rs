@@ -44,6 +44,143 @@ pub struct Lexer<'s> {
     offset: usize,
     errors: Vec<(DiagBox, Location)>,
     cut_short: bool,
+    /// Which operator words lex as names, by byte offset: `(start, [and,
+    /// or, not])` per page of a spliced source (`shadow_table`), the last
+    /// entry at or before a token's start applies.
+    shadow: Vec<(usize, [bool; 3])>,
+}
+
+/// The operator words a source may take back as names, with the symbol
+/// each one spells: `and` `&&`, `or` `||`, `not` `!`.
+pub const SHADOWABLE_WORDS: [(&str, &str); 3] = [("and", "&&"), ("or", "||"), ("not", "!")];
+
+/// `Some(symbol)` when `name` is an operator word a fn may shadow.
+pub fn shadowable_word_symbol(name: &str) -> Option<&'static str> {
+    SHADOWABLE_WORDS.iter().find(|(w, _)| *w == name).map(|(_, s)| *s)
+}
+
+/// Which operator words `source` declares as fns -- a line-level scan for
+/// `fn and` / `fn or` / `fn not` (optionally `pub`), comments skipped. A
+/// page that writes its own `not` (a nand2tetris gate, a DSL) gets the
+/// name in its own text and in the pages that `use` it, and a warning
+/// says so -- never in the pages *it* uses, which were written without it.
+pub fn shadowed_words(source: &str) -> [bool; 3] {
+    let mut out = [false; 3];
+    shadowed_words_into(source, &mut out);
+    out
+}
+
+/// The line a host's splice writes where each page's text begins:
+/// `//# page: game-kit`. A comment to everything else; to the lexer it
+/// bounds a page, so shadowing stays per page in one spliced source.
+pub const PAGE_MARK: &str = "//# page: ";
+
+/// Per-page shadow sets for a program's pages (`(name, text)`): a page's
+/// set is its own `fn and`/`or`/`not` declarations plus the sets of the
+/// pages it `use "…"`s, transitively -- a declaration reaches downstream
+/// (its users), never upstream (its dependencies).
+pub fn shadow_sets(pages: &[(&str, &str)]) -> Vec<[bool; 3]> {
+    fn uses(text: &str) -> Vec<String> {
+        text.lines()
+            .filter_map(|l| {
+                let rest = l.trim().strip_prefix("use")?;
+                if !rest.starts_with([' ', '\t']) {
+                    return None;
+                }
+                let q = rest.trim_start().strip_prefix('"')?;
+                Some(q.split_once('"')?.0.trim().to_lowercase())
+            })
+            .collect()
+    }
+    fn set_of(
+        i: usize,
+        pages: &[(&str, &str)],
+        memo: &mut [Option<[bool; 3]>],
+        busy: &mut [bool],
+    ) -> [bool; 3] {
+        if let Some(s) = memo[i] {
+            return s;
+        }
+        if busy[i] {
+            return shadowed_words(pages[i].1); // a `use` cycle: own decls only
+        }
+        busy[i] = true;
+        let mut out = shadowed_words(pages[i].1);
+        for name in uses(pages[i].1) {
+            if let Some(j) = pages.iter().position(|(n, _)| n.to_lowercase() == name) {
+                let dep = set_of(j, pages, memo, busy);
+                for k in 0..3 {
+                    out[k] |= dep[k];
+                }
+            }
+        }
+        busy[i] = false;
+        memo[i] = Some(out);
+        out
+    }
+    let mut memo = vec![None; pages.len()];
+    let mut busy = vec![false; pages.len()];
+    (0..pages.len()).map(|i| set_of(i, pages, &mut memo, &mut busy)).collect()
+}
+
+/// `source` split at its `PAGE_MARK` lines into pages, each with its
+/// shadow set (`shadow_sets`), as `(byte start, set)`. A source without
+/// marks is one page.
+pub fn shadow_table(source: &str) -> Vec<(usize, [bool; 3])> {
+    let mut starts: Vec<(usize, &str)> = vec![(0, "")];
+    let mut at = 0;
+    for line in source.split_inclusive('\n') {
+        if let Some(name) = line.strip_prefix(PAGE_MARK) {
+            starts.push((at, name.trim()));
+        }
+        at += line.len();
+    }
+    let pages: Vec<(&str, &str)> = starts
+        .iter()
+        .enumerate()
+        .map(|(k, &(s, name))| {
+            let end = starts.get(k + 1).map_or(source.len(), |n| n.0);
+            (name, &source[s..end])
+        })
+        .collect();
+    starts.iter().map(|s| s.0).zip(shadow_sets(&pages)).collect()
+}
+
+/// The set of the last table entry starting at or before `pos`.
+pub fn shadow_at(table: &[(usize, [bool; 3])], pos: usize) -> [bool; 3] {
+    table
+        .iter()
+        .rev()
+        .find(|(s, _)| *s <= pos)
+        .map_or([false; 3], |(_, set)| *set)
+}
+
+fn shadowed_words_into(source: &str, out: &mut [bool; 3]) {
+    for line in source.lines() {
+        let t = line.trim_start();
+        if t.starts_with("//") {
+            continue;
+        }
+        let mut rest = t;
+        while let Some(i) = rest.find("fn ") {
+            let before_ok = i == 0
+                || !rest[..i]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|c| c.is_alphanumeric() || c == '_');
+            let after = rest[i + 3..].trim_start();
+            if before_ok {
+                for (k, (w, _)) in SHADOWABLE_WORDS.iter().enumerate() {
+                    if let Some(tail) = after.strip_prefix(w)
+                        && !tail.starts_with(|c: char| c.is_alphanumeric() || c == '_')
+                    {
+                        out[k] = true;
+                    }
+                }
+            }
+            rest = &rest[i + 3..];
+        }
+    }
 }
 
 impl<'s> Lexer<'s> {
@@ -118,7 +255,31 @@ impl<'s> Lexer<'s> {
             offset: 0,
             errors: vec![],
             cut_short: false,
+            shadow: shadow_table(source),
         }
+    }
+
+    /// Lex with one shadow set throughout: a file of a multi-file program
+    /// (`load_files` computes it with `shadow_sets`), or an f-string
+    /// interpolation's slice (its page's set).
+    pub fn with_shadowed(mut self, shadowed: [bool; 3]) -> Self {
+        self.shadow = vec![(0, shadowed)];
+        self
+    }
+
+    /// Keep another lexer's whole table (a relex of the same source).
+    pub(crate) fn with_shadow_table(mut self, table: Vec<(usize, [bool; 3])>) -> Self {
+        self.shadow = table;
+        self
+    }
+
+    pub(crate) fn shadow_table(&self) -> &[(usize, [bool; 3])] {
+        &self.shadow
+    }
+
+    /// The shadow set in force at byte `pos` of this lexer's source.
+    pub(crate) fn shadowed_at(&self, pos: usize) -> [bool; 3] {
+        shadow_at(&self.shadow, pos)
     }
 
     /// Shifts every location the lexer produces by `offset`. For lexing a slice of a larger
@@ -379,9 +540,11 @@ impl<'s> Lex<'s, Tok<TokKind<'s>>, TokKind<'s>> for Lexer<'s> {
                 // as the symbols (C++'s alternative tokens). Source canonically
                 // spells `&&`/`||`/`!`; the editor can show and accept the
                 // words (a per-person option, apart from the code style).
-                "and" => TokKind::DoubleAmpersand,
-                "or" => TokKind::DoublePipe,
-                "not" => TokKind::NotWord,
+                // A source that declares `fn and`/`fn or`/`fn not` takes the
+                // word back as a name (see `shadowed_words`).
+                "and" if !self.shadowed_at(start)[0] => TokKind::DoubleAmpersand,
+                "or" if !self.shadowed_at(start)[1] => TokKind::DoublePipe,
+                "not" if !self.shadowed_at(start)[2] => TokKind::NotWord,
                 "int" => TokKind::TyKw(TyKw::Int),
                 "float" => TokKind::TyKw(TyKw::Float),
                 "str" => TokKind::TyKw(TyKw::Str),

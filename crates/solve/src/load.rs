@@ -37,10 +37,14 @@ pub fn load_files<'a>(
     // into the same table so a `unit tile` in the first file lexes `4tile`
     // in the second.
     shared::units::clear();
+    // and per-file shadowed operator words: a kit's `fn not` makes `not` a
+    // name in the kit and in the files that `use` it, never upstream
+    let files: Vec<(&str, &str)> = files.into_iter().collect();
+    let shadow = parse::lex::shadow_sets(&files);
     for (file_id, (name, text)) in files.into_iter().enumerate() {
         sources.insert(file_id, NamedSource::new(name, Arc::from(text)));
-        let (ast, parse_errors) =
-            Parser::new_extending(Lexer::new(text, file_id, name.to_owned())).into_ast();
+        let lexer = Lexer::new(text, file_id, name.to_owned()).with_shadowed(shadow[file_id]);
+        let (ast, parse_errors) = Parser::new_extending(lexer).into_ast();
         errors.extend(parse_errors);
         asts.push(ast);
     }

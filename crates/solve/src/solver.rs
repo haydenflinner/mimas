@@ -2389,8 +2389,10 @@ impl Solver {
                 .node_decs
                 .get(&expr.id())
                 .is_some_and(|&dec| self.decs[dec].kind.is_constant()),
+            // elements may be anything const, structs and dicts included: an
+            // array holding one allocates at each use site (`emit_const_dec`)
             ExprKind::Literal(parse::Literal::Array(elems) | parse::Literal::Tuple(elems)) => {
-                elems.iter().all(|e| self.is_const_element(e))
+                elems.iter().all(|e| self.is_const_expr(e))
             }
             ExprKind::Literal(_) => true,
             ExprKind::Grouping(g) => self.is_const_expr(&g.inner),
@@ -2399,29 +2401,6 @@ impl Solver {
             ExprKind::Equality(e) => self.is_const_expr(&e.left) && self.is_const_expr(&e.right),
             ExprKind::Logical(l) => self.is_const_expr(&l.left) && self.is_const_expr(&l.right),
             _ => false,
-        }
-    }
-
-    // const array/tuple elements must encode as a bytecode `Constant` (scalars or nested
-    // arrays/tuples of scalars). dict/struct consts only exist as use-site allocations
-    // (emit_const_dec), so they can't appear inside one -- directly or through a const ref.
-    fn is_const_element(&self, expr: &Expr) -> bool {
-        match expr.kind() {
-            ExprKind::Literal(parse::Literal::Dictionary(_) | parse::Literal::Struct(_)) => false,
-            ExprKind::Literal(parse::Literal::Array(es) | parse::Literal::Tuple(es)) => {
-                es.iter().all(|e| self.is_const_element(e))
-            }
-            ExprKind::Ident(_) => {
-                self.node_decs
-                    .get(&expr.id())
-                    .is_some_and(|&dec| match &self.decs[dec].kind {
-                        DecKind::Constant(Some(
-                            parse::Literal::Dictionary(_) | parse::Literal::Struct(_),
-                        )) => false,
-                        kind => kind.is_constant(),
-                    })
-            }
-            _ => self.is_const_expr(expr),
         }
     }
 

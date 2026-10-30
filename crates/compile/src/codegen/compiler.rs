@@ -105,10 +105,9 @@ impl Compiler {
                             .unwrap_or_else(|| unreachable!("item `{name}` is not a callable fn"));
                         out.functions.insert(name, f);
                     }
-                    // dicts and structs have no constant form, see `Constant::emit_const_dec`
-                    ResolvedDeclKind::Constant(lit)
-                        if !matches!(lit, Literal::Dictionary(_) | Literal::Struct(_)) =>
-                    {
+                    // dicts and structs (and arrays holding them) have no constant
+                    // form, see `Constant::emit_const_dec`
+                    ResolvedDeclKind::Constant(lit) if !Constant::needs_alloc(ir, &lit) => {
                         out.constants.insert(name, Constant::from_literal(ir, lit));
                     }
                     ResolvedDeclKind::Adt(adt) => {

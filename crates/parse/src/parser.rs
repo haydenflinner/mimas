@@ -74,6 +74,9 @@ pub struct Parser<'s> {
     quantities: HashMap<NodeId, shared::units::Dim>,
     /// The unit text as written for each literal in `quantities` (`5ft` -> `"ft"`).
     quantity_units: HashMap<NodeId, String>,
+    /// The source's per-page shadow table (`Lexer::shadow_table`) — an
+    /// f-string interpolation sublexer takes its page's set.
+    shadow: Vec<(usize, [bool; 3])>,
 }
 
 // Basic features
@@ -109,7 +112,8 @@ impl<'s> Parser<'s> {
                 lexer.source(),
                 lexer.file_id(),
                 lexer.file_name().to_string(),
-            );
+            )
+            .with_shadow_table(lexer.shadow_table().to_vec());
             tokens = lexer.by_ref().collect();
         }
         tokens.push(Tok::new(TokKind::Eof, lexer.end()));
@@ -148,6 +152,7 @@ impl<'s> Parser<'s> {
             errors,
             last_error: None,
             cut_short: lexer.cut_short(),
+            shadow: lexer.shadow_table().to_vec(),
             file_id: lexer.file_id(),
             file_name: lexer.file_name().into(),
             src,
@@ -597,6 +602,13 @@ impl<'s> Parser<'s> {
         match self.nth(1) {
             TokKind::Colon | TokKind::LeftBrace => true,
             TokKind::Ident(_) | TokKind::FString(_) | TokKind::Bang | TokKind::NotWord => true,
+            // `check (a * b).same(c)`, `check [1 2] == xs`, `check -x < 0`:
+            // a gap after the word opens a check, as it does before a name;
+            // `check(x)` and `check[i]` touching the word stay a call and
+            // an index
+            TokKind::LeftParenthesis | TokKind::LeftSquare | TokKind::TildeLeftBrace | TokKind::Minus => {
+                kw_end < after
+            }
             kind => Literal::try_from(kind).is_ok(),
         }
     }
@@ -1767,7 +1779,8 @@ impl<'s> Parser<'s> {
         /// Parses the expression inside a `{...}`. It gets a parser of its own, on the
         /// interpolation's slice of the real source.
         fn interpolation<'s>(outer: &mut Parser<'s>, body: &'s str, offset: usize) -> Expr {
-            let lexer = Lexer::new(body, outer.file_id, outer.file_name.clone());
+            let lexer = Lexer::new(body, outer.file_id, outer.file_name.clone())
+                .with_shadowed(crate::lex::shadow_at(&outer.shadow, offset));
             let mut parser = Parser::with_src(lexer.with_offset(offset), outer.src());
             // nested f-strings would otherwise restart the depth guard
             parser.depth = outer.depth;

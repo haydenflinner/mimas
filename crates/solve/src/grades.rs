@@ -59,7 +59,7 @@ use crate::{
     GuardSeg, Solver,
     components::{DecId, DecKind},
     errors::{
-        ConsumeForbidden, DeadStore, MustUseResult, UnusedBinding, UnusedParam,
+        ConsumeForbidden, DeadStore, MustUseResult, ShadowedBuiltin, UnusedBinding, UnusedParam,
         UseAfterConsume,
     },
 };
@@ -1022,6 +1022,19 @@ impl<'a> Pass<'a> {
     }
 
     fn function(&mut self, f: &'a Function) {
+        // `and`/`or`/`not` are operator words unless the source declares a
+        // fn by that name (the lexer's pre-scan) -- allowed, but said
+        if let Some(symbol) = parse::lex::shadowable_word_symbol(&f.name.lexeme) {
+            self.warnings.push(
+                ShadowedBuiltin {
+                    src: self.solver.src(f.name.location),
+                    at: f.name.location.into(),
+                    name: f.name.lexeme.to_string(),
+                    symbol,
+                }
+                .into(),
+            );
+        }
         let dec = self
             .dec_by_site
             .get(&(f.name.location.file_id, f.name.location.span.start))

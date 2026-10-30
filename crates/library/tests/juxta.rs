@@ -64,6 +64,38 @@ test_run!(
     "if t and not f { 1 } else { 2 }" => "1",
 );
 
+// A source may take an operator word back by declaring a fn of that name
+// (nand2tetris's gates): the word is then a name on that source -- call
+// it, pass it -- and the operator is spelled with its symbol. The solver
+// warns (`shadowed_builtin`); a host can allow it per page.
+
+test_run!(
+    a_declared_fn_shadows_its_operator_word,
+    "fn nand(a: int, b: int) -> int { 1 - a * b }
+     fn not(a: int) -> int { nand(a, a) }
+     fn and(a: int, b: int) -> int { not(nand(a, b)) }
+     fn or(a: int, b: int) -> int { nand(not(a), not(b)) }
+     fn map1(a: int, f: (int) -> int) -> int { f(a) }",
+    "not(0)" => "1",
+    "and(1, 1)" => "1",
+    "or(0, 0)" => "0",
+    "map1(1, not)" => "0",
+    "not 1" => "0",
+    "!false && true" => "true",
+);
+
+#[test]
+fn shadowing_an_operator_word_warns_with_a_code() {
+    let files = [("main", "fn not(a: int) -> int { 1 - a }\nlet _x = not(1);")];
+    let audit = vm::Vm::audit_files(&files, library::std).unwrap();
+    // the rendered report carries the code a host filters on
+    assert!(
+        audit.warnings.iter().any(|w| format!("{w:?}").contains("shadowed_builtin")),
+        "{:?}",
+        audit.warnings
+    );
+}
+
 // Inside a sequence (`[…]`, `f(…)`, `~{…}`) commas are optional --
 // adjacency ends the element instead. Applying inside one needs
 // parens, so `[f x]` is `[f, x]` while `[f(x)]` applies.
@@ -122,4 +154,18 @@ fn juxtaposition_errors_stay_errors() {
         "fn add1(x: int) -> int { x + 1 }\nlet a = [add1 2];",
         "expected (int) -> int",
     );
+}
+
+#[test]
+fn a_kits_shadowing_reaches_the_page_that_uses_it() {
+    // one program, three files: the kit declares `fn and`; the page that
+    // `use`s it reads `and` as that fn. `ops` is a page the user also
+    // uses that never asked for the kit -- its `and` stays the operator.
+    let files = [
+        ("page", "use \"kit\";\nuse \"ops\";\nlet _x = and(1, 1);\nlet _z = both();"),
+        ("kit", "fn and(a: int, b: int) -> int { a * b }"),
+        ("ops", "fn both() -> bool { true and !false }"),
+    ];
+    let audit = vm::Vm::audit_files(&files, library::std);
+    assert!(audit.is_ok(), "{:?}", audit.err());
 }

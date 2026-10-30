@@ -279,6 +279,22 @@ fn check_line_is_ordinary_equality() {
 }
 
 #[test]
+fn check_opens_before_a_spaced_paren_bracket_or_minus() {
+    // juxtaposition would read `check (x)` as the call `check(x)`; a gap
+    // after the word opens a check before `(`, `[` and `-` as before a name
+    for (src, name) in [
+        ("check (a * b).same(c)", "(a * b).same(c)"),
+        ("check (f(0)) == 0", "(f(0)) == 0"),
+        ("check [1 2] == xs", "[1 2] == xs"),
+        ("check -x < 0", "-x < 0"),
+    ] {
+        let tests = check_item(src);
+        assert_eq!(tests.cases.len(), 1, "{src}");
+        assert_eq!(&tests.cases[0].name.lexeme, name, "{src}");
+    }
+}
+
+#[test]
 fn check_lines_stand_alone() {
     // no block, no paragraph -- consecutive `check` lines are independent items
     let lexer = crate::lex::Lexer::new(
@@ -303,6 +319,8 @@ fn check_word_still_lexes_as_ident() {
         "check.push(x);",
         "let check = 5;",
         "check(x);",
+        "check[0];",
+        "check-1;",
         "check == 5;",
     ] {
         let lexer = crate::lex::Lexer::new(src, 0, "test".into());
@@ -622,3 +640,38 @@ test_fail!(
     "let a: [int; x] = x;",
     "let a: [int; 4,] = x;"
 );
+
+#[test]
+fn a_declared_fn_takes_back_an_operator_word() {
+    // nand2tetris writes its own `not`/`and`/`or` gates: declaring the fn
+    // makes the word a name on that source -- calls, passing it as a value
+    let src = "fn nand(a: int, b: int) -> int { 1 - a * b }\n\
+               fn not(a: int) -> int { nand(a, a) }\n\
+               fn and(a: int, b: int) -> int { not(nand(a, b)) }\n\
+               fn or(a: int, b: int) -> int { nand(not(a), not(b)) }\n\
+               let f = not;\n\
+               let ok = true && !false;\n";
+    let lexer = crate::lex::Lexer::new(src, 0, "test".into());
+    assert!(crate::Parser::new(lexer).try_into_ast().is_ok());
+    // only the declared words: `or` stays the operator here
+    assert_eq!(crate::lex::shadowed_words("fn not(a: int) -> int { a }"), [false, false, true]);
+    assert_eq!(crate::lex::shadowed_words("pub fn and(a: int) -> int { a }"), [true, false, false]);
+    // a mention in a comment, a longer name, or `fn` inside a word doesn't count
+    assert_eq!(crate::lex::shadowed_words("// fn not(x)\nfn notify() {}\nlet defn not = 1"), [false; 3]);
+}
+
+#[test]
+fn a_spliced_source_shadows_per_page() {
+    // the host's splice marks each page; a page's `fn not` reaches the
+    // pages that `use` it (downstream), never the pages it uses
+    let src = "//# page: kit\nfn ok() -> bool { not false }\n\n\
+               //# page: n2t-lib\nfn not(a: int) -> int { 1 - a }\n\n\
+               //# page: gates\nuse \"n2t-lib\";\nuse \"kit\";\nlet x = not(1);\n";
+    let lexer = crate::lex::Lexer::new(src, 0, "test".into());
+    assert!(crate::Parser::new(lexer).try_into_ast().is_ok());
+    let t = crate::lex::shadow_table(src);
+    let at = |needle: &str| crate::lex::shadow_at(&t, src.find(needle).unwrap())[2];
+    assert!(!at("not false"), "kit keeps the operator");
+    assert!(at("fn not"), "the declaring page");
+    assert!(at("not(1)"), "a page that uses it");
+}

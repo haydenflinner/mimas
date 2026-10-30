@@ -54,6 +54,46 @@ territory). Same precedence, same short-circuit; `t or f and f` is
 exist so the editor can show and accept them as a per-person reading
 option, and so `not x` stops being a foreign-spelling teaching error.
 
+**A source can take a word back.** A file that declares `fn not` (or
+`fn and`/`fn or`, `pub` or not) gets that word as a plain name: the
+lexer's pre-scan (`lex::shadowed_words`) sees the declaration and lexes
+the word as an `Ident` in that page, so `not(a)`, `map1(a, not)` and
+`not a` all call the fn, and the operator is spelled with its symbol.
+The reach is directional: a declaration covers its own page and the
+pages that `use` it, never the pages it uses (`lex::shadow_sets`) — so
+n2t-lib's `fn not(a: int)` reaches n2t-gates but not game-kit's
+`not UP`. Per file in `load_files`; in one spliced source the host's
+splice writes a `//# page: name` line (`lex::PAGE_MARK`) at each page's
+start and `lex::shadow_table` bounds pages there. The
+grades pass warns at the declaration — `shadowed_builtin`, a stable
+miette code a host can filter on (Nina hides it per page with the
+`allow` page property). nand2tetris's gate lib is the motivating page.
+Tests: `parse_validity::a_declared_fn_takes_back_an_operator_word`,
+`library/tests/juxta.rs` (`a_declared_fn_shadows_its_operator_word`,
+`shadowing_an_operator_word_warns_with_a_code`,
+`a_kits_shadowing_reaches_the_page_that_uses_it`),
+`parse_validity::a_spliced_source_shadows_per_page`.
+
+## `check (expr)` opens a check
+
+Juxtaposition made `check (a * b).same(c)` the call `check(a * b)…`. A
+gap after the word now opens a check before `(`, `[`, `~{` and `-`, as
+it always did before a name or literal; `check(x)` and `check[i]`
+touching the word stay a call and an index
+(`parse_validity::check_opens_before_a_spaced_paren_bracket_or_minus`).
+
+## Const arrays may hold structs
+
+`const DIRS4 = [RIGHT DOWN LEFT UP]` over struct consts used to be
+"non-constant" (and `[P { x = 1 }]` an ICE): only scalar arrays have a
+bytecode `Constant` form. A const array/tuple that holds a struct or
+dict — directly, nested, or through a const ref — now allocates at each
+use site, the way a struct const already did (`Constant::needs_alloc`
+in `emit_const_dec` and the module-constant export), so a write into
+one use never reaches the next. Tests:
+`solve_variables::{const_struct_in_array, const_array_of_struct_consts}`,
+`library/tests/structs.rs::const_array_of_struct_consts`.
+
 ## Typed arrays — `IntArray`/`FloatArray` backing stores — branch `typed-arrays`
 
 Homogeneous `[int]`/`[float]` sequences stop paying `Vec<Val>`'s 16-byte

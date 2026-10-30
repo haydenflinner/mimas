@@ -1119,6 +1119,26 @@ pub struct MustUseResult {
     pub name: String,
 }
 
+#[derive(Error, Debug, Diagnostic)]
+#[error("`fn {name}` shadows the word operator `{name}` (`{symbol}`)")]
+#[diagnostic(
+    code(shadowed_builtin),
+    severity(Warning),
+    help(
+        "on this source `{name}` is now your fn -- `{name}(x)` calls it and `{name}` passes it; \
+         spell the operator `{symbol}`. Hosts can allow this per page (Nina: page property \
+         `allow` = `shadowed_builtin`)"
+    )
+)]
+pub struct ShadowedBuiltin {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("`{name}` names this fn here, not the operator")]
+    pub at: SourceSpan,
+    pub name: String,
+    pub symbol: &'static str,
+}
+
 // ---- effect gate (`Vm::compile_files_gated`) -- a refusal, not a lint: the
 // file's inferred effects exceed what the host granted, so it never runs.
 

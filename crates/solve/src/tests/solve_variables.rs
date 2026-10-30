@@ -515,7 +515,12 @@ test_fail!(
     "const B: int = (-9223372036854775807 - 1) ~/ -1;"
 );
 
-test_fail!(
-    const_struct_in_array_ices,
+// an array holding structs allocates at each use site, like a struct const
+test_success!(
+    const_struct_in_array,
     "struct P { x: int } const A = [P { x = 1 }];"
+);
+test_success!(
+    const_array_of_struct_consts,
+    "struct P { x: int } const R = P { x = 1 }; const L = P { x = -1 }; const BOTH = [R L];"
 );
