@@ -91,6 +91,11 @@ fn juxtaposition_errors_stay_errors() {
     rejected("let a = 3 b;", "cannot be called");
     // `x if` keeps its stray-token error — keywords are not arguments
     rejected("let a = 1 if true { 2 } else { 3 };", "expected");
+    // operator words never juxtapose — `a and b` is not `a(and)(b)`,
+    // so the other-language spellings keep their teaching errors
+    rejected("let t = true\nlet a = t and t;", "&&");
+    rejected("let t = true\nlet a = t or t;", "||");
+    rejected("let x = 3\nlet a = x as float;", "no `as` casts");
     // `[add1 two]` is `[add1, two]` — elements, not `add1(two)`: the
     // fn and the int can't unify in one array, where an applied
     // `add1(two)` = `[3]` would have typechecked

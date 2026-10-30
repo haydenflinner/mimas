@@ -2452,7 +2452,13 @@ impl<'s> Parser<'s> {
                 // inside a whitespace-separated region like `table {}`.
                 tok if !fresh_line
                     && self.juxta == Juxta::Apply
-                    && tok.starts_juxta_arg() =>
+                    && tok.starts_juxta_arg()
+                    // `1 b => 2`: an atom right before `=>` is the next
+                    // match arm's pattern (a missing `,`), not an argument
+                    && self.nth(1) != TokKind::FatArrow
+                    && !expr
+                        .as_ident()
+                        .is_some_and(|i| lex::is_operator_word(&i.lexeme)) =>
                 {
                     self.juxta_apply(expr)
                 }

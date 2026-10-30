@@ -272,7 +272,9 @@ test_recover!(
          bar();
      }
      let y = 3;",
-    errors: ["expected token", "expected token"],
+    // commas are optional inside a call (`Juxta::Comma`), so only the
+    // unclosed `(` is reported -- the `if` is the next argument
+    errors: ["expected token"],
     stmts: ["let x = foo(1, 2, if x {bar()} );", "let y = 3;"],
 );
 
@@ -283,7 +285,8 @@ test_recover!(
          bar();
      }
      let y = 3;",
-    errors: ["expected token", "expected token"],
+    // commas are optional inside `[…]`, so only the unclosed `[` is reported
+    errors: ["expected token"],
     stmts: ["let x = [1, 2, if x {bar()} ];", "let y = 3;"],
 );
 
@@ -294,6 +297,7 @@ test_recover!(
          foo();
      }
      let z = 1;",
+    // `1 b` must not juxtapose: an atom before `=>` is the next arm
     errors: ["expected token"],
     stmts: ["_", "let z = 1;"],
 );
@@ -301,12 +305,12 @@ test_recover!(
 test_recover!(
     error_in_a_block_keeps_the_next_expr_stmt,
     "fn f() {
-         g(1 2)
+         g(1 +)
      }
      h();
      let z = 1;",
-    errors: ["expected token"],
-    stmts: ["fn f() {g(1, 2) }", "h()", "let z = 1;"],
+    errors: ["expected expression"],
+    stmts: ["fn f() {g(1 + <poison>) }", "h()", "let z = 1;"],
 );
 
 test_recover!(
@@ -321,35 +325,32 @@ test_recover!(
 
 test_recover!(
     junk_after_a_value_ends_at_its_line,
-    "let a = 1 2 3
+    "let a = 1 => 3
      foo();
      let b = 2;",
     errors: ["unexpected token"],
     stmts: ["let a = 1;", "foo()", "let b = 2;"],
 );
 
+// `~{ a = 1 b = 2 }` and `[1 2]` used to be the broken lists here; commas
+// are optional inside sequences now (`Juxta::Comma`), so they parse.
 test_single_error!(
     broken_list_does_not_truncate_its_block,
     "expected token",
-    "fn f() {
-         let d = ~{ a = 1 b = 2 };
-         foo();
-     }",
-    "fn f() {
-         let w = Foo { a = [1 2] };
-         foo();
-     }",
     "fn f() {
          enum E { A B }
          g();
      }",
 );
 
-test_single_error!(
-    list_missing_comma,
-    "expected token",
-    "foo(1 2);",
-    "let a = [1 2];",
+// commas are optional inside sequences (`Juxta::Comma`) -- these were
+// missing-comma errors before
+test_recover!(
+    list_commas_optional,
+    "foo(1 2);
+     let a = [1 2];",
+    errors: [],
+    stmts: ["foo(1, 2)", "let a = [1, 2];"],
 );
 
 test_recover!(
@@ -370,7 +371,7 @@ test_recover!(
 
 test_recover!(
     fstring_interp_leftovers,
-    r#"let a = f"{x y z}";
+    r#"let a = f"{x => z}";
      let b = 2;"#,
     errors: ["unexpected token"],
     stmts: ["let a = f\"{x}\";", "let b = 2;"],

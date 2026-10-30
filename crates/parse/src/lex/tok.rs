@@ -299,10 +299,11 @@ impl TokKind<'_> {
     /// name, a literal, or a parenthesised expression. `{`, `[`, `|`,
     /// keyword-exprs and unary heads stay out, so `Foo {` keeps its
     /// struct-literal read, `x [i]` stays an index, `f - x` stays
-    /// subtraction, and `x if` stays a stray token. `mod`/`xor` are
-    /// operator words, not atoms — `x mod 2` and `a xor b` stay infix.
+    /// subtraction, and `x if` stays a stray token. Operator words
+    /// ([is_operator_word]) are not atoms — `x mod 2` and `a xor b` stay
+    /// infix, and `a and b` / `x as int` keep their teaching errors.
     pub(crate) fn starts_juxta_arg(self) -> bool {
-        !matches!(self, TokKind::Ident("mod") | TokKind::Ident("xor"))
+        !matches!(self, TokKind::Ident(name) if is_operator_word(name))
             && (Literal::try_from(self).is_ok()
                 || matches!(
                     self,
@@ -399,4 +400,15 @@ impl TokKind<'_> {
                 | TokKind::Star | TokKind::Slash | TokKind::Caret | TokKind::Minus
         )
     }
+}
+
+/// Words that read as operators — mimas's own infix words (`mod`, `xor`)
+/// and other languages' (`and`, `or`, `not`, `as`, `is`, `elif`, which
+/// get a teaching error). They never join a juxtaposition, as head or
+/// argument: `a and b` is not `a(and)(b)`, and `not x` is not `not(x)`.
+pub(crate) fn is_operator_word(name: &str) -> bool {
+    matches!(
+        name,
+        "mod" | "xor" | "and" | "or" | "not" | "as" | "is" | "elif"
+    )
 }
