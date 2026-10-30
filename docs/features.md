@@ -17,8 +17,9 @@ boundaries that need a `str`:
 
 - `x!` and `()`-unwraps still fault `UnwrappedRaised(String)` — the
   display render happens on the fault path, where it's already cold.
-- `absolve`'s handler stays `(str) -> T`: the compiler emits a `Format`
-  on the payload before the call, so `|e|` sees `"42"`/`"[1, 2]"`.
+- `absolve`'s handler is `(any) -> T`: `e` binds the payload itself, not
+  a stringified note — `f"{e}"` formats on use, and `match` narrows it
+  with runtime probes.
 - `Raisable<T>` keeps its `String` variant — native authors see no API
   change; a raised payload crossing `from_value` renders (or reads
   `<unprintable raise payload>`), and `into_value` wraps the message
@@ -40,6 +41,51 @@ The wasm backend needed nothing — `Val::Raised` there is already
 Tests: `optionals.rs` — structured payloads (`int`/`[int]`/`dict`),
 `absolve`/`?`/`!` boundaries, nested raise, snapshot roundtrip;
 `solve_results.rs` — `raise` on non-`str` solves to `T!`.
+
+## `absolve`'s `e` is `any` — `match` narrows the payload
+
+`raise` carries any value, so `absolve`'s handler parameter is the
+dynamic type `any` rather than a pre-stringified `str`. `T` fulfills
+`any`; `any` fulfills only `any` — it stays quarantined until narrowed,
+which is what `match` is for:
+
+```mimas
+enum Flow { Push, Pull }
+fn retry() -> int! { raise Flow::Push }
+
+retry() absolve |e| {
+    match e {
+        Flow::Push => -1,
+        Flow::Pull => 1,
+        _ => 0,      // required — the payload could be anything
+    }
+}
+```
+
+- **Variant/struct/tuple-variant arms are runtime probes**: the pattern
+  resolves the variant as usual and emits `is_instance`, but skips the
+  scrutinee unify — the probe proves the variant, never claims `e` is
+  one. Struct-variant fields bind with the variant's *declared* member
+  types (`Err::Fatal { code }` gives `code: int`); a generic variant's
+  params stay `any` (`Wrap::Full(x)` gives `x: any` — the probe proves
+  `Full`, not `T`).
+- **Literal arms are structural-eq probes** (`42`, `"x"`, `null`); `x?`
+  is a non-null probe binding `x: any`. A `match` over `any` requires a
+  `_` arm — the payload could be anything — and `match … !` still
+  panics on a miss.
+- **Quarantine**: `e + 1`, `e.field`, `|e| e` into a concrete return
+  type, and `let n: int = e` all fail — format (`f"{e}"`), match, or
+  pass it somewhere expecting `any`.
+- `==`/`!=` on `any` is allowed (structural eq is total at runtime), so
+  `e == Order::Desc` works without a `match`.
+- Any-scrutinee matches always take the linear probe chain, never the
+  `switch` jump table — `switch` indexes `Val::Int` payloads and
+  instance struct ids into the same table, and on `any` the two tag
+  spaces can collide.
+- The emit is the cold-path design carried through: `absolve` no longer
+  emits a `Format` — the handler gets the raw payload and picks what to
+  do with it. Handler closures are single-use call-site literals, so
+  inlining one is a syntactic fact, not an analysis problem.
 
 ## Z-set `+`/`-` on sequences + the glued-postfix rule
 
