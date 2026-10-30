@@ -66,6 +66,10 @@ pub struct Resolutions {
     /// for `s - v`). Emit lowers them as ordinary method calls rather than
     /// `Bin`/`Unary` ops.
     pub op_decs: IndexMap<NodeId, OpDispatch>,
+    /// `<op> a` nodes whose operand is pact-typed (`!x` with `x: Dichotomy`):
+    /// no single impl, so emit dispatches at runtime over the bound's
+    /// implementers, exactly like a method call through the pact.
+    pub pact_ops: IndexMap<NodeId, PactOp>,
     pub root: ResolvedModule,
     pub sources: HashMap<FileId, NamedSource<Arc<str>>>,
 }
@@ -77,6 +81,14 @@ pub struct Resolutions {
 pub struct OpDispatch {
     pub dec: DecId,
     pub swap: bool,
+}
+
+/// An operator on a pact-typed operand → the pact method `method` (`inv` for
+/// `!`), dispatched at runtime over the implementers of `pids`.
+#[derive(Debug, Clone)]
+pub struct PactOp {
+    pub pids: Vec<PactId>,
+    pub method: String,
 }
 
 impl Resolutions {
@@ -450,6 +462,7 @@ impl From<Solver> for Resolutions {
             contract_native,
             panic_native,
             op_decs: solver.op_decs,
+            pact_ops: solver.pact_ops,
             root,
             sources: solver.sources,
         }

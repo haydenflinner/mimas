@@ -226,6 +226,9 @@ fn unary_dispatch(
     ty: &Ty,
     location: Location,
 ) -> Result<Option<Ty>> {
+    if let Ty::Pacts(pids) = ty {
+        return Ok(pact_unary_dispatch(solver, id, name, ty, pids));
+    }
     let (aid, args) = match ty {
         Ty::Adt(a, args) | Ty::Identity(a, args) => (*a, args.clone()),
         other => match solver.builtin_adt(other) {
@@ -244,6 +247,37 @@ fn unary_dispatch(
     let _ = expr;
     solver.op_decs.insert(id, OpDispatch { dec, swap: false });
     Ok(Some(ret))
+}
+
+/// `<op> a` with `a` pact-typed (`!x`, `x: Dichotomy`): the pact declares the
+/// operator's method (`fn inv(self) -> Self`), so the operator is a call
+/// through the pact — every implementer has it. Recorded in `pact_ops`; emit
+/// dispatches at runtime. A `Self` return widens to the bound, as it does for
+/// `x.inv()`.
+fn pact_unary_dispatch(
+    solver: &mut Solver,
+    id: NodeId,
+    name: &'static str,
+    ty: &Ty,
+    pids: &[shared::PactId],
+) -> Option<Ty> {
+    let header = pids
+        .iter()
+        .find_map(|pid| solver.pacts[pid].functions.get(name).map(|(h, _)| h.clone()))?;
+    if header.parameters.len() != usize::from(header.is_method) {
+        return None;
+    }
+    let Ty::Fn(f) = solver.instantiate_pact_fn(&header, ty) else {
+        return None;
+    };
+    solver.pact_ops.insert(
+        id,
+        crate::PactOp {
+            pids: pids.to_vec(),
+            method: name.to_string(),
+        },
+    );
+    Some(f.return_ty.as_ref().clone())
 }
 
 impl Solve for Access {

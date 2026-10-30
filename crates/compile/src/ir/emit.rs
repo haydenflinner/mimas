@@ -801,44 +801,7 @@ impl Emit for Call {
             // effects.
             let args = fill_call_args(ir, fn_ty, &[], arguments, fn_ty.is_method.then_some(recv))?;
 
-            let candidates: Vec<_> = ir
-                .resolutions
-                .adts
-                .iter()
-                .filter(|(_, adt)| pids.iter().all(|p| adt.implements.contains(p)))
-                .map(|(_, adt)| (adt.methods[method], adt.dispatch_ids.clone()))
-                .collect();
-            let candidates: Vec<_> = candidates
-                .into_iter()
-                .map(|(dec, ids)| (ir.item_body_for(dec), ids))
-                .collect();
-
-            if let [(body, _)] = candidates.as_slice() {
-                return Some(ir.current().call_direct(*body, args));
-            }
-
-            let merge = ir.push_block("pact_merge");
-            let mut branches = Vec::new();
-            for (body, ids) in candidates {
-                for id in ids {
-                    let hit = ir.push_block("pact_hit");
-                    let next = ir.push_block("pact_next");
-                    let is_inst = ir.current().is_instance(recv, id);
-                    ir.in_current(|block| {
-                        block.jump_if_false(is_inst, next);
-                        block.jump(hit);
-                    });
-                    ir.target(hit);
-                    let value = ir.current().call_direct(body, args.clone());
-                    let end = ir.current_block_id();
-                    ir.current().jump(merge);
-                    branches.push((end, value));
-                    ir.target(next);
-                }
-            }
-            // unreachable: the receiver's pact type guarantees one arm matches.
-            ir.current().panic();
-            merge_branches(ir, merge, branches)
+            dispatch_pact_method(ir, recv, args, pids, method)
         }
 
         // `S::default()` — the implicit memberwise-default constructor:
@@ -1757,6 +1720,9 @@ impl Emit for Unary {
         if let Some(&d) = ir.resolutions.op_decs.get(&id) {
             return emit_op_call(ir, d, vec![right]);
         }
+        if let Some(p) = ir.resolutions.pact_ops.get(&id).cloned() {
+            return dispatch_pact_method(ir, right, vec![right], &p.pids, &p.method);
+        }
         Some(ir.current().unary(self.op.into(), right))
     }
 }
@@ -1927,6 +1893,57 @@ impl Emit for While {
 /// `b.rsub(a)` when the right operand owns the impl (`swap`). Emits the method
 /// call the solver's `op_dispatch` already vetted: source `fn`s go `call_direct`
 /// like any method, `#[native]`s `call_native` with the receiver first.
+/// Runtime dispatch over the implementers of `pids` for `method`: an
+/// `IsInstance` chain, each arm `CallDirect`-ing that adt's body (one
+/// implementer skips the test). `args` already holds the receiver first.
+/// Shared by method calls through a pact and operators on pact-typed values.
+fn dispatch_pact_method(
+    ir: &mut Ir,
+    recv: InstId,
+    args: Vec<InstId>,
+    pids: &[PactId],
+    method: &str,
+) -> Option<InstId> {
+    let candidates: Vec<_> = ir
+        .resolutions
+        .adts
+        .iter()
+        .filter(|(_, adt)| pids.iter().all(|p| adt.implements.contains(p)))
+        .map(|(_, adt)| (adt.methods[method], adt.dispatch_ids.clone()))
+        .collect();
+    let candidates: Vec<_> = candidates
+        .into_iter()
+        .map(|(dec, ids)| (ir.item_body_for(dec), ids))
+        .collect();
+
+    if let [(body, _)] = candidates.as_slice() {
+        return Some(ir.current().call_direct(*body, args));
+    }
+
+    let merge = ir.push_block("pact_merge");
+    let mut branches = Vec::new();
+    for (body, ids) in candidates {
+        for id in ids {
+            let hit = ir.push_block("pact_hit");
+            let next = ir.push_block("pact_next");
+            let is_inst = ir.current().is_instance(recv, id);
+            ir.in_current(|block| {
+                block.jump_if_false(is_inst, next);
+                block.jump(hit);
+            });
+            ir.target(hit);
+            let value = ir.current().call_direct(body, args.clone());
+            let end = ir.current_block_id();
+            ir.current().jump(merge);
+            branches.push((end, value));
+            ir.target(next);
+        }
+    }
+    // unreachable: the receiver's pact type guarantees one arm matches.
+    ir.current().panic();
+    merge_branches(ir, merge, branches)
+}
+
 fn emit_op_call(ir: &mut Ir, d: OpDispatch, args: Vec<InstId>) -> Option<InstId> {
     let ResolvedDeclKind::Item { native, .. } = ir.resolutions.decs[d.dec].kind else {
         return None;

@@ -1,7 +1,6 @@
 use shared::IdVec;
 
 use colored::Colorize;
-use parse::Literal;
 use shared::{FileId, Location, Ty};
 use solve::{
     ResolvedDeclKind, ResolvedModule,

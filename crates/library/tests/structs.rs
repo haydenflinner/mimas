@@ -41,3 +41,25 @@ test_run!(
     "DIRS[0].dx" => "1",
     "{ let s = 0.0; for d in DIRS { s = s + d.dx + d.dy } s }" => "2",
 );
+
+// An operator through a pact: `pact Dichotomy { fn inv(self) -> Self; }`
+// declares `!`'s method, so `!x` on a `Dichotomy`-typed value calls
+// whichever implementer's `inv` the value turns out to be, at runtime --
+// the same dispatch `x.inv()` through the pact gets.
+test_run!(
+    unary_operator_through_a_pact,
+    "pact Dichotomy { fn inv(self) -> Self; }
+     struct Dial { lo: float, hi: float }
+     impl Dichotomy for Dial { fn inv(self) -> Dial { Dial { lo = self.hi, hi = self.lo } } }
+     enum Sky { Sun, Moon }
+     impl Dichotomy for Sky {
+         fn inv(self) -> Sky { match self { Sky::Sun => Sky::Moon, Sky::Moon => Sky::Sun } }
+     }
+     fn involutive(x: Dichotomy) -> bool { !(!x) == x }
+     fn flipped(x: Dichotomy) -> Dichotomy { !x }",
+    "involutive(Dial { lo = 5.0, hi = 95.0 })" => "true",
+    "involutive(Sky::Sun)" => "true",
+    "flipped(Sky::Sun) == Sky::Moon" => "true",
+    "flipped(Dial { lo = 5.0, hi = 95.0 }) == Dial { lo = 95.0, hi = 5.0 }" => "true",
+    "!true" => "false",
+);
