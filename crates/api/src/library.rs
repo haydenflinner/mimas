@@ -9,6 +9,10 @@ pub struct Library<C> {
     intrinsics: HashMap<NativeId, Intrinsic>,
     adts: Vec<ApiAdt>,
     registry: Registry,
+    /// Mimas source the library carries (`(name, text)`): the parts of a
+    /// library written in mimas itself, which every program that installs
+    /// the library compiles alongside its own files.
+    sources: Vec<(&'static str, &'static str)>,
 }
 
 impl<C> Library<C> {
@@ -18,7 +22,17 @@ impl<C> Library<C> {
             intrinsics: HashMap::new(),
             adts: Vec::new(),
             registry: Registry::new(),
+            sources: Vec::new(),
         }
+    }
+
+    /// Ship `src` with the library: programs that install it compile it too.
+    pub fn add_source(&mut self, name: &'static str, src: &'static str) {
+        self.sources.push((name, src));
+    }
+
+    pub fn sources(&self) -> &[(&'static str, &'static str)] {
+        &self.sources
     }
 
     pub fn natives(&self) -> impl Iterator<Item = (NativeId, &ApiEntry<C>)> {

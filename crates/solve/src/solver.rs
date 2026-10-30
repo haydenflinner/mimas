@@ -2427,6 +2427,14 @@ impl Solver {
     /// reduce returns raw location-tagged errors and we materialize them with source here.
     pub(crate) fn reduce_const_expr(&self, expr: &Expr) -> Result<Option<Literal>> {
         crate::utils::reduce(expr, &|e| {
+            if self.is_unit_variant(e) {
+                // `Team::Blue` as a value is the variant's empty struct literal --
+                // emitted at each use like any struct const
+                return Some(Literal::Struct(parse::StructLiteral {
+                    name: e.clone(),
+                    fields: vec![],
+                }));
+            }
             self.node_decs
                 .get(&e.id())
                 .and_then(|&dec| self.decs[dec].kind.const_value().cloned())
@@ -2434,7 +2442,20 @@ impl Solver {
         .map_err(|e| e.into_diag(self))
     }
 
+    /// `E::V` naming a field-less enum variant (`opp Team { Blue, Red }`'s
+    /// `Team::Blue`): a value with nothing to compute, so a `const` may be one.
+    pub(crate) fn is_unit_variant(&self, expr: &Expr) -> bool {
+        matches!(expr.kind(), ExprKind::Access(parse::Access::DoubleColon { .. }))
+            && self.node_decs.get(&expr.id()).is_some_and(|&dec| {
+                matches!(self.decs[dec].kind, DecKind::Variant { layout, .. }
+                    if self.adts[layout].as_singular().is_some_and(|v| v.is_empty()))
+            })
+    }
+
     pub(crate) fn is_const_expr(&self, expr: &Expr) -> bool {
+        if self.is_unit_variant(expr) {
+            return true;
+        }
         match expr.kind() {
             ExprKind::Ident(_) => self
                 .node_decs

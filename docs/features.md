@@ -199,7 +199,26 @@ appended last by `load_files` so user files keep their ids): the `Opp`
 pact itself and the pairs pages kept spelling as bools or ±1 —
 `Sign { Pos, Neg }`, `Size { Big, Small }`, `Shade { Light, Dark }`,
 `Daytime { Day, Night }`, `Flow { Push, Pull }`, `Fill { Full, Empty }`, `Order { Asc, Desc }` (a
-sort's direction — std and pages take it instead of an `asc: bool`). `bool` is the first opp
+sort's direction — std and pages take it instead of an `asc: bool`),
+`Compare { Less, Greater }`, `Side { Start, End }`. Alternative spellings
+are associated consts — `Order::Increasing`/`Decreasing`,
+`Compare::Smaller`/`Bigger` — so `!Order::Increasing ==
+Order::Decreasing`. The core source (`solve/src/builtin.mim`) is
+declarations only; std's operations on the opps ship with std as mimas
+source (`library/src/opp.mim`, via the new `Library::add_source`), on
+the opps themselves so they add no global names: `Order::Desc.rank(keys)`
+(indices, Desc the exact reverse of a stable Asc — `xs.reorder(...)`
+sorts by key), `Side::End.pad(xs, n, fill)` (extend any list — the
+zero-extend case) and `Side::Start.justify(s, width)` (align text). Each
+mirrors: `(!o).rank(k) == rev(o.rank(k))`, `(!Side::End).pad(xs, n, f) ==
+rev(Side::End.pad(rev(xs), n, f))` (`builtin_opp_operations_mirror`).
+Built-in and library sources solve first (their impls' consts are typed
+before user code reads them) while keeping file ids after the user's.
+
+A field-less variant is a constant: `const ME = Team::Blue;` and
+`const BOTH = [Team::Blue, Team::Red]` (built at each use, like struct
+consts); a tuple variant's constructor is still not a value
+(`unit_variant_consts`, `solve_variables::const_tuple_variant_ctor`). `bool` is the first opp
 in spirit; `impl Opp for bool` waits on pact impls for primitive types.
 A unit variant now prints as its bare name (`Sky::Moon`, not
 `Sky::Moon {  }`). Tests: `parse_validity::opp_is_an_enum_and_its_flip`,

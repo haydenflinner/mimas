@@ -127,6 +127,19 @@ impl Constant {
             unreachable!("emit_const_dec called on non-constant dec {dec:?}");
         };
         let lit = lit.clone();
+        // a unit variant (`const ME = Team::Blue`) is its path, lowered the
+        // ordinary way — the struct-literal path would build the enum's type,
+        // not the variant's
+        if let Literal::Struct(s) = &lit
+            && s.fields.is_empty()
+            && matches!(
+                ir.resolutions.node_decs.get(&s.name.id()).map(|&d| &ir.resolutions.decs[d].kind),
+                Some(solve::ResolvedDeclKind::Variant { .. })
+            )
+        {
+            use super::Lower;
+            return s.name.lower(ir);
+        }
         if Self::needs_alloc(ir, &lit) {
             use super::Emit;
             lit.emit(id, ir)
@@ -156,6 +169,11 @@ impl Constant {
                 solve::ResolvedDeclKind::Constant(lit) => Self::needs_alloc(ir, lit),
                 _ => false,
             },
+            // a unit variant (`Team::Blue`) is an instance, built at each use
+            ExprKind::Access(parse::Access::DoubleColon { .. }) => matches!(
+                ir.resolutions.node_decs.get(&expr.id()).map(|&d| &ir.resolutions.decs[d].kind),
+                Some(solve::ResolvedDeclKind::Variant { .. })
+            ),
             _ => false,
         }
     }

@@ -70,15 +70,15 @@ test_run!(
 test_run!(
     opp_declares_a_dichotomy,
     "opp Sky { Sun, Moon }
-     opp Side { Left, Right }
+     opp Hand { Left, Right }
      fn involutive(x: Opp) -> bool { !(!x) == x }
      fn other(x: Opp) -> Opp { !x }
      let opp = 3;",
     "!Sky::Sun == Sky::Moon" => "true",
-    "not Side::Right == Side::Left" => "true",
+    "not Hand::Right == Hand::Left" => "true",
     "Sky::Moon.inv() == Sky::Sun" => "true",
-    "involutive(Sky::Sun) && involutive(Side::Right)" => "true",
-    "other(Side::Left) == Side::Right" => "true",
+    "involutive(Sky::Sun) && involutive(Hand::Right)" => "true",
+    "other(Hand::Left) == Hand::Right" => "true",
     "match !Sky::Moon { Sky::Sun => 1, Sky::Moon => 2 }" => "1",
     "f\"{!Sky::Sun}\"" => "\"Sky::Moon\"",
     "opp + 1" => "4",
@@ -87,4 +87,44 @@ test_run!(
     "!Fill::Full == Fill::Empty" => "true",
     "!Order::Asc == Order::Desc" => "true",
     "involutive(Daytime::Night) && involutive(Flow::Push) && involutive(Shade::Dark)" => "true",
+);
+
+// Std's operations on the built-in opps, and the mirror law each obeys:
+// flipping the opp is reversing the result. `Increasing`/`Decreasing` and
+// `Smaller`/`Bigger` are alternative spellings of the same ends.
+test_run!(
+    builtin_opp_operations_mirror,
+    "fn rev<T>(xs: [T]) -> [T] {
+         let out: [T] = [];
+         for k in xs.len() { out.push(xs[xs.len() - 1 - k]) }
+         out
+     }
+     let ks = [3.0, 9.0, 1.0, 9.0, 4.0];
+     let xs = [1, 2];",
+    "Order::Asc.rank(ks) == [2, 0, 4, 1, 3]" => "true",
+    "(!Order::Asc).rank(ks) == rev(Order::Asc.rank(ks))" => "true",
+    "{ let names = [\"c\", \"i\", \"a\", \"j\", \"d\"]; names.reorder(Order::Desc.rank(ks)); names }" => "[\"j\", \"i\", \"d\", \"c\", \"a\"]",
+    "Side::End.pad(xs, 4, 0) == [1, 2, 0, 0] && Side::Start.pad(xs, 4, 0) == [0, 0, 1, 2]" => "true",
+    "(!Side::End).pad(xs, 4, 0) == rev(Side::End.pad(rev(xs), 4, 0))" => "true",
+    "Side::End.pad(xs, 1, 0) == xs" => "true",
+    "Side::Start.justify(\"7\", 3) + \"|\" + Side::End.justify(\"7\", 3, \"0\")" => "\"  7|700\"",
+    "Order::Increasing == Order::Asc && Order::Decreasing == Order::Desc" => "true",
+    "!Order::Increasing == Order::Decreasing" => "true",
+    "Compare::Bigger == Compare::Greater && !Compare::Smaller == Compare::Bigger" => "true",
+);
+
+// A field-less variant is a constant: `const ME = Team::Blue` (built at
+// each use, like any struct const), and a const array may hold variants.
+// A tuple variant's constructor is a fn, not a value -- still rejected.
+test_run!(
+    unit_variant_consts,
+    "opp Team { Blue, Red }
+     enum Shape { Dot, Box(int) }
+     const ME = Team::Blue;
+     const BOTH = [Team::Blue, Team::Red];
+     const D = Shape::Dot;
+     fn mine(t: Team) -> bool { t == ME }",
+    "mine(Team::Blue) && !mine(!ME)" => "true",
+    "BOTH[1] == Team::Red && BOTH.len() == 2" => "true",
+    "D == Shape::Dot" => "true",
 );

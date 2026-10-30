@@ -524,3 +524,6 @@ test_success!(
     const_array_of_struct_consts,
     "struct P { x: int } const R = P { x = 1 }; const L = P { x = -1 }; const BOTH = [R L];"
 );
+
+// a tuple variant names its constructor (a fn), not a value
+test_fail!(const_tuple_variant_ctor, "enum Shape { Dot, Box(int) } const B = Shape::Box;");
