@@ -31,6 +31,19 @@ codegen-units = 1
 [profile.dev]
 debug = "line-tables-only"
 
+# Optimize the interpreter in dev builds too — the unoptimized VM makes
+# debug CLI/test runs ~7x slower; the driver crates stay cheap to compile.
+[profile.dev.package.mimas-vm]
+opt-level = 3
+[profile.dev.package.mimas-shared]
+opt-level = 3
+[profile.dev.package.mimas-library]
+opt-level = 2
+[profile.dev.package.mimas-parse]
+opt-level = 2
+[profile.dev.package.mimas-compile]
+opt-level = 2
+
 [workspace.dependencies]
 glam = { version = "0.32", default-features = false, features = ["std"] }
 static_assertions = "1.1"

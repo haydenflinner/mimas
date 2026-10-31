@@ -1943,6 +1943,7 @@ expr_test!(
 
 // `x ± d` desugars to `Interval::within(x * 1.0, d * 1.0)`; `x ± d%` to
 // `Interval::pm(x * 1.0, d * 0.01)`.
+// r[verify mimas.interval.literal]
 #[test]
 fn plus_minus_absolute() {
     assert_eq!(parse_expr("x ± 0.5"), "Interval::within(x * 1, 0.5 * 1)");

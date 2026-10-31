@@ -32,6 +32,7 @@ use macros::{MimasStruct, native};
 use vm::conversion::MimasType;
 use vm::{BinOp, Ctx, RtErr, RtResult, UnaryOp, Val, api::Api};
 
+/// r[impl mimas.interval.type] r[impl mimas.interval.ctors]
 #[derive(Debug, Clone, Copy, MimasStruct)]
 pub struct Interval {
     pub lo: f64,
@@ -258,6 +259,7 @@ mod iv {
 
     /// `x.sample(u)` — a draw from the triangular distribution (`u` in 0..1).
     #[native]
+    /// r[impl mimas.interval.sample]
     pub fn sample<'gc>(_ctx: Ctx<'gc>, x: Interval, u: f64) -> f64 {
         x.sample(u)
     }
@@ -330,6 +332,7 @@ mod iv {
 
     /// Infix `a <op> b` where either side is an interval and the other an
     /// interval or a plain number.
+    /// r[impl mimas.interval.arith] r[impl mimas.interval.order]
     pub fn bin<'gc>(ctx: Ctx<'gc>, a: Val<'gc>, b: Val<'gc>, op: BinOp) -> RtResult<Val<'gc>> {
         let (Some(x), Some(y)) = (operand(ctx, a), operand(ctx, b)) else {
             return Err(RtErr::invalid_bin(a, op, b));
