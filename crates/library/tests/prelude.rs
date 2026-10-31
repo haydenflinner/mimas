@@ -53,6 +53,7 @@ test_fail!(
 // the shipped prelude — solve's builtin.mim plus library's <std::opp> and
 // every std_lib .mim — lints warning-free (unused bindings, dead stores,
 // must_use discards): the grades pass is part of the contract pages rely on
+// r[verify mimas.std.lint-clean]
 #[test]
 fn builtins_compile_warning_free() {
     let vm = vm::Vm::execute("", library::std).expect("prelude compiles");
