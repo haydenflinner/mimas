@@ -89,7 +89,7 @@ test_run!(
     // the built-in pairs every program has
     "!Size::Big == Size::Small && !Sign::Neg == Sign::Pos" => "true",
     "!Fill::Full == Fill::Empty" => "true",
-    "!Order::Asc == Order::Desc" => "true",
+    "!SortOrder::Asc == SortOrder::Desc" => "true",
     "involutive(Daytime::Night) && involutive(Flow::Push) && involutive(Shade::Dark)" => "true",
 );
 
@@ -107,15 +107,15 @@ test_run!(
      }
      let ks = [3.0, 9.0, 1.0, 9.0, 4.0];
      let xs = [1, 2];",
-    "Order::Asc.rank(ks) == [2, 0, 4, 1, 3]" => "true",
-    "(!Order::Asc).rank(ks) == rev(Order::Asc.rank(ks))" => "true",
-    "{ let names = [\"c\", \"i\", \"a\", \"j\", \"d\"]; names.reorder(Order::Desc.rank(ks)); names }" => "[\"j\", \"i\", \"d\", \"c\", \"a\"]",
-    "Side::End.pad(xs, 4, 0) == [1, 2, 0, 0] && Side::Start.pad(xs, 4, 0) == [0, 0, 1, 2]" => "true",
-    "(!Side::End).pad(xs, 4, 0) == rev(Side::End.pad(rev(xs), 4, 0))" => "true",
-    "Side::End.pad(xs, 1, 0) == xs" => "true",
-    "Side::Start.justify(\"7\", 3) + \"|\" + Side::End.justify(\"7\", 3, \"0\")" => "\"  7|700\"",
-    "Order::Increasing == Order::Asc && Order::Decreasing == Order::Desc" => "true",
-    "!Order::Increasing == Order::Decreasing" => "true",
+    "SortOrder::Asc.rank(ks) == [2, 0, 4, 1, 3]" => "true",
+    "(!SortOrder::Asc).rank(ks) == rev(SortOrder::Asc.rank(ks))" => "true",
+    "{ let names = [\"c\", \"i\", \"a\", \"j\", \"d\"]; names.reorder(SortOrder::Desc.rank(ks)); names }" => "[\"j\", \"i\", \"d\", \"c\", \"a\"]",
+    "SeqSide::End.pad(xs, 4, 0) == [1, 2, 0, 0] && SeqSide::Start.pad(xs, 4, 0) == [0, 0, 1, 2]" => "true",
+    "(!SeqSide::End).pad(xs, 4, 0) == rev(SeqSide::End.pad(rev(xs), 4, 0))" => "true",
+    "SeqSide::End.pad(xs, 1, 0) == xs" => "true",
+    "SeqSide::Start.justify(\"7\", 3) + \"|\" + SeqSide::End.justify(\"7\", 3, \"0\")" => "\"  7|700\"",
+    "SortOrder::Increasing == SortOrder::Asc && SortOrder::Decreasing == SortOrder::Desc" => "true",
+    "!SortOrder::Increasing == SortOrder::Decreasing" => "true",
     "Compare::Bigger == Compare::Greater && !Compare::Smaller == Compare::Bigger" => "true",
 );
 

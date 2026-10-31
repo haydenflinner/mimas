@@ -2,6 +2,31 @@
 
 Memorable additions to mimas beyond what the changelog tracks — newest first.
 
+## Tagged literals, spanned literal faults, prelude-first solving, `SeqSide`/`SortOrder`
+
+- **Tagged literals.** A name glued to a string — `pat"bd sd"`,
+  `keys"right@5"` — lexes as `TokKind::Tagged` and lowers to a call of
+  the prelude native `__lit_<tag>("…")`, so a host registers one native
+  per tag and the literal is typed by that native's return and checked
+  by its validator at compile time. A tag no native backs errors by the
+  literal's own spelling (`mimas.str.tagged`).
+- **`api::LitFault`.** A literal validator reports which argument and
+  which char span inside it the fault is about; the solver places the
+  error there (`frames::fault_span`). Module-qualified calls
+  (`music::pat("…")`) now run validators — only plain and method callees
+  did (`mimas.lit.validate`).
+- **Prelude first.** `load_files` solves the built-in source and the
+  library's own sources to completion before any user file, so a user
+  type that takes a prelude name shadows it for user code (with a
+  `shadowed_builtin` warning, `ShadowedBuiltinType`) instead of breaking
+  the prelude's own impls mid-hoist (`mimas.prelude.shadow`).
+- **Descriptive built-in opps.** `Side { Start, End }` is `SeqSide` and
+  `Order { Asc, Desc }` is `SortOrder` (`SortOrder::Increasing`/
+  `Decreasing` stay as consts), so the everyday `Side` and `Order` are
+  free for user types — and `LrSide`/`TbSide` have room beside `SeqSide`.
+  `SortOrder::Desc.rank`, `.sort`, `.argsort`, `.arrange`;
+  `SeqSide::End.pad`, `SeqSide::Start.justify`.
+
 ## `raise` carries any value
 
 `raise` used to take only `str` — `Val::Raised` stored the note directly,

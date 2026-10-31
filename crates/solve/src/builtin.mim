@@ -30,13 +30,13 @@ opp Shade { Light, Dark }
 opp Daytime { Day, Night }
 opp Flow { Push, Pull }
 opp Fill { Full, Empty }
-opp Order { Asc, Desc }
+opp SortOrder { Asc, Desc }
 opp Compare { Less, Greater }
-opp Side { Start, End }
+opp SeqSide { Start, End }
 
-impl Order {
-    const Increasing = Order::Asc;
-    const Decreasing = Order::Desc;
+impl SortOrder {
+    const Increasing = SortOrder::Asc;
+    const Decreasing = SortOrder::Desc;
 }
 impl Compare {
     const Smaller = Compare::Less;

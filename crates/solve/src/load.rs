@@ -31,7 +31,7 @@ pub struct Loaded {
 /// rest are the pairs pages kept spelling as bools or ±1 — a shared
 /// vocabulary, so `Size::Big` on one page means what it means on the next.
 /// Declarations only — a program built without std has it too. Std's
-/// opp-taking operations (`Side::End.of(xs)`, `Order::Desc.sort(xs)`) ship
+/// opp-taking operations (`SeqSide::End.of(xs)`, `SortOrder::Desc.sort(xs)`) ship
 /// with std as library source (`Library::add_source`).
 pub const BUILTIN_SRC: &str = include_str!("builtin.mim");
 /// The built-in source's file name.
@@ -74,8 +74,8 @@ pub fn load_files<'a>(
     // r[impl mimas.prelude.shadow]
     // the built-in and library sources solve first, to completion: their
     // impls bind to their own types before a user file is even hoisted, so
-    // a user `enum Side` shadows the built-in `Side` for user code without
-    // catching the built-in `impl Opp for Side` mid-hoist (every file's
+    // a user `enum Size` shadows the built-in `Size` for user code without
+    // catching the built-in `impl Opp for Size` mid-hoist (every file's
     // types used to hoist before any file's impls). `asts` keeps file order.
     let (user, shipped) = asts.split_at(n_user);
     if errors.is_empty() {

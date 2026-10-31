@@ -258,7 +258,7 @@ test_run_display!(
 test_run_display!(
     order_arrange_broadcasts_one_direction,
     EMPLOYEES,
-    r#"Order::Desc.arrange(df, ["age"])"# => r#"shape: (4, 3)
+    r#"SortOrder::Desc.arrange(df, ["age"])"# => r#"shape: (4, 3)
 ┌───────┬─────┬───────┐
 │ name  ┆ age ┆ dept  │
 │ ---   ┆ --- ┆ ---   │

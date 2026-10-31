@@ -1540,7 +1540,7 @@ impl Emit for Match {
         //
         // a dynamic (`any`) scrutinee always bails: `Switch` indexes `Val::Int`
         // payloads and instance struct ids into the *same* table, so `match e
-        // { 5 => .., Order::Asc => .. }` could send a raised `5` to the variant
+        // { 5 => .., SortOrder::Asc => .. }` could send a raised `5` to the variant
         // arm. the linear chain's per-pattern `is_instance`/eq probes are
         // kind-correct on any payload.
         let switched: Option<(u32, Vec<BlockId>, BlockId)> = 'plan: {
