@@ -2,10 +2,73 @@ use shared::{AdtId, Fx, Literal, Ty, units::Dim};
 
 /// A per-native literal checker, submitted via `vm::api::NativeValidator` and joined by Rust
 /// path (same mechanism as `NativeDoc`). The solver calls it when *every* call argument is a
-/// literal: `Ok(())` proves the call can't raise, so a `T!` return narrows to `T`; `Err(msg)`
-/// becomes a compile error at the call site. Non-literal calls are never validated and keep
-/// the honest `T!`.
-pub type LitValidator = fn(&[Literal]) -> Result<(), String>;
+/// literal: `Ok(())` proves the call can't raise, so a `T!` return narrows to `T`; an `Err`
+/// becomes a compile error at the call site -- or inside the offending string argument when
+/// the [`LitFault`] says where. Non-literal calls are never validated and keep the honest
+/// `T!`.
+pub type LitValidator = fn(&[Literal]) -> Result<(), LitFault>;
+
+// r[impl mimas.lit.validate]
+/// What a literal validator reports: the message, which argument it is about (an index into
+/// the literal list the validator saw) and, for a string argument, the char span inside that
+/// string the message points at. A bare `String`/`&str` converts (`.into()`, `?`) and points
+/// at the call as a whole.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LitFault {
+    pub msg: String,
+    pub arg: Option<usize>,
+    pub span: Option<(usize, usize)>,
+}
+
+impl LitFault {
+    /// A fault at char span `span` of string argument `arg`.
+    pub fn span(msg: impl Into<String>, arg: usize, span: (usize, usize)) -> Self {
+        LitFault {
+            msg: msg.into(),
+            arg: Some(arg),
+            span: Some(span),
+        }
+    }
+
+    /// A fault at char `at` of the string argument `arg` whose text is `s` -- one char wide,
+    /// clamped into the string so a fault at its end (`missing ]`) lands on the last char.
+    pub fn in_str(msg: impl Into<String>, arg: usize, s: &str, at: usize) -> Self {
+        let n = s.chars().count();
+        let a = at.min(n.saturating_sub(1));
+        Self::span(msg, arg, (a, (a + 1).min(n.max(1))))
+    }
+
+    /// The same fault, attributed to argument `arg` (no span: the whole argument).
+    pub fn arg(mut self, arg: usize) -> Self {
+        self.arg = Some(arg);
+        self
+    }
+
+    /// The same fault with its span moved `by` chars to the right -- for a validator that
+    /// checks the pieces of a joined spec one at a time.
+    pub fn shifted(mut self, by: usize) -> Self {
+        if let Some((a, b)) = self.span {
+            self.span = Some((a + by, b + by));
+        }
+        self
+    }
+}
+
+impl From<String> for LitFault {
+    fn from(msg: String) -> Self {
+        LitFault {
+            msg,
+            arg: None,
+            span: None,
+        }
+    }
+}
+
+impl From<&str> for LitFault {
+    fn from(msg: &str) -> Self {
+        msg.to_string().into()
+    }
+}
 
 /// `(file!(), CARGO_MANIFEST_DIR, line!())` captured at a native's definition site, joined by
 /// Rust path the same way `NativeDoc` is (see `vm::api::NativeSrc`). `file` is relative to the

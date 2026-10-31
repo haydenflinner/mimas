@@ -242,10 +242,10 @@ fn to(n: f64, unit: &str) -> Raisable<f64> {
 /// A literal unit string is checked at solve time: a known unit proves `to` can't raise
 /// (`float!` narrows to `float`), an unknown one is a compile error. `int::to` has its own
 /// copy -- the validators are joined by Rust path, so each `to` needs its own submission.
-fn valid_unit(args: &[shared::Literal]) -> Result<(), String> {
+fn valid_unit(args: &[shared::Literal]) -> Result<(), vm::api::LitFault> {
     match args.first() {
         Some(shared::Literal::Str(u)) if shared::units::parse(u).is_none() => {
-            Err(format!("`{u}` isn't a unit"))
+            Err(vm::api::LitFault::from(format!("`{u}` isn't a unit")).arg(0))
         }
         _ => Ok(()),
     }

@@ -913,6 +913,46 @@ expr_test!(
     ])
 );
 
+// r[verify mimas.str.tagged]
+// `tag"…"` is sugar for `__lit_tag("…")` -- the host registers one prelude
+// native per tag, and the literal is checked and typed through it.
+expr_test!(
+    tagged_literal_lowers_to_call,
+    "pat\"bd*2 <cp hh>\"",
+    Call::new(
+        ident_expr!("__lit_pat"),
+        vec![Argument::new(Literal::String("bd*2 <cp hh>".to_string()).into_expr())]
+    )
+);
+
+expr_test!(
+    tagged_literal_unescapes_like_a_string,
+    "keys\"a \\\"b\\\"\"",
+    Call::new(
+        ident_expr!("__lit_keys"),
+        vec![Argument::new(Literal::String("a \"b\"".to_string()).into_expr())]
+    )
+);
+
+// a method chain hangs off the literal like off any call
+expr_test!(
+    tagged_literal_chains,
+    "pat\"bd\".slow(2)",
+    Call::new(
+        Access::Dot {
+            left: Call::new(
+                ident_expr!("__lit_pat"),
+                vec![Argument::new(Literal::String("bd".to_string()).into_expr())]
+            )
+            .into_expr(),
+            right: ident_expr!("slow"),
+            kind: AccessKind::Direct,
+        }
+        .into_expr(),
+        vec![Argument::new(int!(2))]
+    )
+);
+
 // `{{` and `}}` are escape sequences for literal braces (python/rust convention).
 expr_test!(
     fstring_escaped_braces,

@@ -111,6 +111,8 @@ pub enum TokKind<'s> {
     Quantity(f64, &'s str),
     String(&'s str),
     FString(&'s str),
+    /// `tag"body"` -- an identifier glued to a string: a tagged literal (`pat"bd sd"`).
+    Tagged(&'s str, &'s str),
     Hex(&'s str),
     Invalid(&'s str),
     Comment(&'s str),
@@ -220,6 +222,7 @@ impl Display for TokKind<'_> {
             TokKind::Quantity(r, unit) => return f.pad(&format!("{r}{unit}")),
             TokKind::String(s) => return f.pad(&format!("\"{s}\"")),
             TokKind::FString(s) => return f.pad(&format!("f\"{s}\"")),
+            TokKind::Tagged(t, s) => return f.pad(&format!("{t}\"{s}\"")),
             TokKind::Hex(hex) => hex,
             TokKind::Invalid(_) => "INVALID_TOKEN",
             TokKind::Comment(s) => return f.pad(s.as_ref()),
@@ -286,6 +289,7 @@ impl TokKind<'_> {
                     | TokKind::SelfKeyword
                     | TokKind::TyKw(_)
                     | TokKind::FString(_)
+                    | TokKind::Tagged(..)
                     | TokKind::LeftParenthesis
                     | TokKind::LeftSquare
                     | TokKind::LeftBrace

@@ -835,6 +835,8 @@ impl Solver {
             // callee expr, so `x.find(..)` on a `str` gets the str::find validator, not a
             // same-named method's.
             ExprKind::Access(Access::Dot { .. }) => self.node_decs.get(&call.left.id()),
+            // `music::pat("…")`: a module item resolves on the access node too
+            ExprKind::Access(Access::DoubleColon { .. }) => self.node_decs.get(&call.left.id()),
             ExprKind::Ident(callee) => self.node_decs.get(&callee.id),
             _ => None,
         };
@@ -857,12 +859,37 @@ impl Solver {
                 Ty::Result(inner) => *inner,
                 ty => ty,
             }),
-            Err(msg) => Err(BadLiteralArg {
-                src: self.src(call.left.location()),
-                at: call.left.location().into(),
-                msg,
-            })?,
+            Err(fault) => {
+                let at = Self::fault_span(call, &fault)
+                    .unwrap_or_else(|| call.left.location().into());
+                Err(BadLiteralArg {
+                    src: self.src(call.left.location()),
+                    at,
+                    msg: fault.msg,
+                })?
+            }
         }
+    }
+
+    // r[impl mimas.lit.validate]
+    /// Where a validator's fault lands: the callee unless the fault names an argument, that
+    /// argument when it does, and the char span inside it when the fault gives one and the
+    /// argument is a string literal. The literal's token covers its quotes, so byte offsets
+    /// into the source start one past the opening quote; chars map to bytes over the
+    /// unescaped text (an escape before the span shifts it by the escape's width).
+    fn fault_span(call: &Call, f: &api::LitFault) -> Option<miette::SourceSpan> {
+        let arg = &call.arguments.get(f.arg?)?.value;
+        let loc = arg.location();
+        let Some((a, b)) = f.span else {
+            return Some(loc.into());
+        };
+        let ExprKind::Literal(Literal::String(s)) = arg.kind() else {
+            return Some(loc.into());
+        };
+        let byte = |ci: usize| s.char_indices().nth(ci).map_or(s.len(), |(bi, _)| bi);
+        let (ba, bb) = (byte(a), byte(b.max(a)));
+        let start = loc.span.start + 1 + ba;
+        Some(miette::SourceSpan::from((start, (bb - ba).max(1))))
     }
 
     /// A call argument as a `shared::Literal` for a validator -- scalar literals only. Any

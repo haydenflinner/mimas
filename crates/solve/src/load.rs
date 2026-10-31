@@ -71,14 +71,20 @@ pub fn load_files<'a>(
     let mut solver = Solver::new();
     solver.install_library(library);
     solver.set_sources(sources.clone());
-    // the built-in and library sources solve first (their impls' consts —
-    // `Order::Increasing` — are typed before user code reads them); `asts`
-    // keeps file order
+    // r[impl mimas.prelude.shadow]
+    // the built-in and library sources solve first, to completion: their
+    // impls bind to their own types before a user file is even hoisted, so
+    // a user `enum Side` shadows the built-in `Side` for user code without
+    // catching the built-in `impl Opp for Side` mid-hoist (every file's
+    // types used to hoist before any file's impls). `asts` keeps file order.
     let (user, shipped) = asts.split_at(n_user);
-    if errors.is_empty()
-        && let Err(error) = solver.solve_all(shipped.iter().chain(user))
-    {
-        errors.push(error);
+    if errors.is_empty() {
+        solver.in_prelude = true;
+        let prelude = solver.solve_all(shipped.iter());
+        solver.in_prelude = false;
+        if let Err(error) = prelude.and_then(|()| solver.solve_all(user.iter())) {
+            errors.push(error);
+        }
     }
     let warnings = std::mem::take(&mut solver.warnings);
 

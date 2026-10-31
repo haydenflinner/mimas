@@ -106,6 +106,29 @@ To write a literal brace, double it:
 let s = f"{{not interpolated}} but {1 + 1} is"; // -> "{not interpolated} but 2 is"
 ```
 
+### Tagged literals
+
+A name glued to a string — no blank between — is a *tagged literal*:
+
+```mimas
+let beat = pat"bd ~ [sd sd] <cp hh>";
+let walk = keys"right@5 up@2";
+```
+
+`tag"…"` is sugar for `__lit_tag("…")`: a call of a prelude native the
+host registers per tag, so the literal is typed by that native's return
+and — because its one argument is a literal — checked by the native's
+validator when the program compiles. A tag no native backs is a compile
+error that names the tag. Keywords never tag, and `f"…"` is the f-string.
+
+Validators (`api::LitValidator`) run whenever *every* argument of a call
+to a native is a literal; a fault may name the argument and a char span
+inside it, and the error lands there.
+
+```mimas
+let s = f"{{not interpolated}} but {1 + 1} is"; // -> "{not interpolated} but 2 is"
+```
+
 ````admonish tip title="String methods chain"
 `str` has a wide set of built-in methods, and they chain:
 

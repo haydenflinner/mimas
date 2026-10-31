@@ -7,6 +7,8 @@ use api::{
 use compile::{BinOp, UnaryOp};
 use shared::{Fx, Literal, Ty};
 
+pub use api::{LitFault, LitValidator};
+
 use crate::{
     RtErr, RtResult, Val,
     adt::{ApiAdtDescriptor, MimasAdt},

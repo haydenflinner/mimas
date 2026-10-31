@@ -1140,6 +1140,25 @@ pub struct ShadowedBuiltin {
 }
 
 #[derive(Error, Debug, Diagnostic)]
+#[error("`{name}` shadows the built-in type `{name}`")]
+#[diagnostic(
+    code(shadowed_builtin),
+    severity(Warning),
+    help(
+        "every program has `{name}` from the prelude (an opp like `Side`/`Order`, say); on this \
+         source `{name}` is now your type and the built-in one is out of reach. Rename yours, or \
+         allow it (Nina: page property `allow` = `shadowed_builtin`)"
+    )
+)]
+pub struct ShadowedBuiltinType {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("`{name}` names this type here, not the built-in")]
+    pub at: SourceSpan,
+    pub name: String,
+}
+
+#[derive(Error, Debug, Diagnostic)]
 #[error("`{field}: {ty}` isn't an axis, so it can't be part of `space {space}`")]
 #[diagnostic(help(
     "a space's fields are axes -- types with a flip (`impl Opp`): an `opp`, `bool`, a number \

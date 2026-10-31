@@ -197,11 +197,11 @@ fn find_all(s: &str, pattern: &str) -> Raisable<Option<Vec<Vec<String>>>> {
 /// Literal validator shared by the regex methods: a literal pattern is checked at solve
 /// time -- one that compiles proves the raise branch unreachable (`T?!` narrows to `T?`),
 /// and one that doesn't is a compile error instead of a raised value.
-fn valid_regex(args: &[shared::Literal]) -> Result<(), String> {
+fn valid_regex(args: &[shared::Literal]) -> Result<(), vm::api::LitFault> {
     match args.first() {
-        Some(shared::Literal::Str(p)) => {
-            regex::Regex::new(p).map(|_| ()).map_err(|e| e.to_string())
-        }
+        Some(shared::Literal::Str(p)) => regex::Regex::new(p)
+            .map(|_| ())
+            .map_err(|e| vm::api::LitFault::from(e.to_string()).arg(0)),
         _ => Ok(()),
     }
 }

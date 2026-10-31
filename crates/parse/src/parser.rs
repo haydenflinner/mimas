@@ -615,7 +615,7 @@ impl<'s> Parser<'s> {
         }
         match self.nth(1) {
             TokKind::Colon | TokKind::LeftBrace => true,
-            TokKind::Ident(_) | TokKind::FString(_) | TokKind::Bang | TokKind::NotWord => true,
+            TokKind::Ident(_) | TokKind::FString(_) | TokKind::Tagged(..) | TokKind::Bang | TokKind::NotWord => true,
             // `check (a * b).same(c)`, `check [1 2] == xs`, `check -x < 0`:
             // a gap after the word opens a check, as it does before a name;
             // `check(x)` and `check[i]` touching the word stay a call and
@@ -2049,6 +2049,28 @@ impl<'s> Parser<'s> {
         }
 
         let start = self.next_start();
+        if let TokKind::Tagged(tag, body) = self.peek() {
+            // r[impl mimas.str.tagged]
+            // `tag"…"` lowers to `__lit_tag("…")`: a prelude native the host
+            // registers per tag (`pat`, `keys`, …), so the literal is checked at
+            // compile time by that native's validator and typed by its return.
+            // The string argument keeps the quoted span, so a validator's fault
+            // lands inside the literal; the callee spans the whole literal.
+            let (tag, body) = (tag.to_string(), body.to_string());
+            self.advance();
+            let end = self.cursor();
+            let quote = start + tag.len();
+            let callee = self.new_expr(
+                Ident::new(format!("__lit_{tag}"), Location::new(self.file_id, Span::new(start, quote))),
+                start,
+            );
+            let value = Expr::new(
+                ExprKind::Literal(Literal::String(chompy::utils::unescape(&body, &['\\'], &['"']))),
+                Location::new(self.file_id, Span::new(quote, end)),
+            );
+            let expr = self.new_expr(Call::new(callee, vec![Argument { name: None, value }]), start);
+            return self.chain_accesses(expr);
+        }
         let TokKind::FString(content) = self.peek() else {
             return self.literal();
         };

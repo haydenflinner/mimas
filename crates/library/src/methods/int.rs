@@ -125,10 +125,10 @@ fn to(n: i64, unit: &str) -> Raisable<f64> {
 
 /// Same literal-unit proof as `float::to`'s -- the join keys on Rust path, so each `to`
 /// registers its own validator (see `float.rs` for the contract).
-fn valid_unit(args: &[shared::Literal]) -> Result<(), String> {
+fn valid_unit(args: &[shared::Literal]) -> Result<(), vm::api::LitFault> {
     match args.first() {
         Some(shared::Literal::Str(u)) if shared::units::parse(u).is_none() => {
-            Err(format!("`{u}` isn't a unit"))
+            Err(vm::api::LitFault::from(format!("`{u}` isn't a unit")).arg(0))
         }
         _ => Ok(()),
     }

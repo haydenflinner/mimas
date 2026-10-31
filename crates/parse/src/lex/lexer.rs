@@ -544,7 +544,7 @@ impl<'s> Lex<'s, Tok<TokKind<'s>>, TokKind<'s>> for Lexer<'s> {
         } else if let Some(body) = rest.strip_prefix('"') {
             TokKind::String(self.construct_quoted(start, body, string_end(body)))
         } else if let Some(ident) = self.construct_ident() {
-            match ident {
+            let kind = match ident {
                 "self" => TokKind::SelfKeyword,
                 "let" => TokKind::Let,
                 "return" => TokKind::Return,
@@ -588,6 +588,18 @@ impl<'s> Lex<'s, Tok<TokKind<'s>>, TokKind<'s>> for Lexer<'s> {
                 "" => TokKind::TyKw(TyKw::Bool),
 
                 lexeme => TokKind::Ident(lexeme),
+            };
+            // r[impl mimas.str.tagged]
+            // `tag"…"` -- a name glued to a string (no blank between) is a
+            // tagged literal: `pat"bd sd"`, `keys"right@5 up@2"`. Keywords
+            // never tag (`f"…"` was taken above as the f-string).
+            match kind {
+                TokKind::Ident(tag) if self.source[self.char_stream.position()..].starts_with('"') => {
+                    self.match_chomp('"');
+                    let body = &self.source[self.char_stream.position()..];
+                    TokKind::Tagged(tag, self.construct_quoted(start, body, string_end(body)))
+                }
+                kind => kind,
             }
         } else {
             let Some(chr) = self.chomp() else {

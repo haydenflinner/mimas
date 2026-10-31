@@ -51,6 +51,19 @@ impl<'a> HoistCtx<'a> {
             "adt decls only hoist at scope level"
         );
         let ty = Ty::adt(adt_id);
+        // r[impl mimas.prelude.shadow]
+        if self.solver.in_prelude {
+            self.solver.prelude_types.insert(ident.lexeme.clone());
+        } else if self.solver.prelude_types.contains(&ident.lexeme) {
+            self.solver.warnings.push(
+                crate::errors::ShadowedBuiltinType {
+                    src: self.solver.src(ident.location),
+                    at: ident.location.into(),
+                    name: ident.lexeme.clone(),
+                }
+                .into(),
+            );
+        }
         let dec_id = self
             .solver
             .dec_id(ident, ty.clone(), DecKind::Adt(adt_id), self.vis);

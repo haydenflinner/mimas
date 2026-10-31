@@ -60,3 +60,16 @@ fn builtins_compile_warning_free() {
     let warnings: Vec<String> = vm.warnings().iter().map(|w| format!("{w:?}")).collect();
     assert!(warnings.is_empty(), "warnings:\n{}", warnings.join("\n"));
 }
+
+// r[verify mimas.prelude.shadow]
+// A user type may take a built-in opp's name: the built-in's own impls
+// bound before the user file hoisted, and user code sees the user's type.
+test_run!(
+    user_types_shadow_builtin_opps,
+    "enum Side { Left, Right }
+     struct Order { n: int }
+     fn pick(s: Side) -> int { match s { Side::Left => 1, Side::Right => 2 } }",
+    "pick(Side::Right)" => "2",
+    "Order { n = 3 }.n" => "3",
+    "!Size::Big == Size::Small" => "true",
+);

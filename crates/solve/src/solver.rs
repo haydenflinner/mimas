@@ -107,6 +107,14 @@ pub struct Solver {
     /// Non-fatal diagnostics (the lint suite). Solve succeeds; hosts decide how to show them.
     /// Surfaces on `Loaded::warnings` and `Resolutions::warnings`.
     pub(crate) warnings: Vec<miette::Report>,
+    /// Set while the prelude group (the built-in source and the library's
+    /// own sources) is being solved -- `load_files` solves that group to
+    /// completion before any user file, so a user `enum Side` can't catch
+    /// the built-in `impl Opp for Side` mid-hoist. Types hoisted under it
+    /// land in `prelude_types`; a user type of the same name shadows it
+    /// for user code, with a `shadowed_builtin` warning.
+    pub(crate) in_prelude: bool,
+    pub(crate) prelude_types: HashSet<String>,
 
     pub(crate) control_flow: ControlFlow,
     pub(crate) ribs: Ribs,
@@ -168,6 +176,8 @@ impl Solver {
             script_effects: IndexMap::new(),
             script_segments: Vec::new(),
             warnings: Vec::new(),
+            in_prelude: false,
+            prelude_types: HashSet::new(),
             non_value: None,
             iter_guards: vec![],
             type_params: vec![],
@@ -2467,10 +2477,16 @@ impl Solver {
                 None => {
                     let pact = self.pacts.iter().find(|(_, p)| p.name == ident.lexeme);
                     let Some((pid, _)) = pact else {
+                        // a tagged literal whose tag no native backs: say so in the
+                        // literal's own spelling, not the lowered `__lit_` name
+                        let name = match ident.lexeme.strip_prefix("__lit_") {
+                            Some(tag) => format!("{tag}\"…\" (no `{tag}` literal tag is registered)"),
+                            None => ident.lexeme.clone(),
+                        };
                         Err(NotFound {
                             src: self.src(read_location),
                             at: read_location.into(),
-                            name: ident.lexeme.clone(),
+                            name,
                         })?
                     };
                     (Ty::pacts(vec![pid]), None)
