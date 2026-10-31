@@ -93,6 +93,27 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add_method(round);
     api.add_method(sign);
     api.add_method(erf);
+    // The order-sensitive ops ride `Order`, not a bare bool — shipped as
+    // library source so `Tensor` (registered above) resolves.
+    // r[impl mimas.std.order-tensor]
+    api.library.add_source(
+        "<std::tensor::opp>",
+        r#"// `Order::Desc.sort(t, 0)` is `t.sort(0, true)` with its direction
+// named by the opp — the same convention `Order::Asc.rank` sets for arrays.
+use std::tensor::Tensor;
+
+impl Order {
+    /// `t` sorted along `dim` in this order.
+    fn sort(self, t: Tensor, dim: int) -> Tensor {
+        t.sort(dim, self == Order::Desc)!
+    }
+    /// The flat per-slice sort indices along `dim` in this order.
+    fn argsort(self, t: Tensor, dim: int) -> [int] {
+        t.argsort(dim, self == Order::Desc)!
+    }
+}
+"#,
+    );
 }
 
 /// Walk a nested mimas list into `(flat, dims)` for `from_flat`. Every row must

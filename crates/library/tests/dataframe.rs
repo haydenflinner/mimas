@@ -254,6 +254,23 @@ test_run_display!(
 └───────┴─────┴───────┘"#,
 );
 
+// r[verify mimas.std.order-arrange]
+test_run_display!(
+    order_arrange_broadcasts_one_direction,
+    EMPLOYEES,
+    r#"Order::Desc.arrange(df, ["age"])"# => r#"shape: (4, 3)
+┌───────┬─────┬───────┐
+│ name  ┆ age ┆ dept  │
+│ ---   ┆ --- ┆ ---   │
+│ str   ┆ i64 ┆ str   │
+╞═══════╪═════╪═══════╡
+│ Carol ┆ 41  ┆ eng   │
+│ Alice ┆ 34  ┆ eng   │
+│ Bob   ┆ 29  ┆ sales │
+│ Dave  ┆ 25  ┆ sales │
+└───────┴─────┴───────┘"#,
+);
+
 test_run_display!(
     mutate_appends_a_computed_column,
     EMPLOYEES,

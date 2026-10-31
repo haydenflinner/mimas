@@ -228,6 +228,21 @@ test_run_display!(
     "tensor([3.0, 1.0, 2.0])!.sort(0, true)!" => "tensor[3]([3, 2, 1])",
 );
 
+// the `Order` spellings ride the opp: `Order::Desc.sort` is the `true` flag named
+// r[verify mimas.std.order-tensor]
+test_run_display!(
+    order_spells_the_sort_direction,
+    T,
+    "Order::Asc.sort(tensor([3.0, 1.0, 2.0])!, 0)" => "tensor[3]([1, 2, 3])",
+    "Order::Desc.sort(tensor([3.0, 1.0, 2.0])!, 0)" => "tensor[3]([3, 2, 1])",
+);
+
+test_run!(
+    order_argsort_matches_the_flag,
+    T,
+    "Order::Desc.argsort(tensor([3.0, 1.0, 2.0])!, 0)" => "[0, 2, 1]",
+);
+
 // -- masking -----------------------------------------------------------------------------------------
 
 test_run_display!(

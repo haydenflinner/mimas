@@ -20,6 +20,23 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add_adt::<DataFrameTy>();
     api.add_adt::<PlExprTy>();
     api.add_adt::<GroupByTy>();
+    // `arrange`'s `[bool]` direction flags get an `Order` spelling —
+    // shipped as library source so `DataFrame` (registered above) resolves.
+    // r[impl mimas.std.order-arrange]
+    api.library.add_source(
+        "<std::df::opp>",
+        r#"// `Order::Desc.arrange(df, ["elapsed", "name"])` sorts every key in
+// this order — the `[bool]` form stays for mixed directions.
+use std::polars::DataFrame;
+
+impl Order {
+    /// `df` sorted by `by`, every key in this order.
+    fn arrange(self, df: DataFrame, by: [str]) -> DataFrame {
+        df.arrange(by, [self == Order::Desc])!
+    }
+}
+"#,
+    );
     // the `table { … }` literal lowers to these (see `Parser::table_literal`); prelude-level so
     // the desugaring needs no `use`
     api.add(__table_new);
