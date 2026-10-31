@@ -95,4 +95,15 @@ test_run!(
     "DayNight::Day.glyph() + DayNight::Night.glyph()" => "\"🌞🌙\"",
     "(!AscDesc::Asc).glyph()" => "\"↘\"",
     "StartEnd::Start.glyph() + BigSmall::Small.glyph() + PosNeg::Pos.glyph() + LightDark::Dark.glyph()" => "\"⇤●➕☾\"",
+    "true.glyph() + false.glyph() + (!true).glyph()" => "\"✓✗✗\"",
+);
+
+// r[verify mimas.enum.glyph]
+// plain enum variants carry glyphs the same way; the synthesized method is inherent
+test_run!(
+    enum_glyphs,
+    "enum Suit { Spades \"♠\", Hearts \"♥\", Diamonds \"♦\", Clubs \"♣\" }
+     fn row(ss: [Suit]) -> str { let out = \"\"; for s in ss { out += s.glyph(); } out }",
+    "Suit::Hearts.glyph()" => "\"♥\"",
+    "row([Suit::Spades, Suit::Clubs])" => "\"♠♣\"",
 );

@@ -20,6 +20,9 @@ Memorable additions to mimas beyond what the changelog tracks — newest first.
   type that takes a prelude name shadows it for user code (with a
   `shadowed_builtin` warning, `ShadowedBuiltinType`) instead of breaking
   the prelude's own impls mid-hoist (`mimas.prelude.shadow`).
+- **Enum glyphs; bool glyphs.** `enum Suit { Spades "♠", … }` synthesizes
+  an inherent `fn glyph(self) -> str` (every plain variant or none);
+  `impl Opp for bool` reads ✗/✓.
 - **Glyphs and symbol names.** `opp Sky { Sun "☀", Moon "☾" }` gives
   each end a glyph (`pact Opp`'s `fn glyph(self) -> str` defaults to
   `""`); the prelude ships ➕➖ ☀☾ 🌞🌙 ↗↘ ⬤● ⇤⇥. Names may be symbols

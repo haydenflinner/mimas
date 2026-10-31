@@ -17,6 +17,7 @@ pact Opp {
 // go wherever an `Opp` is expected (`involutive(true)`).
 impl Opp for bool {
     fn inv(self) -> bool { !self }
+    fn glyph(self) -> str { if self { "✓" } else { "✗" } }
 }
 
 // An ordered quantity is an axis too: its flip is its negation (a `px`

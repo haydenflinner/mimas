@@ -3,7 +3,12 @@
 Names are letters, digits and `_` in any script — and the arrow, shape,
 miscellaneous-symbol, dingbat and emoji blocks too, so `let 🌙 = 1` and
 `opp Sky { ☀, ☾ }` are legal. The operator symbols (`±`, `⊕`, `⊻`) are
-not name characters. & Constants
+not name characters.
+
+Plain enum variants and an opp's ends may carry a one-character glyph —
+`enum Suit { Spades "♠", Hearts "♥" }`, `opp Sky { Sun "☀", Moon "☾" }` —
+read back by `x.glyph()`; the built-in opps ship with theirs, and `bool`
+reads ✗ and ✓. & Constants
 
 Local variables are introduced with `let`. A `let` binding can be reassigned.
 

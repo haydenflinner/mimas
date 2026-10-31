@@ -439,7 +439,10 @@ impl<'s> Parser<'s> {
                 TokKind::Fn => parser.function().into(),
                 TokKind::Struct => parser.struct_decl().into(),
                 TokKind::Pact => parser.pact_decl().into(),
-                TokKind::Enum => parser.enum_decl().into(),
+                TokKind::Enum => {
+                    let start = parser.next_start();
+                    parser.enum_decl(start).into()
+                }
                 TokKind::Impl => parser.impl_decl().into(),
                 TokKind::Const => parser.const_decl().into(),
                 TokKind::Use => parser.use_decl().map_or(Poison.into(), Into::into),
@@ -1117,15 +1120,44 @@ impl<'s> Parser<'s> {
         Pact::new(pact_name, items)
     }
 
-    fn enum_decl(&mut self) -> Enum {
+    fn enum_decl(&mut self, start: usize) -> Enum {
         self.bump(TokKind::Enum);
         let head = self.require_ident();
         let type_params = self.type_params();
-        let members = if self.expect(TokKind::LeftBrace) {
+        let (members, glyphs) = if self.expect(TokKind::LeftBrace) {
             self.enum_members()
         } else {
-            vec![]
+            (vec![], vec![])
         };
+        // r[impl mimas.enum.glyph]
+        // `enum Suit { Spades "♠", … }`: every plain variant carries a glyph,
+        // or none does -- an inherent `fn glyph(self) -> str` is synthesized
+        let given = glyphs.iter().filter(|g| g.is_some()).count();
+        if given > 0 {
+            let all_plain = members
+                .iter()
+                .all(|(_, m)| matches!(m, Member::Struct(f) if f.is_empty()));
+            if given != members.len() || !all_plain {
+                self.error(Misdirection {
+                    src: self.src(),
+                    at: self.location(start).into(),
+                    msg: "an enum's glyphs cover every plain variant or none".into(),
+                    label: "give each variant a glyph: `enum Suit { Spades \"♠\", Hearts \"♥\" }`".into(),
+                });
+            } else if self.depth == 1 {
+                // `item()` parses its body one level under `nested`, so a
+                // top-level enum sees depth 1; a nested one keeps no impl
+                let arms: Vec<(Ident, String)> = members
+                    .iter()
+                    .zip(&glyphs)
+                    .map(|((n, _), g)| (n.clone(), g.clone().unwrap()))
+                    .collect();
+                let at = self.location(start);
+                let item = self.glyph_fn(&head, &arms, start);
+                let imp = Impl::new(Ident::new(head.lexeme.clone(), at), None, vec![item]);
+                self.pending.push(self.new_stmt(Item::new(imp.into(), at, false), start));
+            }
+        }
         Enum {
             head,
             type_params,
@@ -1133,10 +1165,58 @@ impl<'s> Parser<'s> {
         }
     }
 
-    /// An enum's `{ … }` members, after the `{`.
-    fn enum_members(&mut self) -> Vec<(Ident, Member)> {
-            self.list(TokKind::RightBrace, TokKind::is_ident, |p| {
+    /// `fn glyph(self) -> str { match self { T::A => "…", … } }` for the
+    /// synthesized impl of an `opp` or `enum` whose variants carry glyphs.
+    fn glyph_fn(&self, head: &Ident, arms: &[(Ident, String)], start: usize) -> Item {
+        let at = self.location(start);
+        let id = |name: &str| Ident::new(name, at);
+        let cases = arms
+            .iter()
+            .map(|(from, text)| {
+                MatchCase::new(
+                    Pat::new(PatKind::Variant(Box::new(self.opp_path(head, from, start))), at),
+                    None,
+                    self.new_expr(Literal::String(text.clone()), start),
+                )
+            })
+            .collect();
+        let pick = Match::new(self.new_expr(id("self"), start), cases, false);
+        let body = self.new_expr(
+            Block {
+                body: vec![],
+                yielded_expr: Some(self.new_expr(pick, start)),
+            },
+            start,
+        );
+        Item::new(
+            Function {
+                name: id("glyph"),
+                type_params: vec![],
+                parameters: vec![Binding::new(id("self"))],
+                wheres: vec![],
+                return_type: Some(Annotation::Kw(lex::TyKw::Str)),
+                body,
+            }
+            .into(),
+            at,
+            false,
+        )
+    }
+
+    /// An enum's `{ … }` members, after the `{`, plus the glyph string a
+    /// plain variant may carry (`Spades "♠"`), parallel to the members.
+    fn enum_members(&mut self) -> (Vec<(Ident, Member)>, Vec<Option<String>>) {
+        let mut glyphs = Vec::new();
+        let members = self.list(TokKind::RightBrace, TokKind::is_ident, |p| {
                 let name = p.require_ident();
+                let glyph = match p.peek() {
+                    TokKind::String(s) => {
+                        p.advance();
+                        Some(chompy::utils::unescape(s, &['\\'], &['"']))
+                    }
+                    _ => None,
+                };
+                glyphs.push(glyph);
                 let member = if p.eat(TokKind::LeftParenthesis) {
                     Member::Tuple(p.list(
                         TokKind::RightParenthesis,
@@ -1154,7 +1234,8 @@ impl<'s> Parser<'s> {
                     Member::Struct(vec![])
                 };
                 (name, member)
-            })
+            });
+        (members, glyphs)
     }
 
     /// `opp Name {` — a type name and a brace after the word.
@@ -1283,34 +1364,7 @@ impl<'s> Parser<'s> {
         };
         let mut items = vec![Item::new(inv.into(), at, false)];
         if let Some((ga, gb)) = glyphs {
-            let case = |from: &Ident, text: String| {
-                MatchCase::new(
-                    Pat::new(PatKind::Variant(Box::new(self.opp_path(head, from, start))), at),
-                    None,
-                    self.new_expr(Literal::String(text), start),
-                )
-            };
-            let pick = Match::new(
-                self.new_expr(id("self"), start),
-                vec![case(a, ga), case(b, gb)],
-                false,
-            );
-            let body = self.new_expr(
-                Block {
-                    body: vec![],
-                    yielded_expr: Some(self.new_expr(pick, start)),
-                },
-                start,
-            );
-            let glyph = Function {
-                name: id("glyph"),
-                type_params: vec![],
-                parameters: vec![Binding::new(id("self"))],
-                wheres: vec![],
-                return_type: Some(Annotation::Kw(lex::TyKw::Str)),
-                body,
-            };
-            items.push(Item::new(glyph.into(), at, false));
+            items.push(self.glyph_fn(head, &[(a.clone(), ga), (b.clone(), gb)], start));
         }
         let imp = Impl::new(id(&head.lexeme), Some(id("Opp")), items);
         self.new_stmt(Item::new(imp.into(), at, false), start)
