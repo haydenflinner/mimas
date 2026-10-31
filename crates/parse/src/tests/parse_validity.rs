@@ -278,6 +278,7 @@ fn check_line_is_ordinary_equality() {
     assert_eq!(tests.cases.len(), 2);
 }
 
+// r[verify check.spaced]
 #[test]
 fn check_opens_before_a_spaced_paren_bracket_or_minus() {
     // juxtaposition would read `check (x)` as the call `check(x)`; a gap

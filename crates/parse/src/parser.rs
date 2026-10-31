@@ -1164,6 +1164,7 @@ impl<'s> Parser<'s> {
     /// Opp for Sky` (the pact every program has) whose `inv` swaps
     /// them, so `!Sky::Sun == Sky::Moon` and `involutive`-style code over
     /// `Opp` takes it. `bool` is the first opp. Top-level only.
+    // r[impl mimas.opp.decl]
     fn opp_stmt(&mut self, start: usize) -> Stmt {
         let kw = self.advance(); // `opp`
         if self.depth > 0 {
@@ -1255,6 +1256,7 @@ impl<'s> Parser<'s> {
     /// itself and spaces nest. The struct carries `#[space]`: the solver checks
     /// every field is an axis -- a type implementing `Opp`: an opp, `bool`, a
     /// number (flip is negation), a `Dial`, another space. Top-level only.
+    // r[impl mimas.space.decl]
     fn space_stmt(&mut self, start: usize) -> Stmt {
         let kw = self.advance(); // `space`
         if self.depth > 0 {

@@ -27,6 +27,7 @@ fn chain(n: int) -> [(int, int)] { for i in 0 .. n - 1 collect (i, i + 1) }
 "#;
 
 test_run!(
+    // r[verify mimas.datalog.block]
     datalog_transitive_closure,
     CLOSURE,
     "closure(chain(4)).len()" => "6",
@@ -42,6 +43,7 @@ test_run!(
 );
 
 test_run!(
+    // r[verify mimas.datalog.block]
     datalog_seed_and_dedup,
     "let pairs = [(1, 2), (2, 3), (1, 2)];",
     // a single relation comes back as its array, not a tuple of one; the seed's duplicate
@@ -58,6 +60,7 @@ test_run!(
 );
 
 test_run!(
+    // r[verify mimas.datalog.block]
     datalog_single_field_relations,
     "let pairs = [(1, 2), (2, 3), (1, 5)];",
     // a one-field relation is an array of bare values
@@ -74,6 +77,7 @@ test_run!(
 );
 
 test_run!(
+    // r[verify mimas.datalog.body]
     datalog_filters,
     "let pairs = [(1, 2), (2, 2), (1, 3), (3, 1)]; let x = 3;",
     // a repeated variable filters by equality
@@ -99,6 +103,7 @@ test_run!(
 );
 
 test_run!(
+    // r[verify mimas.datalog.body]
     datalog_facts_see_outer_scope,
     "let bl = 7; let k = 2;",
     r#"datalog {
@@ -189,6 +194,7 @@ fn rejected(src: &str, needle: &str) {
     );
 }
 
+// r[verify mimas.datalog.strata]
 #[test]
 fn datalog_errors() {
     let block = |rules: &str| {
@@ -235,6 +241,8 @@ fn datalog_errors() {
 // in a body, stratified negation (`!rel(..)`), and aggregates (`agg x = f(e) in rel(..)`).
 
 test_run!(
+    // r[verify mimas.datalog.block]
+    // r[verify mimas.datalog.body]
     datalog_ascent_spelling,
     "let pairs = [(1, 2), (2, 3), (3, 4)];",
     // the same closure, spelled the way Ascent spells it
@@ -258,6 +266,8 @@ test_run!(
 );
 
 test_run!(
+    // r[verify mimas.datalog.body]
+    // r[verify mimas.datalog.strata]
     datalog_stratified_negation,
     "let pairs = [(1, 2), (2, 3), (5, 6)];
      let nodes = [1, 2, 3, 4, 5, 6];",
@@ -284,6 +294,8 @@ test_run!(
 );
 
 test_run!(
+    // r[verify mimas.datalog.body]
+    // r[verify mimas.datalog.strata]
     datalog_aggregates,
     "let w = [(1, 5), (1, 7), (2, 3)];
      let ids = [1, 2, 3];",

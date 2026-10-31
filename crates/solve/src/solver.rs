@@ -255,6 +255,7 @@ impl Solver {
     /// Every field of a `space` is an axis: its type implements `Opp` (an `opp`,
     /// `bool`, a number, a `Dial`, another space). A field that isn't gets the
     /// targeted error here, before the synthesized flip would trip over it.
+    // r[impl mimas.space.axes]
     fn check_space_axes(&mut self, st: &parse::Struct) -> Result<()> {
         let opp = self
             .resolve_name(&Ident::synthetic("Opp"), st.name.location)?

@@ -119,6 +119,7 @@ impl<'s> Parser<'s> {
         })
     }
 
+    // r[impl mimas.datalog.block]
     fn datalog_body(&mut self, start: usize) -> Expr {
         let mut rels: Vec<Rel> = vec![];
         let mut clauses: Vec<Clause> = vec![];
@@ -416,6 +417,7 @@ impl<'s> Parser<'s> {
             }
         }
 
+        // r[impl mimas.datalog.strata]
         // Stratify (as Ascent does): a rule's head sits at least as high as every relation
         // it reads, and strictly higher than one it negates or aggregates -- that one must
         // be complete before the rule asks. A relation that would have to sit above itself

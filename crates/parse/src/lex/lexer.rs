@@ -150,6 +150,7 @@ pub fn inherited_shadow(files: &[(&str, &str)]) -> Vec<[bool; 3]> {
 /// `source` split at its `PAGE_MARK` lines into pages, each with its
 /// shadow set (`shadow_sets`), as `(byte start, set)`. A source without
 /// marks is one page.
+// r[impl mimas.op.shadow]
 pub fn shadow_table(source: &str) -> Vec<(usize, [bool; 3])> {
     let mut starts: Vec<(usize, &str)> = vec![(0, "")];
     let mut at = 0;

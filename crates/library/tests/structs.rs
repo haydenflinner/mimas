@@ -27,6 +27,7 @@ test_fail!(
 // scalar constant form, so each use site allocates it fresh -- writing
 // into one use never reaches the next.
 test_run!(
+    // r[verify mimas.const.variant]
     const_array_of_struct_consts,
     "struct Dir { dx: float, dy: float }
      const RIGHT = Dir { dx = 1.0, dy = 0.0 };
@@ -47,6 +48,7 @@ test_run!(
 // calls whichever implementer's `inv` the value turns out to be, at
 // runtime -- the same dispatch `x.inv()` through the pact gets.
 test_run!(
+    // r[verify mimas.pact.operator]
     unary_operator_through_a_pact,
     "struct Dial { lo: float, hi: float }
      impl Opp for Dial { fn inv(self) -> Dial { Dial { lo = self.hi, hi = self.lo } } }
@@ -68,6 +70,8 @@ test_run!(
 // an ordinary name anywhere a type name and `{` don't follow it, and a
 // unit variant prints as its bare name.
 test_run!(
+    // r[verify mimas.opp.decl]
+    // r[verify mimas.opp.builtin]
     opp_declares_a_dichotomy,
     "opp Sky { Sun, Moon }
      opp Hand { Left, Right }
@@ -93,6 +97,8 @@ test_run!(
 // flipping the opp is reversing the result. `Increasing`/`Decreasing` and
 // `Smaller`/`Bigger` are alternative spellings of the same ends.
 test_run!(
+    // r[verify mimas.std.order-rank]
+    // r[verify mimas.std.side-pad]
     builtin_opp_operations_mirror,
     "fn rev<T>(xs: [T]) -> [T] {
          let out: [T] = [];
@@ -117,6 +123,7 @@ test_run!(
 // each use, like any struct const), and a const array may hold variants.
 // A tuple variant's constructor is a fn, not a value -- still rejected.
 test_run!(
+    // r[verify mimas.const.variant]
     unit_variant_consts,
     "opp Team { Blue, Red }
      enum Shape { Dot, Box(int) }
@@ -133,6 +140,7 @@ test_run!(
 // bool go wherever an `Opp` is expected -- through the same runtime dispatch
 // as an enum -- while `!b` stays the built-in op.
 test_run!(
+    // r[verify mimas.opp.builtin]
     bool_is_an_opp,
     "opp Sky { Sun, Moon }
      fn involutive(x: Opp) -> bool { !(!x) == x }
@@ -151,6 +159,8 @@ test_run!(
 // targeted error. A number serves static flips only: it doesn't travel as an
 // `Opp`-typed value (that dispatch tests the value's kind at runtime).
 test_run!(
+    // r[verify mimas.space.decl]
+    // r[verify mimas.opp.number]
     space_flips_every_axis,
     "opp Hand { Left, Right }
      opp Grip { Lib, Auth }
@@ -166,6 +176,8 @@ test_run!(
     "!(!f) == f" => "true",
 );
 
+// r[verify mimas.space.axes]
+// r[verify mimas.opp.number]
 #[test]
 fn space_fields_must_be_axes() {
     let reject = |src: &str, needle: &str| {

@@ -47,6 +47,7 @@ test_run!(
 // tokens as `&&`/`||`/`!` (C++'s alternative tokens), with the same
 // precedence: `not` binds as tightly as `!`. They are reserved words.
 test_run!(
+    // r[verify mimas.op.words]
     word_operators_are_the_operators,
     "let t = true
      let f = false",
@@ -70,6 +71,7 @@ test_run!(
 // warns (`shadowed_builtin`); a host can allow it per page.
 
 test_run!(
+    // r[verify mimas.op.shadow]
     a_declared_fn_shadows_its_operator_word,
     "fn nand(a: int, b: int) -> int { 1 - a * b }
      fn not(a: int) -> int { nand(a, a) }
@@ -84,6 +86,7 @@ test_run!(
     "!false && true" => "true",
 );
 
+// r[verify mimas.op.shadow]
 #[test]
 fn shadowing_an_operator_word_warns_with_a_code() {
     let files = [("main", "fn not(a: int) -> int { 1 - a }\nlet _x = not(1);")];
@@ -156,6 +159,7 @@ fn juxtaposition_errors_stay_errors() {
     );
 }
 
+// r[verify mimas.op.shadow]
 #[test]
 fn a_kits_shadowing_reaches_the_page_that_uses_it() {
     // one program, three files: the kit declares `fn and`; the page that
@@ -170,6 +174,7 @@ fn a_kits_shadowing_reaches_the_page_that_uses_it() {
     assert!(audit.is_ok(), "{:?}", audit.err());
 }
 
+// r[verify mimas.op.shadow]
 #[test]
 fn a_spliced_programs_page_marks_bound_shadowing() {
     // one `<compile>` file, as a host splices it: the page marks keep n2t's

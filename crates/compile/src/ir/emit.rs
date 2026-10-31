@@ -1908,6 +1908,7 @@ impl Emit for While {
 /// `IsInstance` chain, each arm `CallDirect`-ing that adt's body (one
 /// implementer skips the test). `args` already holds the receiver first.
 /// Shared by method calls through a pact and operators on pact-typed values.
+// r[impl mimas.pact.operator]
 fn dispatch_pact_method(
     ir: &mut Ir,
     recv: InstId,
