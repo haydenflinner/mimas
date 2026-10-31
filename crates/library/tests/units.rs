@@ -106,6 +106,7 @@ fn declared_dimensions_are_enforced() {
     rejected("let a = 5m.sqrt();", "square root");
 }
 
+// r[verify mimas.lit.validate]
 #[test]
 fn unknown_units_are_named() {
     // a lone unknown name is just an unknown type, as ever

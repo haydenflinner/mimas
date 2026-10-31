@@ -86,6 +86,7 @@ test_run!(
     "match !Sky::Moon { Sky::Sun => 1, Sky::Moon => 2 }" => "1",
     "f\"{!Sky::Sun}\"" => "\"Sky::Moon\"",
     "opp + 1" => "4",
+    // r[verify mimas.opp.builtin]
     // the built-in pairs every program has
     "!BigSmall::Big == BigSmall::Small && !PosNeg::Neg == PosNeg::Pos" => "true",
     "!DayNight::Day == DayNight::Night && !LightDark::Light == LightDark::Dark" => "true",

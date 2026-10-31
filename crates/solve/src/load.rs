@@ -33,6 +33,7 @@ pub struct Loaded {
 /// Declarations only — a program built without std has it too. Std's
 /// opp-taking operations (`StartEnd::End.of(xs)`, `AscDesc::Desc.sort(xs)`) ship
 /// with std as library source (`Library::add_source`).
+// r[impl mimas.opp.builtin]
 pub const BUILTIN_SRC: &str = include_str!("builtin.mim");
 /// The built-in source's file name.
 pub const BUILTIN_NAME: &str = "<builtin>";
