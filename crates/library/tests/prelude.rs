@@ -64,17 +64,17 @@ fn builtins_compile_warning_free() {
 // r[verify mimas.prelude.shadow]
 // A user type may take a built-in opp's name: the built-in's own impls
 // bound before the user file hoisted, and user code sees the user's type.
-// (The built-ins themselves keep descriptive names -- `SeqSide`,
-// `SortOrder` -- so the everyday `Side`/`Order` are free without shadowing.)
+// (The built-ins themselves keep descriptive names -- `StartEnd`,
+// `AscDesc` -- so the everyday `Side`/`Order` are free without shadowing.)
 test_run!(
     user_types_shadow_builtin_opps,
-    "enum Sign { Up, Down }
-     struct Shade { n: int }
+    "enum PosNeg { Up, Down }
+     struct LightDark { n: int }
      enum Side { Left, Right }
-     fn pick(s: Sign) -> int { match s { Sign::Up => 1, Sign::Down => 2 } }",
-    "pick(Sign::Down)" => "2",
-    "Shade { n = 3 }.n" => "3",
+     fn pick(s: PosNeg) -> int { match s { PosNeg::Up => 1, PosNeg::Down => 2 } }",
+    "pick(PosNeg::Down)" => "2",
+    "LightDark { n = 3 }.n" => "3",
     "Side::Left == Side::Left" => "true",
-    "!Daytime::Day == Daytime::Night" => "true",
-    "SeqSide::End.pad([1], 2, 0) == [1, 0]" => "true",
+    "!DayNight::Day == DayNight::Night" => "true",
+    "StartEnd::End.pad([1], 2, 0) == [1, 0]" => "true",
 );

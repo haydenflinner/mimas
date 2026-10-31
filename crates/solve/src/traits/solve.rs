@@ -1536,7 +1536,7 @@ impl Solve for Equality {
             }
         }
         // `==`/`!=` on `any` (a `raise` payload): structural eq is total at
-        // runtime, no static claim needed — `e == SortOrder::Desc` just asks.
+        // runtime, no static claim needed — `e == AscDesc::Desc` just asks.
         if matches!(self.op, EqualityOp::Equal | EqualityOp::NotEqual)
             && (lhs_n == Ty::Any || rhs_n == Ty::Any)
         {

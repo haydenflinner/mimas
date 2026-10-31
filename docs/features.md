@@ -20,6 +20,13 @@ Memorable additions to mimas beyond what the changelog tracks — newest first.
   type that takes a prelude name shadows it for user code (with a
   `shadowed_builtin` warning, `ShadowedBuiltinType`) instead of breaking
   the prelude's own impls mid-hoist (`mimas.prelude.shadow`).
+- **Opps named by their ends.** The prelude is `PosNeg`, `LightDark`,
+  `DayNight`, `AscDesc`, `BigSmall`, `StartEnd`: the two ends glued,
+  first end first, no alternative-spelling consts. The name says what
+  the ends are and never squats on a plain word (`Side`, `Size`,
+  `Order`); user opps can follow the rule mechanically (`LeftRight`,
+  `SunMoon`). `AscDesc::Desc.rank/sort/argsort/arrange`,
+  `StartEnd::End.pad`, `StartEnd::Start.justify`.
 - **`RelativeSize` replaces `Size` and `Compare`; `Fill` and `Flow` are
   gone.** `Size { Big, Small }` took the name a width-and-height type
   wants and `Compare { Less, Greater }` was a second spelling of it;

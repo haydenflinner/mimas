@@ -87,14 +87,14 @@ test_run!(
     "f\"{!Sky::Sun}\"" => "\"Sky::Moon\"",
     "opp + 1" => "4",
     // the built-in pairs every program has
-    "!RelativeSize::Bigger == RelativeSize::Smaller && !Sign::Neg == Sign::Pos" => "true",
-    "!SortOrder::Asc == SortOrder::Desc" => "true",
-    "involutive(Daytime::Night) && involutive(SeqSide::Start) && involutive(Shade::Dark)" => "true",
+    "!BigSmall::Big == BigSmall::Small && !PosNeg::Neg == PosNeg::Pos" => "true",
+    "!DayNight::Day == DayNight::Night && !LightDark::Light == LightDark::Dark" => "true",
+    "!AscDesc::Asc == AscDesc::Desc" => "true",
+    "involutive(DayNight::Night) && involutive(StartEnd::Start) && involutive(LightDark::Dark)" => "true",
 );
 
 // Std's operations on the built-in opps, and the mirror law each obeys:
-// flipping the opp is reversing the result. `Increasing`/`Decreasing` and
-// `Smaller`/`Bigger` are alternative spellings of the same ends.
+// flipping the opp is reversing the result.
 test_run!(
     // r[verify mimas.std.order-rank]
     // r[verify mimas.std.side-pad]
@@ -106,16 +106,13 @@ test_run!(
      }
      let ks = [3.0, 9.0, 1.0, 9.0, 4.0];
      let xs = [1, 2];",
-    "SortOrder::Asc.rank(ks) == [2, 0, 4, 1, 3]" => "true",
-    "(!SortOrder::Asc).rank(ks) == rev(SortOrder::Asc.rank(ks))" => "true",
-    "{ let names = [\"c\", \"i\", \"a\", \"j\", \"d\"]; names.reorder(SortOrder::Desc.rank(ks)); names }" => "[\"j\", \"i\", \"d\", \"c\", \"a\"]",
-    "SeqSide::End.pad(xs, 4, 0) == [1, 2, 0, 0] && SeqSide::Start.pad(xs, 4, 0) == [0, 0, 1, 2]" => "true",
-    "(!SeqSide::End).pad(xs, 4, 0) == rev(SeqSide::End.pad(rev(xs), 4, 0))" => "true",
-    "SeqSide::End.pad(xs, 1, 0) == xs" => "true",
-    "SeqSide::Start.justify(\"7\", 3) + \"|\" + SeqSide::End.justify(\"7\", 3, \"0\")" => "\"  7|700\"",
-    "SortOrder::Increasing == SortOrder::Asc && SortOrder::Decreasing == SortOrder::Desc" => "true",
-    "!SortOrder::Increasing == SortOrder::Decreasing" => "true",
-    "RelativeSize::Greater == RelativeSize::Bigger && !RelativeSize::Less == RelativeSize::Bigger" => "true",
+    "AscDesc::Asc.rank(ks) == [2, 0, 4, 1, 3]" => "true",
+    "(!AscDesc::Asc).rank(ks) == rev(AscDesc::Asc.rank(ks))" => "true",
+    "{ let names = [\"c\", \"i\", \"a\", \"j\", \"d\"]; names.reorder(AscDesc::Desc.rank(ks)); names }" => "[\"j\", \"i\", \"d\", \"c\", \"a\"]",
+    "StartEnd::End.pad(xs, 4, 0) == [1, 2, 0, 0] && StartEnd::Start.pad(xs, 4, 0) == [0, 0, 1, 2]" => "true",
+    "(!StartEnd::End).pad(xs, 4, 0) == rev(StartEnd::End.pad(rev(xs), 4, 0))" => "true",
+    "StartEnd::End.pad(xs, 1, 0) == xs" => "true",
+    "StartEnd::Start.justify(\"7\", 3) + \"|\" + StartEnd::End.justify(\"7\", 3, \"0\")" => "\"  7|700\"",
 );
 
 // A field-less variant is a constant: `const ME = Team::Blue` (built at

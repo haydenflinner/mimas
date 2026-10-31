@@ -3,7 +3,7 @@
 // `opp` declaration implements -- two ends and a flip: `!x` is `x.inv()`,
 // the other end, and `!(!x) == x`. `bool` is the first opp (its `!` stays
 // the built-in op); the rest are the pairs pages kept spelling as bools or ±1, so
-// `Shade::Dark` on one page means what it means on the next.
+// `LightDark::Dark` on one page means what it means on the next.
 
 pact Opp {
     fn inv(self) -> Self;
@@ -24,18 +24,10 @@ impl Opp for int {
 impl Opp for float {
     fn inv(self) -> float { -self }
 }
-opp Sign { Pos, Neg }
-opp Shade { Light, Dark }
-opp Daytime { Day, Night }
-opp SortOrder { Asc, Desc }
-opp RelativeSize { Bigger, Smaller }
-opp SeqSide { Start, End }
+opp PosNeg { Pos, Neg }
+opp LightDark { Light, Dark }
+opp DayNight { Day, Night }
+opp AscDesc { Asc, Desc }
+opp BigSmall { Big, Small }
+opp StartEnd { Start, End }
 
-impl SortOrder {
-    const Increasing = SortOrder::Asc;
-    const Decreasing = SortOrder::Desc;
-}
-impl RelativeSize {
-    const Greater = RelativeSize::Bigger;
-    const Less = RelativeSize::Smaller;
-}

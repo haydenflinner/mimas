@@ -93,23 +93,23 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add_method(round);
     api.add_method(sign);
     api.add_method(erf);
-    // The order-sensitive ops ride `SortOrder`, not a bare bool — shipped as
+    // The order-sensitive ops ride `AscDesc`, not a bare bool — shipped as
     // library source so `Tensor` (registered above) resolves.
     // r[impl mimas.std.order-tensor]
     api.library.add_source(
         "<std::tensor::opp>",
-        r#"// `SortOrder::Desc.sort(t, 0)` is `t.sort(0, true)` with its direction
-// named by the opp — the same convention `SortOrder::Asc.rank` sets for arrays.
+        r#"// `AscDesc::Desc.sort(t, 0)` is `t.sort(0, true)` with its direction
+// named by the opp — the same convention `AscDesc::Asc.rank` sets for arrays.
 use std::tensor::Tensor;
 
-impl SortOrder {
+impl AscDesc {
     /// `t` sorted along `dim` in this order.
     fn sort(self, t: Tensor, dim: int) -> Tensor {
-        t.sort(dim, self == SortOrder::Desc)!
+        t.sort(dim, self == AscDesc::Desc)!
     }
     /// The flat per-slice sort indices along `dim` in this order.
     fn argsort(self, t: Tensor, dim: int) -> [int] {
-        t.argsort(dim, self == SortOrder::Desc)!
+        t.argsort(dim, self == AscDesc::Desc)!
     }
 }
 "#,
