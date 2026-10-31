@@ -1882,6 +1882,7 @@ impl<'s> Parser<'s> {
 
     /// `x ± d` is `Interval::within(x * 1.0, d * 1.0)` — "give or take `d`" in `x`'s unit.
     /// `x ± d%` is relative: `Interval::pm(x * 1.0, d * 0.01)`, the `%` marking percent-of-x.
+    /// r[impl mimas.interval.literal]
     /// The `* 1.0` widens an int operand to the float `Interval` works in; floats and
     /// quantities pass through unchanged.
     fn plus_minus(&mut self, left: Expr, right: Expr, start: usize) -> Expr {
