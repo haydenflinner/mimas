@@ -87,10 +87,9 @@ test_run!(
     "f\"{!Sky::Sun}\"" => "\"Sky::Moon\"",
     "opp + 1" => "4",
     // the built-in pairs every program has
-    "!Size::Big == Size::Small && !Sign::Neg == Sign::Pos" => "true",
-    "!Fill::Full == Fill::Empty" => "true",
+    "!RelativeSize::Bigger == RelativeSize::Smaller && !Sign::Neg == Sign::Pos" => "true",
     "!SortOrder::Asc == SortOrder::Desc" => "true",
-    "involutive(Daytime::Night) && involutive(Flow::Push) && involutive(Shade::Dark)" => "true",
+    "involutive(Daytime::Night) && involutive(SeqSide::Start) && involutive(Shade::Dark)" => "true",
 );
 
 // Std's operations on the built-in opps, and the mirror law each obeys:
@@ -116,7 +115,7 @@ test_run!(
     "SeqSide::Start.justify(\"7\", 3) + \"|\" + SeqSide::End.justify(\"7\", 3, \"0\")" => "\"  7|700\"",
     "SortOrder::Increasing == SortOrder::Asc && SortOrder::Decreasing == SortOrder::Desc" => "true",
     "!SortOrder::Increasing == SortOrder::Decreasing" => "true",
-    "Compare::Bigger == Compare::Greater && !Compare::Smaller == Compare::Bigger" => "true",
+    "RelativeSize::Greater == RelativeSize::Bigger && !RelativeSize::Less == RelativeSize::Bigger" => "true",
 );
 
 // A field-less variant is a constant: `const ME = Team::Blue` (built at

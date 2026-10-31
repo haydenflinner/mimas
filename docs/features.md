@@ -20,6 +20,13 @@ Memorable additions to mimas beyond what the changelog tracks — newest first.
   type that takes a prelude name shadows it for user code (with a
   `shadowed_builtin` warning, `ShadowedBuiltinType`) instead of breaking
   the prelude's own impls mid-hoist (`mimas.prelude.shadow`).
+- **`RelativeSize` replaces `Size` and `Compare`; `Fill` and `Flow` are
+  gone.** `Size { Big, Small }` took the name a width-and-height type
+  wants and `Compare { Less, Greater }` was a second spelling of it;
+  the one opp is `RelativeSize { Bigger, Smaller }` with `Greater`/`Less`
+  consts. `Fill`/`Flow` had no users beyond their involution checks. The
+  prelude: `Sign`, `Shade`, `Daytime`, `SortOrder`, `RelativeSize`,
+  `SeqSide` — every name a qualifier and a noun.
 - **Descriptive built-in opps.** `Side { Start, End }` is `SeqSide` and
   `Order { Asc, Desc }` is `SortOrder` (`SortOrder::Increasing`/
   `Decreasing` stay as consts), so the everyday `Side` and `Order` are

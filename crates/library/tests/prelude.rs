@@ -68,13 +68,13 @@ fn builtins_compile_warning_free() {
 // `SortOrder` -- so the everyday `Side`/`Order` are free without shadowing.)
 test_run!(
     user_types_shadow_builtin_opps,
-    "enum Size { Tiny, Huge }
-     struct Fill { n: int }
+    "enum Sign { Up, Down }
+     struct Shade { n: int }
      enum Side { Left, Right }
-     fn pick(s: Size) -> int { match s { Size::Tiny => 1, Size::Huge => 2 } }",
-    "pick(Size::Huge)" => "2",
-    "Fill { n = 3 }.n" => "3",
+     fn pick(s: Sign) -> int { match s { Sign::Up => 1, Sign::Down => 2 } }",
+    "pick(Sign::Down)" => "2",
+    "Shade { n = 3 }.n" => "3",
     "Side::Left == Side::Left" => "true",
-    "!Shade::Light == Shade::Dark" => "true",
+    "!Daytime::Day == Daytime::Night" => "true",
     "SeqSide::End.pad([1], 2, 0) == [1, 0]" => "true",
 );

@@ -29,7 +29,7 @@ pub struct Loaded {
 /// other end, and `!(!x) == x`. `bool` is the first opp (its `!` is
 /// built in; `impl Opp for bool` waits on impls for primitive types); the
 /// rest are the pairs pages kept spelling as bools or ±1 — a shared
-/// vocabulary, so `Size::Big` on one page means what it means on the next.
+/// vocabulary, so `Shade::Dark` on one page means what it means on the next.
 /// Declarations only — a program built without std has it too. Std's
 /// opp-taking operations (`SeqSide::End.of(xs)`, `SortOrder::Desc.sort(xs)`) ship
 /// with std as library source (`Library::add_source`).
@@ -74,8 +74,8 @@ pub fn load_files<'a>(
     // r[impl mimas.prelude.shadow]
     // the built-in and library sources solve first, to completion: their
     // impls bind to their own types before a user file is even hoisted, so
-    // a user `enum Size` shadows the built-in `Size` for user code without
-    // catching the built-in `impl Opp for Size` mid-hoist (every file's
+    // a user `enum Sign` shadows the built-in `Sign` for user code without
+    // catching the built-in `impl Opp for Sign` mid-hoist (every file's
     // types used to hoist before any file's impls). `asts` keeps file order.
     let (user, shipped) = asts.split_at(n_user);
     if errors.is_empty() {

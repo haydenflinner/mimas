@@ -109,8 +109,8 @@ pub struct Solver {
     pub(crate) warnings: Vec<miette::Report>,
     /// Set while the prelude group (the built-in source and the library's
     /// own sources) is being solved -- `load_files` solves that group to
-    /// completion before any user file, so a user `enum Size` can't catch
-    /// the built-in `impl Opp for Size` mid-hoist. Types hoisted under it
+    /// completion before any user file, so a user `enum Sign` can't catch
+    /// the built-in `impl Opp for Sign` mid-hoist. Types hoisted under it
     /// land in `prelude_types`; a user type of the same name shadows it
     /// for user code, with a `shadowed_builtin` warning.
     pub(crate) in_prelude: bool,
