@@ -690,6 +690,17 @@ fn opp_is_an_enum_and_its_flip() {
     assert_eq!(kinds.len(), 3, "{kinds:?}");
     assert!(kinds[0].starts_with("enum Sky"), "{kinds:?}");
     assert!(kinds[1].starts_with("impl Opp for Sky"), "{kinds:?}");
+    // r[verify mimas.opp.glyph]
+    // glyphs on the ends add `fn glyph` to the impl; one glyph alone is an error
+    let lexer = crate::lex::Lexer::new("opp Sky { Sun \"☀\", Moon \"☾\" }", 0, "test".into());
+    let ast = crate::Parser::new(lexer).try_into_ast().unwrap();
+    let kinds: Vec<String> = ast.stmts().iter().map(|s| s.to_string()).collect();
+    assert!(kinds[1].contains("fn glyph(self) -> str"), "{kinds:?}");
+    let lexer = crate::lex::Lexer::new("opp Sky { Sun \"☀\", Moon }", 0, "test".into());
+    assert!(crate::Parser::new(lexer).try_into_ast().is_err());
+    // emoji are names: an opp's ends can be glyphs themselves
+    let lexer = crate::lex::Lexer::new("opp Sky { ☀, ☾ }\nlet x = !Sky::☀;", 0, "test".into());
+    assert!(crate::Parser::new(lexer).try_into_ast().is_ok());
     // the word stays a name elsewhere
     for src in ["let opp = 1;", "opp(2);", "opp.x;", "opp == 3;"] {
         let lexer = crate::lex::Lexer::new(src, 0, "test".into());

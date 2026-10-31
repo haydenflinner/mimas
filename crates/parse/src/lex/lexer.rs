@@ -485,7 +485,7 @@ impl<'s> Lex<'s, Tok<TokKind<'s>>, TokKind<'s>> for Lexer<'s> {
     /// editor typesets raised; `x ^ 2` spaced still lexes `Caret` (the parser's misdirection
     /// points at `⊕`/`xor`/`.pow`).
     fn construct_ident(&mut self) -> Option<&'s str> {
-        let is_continue = |c: char| c.is_alphanumeric() || c == '_';
+        let is_continue = |c: char| c.is_alphanumeric() || c == '_' || is_symbol_ident(c);
         let stream = self.char_stream();
         let start = stream.position();
         loop {
@@ -816,6 +816,29 @@ impl<'s> Lex<'s, Tok<TokKind<'s>>, TokKind<'s>> for Lexer<'s> {
         let location = self.location(start, self.char_stream.position());
         Ok(Some(Tok::new(kind, location)))
     }
+}
+
+// r[impl mimas.ident.symbols]
+/// Symbols a name may be made of besides letters, digits and `_`: the
+/// arrows, geometric shapes, miscellaneous symbols, dingbats and emoji
+/// blocks, plus the variation selector and joiner emoji sequences need --
+/// so `opp Sky { ☀, ☾ }` and `let 🌙 = 1` lex as names. The operator
+/// symbols stay operators: `±` (Latin-1), `⊕`/`⊻` (Mathematical
+/// Operators) and `⍲`/`⍱` (the APL slice of Miscellaneous Technical,
+/// cut out of that block below) are not in any of these ranges.
+pub fn is_symbol_ident(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x2190..=0x21FF        // arrows: ↑ ↗ ⇤ ⇥
+            | 0x2300..=0x236F  // misc technical: ⌂ ⏮ ⏭ (below the APL run)
+            | 0x2380..=0x23FF  // misc technical, above it
+            | 0x25A0..=0x25FF  // geometric shapes: ● ◆ ▲
+            | 0x2600..=0x27BF  // misc symbols + dingbats: ☀ ☾ ★ ➕ ➖
+            | 0x2B00..=0x2BFF  // misc symbols and arrows: ⬤ ⬆ ⬇
+            | 0x1F000..=0x1FAFF // emoji: 🌞 🌙 😀
+            | 0xFE0F           // variation selector-16
+            | 0x200D           // zero-width joiner
+    )
 }
 
 /// Where the string whose body is the start of `text` has its closing quote.

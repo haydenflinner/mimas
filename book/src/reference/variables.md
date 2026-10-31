@@ -1,4 +1,9 @@
-# Variables & Constants
+# Variables
+
+Names are letters, digits and `_` in any script — and the arrow, shape,
+miscellaneous-symbol, dingbat and emoji blocks too, so `let 🌙 = 1` and
+`opp Sky { ☀, ☾ }` are legal. The operator symbols (`±`, `⊕`, `⊻`) are
+not name characters. & Constants
 
 Local variables are introduced with `let`. A `let` binding can be reassigned.
 

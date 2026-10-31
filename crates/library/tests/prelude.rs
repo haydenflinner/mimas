@@ -78,3 +78,21 @@ test_run!(
     "!DayNight::Day == DayNight::Night" => "true",
     "StartEnd::End.pad([1], 2, 0) == [1, 0]" => "true",
 );
+
+// r[verify mimas.opp.glyph]
+// r[verify mimas.ident.symbols]
+// An opp's ends may carry glyphs (`glyph` on `Opp` defaults to `""`), the
+// prelude ships them, and an end may be a glyph itself.
+test_run!(
+    opp_glyphs_and_symbol_names,
+    "opp Sky { ☀, ☾ }
+     opp Mood { Up \"😀\", Down \"😞\" }
+     fn label(x: Opp) -> str { x.glyph() }",
+    "!Sky::☀ == Sky::☾" => "true",
+    "Sky::☀.glyph()" => "\"\"",
+    "label(Mood::Down)" => "\"😞\"",
+    "label(!Mood::Down)" => "\"😀\"",
+    "DayNight::Day.glyph() + DayNight::Night.glyph()" => "\"🌞🌙\"",
+    "(!AscDesc::Asc).glyph()" => "\"↘\"",
+    "StartEnd::Start.glyph() + BigSmall::Small.glyph() + PosNeg::Pos.glyph() + LightDark::Dark.glyph()" => "\"⇤●➕☾\"",
+);

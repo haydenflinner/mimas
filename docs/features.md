@@ -20,6 +20,12 @@ Memorable additions to mimas beyond what the changelog tracks — newest first.
   type that takes a prelude name shadows it for user code (with a
   `shadowed_builtin` warning, `ShadowedBuiltinType`) instead of breaking
   the prelude's own impls mid-hoist (`mimas.prelude.shadow`).
+- **Glyphs and symbol names.** `opp Sky { Sun "☀", Moon "☾" }` gives
+  each end a glyph (`pact Opp`'s `fn glyph(self) -> str` defaults to
+  `""`); the prelude ships ➕➖ ☀☾ 🌞🌙 ↗↘ ⬤● ⇤⇥. Names may be symbols
+  or emoji (`is_symbol_ident`: arrows, shapes, misc symbols, dingbats,
+  emoji), so `opp Sky { ☀, ☾ }` is legal; `Vm::resolve_chain` calls a
+  zero-arg method chain on a top-level local for hosts that draw ends.
 - **Opps named by their ends.** The prelude is `PosNeg`, `LightDark`,
   `DayNight`, `AscDesc`, `BigSmall`, `StartEnd`: the two ends glued,
   first end first, no alternative-spelling consts. The name says what

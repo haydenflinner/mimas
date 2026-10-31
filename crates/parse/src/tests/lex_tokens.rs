@@ -209,3 +209,8 @@ tok_test!(bang_before_in_ident: "!in_range" => Bang, Ident("in_range"));
 
 tok_test!(plus_minus: "x ± 0.5" => Ident("x"), PlusMinus, Float(0.5));
 tok_test!(plus_minus_percent: "30000 ± 10%" => Int(30000), PlusMinus, Int(10), Percent);
+
+// r[verify mimas.ident.symbols]
+// symbol and emoji blocks are name characters; the operator symbols stay operators
+tok_test!(symbol_names: "☀ 🌙 ↗ x⬤" => Ident("☀"), Ident("🌙"), Ident("↗"), Ident("x⬤"));
+tok_test!(symbol_operators_stay: "a ⊕ b" => Ident("a"), CircledPlus, Ident("b"));

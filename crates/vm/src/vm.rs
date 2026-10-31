@@ -3010,6 +3010,60 @@ impl Vm {
         })
     }
 
+    /// Resolves `name` as a top-level local and calls `methods` on it in turn -- each a
+    /// zero-arg method looked up on the value the previous call returned -- and inspects
+    /// the last result. `resolve_chain(x, ["inv", "glyph"])` is the other end's glyph. `None`
+    /// when `name` isn't a live local, a step's receiver isn't an instance, a method is
+    /// missing or takes arguments, or a call faults.
+    pub fn resolve_chain(&mut self, name: &str, methods: &[&str]) -> Option<Inspect> {
+        shared::units::install(&self.units);
+        let Vm {
+            code,
+            chunks,
+            c_strs: strs,
+            signatures,
+            arena,
+            sources,
+            methods: tables,
+            field_names,
+            bc,
+            ..
+        } = self;
+        arena.mutate(|mc, state| {
+            let ctx = state.ctx(mc);
+            let mut value = {
+                let thread = state.thread.borrow_mut(mc);
+                top_level_receiver(&thread, chunks, name)?
+            };
+            for method in methods {
+                let Val::Instance(inst) = value else {
+                    return None;
+                };
+                let sid = inst.0.borrow().struct_id as usize;
+                let body = *tables.get(sid)?.get(*method)?;
+                if chunks[body].args as usize != 1 {
+                    return None;
+                }
+                value = inject_call(
+                    ctx,
+                    code,
+                    chunks,
+                    signatures,
+                    strs,
+                    sources,
+                    bc.as_deref(),
+                    body,
+                    &[value],
+                    &[],
+                )
+                .ok()?;
+            }
+            let struct_names = state.struct_names.borrow();
+            let mut seen = std::collections::HashSet::new();
+            Some(value.inspect(&struct_names, field_names, &mut seen))
+        })
+    }
+
     /// [`Vm::resolve_for_scene`]'s sibling for methods that take one argument beyond `self`:
     /// resolves `name` as a top-level local, looks up `method` on the instance it holds, builds
     /// the argument host-side from `fields` (a named-field bag — see [`ArgVal`]), calls, and

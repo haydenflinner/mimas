@@ -1179,15 +1179,25 @@ impl<'s> Parser<'s> {
             });
         }
         let head = self.require_ident();
-        let members = if self.expect(TokKind::LeftBrace) {
-            self.enum_members()
+        // r[impl mimas.opp.glyph]
+        // each end is a plain name, optionally followed by the one-character
+        // glyph its pictures draw with: `opp Sky { Sun "☀", Moon "☾" }`
+        let ends: Vec<(Ident, Option<String>)> = if self.expect(TokKind::LeftBrace) {
+            self.list(TokKind::RightBrace, TokKind::is_ident, |p| {
+                let name = p.require_ident();
+                let glyph = match p.peek() {
+                    TokKind::String(s) => {
+                        p.advance();
+                        Some(chompy::utils::unescape(s, &['\\'], &['"']))
+                    }
+                    _ => None,
+                };
+                (name, glyph)
+            })
         } else {
             vec![]
         };
-        let pair = members.len() == 2
-            && members
-                .iter()
-                .all(|(_, m)| matches!(m, Member::Struct(fields) if fields.is_empty()));
+        let pair = ends.len() == 2;
         if !pair {
             self.error(Misdirection {
                 src: self.src(),
@@ -1196,10 +1206,27 @@ impl<'s> Parser<'s> {
                 label: "two plain names, opposite each other: `opp Sky { Sun, Moon }`".into(),
             });
         }
+        let glyphs = match ends.as_slice() {
+            [(_, Some(a)), (_, Some(b))] => Some((a.clone(), b.clone())),
+            [(_, Some(_)), (_, None)] | [(_, None), (_, Some(_))] => {
+                self.error(Misdirection {
+                    src: self.src(),
+                    at: self.location(start).into(),
+                    msg: "an `opp`'s glyphs come in a pair".into(),
+                    label: "give both ends a glyph or neither: `opp Sky { Sun \"☀\", Moon \"☾\" }`".into(),
+                });
+                None
+            }
+            _ => None,
+        };
         if pair && self.depth == 0 {
-            let imp = self.opp_impl(&head, &members[0].0, &members[1].0, start);
+            let imp = self.opp_impl(&head, &ends[0].0, &ends[1].0, glyphs, start);
             self.pending.push(imp);
         }
+        let members: Vec<(Ident, Member)> = ends
+            .into_iter()
+            .map(|(name, _)| (name, Member::Struct(vec![])))
+            .collect();
         let item = Item::new(
             Enum {
                 head,
@@ -1214,8 +1241,17 @@ impl<'s> Parser<'s> {
     }
 
     /// `impl Opp for T { fn inv(self) -> T { match self { T::A => T::B,
-    /// T::B => T::A } } }`, every node located at the `opp` declaration.
-    fn opp_impl(&self, head: &Ident, a: &Ident, b: &Ident, start: usize) -> Stmt {
+    /// T::B => T::A } } }`, every node located at the `opp` declaration --
+    /// plus `fn glyph(self) { match self { T::A => "…", T::B => "…" } }`
+    /// when the ends carry glyphs (else the pact's default, `""`, stands).
+    fn opp_impl(
+        &self,
+        head: &Ident,
+        a: &Ident,
+        b: &Ident,
+        glyphs: Option<(String, String)>,
+        start: usize,
+    ) -> Stmt {
         let at = self.location(start);
         let id = |name: &str| Ident::new(name, at);
         let case = |from: &Ident, to: &Ident| {
@@ -1245,11 +1281,38 @@ impl<'s> Parser<'s> {
             return_type: Some(Annotation::Ty(id(&head.lexeme))),
             body,
         };
-        let imp = Impl::new(
-            id(&head.lexeme),
-            Some(id("Opp")),
-            vec![Item::new(inv.into(), at, false)],
-        );
+        let mut items = vec![Item::new(inv.into(), at, false)];
+        if let Some((ga, gb)) = glyphs {
+            let case = |from: &Ident, text: String| {
+                MatchCase::new(
+                    Pat::new(PatKind::Variant(Box::new(self.opp_path(head, from, start))), at),
+                    None,
+                    self.new_expr(Literal::String(text), start),
+                )
+            };
+            let pick = Match::new(
+                self.new_expr(id("self"), start),
+                vec![case(a, ga), case(b, gb)],
+                false,
+            );
+            let body = self.new_expr(
+                Block {
+                    body: vec![],
+                    yielded_expr: Some(self.new_expr(pick, start)),
+                },
+                start,
+            );
+            let glyph = Function {
+                name: id("glyph"),
+                type_params: vec![],
+                parameters: vec![Binding::new(id("self"))],
+                wheres: vec![],
+                return_type: Some(Annotation::Kw(lex::TyKw::Str)),
+                body,
+            };
+            items.push(Item::new(glyph.into(), at, false));
+        }
+        let imp = Impl::new(id(&head.lexeme), Some(id("Opp")), items);
         self.new_stmt(Item::new(imp.into(), at, false), start)
     }
 
