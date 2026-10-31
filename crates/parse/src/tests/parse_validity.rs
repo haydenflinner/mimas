@@ -709,6 +709,13 @@ fn opp_is_an_enum_and_its_flip() {
         let lexer = crate::lex::Lexer::new(src, 0, "test".into());
         assert!(crate::Parser::new(lexer).try_into_ast().is_err(), "{src}");
     }
+    // r[verify mimas.notation.user]
+    // `notation x(…)` is `fn __lit_x(…)`; the word stays a name elsewhere
+    let lexer = crate::lex::Lexer::new("notation rpn(s: str) -> int { 1 }\nlet notation = 2;", 0, "test".into());
+    let ast = crate::Parser::new(lexer).try_into_ast().unwrap();
+    let kinds: Vec<String> = ast.stmts().iter().map(|s| s.to_string()).collect();
+    assert!(kinds[0].starts_with("fn __lit_rpn(s: str) -> int"), "{kinds:?}");
+    assert_eq!(kinds.len(), 2, "{kinds:?}");
     // emoji are names: an opp's ends can be glyphs themselves
     let lexer = crate::lex::Lexer::new("opp Sky { ☀, ☾ }\nlet x = !Sky::☀;", 0, "test".into());
     assert!(crate::Parser::new(lexer).try_into_ast().is_ok());

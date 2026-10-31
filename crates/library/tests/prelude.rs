@@ -107,3 +107,23 @@ test_run!(
     "Suit::Hearts.glyph()" => "\"♥\"",
     "row([Suit::Spades, Suit::Clubs])" => "\"♠♣\"",
 );
+
+// r[verify mimas.notation.user]
+// A page's own tagged literal: `tag"…"` lowers to `__lit_tag("…")`, which
+// the page may define directly or through the `notation` spelling.
+test_run!(
+    user_notations,
+    "fn __lit_twice(s: str) -> str { s + s }
+     notation rpn(s: str) -> int {
+         let st: [int] = [];
+         for w in s.split(\" \") {
+             if w == \"+\" { let b = st.pop() ?? 0; let a = st.pop() ?? 0; st.push(a + b); }
+             else if w == \"*\" { let b = st.pop() ?? 0; let a = st.pop() ?? 0; st.push(a * b); }
+             else { st.push(w.to_int() ?? 0); }
+         }
+         st.pop() ?? 0
+     }",
+    "twice\"ab\"" => "\"abab\"",
+    "rpn\"3 4 + 2 *\"" => "14",
+    "rpn\"1 2 3 + +\" + 1" => "7",
+);

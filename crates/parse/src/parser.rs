@@ -377,6 +377,18 @@ impl<'s> Parser<'s> {
             // `opp Sky { Sun, Moon }` declares a dichotomy. Contextual: `opp`
             // is a name anywhere a type name and `{` don't follow it.
             TokKind::Ident("opp") if self.opp_intro() => BlockElement::Stmt(self.opp_stmt(start)),
+            // r[impl mimas.notation.user]
+            // `notation chords(s: str) -> Chords { … }` -- the page's own tagged
+            // literal: `chords"…"` lowers to `__lit_chords("…")`, and this is
+            // that fn under its working name. Contextual like `opp`: a name
+            // and a `(` after the word.
+            TokKind::Ident("notation") if self.notation_intro() => {
+                self.advance();
+                let f = self.function_with(Some("__lit_"));
+                let item = Item::new(f.into(), self.location(start), false);
+                self.end_item(&item);
+                BlockElement::Stmt(self.new_stmt(item, start))
+            }
             // `space Politics { econ: Dial, power: Dial }` -- axes taken together
             TokKind::Ident("space") if self.opp_intro() => BlockElement::Stmt(self.space_stmt(start)),
             kind if kind.starts_item() => {
@@ -1089,7 +1101,7 @@ impl<'s> Parser<'s> {
                     });
                 }
                 TokKind::Fn => {
-                    let (name, generics, parameters, return_type) = self.function_sig(false);
+                    let (name, generics, parameters, return_type) = self.function_sig(false, None);
                     self.reject_type_params(&generics);
                     // optional default body -- `{ ... }` after the sig. when present, the trailing
                     // `;` is dropped (block-terminated, like normal fns).
@@ -1236,6 +1248,11 @@ impl<'s> Parser<'s> {
                 (name, member)
             });
         (members, glyphs)
+    }
+
+    /// `notation name(` — a name and a paren after the word.
+    fn notation_intro(&self) -> bool {
+        matches!(self.nth(1), TokKind::Ident(_)) && matches!(self.nth(2), TokKind::LeftParenthesis)
     }
 
     /// `opp Name {` — a type name and a brace after the word.
@@ -1552,9 +1569,15 @@ impl<'s> Parser<'s> {
     fn function_sig(
         &mut self,
         defaults: bool,
+        prefix: Option<&str>,
     ) -> (Ident, Vec<Ident>, Vec<Binding>, Option<Annotation>) {
-        self.bump(TokKind::Fn);
-        let name = self.require_ident();
+        if prefix.is_none() {
+            self.bump(TokKind::Fn);
+        }
+        let mut name = self.require_ident();
+        if let Some(prefix) = prefix {
+            name = Ident::new(format!("{prefix}{}", name.lexeme), name.location);
+        }
         let type_params = self.type_params();
         let parameters = if self.expect(TokKind::LeftParenthesis) {
             let mut first = true;
@@ -1596,8 +1619,15 @@ impl<'s> Parser<'s> {
     }
 
     fn function(&mut self) -> Function {
+        self.function_with(None)
+    }
+
+    /// A `fn` item -- or, with `prefix`, the same shape after a contextual
+    /// keyword already consumed, its name prefixed (`notation x` is
+    /// `fn __lit_x`).
+    fn function_with(&mut self, prefix: Option<&str>) -> Function {
         let start = self.next_start();
-        let (name, type_params, parameters, return_type) = self.function_sig(true);
+        let (name, type_params, parameters, return_type) = self.function_sig(true, prefix);
         let wheres = self.where_clause();
         let body = if self.at(TokKind::LeftBrace) {
             self.block()

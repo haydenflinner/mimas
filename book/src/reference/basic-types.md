@@ -121,6 +121,14 @@ and — because its one argument is a literal — checked by the native's
 validator when the program compiles. A tag no native backs is a compile
 error that names the tag. Keywords never tag, and `f"…"` is the f-string.
 
+A program declares its own tag with `notation`, which is `fn __lit_<tag>`
+under a working name:
+
+```mimas
+notation twice(s: str) -> str { s + s }
+let x = twice"ab"; // "abab"
+```
+
 Validators (`api::LitValidator`) run whenever *every* argument of a call
 to a native is a literal; a fault may name the argument and a char span
 inside it, and the error lands there.

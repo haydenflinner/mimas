@@ -44,13 +44,6 @@ pub enum Intrinsic {
     /// `xs.foldi(init, f)` -- like [`Intrinsic::Fold`], but `f` also gets the
     /// index. Signature: `[T] -> (U, (int, U, T) -> U) -> U`.
     FoldI,
-    /// `recv.m(a.., f)` where `f: (Recv) -> Recv` -- a combinator whose
-    /// transform is a Mimas closure. A native can't call back into the VM, so
-    /// the lowering emits `f(recv)` itself, then hands
-    /// `merge(recv, f(recv), a..)` to the payload native, which owns the
-    /// combining rule (merge over windows, stack, mask-gated pick, ...).
-    /// Convention: `f` is the last declared param.
-    ApplyMerge(NativeId),
     /// `under(iso, f, x)` / `under(iso, f)` — apply `iso`'s forward transform to `x`,
     /// run `f` on the result, then map back through `iso`'s inverse/update (Uiua's
     /// `⍜`). The `#[native]` body is unreachable; the lowering emits the field loads

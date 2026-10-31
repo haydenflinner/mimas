@@ -714,17 +714,6 @@ impl Emit for Call {
                     ir.current()
                         .new_instance(iso_adt, vec![kind, do_clo, undo_clo])
                 }
-                // `recv.m(a.., f)` → `merge(recv, f(recv), a..)` — the closure
-                // runs in generated code (a native can't re-enter the VM),
-                // and the merge native gets [recv, transformed, ..middle args].
-                api::Intrinsic::ApplyMerge(merge) => {
-                    let f = *args.last().unwrap();
-                    let mut m_args = Vec::with_capacity(args.len());
-                    m_args.push(args[0]);
-                    m_args.push(ir.current().call(f, vec![args[0]]));
-                    m_args.extend_from_slice(&args[1..args.len() - 1]);
-                    ir.current().call_native(merge, m_args)
-                }
                 // `sim::seeds(n, prop)` — property-check loop: `prop(i)` for i in
                 // 0..n. First `false` raises "sim seed i failed"; a Raised out of
                 // `prop` itself re-raises unchanged so run errors keep their own
