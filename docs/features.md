@@ -537,7 +537,15 @@ no editing existing workbooks). Behind the default-on `xlsx` feature on
 - Deferred: in-place workbook editing → `umya-spreadsheet` if the need ever
   shows up. SheetJS and the C `xlsxwriter` bindings were ruled out.
 
-## Cranelift JIT tier — `mimas-jit` (branch `jit-cranelift`)
+## Cranelift JIT tier — `mimas-jit`
+
+Restored in-tree (2026-10-31) alongside `mimas-bcgen`/`mimas-bcgen-test`, and
+ported to the `*const BodyEnv` `BodyFn` ABI: emitted bodies take the single
+env pointer and load `thread`/`code`/`mutation`/`state`/`strs`/`fuel`/`op_ip`/
+`out` fields via `offset_of!` at entry; `call_body`/`call_dyn` and inline
+`CallDirect` calls forward `env` verbatim instead of ten flat params.
+(`mimas-llvm`'s `llvm-jit` MCJIT lane is intentionally not merged — LLVM's
+compile latency made it the wrong tier; pure-Rust lanes only.)
 
 Second Futamura projection: `jit::compile(&program)` emits one native function
 per bytecode chunk with Cranelift (`FunctionBuilder`, dense op dispatch through
