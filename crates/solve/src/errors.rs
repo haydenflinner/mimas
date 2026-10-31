@@ -965,6 +965,16 @@ pub struct NoSuchColumn {
 /// A native's literal validator rejected the call -- e.g. `s.find("(")` where the regex
 /// doesn't compile. The validator supplies the message; see `api::LitValidator`.
 #[derive(Error, Debug, Diagnostic)]
+#[error("`..base` needs a struct")]
+#[diagnostic(help("an enum variant's fields can't be filled from another value -- its base might be a different variant"))]
+pub struct UpdateNeedsStruct {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("list every field instead")]
+    pub at: SourceSpan,
+}
+
+#[derive(Error, Debug, Diagnostic)]
 #[error("invalid literal argument")]
 pub struct BadLiteralArg {
     #[source_code]

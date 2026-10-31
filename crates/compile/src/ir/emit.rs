@@ -1405,15 +1405,32 @@ impl Emit for Literal {
                     .iter()
                     .map(|(key, expr)| (key.to_string(), expr.lower(ir)))
                     .collect();
+                // r[impl mimas.struct.update]
+                // `..base` is evaluated once; every field not listed is a
+                // slotted load from it (the solver proved it's this struct)
+                let base = match &s.base {
+                    Some(b) => Some(b.lower(ir)?),
+                    None => None,
+                };
 
-                let fields: Option<Vec<_>> = ir.resolutions.adts[adt]
-                    .fields
+                let names: Vec<String> = ir.resolutions.adts[adt].fields.clone();
+                let fields: Option<Vec<_>> = names
                     .iter()
-                    .map(|name| {
+                    .enumerate()
+                    .map(|(slot, name)| {
                         supplied
                             .iter()
                             .find(|(k, _)| k == name)
                             .map(|(_, v)| *v)
+                            .or_else(|| {
+                                base.map(|b| {
+                                    Some(ir.current().get_field(
+                                        b,
+                                        u32::try_from(slot).unwrap(),
+                                        AccessKind::Direct,
+                                    ))
+                                })
+                            })
                             .unwrap()
                     })
                     .collect();

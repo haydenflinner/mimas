@@ -1015,7 +1015,8 @@ expr_test!(
     "Foo {}",
     Literal::Struct(StructLiteral {
         name: ident_expr!("Foo"),
-        fields: vec![]
+        fields: vec![],
+        base: None,
     })
 );
 
@@ -1024,7 +1025,8 @@ expr_test!(
     "Foo { a = 0 }",
     Literal::Struct(StructLiteral {
         name: ident_expr!("Foo"),
-        fields: vec![(FieldKey::Ident(ident!("a")), int!(0))]
+        fields: vec![(FieldKey::Ident(ident!("a")), int!(0))],
+        base: None,
     })
 );
 
@@ -1033,7 +1035,8 @@ expr_test!(
     "Foo { a }",
     Literal::Struct(StructLiteral {
         name: ident_expr!("Foo"),
-        fields: vec![(FieldKey::Ident(ident!("a")), ident!("a").into_expr())]
+        fields: vec![(FieldKey::Ident(ident!("a")), ident!("a").into_expr())],
+        base: None,
     })
 );
 
@@ -1042,7 +1045,8 @@ expr_test!(
     "Foo { a, }",
     Literal::Struct(StructLiteral {
         name: ident_expr!("Foo"),
-        fields: vec![(FieldKey::Ident(ident!("a")), ident!("a").into_expr())]
+        fields: vec![(FieldKey::Ident(ident!("a")), ident!("a").into_expr())],
+        base: None,
     })
 );
 
@@ -1054,7 +1058,8 @@ expr_test!(
         fields: vec![
             (FieldKey::Ident(ident!("a")), ident!("a").into_expr()),
             (FieldKey::Ident(ident!("b")), ident!("b").into_expr()),
-        ]
+        ],
+        base: None,
     })
 );
 
@@ -1066,7 +1071,8 @@ expr_test!(
         fields: vec![
             (FieldKey::Ident(ident!("a")), ident!("a").into_expr()),
             (FieldKey::Ident(ident!("b")), int!(0)),
-        ]
+        ],
+        base: None,
     })
 );
 
@@ -1079,7 +1085,8 @@ expr_test!(
             right: ident!("Bar")
         }
         .into_expr(),
-        fields: vec![]
+        fields: vec![],
+        base: None,
     })
 );
 
@@ -1092,7 +1099,8 @@ expr_test!(
             right: ident!("Bar")
         }
         .into_expr(),
-        fields: vec![(FieldKey::Ident(ident!("a")), int!(0))]
+        fields: vec![(FieldKey::Ident(ident!("a")), int!(0))],
+        base: None,
     })
 );
 
@@ -2054,3 +2062,25 @@ fn spaced_percent_is_old_modulo() {
     assert_eq!(expr.to_string(), "a mod b");
     assert_eq!(parser.errors().len(), 1);
 }
+
+// r[verify mimas.struct.update]
+// `Foo { x = 1, ..base }` -- the listed fields, then the rest from `base`
+expr_test!(
+    struct_update_literal,
+    "Foo { x = 1, ..base }",
+    Literal::Struct(StructLiteral {
+        name: ident_expr!("Foo"),
+        fields: vec![(FieldKey::Ident(ident!("x")), int!(1))],
+        base: Some(ident_expr!("base")),
+    })
+);
+
+expr_test!(
+    struct_update_only_base,
+    "Foo { ..base }",
+    Literal::Struct(StructLiteral {
+        name: ident_expr!("Foo"),
+        fields: vec![],
+        base: Some(ident_expr!("base")),
+    })
+);

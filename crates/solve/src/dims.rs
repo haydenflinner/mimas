@@ -787,6 +787,9 @@ impl<'a> Pass<'a> {
             Literal::Struct(s) => {
                 let name = s.name.as_ident().map(|i| i.lexeme.clone());
                 let decl = name.as_ref().and_then(|n| self.structs.get(n).copied());
+                if let Some(base) = &s.base {
+                    self.expr(base);
+                }
                 for (key, value) in &s.fields {
                     let got = self.expr(value);
                     let (Some(decl), FieldKey::Ident(k)) = (decl, key) else {

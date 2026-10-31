@@ -1472,6 +1472,7 @@ impl<'s> Parser<'s> {
             Literal::Struct(StructLiteral {
                 name: self.new_expr(id(&name.lexeme), start),
                 fields: flipped,
+                base: None,
             }),
             start,
         );
@@ -2352,18 +2353,39 @@ impl<'s> Parser<'s> {
             if !self.struct_literals || !self.eat(TokKind::LeftBrace) {
                 return name;
             }
-            let fields = self.list(TokKind::RightBrace, TokKind::is_ident, |p| {
-                let field = p.require_ident();
+            // r[impl mimas.struct.update]
+            // fields, then optionally `..base` last: every field not listed
+            // is read from `base`, a value of the same struct type
+            let mut fields = Vec::new();
+            let mut base = None;
+            loop {
+                if self.at(TokKind::RightBrace) {
+                    break;
+                }
+                if self.eat(TokKind::DoubleDot) {
+                    base = Some(self.expr());
+                    self.eat(TokKind::Comma);
+                    break;
+                }
+                if !self.peek().is_ident() {
+                    self.expected("a field name or `..base`");
+                    break;
+                }
+                let field = self.require_ident();
                 // shorthand: `Foo { x }` is `Foo { x = x }`
-                let value = if p.at(TokKind::Comma) || p.at(TokKind::RightBrace) {
-                    p.new_expr(field.clone(), field.location.span().start())
+                let value = if self.at(TokKind::Comma) || self.at(TokKind::RightBrace) {
+                    self.new_expr(field.clone(), field.location.span().start())
                 } else {
-                    p.expect(TokKind::Equal);
-                    p.expr()
+                    self.expect(TokKind::Equal);
+                    self.expr()
                 };
-                (FieldKey::Ident(field), value)
-            });
-            let expr = self.new_expr(Literal::Struct(StructLiteral { name, fields }), start);
+                fields.push((FieldKey::Ident(field), value));
+                if !self.eat(TokKind::Comma) {
+                    break;
+                }
+            }
+            self.expect(TokKind::RightBrace);
+            let expr = self.new_expr(Literal::Struct(StructLiteral { name, fields, base }), start);
             self.chain_accesses(expr)
         }
     }

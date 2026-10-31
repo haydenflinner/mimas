@@ -35,6 +35,9 @@ pub type DictField = (Ident, Expr);
 pub struct StructLiteral {
     pub name: Expr,
     pub fields: Vec<(FieldKey, Expr)>,
+    /// `Foo { x = 1, ..base }` -- every field not listed is read from `base`, a
+    /// value of the same struct type.
+    pub base: Option<Expr>,
 }
 
 impl From<Literal> for ExprKind {
@@ -67,12 +70,14 @@ impl std::fmt::Display for Literal {
                     .map(|(Ident { lexeme, .. }, symbol)| format!("{lexeme} = {symbol}"))
                     .join(", ")
             )),
-            Literal::Struct(StructLiteral { name, fields }) => f.pad(&format!(
-                "{name} {{ {} }}",
+            Literal::Struct(StructLiteral { name, fields, base }) => f.pad(&format!(
+                "{name} {{ {}{} }}",
                 fields
                     .iter()
                     .map(|(name, value)| format!("{name} = {value}"))
                     .join(", ")
+                ,
+                base.as_ref().map_or(String::new(), |b| if fields.is_empty() { format!("..{b}") } else { format!(", ..{b}") })
             )),
             Literal::Tuple(exprs) => f.pad(&format!(
                 "({})",

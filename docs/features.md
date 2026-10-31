@@ -20,6 +20,10 @@ Memorable additions to mimas beyond what the changelog tracks — newest first.
   type that takes a prelude name shadows it for user code (with a
   `shadowed_builtin` warning, `ShadowedBuiltinType`) instead of breaking
   the prelude's own impls mid-hoist (`mimas.prelude.shadow`).
+- **Struct update.** `S { f = v, ..base }` — the listed fields change,
+  the rest are read from `base` (same struct type, evaluated once);
+  an enum variant literal refuses a base (`UpdateNeedsStruct`), since
+  it might be another variant. `mimas.struct.update`.
 - **`notation`.** `notation x(s: str) -> T { … }` is `fn __lit_x`, so a
   program's own tag `x"…"` has a reader; the word stays a name elsewhere
   (`mimas.notation.user`). The `ApplyMerge` intrinsic is gone: a host

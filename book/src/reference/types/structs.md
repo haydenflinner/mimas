@@ -113,3 +113,18 @@ A field-free struct is written with empty braces or a bare `struct Name;` -- use
 ```mimas
 struct Marker;
 ```
+
+## Struct update
+
+A struct literal may end with `..base`, an expression of the same struct
+type; the listed fields are as given and every other field is read from
+`base`, which is evaluated once:
+
+```mimas
+struct P { x: int, y: int, z: int }
+let p = P { x = 1, y = 2, z = 3 };
+let q = P { y = 20, ..p }; // P { x = 1, y = 20, z = 3 }
+```
+
+A base of another type is a compile error, and an enum variant literal
+cannot take a base, since the base might be a different variant.

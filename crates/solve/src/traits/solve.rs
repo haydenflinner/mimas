@@ -2242,7 +2242,7 @@ impl Solve for Literal {
                 fields.iter().map(|(_, v)| v).collect(),
                 solver,
             )?)),
-            Literal::Struct(StructLiteral { name, fields }) => {
+            Literal::Struct(StructLiteral { name, fields, base }) => {
                 let (adt, variant, layout) = match name.kind() {
                     ExprKind::Access(Access::DoubleColon { left, right }) => {
                         let lhs = solver.resolve_path_head(left)?;
@@ -2401,13 +2401,27 @@ impl Solve for Literal {
                     value.fulfill_ty(target.ty, solver)?;
                 }
 
+                // r[impl mimas.struct.update]
+                // `..base`: the rest of the fields come from a value of this very
+                // type -- a struct, not an enum variant, whose layout the base's
+                // own variant might not share
+                if let Some(base) = base {
+                    if layout != adt {
+                        Err(UpdateNeedsStruct {
+                            src: solver.src(base.location()),
+                            at: base.location().into(),
+                        })?;
+                    }
+                    base.fulfill_ty(adt_ty.clone(), solver)?;
+                }
+
                 let remaining: Vec<String> = prototype_fields
                     .iter()
                     .filter(|(_, field)| !field.constant)
                     .map(|v| v.0.clone())
                     .collect();
 
-                if !remaining.is_empty() {
+                if base.is_none() && !remaining.is_empty() {
                     Err(MissingStructFields {
                         src: solver.src(location),
                         at: location.into(),

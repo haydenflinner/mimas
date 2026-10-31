@@ -1399,6 +1399,9 @@ impl<'a> Pass<'a> {
                 for (_, e) in &s.fields {
                     self.expr(e);
                 }
+                if let Some(base) = &s.base {
+                    self.expr(base);
+                }
             }
             Literal::Tuple(items) => {
                 for e in items {

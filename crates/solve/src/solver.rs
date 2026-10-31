@@ -2520,6 +2520,7 @@ impl Solver {
                 return Some(Literal::Struct(parse::StructLiteral {
                     name: e.clone(),
                     fields: vec![],
+                    base: None,
                 }));
             }
             self.node_decs

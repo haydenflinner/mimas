@@ -187,3 +187,31 @@ fn space_fields_must_be_axes() {
     // a number is an axis for a space's static flip, not an `Opp`-typed value
     reject("fn f(o: Opp) -> Opp { !o }\nlet x = f(3.0);", "mismatched types");
 }
+
+// r[verify mimas.struct.update]
+// `S { f = v, ..base }`: the listed fields change, the rest are read from
+// `base` once; the base must be the same struct, and an enum variant's
+// fields can't be filled this way.
+test_run!(
+    struct_update,
+    "struct P { x: int, y: int, z: int }
+     fn up(p: P) -> P { P { y = p.y + 1, ..p } }
+     fn calls() -> int { 0 }
+     let n = 0;
+     fn base() -> P { n += 1; P { x = 1, y = 2, z = 3 } }",
+    "up(P { x = 1, y = 2, z = 3 }).y" => "3",
+    "up(P { x = 1, y = 2, z = 3 }).z" => "3",
+    "{ let q = P { x = 9, ..base() }; q.x + q.y + q.z }" => "14",
+    "{ let _q = P { x = 9, ..base() }; n }" => "1",
+);
+
+#[test]
+fn struct_update_is_checked() {
+    let rejected = |src: &str, needle: &str| {
+        let err = test_runner::try_execute(src).expect_err("should be rejected");
+        let text = format!("{err:?}");
+        assert!(text.contains(needle), "`{src}`: expected `{needle}` in:\n{text}");
+    };
+    rejected("struct P { x: int, y: int }\nstruct Q { x: int, y: int }\nlet q = Q { x = 1, y = 2 };\nlet p = P { x = 3, ..q };", "mismatch");
+    rejected("enum E { A { x: int, y: int }, B { x: int, y: int } }\nlet b = E::B { x = 1, y = 2 };\nlet a = E::A { x = 3, ..b };", "needs a struct");
+}

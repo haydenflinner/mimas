@@ -267,6 +267,9 @@ pub fn walk_expr(expr: &Expr, visitor: &mut impl Visitor) {
                     }
                     walk_expr(value, visitor);
                 }
+                if let Some(base) = &struc.base {
+                    walk_expr(base, visitor);
+                }
             }
             _ => {}
         },
