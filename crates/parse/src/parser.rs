@@ -376,6 +376,8 @@ impl<'s> Parser<'s> {
             // `opp Sky { Sun, Moon }` declares a dichotomy. Contextual: `opp`
             // is a name anywhere a type name and `{` don't follow it.
             TokKind::Ident("opp") if self.opp_intro() => BlockElement::Stmt(self.opp_stmt(start)),
+            // `space Politics { econ: Dial, power: Dial }` -- axes taken together
+            TokKind::Ident("space") if self.opp_intro() => BlockElement::Stmt(self.space_stmt(start)),
             kind if kind.starts_item() => {
                 let item = self.item();
                 self.end_item(&item);
@@ -1241,6 +1243,116 @@ impl<'s> Parser<'s> {
         };
         let imp = Impl::new(
             id(&head.lexeme),
+            Some(id("Opp")),
+            vec![Item::new(inv.into(), at, false)],
+        );
+        self.new_stmt(Item::new(imp.into(), at, false), start)
+    }
+
+    /// `space Politics { econ: Dial, power: Dial }` -- axes taken together. It is
+    /// the struct of its fields plus a synthesized `impl Opp` that flips every
+    /// field (`Politics { econ = self.econ.inv(), … }`), so a space is an axis
+    /// itself and spaces nest. The struct carries `#[space]`: the solver checks
+    /// every field is an axis -- a type implementing `Opp`: an opp, `bool`, a
+    /// number (flip is negation), a `Dial`, another space. Top-level only.
+    fn space_stmt(&mut self, start: usize) -> Stmt {
+        let kw = self.advance(); // `space`
+        if self.depth > 0 {
+            self.error(Misdirection {
+                src: self.src(),
+                at: Location::from(kw.location()).into(),
+                msg: "`space` decls are top-level only".into(),
+                label: "declare the space at the top of the file".into(),
+            });
+        }
+        let name = self.require_ident();
+        let fields = if self.expect(TokKind::LeftBrace) {
+            self.list(
+                TokKind::RightBrace,
+                |kind| kind == TokKind::Pub || kind.is_ident(),
+                Self::named_field,
+            )
+        } else {
+            vec![]
+        };
+        if fields.is_empty() {
+            self.error(Misdirection {
+                src: self.src(),
+                at: self.location(start).into(),
+                msg: "a `space` needs at least one axis".into(),
+                label: "name its axes: `space Compass { ns: Dial, ew: Dial }`".into(),
+            });
+        } else if self.depth == 0 {
+            let imp = self.space_impl(&name, &fields, start);
+            self.pending.push(imp);
+        }
+        let at = self.location(start);
+        let item = Item::new(
+            Struct {
+                name: name.clone(),
+                type_params: vec![],
+                fields,
+            }
+            .into(),
+            at,
+            false,
+        )
+        .with_attrs(vec![Attribute {
+            name: Ident::new("space", at),
+        }]);
+        self.new_stmt(item, start)
+    }
+
+    /// `impl Opp for S { fn inv(self) -> S { S { f = self.f.inv(), … } } }`, every
+    /// node located at the `space` declaration.
+    fn space_impl(&self, name: &Ident, fields: &[StructField], start: usize) -> Stmt {
+        let at = self.location(start);
+        let id = |n: &str| Ident::new(n, at);
+        let dot = |left: Expr, right: &str| {
+            self.new_expr(
+                Access::Dot {
+                    left,
+                    right: self.new_expr(id(right), start),
+                    kind: AccessKind::Direct,
+                },
+                start,
+            )
+        };
+        let flipped: Vec<(FieldKey, Expr)> = fields
+            .iter()
+            .filter_map(|f| match &f.name {
+                FieldKey::Ident(field) => {
+                    let value = dot(self.new_expr(id("self"), start), &field.lexeme);
+                    let call = self.new_expr(Call::new(dot(value, "inv"), vec![]), start);
+                    Some((FieldKey::Ident(id(&field.lexeme)), call))
+                }
+                FieldKey::Int(_) => None,
+            })
+            .collect();
+        let literal = self.new_expr(
+            Literal::Struct(StructLiteral {
+                name: self.new_expr(id(&name.lexeme), start),
+                fields: flipped,
+            }),
+            start,
+        );
+        let body = self.new_expr(
+            Block {
+                body: vec![],
+                yielded_expr: Some(literal),
+            },
+            start,
+        );
+        let inv = Function {
+            name: id("inv"),
+            type_params: vec![],
+            parameters: vec![Binding::new(id("self"))],
+            wheres: vec![],
+            return_type: Some(Annotation::Ty(id(&name.lexeme))),
+            body,
+        };
+        let imp = Impl::new(
+            id(&name.lexeme),
             Some(id("Opp")),
             vec![Item::new(inv.into(), at, false)],
         );

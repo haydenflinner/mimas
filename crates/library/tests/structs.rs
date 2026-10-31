@@ -144,3 +144,38 @@ test_run!(
     "!true" => "false",
     "!(1 < 2)" => "false",
 );
+
+// `space` — axes taken together: the struct of its fields plus a flip of
+// every field (`impl Opp`), so a space is an axis itself and nests. Ordered
+// quantities are axes (their flip is negation); a field without a flip is a
+// targeted error. A number serves static flips only: it doesn't travel as an
+// `Opp`-typed value (that dispatch tests the value's kind at runtime).
+test_run!(
+    space_flips_every_axis,
+    "opp Hand { Left, Right }
+     opp Grip { Lib, Auth }
+     space Politics { econ: Hand, power: Grip }
+     space Frame { x: float, y: int, on: bool, view: Politics, w: px }
+     fn involutive(o: Opp) -> bool { !(!o) == o }
+     let p = Politics { econ = Hand::Left, power = Grip::Auth };
+     let f = Frame { x = 1.5, y = 2, on = true, view = p, w = 10.0px };",
+    "!p == Politics { econ = Hand::Right, power = Grip::Lib }" => "true",
+    "involutive(p)" => "true",
+    "(!f).x == -1.5 && (!f).y == -2 && !(!f).on && (!f).view == !p" => "true",
+    "(!f).w == -10.0px" => "true",
+    "!(!f) == f" => "true",
+);
+
+#[test]
+fn space_fields_must_be_axes() {
+    let reject = |src: &str, needle: &str| {
+        let err = test_runner::try_execute(src).expect_err(src);
+        let text = format!("{err:?}");
+        assert!(text.contains(needle), "`{src}`: expected `{needle}` in:\n{text}");
+    };
+    reject("space Bad { name: str }", "`name: str` isn't an axis");
+    reject("struct Data { n: int }\nspace Bad { d: Data }", "`d: Data` isn't an axis");
+    reject("space Empty {}", "a `space` needs at least one axis");
+    // a number is an axis for a space's static flip, not an `Opp`-typed value
+    reject("fn f(o: Opp) -> Opp { !o }\nlet x = f(3.0);", "mismatched types");
+}

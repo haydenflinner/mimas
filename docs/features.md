@@ -229,6 +229,22 @@ Tests: `parse_validity::a_declared_fn_takes_back_an_operator_word`,
 `a_kits_shadowing_reaches_the_page_that_uses_it`),
 `parse_validity::a_spliced_source_shadows_per_page`.
 
+## `space` — axes taken together
+
+`space Politics { econ: Hand, power: Grip }` declares a struct whose
+fields are all axes, plus a synthesized `impl Opp` that flips every field
+(`Politics { econ = self.econ.inv(), … }`) — so `!p` is the opposite
+point, a space is an axis itself, and spaces nest. An axis is any type
+implementing `Opp`: an `opp`, `bool`, a number (`impl Opp for int` /
+`float` in the built-in source: the flip is negation, so `px` and other
+quantities count), a `Dial`, another space. A field without a flip gets a
+targeted error at the field ("`name: str` isn't an axis, so it can't be
+part of `space S`"). Numbers serve static flips only — a space calls its
+fields' `inv` directly — and don't travel as `Opp`-typed values, since a
+pact-typed call tests the value's kind at runtime and a number has no
+test (`involutive(3.0)` is a type error). Tests:
+`space_flips_every_axis`, `space_fields_must_be_axes`.
+
 ## `datalog { … }` — Ascent's language, run in mimas
 
 A `datalog` block declares relations, facts and rules, evaluates them to a

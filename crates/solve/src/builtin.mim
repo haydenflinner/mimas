@@ -14,6 +14,16 @@ pact Opp {
 impl Opp for bool {
     fn inv(self) -> bool { !self }
 }
+
+// An ordered quantity is an axis too: its flip is its negation (a `px`
+// is a float). These serve static calls -- a space's flip calls a number
+// field's `inv` -- a number doesn't travel as an `Opp`-typed value.
+impl Opp for int {
+    fn inv(self) -> int { -self }
+}
+impl Opp for float {
+    fn inv(self) -> float { -self }
+}
 opp Sign { Pos, Neg }
 opp Size { Big, Small }
 opp Shade { Light, Dark }

@@ -2011,9 +2011,11 @@ impl Solve for Impl {
         // Find our target -- a pact impl may name a primitive (`impl Opp for
         // bool`), which lands on that primitive's library adt
         let primitive = match self.target.lexeme.as_str() {
-            // `bool` only for now: a pact-typed call tests the value's kind at
-            // runtime, and only a bool has a cheap test (`x == true || x == false`)
-            "bool" if self.pact.is_some() => {
+            // `int`/`float` impls serve static calls (a space's flip calls a number
+            // field's `inv` directly); only a `bool` may also travel as a pact-typed
+            // value, since dispatch through a pact tests the value's kind at runtime
+            // and only a bool has a cheap test (`x == true || x == false`)
+            "bool" | "int" | "float" if self.pact.is_some() => {
                 solver.library.get(self.target.lexeme.as_str()).copied()
             }
             _ => None,

@@ -1139,6 +1139,23 @@ pub struct ShadowedBuiltin {
     pub symbol: &'static str,
 }
 
+#[derive(Error, Debug, Diagnostic)]
+#[error("`{field}: {ty}` isn't an axis, so it can't be part of `space {space}`")]
+#[diagnostic(help(
+    "a space's fields are axes -- types with a flip (`impl Opp`): an `opp`, `bool`, a number \
+     (its flip is negation), a `Dial`, or another space. Declare a plain `struct` for data \
+     that isn't an axis"
+))]
+pub struct SpaceFieldNotAnAxis {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("this field's type has no flip")]
+    pub at: SourceSpan,
+    pub space: String,
+    pub field: String,
+    pub ty: String,
+}
+
 // ---- effect gate (`Vm::compile_files_gated`) -- a refusal, not a lint: the
 // file's inferred effects exceed what the host granted, so it never runs.
 

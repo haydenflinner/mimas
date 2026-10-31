@@ -252,6 +252,37 @@ impl Solver {
         Ok(())
     }
 
+    /// Every field of a `space` is an axis: its type implements `Opp` (an `opp`,
+    /// `bool`, a number, a `Dial`, another space). A field that isn't gets the
+    /// targeted error here, before the synthesized flip would trip over it.
+    fn check_space_axes(&mut self, st: &parse::Struct) -> Result<()> {
+        let opp = self
+            .resolve_name(&Ident::synthetic("Opp"), st.name.location)?
+            .as_single_pact();
+        for field in &st.fields {
+            let ty = Ty::from_annotation(field.annotation.clone(), self)?.normalized(self);
+            let aid = match &ty {
+                Ty::Adt(a, _) | Ty::Identity(a, _) => Some(*a),
+                other => self.builtin_adt(other),
+            };
+            let axis = opp.zip(aid).is_some_and(|(p, a)| self.pact_impls.contains(&(p, a)));
+            if !axis {
+                let name = match &field.name {
+                    parse::FieldKey::Ident(i) => i.lexeme.clone(),
+                    parse::FieldKey::Int(n) => n.to_string(),
+                };
+                Err(crate::errors::SpaceFieldNotAnAxis {
+                    src: self.src(field.location),
+                    at: field.location.into(),
+                    space: st.name.lexeme.clone(),
+                    field: name,
+                    ty: ty.to_string(),
+                })?;
+            }
+        }
+        Ok(())
+    }
+
     /// The primitive whose library adt `aid` is (`bool` for the `bool`
     /// namespace) -- the reverse of [`Self::builtin_adt`] for the scalars.
     pub(crate) fn primitive_of(&self, aid: AdtId) -> Option<Ty> {
@@ -2272,6 +2303,10 @@ impl Solver {
                 // import rib (hoist_uses pushed them, but its rib was popped at phase end).
                 ItemKind::Use(us) => self.process_use(us, item.location())?,
                 ItemKind::Poison(poison) => poison.escaped(),
+                // a `space`'s fields must all be axes -- types implementing `Opp`
+                ItemKind::Struct(st) if item.attrs().iter().any(|a| a.name.lexeme == "space") => {
+                    self.check_space_axes(st)?
+                }
                 // all we need to do at this point is process the fn defaults
                 ItemKind::Pact(pact) => {
                     let Some(pid) = self
