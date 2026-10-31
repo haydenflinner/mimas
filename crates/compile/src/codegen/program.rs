@@ -395,7 +395,7 @@ impl Decode for BinOp {
     fn decode(decoder: &mut Decoder) -> Self {
         let b = decoder.u8();
         debug_assert!(
-            (b as usize) <= BinOp::Coalesce as usize,
+            (b as usize) <= BinOp::Nor as usize,
             "invalid BinOp byte {b}: bytecode desync"
         );
         unsafe { std::mem::transmute::<u8, BinOp>(b) }

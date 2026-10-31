@@ -1537,7 +1537,16 @@ impl Emit for Match {
         // many things can "go wrong" that will make us fall back to a linear chain: for
         // example, the moment an if-guard gets introduced we're (as usual) screwed. when those
         // happen we'll just bail 'plan with a None and move on to our standard chain.
+        //
+        // a dynamic (`any`) scrutinee always bails: `Switch` indexes `Val::Int`
+        // payloads and instance struct ids into the *same* table, so `match e
+        // { 5 => .., Order::Asc => .. }` could send a raised `5` to the variant
+        // arm. the linear chain's per-pattern `is_instance`/eq probes are
+        // kind-correct on any payload.
         let switched: Option<(u32, Vec<BlockId>, BlockId)> = 'plan: {
+            if ir.resolutions.node_tys.get(&self.identity.id()) == Some(&Ty::Any) {
+                break 'plan None;
+            }
             /// identifies the tag we can use to represent this variant -- be it an adt variant or
             /// an integer
             fn variant_arm(ir: &Ir, pat: &Pat) -> Option<(u32, Vec<(u32, DecId)>)> {
@@ -1805,6 +1814,8 @@ impl Emit for Absolve {
         });
 
         let err_branch = ir.in_block(err_block, |b| {
+            // the handler's param is `any` — hand it the payload itself;
+            // narrowing happens in the handler's `match`, not here.
             let err = b.unwrap_raised(value);
             let r = b.call(handler, vec![err]);
             let end = b.id();
@@ -1897,6 +1908,7 @@ impl Emit for While {
 /// `IsInstance` chain, each arm `CallDirect`-ing that adt's body (one
 /// implementer skips the test). `args` already holds the receiver first.
 /// Shared by method calls through a pact and operators on pact-typed values.
+// r[impl mimas.pact.operator]
 fn dispatch_pact_method(
     ir: &mut Ir,
     recv: InstId,
@@ -1909,24 +1921,37 @@ fn dispatch_pact_method(
         .adts
         .iter()
         .filter(|(_, adt)| pids.iter().all(|p| adt.implements.contains(p)))
-        .map(|(_, adt)| (adt.methods[method], adt.dispatch_ids.clone()))
+        .map(|(_, adt)| (adt.methods[method], adt.dispatch_ids.clone(), adt.name == "bool"))
         .collect();
     let candidates: Vec<_> = candidates
         .into_iter()
-        .map(|(dec, ids)| (ir.item_body_for(dec), ids))
+        .map(|(dec, ids, is_bool)| (ir.item_body_for(dec), ids, is_bool))
         .collect();
 
-    if let [(body, _)] = candidates.as_slice() {
+    if let [(body, _, _)] = candidates.as_slice() {
         return Some(ir.current().call_direct(*body, args));
     }
 
     let merge = ir.push_block("pact_merge");
     let mut branches = Vec::new();
-    for (body, ids) in candidates {
-        for id in ids {
+    for (body, ids, is_bool) in candidates {
+        // a `bool` implementer (`impl Opp for bool`) has no instance id to
+        // test: its arm asks whether the value is `true` or `false`
+        let tests: Vec<Option<AdtId>> =
+            if is_bool { vec![None] } else { ids.into_iter().map(Some).collect() };
+        for id in tests {
             let hit = ir.push_block("pact_hit");
             let next = ir.push_block("pact_next");
-            let is_inst = ir.current().is_instance(recv, id);
+            let is_inst = match id {
+                Some(id) => ir.current().is_instance(recv, id),
+                None => {
+                    let t = ir.current().constant(Constant::Bool(true));
+                    let f = ir.current().constant(Constant::Bool(false));
+                    let is_t = ir.current().bin(BinOp::Identity, recv, t, OperandKind::Generic);
+                    let is_f = ir.current().bin(BinOp::Identity, recv, f, OperandKind::Generic);
+                    ir.current().bin(BinOp::Or, is_t, is_f, OperandKind::Bool)
+                }
+            };
             ir.in_current(|block| {
                 block.jump_if_false(is_inst, next);
                 block.jump(hit);

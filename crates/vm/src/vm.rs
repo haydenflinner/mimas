@@ -1341,7 +1341,7 @@ pub(crate) fn step_one<'gc>(
             match v {
                 Val::Null => return Err(RtErr::UnwrappedNull),
                 Val::Raised(err) => {
-                    return Err(RtErr::UnwrappedRaised(err.as_str().to_string()));
+                    return Err(RtErr::UnwrappedRaised(ctx.to_string(*err)?));
                 }
                 _ => wr!(regs, dst, v),
             }
@@ -2247,10 +2247,8 @@ pub fn cold_dispatch<'gc>(
         }
         OpCode::Raise => {
             let src = Reg::decode(code);
-            let Val::Str(err) = rd!(regs, src) else {
-                unreachable!("raise on a non-str value")
-            };
-            return Ok(Flow::Return(Val::Raised(err)));
+            let err = rd!(regs, src);
+            return Ok(Flow::Return(Val::Raised(Gc::new(ctx.mutation(), err))));
         }
         OpCode::IsRaised => {
             let dst = Reg::decode(code);
@@ -2264,7 +2262,7 @@ pub fn cold_dispatch<'gc>(
             let Val::Raised(err) = rd!(regs, src) else {
                 unreachable!("UnwrapRaised on non-raised value")
             };
-            wr!(regs, dst, Val::Str(err));
+            wr!(regs, dst, *err);
         }
         OpCode::UnwrapUnit => {
             // `()`'s repr is Null, so no null check; only Raised faults. Any
@@ -2273,7 +2271,7 @@ pub fn cold_dispatch<'gc>(
             let src = Reg::decode(code);
             match rd!(regs, src) {
                 Val::Raised(err) => {
-                    return Err(RtErr::UnwrappedRaised(err.as_str().to_string()));
+                    return Err(RtErr::UnwrappedRaised(ctx.to_string(*err)?));
                 }
                 _ => wr!(regs, dst, Val::Null),
             }
@@ -3559,9 +3557,9 @@ impl Vm {
         let mut asts = Vec::with_capacity(files.len());
         let mut sources = Sources::with_capacity(files.len());
         shared::units::clear();
-        let shadow = parse::lex::shadow_sets(files);
+        let inherited = parse::lex::inherited_shadow(files);
         for (file_id, (name, source)) in files.iter().enumerate() {
-            let lexer = Lexer::new(source, file_id, (*name).into()).with_shadowed(shadow[file_id]);
+            let lexer = Lexer::new(source, file_id, (*name).into()).with_inherited(inherited[file_id]);
             let ast = Parser::new_extending(lexer)
                 .try_into_ast()
                 .map_err(|mut errs| FunctionDataflowError::from(errs.swap_remove(0)))?;

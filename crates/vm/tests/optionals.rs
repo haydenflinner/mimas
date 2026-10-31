@@ -1,7 +1,7 @@
 #[macro_use]
 mod vm_test_utils;
 
-use vm::Captured::*;
+use vm::{Captured::*, Vm};
 
 test_vm!(
     coalesce,
@@ -192,3 +192,145 @@ test_fail!(
     result_unwrap_raised_errors,
     "fn foo() -> int! { raise \"bad\" }\nlet TEST_VALUE = foo()!;"
 );
+
+// `raise` carries any value — the payload stays a `Val` until something asks
+// for text. A raised call bound without `!`/`?`/`absolve` keeps its wrapper.
+test_vm!(
+    raise_any_value_keeps_payload,
+    "fn die() -> int! { raise 42 }
+     fn die_list() -> int! { raise [1, 2] }
+     fn die_dict() -> int! { raise ~{x = 9} }",
+    "die()" => Raised(Box::new(Int(42))),
+    "die_list()" => Raised(Box::new(array!(Int(1), Int(2)))),
+    "die_dict()" => Raised(Box::new(dict! { ~{x = Int(9)} })),
+);
+
+// `?` demotes a structured raise to null without touching the payload;
+// `absolve`'s handler binds the payload itself (`e: any`) — format it
+// explicitly for the old str note.
+test_vm!(
+    raise_any_value_boundaries,
+    "fn die() -> str! { raise 42 }
+     fn die_list() -> str! { raise [1, 2] }",
+    "die() absolve |e| f\"saw: {e}\"" => str!("saw: 42"),
+    "die_list() absolve |e| f\"{e}\"" => str!("[1, 2]"),
+    "die()?" => Null,
+    "die_list()?" => Null,
+);
+
+test_vm!(
+    raise_nested_payload,
+    "fn inner() -> int! { raise 7 }
+     fn outer() -> str! { raise inner() }",
+    "outer() absolve |e| f\"{e}\"" => str!("<raised 7>"),
+);
+
+// `match` narrows the `any` payload with runtime probes: variant arms test
+// the instance layout, literals test structural eq. A `_` arm is required —
+// the payload could be anything.
+test_vm!(
+    absolve_match_enum_variants,
+    "enum Dir { Fwd, Bak }
+     fn retry() -> int! { raise Dir::Fwd }
+     fn back() -> int! { raise Dir::Bak }",
+    "retry() absolve |e| match e { Dir::Fwd => -1, Dir::Bak => 1, _ => 0 }" => Int(-1),
+    "back() absolve |e| match e { Dir::Fwd => -1, Dir::Bak => 1, _ => 0 }" => Int(1),
+);
+
+test_vm!(
+    absolve_match_non_adt_falls_through,
+    "enum Dir { Fwd, Bak }
+     fn retry() -> int! { raise 42 }",
+    "retry() absolve |e| match e { Dir::Fwd => -1, Dir::Bak => 1, _ => 0 }" => Int(0),
+);
+
+test_vm!(
+    absolve_match_literal_probe,
+    "enum Dir { Fwd, Bak }
+     fn die() -> int! { raise 42 }
+     fn err() -> int! { raise \"nope\" }
+     fn flo() -> int! { raise Dir::Fwd }",
+    "die() absolve |e| match e { 42 => 1, 7 => 2, _ => 0 }" => Int(1),
+    "err() absolve |e| match e { 42 => 1, 7 => 2, _ => 0 }" => Int(0),
+    // an int payload must not fall into a variant arm even when its value
+    // collides with the variant's layout tag (any-scrutinee matches never
+    // take the `switch` jump table — the two tag spaces overlap)
+    "flo() absolve |e| match e { 5 => 9, Dir::Fwd => 1, _ => 0 }" => Int(1),
+    "die() absolve |e| match e { 5 => 9, Dir::Fwd => 1, _ => 0 }" => Int(0),
+);
+
+test_vm!(
+    absolve_match_variant_fields,
+    "enum Err { Fatal { code: int }, Soft }
+     fn die() -> int! { raise Err::Fatal { code = 7 } }",
+    // a passed probe proves the variant, so `code` binds `int` for real
+    "die() absolve |e| match e { Err::Fatal { code } => code, _ => 0 }" => Int(7),
+    "die() absolve |e| match e { Err::Soft => -1, _ => 0 }" => Int(0),
+);
+
+test_vm!(
+    absolve_match_generic_variant_binds_any,
+    "enum Wrap<T> { Full(T), Empty }
+     fn die() -> str! { raise Wrap::Full(3) }",
+    // `x` is `any` — the probe proves `Full`, not `T` — but binding works
+    "die() absolve |e| match e { Wrap::Full(x) => f\"{x}\", _ => \"empty\" }" => str!("3"),
+);
+
+test_vm!(
+    absolve_match_nullbind_probe,
+    "fn die() -> int! { raise 42 }
+     fn none() -> int! { raise null }",
+    "die() absolve |e| match e { x? => 1, _ => 0 }" => Int(1),
+    "none() absolve |e| match e { x? => 1, _ => 0 }" => Int(0),
+);
+
+test_vm!(
+    absolve_match_or_pattern,
+    "enum Dir { Fwd, Bak }
+     fn retry() -> int! { raise Dir::Fwd }",
+    "retry() absolve |e| match e { Dir::Fwd | 7 => -1, _ => 0 }" => Int(-1),
+);
+
+// `any` is quarantined: it can't be used where a concrete type is expected.
+// `match` (or formatting) is the way back to a real type.
+test_fail!(
+    absolve_any_is_quarantined,
+    "fn retry() -> int! { raise 7 }\nretry() absolve |e| e + 1;",
+    "fn retry() -> int! { raise 7 }\nretry() absolve |e| e;",
+    "fn retry() -> int! { raise 7 }\nlet n: int = retry() absolve |e| e;",
+);
+
+test_fail!(
+    absolve_match_requires_catchall,
+    "enum Dir { Fwd, Bak }
+     fn retry() -> int! { raise Dir::Fwd }
+     retry() absolve |e| match e { Dir::Fwd => -1, Dir::Bak => 1 };",
+);
+
+test_fail!(
+    unwrap_raised_int_errors,
+    "fn foo() -> int! { raise 42 }\nlet TEST_VALUE = foo()!;"
+);
+
+test_fail!(
+    unwrap_raised_list_errors,
+    "fn foo() -> int! { raise [1, 2] }\nlet TEST_VALUE = foo()!;"
+);
+
+// a raised structured payload survives the heap snapshot intact — the
+// `SnapVal` tree recurses through the payload like any other value.
+#[test]
+fn raised_payload_survives_snapshot() {
+    let source = r#"
+fn die() -> int! { raise [1, 2] }
+let held = die();
+let TEST_VALUE = 0;
+"#;
+    let mut vm = Vm::execute(source, |_| {}).expect("compiled and ran");
+    let snap = vm.snapshot().expect("snapshot");
+    vm.restore(&snap).expect("restore");
+    assert_eq!(
+        vm.resolve_name("held"),
+        Some(Raised(Box::new(array!(Int(1), Int(2))))),
+    );
+}

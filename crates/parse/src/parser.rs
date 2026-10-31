@@ -9,6 +9,8 @@ use miette::NamedSource;
 use shared::{FileId, Located, Location, Span, units::Dim};
 use std::{cell::Cell, sync::Arc};
 
+mod datalog;
+
 /// Recursively descends mimas source, incrementally returning various
 /// statements and expressions.
 /// What `x y` — an expression followed by an atom on the same line —
@@ -77,6 +79,9 @@ pub struct Parser<'s> {
     /// The source's per-page shadow table (`Lexer::shadow_table`) — an
     /// f-string interpolation sublexer takes its page's set.
     shadow: Vec<(usize, [bool; 3])>,
+    /// Top-level statements a declaration synthesized alongside itself
+    /// (`opp`'s `impl Opp`), emitted right after it.
+    pending: Vec<Stmt>,
 }
 
 // Basic features
@@ -153,6 +158,7 @@ impl<'s> Parser<'s> {
             last_error: None,
             cut_short: lexer.cut_short(),
             shadow: lexer.shadow_table().to_vec(),
+            pending: Vec::new(),
             file_id: lexer.file_id(),
             file_name: lexer.file_name().into(),
             src,
@@ -175,6 +181,7 @@ impl<'s> Parser<'s> {
         while !self.at(TokKind::Eof) {
             if self.peek().starts_stmt() {
                 statements.push(self.stmt());
+                statements.append(&mut self.pending);
             } else {
                 self.reject_stmt(self.unexpected_token());
             }
@@ -367,6 +374,11 @@ impl<'s> Parser<'s> {
             TokKind::Ident("unit") if self.unit_intro() => {
                 BlockElement::Stmt(self.unit_stmt(start))
             }
+            // `opp Sky { Sun, Moon }` declares a dichotomy. Contextual: `opp`
+            // is a name anywhere a type name and `{` don't follow it.
+            TokKind::Ident("opp") if self.opp_intro() => BlockElement::Stmt(self.opp_stmt(start)),
+            // `space Politics { econ: Dial, power: Dial }` -- axes taken together
+            TokKind::Ident("space") if self.opp_intro() => BlockElement::Stmt(self.space_stmt(start)),
             kind if kind.starts_item() => {
                 let item = self.item();
                 self.end_item(&item);
@@ -1110,6 +1122,19 @@ impl<'s> Parser<'s> {
         let head = self.require_ident();
         let type_params = self.type_params();
         let members = if self.expect(TokKind::LeftBrace) {
+            self.enum_members()
+        } else {
+            vec![]
+        };
+        Enum {
+            head,
+            type_params,
+            members,
+        }
+    }
+
+    /// An enum's `{ … }` members, after the `{`.
+    fn enum_members(&mut self) -> Vec<(Ident, Member)> {
             self.list(TokKind::RightBrace, TokKind::is_ident, |p| {
                 let name = p.require_ident();
                 let member = if p.eat(TokKind::LeftParenthesis) {
@@ -1130,14 +1155,225 @@ impl<'s> Parser<'s> {
                 };
                 (name, member)
             })
+    }
+
+    /// `opp Name {` — a type name and a brace after the word.
+    fn opp_intro(&self) -> bool {
+        matches!(self.nth(1), TokKind::Ident(_)) && matches!(self.nth(2), TokKind::LeftBrace)
+    }
+
+    /// `opp Sky { Sun, Moon }` — a dichotomy, as basic as an enum: two ends
+    /// and a flip. It is the enum of its two ends plus a synthesized `impl
+    /// Opp for Sky` (the pact every program has) whose `inv` swaps
+    /// them, so `!Sky::Sun == Sky::Moon` and `involutive`-style code over
+    /// `Opp` takes it. `bool` is the first opp. Top-level only.
+    // r[impl mimas.opp.decl]
+    fn opp_stmt(&mut self, start: usize) -> Stmt {
+        let kw = self.advance(); // `opp`
+        if self.depth > 0 {
+            self.error(Misdirection {
+                src: self.src(),
+                at: Location::from(kw.location()).into(),
+                msg: "`opp` decls are top-level only".into(),
+                label: "declare the pair at the top of the file".into(),
+            });
+        }
+        let head = self.require_ident();
+        let members = if self.expect(TokKind::LeftBrace) {
+            self.enum_members()
         } else {
             vec![]
         };
-        Enum {
-            head,
-            type_params,
-            members,
+        let pair = members.len() == 2
+            && members
+                .iter()
+                .all(|(_, m)| matches!(m, Member::Struct(fields) if fields.is_empty()));
+        if !pair {
+            self.error(Misdirection {
+                src: self.src(),
+                at: self.location(start).into(),
+                msg: "an `opp` has exactly two ends".into(),
+                label: "two plain names, opposite each other: `opp Sky { Sun, Moon }`".into(),
+            });
         }
+        if pair && self.depth == 0 {
+            let imp = self.opp_impl(&head, &members[0].0, &members[1].0, start);
+            self.pending.push(imp);
+        }
+        let item = Item::new(
+            Enum {
+                head,
+                type_params: vec![],
+                members,
+            }
+            .into(),
+            self.location(start),
+            false,
+        );
+        self.new_stmt(item, start)
+    }
+
+    /// `impl Opp for T { fn inv(self) -> T { match self { T::A => T::B,
+    /// T::B => T::A } } }`, every node located at the `opp` declaration.
+    fn opp_impl(&self, head: &Ident, a: &Ident, b: &Ident, start: usize) -> Stmt {
+        let at = self.location(start);
+        let id = |name: &str| Ident::new(name, at);
+        let case = |from: &Ident, to: &Ident| {
+            MatchCase::new(
+                Pat::new(PatKind::Variant(Box::new(self.opp_path(head, from, start))), at),
+                None,
+                self.opp_path(head, to, start),
+            )
+        };
+        let flip = Match::new(
+            self.new_expr(id("self"), start),
+            vec![case(a, b), case(b, a)],
+            false,
+        );
+        let body = self.new_expr(
+            Block {
+                body: vec![],
+                yielded_expr: Some(self.new_expr(flip, start)),
+            },
+            start,
+        );
+        let inv = Function {
+            name: id("inv"),
+            type_params: vec![],
+            parameters: vec![Binding::new(id("self"))],
+            wheres: vec![],
+            return_type: Some(Annotation::Ty(id(&head.lexeme))),
+            body,
+        };
+        let imp = Impl::new(
+            id(&head.lexeme),
+            Some(id("Opp")),
+            vec![Item::new(inv.into(), at, false)],
+        );
+        self.new_stmt(Item::new(imp.into(), at, false), start)
+    }
+
+    /// `space Politics { econ: Dial, power: Dial }` -- axes taken together. It is
+    /// the struct of its fields plus a synthesized `impl Opp` that flips every
+    /// field (`Politics { econ = self.econ.inv(), … }`), so a space is an axis
+    /// itself and spaces nest. The struct carries `#[space]`: the solver checks
+    /// every field is an axis -- a type implementing `Opp`: an opp, `bool`, a
+    /// number (flip is negation), a `Dial`, another space. Top-level only.
+    // r[impl mimas.space.decl]
+    fn space_stmt(&mut self, start: usize) -> Stmt {
+        let kw = self.advance(); // `space`
+        if self.depth > 0 {
+            self.error(Misdirection {
+                src: self.src(),
+                at: Location::from(kw.location()).into(),
+                msg: "`space` decls are top-level only".into(),
+                label: "declare the space at the top of the file".into(),
+            });
+        }
+        let name = self.require_ident();
+        let fields = if self.expect(TokKind::LeftBrace) {
+            self.list(
+                TokKind::RightBrace,
+                |kind| kind == TokKind::Pub || kind.is_ident(),
+                Self::named_field,
+            )
+        } else {
+            vec![]
+        };
+        if fields.is_empty() {
+            self.error(Misdirection {
+                src: self.src(),
+                at: self.location(start).into(),
+                msg: "a `space` needs at least one axis".into(),
+                label: "name its axes: `space Compass { ns: Dial, ew: Dial }`".into(),
+            });
+        } else if self.depth == 0 {
+            let imp = self.space_impl(&name, &fields, start);
+            self.pending.push(imp);
+        }
+        let at = self.location(start);
+        let item = Item::new(
+            Struct {
+                name: name.clone(),
+                type_params: vec![],
+                fields,
+            }
+            .into(),
+            at,
+            false,
+        )
+        .with_attrs(vec![Attribute {
+            name: Ident::new("space", at),
+        }]);
+        self.new_stmt(item, start)
+    }
+
+    /// `impl Opp for S { fn inv(self) -> S { S { f = self.f.inv(), … } } }`, every
+    /// node located at the `space` declaration.
+    fn space_impl(&self, name: &Ident, fields: &[StructField], start: usize) -> Stmt {
+        let at = self.location(start);
+        let id = |n: &str| Ident::new(n, at);
+        let dot = |left: Expr, right: &str| {
+            self.new_expr(
+                Access::Dot {
+                    left,
+                    right: self.new_expr(id(right), start),
+                    kind: AccessKind::Direct,
+                },
+                start,
+            )
+        };
+        let flipped: Vec<(FieldKey, Expr)> = fields
+            .iter()
+            .filter_map(|f| match &f.name {
+                FieldKey::Ident(field) => {
+                    let value = dot(self.new_expr(id("self"), start), &field.lexeme);
+                    let call = self.new_expr(Call::new(dot(value, "inv"), vec![]), start);
+                    Some((FieldKey::Ident(id(&field.lexeme)), call))
+                }
+                FieldKey::Int(_) => None,
+            })
+            .collect();
+        let literal = self.new_expr(
+            Literal::Struct(StructLiteral {
+                name: self.new_expr(id(&name.lexeme), start),
+                fields: flipped,
+            }),
+            start,
+        );
+        let body = self.new_expr(
+            Block {
+                body: vec![],
+                yielded_expr: Some(literal),
+            },
+            start,
+        );
+        let inv = Function {
+            name: id("inv"),
+            type_params: vec![],
+            parameters: vec![Binding::new(id("self"))],
+            wheres: vec![],
+            return_type: Some(Annotation::Ty(id(&name.lexeme))),
+            body,
+        };
+        let imp = Impl::new(
+            id(&name.lexeme),
+            Some(id("Opp")),
+            vec![Item::new(inv.into(), at, false)],
+        );
+        self.new_stmt(Item::new(imp.into(), at, false), start)
+    }
+
+    /// `T::V` as an expression, located at `start`'s declaration.
+    fn opp_path(&self, head: &Ident, member: &Ident, start: usize) -> Expr {
+        let at = self.location(start);
+        self.new_expr(
+            Access::DoubleColon {
+                left: self.new_expr(Ident::new(head.lexeme.clone(), at), start),
+                right: Ident::new(member.lexeme.clone(), at),
+            },
+            start,
+        )
     }
 
     fn impl_decl(&mut self) -> Impl {
@@ -1150,7 +1386,15 @@ impl<'s> Parser<'s> {
         // `impl Foo {}` (inherent) vs `impl Pact for Foo {}` (pact impl). After the first ident,
         // a `for` token disambiguates -- first becomes the pact, second becomes the target.
         let (pact, target) = if self.eat(TokKind::For) {
-            let target = self.require_ident();
+            // a pact may be implemented for a primitive (`impl Opp for bool`)
+            let target = match self.peek() {
+                TokKind::TyKw(ty) => {
+                    let at = self.next_location();
+                    self.advance();
+                    Ident::new(ty.to_string(), at)
+                }
+                _ => self.require_ident(),
+            };
             let generics = self.type_params();
             self.reject_type_params(&generics);
             (Some(first), target)
@@ -1906,6 +2150,12 @@ impl<'s> Parser<'s> {
         {
             let expr = self.query_literal();
             self.chain_accesses(expr)
+        } else if self.struct_literals
+            && self.peek() == TokKind::Ident("datalog")
+            && self.nth(1) == TokKind::LeftBrace
+        {
+            let expr = self.datalog_literal();
+            self.chain_accesses(expr)
         } else if self.at(TokKind::Dollar) {
             // `$expr` — a `query { }` splice: `expr` is a value from the
             // surrounding scope, not a column. Emitted as `__q_splice(expr)`;
@@ -2448,11 +2698,23 @@ impl<'s> Parser<'s> {
                 TokKind::LeftSquare | TokKind::HookLeftSquare => self.square_access(expr),
                 TokKind::DoubleColon => self.colon_access(expr),
                 TokKind::Dot | TokKind::HookDot => self.dot_access(expr),
-                TokKind::Bang if expr.as_ident().is_some_and(|i| i.lexeme == "assert") => {
+                // postfix `!` hugs its operand like `x%` — a spaced `!`
+                // is *not* an unwrap, it's the next thing: `[!a !b]` is
+                // `[!a, !b]` (the `!` starts a fresh element), and
+                // `f !x` errors at the statement boundary rather than
+                // silently meaning `(f!)(x)`. The `x !`-reads-unwrap
+                // spelling is `x!`.
+                TokKind::Bang
+                    if self.cursor() == self.next_start()
+                        && expr.as_ident().is_some_and(|i| i.lexeme == "assert") =>
+                {
                     self.assert_or_unwrap(expr)
                 }
-                TokKind::Bang => self.unwrap(expr),
-                TokKind::Hook => self.demote(expr),
+                TokKind::Bang if self.cursor() == self.next_start() => self.unwrap(expr),
+                // `?` hugs like `!`: `x?` demotes, a spaced `?` starts
+                // nothing (`?` opens no expression), so `f ?x` errors
+                // rather than silently reading `(f?)(x)`.
+                TokKind::Hook if self.cursor() == self.next_start() => self.demote(expr),
                 // `x%` hugs its operand and spells percent -- `50%` is `50 * 0.01`, the
                 // `pct` unit by another name. A spaced `%` is neither postfix nor modulo
                 // (`a mod b`); `binary` reports it. While a `±` tolerance parses the
@@ -3892,10 +4154,16 @@ impl BinaryOp {
         if matches!(kind, TokKind::In | TokKind::NotIn) {
             return Some((Self::In(kind == TokKind::In), 3));
         }
-        // `a xor b` — the word spelling of `⊕`, contextual like `mod`:
-        // an ordinary name everywhere else.
-        if matches!(kind, TokKind::Ident("xor")) {
-            return Some((Self::Eval(EvaluationOp::Xor), 4));
+        // `a xor b` — the word spellings of `⊕`/`⍲`/`⍱`, contextual like
+        // `mod`: ordinary names everywhere else.
+        let word_op = match kind {
+            TokKind::Ident("xor") => Some(EvaluationOp::Xor),
+            TokKind::Ident("nand") => Some(EvaluationOp::Nand),
+            TokKind::Ident("nor") => Some(EvaluationOp::Nor),
+            _ => None,
+        };
+        if let Some(op) = word_op {
+            return Some((Self::Eval(op), 4));
         }
         let op = EvaluationOp::try_from(kind).ok()?;
         let power = if op.is_binary() {

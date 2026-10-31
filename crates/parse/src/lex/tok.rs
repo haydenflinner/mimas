@@ -90,6 +90,10 @@ pub enum TokKind<'s> {
     CircledPlus,
     /// `⊕=` (also `⊻=`).
     CircledPlusEqual,
+    /// `⍲` — nand, the APL glyph; the word `nand` spells the same op.
+    Nand,
+    /// `⍱` — nor; the word `nor` spells the same op.
+    Nor,
     Tilde,
     Dollar,
     DoubleLeftCaret,
@@ -198,6 +202,8 @@ impl Display for TokKind<'_> {
             TokKind::CaretEqual => "^=",
             TokKind::CircledPlus => "⊕",
             TokKind::CircledPlusEqual => "⊕=",
+            TokKind::Nand => "⍲",
+            TokKind::Nor => "⍱",
             TokKind::Tilde => "~",
             TokKind::Dollar => "$",
             TokKind::DoubleLeftCaret => "<<",
@@ -413,5 +419,8 @@ impl TokKind<'_> {
 /// argument. (`and`/`or`/`not` aren't names at all: they lex as the
 /// `&&`/`||`/prefix-`!` operators — see the lexer's keyword table.)
 pub(crate) fn is_operator_word(name: &str) -> bool {
-    matches!(name, "mod" | "xor" | "as" | "is" | "elif")
+    matches!(
+        name,
+        "mod" | "xor" | "nand" | "nor" | "as" | "is" | "elif"
+    )
 }

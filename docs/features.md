@@ -2,6 +2,161 @@
 
 Memorable additions to mimas beyond what the changelog tracks — newest first.
 
+## `raise` carries any value
+
+`raise` used to take only `str` — `Val::Raised` stored the note directly,
+and the solver rejected `raise 42`. Now the payload is any `Val`, boxed
+as `Raised(Gc<Val>)` so a `Val` never holds a `Val` inline: `raise 42`,
+`raise [1, 2]`, `raise ~{code = 7}` all work, and a raised value can even
+carry another raised value (`raise inner()` nests to `<raised 7>`).
+
+The point is *when* the text appears: the payload stays structured
+through `Flow::Return`, `is_raised`, `?` demotion, binding, and the
+snapshot/inspect/capture surfaces, and only stringifies at the cold
+boundaries that need a `str`:
+
+- `x!` and `()`-unwraps still fault `UnwrappedRaised(String)` — the
+  display render happens on the fault path, where it's already cold.
+- `absolve`'s handler is `(any) -> T`: `e` binds the payload itself, not
+  a stringified note — `f"{e}"` formats on use, and `match` narrows it
+  with runtime probes.
+- `Raisable<T>` keeps its `String` variant — native authors see no API
+  change; a raised payload crossing `from_value` renders (or reads
+  `<unprintable raise payload>`), and `into_value` wraps the message
+  `Str` in the structured payload.
+- `Captured::Raised`/`Inspect::Raised`/`SnapVal::Raised` all hold the
+  payload recursively (`Box<…>`), so the web host's `inspect_json` hands
+  JS a nested `{"$raised": …}` document — richer raise/resume context
+  without a flattening pass.
+
+Cycle protection rides along: the payload `Gc` joins the render path's
+pointer guard, capture/inspect `seen` sets, and snapshot node walk, so
+`raise` on a cyclic structure errors deep instead of recursing forever.
+
+The wasm backend needed nothing — `Val::Raised` there is already
+`tag|word` with the payload as a raw word. The JIT/bcgen helpers grew a
+`Ctx` arg only where cold-stringify lives (`unwrap`, `unwrap_unit`,
+`raise`); `unwrap_raised` still just moves the payload.
+
+Tests: `optionals.rs` — structured payloads (`int`/`[int]`/`dict`),
+`absolve`/`?`/`!` boundaries, nested raise, snapshot roundtrip;
+`solve_results.rs` — `raise` on non-`str` solves to `T!`.
+
+## `absolve`'s `e` is `any` — `match` narrows the payload
+
+`raise` carries any value, so `absolve`'s handler parameter is the
+dynamic type `any` rather than a pre-stringified `str`. `T` fulfills
+`any`; `any` fulfills only `any` — it stays quarantined until narrowed,
+which is what `match` is for:
+
+```mimas
+enum Flow { Push, Pull }
+fn retry() -> int! { raise Flow::Push }
+
+retry() absolve |e| {
+    match e {
+        Flow::Push => -1,
+        Flow::Pull => 1,
+        _ => 0,      // required — the payload could be anything
+    }
+}
+```
+
+- **Variant/struct/tuple-variant arms are runtime probes**: the pattern
+  resolves the variant as usual and emits `is_instance`, but skips the
+  scrutinee unify — the probe proves the variant, never claims `e` is
+  one. Struct-variant fields bind with the variant's *declared* member
+  types (`Err::Fatal { code }` gives `code: int`); a generic variant's
+  params stay `any` (`Wrap::Full(x)` gives `x: any` — the probe proves
+  `Full`, not `T`).
+- **Literal arms are structural-eq probes** (`42`, `"x"`, `null`); `x?`
+  is a non-null probe binding `x: any`. A `match` over `any` requires a
+  `_` arm — the payload could be anything — and `match … !` still
+  panics on a miss.
+- **Quarantine**: `e + 1`, `e.field`, `|e| e` into a concrete return
+  type, and `let n: int = e` all fail — format (`f"{e}"`), match, or
+  pass it somewhere expecting `any`.
+- `==`/`!=` on `any` is allowed (structural eq is total at runtime), so
+  `e == Order::Desc` works without a `match`.
+- Any-scrutinee matches always take the linear probe chain, never the
+  `switch` jump table — `switch` indexes `Val::Int` payloads and
+  instance struct ids into the same table, and on `any` the two tag
+  spaces can collide.
+- The emit is the cold-path design carried through: `absolve` no longer
+  emits a `Format` — the handler gets the raw payload and picks what to
+  do with it. Handler closures are single-use call-site literals, so
+  inlining one is a syntactic fact, not an analysis problem.
+
+## Z-set `+`/`-` on sequences + the glued-postfix rule
+
+`xs + x` appends one `x`, `xs - x` drops the first `==` match, `xs + ys`
+unions (concat), `xs - ys` removes each `y` in turn, and `xs += x` /
+`xs -= x` / `xs += ys` / `xs -= ys` come with them. This is the
+weight-±1 surface of the algebra `Change` already carries weighted —
+`xs + add(3)` and `xs + 3` now agree — and it replaces nothing anyone
+could write: `[T] ± T`/`[T] ± [T]` were type errors before (the VM's
+sequence broadcast arms were unreachable from solved code; `*`/`/`
+keep theirs).
+
+Two pieces worth knowing:
+
+- The point/extent choice is *type-directed*, resolved the same way an
+  `impl` would: `add`/`sub` are element-shaped natives, `union`/`minus`
+  are list-shaped ones, and `xs + ys` falls through `add`'s element
+  slot to `union` — so `[[1]] + [2]` appends `[2]` (it *is* a valid
+  element), while `[[1]] + [[2]]` concats. `op_dispatch` now treats an
+  arg that doesn't fit a candidate as "keep looking" instead of an
+  error, which is also what lets `xs + c` still reach `c.radd(xs)`.
+- `xs - x` is a quiet no-op when `x` isn't there — arrays can't hold
+  the negative multiplicities a `~{int}` Z-set can (`xs - xs` empties).
+  `[T; n]` places refuse `±=` like `push` does.
+
+Postfix `!` now hugs its operand like `x%`: `x!` unwraps, but a *spaced*
+`!` starts the next thing — `[!a !b]` is `[!a, !b]` (the parse everyone
+meant), and `f !x` errors at the statement boundary rather than
+silently meaning `(f!)(x)`. Same rule Zig calls partial precedence:
+adjacency with two readings gets neither. `?` demote follows the same
+rule — `x?` needs the hug too, so `f ?x` errors rather than reading
+`(f?)(x)` (a spaced `?` opens nothing, so there's no second element
+to win; the win is purely that the silent misread is gone).
+
+Tests: `zset.rs` — arithmetic, `±=` forms, element/list-type rejection,
+the `[T; n]` guard, and the spaced-`!`/`?` parses both ways.
+
+## `nand`/`nor` — the gate operators, word or glyph
+
+`a nand b` and `a ⍲ b` spell the same op; `a nor b`/`a ⍱ b` likewise
+(the APL glyphs are canonical — the AST prints `⍲`/`⍱` as it does `⊕`).
+They sit with `&`/`|`/`⊕` in the bit/gate family: on bools they're the
+*eager* forms — `!(a && b)`/`!(a || b)` with both operands always
+evaluated, the parallel read where `&&`/`||` are the serial walk that
+may skip the tail — and on ints they run per bit-lane, `~(a & b)`/
+`~(a | b)`, a 64-wide gate array just as `&` is a 64-wide read.
+
+What makes them load-bearing rather than trivia: `nand`/`nor` are each
+functionally complete bases, and the choice between them is real —
+`nand` is the existential gate (`¬∀`, any low input settles it — the
+parallel-deciding shape, and in silicon literally a *parallel* pull-up
+pair), `nor` the universal (`¬∃`, every input must report — the serial
+one). `host/web/games/logic-kit.mimas` writes the whole story as `check`
+lines: the lazy/eager witness (a `log` counting operand reads),
+`nand = ¬all`/`nor = ¬any` over `[bool]`, `dual(f) = λ¬f(¬a,¬b)` as a
+higher-order fn (`dual(nand) = nor`, `dual(xor) = xnor`), sheffer
+completeness built from both bases, a Kleene three-valued `Tri`
+overloading the whole family, and the `span`/`points` fencepost split
+(half-open `a..b` holds `span(a,b)` points — Dijkstra's rule, the +1
+only appears when the extent is closed).
+
+Dispatch: `nand`/`nor` are the first operator words that also name
+methods — `mod`/`xor`/`and`/`or`/`not` are keywords or reserved infix
+spellings, but `fn nand` stays an ordinary declaration (contextual like
+`xor`), so `a.nand(b)` and `a nand b` are the same call. Overload names
+are `nand`/`rnand` and `nor`/`rnor`.
+
+Tests: `operators.rs` `nand_nor_builtin_gates` /
+`nand_nor_dispatch_to_impl_methods`; the kit's 13 `check` lines run in
+`logic_kit::logic_kit_check_lines_all_pass`.
+
 ## Operator overloading — operators resolve to ordinary methods
 
 `a + b` is a method call: the left operand's type is asked for `add`, and
@@ -73,6 +228,112 @@ Tests: `parse_validity::a_declared_fn_takes_back_an_operator_word`,
 `shadowing_an_operator_word_warns_with_a_code`,
 `a_kits_shadowing_reaches_the_page_that_uses_it`),
 `parse_validity::a_spliced_source_shadows_per_page`.
+
+## `space` — axes taken together
+
+`space Politics { econ: Hand, power: Grip }` declares a struct whose
+fields are all axes, plus a synthesized `impl Opp` that flips every field
+(`Politics { econ = self.econ.inv(), … }`) — so `!p` is the opposite
+point, a space is an axis itself, and spaces nest. An axis is any type
+implementing `Opp`: an `opp`, `bool`, a number (`impl Opp for int` /
+`float` in the built-in source: the flip is negation, so `px` and other
+quantities count), a `Dial`, another space. A field without a flip gets a
+targeted error at the field ("`name: str` isn't an axis, so it can't be
+part of `space S`"). Numbers serve static flips only — a space calls its
+fields' `inv` directly — and don't travel as `Opp`-typed values, since a
+pact-typed call tests the value's kind at runtime and a number has no
+test (`involutive(3.0)` is a type error). Tests:
+`space_flips_every_axis`, `space_fields_must_be_axes`.
+
+## `datalog { … }` — Ascent's language, run in mimas
+
+A `datalog` block declares relations, facts and rules, evaluates them to a
+fixpoint, and yields the relations in declaration order (a tuple of arrays
+of tuples):
+
+```
+let (edge_, path_) = datalog {
+    relation edge(int, int) from pairs          // or `rel edge(a: int, b: int)`
+    relation path(int, int)
+    path(x, y) <-- edge(x, y)                    // or `if`
+    path(x, z) <-- edge(x, y), path(y, z)
+};
+```
+
+The language follows Ascent (the Rust Datalog crate) but runs in mimas,
+so rules can call the page's own functions and it works in the browser.
+A body holds atoms, conditions (`if cond` or bare), `let x = e`, `for x in
+e`, negation `!rel(args)` / `not rel(args)` (every variable bound to its
+left), and aggregates `agg x = f(e) in rel(args)` — `count()`, `sum`,
+`min`, `max`, `mean` (over no tuples only `count` derives). Rules are
+stratified the way Ascent's are: a head sits at least as high as every
+relation it reads and strictly higher than one it negates or aggregates,
+so that relation is complete when asked; depending on your own negation or
+aggregate is an error. Each stratum runs semi-naively to its own
+fixpoint.
+
+The parser lowers a block to plain mimas (`parse::parser::datalog`): one
+array per relation, a hash-bucketed dedup index, a `loop` per stratum
+whose rounds only revisit combinations touching last round's delta. No new
+runtime. Not yet: lattices, `if let`, several heads per rule. Tests:
+`library/tests/datalog.rs` (closure, seeds, filters, the carp-kit and
+learned lessons, Ascent spelling, negation, aggregates, errors).
+
+## `opp` — a dichotomy, as basic as an enum
+
+`opp Sky { Sun, Moon }` declares a type with exactly two ends, each the
+other's opposite: the enum of its two ends plus a synthesized `impl Opp
+for Sky` (built by the parser, every node located at the declaration)
+whose `inv` swaps them. So `!Sky::Sun == Sky::Moon`, `not` spells the
+same flip, and `fn involutive(x: Opp) -> bool { !(!x) == x }` takes any
+opp — `!` dispatches through the pact at runtime. Anything but two plain
+names is an error ("an `opp` has exactly two ends"); `opp` stays an
+ordinary name wherever a type name and `{` don't follow it.
+
+Every program has a small built-in source (`solve::BUILTIN_SRC`,
+appended last by `load_files` so user files keep their ids): the `Opp`
+pact itself and the pairs pages kept spelling as bools or ±1 —
+`Sign { Pos, Neg }`, `Size { Big, Small }`, `Shade { Light, Dark }`,
+`Daytime { Day, Night }`, `Flow { Push, Pull }`, `Fill { Full, Empty }`, `Order { Asc, Desc }` (a
+sort's direction — std and pages take it instead of an `asc: bool`),
+`Compare { Less, Greater }`, `Side { Start, End }`. Alternative spellings
+are associated consts — `Order::Increasing`/`Decreasing`,
+`Compare::Smaller`/`Bigger` — so `!Order::Increasing ==
+Order::Decreasing`. The core source (`solve/src/builtin.mim`) is
+declarations only; std's operations on the opps ship with std as mimas
+source (`library/src/opp.mim`, via the new `Library::add_source`), on
+the opps themselves so they add no global names: `Order::Desc.rank(keys)`
+(indices, Desc the exact reverse of a stable Asc — `xs.reorder(...)`
+sorts by key), `Side::End.pad(xs, n, fill)` (extend any list — the
+zero-extend case) and `Side::Start.justify(s, width)` (align text). A host asking a variant's value for a
+method (the debugger's `draw`, Nina's switch calling `inv`) finds the
+enum's impl: the host-facing method table registers an enum's methods
+under each variant's runtime id too. Each
+mirrors: `(!o).rank(k) == rev(o.rank(k))`, `(!Side::End).pad(xs, n, f) ==
+rev(Side::End.pad(rev(xs), n, f))` (`builtin_opp_operations_mirror`).
+Built-in and library sources solve first (their impls' consts are typed
+before user code reads them) while keeping file ids after the user's.
+
+A field-less variant is a constant: `const ME = Team::Blue;` and
+`const BOTH = [Team::Blue, Team::Red]` (built at each use, like struct
+consts); a tuple variant's constructor is still not a value
+(`unit_variant_consts`, `solve_variables::const_tuple_variant_ctor`). `bool` is the first opp
+in spirit; `impl Opp for bool` waits on pact impls for primitive types.
+A unit variant now prints as its bare name (`Sky::Moon`, not
+`Sky::Moon {  }`). Tests: `parse_validity::opp_is_an_enum_and_its_flip`,
+`library/tests/structs.rs` (`opp_declares_a_dichotomy`,
+`unary_operator_through_a_pact`).
+
+**`bool` is an opp.** The built-in source has `impl Opp for bool` (`inv` is
+`!self`), so a bool goes wherever an `Opp` is expected — `involutive(true)`
+— through the same runtime dispatch as an enum (a bool arm tests the value
+with `x == true || x == false`; there's no instance id to test). A pact
+may now be implemented for a primitive (`impl P for bool`; `bool` only for
+now), `Self` inside is the primitive, and a primitive satisfies a pact its
+library adt implements. A primitive's operators stay built in — `!b` is
+never dispatched to `inv` (which is `!self`, so it couldn't recurse) —
+and the same holds for every operator on `int`/`float`/`str`/`bool`
+(`bool_is_an_opp`).
 
 ## `check (expr)` opens a check
 
@@ -276,7 +537,15 @@ no editing existing workbooks). Behind the default-on `xlsx` feature on
 - Deferred: in-place workbook editing → `umya-spreadsheet` if the need ever
   shows up. SheetJS and the C `xlsxwriter` bindings were ruled out.
 
-## Cranelift JIT tier — `mimas-jit` (branch `jit-cranelift`)
+## Cranelift JIT tier — `mimas-jit`
+
+Restored in-tree (2026-10-31) alongside `mimas-bcgen`/`mimas-bcgen-test`, and
+ported to the `*const BodyEnv` `BodyFn` ABI: emitted bodies take the single
+env pointer and load `thread`/`code`/`mutation`/`state`/`strs`/`fuel`/`op_ip`/
+`out` fields via `offset_of!` at entry; `call_body`/`call_dyn` and inline
+`CallDirect` calls forward `env` verbatim instead of ten flat params.
+(`mimas-llvm`'s `llvm-jit` MCJIT lane is intentionally not merged — LLVM's
+compile latency made it the wrong tier; pure-Rust lanes only.)
 
 Second Futamura projection: `jit::compile(&program)` emits one native function
 per bytecode chunk with Cranelift (`FunctionBuilder`, dense op dispatch through

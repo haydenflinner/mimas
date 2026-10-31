@@ -212,6 +212,8 @@ fn evaluate(
             And => Some(Int(a & b)),
             Or => Some(Int(a | b)),
             Xor => Some(Int(a ^ b)),
+            Nand => Some(Int(!(a & b))),
+            Nor => Some(Int(!(a | b))),
             BitShiftLeft => Some(Int(a.wrapping_shl(
                 b.try_into()
                     .map_err(|_| ReduceError::InvalidShift(location))?,

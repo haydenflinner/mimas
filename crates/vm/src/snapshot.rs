@@ -49,7 +49,9 @@ pub enum SnapVal {
     /// Strings travel by content and re-intern on restore — `Str` equality is content-wise,
     /// so identity needn't survive (and can't: the interner dedupes).
     Str(SharedStr),
-    Raised(SharedStr),
+    /// `raise` payloads travel whole — a raised dict snapshots as its
+    /// node, not its display text.
+    Raised(Box<SnapVal>),
     Node(u32),
 }
 
@@ -155,7 +157,7 @@ impl<'gc> Snapper<'gc> {
             Val::Float(f) => SnapVal::Float(f),
             Val::Fn(b) => SnapVal::Fn(b.into()),
             Val::Str(s) => SnapVal::Str(Gc::as_ref(s.0).clone()),
-            Val::Raised(s) => SnapVal::Raised(Gc::as_ref(s.0).clone()),
+            Val::Raised(s) => SnapVal::Raised(Box::new(self.val(*s)?)),
             Val::Array(a) => self.node(Gc::as_ptr(a.0) as *const (), v),
             // A demoted typed array snaps as the *inner* `Array`'s node —
             // keyed on the inner `Gc` — so a `Val::Array` handle a native
@@ -273,7 +275,7 @@ impl<'gc> Thaw<'gc, '_> {
             SnapVal::Float(f) => Val::Float(*f),
             SnapVal::Fn(b) => Val::Fn(BodyId::from(*b)),
             SnapVal::Str(s) => Val::Str(self.ctx.intern(s)),
-            SnapVal::Raised(s) => Val::Raised(self.ctx.intern(s)),
+            SnapVal::Raised(s) => Val::Raised(Gc::new(self.ctx.mutation(), self.thaw(s)?)),
             SnapVal::Node(i) => match self.resolved[*i as usize] {
                 Some(v) => v,
                 None => self.thaw_closure(*i)?,

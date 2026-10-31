@@ -1,0 +1,15 @@
+[package]
+name = "mimas-bcgen"
+version = "0.2.0"
+edition = "2024"
+description = "Futamura-1 specialization of the mimas interpreter: emits one chunk-specialized `step_one` body fn per bytecode body. Unspecialized ops delegate back to the interpreter's own dispatch, so generated modules are always total."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "bcgen"
+
+[dependencies]
+compile = { package = "mimas-compile", path = "../compile", version = "0.2.0" }

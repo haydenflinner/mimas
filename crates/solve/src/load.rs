@@ -24,6 +24,19 @@ pub struct Loaded {
     pub solver: Solver,
 }
 
+/// What every program has, in mimas source. `Opp` is the pact an `opp`
+/// declaration implements: two ends and a flip — `!x` is `x.inv()`, the
+/// other end, and `!(!x) == x`. `bool` is the first opp (its `!` is
+/// built in; `impl Opp for bool` waits on impls for primitive types); the
+/// rest are the pairs pages kept spelling as bools or ±1 — a shared
+/// vocabulary, so `Size::Big` on one page means what it means on the next.
+/// Declarations only — a program built without std has it too. Std's
+/// opp-taking operations (`Side::End.of(xs)`, `Order::Desc.sort(xs)`) ship
+/// with std as library source (`Library::add_source`).
+pub const BUILTIN_SRC: &str = include_str!("builtin.mim");
+/// The built-in source's file name.
+pub const BUILTIN_NAME: &str = "<builtin>";
+
 /// Parses and solves `files` (each a name and its text) against `library`. The solver can't
 /// take poison yet, so a parse error in any file skips the solve.
 pub fn load_files<'a>(
@@ -39,11 +52,17 @@ pub fn load_files<'a>(
     shared::units::clear();
     // and per-file shadowed operator words: a kit's `fn not` makes `not` a
     // name in the kit and in the files that `use` it, never upstream
-    let files: Vec<(&str, &str)> = files.into_iter().collect();
-    let shadow = parse::lex::shadow_sets(&files);
+    let mut files: Vec<(&str, &str)> = files.into_iter().collect();
+    // every program has the built-in source: last, so user files keep
+    // their file ids (the first is still 0)
+    files.push((BUILTIN_NAME, BUILTIN_SRC));
+    // then the mimas source the library carries (std's opp operations)
+    let n_user = files.len() - 1;
+    files.extend(library.sources().iter().copied());
+    let inherited = parse::lex::inherited_shadow(&files);
     for (file_id, (name, text)) in files.into_iter().enumerate() {
         sources.insert(file_id, NamedSource::new(name, Arc::from(text)));
-        let lexer = Lexer::new(text, file_id, name.to_owned()).with_shadowed(shadow[file_id]);
+        let lexer = Lexer::new(text, file_id, name.to_owned()).with_inherited(inherited[file_id]);
         let (ast, parse_errors) = Parser::new_extending(lexer).into_ast();
         errors.extend(parse_errors);
         asts.push(ast);
@@ -52,8 +71,12 @@ pub fn load_files<'a>(
     let mut solver = Solver::new();
     solver.install_library(library);
     solver.set_sources(sources.clone());
+    // the built-in and library sources solve first (their impls' consts —
+    // `Order::Increasing` — are typed before user code reads them); `asts`
+    // keeps file order
+    let (user, shipped) = asts.split_at(n_user);
     if errors.is_empty()
-        && let Err(error) = solver.solve_all(&asts)
+        && let Err(error) = solver.solve_all(shipped.iter().chain(user))
     {
         errors.push(error);
     }

@@ -27,6 +27,7 @@ test_fail!(
 // scalar constant form, so each use site allocates it fresh -- writing
 // into one use never reaches the next.
 test_run!(
+    // r[verify mimas.const.variant]
     const_array_of_struct_consts,
     "struct Dir { dx: float, dy: float }
      const RIGHT = Dir { dx = 1.0, dy = 0.0 };
@@ -42,24 +43,151 @@ test_run!(
     "{ let s = 0.0; for d in DIRS { s = s + d.dx + d.dy } s }" => "2",
 );
 
-// An operator through a pact: `pact Dichotomy { fn inv(self) -> Self; }`
-// declares `!`'s method, so `!x` on a `Dichotomy`-typed value calls
-// whichever implementer's `inv` the value turns out to be, at runtime --
-// the same dispatch `x.inv()` through the pact gets.
+// An operator through a pact: the built-in `pact Opp { fn inv(self)
+// -> Self; }` declares `!`'s method, so `!x` on a `Opp`-typed value
+// calls whichever implementer's `inv` the value turns out to be, at
+// runtime -- the same dispatch `x.inv()` through the pact gets.
 test_run!(
+    // r[verify mimas.pact.operator]
     unary_operator_through_a_pact,
-    "pact Dichotomy { fn inv(self) -> Self; }
-     struct Dial { lo: float, hi: float }
-     impl Dichotomy for Dial { fn inv(self) -> Dial { Dial { lo = self.hi, hi = self.lo } } }
+    "struct Dial { lo: float, hi: float }
+     impl Opp for Dial { fn inv(self) -> Dial { Dial { lo = self.hi, hi = self.lo } } }
      enum Sky { Sun, Moon }
-     impl Dichotomy for Sky {
+     impl Opp for Sky {
          fn inv(self) -> Sky { match self { Sky::Sun => Sky::Moon, Sky::Moon => Sky::Sun } }
      }
-     fn involutive(x: Dichotomy) -> bool { !(!x) == x }
-     fn flipped(x: Dichotomy) -> Dichotomy { !x }",
+     fn involutive(x: Opp) -> bool { !(!x) == x }
+     fn flipped(x: Opp) -> Opp { !x }",
     "involutive(Dial { lo = 5.0, hi = 95.0 })" => "true",
     "involutive(Sky::Sun)" => "true",
     "flipped(Sky::Sun) == Sky::Moon" => "true",
     "flipped(Dial { lo = 5.0, hi = 95.0 }) == Dial { lo = 95.0, hi = 5.0 }" => "true",
     "!true" => "false",
 );
+
+// `opp Sky { Sun, Moon }` declares a dichotomy: the enum of its two ends
+// plus a synthesized `impl Opp` whose `inv` swaps them. `opp` stays
+// an ordinary name anywhere a type name and `{` don't follow it, and a
+// unit variant prints as its bare name.
+test_run!(
+    // r[verify mimas.opp.decl]
+    // r[verify mimas.opp.builtin]
+    opp_declares_a_dichotomy,
+    "opp Sky { Sun, Moon }
+     opp Hand { Left, Right }
+     fn involutive(x: Opp) -> bool { !(!x) == x }
+     fn other(x: Opp) -> Opp { !x }
+     let opp = 3;",
+    "!Sky::Sun == Sky::Moon" => "true",
+    "not Hand::Right == Hand::Left" => "true",
+    "Sky::Moon.inv() == Sky::Sun" => "true",
+    "involutive(Sky::Sun) && involutive(Hand::Right)" => "true",
+    "other(Hand::Left) == Hand::Right" => "true",
+    "match !Sky::Moon { Sky::Sun => 1, Sky::Moon => 2 }" => "1",
+    "f\"{!Sky::Sun}\"" => "\"Sky::Moon\"",
+    "opp + 1" => "4",
+    // the built-in pairs every program has
+    "!Size::Big == Size::Small && !Sign::Neg == Sign::Pos" => "true",
+    "!Fill::Full == Fill::Empty" => "true",
+    "!Order::Asc == Order::Desc" => "true",
+    "involutive(Daytime::Night) && involutive(Flow::Push) && involutive(Shade::Dark)" => "true",
+);
+
+// Std's operations on the built-in opps, and the mirror law each obeys:
+// flipping the opp is reversing the result. `Increasing`/`Decreasing` and
+// `Smaller`/`Bigger` are alternative spellings of the same ends.
+test_run!(
+    // r[verify mimas.std.order-rank]
+    // r[verify mimas.std.side-pad]
+    builtin_opp_operations_mirror,
+    "fn rev<T>(xs: [T]) -> [T] {
+         let out: [T] = [];
+         for k in xs.len() { out.push(xs[xs.len() - 1 - k]) }
+         out
+     }
+     let ks = [3.0, 9.0, 1.0, 9.0, 4.0];
+     let xs = [1, 2];",
+    "Order::Asc.rank(ks) == [2, 0, 4, 1, 3]" => "true",
+    "(!Order::Asc).rank(ks) == rev(Order::Asc.rank(ks))" => "true",
+    "{ let names = [\"c\", \"i\", \"a\", \"j\", \"d\"]; names.reorder(Order::Desc.rank(ks)); names }" => "[\"j\", \"i\", \"d\", \"c\", \"a\"]",
+    "Side::End.pad(xs, 4, 0) == [1, 2, 0, 0] && Side::Start.pad(xs, 4, 0) == [0, 0, 1, 2]" => "true",
+    "(!Side::End).pad(xs, 4, 0) == rev(Side::End.pad(rev(xs), 4, 0))" => "true",
+    "Side::End.pad(xs, 1, 0) == xs" => "true",
+    "Side::Start.justify(\"7\", 3) + \"|\" + Side::End.justify(\"7\", 3, \"0\")" => "\"  7|700\"",
+    "Order::Increasing == Order::Asc && Order::Decreasing == Order::Desc" => "true",
+    "!Order::Increasing == Order::Decreasing" => "true",
+    "Compare::Bigger == Compare::Greater && !Compare::Smaller == Compare::Bigger" => "true",
+);
+
+// A field-less variant is a constant: `const ME = Team::Blue` (built at
+// each use, like any struct const), and a const array may hold variants.
+// A tuple variant's constructor is a fn, not a value -- still rejected.
+test_run!(
+    // r[verify mimas.const.variant]
+    unit_variant_consts,
+    "opp Team { Blue, Red }
+     enum Shape { Dot, Box(int) }
+     const ME = Team::Blue;
+     const BOTH = [Team::Blue, Team::Red];
+     const D = Shape::Dot;
+     fn mine(t: Team) -> bool { t == ME }",
+    "mine(Team::Blue) && !mine(!ME)" => "true",
+    "BOTH[1] == Team::Red && BOTH.len() == 2" => "true",
+    "D == Shape::Dot" => "true",
+);
+
+// `bool` is the first opp: the built-in source's `impl Opp for bool` lets a
+// bool go wherever an `Opp` is expected -- through the same runtime dispatch
+// as an enum -- while `!b` stays the built-in op.
+test_run!(
+    // r[verify mimas.opp.builtin]
+    bool_is_an_opp,
+    "opp Sky { Sun, Moon }
+     fn involutive(x: Opp) -> bool { !(!x) == x }
+     fn flips(x: Opp) -> bool { !x != x }",
+    "involutive(true) && involutive(false)" => "true",
+    "involutive(Sky::Sun) && involutive(true)" => "true",
+    "flips(false) && flips(Sky::Moon)" => "true",
+    "true.inv() == false" => "true",
+    "!true" => "false",
+    "!(1 < 2)" => "false",
+);
+
+// `space` — axes taken together: the struct of its fields plus a flip of
+// every field (`impl Opp`), so a space is an axis itself and nests. Ordered
+// quantities are axes (their flip is negation); a field without a flip is a
+// targeted error. A number serves static flips only: it doesn't travel as an
+// `Opp`-typed value (that dispatch tests the value's kind at runtime).
+test_run!(
+    // r[verify mimas.space.decl]
+    // r[verify mimas.opp.number]
+    space_flips_every_axis,
+    "opp Hand { Left, Right }
+     opp Grip { Lib, Auth }
+     space Politics { econ: Hand, power: Grip }
+     space Frame { x: float, y: int, on: bool, view: Politics, w: px }
+     fn involutive(o: Opp) -> bool { !(!o) == o }
+     let p = Politics { econ = Hand::Left, power = Grip::Auth };
+     let f = Frame { x = 1.5, y = 2, on = true, view = p, w = 10.0px };",
+    "!p == Politics { econ = Hand::Right, power = Grip::Lib }" => "true",
+    "involutive(p)" => "true",
+    "(!f).x == -1.5 && (!f).y == -2 && !(!f).on && (!f).view == !p" => "true",
+    "(!f).w == -10.0px" => "true",
+    "!(!f) == f" => "true",
+);
+
+// r[verify mimas.space.axes]
+// r[verify mimas.opp.number]
+#[test]
+fn space_fields_must_be_axes() {
+    let reject = |src: &str, needle: &str| {
+        let err = test_runner::try_execute(src).expect_err(src);
+        let text = format!("{err:?}");
+        assert!(text.contains(needle), "`{src}`: expected `{needle}` in:\n{text}");
+    };
+    reject("space Bad { name: str }", "`name: str` isn't an axis");
+    reject("struct Data { n: int }\nspace Bad { d: Data }", "`d: Data` isn't an axis");
+    reject("space Empty {}", "a `space` needs at least one axis");
+    // a number is an axis for a space's static flip, not an `Opp`-typed value
+    reject("fn f(o: Opp) -> Opp { !o }\nlet x = f(3.0);", "mismatched types");
+}

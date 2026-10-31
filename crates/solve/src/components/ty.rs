@@ -54,7 +54,8 @@ impl TyExt for Ty {
             | Ty::Bool
             | Ty::Int
             | Ty::Float
-            | Ty::Str => false,
+            | Ty::Str
+            | Ty::Any => false,
         }
     }
 
@@ -311,7 +312,14 @@ impl TyExt for Ty {
 
     fn normalized(self, solver: &Solver) -> Ty {
         match self {
-            Ty::Unit | Ty::Never | Ty::Null | Ty::Bool | Ty::Int | Ty::Float | Ty::Str => self,
+            Ty::Unit
+            | Ty::Never
+            | Ty::Null
+            | Ty::Bool
+            | Ty::Int
+            | Ty::Float
+            | Ty::Str
+            | Ty::Any => self,
             Ty::Vid(vid) => solver
                 .sub(vid)
                 .map(|ty| ty.clone().normalized(solver))
@@ -392,7 +400,8 @@ impl TyExt for Ty {
             | Ty::Bool
             | Ty::Int
             | Ty::Float
-            | Ty::Str => self.clone(),
+            | Ty::Str
+            | Ty::Any => self.clone(),
         }
     }
 }

@@ -35,6 +35,8 @@ op!(
         Ampersand => And,
         Pipe => Or,
         CircledPlus => Xor,
+        Nand => Nand,
+        Nor => Nor,
         DoubleLeftCaret => BitShiftLeft,
         DoubleRightCaret => BitShiftRight,
     }
@@ -45,10 +47,16 @@ impl EvaluationOp {
         self.is_binary() || self.is_bit_shift()
     }
 
+    /// The bit/gate family: `&`, `|`, `⊕`, `⍲`, `⍱` — bitwise on ints,
+    /// eager logic on bools (`nand`/`nor` spell the last two as words).
     pub fn is_binary(&self) -> bool {
         matches!(
             self,
-            EvaluationOp::And | EvaluationOp::Or | EvaluationOp::Xor
+            EvaluationOp::And
+                | EvaluationOp::Or
+                | EvaluationOp::Xor
+                | EvaluationOp::Nand
+                | EvaluationOp::Nor
         )
     }
 

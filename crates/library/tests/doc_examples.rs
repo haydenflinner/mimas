@@ -9,6 +9,10 @@ const SKIP_IF: &[&str] = &[
     "sys::stdin",
     "std::fs",
     "std::process::Command",
+    // runs a real child on the test's own terminal — the doc's example is
+    // `run_attached("cargo", ["test"])`, a `cargo test` inside `cargo test`
+    // (rustup refused it with "error: infinite recursion detected")
+    "process::run_attached",
     "::sleep",
 ];
 

@@ -1,0 +1,39 @@
+// Std's operations on the built-in opps (library::OPP_SRC, shipped with std
+// through `Library::add_source`). They live on the opps themselves, so they
+// add no global names a page could collide with, and each pair of ends
+// mirrors the other: flipping the opp is reversing the result.
+
+impl Order {
+    /// The indices of `keys` in this order -- `Order::Asc.rank([3.0, 9.0, 1.0])`
+    /// is `[2, 0, 1]`. Asc keeps tied keys in their original order and Desc is
+    /// its exact reverse, so `(!o).rank(keys)` is `o.rank(keys)` reversed.
+    /// `xs.reorder(Order::Desc.rank(keys))` sorts `xs` by `keys`, largest first.
+    fn rank(self, keys: [float]) -> [int] {
+        let up = keys.argsort();
+        if self == Order::Asc { return up; }
+        let out: [int] = [];
+        for k in up.len() { out.push(up[up.len() - 1 - k]); }
+        out
+    }
+}
+
+impl Side {
+    /// `xs` extended with `fill` at this end to `width` elements (left as it is
+    /// when already that long) -- zero-extending a series is
+    /// `Side::End.pad(xs, n, 0.0)`. Padding at one end is padding the reversed
+    /// list at the other.
+    fn pad<T>(self, xs: [T], width: int, fill: T) -> [T] {
+        let out: [T] = [];
+        let n = width - xs.len();
+        if self == Side::Start { for _i in n { out.push(fill); } }
+        for x in xs { out.push(x); }
+        if self == Side::End { for _i in n { out.push(fill); } }
+        out
+    }
+    /// `s` filled out to `width` characters at this end: `Side::Start.justify`
+    /// right-aligns (`"  7"`), `Side::End.justify` left-aligns (`"7  "`).
+    fn justify(self, s: str, width: int, fill: str = " ") -> str {
+        let n = width - s.len();
+        if n <= 0 { s } else if self == Side::Start { fill.repeat(n) + s } else { s + fill.repeat(n) }
+    }
+}

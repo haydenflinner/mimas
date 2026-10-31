@@ -90,8 +90,12 @@ pub trait Solve {
 /// The method names an infix `a <op> b` desugars to — `a.<name>(b)` when the left
 /// operand's type implements it, else `b.<rname>(a)` on the right's, the same
 /// left-to-right order the native `add_bin_op` dispatch uses. `self` always owns
-/// the impl, so `s - v` finds `v.rsub(s)` for `s - self`. Spellings avoid the
-/// word-operators — `mod`/`xor`/`and`/`or` can't name a method.
+/// the impl, so `s - v` finds `v.rsub(s)` for `s - self`. The dodged spellings
+/// (`rem`/`bxor`/`band`/`bor`/`inv`) keep call-space and op-space separate —
+/// `mod`/`xor` could name methods (`fn xor` is an ordinary declaration),
+/// `and`/`or`/`not` are shadowable words, and `inv` dodges `not`.
+/// `nand`/`nor` deliberately *don't* dodge: the word, the method and the op
+/// unify, so `a.nand(b)` and `a nand b` name the same call.
 fn op_method_names(op: EvaluationOp) -> (&'static str, &'static str) {
     match op {
         EvaluationOp::Plus => ("add", "radd"),
@@ -103,6 +107,8 @@ fn op_method_names(op: EvaluationOp) -> (&'static str, &'static str) {
         EvaluationOp::And => ("band", "rband"),
         EvaluationOp::Or => ("bor", "rbor"),
         EvaluationOp::Xor => ("bxor", "rbxor"),
+        EvaluationOp::Nand => ("nand", "rnand"),
+        EvaluationOp::Nor => ("nor", "rnor"),
         EvaluationOp::BitShiftLeft => ("shl", "rshl"),
         EvaluationOp::BitShiftRight => ("shr", "rshr"),
     }
@@ -192,6 +198,9 @@ pub(crate) fn op_dispatch(
         (lhs, names.0, right, false),
         (rhs, names.1, left, true),
     ] {
+        if is_primitive(recv_ty) {
+            continue;
+        }
         let (aid, args) = match recv_ty {
             Ty::Adt(a, args) | Ty::Identity(a, args) => (*a, args.clone()),
             other => match solver.builtin_adt(other) {
@@ -210,11 +219,61 @@ pub(crate) fn op_dispatch(
             _ => continue,
         };
         let ret = f.return_ty.as_ref().clone();
-        arg.fulfill_ty(operand, solver)?;
+        // an arg that doesn't fit this candidate isn't an error — the
+        // search continues (`xs + ys` passes a list to `[T]::add`'s
+        // element slot and still has `union`/`radd` to try). Whatever
+        // nothing claims falls back to `eval`'s own diagnostics.
+        if arg.fulfill_ty(operand, solver).is_err() {
+            continue;
+        }
         solver.op_decs.insert(id, OpDispatch { dec, swap });
         return Ok(Some(ret));
     }
     Ok(None)
+}
+
+/// `xs + ys`/`xs - ys` — the Z-set list forms, dispatched to `[T]`'s
+/// `union`/`minus` natives when the rhs is a same-element list (the
+/// element shapes `add`/`sub` are `op_dispatch`'s business). `None`
+/// leaves `eval`'s diagnostics — `[int] - "a"` still errors.
+pub(crate) fn seq_op_dispatch(
+    solver: &mut Solver,
+    id: NodeId,
+    op: EvaluationOp,
+    right: &Expr,
+    lhs: &Ty,
+    rhs: &Ty,
+    location: Location,
+) -> Result<Option<Ty>> {
+    let name = match op {
+        EvaluationOp::Plus => "union",
+        EvaluationOp::Minus => "minus",
+        _ => return Ok(None),
+    };
+    let (Ty::Array(inner, _), Ty::Array(other, _)) = (lhs, rhs) else {
+        return Ok(None);
+    };
+    if other != inner {
+        return Ok(None);
+    }
+    let Some(aid) = solver.builtin_adt(lhs) else {
+        return Ok(None);
+    };
+    let Some((dec, f)) = op_method_sig(solver, aid, name, lhs, &[], location)? else {
+        return Ok(None);
+    };
+    let Some(operand) = f.parameters.first().map(|p| p.ty.clone()) else {
+        return Ok(None);
+    };
+    right.fulfill_ty(operand, solver)?;
+    solver.op_decs.insert(id, OpDispatch { dec, swap: false });
+    Ok(Some(Ty::array(inner.as_ref().clone())))
+}
+
+/// `int`/`float`/`str`/`bool`: their operators are built in, never dispatched
+/// to a method, even when a pact impl gives them one of those names.
+fn is_primitive(ty: &Ty) -> bool {
+    matches!(ty, Ty::Int | Ty::Float | Ty::Str | Ty::Bool)
 }
 
 /// `<op> a` → `a.<name>()` — the unary half of `op_dispatch`.
@@ -228,6 +287,12 @@ fn unary_dispatch(
 ) -> Result<Option<Ty>> {
     if let Ty::Pacts(pids) = ty {
         return Ok(pact_unary_dispatch(solver, id, name, ty, pids));
+    }
+    // a primitive's operators are built in -- `impl Opp for bool` gives `bool`
+    // an `inv`, but `!b` stays the bool op (and `!self` inside that `inv`
+    // can't recurse)
+    if is_primitive(ty) {
+        return Ok(None);
     }
     let (aid, args) = match ty {
         Ty::Adt(a, args) | Ty::Identity(a, args) => (*a, args.clone()),
@@ -1470,6 +1535,13 @@ impl Solve for Equality {
                 }
             }
         }
+        // `==`/`!=` on `any` (a `raise` payload): structural eq is total at
+        // runtime, no static claim needed — `e == Order::Desc` just asks.
+        if matches!(self.op, EqualityOp::Equal | EqualityOp::NotEqual)
+            && (lhs_n == Ty::Any || rhs_n == Ty::Any)
+        {
+            return Ok(Ty::Bool);
+        }
         match (&lhs, &rhs) {
             (Ty::Null, Ty::Option(_)) | (Ty::Option(_), Ty::Null) => Ok(()),
             (l, r) if l.is_numeric() && r.is_numeric() => Ok(()),
@@ -1630,7 +1702,16 @@ impl Solve for Evaluation {
             &lhs_n,
             &rhs_n,
             location,
-        )? {
+        )?
+        .or(seq_op_dispatch(
+            solver,
+            id,
+            self.op,
+            &self.right,
+            &lhs_n,
+            &rhs_n,
+            location,
+        )?) {
             return Ok(ty);
         }
         eval(self.op, &lhs_n, &rhs_n, location, solver)
@@ -1927,12 +2008,26 @@ impl Solve for If {
 
 impl Solve for Impl {
     fn solve(&self, _id: NodeId, _location: Location, solver: &mut Solver) -> Result<Ty> {
-        // Find our target
-        let Some(aid) = solver
-            .resolve_name(&self.target, self.target.location())?
-            .as_adt()
-            .copied()
-        else {
+        // Find our target -- a pact impl may name a primitive (`impl Opp for
+        // bool`), which lands on that primitive's library adt
+        let primitive = match self.target.lexeme.as_str() {
+            // `int`/`float` impls serve static calls (a space's flip calls a number
+            // field's `inv` directly); only a `bool` may also travel as a pact-typed
+            // value, since dispatch through a pact tests the value's kind at runtime
+            // and only a bool has a cheap test (`x == true || x == false`)
+            "bool" | "int" | "float" if self.pact.is_some() => {
+                solver.library.get(self.target.lexeme.as_str()).copied()
+            }
+            _ => None,
+        };
+        let resolved = match primitive {
+            Some(aid) => Some(aid),
+            None => solver
+                .resolve_name(&self.target, self.target.location())?
+                .as_adt()
+                .copied(),
+        };
+        let Some(aid) = resolved else {
             Err(InvalidImplTarget {
                 src: solver.src(self.target.location()),
                 at: self.target.location().into(),
@@ -2587,7 +2682,10 @@ impl Solve for parse::Raise {
             })?
         }
 
-        self.value.fulfill_ty(Ty::Str, solver)?;
+        // `raise` carries any value — the payload stays structured until a
+        // boundary stringifies it (`!` faults) or an `absolve` handler
+        // narrows it by `match`.
+        self.value.query(solver)?;
         solver.control_flow.push(Flow::Return);
         Ok(Ty::Never)
     }
@@ -2612,11 +2710,22 @@ impl Solve for parse::Absolve {
             })?
         };
         let inner = *inner;
+        // the handler sees the raised payload itself, not a stringified
+        // note — `e: any`, narrowed by `match` or formatted on use. seed the
+        // expected params before the closure solves (same as call-site args)
+        // or the body's own use would pin `e` to something concrete first.
         let handler_ty = Ty::Fn(FnHeader::new(
-            vec![FnParam::new(None, Ty::Str, false)],
+            vec![FnParam::new(None, Ty::Any, false)],
             inner.clone(),
             false,
         ));
+        if let ExprKind::Closure(_) = self.handler.kind()
+            && let Ty::Fn(h) = &handler_ty
+        {
+            solver
+                .expected_closures
+                .insert(self.handler.id(), h.parameters.clone());
+        }
         self.handler.fulfill_ty(handler_ty, solver)?;
         Ok(inner)
     }

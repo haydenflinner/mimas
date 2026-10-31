@@ -682,7 +682,7 @@ impl Compiler {
             .collect::<Vec<_>>()
             .into();
 
-        let methods: IdVec<_, HashMap<String, BodyId>> = ir
+        let mut by_adt: Vec<HashMap<String, BodyId>> = ir
             .resolutions
             .adts
             .values()
@@ -694,8 +694,25 @@ impl Compiler {
                     })
                     .collect()
             })
-            .collect::<Vec<_>>()
-            .into();
+            .collect();
+        // A value's runtime struct id is its variant's for an enum, while the
+        // impl sits on the enum: register the enum's methods under each
+        // variant id too, so a host asking `Sky::Moon` for `inv` (or `draw`)
+        // finds it. A variant's own method of the same name wins.
+        for (i, adt) in ir.resolutions.adts.values().enumerate() {
+            for did in &adt.dispatch_ids {
+                let d = did.index();
+                if d == i || d >= by_adt.len() {
+                    continue;
+                }
+                let inherited: Vec<(String, BodyId)> =
+                    by_adt[i].iter().map(|(k, v)| (k.clone(), *v)).collect();
+                for (name, body) in inherited {
+                    by_adt[d].entry(name).or_insert(body);
+                }
+            }
+        }
+        let methods: IdVec<_, HashMap<String, BodyId>> = by_adt.into();
 
         let field_names: IdVec<_, Vec<String>> = ir
             .resolutions

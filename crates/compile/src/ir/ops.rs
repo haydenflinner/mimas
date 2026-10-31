@@ -24,6 +24,8 @@ pub enum BinOp {
     BitShiftLeft,
     BitShiftRight,
     Coalesce,
+    Nand,
+    Nor,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq)]
@@ -71,6 +73,10 @@ impl BinOp {
                 let s: u32 = b.try_into().map_err(|_| BinFault::InvalidShift)?;
                 Scalar::Int(a.checked_shr(s).ok_or(BinFault::InvalidShift)?)
             }
+            // `a nand b` on ints runs per bit-lane — a 64-wide nand array, the
+            // same "the extent is the whole word" reading `&`/`|` carry.
+            Nand => Scalar::Int(!(a & b)),
+            Nor => Scalar::Int(!(a | b)),
             And | Or | Xor | Coalesce => return Err(BinFault::Type),
         })
     }
@@ -90,7 +96,8 @@ impl BinOp {
             LessEqual => Scalar::Bool(a <= b),
             GreaterThan => Scalar::Bool(a > b),
             GreaterEqual => Scalar::Bool(a >= b),
-            And | Or | Xor | BitAnd | BitOr | BitXor | BitShiftLeft | BitShiftRight | Coalesce => {
+            And | Or | Xor | BitAnd | BitOr | BitXor | BitShiftLeft | BitShiftRight | Coalesce
+            | Nand | Nor => {
                 return Err(BinFault::Type);
             }
         })
@@ -122,6 +129,8 @@ impl std::fmt::Display for BinOp {
             BinOp::BitShiftLeft => f.pad("bit_shift_left"),
             BinOp::BitShiftRight => f.pad("bit_shift_right"),
             BinOp::Coalesce => f.pad("null_coalesce"),
+            BinOp::Nand => f.pad("nand"),
+            BinOp::Nor => f.pad("nor"),
         }
     }
 }
@@ -138,6 +147,8 @@ impl From<EvaluationOp> for BinOp {
             EvaluationOp::And => BinOp::BitAnd,
             EvaluationOp::Or => BinOp::BitOr,
             EvaluationOp::Xor => BinOp::BitXor,
+            EvaluationOp::Nand => BinOp::Nand,
+            EvaluationOp::Nor => BinOp::Nor,
             EvaluationOp::BitShiftLeft => BinOp::BitShiftLeft,
             EvaluationOp::BitShiftRight => BinOp::BitShiftRight,
         }

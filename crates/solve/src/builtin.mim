@@ -1,0 +1,44 @@
+// The built-in source every program has (solve::BUILTIN_SRC): declarations
+// only, so a program built without std has it too. `Opp` is the pact an
+// `opp` declaration implements -- two ends and a flip: `!x` is `x.inv()`,
+// the other end, and `!(!x) == x`. `bool` is the first opp (its `!` stays
+// the built-in op); the rest are the pairs pages kept spelling as bools or ±1, so
+// `Size::Big` on one page means what it means on the next.
+
+pact Opp {
+    fn inv(self) -> Self;
+}
+
+// `bool` is the first opp: `!b` stays the built-in op; the impl lets a bool
+// go wherever an `Opp` is expected (`involutive(true)`).
+impl Opp for bool {
+    fn inv(self) -> bool { !self }
+}
+
+// An ordered quantity is an axis too: its flip is its negation (a `px`
+// is a float). These serve static calls -- a space's flip calls a number
+// field's `inv` -- a number doesn't travel as an `Opp`-typed value.
+impl Opp for int {
+    fn inv(self) -> int { -self }
+}
+impl Opp for float {
+    fn inv(self) -> float { -self }
+}
+opp Sign { Pos, Neg }
+opp Size { Big, Small }
+opp Shade { Light, Dark }
+opp Daytime { Day, Night }
+opp Flow { Push, Pull }
+opp Fill { Full, Empty }
+opp Order { Asc, Desc }
+opp Compare { Less, Greater }
+opp Side { Start, End }
+
+impl Order {
+    const Increasing = Order::Asc;
+    const Decreasing = Order::Desc;
+}
+impl Compare {
+    const Smaller = Compare::Less;
+    const Bigger = Compare::Greater;
+}

@@ -47,7 +47,12 @@ use vm::api::Api;
 
 /// Single entry point passed to `Vm::install_library`. Each `install` call registers its module's
 /// natives explicitly (into both the solver metadata and the arena callable table).
+/// Std's operations on the built-in opps, written in mimas (`opp.mim`) and
+/// shipped with std through `Library::add_source`.
+pub const OPP_SRC: &str = include_str!("opp.mim");
+
 pub fn std<'gc>(api: &mut Api<'_, 'gc>) {
+    api.library.add_source("<std::opp>", OPP_SRC);
     prelude::install(api);
     methods::array::install(api);
     methods::dict::install(api);

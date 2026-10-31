@@ -17,6 +17,11 @@ impl V {
     fn lt(self, o: V) -> bool { self.x < o.x }
     fn band(self, o: V) -> V { self.add(o) }
     fn bor(self, o: V) -> V { self.sub(o) }
+    // `nand`/`nor` name methods directly — the words are operators yet
+    // still ordinary identifiers, unlike `mod`/`xor`/`and`/`or`/`not`.
+    fn nand(self, o: V) -> V { V { x = self.y, y = o.y } }
+    fn nor(self, o: V) -> V { V { x = o.x, y = self.x } }
+    fn rnor(self, s: float) -> V { V { x = -1.0, y = -1.0 } }
 }
 let a = V { x = 1.0, y = 2.0 };
 let b = V { x = 3.0, y = 4.0 };
@@ -82,6 +87,37 @@ test_run!(
     "(v / 2.0).y" => "2",
     "(-v).x" => "-3",
     "(v + Vec2::new(1.0, 1.0)).x" => "4",
+);
+
+// `nand`/`nor` run as builtin gates on bools (eager — no short-circuit) and
+// per bit-lane on ints; the words `nand`/`nor` and glyphs `⍲`/`⍱` spell the
+// same ops, and an impl method of the same name wins dispatch on an ADT.
+test_run!(
+    nand_nor_builtin_gates,
+    "",
+    "true nand true" => "false",
+    "true nand false" => "true",
+    "false nor false" => "true",
+    "false nor true" => "false",
+    "(true ⍲ false) == false ⍱ false" => "true",
+    // the existential gate: `a nand b` is `!(a && b)` — `nor` its dual, `!(a || b)`
+    "(true nand false) == !(true && false)" => "true",
+    "(false nor true) == !(false || true)" => "true",
+    // bit-lane on ints: `12 nand 10` is `~(12 & 10)` = `~8`
+    "12 nand 10" => "-9",
+    "12 nor 10" => "-15",
+);
+
+test_run!(
+    nand_nor_dispatch_to_impl_methods,
+    VEC,
+    "(a nand b).x" => "2",
+    "(a ⍲ b).y" => "4",
+    // the word and the glyph spell the same call
+    "(a nand b).x == (a ⍲ b).x" => "true",
+    "(a nor b).x" => "3",
+    // `2.0 nor v` finds `v.rnor(2.0)` — self owns the impl on the right
+    "(2.0 nor b).x" => "-1",
 );
 
 // not an operator impl: a method named `add` with extra required params is an

@@ -33,6 +33,12 @@ impl Unification {
             // Never is never checked
             (Ty::Never, _) | (_, Ty::Never) => Ok(Substitution::None),
 
+            // `any` accepts everything as an *expected* type — a `raise`
+            // payload lands in `absolve`'s handler with no statically-known
+            // shape. It never fulfills a concrete type itself (the arm below
+            // deliberately doesn't exist): `match` narrows it.
+            (_, Ty::Any) => Ok(Substitution::None),
+
             // Adts (or Identities) must point to the same definition, and every type argument
             // must unify pairwise -- `List<int>` vs `List<str>` is a mismatch, `List<?x>` binds.
             // arity mismatches on the same adt (`Adt(id, [])` vs `Adt(id, [T])`) fall through
@@ -68,6 +74,21 @@ impl Unification {
                     .iter()
                     .all(|pid| solver.pact_impls.contains(&(*pid, *aid)))
                 {
+                    Ok(Substitution::None)
+                } else {
+                    Err(potential_err)
+                }
+            }
+
+            // a primitive fulfills a pact its library adt implements (`impl Opp for
+            // bool`: a `bool` goes wherever an `Opp` is expected)
+            // (bool only: a pact-typed value dispatches by a runtime kind test, and a
+            // number has none -- `impl Opp for float` serves static calls)
+            (prim @ Ty::Bool, Ty::Pacts(pids)) | (Ty::Pacts(pids), prim @ Ty::Bool) => {
+                let aid = solver.builtin_adt(prim);
+                if aid.is_some_and(|aid| {
+                    pids.iter().all(|pid| solver.pact_impls.contains(&(*pid, aid)))
+                }) {
                     Ok(Substitution::None)
                 } else {
                     Err(potential_err)

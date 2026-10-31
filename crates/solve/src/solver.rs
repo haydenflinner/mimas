@@ -40,7 +40,7 @@ pub struct Solver {
     vids: IdVec<Vid, ()>,
     subs: IdVec<Vid, Option<Ty>>,
     node_visits: HashSet<NodeId>,
-    library: HashMap<String, AdtId>,
+    pub(crate) library: HashMap<String, AdtId>,
     pub(crate) root_modules: IndexMap<String, AdtId>,
     pub(crate) module_items: IndexMap<AdtId, IndexMap<String, DecId>>,
     pub(crate) sources: HashMap<FileId, NamedSource<Arc<str>>>,
@@ -250,6 +250,47 @@ impl Solver {
             })?
         }
         Ok(())
+    }
+
+    /// Every field of a `space` is an axis: its type implements `Opp` (an `opp`,
+    /// `bool`, a number, a `Dial`, another space). A field that isn't gets the
+    /// targeted error here, before the synthesized flip would trip over it.
+    // r[impl mimas.space.axes]
+    fn check_space_axes(&mut self, st: &parse::Struct) -> Result<()> {
+        let opp = self
+            .resolve_name(&Ident::synthetic("Opp"), st.name.location)?
+            .as_single_pact();
+        for field in &st.fields {
+            let ty = Ty::from_annotation(field.annotation.clone(), self)?.normalized(self);
+            let aid = match &ty {
+                Ty::Adt(a, _) | Ty::Identity(a, _) => Some(*a),
+                other => self.builtin_adt(other),
+            };
+            let axis = opp.zip(aid).is_some_and(|(p, a)| self.pact_impls.contains(&(p, a)));
+            if !axis {
+                let name = match &field.name {
+                    parse::FieldKey::Ident(i) => i.lexeme.clone(),
+                    parse::FieldKey::Int(n) => n.to_string(),
+                };
+                Err(crate::errors::SpaceFieldNotAnAxis {
+                    src: self.src(field.location),
+                    at: field.location.into(),
+                    space: st.name.lexeme.clone(),
+                    field: name,
+                    ty: ty.to_string(),
+                })?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The primitive whose library adt `aid` is (`bool` for the `bool`
+    /// namespace) -- the reverse of [`Self::builtin_adt`] for the scalars.
+    pub(crate) fn primitive_of(&self, aid: AdtId) -> Option<Ty> {
+        [("int", Ty::Int), ("float", Ty::Float), ("str", Ty::Str), ("bool", Ty::Bool)]
+            .into_iter()
+            .find(|(name, _)| self.library.get(*name) == Some(&aid))
+            .map(|(_, ty)| ty)
     }
 
     pub(crate) fn builtin_adt(&self, ty: &Ty) -> Option<AdtId> {
@@ -1103,6 +1144,7 @@ impl Solver {
             | Ty::Int
             | Ty::Float
             | Ty::Str
+            | Ty::Any
             | Ty::Vid(_)
             | Ty::Param(_)
             | Ty::Pacts(_)
@@ -1735,6 +1777,7 @@ impl Solver {
             | Ty::Int
             | Ty::Float
             | Ty::Str
+            | Ty::Any
             | Ty::Vid(_)
             | Ty::Anon(_)
             | Ty::Pacts(_)
@@ -1808,6 +1851,11 @@ impl Solver {
     /// this arm's own rib), so all alternatives share a single binding and its type. That sharing
     /// is what makes the payload types of `Foo::Bar(n) | Foo::Fizz(n)` unify.
     pub(crate) fn solve_match_pat(&mut self, pat: &Pat, ty: Ty, reuse: bool) -> Result<()> {
+        // `match` on a dynamic payload (`absolve`'s `any` arm): the pattern is
+        // a runtime probe, not a static claim — literal/variant arms skip the
+        // scrutinee unify but still resolve the variant and bind fields with
+        // member types (sound: the arm only runs when the probe passed).
+        let dynamic = matches!(ty.clone().normalized(self), Ty::Any);
         let pat_src = self.src(pat.location());
         let bad = |ty: &Ty| InvalidPattern {
             src: pat_src.clone(),
@@ -1834,6 +1882,12 @@ impl Solver {
             }
             PatKind::Ident(ident) => self.declare(ident, pat.id(), ty).map(|_| ()),
             PatKind::Poison(poison) => poison.escaped(),
+            PatKind::Literal(lit) if dynamic => {
+                // a literal on `any` is a runtime eq probe — `42`, `"x"`,
+                // `null` all compare fine against whatever was raised
+                let _ = lit;
+                Ok(())
+            }
             PatKind::Literal(lit) => unify(
                 self,
                 ty,
@@ -1863,12 +1917,17 @@ impl Solver {
             }
             PatKind::NullBind(inner_pat) => {
                 let normalized = ty.normalized(self);
-                let inner = match &normalized {
-                    Ty::Option(inner) | Ty::Result(inner) => inner.as_ref().clone(),
+                let (inner, probe) = match &normalized {
+                    Ty::Option(inner) | Ty::Result(inner) => {
+                        (inner.as_ref().clone(), normalized.clone())
+                    }
+                    // a non-null probe on `any`: `x?` binds whatever isn't
+                    // `null`, still `any` inside the arm
+                    Ty::Any => (Ty::Any, Ty::Option(Box::new(Ty::Any))),
                     _ => Err(bad(&normalized))?,
                 };
                 // the IR reads this node's ty to pick the success test (null vs raised)
-                self.shadow_expr_ty(pat.id(), normalized, pat.location())?;
+                self.shadow_expr_ty(pat.id(), probe, pat.location())?;
                 self.solve_match_pat(inner_pat, inner, reuse)
             }
             PatKind::Or(alts) => {
@@ -1952,10 +2011,18 @@ impl Solver {
 
                 // the pattern's own instantiation of the adt: unifying it against the scrutinee
                 // binds these fresh arg vids to the scrutinee's actual args (e.g. `int`), and
-                // `specialize` then plugs them into the variant's declared member types
+                // `specialize` then plugs them into the variant's declared member types.
+                // a dynamic scrutinee (`any`) skips the unify — the pattern is a
+                // runtime probe and the args stay the variant's declared types.
                 let ctor_ty = self.instantiated_adt(adt);
-                unify(self, ty, ctor_ty.clone(), pat.location())?;
+                if !dynamic {
+                    unify(self, ty, ctor_ty.clone(), pat.location())?;
+                }
                 let ctor_args: Vec<Ty> = match &ctor_ty {
+                    // a dynamic scrutinee pins none of the adt's args — the
+                    // probe proves the variant, not its parameters, so bound
+                    // members stay `any` rather than lingering as vids
+                    Ty::Adt(_, args) if dynamic => vec![Ty::Any; args.len()],
                     Ty::Adt(_, args) => args.clone(),
                     _ => vec![],
                 };
@@ -2090,6 +2157,22 @@ impl Solver {
                     // method (`x.add(v)`, or `v.radd(x)` when the rhs owns the
                     // impl) beats the plain same-type rule.
                     let place = left.query(self)?;
+                    // `xs += x`/`xs -= x` move the length — on a `[T; n]`
+                    // place that's the same refusal `push`/`pop`/`extend`
+                    // get. Checked outright rather than via the result
+                    // type so the message names the rule, not a mismatch.
+                    if matches!(
+                        *op,
+                        parse::AssignmentOp::PlusEqual | parse::AssignmentOp::MinusEqual
+                    ) && let Ty::Array(_, Len::Const(n)) = place.clone().normalized(self)
+                    {
+                        Err(crate::errors::SizedArrayMutation {
+                            src: self.src(left.location()),
+                            at: left.location().into(),
+                            method: op.to_string(),
+                            ty: format!("[_; {n}]"),
+                        })?;
+                    }
                     let dispatched = match crate::traits::op_assign_names(*op) {
                         Some(names) => {
                             let place_n = place.clone().normalized(self);
@@ -2110,7 +2193,40 @@ impl Solver {
                     match dispatched {
                         // the method's result still has to fit the place
                         Some(ret) => left.fulfill_ty(ret, self)?,
-                        None => right.fulfill_ty(place, self)?,
+                        None => {
+                            // `xs += ys`/`xs -= ys` — `add`/`sub` only take
+                            // elements, so a list rhs falls through here to
+                            // `union`/`minus`, the same call `xs + ys` makes.
+                            let op = match *op {
+                                parse::AssignmentOp::PlusEqual => {
+                                    Some(parse::EvaluationOp::Plus)
+                                }
+                                parse::AssignmentOp::MinusEqual => {
+                                    Some(parse::EvaluationOp::Minus)
+                                }
+                                _ => None,
+                            };
+                            let seq = match op {
+                                Some(op) => {
+                                    let place_n = place.clone().normalized(self);
+                                    let right_n = right.query(self)?.normalized(self);
+                                    crate::traits::seq_op_dispatch(
+                                        self,
+                                        stmt.id(),
+                                        op,
+                                        right,
+                                        &place_n,
+                                        &right_n,
+                                        left.location(),
+                                    )?
+                                }
+                                None => None,
+                            };
+                            match seq {
+                                Some(ret) => left.fulfill_ty(ret, self)?,
+                                None => right.fulfill_ty(place, self)?,
+                            }
+                        }
                     }
                 }
             }
@@ -2188,6 +2304,10 @@ impl Solver {
                 // import rib (hoist_uses pushed them, but its rib was popped at phase end).
                 ItemKind::Use(us) => self.process_use(us, item.location())?,
                 ItemKind::Poison(poison) => poison.escaped(),
+                // a `space`'s fields must all be axes -- types implementing `Opp`
+                ItemKind::Struct(st) if item.attrs().iter().any(|a| a.name.lexeme == "space") => {
+                    self.check_space_axes(st)?
+                }
                 // all we need to do at this point is process the fn defaults
                 ItemKind::Pact(pact) => {
                     let Some(pid) = self
@@ -2378,6 +2498,14 @@ impl Solver {
     /// reduce returns raw location-tagged errors and we materialize them with source here.
     pub(crate) fn reduce_const_expr(&self, expr: &Expr) -> Result<Option<Literal>> {
         crate::utils::reduce(expr, &|e| {
+            if self.is_unit_variant(e) {
+                // `Team::Blue` as a value is the variant's empty struct literal --
+                // emitted at each use like any struct const
+                return Some(Literal::Struct(parse::StructLiteral {
+                    name: e.clone(),
+                    fields: vec![],
+                }));
+            }
             self.node_decs
                 .get(&e.id())
                 .and_then(|&dec| self.decs[dec].kind.const_value().cloned())
@@ -2385,7 +2513,20 @@ impl Solver {
         .map_err(|e| e.into_diag(self))
     }
 
+    /// `E::V` naming a field-less enum variant (`opp Team { Blue, Red }`'s
+    /// `Team::Blue`): a value with nothing to compute, so a `const` may be one.
+    pub(crate) fn is_unit_variant(&self, expr: &Expr) -> bool {
+        matches!(expr.kind(), ExprKind::Access(parse::Access::DoubleColon { .. }))
+            && self.node_decs.get(&expr.id()).is_some_and(|&dec| {
+                matches!(self.decs[dec].kind, DecKind::Variant { layout, .. }
+                    if self.adts[layout].as_singular().is_some_and(|v| v.is_empty()))
+            })
+    }
+
     pub(crate) fn is_const_expr(&self, expr: &Expr) -> bool {
+        if self.is_unit_variant(expr) {
+            return true;
+        }
         match expr.kind() {
             ExprKind::Ident(_) => self
                 .node_decs
@@ -2415,6 +2556,11 @@ impl Solver {
     /// `Pair<A, B>` with the adt's own params in scope, not any single instantiation.
     pub(crate) fn impl_target_ty(&self) -> Option<Ty> {
         let aid = self.impl_target()?;
+        // `impl Opp for bool`: inside, `Self` is the primitive, not the
+        // library's `bool` namespace adt
+        if let Some(prim) = self.primitive_of(aid) {
+            return Some(prim);
+        }
         let args = self.adts[aid]
             .type_params
             .iter()
