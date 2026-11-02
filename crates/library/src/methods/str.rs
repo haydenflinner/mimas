@@ -14,6 +14,7 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add_method(trim);
     api.add_method(to_snake);
     api.add_method(split);
+    api.add_method(chars);
     api.add_method(find);
     api.add_method(find_all);
     api.add_method(lines);
@@ -116,15 +117,37 @@ fn to_snake(s: &str) -> String {
 
 #[native]
 /// Returns the pieces of the string between each occurrence of `separator`. Two separators in a
-/// row leave an empty string between them.
+/// row leave an empty string between them. An empty separator splits into the characters, the
+/// same list `chars()` gives — no empty piece at either end.
 ///
 /// ```mimas
 /// let a = "a,b,c".split(",");     // ["a", "b", "c"]
 /// let b = "a,,b".split(",");      // ["a", "", "b"]
 /// let c = "no commas".split(","); // ["no commas"]
+/// let d = "abc".split("");        // ["a", "b", "c"]
 /// ```
 fn split(s: &str, delim: &str) -> Vec<String> {
+    if delim.is_empty() {
+        return chars_of(s);
+    }
     s.split(&delim).map(|v| v.to_string()).collect()
+}
+
+fn chars_of(s: &str) -> Vec<String> {
+    s.chars().map(|c| c.to_string()).collect()
+}
+
+#[native]
+/// Returns the string's characters, each as a one-character string, in order — what a `for`
+/// loop over a string wants. Characters are Unicode characters, not bytes, like `len()`.
+///
+/// ```mimas
+/// let a = "hey".chars();    // ["h", "e", "y"]
+/// let b = "café".chars();   // ["c", "a", "f", "é"]
+/// let n = "banana".chars().filter(|c| c == "a").len(); // 3
+/// ```
+fn chars(s: &str) -> Vec<String> {
+    chars_of(s)
 }
 
 #[native]

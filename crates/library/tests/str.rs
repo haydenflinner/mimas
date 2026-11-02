@@ -211,12 +211,23 @@ test_run!(
     r#"",a".split(",")"# => r#"["", "a"]"#,
 );
 
-// split on "" splits into chars, with leading+trailing empty segments
+// split on "" is the characters — the same list as chars(), no empty
+// piece at either end (Rust's `["", "a", "b", "c", ""]` tripped every
+// beginner who tried it)
 test_run!(
     split_empty_delim,
-    r#""abc".split("")"# => r#"["", "a", "b", "c", ""]"#,
-    r#""".split("")"# => r#"["", ""]"#,
+    r#""abc".split("")"# => r#"["a", "b", "c"]"#,
+    r#""".split("")"# => r#"[]"#,
     r#""".split(",")"# => r#"[""]"#,
+);
+
+// chars: one-character strings, Unicode characters like len()
+test_run!(
+    chars_basic,
+    r#""hey".chars()"# => r#"["h", "e", "y"]"#,
+    r#""café".chars()"# => r#"["c", "a", "f", "é"]"#,
+    r#""".chars()"# => r#"[]"#,
+    r#""banana".chars().filter(|c| c == "a").len()"# => "3",
 );
 
 test_run!(
