@@ -189,6 +189,9 @@ impl Out {
 pub enum PrintKind {
     Print,
     Warn,
+    /// The value of a bare top-level expression (`echo`, see the parse
+    /// crate's `Stmt::echo`) — a host shows it as the line's result.
+    Echo,
 }
 
 /// Every `print`/`dbg`/`warn` line, keyed by call site — a rich host (the lit
@@ -227,6 +230,17 @@ impl Prints {
     /// `(site, text)` are suppressed — the host still holds the first.
     /// Returns whether the warning was new (the caller may still want to
     /// echo it to `Out` only then).
+    /// A bare expression's value at its line — kept apart from prints so
+    /// a host can style it as a result and keep only a card's last one.
+    pub fn push_echo(&self, loc: Location, text: String) {
+        let mut lines = self.lines.borrow_mut();
+        if lines.len() < Self::CAP {
+            lines.push((loc, PrintKind::Echo, text));
+        } else {
+            self.dropped.set(self.dropped.get() + 1);
+        }
+    }
+
     pub fn push_warn(&self, loc: Location, text: String) -> bool {
         if !self.warned.borrow_mut().insert((loc, text.clone())) {
             return false;

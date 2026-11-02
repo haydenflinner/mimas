@@ -69,6 +69,19 @@ pub fn load_files<'a>(
         asts.push(ast);
     }
 
+    // A bare expression at a user file's top level shows its value to a
+    // host (`Stmt::echo` in the parse crate); the shipped prelude and
+    // library stay as they are.
+    // Only where the library provides `echo` (the std prelude does; a bare
+    // VM with a minimal library has nothing to call).
+    let has_echo = library
+        .natives()
+        .any(|(_, e)| matches!(e, ::api::ApiEntry::Function(f) if f.name == "echo" && f.module.is_empty()));
+    if has_echo {
+        for ast in asts.iter_mut().take(n_user) {
+            ast.echo_top_level();
+        }
+    }
     let mut solver = Solver::new();
     solver.install_library(library);
     solver.set_sources(sources.clone());

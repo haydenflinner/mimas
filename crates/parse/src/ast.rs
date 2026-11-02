@@ -78,6 +78,14 @@ impl Ast {
     }
 
     /// Get a mutable reference to the ast's statements.
+    /// Rewrite every top-level expression statement into an `echo` of
+    /// itself (see [`Stmt::echo`]) — run on user files before they are
+    /// solved, never on the prelude.
+    pub fn echo_top_level(&mut self) {
+        let stmts = std::mem::take(&mut self.stmts);
+        self.stmts = stmts.into_iter().map(Stmt::echo).collect();
+    }
+
     pub fn stmts_mut(&mut self) -> &mut Vec<Stmt> {
         &mut self.stmts
     }

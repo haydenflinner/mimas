@@ -267,31 +267,34 @@ test_run_display!(
 );
 
 // -- errors surface as Raised, never panics -------------------------------------------------------
+// (each case forces its result with `!`: a bare `tensor(…)` returning `Err` is a
+// value, not a failure — these used to pass only because a trailing expression
+// without `;` was a parse error)
 
 test_fail!(
     bad_ops_raise_instead_of_panicking,
     // ragged input to the constructor
-    "use std::tensor::*; tensor([[1.0], [2.0, 3.0]])",
+    "use std::tensor::*; tensor([[1.0], [2.0, 3.0]])!",
     // inner dims don't line up
-    "use std::tensor::*; tensor([[1.0, 2.0]])!.matmul(eye(3)!)",
+    "use std::tensor::*; tensor([[1.0, 2.0]])!.matmul(eye(3)!)!",
     // rank-1 matmul
-    "use std::tensor::*; tensor([1.0, 2.0])!.matmul(tensor([3.0, 4.0])!)",
+    "use std::tensor::*; tensor([1.0, 2.0])!.matmul(tensor([3.0, 4.0])!)!",
     // wrong element count
-    "use std::tensor::*; arange(6)!.reshape([4])",
+    "use std::tensor::*; arange(6)!.reshape([4])!",
     // squeeze a dim that isn't 1
-    "use std::tensor::*; arange(6)!.reshape([2, 3])!.squeeze(1)",
+    "use std::tensor::*; arange(6)!.reshape([2, 3])!.squeeze(1)!",
     // negative dim
-    "use std::tensor::*; zeros([-1, 2])",
+    "use std::tensor::*; zeros([-1, 2])!",
     // permute that isn't a permutation
-    "use std::tensor::*; eye(2)!.permute([0, 0])",
+    "use std::tensor::*; eye(2)!.permute([0, 0])!",
     // broadcast-incompatible comparison
-    "use std::tensor::*; zeros([2])! > zeros([3])!",
+    "use std::tensor::*; zeros([2])! > zeros([3])!;",
     // slice past the end of a dim
-    "use std::tensor::*; arange(4)!.slice(0, 2, 9)",
+    "use std::tensor::*; arange(4)!.slice(0, 2, 9)!",
     // unfold window bigger than the dim
-    "use std::tensor::*; arange(4)!.unfold(0, 5, 1)",
+    "use std::tensor::*; arange(4)!.unfold(0, 5, 1)!",
     // cumsum past the rank
-    "use std::tensor::*; arange(4)!.cumsum(1)",
+    "use std::tensor::*; arange(4)!.cumsum(1)!",
     // `t == non-broadcastable` is a compile error -- the solver only types a
     // comparison `Tensor` when the other side can broadcast (numeric/tensor),
     // so this fails to unify like `1 == "x"` does.

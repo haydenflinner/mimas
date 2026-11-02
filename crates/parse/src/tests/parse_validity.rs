@@ -215,9 +215,10 @@ test_fail!(
     "check: { x == 1 }",
     // `is` is gone -- plain `==` is the check spelling now
     "check x is 1",
-    // the retired keywords are ordinary identifiers again
+    // the retired keywords are ordinary identifiers again (`example { x }`
+    // alone is an expression closing the input, so a stray `}` follows it)
     "where: x == 1",
-    "example { x }",
+    "example { x } }",
     // junk after a check used to spin the parser until its fuel guard panicked
     "check {\n    xs[1..] == [2]\n}",
     "check { a[1..] == b",

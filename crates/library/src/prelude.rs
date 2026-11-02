@@ -23,6 +23,7 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add(panic);
     api.add(todo);
     api.add(dbg);
+    api.add(echo);
     api.add(__contract_fail);
 }
 
@@ -115,6 +116,26 @@ fn todo<'gc>(ctx: Ctx<'gc>, msg: Option<anon::T<'gc>>) -> Result<NeverReturn, Rt
 /// Compiler-emitted contract check (`[T; n]` dims, `where` predicates). Its message is the
 /// diagnostic title as authored at emit -- no `panic:`-style prefix -- carried on
 /// `RtErr::Contract`. Not for user code; the `__` marks it internal.
+#[native]
+#[effects()]
+/// The value of a bare expression at a file's top level: the parser wraps
+/// `3 + 5` as `echo(3 + 5)`, and this records `8` at that line for a host,
+/// the way `print` records its text — Jupyter's echo of a cell's last
+/// expression. Nothing reaches the out sink, unit is skipped so a call made
+/// for its effect stays silent, and the argument is returned unchanged, so a
+/// script's trailing expression is still its result.
+/// r[impl mimas.echo]
+fn echo<'gc>(ctx: Ctx<'gc>, val: anon::T<'gc>) -> Result<anon::T<'gc>, RtErr> {
+    if !matches!(val.0, Val::Null) {
+        if let Some(loc) = ctx.fixture::<DebugInfo>().top_loc() {
+            let suffix = unit_suffix(ctx, Some(loc));
+            let text = ctx.display(val.0)?;
+            ctx.fixture::<Prints>().push_echo(loc, format!("{text}{suffix}"));
+        }
+    }
+    Ok(val)
+}
+
 #[native]
 fn __contract_fail<'gc>(
     ctx: Ctx<'gc>,

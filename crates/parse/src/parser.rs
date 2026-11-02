@@ -3395,7 +3395,12 @@ impl<'s> Parser<'s> {
         }
 
         let stmt = self.new_stmt(StmtKind::Expr(expr), start);
-        if semicolon_optional {
+        if semicolon_optional || self.at(TokKind::Eof) {
+            // The end of input ends an expression statement (Go's rule):
+            // a file — or a page's last card — may close on a bare
+            // expression, whose value a host echoes. A `let` or an
+            // assignment still wants its `;`.
+            // r[impl mimas.stmt.trailing]
             self.eat(TokKind::SemiColon);
         } else {
             self.end_stmt(stmt.location());
