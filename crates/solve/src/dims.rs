@@ -1245,7 +1245,46 @@ impl<'a> Pass<'a> {
                     _ => D::Any,
                 }
             }
-            (D::Q(d), "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "exp" | "ln") => {
+            // Trig eats an angle or a plain number (plain reads as
+            // radians, as it always has); the inverses take a plain
+            // number and give back an angle — `x.asin().to("deg")`.
+            // r[impl mimas.unit.trig]
+            (D::Q(d), "sin" | "cos" | "tan") => {
+                if !(d.is_none() || *d == units::ANGLE) {
+                    self.fail(
+                        e.location(),
+                        format!("`{name}` needs an angle or a plain number, found {}", Self::describe(d)),
+                        "has a unit".into(),
+                        "angles are `deg`/`rad`/`turn` quantities; anything else needs `.to(unit)` first",
+                    );
+                }
+                PLAIN
+            }
+            (D::Q(d), "asin" | "acos" | "atan") => {
+                if !d.is_none() {
+                    self.fail(
+                        e.location(),
+                        format!("`{name}` needs a plain number, found {}", Self::describe(d)),
+                        "has a unit".into(),
+                        "divide by a unit to get a plain number, or use `.to(unit)`",
+                    );
+                }
+                D::Q(units::ANGLE)
+            }
+            // `y.atan2(x)`: the two legs must measure the same thing —
+            // atan2(3px, 4px) is an angle, atan2(3px, 4s) is a bug.
+            (D::Q(_), "atan2") => {
+                if let Some(a) = args.first() {
+                    self.expect(
+                        &recv,
+                        a,
+                        c.arguments[0].value.location(),
+                        "`atan2` needs both legs in the same dimension",
+                    );
+                }
+                D::Q(units::ANGLE)
+            }
+            (D::Q(d), "exp" | "ln") => {
                 if !d.is_none() {
                     self.fail(
                         e.location(),

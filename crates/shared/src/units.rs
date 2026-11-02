@@ -17,7 +17,7 @@ pub const N: usize = FIRST_CUSTOM + MAX_CUSTOM;
 
 /// Where a `unit tile;` declaration's base dimension sits in the [`Dim`]
 /// array -- the builtins occupy the slots before it.
-const FIRST_CUSTOM: usize = 14;
+const FIRST_CUSTOM: usize = 15;
 
 /// How many new base dimensions (`unit tile;`) one program may declare.
 /// Derived decls (`unit league = 3mi;`) don't spend a slot -- they share
@@ -28,7 +28,7 @@ pub const MAX_CUSTOM: usize = 8;
 /// themselves through [`declare`]; the empty strings are the fallback for
 /// a `Dim` that outlives its compilation.
 pub const BASES: [&str; N] = [
-    "m", "kg", "s", "A", "K", "mol", "cd", "usd", "px", "frame", "beat", "st", "b", "index",
+    "m", "kg", "s", "A", "K", "mol", "cd", "usd", "px", "frame", "beat", "st", "b", "index", "rad",
     "", "", "", "", "", "", "", "",
 ];
 
@@ -233,35 +233,39 @@ const fn d(e: [i8; FIRST_CUSTOM]) -> Dim {
     Dim(out)
 }
 
-// exponents:        m  kg  s  A  K mol cd usd px frame beat st bit index
-pub const LENGTH: Dim = d([1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const MASS: Dim = d([0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const TIME: Dim = d([0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const CURRENT: Dim = d([0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const TEMP: Dim = d([0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const AMOUNT: Dim = d([0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const LUMINOUS: Dim = d([0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]);
-pub const MONEY: Dim = d([0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0]);
-pub const PIXELS: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0]);
-pub const FRAMES: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0]);
-pub const BEAT: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0]);
-pub const PITCH: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0]);
-pub const DATA: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0]);
+// exponents:        m  kg  s  A  K mol cd usd px frame beat st bit index rad
+pub const LENGTH: Dim = d([1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const MASS: Dim = d([0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const TIME: Dim = d([0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const CURRENT: Dim = d([0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const TEMP: Dim = d([0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const AMOUNT: Dim = d([0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const LUMINOUS: Dim = d([0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const MONEY: Dim = d([0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]);
+pub const PIXELS: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0]);
+pub const FRAMES: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0]);
+pub const BEAT: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0]);
+pub const PITCH: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0]);
+pub const DATA: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0]);
 /// A position into a collection: `i: index` is an `int` that can't be mixed
 /// with any quantity (`i + 3px` is an error). Plain numbers convert freely
 /// (`i += 1`, `i < xs.len()`) -- the dimension exists to keep *measurements*
 /// out of index variables, not to make counting verbose.
-pub const INDEX: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
-pub const FREQ: Dim = d([0, 0, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const FORCE: Dim = d([1, 1, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const PRESSURE: Dim = d([-1, 1, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const ENERGY: Dim = d([2, 1, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const POWER: Dim = d([2, 1, -3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const CHARGE: Dim = d([0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const VOLTAGE: Dim = d([2, 1, -3, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const INDEX: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0]);
+/// An angle, in radians: `deg`, `turn`, `grad`, `arcmin`, `arcsec` and `mrad`
+/// are scaled spellings of it. Unlike `prob`/`pct`, an angle *does* compose —
+/// `angle / s` is angular velocity and `rad^2` is a solid angle.
+pub const ANGLE: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+pub const FREQ: Dim = d([0, 0, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const FORCE: Dim = d([1, 1, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const PRESSURE: Dim = d([-1, 1, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const ENERGY: Dim = d([2, 1, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const POWER: Dim = d([2, 1, -3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const CHARGE: Dim = d([0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const VOLTAGE: Dim = d([2, 1, -3, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
 
 /// Dimension families, for error messages.
-const SI: [(&str, Dim); 22] = [
+const SI: [(&str, Dim); 23] = [
     ("length", LENGTH),
     ("volume", LENGTH.powi(3)),
     ("mass", MASS),
@@ -284,10 +288,11 @@ const SI: [(&str, Dim); 22] = [
     ("charge", CHARGE),
     ("voltage", VOLTAGE),
     ("index", INDEX),
+    ("angle", ANGLE),
 ];
 
 /// The coherent unit each family is kept in.
-const NAMED: [(&str, Dim, f64); 21] = [
+const NAMED: [(&str, Dim, f64); 22] = [
     ("m", LENGTH, 1.0),
     ("kg", MASS, 1.0),
     ("s", TIME, 1.0),
@@ -309,6 +314,7 @@ const NAMED: [(&str, Dim, f64); 21] = [
     ("C", CHARGE, 1.0),
     ("V", VOLTAGE, 1.0),
     ("idx", INDEX, 1.0),
+    ("rad", ANGLE, 1.0),
 ];
 
 /// The word for base-dimension slot `i` — builtins by name, custom slots
@@ -541,16 +547,29 @@ fn lookup_builtin(name: &str) -> Option<(Dim, f64)> {
         "cpm" => (BEAT.div(TIME), 4.0 / 60.0),
         "st" => (PITCH, 1.0),
         "oct" => (PITCH, 12.0),
-        // dimensionless scales: `90deg`, `6pct` are plain floats. `prob`/
-        // `logit` scale 1 — they're intent annotations like `rad` ("this
-        // number is a probability"), not new dimensions: probability
-        // doesn't compose under the dim algebra (`p * p` stays a
-        // probability, so a `prob` base dim would wrongly read `prob^2`,
-        // and `p / p` is odds, not dimensionless). `bp` is basis points —
-        // `25bp` is `0.0025`; spelled `bp`, not `bps`, so `b/s` keeps
-        // meaning bits per second.
-        "rad" => (NONE, 1.0),
-        "deg" => (NONE, std::f64::consts::PI / 180.0),
+        // angles: a real dimension — `deg`/`rad` arithmetic checks, and
+        // `a.to("deg")` reads an angle back in degrees. `rad` is the base
+        // (1 turn = 2π); `grad`/`gon` the surveyor's 400-per-turn;
+        // `arcmin`/`arcsec` the astronomer's sixtieths of a degree; `mrad`
+        // the milliradian (not the NATO mil — 1/6400 of a turn, which
+        // nothing here calls by name).
+        // r[impl mimas.unit.angle]
+        "rad" => (ANGLE, 1.0),
+        "deg" => (ANGLE, std::f64::consts::PI / 180.0),
+        "turn" => (ANGLE, std::f64::consts::TAU),
+        "rev" => (ANGLE, std::f64::consts::TAU),
+        "grad" => (ANGLE, std::f64::consts::PI / 200.0),
+        "gon" => (ANGLE, std::f64::consts::PI / 200.0),
+        "arcmin" => (ANGLE, std::f64::consts::PI / 10_800.0),
+        "arcsec" => (ANGLE, std::f64::consts::PI / 648_000.0),
+        "mrad" => (ANGLE, 1e-3),
+        // dimensionless scales: `6pct` is a plain float. `prob`/`logit`
+        // scale 1 — they're intent annotations ("this number is a
+        // probability"), not new dimensions: probability doesn't compose
+        // under the dim algebra (`p * p` stays a probability, so a `prob`
+        // base dim would wrongly read `prob^2`, and `p / p` is odds, not
+        // dimensionless). `bp` is basis points — `25bp` is `0.0025`;
+        // spelled `bp`, not `bps`, so `b/s` keeps meaning bits per second.
         "pct" => (NONE, 0.01),
         "bp" => (NONE, 1e-4),
         "prob" => (NONE, 1.0),
@@ -650,6 +669,31 @@ mod tests {
         assert_eq!(lookup("logit"), Some((Dim::NONE, 1.0)));
         assert_eq!(lookup("bp"), Some((Dim::NONE, 1e-4)));
         assert!(lookup("bogus").is_none());
+    }
+
+    // r[verify mimas.unit.angle]
+    #[test]
+    fn angle_units_carry_the_angle_dimension() {
+        use std::f64::consts::{PI, TAU};
+        assert_eq!(lookup("rad"), Some((ANGLE, 1.0)));
+        for (name, scale) in [
+            ("deg", PI / 180.0),
+            ("turn", TAU),
+            ("rev", TAU),
+            ("grad", PI / 200.0),
+            ("gon", PI / 200.0),
+            ("arcmin", PI / 10_800.0),
+            ("arcsec", PI / 648_000.0),
+            ("mrad", 1e-3),
+        ] {
+            assert_eq!(lookup(name), Some((ANGLE, scale)), "{name}");
+        }
+        // angles compose like any dimension
+        assert_eq!(parse("rad/s").unwrap(), (ANGLE.div(TIME), 1.0));
+        assert_eq!(parse("deg^2").unwrap().0, ANGLE.powi(2));
+        // but they are not dimensionless — pct-style entries stay NONE
+        assert_ne!(ANGLE, Dim::NONE);
+        assert_eq!(lookup("deg").unwrap().0.describe(), "angle (rad)");
     }
 
     #[test]

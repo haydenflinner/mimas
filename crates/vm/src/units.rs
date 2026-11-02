@@ -88,6 +88,13 @@ unit_ty!(
     /// Pixels -- screen-space positions and extents.
     Px, "px", units::PIXELS
 );
+// r[impl mimas.unit.angle]
+unit_ty!(
+    /// Radians -- `deg`/`turn`/`grad`/`arcmin`/`arcsec`/`mrad` are the same
+    /// dimension, scaled. An angle-taking native declares this and the
+    /// checker refuses plain numbers at the call site.
+    Rad, "rad", units::ANGLE
+);
 unit_ty!(
     /// Pixels per second -- screen-space velocities.
     PxS, "px/s", units::PIXELS.div(units::TIME)

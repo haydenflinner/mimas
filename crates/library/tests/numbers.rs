@@ -303,7 +303,7 @@ test_run!(
     float_trig_and_friends,
     "(0.0).sin()" => "0",
     "(0.0).cos()" => "1",
-    "(1.0).atan2(1.0) * 4.0 == std::math::PI" => "true",
+    "(1.0).atan2(1.0).to(\"rad\") * 4.0 == std::math::PI" => "true",
     "(2.0).pow(10.0)" => "1024",
     "(1.0).exp().ln()" => "1",
     "(5.5).clamp(0.0, 1.0)" => "1",

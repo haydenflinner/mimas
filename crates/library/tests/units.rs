@@ -44,6 +44,31 @@ test_run!(
     "25kW.to(bad) absolve |_| -1.0" => "-1",
 );
 
+// r[verify mimas.unit.angle]
+// r[verify mimas.unit.trig]
+test_run!(
+    angles_are_a_dimension,
+    "",
+    "(90deg.to(\"rad\") * 2.0 - std::math::PI).abs() < 1.0e-12" => "true",
+    "(0.5turn.to(\"deg\") - 180.0).abs() < 1.0e-9" => "true",
+    "(100grad.to(\"deg\") - 90.0).abs() < 1.0e-9" => "true",
+    "(60arcmin.to(\"deg\") - 1.0).abs() < 1.0e-9" => "true",
+    "(3600arcsec.to(\"deg\") - 1.0).abs() < 1.0e-9" => "true",
+    "(1000mrad.to(\"rad\") - 1.0).abs() < 1.0e-9" => "true",
+    // same unit spelled two ways
+    "(1rev.to(\"deg\") - 360.0).abs() < 1.0e-9" => "true",
+    "(200gon.to(\"turn\") - 0.5).abs() < 1.0e-9" => "true",
+    // trig eats angles and plain radians alike; inverses give angles back
+    "((90deg).sin() - 1.0).abs() < 1.0e-12" => "true",
+    "(std::math::PI / 2.0).sin() - (90deg).sin()" => "0",
+    "(1.0).atan2(0.0).to(\"deg\") - 90.0" => "0",
+    "(0.0).asin().to(\"deg\")" => "0",
+    // angles compose: add across units, divide by time for angular velocity
+    "(90deg + 0.25turn).to(\"deg\")" => "180",
+    "(90deg + 0.25turn).to(\"turn\")" => "0.5",
+    "((1turn / 1s) * 2s).to(\"deg\")" => "720",
+);
+
 fn rejected(src: &str, needle: &str) {
     let err = test_runner::try_execute(src).expect_err(&format!("`{src}` should be rejected"));
     let text = format!("{err:?}");
@@ -102,7 +127,10 @@ fn declared_dimensions_are_enforced() {
     rejected("struct S { p: kW }\nlet a = S { p = 5s };", "field `p`");
     rejected("let a: kW = 5.0;", "declared type doesn't match");
     rejected("let a = 5kW;\nlet b = a.to(\"s\");", "cannot express");
-    rejected("let a = 5kW.sin();", "needs a plain number");
+    // r[verify mimas.unit.trig]
+    rejected("let a = 5kW.sin();", "needs an angle or a plain number");
+    rejected("let a = 5kW.asin();", "needs a plain number");
+    rejected("let a = (1.0px).atan2(1.0);", "same dimension");
     rejected("let a = 5m.sqrt();", "square root");
 }
 
