@@ -243,16 +243,17 @@ impl<'s> Lexer<'s> {
         plain
     }
 
-    /// An `e[+-]?digits` exponent riding on a float's mantissa, chomped only when it's really
+    /// An `e[+-]?digits` exponent riding on a mantissa, chomped only when it's really
     /// there. chompy's own scan advances twice per exponent digit, which drops a char each
     /// time and can swallow what follows the number (`1.5e2+1` came out as `1.5`), so the
     /// exponent is done here instead. `_` separates exponent digits like anywhere else, and
     /// an `e` that isn't followed by `digits` (or `sign + digits`) is simply left alone --
-    /// `1.5else` is `1.5` then the identifier `else`.
-    fn with_exponent(&mut self, mantissa: f64) -> f64 {
+    /// `1.5else` is `1.5` then the identifier `else`. Returns `None` when no exponent was
+    /// consumed, so the caller knows whether to keep an `Int` or mint a `Float`.
+    fn with_exponent(&mut self, mantissa: f64) -> Option<f64> {
         let stream = &mut self.char_stream;
         if !stream.match_peek('e') {
-            return mantissa;
+            return None;
         }
         stream.match_peek_with(|c: char| c == '+' || c == '-');
         while stream.match_peek_with(|c: char| c.is_ascii_digit() || c == '_') {}
@@ -261,11 +262,11 @@ impl<'s> Lexer<'s> {
         match exp {
             Ok(exp) => {
                 stream.chomp_peeks();
-                mantissa * 10f64.powi(exp)
+                Some(mantissa * 10f64.powi(exp))
             }
             Err(_) => {
                 stream.reset_peeks();
-                mantissa
+                None
             }
         }
     }
@@ -521,11 +522,17 @@ impl<'s> Lex<'s, Tok<TokKind<'s>>, TokKind<'s>> for Lexer<'s> {
                 }
             }
         } else if let Some(mantissa) = self.construct_float(true, false) {
-            let float = self.with_exponent(mantissa);
+            let float = self.with_exponent(mantissa).unwrap_or(mantissa);
             self.with_unit(TokKind::Float(float), float)
         } else if rest.starts_with(|c: char| c.is_ascii_digit()) {
             match self.construct_integer(true) {
-                Some(int) => self.with_unit(TokKind::Int(int), int as f64),
+                // r[impl mimas.num.exponent]
+                // `1e-6`, `2e3`: an exponent on an int mantissa makes a float;
+                // `1e` or `1else` is an int then whatever follows, as before
+                Some(int) => match self.with_exponent(int as f64) {
+                    Some(float) => self.with_unit(TokKind::Float(float), float),
+                    None => self.with_unit(TokKind::Int(int), int as f64),
+                },
                 // on a digit, the only way for that to fail is a number too big to hold
                 None => {
                     let location = self.location(start, self.char_stream.position());

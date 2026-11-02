@@ -1,7 +1,7 @@
 use api::Intrinsic;
 use macros::native;
 use shared::Ty;
-use vm::{Ctx, RtErr, api::Api, conversion::Raisable};
+use vm::{Ctx, RtErr, Val, api::Api, conversion::Raisable};
 
 pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add_method(floor);
@@ -227,15 +227,22 @@ fn to_int(n: f64) -> i64 {
 }
 
 /// `q.to("kWh")` -- a quantity as a plain number in `unit`. A quantity is stored in base units
-/// (`25kW` is `25000.0`), so this divides by the unit's scale. The compiler checks that `q` and
+/// (`25kW` is `25000.0`), so this divides by the unit's scale. `q.to(1kWh)` spells the same
+/// thing without the string: the argument is itself a quantity of the same kind and `to`
+/// simply divides — `rate.to(1deg/s)`, `bill.to(1usd/kWh)`. The compiler checks that `q` and
 /// `unit` measure the same thing; at runtime only the name has to be a unit. A computed unit
 /// string can fail, so the sig is honest `float!`; literal units are proven at solve time and
 /// keep a plain `float` return (see `frame_method_call`).
 #[native]
-fn to(n: f64, unit: &str) -> Raisable<f64> {
-    match shared::units::parse(unit) {
-        Some((_, scale)) => Raisable::Ok(n / scale),
-        None => Raisable::Raised(format!("`{unit}` isn't a unit")),
+fn to<'gc>(n: f64, unit: Val<'gc>) -> Raisable<f64> {
+    match unit {
+        Val::Float(u) => Raisable::Ok(n / u),
+        Val::Int(u) => Raisable::Ok(n / u as f64),
+        Val::Str(u) => match shared::units::parse(u.as_str()) {
+            Some((_, scale)) => Raisable::Ok(n / scale),
+            None => Raisable::Raised(format!("`{}` isn't a unit", u.as_str())),
+        },
+        _ => Raisable::Raised("`to` needs a unit name or a quantity".into()),
     }
 }
 

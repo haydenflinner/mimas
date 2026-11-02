@@ -623,7 +623,7 @@ fn vec2_from_polar(r: f32, angle: Rad) -> Vec2 {
 ///
 /// // e to the i pi is -1, give or take float noise:
 /// let z = Vec2::new(0.0, PI).exp();
-/// check (z.x + 1.0).abs() < 1.0e-6;
+/// check (z.x + 1.0).abs() < 1e-6;
 /// ```
 #[native]
 fn vec2_exp(v: Vec2) -> Vec2 {

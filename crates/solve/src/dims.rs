@@ -1316,6 +1316,24 @@ impl<'a> Pass<'a> {
                         _ => {}
                     }
                 }
+                // `x.to(1kWh)`: the argument itself is a quantity and `to` divides,
+                // so it must measure the same thing. A `str` arrives `Any` — this
+                // fires only on known numbers.
+                // r[impl mimas.unit.to]
+                if let Some(D::Q(ud)) = args.first()
+                    && *ud != *d
+                {
+                    self.fail(
+                        c.arguments[0].value.location(),
+                        format!(
+                            "cannot express {} in {}",
+                            Self::describe(d),
+                            Self::describe(ud)
+                        ),
+                        "the argument is a quantity".into(),
+                        "`to` divides — pick a quantity of the same kind (x.to(1kWh)), or give the unit's name",
+                    );
+                }
                 PLAIN
             }
             (D::Arr(inner), "push") => {

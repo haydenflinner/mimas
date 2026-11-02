@@ -1,7 +1,7 @@
 use api::Intrinsic;
 use macros::native;
 use shared::Ty;
-use vm::{Ctx, RtErr, api::Api, conversion::Raisable};
+use vm::{Ctx, RtErr, Val, api::Api, conversion::Raisable};
 
 pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add_method(abs);
@@ -111,15 +111,21 @@ fn to_float<'gc>(v: i64) -> f64 {
 }
 
 /// `q.to("g")` on an int -- an int-valued quantity (`5.5kg.to_int()`) reads back in any
-/// unit of the same kind, exactly like float's `to`: the compiler checks the unit
-/// measures the same thing; at runtime only the name has to be a unit. A computed unit
-/// string can fail, so the sig is honest `float!`; literal units are proven at solve
-/// time and keep a plain `float` return (see `frame_method_call`).
+/// unit of the same kind, exactly like float's `to`, and `q.to(1g)` divides by the
+/// quantity's scale without the string. The compiler checks the unit measures the same
+/// thing; at runtime only the name has to be a unit. A computed unit string can fail,
+/// so the sig is honest `float!`; literal units are proven at solve time and keep a
+/// plain `float` return (see `frame_method_call`).
 #[native]
-fn to(n: i64, unit: &str) -> Raisable<f64> {
-    match shared::units::parse(unit) {
-        Some((_, scale)) => Raisable::Ok(n as f64 / scale),
-        None => Raisable::Raised(format!("`{unit}` isn't a unit")),
+fn to<'gc>(n: i64, unit: Val<'gc>) -> Raisable<f64> {
+    match unit {
+        Val::Float(u) => Raisable::Ok(n as f64 / u),
+        Val::Int(u) => Raisable::Ok(n as f64 / u as f64),
+        Val::Str(u) => match shared::units::parse(u.as_str()) {
+            Some((_, scale)) => Raisable::Ok(n as f64 / scale),
+            None => Raisable::Raised(format!("`{}` isn't a unit", u.as_str())),
+        },
+        _ => Raisable::Raised("`to` needs a unit name or a quantity".into()),
     }
 }
 

@@ -44,6 +44,20 @@ test_run!(
     "25kW.to(bad) absolve |_| -1.0" => "-1",
 );
 
+// `x.to(1unit)`: the argument itself is a quantity and `to` divides by its scale —
+// the whole unit grammar (`deg/s`, `usd/kWh`) without a string. A literal quantity
+// proves the same non-raising `float`; a computed one stays `float!`.
+test_run!(
+    // r[verify mimas.unit.to]
+    to_accepts_a_quantity_unit,
+    "let deg_s = 1deg/s;",
+    "90deg.to(1deg)" => "90",
+    "(1turn / 1s).to(1deg/s)" => "360",
+    "(0.14usd/kWh * 100kWh).to(1usd)" => "14",
+    "(3km / 2h).to(1m/s) < 0.42" => "true",
+    "(1turn / 1s).to(deg_s)?" => "360",
+);
+
 // r[verify mimas.unit.angle]
 // r[verify mimas.unit.trig]
 test_run!(
@@ -127,6 +141,10 @@ fn declared_dimensions_are_enforced() {
     rejected("struct S { p: kW }\nlet a = S { p = 5s };", "field `p`");
     rejected("let a: kW = 5.0;", "declared type doesn't match");
     rejected("let a = 5kW;\nlet b = a.to(\"s\");", "cannot express");
+    // `to` with a quantity argument divides, so it must measure the same thing
+    rejected("let a = 5kW.to(1s);", "cannot express");
+    rejected("let a = 5kW.to(1deg);", "cannot express");
+    rejected("let a = 5.0.to(1deg);", "cannot express");
     // r[verify mimas.unit.trig]
     rejected("let a = 5kW.sin();", "needs an angle or a plain number");
     rejected("let a = 5kW.asin();", "needs a plain number");

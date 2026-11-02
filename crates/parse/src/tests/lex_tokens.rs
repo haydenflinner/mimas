@@ -23,6 +23,16 @@ tok_test!(float_exponent_signed: "1.5e+3 1.5e-3" => Float(1500.0), Float(0.0015)
 tok_test!(float_exponent_with_underscores: "1.5e1_0" => Float(15000000000.0));
 tok_test!(float_exponent_then_code: "1.5e2+1" => Float(150.0), Plus, Int(1));
 tok_test!(float_e_without_digits: "1.5else" => Float(1.5), Else);
+// r[verify mimas.num.exponent]
+// int mantissas take exponents too -- `1e-6` is one float, not `1` then `e-6` (the
+// old lex made `(x).abs() < 1e-6` fail as "`int` cannot be called"). An `e` that
+// isn't followed by digits still isn't an exponent: `1else` and `2e` stand.
+tok_test!(int_exponent: "1e-6" => Float(1e-6));
+tok_test!(int_exponent_signed: "1e+6 2e3" => Float(1e6), Float(2000.0));
+tok_test!(int_exponent_with_underscores: "1e1_0" => Float(10_000_000_000.0));
+tok_test!(int_exponent_then_code: "1e2+1" => Float(100.0), Plus, Int(1));
+tok_test!(int_e_without_digits: "1else" => Int(1), Else);
+tok_test!(int_e_alone: "2e" => Int(2), Ident("e"));
 tok_test!(quantity_with_underscores: "1_0kW" => Quantity(10.0, "kW"));
 tok_test!(float: "0.2" => Float(0.2));
 tok_test!(float_zero: "0.0" => Float(0.0));
