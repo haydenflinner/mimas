@@ -60,28 +60,6 @@ impl Stmt {
         self.kind.as_ref()
     }
 
-    /// A top-level expression statement `e` becomes `echo(e)`: the value
-    /// of a bare expression reaches a host through the `Prints` fixture
-    /// the way `print`'s text does — Jupyter's echo of a cell's last
-    /// expression — and `echo` returns its argument, so a script's
-    /// trailing expression is still its result. Loops, jumps and blocks
-    /// are left alone: they yield nothing to show, and their control
-    /// flow must not sit inside a call argument.
-    /// r[impl mimas.echo]
-    pub(crate) fn echo(self) -> Self {
-        let Self { kind, id, location } = self;
-        let kind = match *kind {
-            StmtKind::Expr(e) if echoes(&e) => {
-                let loc = e.location();
-                let callee = Expr::new(ExprKind::Ident(Ident::synthetic("echo")), loc);
-                let call = Call::new(callee, vec![Argument { name: None, value: e }]);
-                StmtKind::Expr(Expr::new(ExprKind::Call(call), loc))
-            }
-            other => other,
-        };
-        Self { kind: Box::new(kind), id, location }
-    }
-
     /// Get the stmt's id.
     #[allow(unused)]
     pub fn id(&self) -> NodeId {
@@ -123,20 +101,4 @@ impl PartialEq<Stmt> for Stmt {
     fn eq(&self, other: &Stmt) -> bool {
         self.kind == other.kind
     }
-}
-
-/// Which expression statements are worth echoing (see [`Stmt::echo`]).
-fn echoes(e: &Expr) -> bool {
-    !matches!(
-        e.kind(),
-        ExprKind::For(_)
-            | ExprKind::While(_)
-            | ExprKind::Loop(_)
-            | ExprKind::Return(_)
-            | ExprKind::Break(_)
-            | ExprKind::Continue(_)
-            | ExprKind::Raise(_)
-            | ExprKind::Block(_)
-            | ExprKind::Poison(_)
-    )
 }

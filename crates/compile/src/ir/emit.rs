@@ -130,8 +130,16 @@ impl Ir {
             }
             StmtKind::Expr(expr) => {
                 // the result of this emit is tossed out beyond whatever knock on effects it did --
-                // nothing can consume it
-                let _ = expr.lower(ir);
+                // nothing can consume it. At the top level it first goes to `echo`, the
+                // stdlib native that records it for a host (off unless the host asks):
+                // a notebook's cell shows its last expression. r[impl mimas.echo]
+                let value = expr.lower(ir);
+                if ir.current_body == crate::ir::BodyId::ZERO
+                    && !ir.is_terminated()
+                    && let (Some(value), Some(nid)) = (value, ir.resolutions.echo_native)
+                {
+                    ir.current().call_native(nid, vec![value]);
+                }
 
                 // what we actually care about is our _state_, regardless of what the expr yielded.
                 // if we're terminated, we can return None here. this lets us not inject synthetic

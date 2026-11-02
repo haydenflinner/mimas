@@ -16,12 +16,10 @@ fn print_names_the_unit() {
         library::std,
     )
     .expect("runs");
-    // `dbg(3s)` at the top level also echoes its value — not a print line
     let lines = vm
         .fixture::<vm::fixtures::Prints>()
         .take()
         .into_iter()
-        .filter(|(_, kind, _)| !matches!(kind, vm::fixtures::PrintKind::Echo))
         .map(|(_, _, text)| text)
         .collect::<Vec<_>>();
     assert_eq!(
@@ -36,45 +34,34 @@ fn print_names_the_unit() {
     );
 }
 
-// an explicit `echo(v)` records v at its call site and returns it
-#[test]
-fn explicit_echo_records() {
-    let vm = vm::Vm::execute("let y = echo(3 + 5);", library::std).expect("runs");
-    let lines = vm
-        .fixture::<vm::fixtures::Prints>()
-        .take()
-        .into_iter()
-        .map(|(_, kind, text)| (matches!(kind, vm::fixtures::PrintKind::Echo), text))
-        .collect::<Vec<_>>();
-    assert_eq!(lines, [(true, "8".to_string())]);
-}
-
-// a bare expression at the top level echoes its value at its line; a let,
-// a print (unit) and a check line stay silent; the script's result is unchanged
+// a bare expression at the top level echoes its value at its line once a
+// host turns echoes on; a let, a print (unit) and a check line stay silent
 // r[verify mimas.echo] r[verify mimas.stmt.trailing]
 #[test]
 fn top_level_expressions_echo() {
-    let vm = vm::Vm::execute(
-        "3 + 5\nlet x = 2;\nx * 3\nprint(\"hi\");\nfn f() -> int { 7 }\nf()\n\"go\" + \"!\"",
-        library::std,
-    )
-    .expect("runs");
+    let src = "3 + 5\nlet x = 2;\nx * 3\nprint(\"hi\");\nfn f() -> int { 7 }\nf()\n\"go\" + \"!\"";
+    let mut vm = vm::Vm::compile(src, library::std).expect("compiles");
+    vm.fixture::<vm::fixtures::Echoes>().on.set(true);
+    vm.run().expect("runs");
     let lines = vm
-        .fixture::<vm::fixtures::Prints>()
+        .fixture::<vm::fixtures::Echoes>()
         .take()
         .into_iter()
-        .map(|(loc, kind, text)| (loc.span.start(), matches!(kind, vm::fixtures::PrintKind::Echo), text))
+        .map(|(loc, text, value)| (loc.span.start(), text, matches!(value, vm::Inspect::Int(_) | vm::Inspect::Str(_))))
         .collect::<Vec<_>>();
     assert_eq!(
         lines,
         [
-            (0, true, "8".to_string()),
-            (17, true, "6".to_string()),
-            (23, false, "\"hi\"".to_string()),
-            (56, true, "7".to_string()),
-            (60, true, "\"go!\"".to_string()),
+            (0, "8".to_string(), true),
+            (17, "6".to_string(), true),
+            (56, "7".to_string(), true),
+            (60, "\"go!\"".to_string(), true),
         ]
     );
+    // off by default: a plain run records nothing
+    let mut vm = vm::Vm::compile(src, library::std).expect("compiles");
+    vm.run().expect("runs");
+    assert!(vm.fixture::<vm::fixtures::Echoes>().take().is_empty());
 }
 
 // panic has type `!`, so a panicking match/if arm coerces to the other arm's type

@@ -4,7 +4,7 @@ use vm::{
     anon::{self},
     api::Api,
     conversion::NeverReturn,
-    fixtures::{DebugInfo, Out, PrintDims, Prints},
+    fixtures::{DebugInfo, Echoes, Out, PrintDims, Prints},
 };
 
 /// The ` {unit}` a `print`/`dbg`/`warn` appends when the dims pass proved the value's
@@ -118,22 +118,25 @@ fn todo<'gc>(ctx: Ctx<'gc>, msg: Option<anon::T<'gc>>) -> Result<NeverReturn, Rt
 /// `RtErr::Contract`. Not for user code; the `__` marks it internal.
 #[native]
 #[effects()]
-/// The value of a bare expression at a file's top level: the parser wraps
-/// `3 + 5` as `echo(3 + 5)`, and this records `8` at that line for a host,
-/// the way `print` records its text — Jupyter's echo of a cell's last
-/// expression. Nothing reaches the out sink, unit is skipped so a call made
-/// for its effect stays silent, and the argument is returned unchanged, so a
-/// script's trailing expression is still its result.
+/// The value of a bare expression at a file's top level: the compiler hands
+/// every top-level expression statement's value here, and while a host has
+/// turned `Echoes` on this records the value's display text and structure at
+/// the statement's line — what a notebook cell shows under itself. Off (the
+/// default) it does nothing, so a plain run formats nothing. Unit is skipped,
+/// so a call made for its effect stays silent, and nothing reaches the out
+/// sink.
 /// r[impl mimas.echo]
-fn echo<'gc>(ctx: Ctx<'gc>, val: anon::T<'gc>) -> Result<anon::T<'gc>, RtErr> {
-    if !matches!(val.0, Val::Null) {
-        if let Some(loc) = ctx.fixture::<DebugInfo>().top_loc() {
-            let suffix = unit_suffix(ctx, Some(loc));
-            let text = ctx.display(val.0)?;
-            ctx.fixture::<Prints>().push_echo(loc, format!("{text}{suffix}"));
-        }
+fn echo<'gc>(ctx: Ctx<'gc>, val: anon::T<'gc>) -> Result<(), RtErr> {
+    let echoes = ctx.fixture::<Echoes>();
+    if !echoes.on.get() || matches!(val.0, Val::Null) {
+        return Ok(());
     }
-    Ok(val)
+    if let Some(loc) = ctx.fixture::<DebugInfo>().top_loc() {
+        let suffix = unit_suffix(ctx, Some(loc));
+        let text = ctx.display(val.0)?;
+        echoes.push(loc, format!("{text}{suffix}"), ctx.inspect(val.0));
+    }
+    Ok(())
 }
 
 #[native]

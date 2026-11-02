@@ -58,6 +58,10 @@ pub struct Resolutions {
     /// The `__contract_fail` native's id, for contract-failure lowering at emit.
     /// `None` in embeddings that never installed the stdlib.
     pub contract_native: Option<NativeId>,
+    /// The `echo` native's id: emit hands every top-level expression
+    /// statement's value to it, so a host can show the value at its line.
+    /// `None` without the stdlib — then nothing is emitted.
+    pub echo_native: Option<NativeId>,
     /// The `panic` native's id -- emit's contract-failure fallback when the
     /// prettier `__contract_fail` channel isn't installed.
     pub panic_native: Option<NativeId>,
@@ -377,6 +381,12 @@ impl From<Solver> for Resolutions {
             .filter(|(id, _)| solver.dec_to_native.contains_key(id))
             .find(|(_, dec)| dec.name == "__contract_fail")
             .map(|(id, _)| solver.dec_to_native[&id].id);
+        let echo_native = solver
+            .decs
+            .iter()
+            .filter(|(id, _)| solver.dec_to_native.contains_key(id))
+            .find(|(_, dec)| dec.name == "echo")
+            .map(|(id, _)| solver.dec_to_native[&id].id);
         let panic_native = solver
             .decs
             .iter()
@@ -460,6 +470,7 @@ impl From<Solver> for Resolutions {
             len_checks: solver.len_checks,
             default_ctors: solver.default_ctors,
             contract_native,
+            echo_native,
             panic_native,
             op_decs: solver.op_decs,
             pact_ops: solver.pact_ops,

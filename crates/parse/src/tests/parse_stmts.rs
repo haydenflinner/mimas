@@ -1288,19 +1288,3 @@ fn if_body_starting_with_an_assignment_is_fine() {
             .unwrap_or_else(|e| panic!("{src}: {e:?}"));
     }
 }
-
-// a top-level expression statement is wrapped as `echo(e)`; lets, items,
-// loops and jumps are left alone
-// r[verify mimas.echo]
-#[test]
-fn top_level_expressions_wrap_in_echo() {
-    let (mut ast, errors) = crate::tests::utils::parse("3 + 5\nlet x = 2;\nfn f() -> int { 7 }\nfor i in [1] { i }\nx * 3");
-    assert!(errors.is_empty(), "{errors:?}");
-    ast.echo_top_level();
-    let stmts: Vec<String> = ast.stmts().iter().map(ToString::to_string).collect();
-    assert!(stmts[0].starts_with("echo("), "{stmts:?}");
-    assert!(!stmts[1].contains("echo("), "{stmts:?}");
-    assert!(!stmts[2].contains("echo("), "{stmts:?}");
-    assert!(!stmts[3].contains("echo("), "{stmts:?}");
-    assert!(stmts[4].starts_with("echo("), "{stmts:?}");
-}

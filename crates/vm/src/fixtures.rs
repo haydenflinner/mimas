@@ -189,9 +189,6 @@ impl Out {
 pub enum PrintKind {
     Print,
     Warn,
-    /// The value of a bare top-level expression (`echo`, see the parse
-    /// crate's `Stmt::echo`) — a host shows it as the line's result.
-    Echo,
 }
 
 /// Every `print`/`dbg`/`warn` line, keyed by call site — a rich host (the lit
@@ -230,17 +227,6 @@ impl Prints {
     /// `(site, text)` are suppressed — the host still holds the first.
     /// Returns whether the warning was new (the caller may still want to
     /// echo it to `Out` only then).
-    /// A bare expression's value at its line — kept apart from prints so
-    /// a host can style it as a result and keep only a card's last one.
-    pub fn push_echo(&self, loc: Location, text: String) {
-        let mut lines = self.lines.borrow_mut();
-        if lines.len() < Self::CAP {
-            lines.push((loc, PrintKind::Echo, text));
-        } else {
-            self.dropped.set(self.dropped.get() + 1);
-        }
-    }
-
     pub fn push_warn(&self, loc: Location, text: String) -> bool {
         if !self.warned.borrow_mut().insert((loc, text.clone())) {
             return false;
@@ -379,5 +365,36 @@ impl Fixtures {
         // SAFETY: entries are never removed; Box's heap address is stable for the
         // lifetime of self. The returned reference is tied to &self via inference.
         unsafe { &*ptr }
+    }
+}
+
+/// The values of bare top-level expressions, by their line: what a
+/// notebook cell shows under itself. `echo` (the stdlib native every
+/// top-level expression statement is compiled to call) records here only
+/// while `on` — a host sets it for the pass it reads, so a plain run
+/// formats nothing. Each entry is the call site, the value's display text
+/// (quoted strings, `Name { .. }`), and its [`Inspect`] tree for a richer
+/// view. Capped like [`Prints`].
+#[derive(Default)]
+pub struct Echoes {
+    pub on: Cell<bool>,
+    pub lines: RefCell<Vec<(Location, String, crate::Inspect)>>,
+    pub dropped: Cell<usize>,
+}
+
+impl Echoes {
+    pub const CAP: usize = 4096;
+
+    pub fn push(&self, loc: Location, text: String, value: crate::Inspect) {
+        let mut lines = self.lines.borrow_mut();
+        if lines.len() < Self::CAP {
+            lines.push((loc, text, value));
+        } else {
+            self.dropped.set(self.dropped.get() + 1);
+        }
+    }
+
+    pub fn take(&self) -> Vec<(Location, String, crate::Inspect)> {
+        std::mem::take(&mut *self.lines.borrow_mut())
     }
 }

@@ -262,6 +262,15 @@ impl<'gc> Ctx<'gc> {
         self.state.fixtures.get::<T>()
     }
 
+    /// A value's [`Inspect`] tree with the program's struct and field names —
+    /// what the env pane reads for a `let`, available to a native too.
+    pub fn inspect(self, value: Val<'gc>) -> crate::Inspect {
+        let struct_names = self.state.struct_names.borrow();
+        let field_names = self.state.field_names.borrow();
+        let mut seen = std::collections::HashSet::new();
+        value.inspect(&struct_names, &field_names, &mut seen)
+    }
+
     /// Emit a non-fatal diagnostic at the current call site: the host gets a
     /// `(call site, text)` pair through [`Prints`](crate::fixtures::Prints)
     /// (same pipeline as `print` popovers, tagged `Warn`), and `warning: …`
