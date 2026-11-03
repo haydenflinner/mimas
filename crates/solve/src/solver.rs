@@ -60,6 +60,10 @@ pub struct Solver {
     /// The unit text as written for each literal in `ast_quantities`, so diagnostics can
     /// name `ft` rather than collapsing it to `length (m)`.
     pub(crate) ast_quantity_units: HashMap<NodeId, String>,
+    /// Bare unit names resolved as constants (`kWh` reads as `1kWh`): unit text -> its
+    /// synthetic `Constant` dec and dimension, deduped so every use points at one dec.
+    /// r[impl mimas.unit.constant]
+    pub(crate) unit_consts: HashMap<String, (DecId, shared::units::Dim)>,
     /// Every expression's computed dimension, recorded by the dims pass —
     /// `b.x + 2.0px` is `px` here while its `node_tys` stays `Float`.
     /// Surfaces on [`Resolutions::node_dims`](crate::Resolutions).
@@ -164,6 +168,7 @@ impl Solver {
             group_decs: HashMap::new(),
             ast_quantities: HashMap::new(),
             ast_quantity_units: HashMap::new(),
+            unit_consts: HashMap::new(),
             node_dims: IndexMap::new(),
             want_dims: IndexMap::new(),
             print_dims: IndexMap::new(),
@@ -1649,6 +1654,31 @@ impl Solver {
         self.note(ident, Ty::Vid(vid), Some(dec));
         dec
     }
+
+    /// `kWh` where nothing binds it: the quantity `1kWh`, as a synthetic `Constant` dec —
+    /// codegen folds it like `PI`, `reduce_const_expr` proves it literal, and the dims
+    /// pass reads its dimension from `unit_consts`. Deduped by name; an `index` unit is
+    /// an `int`, everything else a `float`.
+    fn unit_const(
+        &mut self,
+        ident: &Ident,
+        dim: shared::units::Dim,
+        scale: f64,
+    ) -> (Ty, Option<DecId>) {
+        if let Some(&(dec, _)) = self.unit_consts.get(&ident.lexeme) {
+            let ty = Ty::Vid(self.decs[dec].vid);
+            self.note(ident, ty.clone(), Some(dec));
+            return (ty, Some(dec));
+        }
+        let (ty, lit) = if dim == shared::units::INDEX {
+            (Ty::Int, Literal::Int(1))
+        } else {
+            (Ty::Float, Literal::Float(scale))
+        };
+        let dec = self.dec_id(ident, ty.clone(), DecKind::Constant(Some(lit)), Vis::Public);
+        self.unit_consts.insert(ident.lexeme.clone(), (dec, dim));
+        (ty, Some(dec))
+    }
 }
 
 // generic type params
@@ -2102,11 +2132,23 @@ impl Solver {
                     src: self.src(loc),
                     at: loc.into(),
                 })?;
-                let dec_id = self.ribs.resolve(root).ok_or_else(|| NotFound {
-                    src: self.src(root.location),
-                    at: root.location.into(),
-                    name: root.lexeme.clone(),
-                })?;
+                let dec_id = match self.ribs.resolve(root) {
+                    Some(d) => d,
+                    // `m = 5`: the name resolves -- as a constant, and constants
+                    // can't be assigned
+                    None if shared::units::parse(&root.lexeme).is_some() => {
+                        Err(AssignToConst {
+                            src: self.src(root.location),
+                            at: root.location.into(),
+                            name: root.lexeme.clone(),
+                        })?
+                    }
+                    None => Err(NotFound {
+                        src: self.src(root.location),
+                        at: root.location.into(),
+                        name: root.lexeme.clone(),
+                    })?,
+                };
                 // `x = v` doesn't *read* x, but the grades pass needs the target's dec to
                 // count the store -- same lookup as every other ident site
                 self.node_decs.insert(root.id, dec_id);
@@ -2476,7 +2518,16 @@ impl Solver {
                 }
                 None => {
                     let pact = self.pacts.iter().find(|(_, p)| p.name == ident.lexeme);
-                    let Some((pid, _)) = pact else {
+                    if let Some((pid, _)) = pact {
+                        (Ty::pacts(vec![pid]), None)
+                    // a bare unit name is a constant: unbound `kWh` reads as `1kWh`, and
+                    // `deg / s` composes through ordinary quantity arithmetic. Everything
+                    // declared -- bindings, natives, pacts -- wins before this fires.
+                    // r[impl mimas.unit.constant]
+                    } else if let Some((dim, scale)) = shared::units::parse(&ident.lexeme)
+                    {
+                        self.unit_const(ident, dim, scale)
+                    } else {
                         // a tagged literal whose tag no native backs: say so in the
                         // literal's own spelling, not the lowered `__lit_` name
                         let name = match ident.lexeme.strip_prefix("__lit_") {
@@ -2488,8 +2539,7 @@ impl Solver {
                             at: read_location.into(),
                             name,
                         })?
-                    };
-                    (Ty::pacts(vec![pid]), None)
+                    }
                 }
             }
         };

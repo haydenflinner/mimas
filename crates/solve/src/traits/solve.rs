@@ -1889,6 +1889,14 @@ impl Solve for Ident {
     fn solve(&self, id: NodeId, _location: Location, solver: &mut Solver) -> Result<Ty> {
         let ty = self.query(solver)?;
         let resolved = solver.ribs.resolve_with_closures(self);
+        // a unit constant (`kWh` reads as `1kWh`) resolved through `resolve_name`'s
+        // fallback, not the ribs -- it counts as bound so the use site links its dec
+        let resolved = resolved.or_else(|| {
+            solver
+                .unit_consts
+                .get(&self.lexeme)
+                .map(|&(dec, _)| (dec, Vec::new()))
+        });
         let bound = resolved.is_some();
 
         // mark this usage; every closure boundary crossed on the way to the binding captures it

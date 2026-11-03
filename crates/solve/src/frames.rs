@@ -849,7 +849,7 @@ impl Solver {
         let Some(lits) = call
             .arguments
             .iter()
-            .map(|a| Self::lit_arg(&a.value))
+            .map(|a| self.lit_arg(&a.value))
             .collect::<Option<Vec<_>>>()
         else {
             return Ok(ty);
@@ -894,15 +894,28 @@ impl Solver {
 
     /// A call argument as a `shared::Literal` for a validator -- scalar literals only. Any
     /// array/tuple/non-literal makes the whole call unvalidated (validators see a flat
-    /// `&[Literal]`, so partial conversion would misalign positions).
-    fn lit_arg(e: &Expr) -> Option<shared::Literal> {
+    /// `&[Literal]`, so partial conversion would misalign positions). A bare unit name
+    /// (`kWh`), a `const` (`KWH`), and constant folds of them (`deg / s`, `usd/kWh`)
+    /// count as literal -- `reduce_const_expr` already does that work.
+    fn lit_arg(&self, e: &Expr) -> Option<shared::Literal> {
         match e.kind() {
-            ExprKind::Literal(Literal::Int(i)) => Some(shared::Literal::Int(*i)),
-            ExprKind::Literal(Literal::Float(f)) => Some(shared::Literal::Float(*f)),
-            ExprKind::Literal(Literal::String(s)) => Some(shared::Literal::Str(s.clone())),
-            ExprKind::Literal(Literal::True) => Some(shared::Literal::Bool(true)),
-            ExprKind::Literal(Literal::False) => Some(shared::Literal::Bool(false)),
-            ExprKind::Literal(Literal::Null) => Some(shared::Literal::Null),
+            ExprKind::Literal(l) => Self::lit_literal(l),
+            _ => self
+                .reduce_const_expr(e)
+                .ok()
+                .flatten()
+                .and_then(|l| Self::lit_literal(&l)),
+        }
+    }
+
+    fn lit_literal(l: &Literal) -> Option<shared::Literal> {
+        match l {
+            Literal::Int(i) => Some(shared::Literal::Int(*i)),
+            Literal::Float(f) => Some(shared::Literal::Float(*f)),
+            Literal::String(s) => Some(shared::Literal::Str(s.clone())),
+            Literal::True => Some(shared::Literal::Bool(true)),
+            Literal::False => Some(shared::Literal::Bool(false)),
+            Literal::Null => Some(shared::Literal::Null),
             _ => None,
         }
     }

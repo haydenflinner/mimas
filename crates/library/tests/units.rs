@@ -58,6 +58,43 @@ test_run!(
     "(1turn / 1s).to(deg_s)?" => "360",
 );
 
+// r[verify mimas.unit.constant]
+// a bare unit name is the quantity `1` of it: `kWh` reads `1kWh`, so `e / kWh` is
+// the conversion, `e.to(kWh)` its friendly spelling, and `deg / s`, `usd / kWh`,
+// `2.5 * m` compose through ordinary quantity arithmetic. Everything declared —
+// bindings, natives, pacts — shadows the fallback.
+test_run!(
+    unit_names_are_constants,
+    "const RATE = 720deg/s;",
+    "(25kW * 4h).to(kWh)" => "100",
+    "(25kW * 4h) / kWh" => "100",
+    "(1turn / 1s).to(deg/s)" => "360",
+    "((1turn / 1s) / (deg/s))" => "360",
+    "(0.14usd/kWh * 100kWh) / usd" => "14",
+    "((0.14usd/kWh).to(usd/kWh) - 0.14).abs() < 1e-12" => "true",
+    "(2.5 * m).to(cm)" => "250",
+    "(deg / s == 1deg / 1s)" => "true",
+    "(kWh == 1kWh)" => "true",
+    "pct == 0.01" => "true",
+    "RATE.to(deg/s)" => "720",
+    "{ let u = kWh; (25kW * 4h).to(u)? }" => "100",
+    "(m * m).to(m*m)" => "1",
+);
+
+#[test]
+fn unit_constants_are_checked_and_shadowable() {
+    // the fallback still knows the dimension: wrong-kind conversions fail
+    rejected("let a = 5kW.to(s);", "cannot express");
+    rejected("let a = 5s + m;", "cannot add");
+    // units are constants: you can read them but not write them
+    rejected("m = 5;", "defined as a constant");
+    // declared bindings shadow unit names everywhere
+    test_runner::try_execute("let m = 5; let a = m;").unwrap();
+    test_runner::try_execute("let s = \"secs\"; let a = s;").unwrap();
+    test_runner::try_execute("fn f(s: int) -> int { s + 1 }\nlet a = f(1);").unwrap();
+    test_runner::try_execute("for m in [1, 2] { m * 2; };").unwrap();
+}
+
 // r[verify mimas.unit.angle]
 // r[verify mimas.unit.trig]
 test_run!(

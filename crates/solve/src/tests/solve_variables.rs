@@ -434,7 +434,7 @@ test_fail!(violate_infered_type, "let a = 0; a = true;");
 test_fail!(violate_explicate_type, "let a: int = 0; a = true;");
 test_fail!(annotation_value_mismatch, "let a: int = true;");
 test_fail!(typed_array_rejects_wrong_element, "let a: [int] = [1.0];");
-test_fail!(read_undefined_variable, "let a = b;");
+test_fail!(read_undefined_variable, "let a = zz;");
 test_fail!(missing_members_in_tuple_destroy, "let (a) = (0, 1);");
 test_fail!(extra_members_in_tuple_destroy, "let (a, b, c) = (0, 1);");
 

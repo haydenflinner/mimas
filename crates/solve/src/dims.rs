@@ -140,7 +140,14 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> Result<()> {
             enum_names: Default::default(),
             ty_params: Vec::new(),
             env: HashMap::new(),
-            consts: HashMap::new(),
+            // unit constants (`kWh` reads as `1kWh`) carry their dimension — the
+            // solver minted their decs without a `const` statement, so `bind_const`
+            // never saw them; seed them here once.
+            consts: solver
+                .unit_consts
+                .values()
+                .map(|(dec, dim)| (*dec, D::Q(*dim)))
+                .collect(),
             rets: Vec::new(),
             dims: IndexMap::new(),
             want_dims: IndexMap::new(),
