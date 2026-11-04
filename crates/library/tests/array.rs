@@ -876,3 +876,51 @@ test_fail!(
     "let _ = [1, 2].foldi(0, |i, acc| acc);"
 );
 test_fail!(zip_rejects_non_array, "let _ = [1, 2].zip(5);");
+
+// r[verify mimas.array.comprehension]
+test_run!(
+    comprehension_maps,
+    "let xs = [1, 2, 3, 4];",
+    "[x * 2 for x in xs]" => "[2, 4, 6, 8]",
+    // the result chains like any array
+    "[x for x in xs].len()" => "4",
+    "[x for x in 0..3]" => "[0, 1, 2]",
+    "[x for x in 0..=2]" => "[0, 1, 2]",
+);
+
+test_run!(
+    comprehension_filters,
+    "let xs = [1, 2, 3, 4];",
+    "[x for x in xs if x > 1]" => "[2, 3, 4]",
+    // an `if` after the first `if` nests, not errors
+    "[x for x in xs if x > 1 if x < 4]" => "[2, 3]",
+    "[x for x in xs if x > 9]" => "[]",
+);
+
+test_run!(
+    comprehension_iterates_strings_and_dicts,
+    "let d = ~{a = 1, b = 2};",
+    "[c for c in \"ab\"]" => r#"["a", "b"]"#,
+    "[kv for kv in d]" => r#"[["a", 1], ["b", 2]]"#,
+);
+
+test_run!(
+    comprehension_nests_flat,
+    // `for x for y` is Python's order: x1y1, x1y2, x2y1, x2y2 — and the
+    // result stays one list, not a list of lists.
+    "[[x, y] for x in [1, 2] for y in [3, 4]]" => "[[1, 3], [1, 4], [2, 3], [2, 4]]",
+    "[(x, y) for x in [1, 2] if x > 1 for y in [3]]" => "[[2, 3]]",
+);
+
+test_run!(
+    comprehension_binds_inner_names,
+    "let xs = [1, 2];",
+    // a comprehension inside the head sees the clause's binding
+    "[[y for y in [x, x * 10]] for x in xs]" => "[[1, 10], [2, 20]]",
+);
+
+// the clause's binding doesn't leak into the enclosing scope
+test_fail!(
+    comprehension_binding_is_scoped,
+    "let xs = [1, 2]; let _ = [x for x in xs]; x"
+);

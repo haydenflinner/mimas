@@ -165,6 +165,27 @@ expr_test!(
     )
 );
 
+// r[verify mimas.array.comprehension]
+expr_test!(
+    list_comprehension,
+    "[a for x in xs]",
+    For::new(
+        ident!("x"),
+        ident_expr!("xs"),
+        Collect::new(ident_expr!("a")).into_expr()
+    )
+);
+
+expr_test!(
+    list_comprehension_filter,
+    "[a for x in xs if p]",
+    For::new(
+        ident!("x"),
+        ident_expr!("xs"),
+        If::new(ident_expr!("p"), Collect::new(ident_expr!("a")).into_expr()).into_expr()
+    )
+);
+
 expr_test!(r#if, "if a {}", If::new(ident_expr!("a"), block!()));
 
 expr_test!(

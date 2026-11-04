@@ -1778,9 +1778,18 @@ impl<'s> Parser<'s> {
 
         let binding = self.pattern();
         self.expect(TokKind::In);
-        // `for x in xs y` -- `y` is the body, not `xs(y)`; the loop head
-        // disarms juxtaposition like an `if`/`while` condition
-        let iterator = self.with_juxta(Juxta::Off, |p| p.struct_literals(false, |p| {
+        let iterator = self.iter_target();
+        let body = self.block_body();
+        self.new_expr(For::new(binding, iterator, body), start)
+    }
+
+    /// The `for x in <this>` — an expr plus an optional `..`/`..=` range
+    /// tail, with juxtaposition disarmed (`for x in xs y` -- `y` is the
+    /// body, not `xs(y)`) and struct literals off (`for x in P {` --
+    /// `{` opens the body, not `P`'s fields). Shared by `for` loops and
+    /// the clauses of a `[e for x in xs]` comprehension.
+    fn iter_target(&mut self) -> Expr {
+        self.with_juxta(Juxta::Off, |p| p.struct_literals(false, |p| {
             let iterator = p.expr();
             let inclusive = p.at(TokKind::DoubleDotEqual);
             if !p.infix_binds() || (!inclusive && !p.at(TokKind::DoubleDot)) {
@@ -1790,9 +1799,101 @@ impl<'s> Parser<'s> {
             let start = iterator.span().start();
             let end = p.expr();
             p.new_expr(Range::new(iterator, end, inclusive), start)
-        }));
-        let body = self.block_body();
-        self.new_expr(For::new(binding, iterator, body), start)
+        }))
+    }
+
+    // r[impl mimas.array.comprehension]
+    /// The `for x in xs …` tail of a `[head for x in xs]` comprehension
+    /// — the head expr is already parsed. Clauses apply in order, each
+    /// `for` nesting a loop and each `if` guarding what follows. The
+    /// desugar rides `collect`: `[e for x in xs if p]` is
+    /// `for x in xs { if p { collect e } }`; a second `for` collects
+    /// the inner loop's list and flattens one level per extra clause —
+    /// `for x in a { collect (for y in b { collect e }) }.flatten()`,
+    /// which is Python's nesting order.
+    fn list_comprehension(&mut self, head: Expr) -> Expr {
+        let start = head.span().start();
+        enum Clause {
+            For(Pat, Expr),
+            If(Option<Pat>, Expr),
+        }
+        let mut clauses = vec![];
+        loop {
+            if self.eat(TokKind::For) {
+                let binding = self.pattern();
+                self.expect(TokKind::In);
+                clauses.push(Clause::For(binding, self.iter_target()));
+            } else if self.eat(TokKind::If) {
+                let (binding, condition) = self.condition();
+                clauses.push(Clause::If(binding, condition));
+            } else {
+                break;
+            }
+        }
+        if !self.at(TokKind::RightSquare) {
+            // `[e for x in xs, y]` — clauses end the bracket; report
+            // and let the caller's sequence recover the rest.
+            self.expected("]");
+        }
+        let hloc = head.location();
+        let mut body = Expr::new(Collect::new(head).into(), hloc);
+        // `emits` — the folded body's leaf `collect`s into the
+        // enclosing loop. A `for` clause consumes the emitter as its
+        // own body, or — once a `for` has wrapped it — `collect`s the
+        // produced list (threaded under `if`s by `collect_at_leaf`).
+        let mut emits = true;
+        let mut depth = 0usize;
+        for clause in clauses.into_iter().rev() {
+            body = match clause {
+                Clause::For(binding, iterator) => {
+                    if !emits {
+                        body = self.collect_at_leaf(body);
+                    }
+                    emits = false;
+                    depth += 1;
+                    self.new_expr(For::new(binding, iterator, body), start)
+                }
+                Clause::If(binding, condition) => self.new_expr(
+                    If {
+                        condition,
+                        main_body: body,
+                        else_expr: None,
+                        binding,
+                    },
+                    start,
+                ),
+            };
+        }
+        // each `for` past the first wrapped a produced list — flatten
+        // it back out, one `.flatten()` per extra clause.
+        for _ in 1..depth {
+            let at = body.location();
+            let dot = Expr::new(
+                Access::Dot {
+                    left: body,
+                    right: Expr::new(Ident::new("flatten", at).into(), at),
+                    kind: AccessKind::Direct,
+                }
+                .into(),
+                at,
+            );
+            body = Expr::new(Call::new(dot, vec![]).into(), at);
+        }
+        body
+    }
+
+    /// `collect <body>` with the `collect` pushed to the leaf of any
+    /// `if` chain — `for x if p` collects the produced list only when
+    /// `p` holds, never an `Option`.
+    fn collect_at_leaf(&mut self, body: Expr) -> Expr {
+        let at = body.location();
+        match body.into_kind() {
+            ExprKind::If(mut if_) => {
+                if_.main_body = self.collect_at_leaf(if_.main_body);
+                Expr::new(if_.into(), at)
+            }
+            kind => Expr::new(Collect::new(Expr::new(kind, at)).into(), at),
+        }
     }
 
     fn if_expr(&mut self) -> Expr {
@@ -2304,12 +2405,28 @@ impl<'s> Parser<'s> {
             // todo: this might allow "hello"() or true[]" etc. only dot accesses are okay on lits"
             self.chain_accesses(expr)
         } else if self.eat(TokKind::LeftSquare) {
+            // `[e for x in xs]` — a comprehension desugars to the
+            // `for`/`collect` loop; anything else is a plain literal.
+            let mut comp = false;
+            let mut first = true;
             let elements = self.with_juxta(Juxta::Comma, |p| {
                 p.list(TokKind::RightSquare, TokKind::starts_expr, |p| {
-                    p.struct_literals(true, Self::expr)
+                    let mut element = p.struct_literals(true, Self::expr);
+                    if first && p.at(TokKind::For) {
+                        comp = true;
+                        element = p.list_comprehension(element);
+                    }
+                    first = false;
+                    element
                 })
             });
-            let expr = self.new_expr(Literal::Array(elements), start);
+            let expr = if comp {
+                // the For node `list_comprehension` built — later
+                // elements, if any, already drew their own errors
+                elements.into_iter().next().unwrap()
+            } else {
+                self.new_expr(Literal::Array(elements), start)
+            };
             self.chain_accesses(expr)
         } else if self.eat(TokKind::TildeLeftBrace) {
             let elements = self.with_juxta(Juxta::Comma, |p| {
