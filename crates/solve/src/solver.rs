@@ -2,10 +2,10 @@ use crate::{
     Error, Result, Unification, UnificationError,
     components::*,
     errors::{
-        AssignToConst, AssignToLoopVar, AssignToStringIndex, BareNullBinding, ExtraTupleMembers,
-        FieldNotFound, InvalidAssignTarget, InvalidPattern, InvalidUseTarget, IteratingHere,
-        MissingTupleMembers, MultipleConstDeclarations, MutateWhileIterating, NonConstantValue,
-        NotFound, SelfOutOfContext,
+        AssignToConst, AssignToLoopVar, AssignToStringIndex, BareNullBinding, CheckIsNotCallable,
+        ExtraTupleMembers, FieldNotFound, InvalidAssignTarget, InvalidPattern, InvalidUseTarget,
+        IteratingHere, MissingTupleMembers, MultipleConstDeclarations, MutateWhileIterating,
+        NonConstantValue, NotFound, SelfOutOfContext,
     },
     traits::*,
 };
@@ -111,6 +111,10 @@ pub struct Solver {
     /// Non-fatal diagnostics (the lint suite). Solve succeeds; hosts decide how to show them.
     /// Surfaces on `Loaded::warnings` and `Resolutions::warnings`.
     pub(crate) warnings: Vec<miette::Report>,
+    /// Modules brought in by a bare `use music;` (which binds the name,
+    /// not the members) -- an unbound-name error that names a member of
+    /// one of these gets the "you wanted `::*`" hint.
+    pub(crate) bare_module_uses: HashMap<String, AdtId>,
     /// Set while the prelude group (the built-in source and the library's
     /// own sources) is being solved -- `load_files` solves that group to
     /// completion before any user file, so a user `enum PosNeg` can't catch
@@ -181,6 +185,7 @@ impl Solver {
             script_effects: IndexMap::new(),
             script_segments: Vec::new(),
             warnings: Vec::new(),
+            bare_module_uses: HashMap::new(),
             in_prelude: false,
             prelude_types: HashSet::new(),
             non_value: None,
@@ -785,7 +790,17 @@ impl Solver {
 
         let imports: Vec<ImportBinding> = match us {
             Use::Host(_) => unreachable!("handled above"),
-            Use::Singular(_, _) => vec![target],
+            Use::Singular(_, _) => {
+                // `use music` binds `music` -- the module itself, which
+                // `music::` already names -- it does NOT import `pat`.
+                // Remember it so an unbound `pat` can say why.
+                if let Some(adt) = target.ty.as_adt().copied()
+                    && self.adts[adt].flags.contains(AdtFlags::IS_MODULE)
+                {
+                    self.bare_module_uses.insert(target.name.clone(), adt);
+                }
+                vec![target]
+            }
             Use::Multi(_, items) => {
                 let Some(adt) = target.ty.as_adt().copied() else {
                     Err(InvalidUseTarget {
@@ -2534,6 +2549,27 @@ impl Solver {
                             Some(tag) => format!("{tag}\"…\" (no `{tag}` literal tag is registered)"),
                             None => ident.lexeme.clone(),
                         };
+                        // `check(x)` touching the word parsed as a call --
+                        // the check is a line, its hint is the spacing fix
+                        if name == "check" {
+                            Err(CheckIsNotCallable {
+                                src: self.src(read_location),
+                                at: read_location.into(),
+                            })?
+                        }
+                        // `use music` then `pat`: the bare import bound the
+                        // module's name, so a member name fails here -- say
+                        // which module has it and how to really import it.
+                        for (module, adt) in self.bare_module_uses.clone() {
+                            if self.module_field(adt, ident).is_ok() {
+                                Err(crate::errors::BareImportMember {
+                                    src: self.src(read_location),
+                                    at: read_location.into(),
+                                    module,
+                                    name: name.clone(),
+                                })?
+                            }
+                        }
                         Err(NotFound {
                             src: self.src(read_location),
                             at: read_location.into(),

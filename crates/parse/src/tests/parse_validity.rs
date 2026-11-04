@@ -265,17 +265,19 @@ fn check_line_is_ordinary_equality() {
         };
         assert_eq!(tests.cases.len(), 1);
         assert_eq!(&tests.cases[0].name.lexeme, want);
+        // `check` bodies desugar like `assert` -- operand lets + an
+        // if-panic inside a block that yields `true`.
         assert!(matches!(
             tests.cases[0].expr.kind(),
-            crate::ExprKind::Equality(_)
+            crate::ExprKind::Block(_)
         ));
     }
-    // a bare expr stays a bare check
+    // a bare expr takes the same desugar, with no operand pair
     let tests = check_item("check alive()");
     assert_eq!(tests.cases[0].name.lexeme, "alive()");
-    assert!(!matches!(
+    assert!(matches!(
         tests.cases[0].expr.kind(),
-        crate::ExprKind::Equality(_)
+        crate::ExprKind::Block(_)
     ));
     // `,` chains a second check on the same line
     let tests = check_item("check f() == 0, g() == 1");

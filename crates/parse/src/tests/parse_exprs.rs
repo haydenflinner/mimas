@@ -1832,13 +1832,23 @@ fn parse_expr(source: &str) -> String {
 
 #[test]
 fn assert_eq_rewrites_to_inverted_if() {
-    let text = parse_expr("assert!(1 == 2)");
+    let text = parse_expr("assert!(a == 2)");
+    // `a` needs the evaluate-once temp; the literal `2` inlines
     assert!(text.contains("__assert_left_1"), "{text}");
-    assert!(text.contains("__assert_right_1"), "{text}");
+    assert!(!text.contains("__assert_right_1"), "{text}");
     assert!(text.contains("!="), "{text}");
     assert!(text.contains("=="), "{text}");
     assert!(text.contains("panic"), "{text}");
     assert!(text.contains("assertion failed:"), "{text}");
+}
+
+#[test]
+fn assert_eq_null_inlines_no_bare_null_let() {
+    // `assert(v == null)` used to desugar `let __r = null`, tripping the
+    // bare-null lint on generated code -- literals never get temps.
+    let text = parse_expr("assert!(v == null)");
+    assert!(!text.contains("let __assert_right"), "{text}");
+    assert!(text.contains("!= null"), "{text}");
 }
 
 #[test]
@@ -1868,7 +1878,9 @@ fn assert_bool_rewrites_to_not() {
 
 #[test]
 fn nested_asserts_get_distinct_temps() {
-    let text = parse_expr("assert!(assert!(1 == 1) == ())");
+    let text = parse_expr("assert!(assert!(a == b) == ())");
+    // inner `a`/`b` get pair 1's temps; the outer's left (the assert
+    // block) gets pair 2's left temp; `()` is a literal and inlines
     assert!(text.contains("__assert_left_1"), "{text}");
     assert!(text.contains("__assert_left_2"), "{text}");
 }

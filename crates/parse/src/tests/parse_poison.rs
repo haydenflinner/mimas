@@ -1171,3 +1171,11 @@ fn preview(source: &str) -> String {
 }
 
 test_error_label!(let_mut_label_sits_on_mut, "let mut i = 0;", "mut");
+
+test_recover!(
+    rust_dict_type_habit,
+    "fn f(d: {str: int}) -> int { 0 }
+     let x = 1;",
+    errors: ["`{str: V}` isn't a type -- a dict type is `~{V}` (keys are always `str`)"],
+    stmts: ["fn f(d: <poison>) -> int {0 }", "let x = 1;"],
+);

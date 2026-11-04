@@ -797,15 +797,27 @@ impl<'s> Parser<'s> {
         Tests::new(cases)
     }
 
-    /// One check: an `expr` — `a == b` is an ordinary equality, no sugar.
+    /// One check: the `expr`, wrapped in `assert`'s operand-reporting rewrite.
     fn check_case(&mut self, names: &mut std::collections::HashSet<String>) -> TestCase {
         let expr = self.expr();
         let name = unique_test_name(names, self.source_of(&expr));
         let location = expr.location();
+        // `check` gets `assert`'s operand rewrite: a failed `check x == 40`
+        // panics "assertion failed: 39 == 40" -- the got value, not just
+        // the check's expected text.
+        let start = expr.span().start();
+        let asserted = self.rewrite_assert(start, expr);
+        let body = self.new_expr(
+            Block {
+                body: vec![self.new_stmt(StmtKind::Expr(asserted), start)],
+                yielded_expr: Some(self.new_expr(Literal::True, start)),
+            },
+            start,
+        );
         TestCase {
             id: NodeId::new(),
             name: Ident::new(name, location),
-            expr,
+            expr: body,
         }
     }
 
@@ -3036,8 +3048,8 @@ impl<'s> Parser<'s> {
         op_text: String,
     ) -> Expr {
         let (left_ident, right_ident) = self.next_assert_temps(start);
-        let left_expr = self.new_expr(left_ident.clone(), start);
-        let right_expr = self.new_expr(right_ident.clone(), start);
+        let (left_expr, left_let) = self.assert_operand(left, left_ident, start);
+        let (right_expr, right_let) = self.assert_operand(right, right_ident, start);
         let condition = self.new_expr(
             Equality::new(left_expr.clone(), inverted, right_expr.clone()),
             start,
@@ -3045,12 +3057,22 @@ impl<'s> Parser<'s> {
         let message = self.assert_pair_message(left_expr, right_expr, &op_text, start);
         self.assert_lets_if(
             start,
-            vec![
-                self.synthetic_let(left_ident, left, start),
-                self.synthetic_let(right_ident, right, start),
-            ],
+            [left_let, right_let].into_iter().flatten().collect(),
             condition,
             message,
+        )
+    }
+
+    /// The use-site operand for an assert pair: literals don't need the
+    /// evaluate-once temp (and `let __n = null` would trip the bare-null
+    /// lint), so they inline; anything else gets `let __tmp = expr`.
+    fn assert_operand(&mut self, expr: Expr, ident: Ident, start: usize) -> (Expr, Option<Stmt>) {
+        if matches!(expr.kind(), ExprKind::Literal(_)) {
+            return (expr, None);
+        }
+        (
+            self.new_expr(ident.clone(), start),
+            Some(self.synthetic_let(ident, expr, start)),
         )
     }
 
@@ -3063,8 +3085,8 @@ impl<'s> Parser<'s> {
         op_text: &str,
     ) -> Expr {
         let (left_ident, right_ident) = self.next_assert_temps(start);
-        let left_expr = self.new_expr(left_ident.clone(), start);
-        let right_expr = self.new_expr(right_ident.clone(), start);
+        let (left_expr, left_let) = self.assert_operand(left, left_ident, start);
+        let (right_expr, right_let) = self.assert_operand(right, right_ident, start);
         let condition = self.new_expr(
             In::new(left_expr.clone(), right_expr.clone(), fail_when),
             start,
@@ -3072,10 +3094,7 @@ impl<'s> Parser<'s> {
         let message = self.assert_pair_message(left_expr, right_expr, op_text, start);
         self.assert_lets_if(
             start,
-            vec![
-                self.synthetic_let(left_ident, left, start),
-                self.synthetic_let(right_ident, right, start),
-            ],
+            [left_let, right_let].into_iter().flatten().collect(),
             condition,
             message,
         )
@@ -3510,7 +3529,20 @@ impl<'s> Parser<'s> {
             annotation
         }
         if !self.peek().starts_annotation() {
-            self.expected("type");
+            // `{str: int}` is Rust's `HashMap<str, int>` habit — the dict
+            // type's real spelling is `~{int}` (keys are always `str`).
+            // `reject` skips the whole brace group, a clean recovery.
+            if self.at(TokKind::LeftBrace) {
+                self.reject(Misdirection {
+                    src: self.src(),
+                    at: self.next_location().into(),
+                    msg: "`{str: V}` isn't a type -- a dict type is `~{V}` (keys are always `str`)"
+                        .into(),
+                    label: "not a type -- write `~{V}`".into(),
+                });
+            } else {
+                self.expected("type");
+            }
             return Annotation::Poison(Poison);
         }
         self.nested(inner).unwrap_or(Annotation::Poison(Poison))

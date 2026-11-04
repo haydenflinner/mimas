@@ -308,6 +308,48 @@ fn closure_call_site_is_unknown() {
 }
 
 #[test]
+fn bare_use_member_gets_the_glob_hint() {
+    let _t = TestResetter;
+    // `use musi` binds the module's own name (already reachable as
+    // `musi::`) — `pat` alone stays unbound, and the error names both
+    // the module that has it and the glob that would import it. The
+    // module stands in for a native one like `music`/`std`.
+    TEST_SESSION.with(|s| {
+        let mut s = s.borrow_mut();
+        let adt = s.0.ensure_module_path(&["musi".to_string()]);
+        let dec = s.0.dec_id(
+            &parse::Ident::synthetic("pat".to_string()),
+            Ty::Int,
+            crate::components::DecKind::Local,
+            crate::components::Vis::Public,
+        );
+        s.0.adts[adt].as_struct_mut().fields.insert(
+            "pat".to_string(),
+            crate::components::Field {
+                ty: Ty::Int,
+                declaration_location: shared::Location::default(),
+                constant: true,
+                dec,
+            },
+        );
+    });
+    let e = err("use musi; let _x = pat;").unwrap();
+    assert!(
+        e.contains("`use musi` imports the module's name"),
+        "{e}"
+    );
+}
+
+#[test]
+fn check_as_a_call_says_its_a_line() {
+    let _t = TestResetter;
+    // `check(x)` touching the word parses as a call to `check`, which
+    // doesn't exist -- the error names the spacing fix
+    let e = err("check(1 == 1)").unwrap();
+    assert!(e.contains("`check` isn't a function"), "{e}");
+}
+
+#[test]
 fn warnings_are_not_errors() {
     let _t = TestResetter;
     // lints never fail a solve -- the code still runs

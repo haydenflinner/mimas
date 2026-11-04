@@ -76,6 +76,16 @@ pub struct NotFound {
 }
 
 #[derive(Error, Debug, Diagnostic)]
+#[error("`check` isn't a function")]
+#[diagnostic(help("write `check x` -- or `check (x)` with a space, if it must be wrapped"))]
+pub struct CheckIsNotCallable {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("`check` takes a line, not a call")]
+    pub at: SourceSpan,
+}
+
+#[derive(Error, Debug, Diagnostic)]
 #[error("invalid `??` target")]
 pub struct CoalesceNonOptional {
     #[source_code]
@@ -1147,6 +1157,18 @@ pub struct ShadowedBuiltin {
     pub at: SourceSpan,
     pub name: String,
     pub symbol: &'static str,
+}
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("`{name}` isn't in scope -- `use {module}` imports the module's name, not its members")]
+#[diagnostic(help("write `use {module}::*;` to bring its members into scope -- or say `{module}::{name}`"))]
+pub struct BareImportMember {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("`{module}::{name}` resolves, `{name}` doesn't")]
+    pub at: SourceSpan,
+    pub module: String,
+    pub name: String,
 }
 
 #[derive(Error, Debug, Diagnostic)]
