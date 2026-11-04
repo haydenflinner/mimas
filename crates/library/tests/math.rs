@@ -69,3 +69,36 @@ test_run!(
     "(Quat::from_axis_angle(Vec3::new(0.0, 0.0, 1.0), 90deg).axis().z - 1.0).abs() < 1.0e-4" => "true",
     "(Quat::from_rotation_z(90deg).slerp(Quat::from_rotation_z(180deg), 0.5).angle().to(\"deg\") - 135.0).abs() < 1.0e-3" => "true",
 );
+
+// `float::INF` and friends: the IEEE corners as associated constants on
+// the builtin, like `Player::MAX_HEALTH` on an adt, and the predicates
+// that are the only honest way to test for them.
+test_run!(
+    float_constants,
+    "float::INF > float::MAX" => "true",
+    "float::NEG_INF < float::MIN" => "true",
+    "-float::INF == float::NEG_INF" => "true",
+    "1.0 / 0.0 == float::INF" => "true",
+    "float::INF.is_infinite()" => "true",
+    "float::INF.is_finite()" => "false",
+    "float::NAN == float::NAN" => "false",
+    "float::NAN.is_nan()" => "true",
+    "(0.0 / 0.0).is_nan()" => "true",
+    "float::NAN.is_infinite()" => "false",
+    "1.0.is_finite() && 1.0e300.is_finite()" => "true",
+    "float::EPSILON > 0.0 && float::EPSILON < 1.0e-15" => "true",
+    "1.0 + float::EPSILON > 1.0" => "true",
+    "float::MIN_POSITIVE > 0.0 && float::MIN_POSITIVE < 1.0e-300" => "true",
+    "float::MAX > 1.0e308" => "true",
+    "float::MIN == -float::MAX" => "true",
+    // the running-minimum idiom the constants exist for
+    "{ let d = float::INF; for x in [3.0, 1.5, 2.0] { d = d.min(x); } d }" => "1.5",
+    "float::INF.min(4.0)" => "4",
+);
+
+test_run!(
+    int_constants,
+    "int::MAX" => "9223372036854775807",
+    "int::MIN" => "-9223372036854775808",
+    "int::MAX > 0 && int::MIN < 0" => "true",
+);

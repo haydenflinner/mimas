@@ -1,6 +1,6 @@
 use api::Intrinsic;
 use macros::native;
-use shared::Ty;
+use shared::{Literal, Ty};
 use vm::{Ctx, RtErr, Val, api::Api, conversion::Raisable};
 
 pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
@@ -29,7 +29,98 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add_method(pow);
     api.add_method(exp);
     api.add_method(ln);
+    api.add_method(is_nan);
+    api.add_method(is_finite);
+    api.add_method(is_infinite);
     api.add_assoc(Ty::Float, random);
+    // the IEEE corners every numeric kernel reaches for -- `float::INF` is
+    // the "no hit yet" a minimum search starts from, `NAN` the value a bad
+    // division leaves, and the rest the limits of the representation
+    api.assoc_constant(
+        Ty::Float,
+        "INF",
+        Ty::Float,
+        Literal::Float(f64::INFINITY),
+        "Positive infinity. Larger than every finite float, so a running minimum can start from \
+         it: `let d = float::INF; … d = d.min(len)`. `1.0 / 0.0` is the same value.",
+    );
+    api.assoc_constant(
+        Ty::Float,
+        "NEG_INF",
+        Ty::Float,
+        Literal::Float(f64::NEG_INFINITY),
+        "Negative infinity, `-float::INF`. Smaller than every finite float.",
+    );
+    api.assoc_constant(
+        Ty::Float,
+        "NAN",
+        Ty::Float,
+        Literal::Float(f64::NAN),
+        "Not a number -- what `0.0 / 0.0` or `(-1.0).sqrt()` leaves. It compares unequal to \
+         everything, itself included, so test for it with `is_nan()`, never `==`.",
+    );
+    api.assoc_constant(
+        Ty::Float,
+        "MAX",
+        Ty::Float,
+        Literal::Float(f64::MAX),
+        "The largest finite float, about `1.8e308`.",
+    );
+    api.assoc_constant(
+        Ty::Float,
+        "MIN",
+        Ty::Float,
+        Literal::Float(f64::MIN),
+        "The most negative finite float, `-float::MAX`.",
+    );
+    api.assoc_constant(
+        Ty::Float,
+        "MIN_POSITIVE",
+        Ty::Float,
+        Literal::Float(f64::MIN_POSITIVE),
+        "The smallest positive normal float, about `2.2e-308`.",
+    );
+    api.assoc_constant(
+        Ty::Float,
+        "EPSILON",
+        Ty::Float,
+        Literal::Float(f64::EPSILON),
+        "The gap between `1.0` and the next float up, about `2.2e-16` -- the scale of rounding \
+         error in one operation near `1.0`.",
+    );
+}
+
+#[native]
+/// Whether the number is `NAN`. The only reliable test: `NAN == NAN` is `false`.
+///
+/// ```mimas
+/// let a = float::NAN.is_nan(); // true
+/// let b = 1.0.is_nan();        // false
+/// ```
+fn is_nan(n: f64) -> bool {
+    n.is_nan()
+}
+
+#[native]
+/// Whether the number is neither infinite nor `NAN`.
+///
+/// ```mimas
+/// let a = 1.0e300.is_finite();    // true
+/// let b = float::INF.is_finite(); // false
+/// ```
+fn is_finite(n: f64) -> bool {
+    n.is_finite()
+}
+
+#[native]
+/// Whether the number is `INF` or `NEG_INF`.
+///
+/// ```mimas
+/// let a = (1.0 / 0.0).is_infinite(); // true
+/// let b = float::NAN.is_infinite();  // false
+/// ```
+fn is_infinite(n: f64) -> bool {
+    n.is_infinite()
 }
 
 #[native]

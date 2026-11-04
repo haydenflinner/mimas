@@ -1,6 +1,6 @@
 use api::Intrinsic;
 use macros::native;
-use shared::Ty;
+use shared::{Literal, Ty};
 use vm::{Ctx, RtErr, Val, api::Api, conversion::Raisable};
 
 pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
@@ -13,6 +13,20 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     let id = api.add_method(to_float);
     api.mark_intrinsic(id, Intrinsic::ToFloat);
     api.add_assoc(Ty::Int, random);
+    api.assoc_constant(
+        Ty::Int,
+        "MAX",
+        Ty::Int,
+        Literal::Int(i64::MAX),
+        "The largest int, `9223372036854775807` -- a running minimum over ints can start here.",
+    );
+    api.assoc_constant(
+        Ty::Int,
+        "MIN",
+        Ty::Int,
+        Literal::Int(i64::MIN),
+        "The smallest int, `-9223372036854775808`.",
+    );
 }
 
 #[native]
