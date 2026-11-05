@@ -2,6 +2,80 @@
 
 Memorable additions to mimas beyond what the changelog tracks — newest first.
 
+## IR optimizer: inlining and scalar replacement (`compile/src/codegen/opt.rs`)
+
+Two passes run on the IR before `clean`, for every lane (interpreter,
+jit, wasmgen) since they rewrite the shared `compile::Ir`. `MIMAS_OPT=0`
+disables them; `MIMAS_DUMP_OPT=1` prints the IR after them.
+
+- **Inlining.** A direct call to a small body (≤ 64 insts) is replaced by
+  a copy: the call's block binds the callee's params as fresh locals and
+  jumps into the copy; every copied `return` stores into one fresh local
+  and jumps to a continuation block holding the rest of the caller's
+  block, with the call instruction itself turned into a read of that
+  local -- so nothing that referenced the call's id changes, and phis
+  that named the split block are re-pointed at the continuation.
+  Callees are processed bottom-up (post-order over the direct-call
+  graph), a caller stops at 4096 insts. Never inlined: the entry body
+  (into or out of), closures (captures), anything that reaches itself,
+  a body containing `raise` (`Op::Raise` returns from the *frame*, which
+  a copy no longer has), and a body that calls a frame-reading native --
+  the VM hands the compiler every `std::debug::*` id via
+  `Compiler::with_frame_natives`, so `debug::caller_line` keeps reporting
+  the truth. Call-edge *tracing* (`Vm::trace_take`) sees no edge for an
+  inlined call; `vm/tests/trace.rs` uses a recursive callee for that
+  reason.
+- **Scalar replacement.** A struct local that is only ever built from a
+  `make_instance` and read or written field by field becomes one local
+  per field, and the struct is never allocated. The unit is an *object
+  class*: a root local whose single store is a `make_instance` nothing
+  else uses, plus every local that is a plain copy of a member
+  (`set l2: get l1`, which is what inlining leaves for returns and
+  params); members share the field locals, which is what aliasing
+  means, and the copies are dropped. Soundness rule: every member is
+  written exactly once, that write dominates all of its reads (block
+  dominators over the body, position within a block), and every read is
+  a `get_field`/`set_field` on the object or the copy into another
+  member. Params, captures, entry slots, anything stored, compared,
+  passed or returned keep their object and identity. Up to four rounds
+  per body (a field that held a struct becomes a local holding one).
+  The entry body is skipped entirely: its locals are the page's
+  top-level bindings, read off the heap by the debugger, `#m` prose and
+  `envDraw`.
+
+Measured (`wasmgen/examples/wgbench`, release, interpreter vs the wasm
+lane under wasmtime; `float::*` natives bound for real -- a zero stub
+made the earlier comparison a lie):
+
+| program | interpreter | wasm lane | wasm arena per run |
+| --- | --- | --- | --- |
+| closest-point loop, 200k × 4 segments (`V2` math) | 0.956 s → 0.312 s (3.1×) | 56.5 → 29.9 ms (1.9×) | 121 MB → 1.1 MB |
+| walk-on-stars solver, 2000 walks (the `wost-kit`) | 0.154 s → 0.085 s (1.8×) | 9.4 → 6.8 ms (1.4×) | 19.9 → 6.3 MB |
+
+Results identical with the passes off and on. The arena column is the
+point for the wasm lane: it has no GC, so an allocation-heavy program
+runs out of memory before it finishes -- the solver at 20k walks
+trapped in `__alloc` before, and runs now.
+
+Tests: `compile/src/tests/opt_tests.rs` (what the passes leave:
+inlined arithmetic, no field ops on a scalarized local, params and
+escaping or rebound structs untouched, entry body untouched, recursion
+not inlined), `vm/tests/opt_semantics.rs` (mutation through an inlined
+param, copy-then-rebind, struct in an array, returned structs,
+structural equality, a struct per loop iteration, branch-chosen struct,
+nested fields). `wgbench` moved here from `host/eval/examples` and binds
+the float natives by name (floats cross the import boundary as f64 or
+as their bit pattern in a `Word`; result types come from the import's
+signature), instantiates fresh per run (the arena persists across calls
+of one instance), and reports the arena high-water mark.
+
+Not done, measured as the next costs: `local_kinds` types a synthetic
+(`DANGLING`) local from its writes in one pass, so a field local fed by
+another `DANGLING` local stays `Generic` (boxed) -- a fixpoint there
+would unbox more of the inlined chains; and locals written more than
+once (`x = hit.p` in the walk) are never scalarized, which SSA
+construction for locals would lift.
+
 ## Tagged literals, spanned literal faults, prelude-first solving, `SeqSide`/`SortOrder`
 
 - **Tagged literals.** A name glued to a string — `pat"bd sd"`,

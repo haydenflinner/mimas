@@ -25,6 +25,7 @@ pub use ir::*;
 #[macro_use]
 mod codegen {
     mod clean;
+    pub(crate) mod opt;
     mod compiler;
     #[macro_use]
     mod op;
@@ -46,4 +47,5 @@ mod tests {
 
     mod bytecode;
     mod ir_tests;
+    mod opt_tests;
 }

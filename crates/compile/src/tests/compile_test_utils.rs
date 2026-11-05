@@ -10,6 +10,21 @@ pub(crate) fn lower_ir(src: &str) -> String {
     ir.to_string()
 }
 
+/// The IR after the pre-codegen optimizer (`codegen::opt`) -- inlining and
+/// scalar replacement -- before `clean`, so dead leftovers are still visible.
+#[cfg(test)]
+pub(crate) fn optimized_ir(src: &str) -> String {
+    let lexer = parse::lex::Lexer::new(src, 0, String::new());
+    let ast = parse::Parser::new(lexer).try_into_ast().unwrap();
+    let mut solver = solve::Solver::new();
+    solver.solve(&ast).unwrap();
+    let resolutions = solver.into();
+    let mut ir = crate::Ir::new(resolutions, Default::default());
+    ir.lower(&ast.unpack());
+    crate::codegen::opt::optimize(&mut ir, &Default::default());
+    ir.to_string()
+}
+
 /// The fully-compiled op stream (post-optimization) for `src`, for asserting codegen/optimizer
 /// behavior that a value-only VM test can't observe (same result, different ops).
 #[cfg(test)]

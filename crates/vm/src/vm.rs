@@ -3601,7 +3601,13 @@ impl Vm {
             library.intrinsics().iter().map(|(a, b)| (*a, *b)).collect(),
         );
         ir.lower(&stmts);
-        let program = compile::Compiler::new().compile(&mut ir);
+        // `std::debug` reads the call stack, so a body that calls into it
+        // must keep a frame of its own: the optimizer leaves it un-inlined
+        let frame_natives = library.natives().filter_map(|(id, e)| match e {
+            ::api::ApiEntry::Function(f) if f.module.first().is_some_and(|m| m == "std") && f.module.get(1).is_some_and(|m| m == "debug") => Some(id),
+            _ => None,
+        });
+        let program = compile::Compiler::new().with_frame_natives(frame_natives).compile(&mut ir);
         Ok(BuiltProgram {
             program,
             ir,

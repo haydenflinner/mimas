@@ -21,4 +21,12 @@ wasm-encoder = "0.242"
 [dev-dependencies]
 vm = { package = "mimas-vm", path = "../vm", version = "0.2.0" }
 mimas = { package = "mimas", path = "../mimas", version = "0.2.0" }
+api = { package = "mimas-api", path = "../api", version = "0.2.0" }
 wasmparser = "0.242"
+
+# the `wgbench` example times the interpreter against this crate's wasm
+# under wasmtime, which has no wasm32 build
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies.wasmtime]
+version = "49.0.2"
+default-features = false
+features = ["cranelift", "runtime"]

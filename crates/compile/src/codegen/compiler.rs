@@ -29,6 +29,9 @@ pub struct Compiler {
     pub(crate) chunks: IdVec<BodyId, Chunk>,
     disasm: bool,
     srcs: HashMap<FileId, Arc<str>>,
+    /// Natives that read the live call stack: a body calling one is never
+    /// inlined, so its frame stays real. See `opt`.
+    frame_natives: std::collections::HashSet<api::NativeId>,
 }
 
 // fuse a comparison op + JumpIfFalse into its `B`-prefixed branch form. reg-reg comparisons carry
@@ -52,7 +55,14 @@ impl Compiler {
             chunks: IdVec::new(),
             disasm: false,
             srcs: HashMap::new(),
+            frame_natives: Default::default(),
         }
+    }
+    /// Natives that inspect the call stack (`std::debug::*`): bodies that
+    /// call them keep their frames.
+    pub fn with_frame_natives(mut self, ids: impl IntoIterator<Item = api::NativeId>) -> Self {
+        self.frame_natives = ids.into_iter().collect();
+        self
     }
 
     pub fn with_disasm(mut self, on: bool) -> Self {
@@ -193,6 +203,12 @@ impl Compiler {
         // need it to turn a global's `Local` into its absolute (base-0) entry-frame register.
         let mut entry_to_reg: IdVec<Local, Reg> = IdVec::new();
 
+        if super::opt::enabled() {
+            super::opt::optimize(ir, &self.frame_natives);
+            if std::env::var("MIMAS_DUMP_OPT").is_ok_and(|v| v == "1") {
+                eprintln!("{ir}");
+            }
+        }
         for (body_id, body) in ir.bodies.iter_mut() {
             clean::clean(body);
 
