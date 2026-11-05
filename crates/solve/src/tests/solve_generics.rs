@@ -248,3 +248,91 @@ test_ty!(
     "fn f(x) -> [int] { [x + 1, x] }",
     "f(3)" => array!(Int),
 );
+
+// -- bounded params -------------------------------------------------------------
+// r[verify mimas.generic.bound]
+// `<T: Draw>` lets the body call the pact's methods on a `T`; each use is held to the
+// bound once its type settles. `Self` in the pact's signatures reads as `T`, not the bound.
+
+test_ty!(
+    bounded_param_method_call,
+    "pact Show { fn show(self) -> str; }
+     struct Dot { x: int }
+     impl Show for Dot { fn show(self) -> str { f\"dot {self.x}\" } }
+     fn label<T: Show>(x: T) -> str { x.show() }",
+    "label(Dot { x = 1 })" => Str,
+);
+
+test_ty!(
+    bounded_param_self_return_stays_param,
+    "pact Step { fn step(self) -> Self; }
+     struct N { v: int }
+     impl Step for N { fn step(self) -> N { N { v = self.v + 1 } } }
+     fn twice<T: Step>(x: T) -> T { x.step().step() }",
+    "twice(N { v = 1 }).v" => Int,
+);
+
+test_ty!(
+    bounded_param_two_bounds,
+    "pact A { fn a(self) -> int; }
+     pact B { fn b(self) -> str; }
+     struct S { v: int }
+     impl A for S { fn a(self) -> int { self.v } }
+     impl B for S { fn b(self) -> str { \"s\" } }
+     fn both<T: A + B>(x: T) -> str { f\"{x.a()} {x.b()}\" }",
+    "both(S { v = 1 })" => Str,
+);
+
+test_ty!(
+    bounded_adt_param_reaches_impl_methods,
+    "pact Show { fn show(self) -> str; }
+     struct Dot { x: int }
+     impl Show for Dot { fn show(self) -> str { \"dot\" } }
+     struct Box<T: Show> { v: T }
+     impl Box { fn label(self) -> str { self.v.show() } }",
+    "Box { v = Dot { x = 1 } }.label()" => Str,
+);
+
+test_ty!(
+    bounded_param_passes_through_generic_caller,
+    "pact Show { fn show(self) -> str; }
+     struct Dot { x: int }
+     impl Show for Dot { fn show(self) -> str { \"dot\" } }
+     fn label<T: Show>(x: T) -> str { x.show() }
+     fn relabel<U: Show>(y: U) -> str { label(y) }",
+    "relabel(Dot { x = 1 })" => Str,
+);
+
+test_ty!(
+    nested_generic_annotation_closes_with_double_caret,
+    "struct Box<T> { v: T }
+     fn wrap<T>(x: T) -> Box<Box<T>> { Box { v = Box { v = x } } }",
+    "wrap(1).v.v" => Int,
+);
+
+test_fail!(
+    unbounded_param_has_no_members,
+    "pact Show { fn show(self) -> str; }
+     fn label<T>(x: T) -> str { x.show() }",
+);
+
+test_fail!(
+    bound_not_satisfied,
+    "pact Show { fn show(self) -> str; }
+     struct Dot { x: int }
+     fn label<T: Show>(x: T) -> str { x.show() }
+     let s = label(Dot { x = 1 });",
+    "pact Show { fn show(self) -> str; }
+     struct Dot { x: int }
+     struct Box<T: Show> { v: T }
+     let b = Box { v = Dot { x = 1 } };",
+    "pact Show { fn show(self) -> str; }
+     fn label<T: Show>(x: T) -> str { x.show() }
+     let s = label(3);",
+);
+
+test_fail!(
+    bound_must_name_a_pact,
+    "struct Dot { x: int }
+     fn label<T: Dot>(x: T) -> str { \"\" }",
+);

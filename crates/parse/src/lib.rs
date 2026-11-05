@@ -22,10 +22,12 @@ pub mod components {
     mod macros;
     mod pat;
     mod poison;
+    mod type_param;
     pub use annotation::*;
     pub use binding::*;
     pub use pat::*;
     pub use poison::*;
+    pub use type_param::*;
 }
 
 pub mod expr {

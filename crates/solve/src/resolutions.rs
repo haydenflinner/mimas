@@ -74,6 +74,9 @@ pub struct Resolutions {
     /// no single impl, so emit dispatches at runtime over the bound's
     /// implementers, exactly like a method call through the pact.
     pub pact_ops: IndexMap<NodeId, PactOp>,
+    /// The pacts each declared type param is bounded by (`<T: Draw>`): a method call on a
+    /// `T`-typed receiver dispatches through them at runtime, like a pact-typed one.
+    pub param_bounds: IndexMap<ParamId, Vec<PactId>>,
     pub root: ResolvedModule,
     pub sources: HashMap<FileId, NamedSource<Arc<str>>>,
 }
@@ -474,6 +477,11 @@ impl From<Solver> for Resolutions {
             panic_native,
             op_decs: solver.op_decs,
             pact_ops: solver.pact_ops,
+            param_bounds: solver
+                .param_bounds
+                .iter()
+                .map(|(pid, pacts)| (*pid, pacts.clone()))
+                .collect(),
             root,
             sources: solver.sources,
         }

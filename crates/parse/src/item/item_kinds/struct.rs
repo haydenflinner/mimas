@@ -1,5 +1,5 @@
 use crate::{
-    components::Annotation,
+    components::{Annotation, TypeParam},
     expr::Ident,
     item::{IntoItem, ItemKind},
 };
@@ -13,7 +13,7 @@ use shared::Location;
 pub struct Struct {
     pub name: Ident,
     /// The declared type parameters, `<A, B>` after the name. Empty for non-generic structs.
-    pub type_params: Vec<Ident>,
+    pub type_params: Vec<TypeParam>,
     pub fields: Vec<StructField>,
 }
 impl Struct {

@@ -851,11 +851,16 @@ impl Emit for Call {
             // over every implementor of the bound. a grafted default lands in each impl's table,
             // so default methods dispatch here for free.
             // `self` inside a default body counts too: one implementer, decided at runtime
+            // a bounded type param (`x: T` under `<T: Draw>`) dispatches the same way:
+            // its bounds are the pacts to search r[impl mimas.generic.bound]
             let pact_pids = ir
                 .resolutions
                 .node_tys
                 .get(&left.id())
-                .and_then(Ty::as_pacts);
+                .and_then(|ty| match ty {
+                    Ty::Param(pid) => ir.resolutions.param_bounds.get(pid).cloned(),
+                    other => other.as_pacts(),
+                });
             if let Some(pids) = pact_pids {
                 let method = right
                     .as_ident()

@@ -3349,6 +3349,26 @@ impl Vm {
         })
     }
 
+    /// [`Vm::local_inspect`] in literal form (see [`Val::inspect_literal`]): a shared
+    /// acyclic subgraph expands per alias instead of marking [`Inspect::Cycle`], so a host
+    /// that spells the value back as source (a livelit write-back) gets every field. A true
+    /// cycle still marks `Cycle`. `budget` caps the nodes walked.
+    pub fn local_inspect_literal(&mut self, name: &str, budget: usize) -> Option<Inspect> {
+        let chunks = &self.chunks;
+        let field_names = &self.field_names;
+        self.arena.mutate(|_mc, state| {
+            let struct_names = state.struct_names.borrow();
+            let t = state.thread.borrow();
+            for f in t.frames.iter().rev() {
+                if let Some(&reg) = chunks[f.chunk].locals.get(name) {
+                    let v = t.regs[f.base + reg.index()];
+                    return Some(v.inspect_literal(&struct_names, field_names, budget));
+                }
+            }
+            None
+        })
+    }
+
     /// Source-level name of a chunk, when it's a named top-level item -- `None` for closures
     /// and other synthetic chunks.
     pub fn chunk_name(&self, chunk: BodyId) -> Option<&str> {

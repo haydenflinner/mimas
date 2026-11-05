@@ -195,7 +195,7 @@ impl Hoist for parse::item::Enum {
             .collect();
 
         let mut adt = crate::components::Adt::new_enum(self.head.to_string(), variants);
-        adt.type_params = type_params_of(&self.type_params);
+        adt.type_params = ctx.solver.declare_type_params(&self.type_params);
         let id = ctx.solver.push_adt(adt);
 
         let variant_names: Vec<_> = ctx.solver.adts[id].variants.keys().cloned().collect();
@@ -276,7 +276,7 @@ impl Hoist for Struct {
         };
 
         let id = ctx.solver.push_adt(adt);
-        ctx.solver.adts[id].type_params = type_params_of(&self.type_params);
+        ctx.solver.adts[id].type_params = ctx.solver.declare_type_params(&self.type_params);
         ctx.write_adt(&self.name, id)
     }
 }
@@ -616,13 +616,6 @@ fn hoist_fn_header(
 /// off its id), while a tuple field has only a number to go on.
 /// `(name, ParamId)` for each entry of a parsed `<T, U>` list -- stored on the adt as
 /// `type_params` so `impl` blocks and `Self` can re-enter the scope with the same ids.
-fn type_params_of(params: &[Ident]) -> Vec<(String, shared::ParamId)> {
-    params
-        .iter()
-        .map(|i| (i.lexeme.clone(), Solver::param_id_of(i)))
-        .collect()
-}
-
 fn field_ident(name: &FieldKey, location: Location) -> Ident {
     match name {
         FieldKey::Ident(ident) => ident.clone(),

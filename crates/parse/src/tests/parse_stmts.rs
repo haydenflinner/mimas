@@ -1178,7 +1178,7 @@ stmt_test!(
     "fn id<T>(x: T) -> T {}",
     Function {
         name: ident!("id"),
-        type_params: vec![ident!("T")],
+        type_params: vec![ident!("T").into()],
         wheres: vec![],
         parameters: vec![Binding::new(ident!("x")).with_annotation(Annotation::Ty(ident!("T")))],
         return_type: Some(Annotation::Ty(ident!("T"))),
@@ -1192,7 +1192,7 @@ stmt_test!(
     "fn map<T, U>(xs: [T]) {}",
     Function {
         name: ident!("map"),
-        type_params: vec![ident!("T"), ident!("U")],
+        type_params: vec![ident!("T").into(), ident!("U").into()],
         wheres: vec![],
         parameters: vec![
             Binding::new(ident!("xs")).with_annotation(Annotation::Array(
@@ -1211,7 +1211,7 @@ stmt_test!(
     "struct Pair<A, B> { first: A, second: B }",
     Struct {
         name: ident!("Pair"),
-        type_params: vec![ident!("A"), ident!("B")],
+        type_params: vec![ident!("A").into(), ident!("B").into()],
         fields: vec![
             StructField {
                 name: FieldKey::Ident(ident!("first")),
@@ -1235,7 +1235,7 @@ stmt_test!(
     "enum List<T> { E, C { first: T, rest: List<T> } }",
     Enum {
         head: ident!("List"),
-        type_params: vec![ident!("T")],
+        type_params: vec![ident!("T").into()],
         members: vec![
             (ident!("E"), Member::Struct(vec![])),
             (

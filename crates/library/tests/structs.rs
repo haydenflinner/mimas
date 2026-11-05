@@ -216,3 +216,17 @@ fn struct_update_is_checked() {
     rejected("struct P { x: int, y: int }\nstruct Q { x: int, y: int }\nlet q = Q { x = 1, y = 2 };\nlet p = P { x = 3, ..q };", "mismatch");
     rejected("enum E { A { x: int, y: int }, B { x: int, y: int } }\nlet b = E::B { x = 1, y = 2 };\nlet a = E::A { x = 3, ..b };", "needs a struct");
 }
+
+// -- bounded type params with the std in scope -------------------------------
+// `<T: Show>` reaches the pact's methods through a closure over `[T]`: the array's
+// `map` is a std method, so the solver/vm harnesses (no std) can't host this one.
+test_run!(
+    bounded_param_maps_over_array,
+    "pact Show { fn show(self) -> str; }
+     struct Dot { x: int }
+     impl Show for Dot { fn show(self) -> str { f\"d{self.x}\" } }
+     fn labels<T: Show>(xs: [T]) -> [str] { xs.map(|x| x.show()) }
+     fn same<T>(xs: [T]) -> [T] { xs.map(|x| x) }",
+    "labels([Dot { x = 1 }, Dot { x = 2 }])" => "[\"d1\", \"d2\"]",
+    "same([1, 2])" => "[1, 2]",
+);

@@ -49,7 +49,10 @@ pub fn walk_item(item: &Item, visitor: &mut impl Visitor) {
         ItemKind::Function(function) => {
             visitor.ident(&function.name);
             for param in &function.type_params {
-                visitor.ident(param);
+                visitor.ident(&param.name);
+                for bound in &param.bounds {
+                    visitor.ident(bound);
+                }
             }
             for parameter in &function.parameters {
                 walk_binding(parameter, visitor);
@@ -109,14 +112,20 @@ pub fn walk_item(item: &Item, visitor: &mut impl Visitor) {
         ItemKind::Struct(struc) => {
             visitor.ident(&struc.name);
             for param in &struc.type_params {
-                visitor.ident(param);
+                visitor.ident(&param.name);
+                for bound in &param.bounds {
+                    visitor.ident(bound);
+                }
             }
             walk_fields(&struc.fields, visitor);
         }
         ItemKind::Enum(en) => {
             visitor.ident(&en.head);
             for param in &en.type_params {
-                visitor.ident(param);
+                visitor.ident(&param.name);
+                for bound in &param.bounds {
+                    visitor.ident(bound);
+                }
             }
             for (name, member) in &en.members {
                 visitor.ident(name);

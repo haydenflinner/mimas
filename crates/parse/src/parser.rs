@@ -1006,16 +1006,27 @@ impl<'s> Parser<'s> {
 
     /// An optional `<T, U>` type parameter list after a declaration name. The `<` is
     /// unambiguous here: nothing else can follow the name in decl position.
-    fn type_params(&mut self) -> Vec<Ident> {
+    /// Each param may carry pact bounds: `<T: Draw, U: Draw + Vary>`.
+    fn type_params(&mut self) -> Vec<TypeParam> {
         if !self.eat(TokKind::Less) {
             return vec![];
         }
-        self.list(TokKind::Greater, TokKind::is_ident, |p| p.require_ident())
+        self.list(TokKind::Greater, TokKind::is_ident, |p| {
+            let name = p.require_ident();
+            let mut bounds = vec![];
+            if p.eat(TokKind::Colon) {
+                bounds.push(p.require_ident());
+                while p.eat(TokKind::Plus) {
+                    bounds.push(p.require_ident());
+                }
+            }
+            TypeParam::new(name, bounds)
+        })
     }
 
     /// The span covering a `<...>` list already parsed, for rejecting it in positions that
     /// don't take generics.
-    fn reject_type_params(&mut self, params: &[Ident]) {
+    fn reject_type_params(&mut self, params: &[TypeParam]) {
         if let (Some(first), Some(last)) = (params.first(), params.last()) {
             self.error(GenericsNotAllowed {
                 src: self.src(),
@@ -1583,7 +1594,7 @@ impl<'s> Parser<'s> {
         &mut self,
         defaults: bool,
         prefix: Option<&str>,
-    ) -> (Ident, Vec<Ident>, Vec<Binding>, Option<Annotation>) {
+    ) -> (Ident, Vec<TypeParam>, Vec<Binding>, Option<Annotation>) {
         if prefix.is_none() {
             self.bump(TokKind::Fn);
         }
@@ -3863,7 +3874,15 @@ impl<'s> Parser<'s> {
         mut element: impl FnMut(&mut Self) -> T,
     ) -> Vec<T> {
         let mut elements = vec![];
-        while !self.eat(closer) {
+        loop {
+            // `Outer<Inner<T>>` lexes its tail as one `>>`: a list closed by `>`
+            // takes the first half and leaves a `>` for the list around it
+            if closer == TokKind::Greater && self.at(TokKind::DoubleRightCaret) {
+                self.split_double_caret();
+            }
+            if self.eat(closer) {
+                break;
+            }
             let kind = self.peek();
             if starts(kind) {
                 elements.push(element(self));
@@ -4061,7 +4080,15 @@ impl<'s> Parser<'s> {
                     // `Foo { ... }` struct
                     TokKind::LeftBrace => {
                         self.bump(TokKind::LeftBrace);
-                        let fields = self.list(TokKind::RightBrace, TokKind::is_ident, |p| {
+                        // a trailing `..` says the rest of the fields are
+                        // deliberately unnamed -- a struct pattern already
+                        // matches any field it doesn't mention, so it binds
+                        // nothing; it just reads as the omission it is
+                        let starts = |k: TokKind<'s>| k.is_ident() || k == TokKind::DoubleDot;
+                        let fields = self.list(TokKind::RightBrace, starts, |p| {
+                            if p.eat(TokKind::DoubleDot) {
+                                return None;
+                            }
                             let name = p.require_ident();
                             let sub = if p.eat(TokKind::Equal) {
                                 p.pattern()
@@ -4069,9 +4096,9 @@ impl<'s> Parser<'s> {
                                 // shorthand: `Foo { x }` is `Foo { x = x }`
                                 Pat::from(name.clone())
                             };
-                            (name.lexeme, sub)
+                            Some((name.lexeme, sub))
                         });
-                        let fields = fields.into_iter().collect();
+                        let fields = fields.into_iter().flatten().collect();
                         self.new_pat(PatKind::Struct(Box::new(head_expr), fields), start)
                     }
                     // bare path -- `Foo::Bar` with no payload
@@ -4142,6 +4169,16 @@ impl<'s> Parser<'s> {
             self.advance();
         }
         found
+    }
+
+    /// The `>>` ahead becomes two `>` tokens (same location: a `>` only ever
+    /// errors as "expected `>`", never by its own span).
+    fn split_double_caret(&mut self) {
+        debug_assert!(self.at(TokKind::DoubleRightCaret));
+        let location = self.tokens[self.next].location;
+        self.tokens[self.next] = Tok::new(TokKind::Greater, location);
+        self.tokens
+            .insert(self.next, Tok::new(TokKind::Greater, location));
     }
 
     /// Takes a token the grammar already dispatched on.

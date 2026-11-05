@@ -2,7 +2,7 @@ use itertools::Itertools;
 
 use crate::{
     Expr,
-    components::{Annotation, Binding},
+    components::{Annotation, Binding, TypeParam},
     expr::Ident,
     item::{IntoItem, ItemKind},
 };
@@ -13,7 +13,7 @@ pub struct Function {
     /// The name, if any, of this function. Anonymous functions do not have names.
     pub name: Ident,
     /// The declared type parameters, `<T, U>` after the name. Empty for non-generic fns.
-    pub type_params: Vec<Ident>,
+    pub type_params: Vec<TypeParam>,
     /// The parameters of this function.
     pub parameters: Vec<Binding>,
     /// `where` predicates between the signature and the body, each checked against the

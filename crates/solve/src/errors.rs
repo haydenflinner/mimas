@@ -1220,3 +1220,35 @@ pub struct FxGate {
     pub have: String,
     pub allowed: String,
 }
+
+/// A bounded type param (`fn f<T: Draw>`) was filled by a type that doesn't implement the
+/// pact -- found once every use has settled, reported at the use that filled it.
+#[derive(Error, Debug, Diagnostic)]
+#[error("`{ty}` does not implement `{pact}`")]
+#[diagnostic(help(
+    "the type parameter this fills is bounded by `{pact}` -- add `impl {pact} for {ty}`, or pass a type that has one"
+))]
+pub struct BoundNotSatisfied {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("`{ty}` is held to `{pact}` here")]
+    pub at: SourceSpan,
+    pub ty: String,
+    pub pact: String,
+}
+
+/// A member read on an unbounded type param: `x.draw()` with `x: T` and no `T: Draw`. A
+/// bare `T` is any type at all, so there's nothing to look the member up on.
+#[derive(Error, Debug, Diagnostic)]
+#[error("`{param}` has no bound to reach `{member}` through")]
+#[diagnostic(help(
+    "bound the parameter by the pact that declares `{member}`: `<{param}: SomePact>`"
+))]
+pub struct ParamHasNoBound {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("`{param}` could be any type here")]
+    pub at: SourceSpan,
+    pub param: String,
+    pub member: String,
+}

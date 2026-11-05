@@ -433,7 +433,10 @@ impl Solve for Access {
                 solver.instantiate_native(&sig, None)?
             } else {
                 let stored = field.ty.normalized(solver);
-                solver.instantiate_params(&stored)
+                let prev = solver.obligation_at.replace(right.location());
+                let ty = solver.instantiate_params(&stored);
+                solver.obligation_at = prev;
+                ty
             };
             solver.note(right, ty.clone(), Some(dec));
             Ok(ty)
@@ -550,7 +553,12 @@ impl Solve for Access {
                             })
                         })?
                     }
-                    Ty::Pacts(_) | Ty::Skolem(_) => {
+                    // a bound annotation, `Self` in a default body, or a bounded type
+                    // param (`x: T` under `<T: Draw>`): members come from the pacts
+                    // r[impl mimas.generic.bound]
+                    Ty::Pacts(_) | Ty::Skolem(_) | Ty::Param(_)
+                        if solver.pacts_of(&lhs).is_some() =>
+                    {
                         if let ExprKind::Literal(Literal::Int(_)) = right.kind() {
                             return Err(NotATuple {
                                 src: solver.src(location),
@@ -566,7 +574,7 @@ impl Solve for Access {
                         let mut matches = 0;
                         // `self` in a default body is one implementer of its pact, not yet known
                         // which, so it reaches members the same way a bound does
-                        for pid in &lhs.as_pacts().expect("narrowed by the outer arm") {
+                        for pid in &solver.pacts_of(&lhs).expect("narrowed by the outer arm") {
                             let pact = &solver.pacts[pid];
                             if let Some(c) = pact.constants.get(name) {
                                 con = Some(c.clone());
@@ -657,6 +665,17 @@ impl Solve for Access {
                         // `specialize`d onto them (`p.first` on `Pair<int, str>` gives `int`).
                         let (aid, args) = match other {
                             Ty::Adt(aid, args) | Ty::Identity(aid, args) => (*aid, args.clone()),
+                            // an unbounded param is any type at all -- nothing to look
+                            // a member up on. the fix is a bound, so say so.
+                            Ty::Param(_) if right.as_ident().is_some() => {
+                                return Err(ParamHasNoBound {
+                                    src: solver.src(left.location()),
+                                    at: left.location().into(),
+                                    param: other.to_string(),
+                                    member: right.as_ident().unwrap().lexeme.clone(),
+                                }
+                                .into());
+                            }
                             l => (
                                 solver.builtin_adt(l).ok_or_else(|| {
                                     Error::from(TypeHasNoFields {
@@ -970,7 +989,7 @@ impl Solve for Call {
                     // a ctor on a generic adt gets a fresh instantiation of its params --
                     // `List::C(1, ...)` and `List::C("x", ...)` pick different `T`s, and the
                     // member types are specialized with the same args the result reports
-                    let adt_ty = solver.instantiated_adt(adt);
+                    let adt_ty = solver.instantiated_adt_at(adt, location);
                     let ctor_args: Vec<Ty> = match &adt_ty {
                         Ty::Adt(_, args) => args.clone(),
                         _ => vec![],
@@ -2384,7 +2403,7 @@ impl Solve for Literal {
                 // like a ctor call, the literal gets a fresh instantiation of the adt's
                 // params; each field's stored `Ty::Param`s are specialized with those args so
                 // what the fields end up as is exactly what the literal's type reports
-                let adt_ty = solver.instantiated_adt(adt);
+                let adt_ty = solver.instantiated_adt_at(adt, location);
                 let ctor_args: Vec<Ty> = match &adt_ty {
                     Ty::Adt(_, args) => args.clone(),
                     _ => vec![],

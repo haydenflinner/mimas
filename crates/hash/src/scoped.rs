@@ -565,7 +565,11 @@ impl<'s> Scoped<'s> {
     fn function(&mut self, f: &Function) {
         self.push();
         for param in &f.type_params {
-            self.bind_ty(param);
+            self.bind_ty(&param.name);
+            // a bound names a pact: a reference, same as a `d: Draw` annotation
+            for bound in &param.bounds {
+                self.ty_reference(bound);
+            }
         }
         for parameter in &f.parameters {
             self.binding(parameter);

@@ -1,6 +1,6 @@
 use crate::{
     StructField,
-    components::Annotation,
+    components::{Annotation, TypeParam},
     expr::Ident,
     item::{IntoItem, ItemKind},
 };
@@ -11,7 +11,7 @@ use itertools::Itertools;
 pub struct Enum {
     pub head: Ident,
     /// The declared type parameters, `<T>` after the name. Empty for non-generic enums.
-    pub type_params: Vec<Ident>,
+    pub type_params: Vec<TypeParam>,
     /// The members of this enum.
     pub members: Vec<(Ident, Member)>,
 }

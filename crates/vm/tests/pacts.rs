@@ -256,3 +256,51 @@ test_vm!(
     "dbl(V { x = 3 })" => Int(6),
     "dbl(W { y = 4 })" => Int(8)
 );
+
+// -- bounded type params --------------------------------------------------------
+// r[verify mimas.generic.bound]
+// `<T: Pact>` dispatches at runtime over the pact's implementers, like a pact-typed
+// parameter does -- so one generic body serves every implementer.
+
+test_vm!(
+    bounded_param_dispatches_by_type,
+    "pact Greet { fn g(self) -> str; }
+     struct A; struct B;
+     impl Greet for A { fn g(self) -> str { \"a\" } }
+     impl Greet for B { fn g(self) -> str { \"b\" } }
+     fn greet<T: Greet>(x: T) -> str { x.g() }",
+    "greet(A) + greet(B)" => str!("ab")
+);
+
+test_vm!(
+    bounded_param_self_return_chains,
+    "pact Step { fn step(self) -> Self; }
+     struct N { v: int }
+     impl Step for N { fn step(self) -> N { N { v = self.v + 1 } } }
+     fn twice<T: Step>(x: T) -> T { x.step().step() }",
+    "twice(N { v = 1 }).v" => Int(3)
+);
+
+test_vm!(
+    bounded_adt_param_method_on_field,
+    "pact Show { fn show(self) -> str; }
+     struct Dot { x: int }
+     impl Show for Dot { fn show(self) -> str { f\"dot {self.x}\" } }
+     struct Box<T: Show> { v: T }
+     impl Box { fn label(self) -> str { self.v.show() } }",
+    "Box { v = Dot { x = 7 } }.label()" => str!("dot 7")
+);
+
+test_vm!(
+    nested_generic_closes_with_double_caret,
+    "struct Box<T> { v: T }
+     fn wrap<T>(x: T) -> Box<Box<T>> { Box { v = Box { v = x } } }",
+    "wrap(5).v.v" => Int(5)
+);
+
+test_vm!(
+    struct_pattern_rest,
+    "struct P { x: int, y: int, z: int }
+     fn first(p: P) -> int { match p { P { x, .. } => x } }",
+    "first(P { x = 1, y = 2, z = 3 })" => Int(1)
+);

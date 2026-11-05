@@ -2,10 +2,11 @@ use crate::{
     Error, Result, Unification, UnificationError,
     components::*,
     errors::{
-        AssignToConst, AssignToLoopVar, AssignToStringIndex, BareNullBinding, CheckIsNotCallable,
+        AssignToConst, AssignToLoopVar, AssignToStringIndex, BareNullBinding, BoundNotSatisfied,
+        CheckIsNotCallable,
         ExtraTupleMembers, FieldNotFound, InvalidAssignTarget, InvalidPattern, InvalidUseTarget,
         IteratingHere, MissingTupleMembers, MultipleConstDeclarations, MutateWhileIterating,
-        NonConstantValue, NotFound, SelfOutOfContext,
+        NonConstantValue, NotAPact, NotFound, SelfOutOfContext,
     },
     traits::*,
 };
@@ -14,7 +15,7 @@ use indexmap::{IndexMap, IndexSet};
 use miette::NamedSource;
 use parse::{
     ExprKind,
-    components::{Annotation, Binding, Pat, PatKind},
+    components::{Annotation, Binding, Pat, PatKind, TypeParam},
     *,
 };
 use shared::{FileId, IdVec, Literal as RawLiteral, Located, Location, PactId, ParamId};
@@ -35,6 +36,18 @@ pub struct Solver {
     pub(crate) node_decs: IndexMap<NodeId, DecId>,
     pub(crate) op_decs: IndexMap<NodeId, crate::OpDispatch>,
     pub(crate) pact_ops: IndexMap<NodeId, crate::PactOp>,
+    /// The pacts each declared type param is bounded by (`T: Draw`), by the param's id.
+    /// Absent means unbounded. Fn and adt params share the map -- ids are global.
+    pub(crate) param_bounds: HashMap<ParamId, Vec<PactId>>,
+    /// Bounds named before their pact was hoisted (a struct's `<T: Draw>` is read in
+    /// `hoist_types`, ahead of `hoist_pacts`) -- settled by `resolve_pending_bounds`.
+    pub(crate) pending_bounds: Vec<(ParamId, Ident)>,
+    /// Every instantiation of a bounded param: the vid it became, the pact it owes, and the
+    /// use that incurred it. Checked once bodies are solved (`check_bounds`).
+    pub(crate) bound_obligations: Vec<(Ty, PactId, Location)>,
+    /// Where the instantiation under way is written, so `substitute_params` can record an
+    /// obligation against it. `None` when the caller has no use site to blame.
+    pub(crate) obligation_at: Option<Location>,
     pub(crate) closure_captures: IndexMap<NodeId, IndexSet<DecId>>,
     pub(crate) expected_closures: IndexMap<NodeId, Vec<FnParam>>,
     vids: IdVec<Vid, ()>,
@@ -191,6 +204,10 @@ impl Solver {
             non_value: None,
             iter_guards: vec![],
             type_params: vec![],
+            param_bounds: HashMap::new(),
+            pending_bounds: vec![],
+            bound_obligations: vec![],
+            obligation_at: None,
         };
         solver.ribs.push_import();
         solver.ribs.push_script();
@@ -387,6 +404,7 @@ impl Solver {
         run_phase(self, Self::hoist_types, &mut saved_ribs)?;
         run_phase(self, Self::hoist_pacts, &mut saved_ribs)?;
         run_phase(self, Self::hoist_callables, &mut saved_ribs)?;
+        run_phase(self, Self::resolve_pending_bounds, &mut saved_ribs)?;
         run_phase(self, Self::hoist_constants, &mut saved_ribs)?;
 
         // fixpoint: hoist_uses + solve_consts. each round may resolve more consts (e.g. a const
@@ -427,6 +445,8 @@ impl Solver {
         self.control_flow = ControlFlow::default();
         assert!(self.fn_stack.is_empty());
         assert!(self.loop_stack.is_empty());
+        // every bounded param that got filled: by a type that implements the pact?
+        self.check_bounds()?;
         // last, once every node has its type: do the units add up?
         crate::dims::check(self, &asts)?;
         // and, with decs resolved everywhere the walk reaches: the usage/effect grades
@@ -1711,12 +1731,138 @@ impl Solver {
     /// is derived from the param ident's `NodeId`, so hoisting and body-solving the same
     /// decl resolve `T` to the *same* id -- that's what lets a signature written once carry
     /// rigid params through both phases.
-    pub(crate) fn push_type_params(&mut self, params: &[Ident]) {
-        let scope: HashMap<String, ParamId> = params
-            .iter()
-            .map(|i| (i.lexeme.clone(), Self::param_id_of(i)))
-            .collect();
+    pub(crate) fn push_type_params(&mut self, params: &[TypeParam]) {
+        let scope: HashMap<String, ParamId> =
+            self.declare_type_params(params).into_iter().collect();
         self.type_params.push(scope);
+    }
+
+    /// The `ParamId` of each declared param, with its bounds registered in `param_bounds`.
+    /// Hoisting and body-solving both pass through here for one decl; the ids agree (see
+    /// `param_id_of`) and a bound registers once.
+    pub(crate) fn declare_type_params(
+        &mut self,
+        params: &[TypeParam],
+    ) -> Vec<(String, ParamId)> {
+        params
+            .iter()
+            .map(|p| {
+                let pid = Self::param_id_of(&p.name);
+                for bound in &p.bounds {
+                    self.bind_param(pid, bound);
+                }
+                (p.lexeme.clone(), pid)
+            })
+            .collect()
+    }
+
+    // r[impl mimas.generic.bound]
+    /// `T: Draw` -- hold `pid` to the pact `bound` names. A name that doesn't resolve yet
+    /// (the pact is hoisted after the types) waits in `pending_bounds`.
+    fn bind_param(&mut self, pid: ParamId, bound: &Ident) {
+        let pact = self
+            .resolve_name(bound, bound.location)
+            .ok()
+            .and_then(|ty| ty.as_single_pact());
+        match pact {
+            Some(pact) => {
+                let bounds = self.param_bounds.entry(pid).or_default();
+                if !bounds.contains(&pact) {
+                    bounds.push(pact);
+                }
+            }
+            None => {
+                let waiting = self
+                    .pending_bounds
+                    .iter()
+                    .any(|(p, i)| *p == pid && i.lexeme == bound.lexeme);
+                if !waiting {
+                    self.pending_bounds.push((pid, bound.clone()));
+                }
+            }
+        }
+    }
+
+    /// Bounds that named a pact before it existed: resolve them now, or say what the name
+    /// is instead. A phase after `hoist_callables`, when every pact is declared.
+    fn resolve_pending_bounds(&mut self, _ast: &Ast) -> Result<()> {
+        for (pid, bound) in std::mem::take(&mut self.pending_bounds) {
+            let ty = self.resolve_name(&bound, bound.location)?;
+            let Some(pact) = ty.as_single_pact() else {
+                return Err(NotAPact {
+                    src: self.src(bound.location),
+                    at: bound.location.into(),
+                    ty: ty.to_string(),
+                }
+                .into());
+            };
+            let bounds = self.param_bounds.entry(pid).or_default();
+            if !bounds.contains(&pact) {
+                bounds.push(pact);
+            }
+        }
+        Ok(())
+    }
+
+    /// The pacts a receiver of `ty` dispatches through: a bound annotation
+    /// (`d: Draw + Named`), `Self` in a default body, or a declared param's bounds
+    /// (`x: T` under `<T: Draw>`). `None` for a concrete type -- or an unbounded param,
+    /// which has nothing to dispatch through.
+    pub(crate) fn pacts_of(&self, ty: &Ty) -> Option<Vec<PactId>> {
+        match ty {
+            Ty::Param(pid) => self
+                .param_bounds
+                .get(pid)
+                .filter(|b| !b.is_empty())
+                .cloned(),
+            other => other.as_pacts(),
+        }
+    }
+
+    /// A fresh vid standing in for the bounded param `pid` at the use `obligation_at`
+    /// names: whatever it settles to owes the param's pacts.
+    fn owe_bounds(&mut self, pid: ParamId, ty: &Ty) {
+        let Some(at) = self.obligation_at else {
+            return;
+        };
+        for pact in self.param_bounds.get(&pid).cloned().unwrap_or_default() {
+            self.bound_obligations.push((ty.clone(), pact, at));
+        }
+    }
+
+    // r[impl mimas.generic.bound]
+    /// Every bounded param that got instantiated: does the type it settled to implement
+    /// the pact? Runs once bodies are solved, so each vid is as pinned as it will get --
+    /// one still open is held to nothing.
+    fn check_bounds(&mut self) -> Result<()> {
+        for (ty, pact, at) in std::mem::take(&mut self.bound_obligations) {
+            let ty = ty.normalized(self);
+            let ok = match &ty {
+                Ty::Vid(_) | Ty::Never => true,
+                Ty::Adt(aid, _) | Ty::Identity(aid, _) => {
+                    self.pact_impls.contains(&(pact, *aid))
+                }
+                Ty::Pacts(pids) => pids.contains(&pact),
+                Ty::Skolem(p) => *p == pact,
+                Ty::Param(p) => self
+                    .param_bounds
+                    .get(p)
+                    .is_some_and(|b| b.contains(&pact)),
+                other => self
+                    .builtin_adt(other)
+                    .is_some_and(|aid| self.pact_impls.contains(&(pact, aid))),
+            };
+            if !ok {
+                return Err(BoundNotSatisfied {
+                    src: self.src(at),
+                    at: at.into(),
+                    ty: ty.to_string(),
+                    pact: self.pacts[pact].name.clone(),
+                }
+                .into());
+            }
+        }
+        Ok(())
     }
 
     /// Re-enter the parameter scope of an already-declared adt -- `impl List` sees `List<T>`'s
@@ -1743,9 +1889,29 @@ impl Solver {
     /// `Ty::Adt(aid, args)` with a fresh vid for every declared param -- what a ctor use
     /// (`L::C`, `Pair { .. }`) starts from before unification pins the args down.
     pub(crate) fn instantiated_adt(&mut self, aid: AdtId) -> Ty {
-        let arity = self.adts[aid].type_params.len();
-        let args = (0..arity).map(|_| Ty::Vid(self.vid())).collect();
+        let params: Vec<ParamId> = self.adts[aid]
+            .type_params
+            .iter()
+            .map(|(_, p)| *p)
+            .collect();
+        let args = params
+            .into_iter()
+            .map(|pid| {
+                let ty = Ty::Vid(self.vid());
+                self.owe_bounds(pid, &ty);
+                ty
+            })
+            .collect();
         Ty::Adt(aid, args)
+    }
+
+    /// [`Self::instantiated_adt`] for a use written at `at` -- a bounded param's
+    /// obligation is recorded against it.
+    pub(crate) fn instantiated_adt_at(&mut self, aid: AdtId, at: Location) -> Ty {
+        let prev = self.obligation_at.replace(at);
+        let ty = self.instantiated_adt(aid);
+        self.obligation_at = prev;
+        ty
     }
 
     /// A type stored inside a generic definition, read back at a use site: every `Ty::Param`
@@ -1787,6 +1953,7 @@ impl Solver {
                 None => {
                     let ty = Ty::Vid(self.vid());
                     map.insert(*pid, ty.clone());
+                    self.owe_bounds(*pid, &ty);
                     ty
                 }
             },
@@ -2523,7 +2690,13 @@ impl Solver {
                         let stored = Ty::Vid(self.decs[dec_id].vid).normalized(self);
                         match self.decs[dec_id].kind {
                             DecKind::Local | DecKind::Global | DecKind::LoopVar => stored,
-                            _ => self.instantiate_params(&stored),
+                            _ => {
+                                // this read is where a bounded param's obligation lands
+                                let prev = self.obligation_at.replace(read_location);
+                                let ty = self.instantiate_params(&stored);
+                                self.obligation_at = prev;
+                                ty
+                            }
                         }
                     };
                     (ty, Some(dec_id))
