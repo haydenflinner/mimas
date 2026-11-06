@@ -352,6 +352,17 @@ impl Solver {
 
     pub fn solve_all<'a>(&mut self, asts: impl IntoIterator<Item = &'a Ast>) -> Result<()> {
         let asts: Vec<_> = asts.into_iter().collect();
+        // `MIMAS_SOLVE_TIMING=1` prints each phase's time to stderr — a
+        // probe for "where does a solve go", costing nothing when unset.
+        let timing = std::env::var_os("MIMAS_SOLVE_TIMING").is_some();
+        let mut last = std::time::Instant::now();
+        let mut lap = move |phase: &str| {
+            if timing {
+                let now = std::time::Instant::now();
+                eprintln!("SOLVE {phase}: {:?}", now - last);
+                last = now;
+            }
+        };
         for ast in &asts {
             self.ast_quantities.extend(ast.quantities());
             self.ast_quantity_units.extend(
@@ -405,10 +416,15 @@ impl Solver {
         };
 
         run_phase(self, Self::hoist_types, &mut saved_ribs)?;
+        lap("hoist_types");
         run_phase(self, Self::hoist_pacts, &mut saved_ribs)?;
+        lap("hoist_pacts");
         run_phase(self, Self::hoist_callables, &mut saved_ribs)?;
+        lap("hoist_callables");
         run_phase(self, Self::resolve_pending_bounds, &mut saved_ribs)?;
+        lap("resolve_pending_bounds");
         run_phase(self, Self::hoist_constants, &mut saved_ribs)?;
+        lap("hoist_constants");
 
         // fixpoint: hoist_uses + solve_consts. each round may resolve more consts (e.g. a const
         // that references another module's const reduces only once that other const is bound).
@@ -417,7 +433,9 @@ impl Solver {
         let mut prev = self.resolved_constants();
         for _ in 0..FIXPOINT_CAP {
             run_phase(self, Self::hoist_uses, &mut saved_ribs)?;
+            lap("hoist_uses");
             run_phase(self, Self::solve_consts, &mut saved_ribs)?;
+            lap("solve_consts");
             let curr = self.resolved_constants();
             if curr == prev {
                 break;
@@ -426,7 +444,9 @@ impl Solver {
         }
 
         run_phase(self, Self::solve_types, &mut saved_ribs)?;
+        lap("solve_types");
         run_phase(self, Self::solve_bodies, &mut saved_ribs)?;
+        lap("solve_bodies");
 
         // body solving is the last chance for an impl-associated or block-scoped const to gain
         // its literal value. anything still at `Constant(None)` afterwards is unresolvable --
@@ -450,10 +470,13 @@ impl Solver {
         assert!(self.loop_stack.is_empty());
         // every bounded param that got filled: by a type that implements the pact?
         self.check_bounds()?;
+        lap("check_bounds");
         // last, once every node has its type: do the units add up?
         crate::dims::check(self, &asts)?;
+        lap("dims");
         // and, with decs resolved everywhere the walk reaches: the usage/effect grades
         crate::grades::check(self, &asts)?;
+        lap("grades");
         Ok(())
     }
 
