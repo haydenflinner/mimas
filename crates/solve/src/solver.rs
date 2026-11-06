@@ -73,31 +73,31 @@ pub struct Solver {
     /// Where the instantiation under way is written, so `substitute_params` can record an
     /// obligation against it. `None` when the caller has no use site to blame.
     pub(crate) obligation_at: Option<Location>,
-    pub(crate) closure_captures: IndexMap<NodeId, IndexSet<DecId>>,
-    pub(crate) expected_closures: IndexMap<NodeId, Vec<FnParam>>,
+    pub(crate) closure_captures: FxIndexMap<NodeId, FxIndexSet<DecId>>,
+    pub(crate) expected_closures: FxIndexMap<NodeId, Vec<FnParam>>,
     vids: IdVec<Vid, ()>,
     subs: IdVec<Vid, Option<Ty>>,
-    node_visits: HashSet<NodeId>,
-    pub(crate) library: HashMap<String, AdtId>,
-    pub(crate) root_modules: IndexMap<String, AdtId>,
-    pub(crate) module_items: IndexMap<AdtId, IndexMap<String, DecId>>,
-    pub(crate) sources: HashMap<FileId, NamedSource<Arc<str>>>,
+    node_visits: FxHashSet<NodeId>,
+    pub(crate) library: Shared<FxHashMap<String, AdtId>>,
+    pub(crate) root_modules: Shared<FxIndexMap<String, AdtId>>,
+    pub(crate) module_items: Shared<FxIndexMap<AdtId, FxIndexMap<String, DecId>>>,
+    pub(crate) sources: FxHashMap<FileId, NamedSource<Arc<str>>>,
 
-    pub(crate) dec_to_native: HashMap<DecId, NativeBinding>,
+    pub(crate) dec_to_native: Shared<FxHashMap<DecId, NativeBinding>>,
 
     // dataframe schemas (see frames.rs): a frame's Ty stays the nominal `DataFrame` while
     // these carry its column map -- keyed by producing expr and by `let` binding.
-    pub(crate) frame_schemas: HashMap<NodeId, Rc<crate::frames::FrameSchema>>,
-    pub(crate) frame_decs: HashMap<DecId, Rc<crate::frames::FrameSchema>>,
+    pub(crate) frame_schemas: FxHashMap<NodeId, Rc<crate::frames::FrameSchema>>,
+    pub(crate) frame_decs: FxHashMap<DecId, Rc<crate::frames::FrameSchema>>,
     /// `__q_group`/`group_by` results: `(input schema, key columns)` by expr/binding.
-    pub(crate) group_schemas: HashMap<NodeId, crate::frames::GroupInfo>,
-    pub(crate) group_decs: HashMap<DecId, crate::frames::GroupInfo>,
+    pub(crate) group_schemas: FxHashMap<NodeId, crate::frames::GroupInfo>,
+    pub(crate) group_decs: FxHashMap<DecId, crate::frames::GroupInfo>,
     /// Unit dims of `25kW`-style literals, merged from every solved ast (`NodeId`s are
     /// globally unique, so one map is collision-free).
-    pub(crate) ast_quantities: HashMap<NodeId, shared::units::Dim>,
+    pub(crate) ast_quantities: FxHashMap<NodeId, shared::units::Dim>,
     /// The unit text as written for each literal in `ast_quantities`, so diagnostics can
     /// name `ft` rather than collapsing it to `length (m)`.
-    pub(crate) ast_quantity_units: HashMap<NodeId, String>,
+    pub(crate) ast_quantity_units: FxHashMap<NodeId, String>,
     /// Bare unit names resolved as constants (`kWh` reads as `1kWh`): unit text -> its
     /// synthetic `Constant` dec and dimension, deduped so every use points at one dec.
     /// r[impl mimas.unit.constant]
@@ -105,43 +105,43 @@ pub struct Solver {
     /// Every expression's computed dimension, recorded by the dims pass —
     /// `b.x + 2.0px` is `px` here while its `node_tys` stays `Float`.
     /// Surfaces on [`Resolutions::node_dims`](crate::Resolutions).
-    pub(crate) node_dims: IndexMap<NodeId, shared::units::Dim>,
+    pub(crate) node_dims: FxIndexMap<NodeId, shared::units::Dim>,
     /// The dimension each expr's context demanded (a call arg's declared param
     /// dim) — an expr whose own dim is `Any` still knows the unit its slot wanted.
     /// Surfaces on [`Resolutions::want_dims`](crate::Resolutions).
-    pub(crate) want_dims: IndexMap<NodeId, shared::units::Dim>,
+    pub(crate) want_dims: FxIndexMap<NodeId, shared::units::Dim>,
     /// `print`/`dbg`/`warn` call site → the dimension the pass computed for the printed
     /// value — so the natives can render `25000 W` rather than a bare `25000`.
     /// Keyed by call location, the same span the `Prints` fixture attributes.
     /// Surfaces on [`Resolutions::print_dims`](crate::Resolutions).
-    pub(crate) print_dims: IndexMap<shared::Location, shared::units::Dim>,
+    pub(crate) print_dims: FxIndexMap<shared::Location, shared::units::Dim>,
     /// Dimensions of api-adt fields (`Input.dt` is `s`): `(adt name, field name)`.
     /// Populated by `install_user_adt` from `ApiVariantFields::Named` dims; the dims pass
     /// consults it when a `.field` read isn't on a source-declared struct.
-    pub(crate) field_dims: HashMap<(String, String), shared::units::Dim>,
+    pub(crate) field_dims: FxHashMap<(String, String), shared::units::Dim>,
     /// Declared unit of each source-struct member, through `?`/`[..]`:
     /// `(struct name, field name)`. `next: index?` and `kids: [idx]` both
     /// land as `INDEX`. Recorded by the dims pass; surfaces on
     /// [`ResolvedAdt::member_dims`](crate::ResolvedAdt).
-    pub(crate) member_units: HashMap<(String, String), shared::units::Dim>,
+    pub(crate) member_units: FxHashMap<(String, String), shared::units::Dim>,
     /// Exprs that fulfill a `[T; n]` position with a length the compiler couldn't
     /// prove -- emit wraps each in a runtime dim check (see `lens.rs`).
     /// Surfaces on [`Resolutions::len_checks`](crate::Resolutions).
-    pub(crate) len_checks: IndexMap<NodeId, Vec<Option<usize>>>,
+    pub(crate) len_checks: FxIndexMap<NodeId, Vec<Option<usize>>>,
     /// `S::default()` calls the solver blessed: call node → the struct's adt.
     /// Emit lowers each to a `NewInstance` with every member set to its
     /// type's default rather than a call.
-    pub(crate) default_ctors: IndexMap<NodeId, AdtId>,
+    pub(crate) default_ctors: FxIndexMap<NodeId, AdtId>,
 
     /// Per-declaration read/write site counts, filled by the grades pass -- the `{0,1,ω}`
     /// usage grades behind the lint suite. Surfaces on [`Resolutions::dec_uses`].
-    pub(crate) dec_uses: IndexMap<DecId, crate::grades::UseInfo>,
+    pub(crate) dec_uses: FxIndexMap<DecId, crate::grades::UseInfo>,
     /// Inferred effect sets for each `fn` dec (`#[effects]`-declared natives seed the
     /// fixpoint; user fns are the union of their callees). `Resolutions::fn_effects`.
-    pub(crate) fn_effects: IndexMap<DecId, shared::Fx>,
+    pub(crate) fn_effects: FxIndexMap<DecId, shared::Fx>,
     /// Effect set of each file's top-level statements, keyed by the ast's name. Script code
     /// isn't a dec, so page-eval effects surface here for a host to check against its caps.
-    pub(crate) script_effects: IndexMap<String, shared::Fx>,
+    pub(crate) script_effects: FxIndexMap<String, shared::Fx>,
     /// Per top-level statement: `(file name, site, inferred fx)` in source order. A host
     /// that splices `use`-includes into one file maps each site back onto its include's
     /// byte range -- how a peer page's contribution is attributed (and gated) separately.
@@ -186,18 +186,18 @@ impl Solver {
             subs: IdVec::new(),
             decs: IdVec::new(),
             adts: IdVec::new(),
-            pacts: IdVec::new(),
-            pact_impls: HashSet::new(),
-            pact_members: HashMap::new(),
+            pacts: Shared::new(IdVec::new()),
+            pact_impls: Shared::default(),
+            pact_members: Shared::default(),
             pact_self: None,
-            node_to_vid: IndexMap::new(),
-            node_decs: IndexMap::new(),
-            op_decs: IndexMap::new(),
-            pact_ops: IndexMap::new(),
-            closure_captures: IndexMap::new(),
-            expected_closures: IndexMap::new(),
+            node_to_vid: FxIndexMap::default(),
+            node_decs: FxIndexMap::default(),
+            op_decs: FxIndexMap::default(),
+            pact_ops: FxIndexMap::default(),
+            closure_captures: FxIndexMap::default(),
+            expected_closures: FxIndexMap::default(),
             control_flow: ControlFlow::new(),
-            node_visits: HashSet::new(),
+            node_visits: FxHashSet::default(),
             ribs: Ribs::default(),
             loop_stack: vec![],
             fn_stack: vec![],
@@ -225,13 +225,13 @@ impl Solver {
             script_effects: IndexMap::new(),
             script_segments: Vec::new(),
             warnings: Vec::new(),
-            bare_module_uses: HashMap::new(),
+            bare_module_uses: FxHashMap::default(),
             in_prelude: false,
-            prelude_types: HashSet::new(),
+            prelude_types: FxHashSet::default(),
             non_value: None,
             iter_guards: vec![],
             type_params: vec![],
-            param_bounds: HashMap::new(),
+            param_bounds: FxHashMap::default(),
             pending_bounds: vec![],
             bound_obligations: vec![],
             obligation_at: None,
