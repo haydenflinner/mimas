@@ -55,14 +55,14 @@ impl<'a> HoistCtx<'a> {
         if self.solver.in_prelude {
             self.solver.prelude_types.insert(ident.lexeme.clone());
         } else if self.solver.prelude_types.contains(&ident.lexeme) {
-            self.solver.warnings.push(
+            self.solver.warnings.push(std::rc::Rc::new(
                 crate::errors::ShadowedBuiltinType {
                     src: self.solver.src(ident.location),
                     at: ident.location.into(),
                     name: ident.lexeme.clone(),
                 }
                 .into(),
-            );
+            ));
         }
         let dec_id = self
             .solver

@@ -396,7 +396,7 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> crate::errors::Result
                 entry.writes.tick();
             }
         }
-        solver.warnings.extend(warnings);
+        solver.warnings.extend(warnings.into_iter().map(std::rc::Rc::new));
     }
 
     // fixpoint: fn_effects[f] |= union fn_fx[callee] until stable. Each round only adds bits,

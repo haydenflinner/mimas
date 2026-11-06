@@ -25,6 +25,7 @@ use std::{
     sync::Arc,
 };
 
+#[derive(Clone)]
 pub struct Solver {
     pub(crate) decs: IdVec<DecId, Dec>,
     pub(crate) adts: IdVec<AdtId, Adt>,
@@ -123,7 +124,9 @@ pub struct Solver {
     pub(crate) script_segments: Vec<(String, shared::Location, shared::Fx)>,
     /// Non-fatal diagnostics (the lint suite). Solve succeeds; hosts decide how to show them.
     /// Surfaces on `Loaded::warnings` and `Resolutions::warnings`.
-    pub(crate) warnings: Vec<miette::Report>,
+    /// Lints from the grades pass, behind `Rc` so a prepared solver (see
+    /// `load::Prepared`) clones; `Loaded` unwraps them on the way out.
+    pub(crate) warnings: Vec<std::rc::Rc<miette::Report>>,
     /// Modules brought in by a bare `use music;` (which binds the name,
     /// not the members) -- an unbound-name error that names a member of
     /// one of these gets the "you wanted `::*`" hint.
@@ -3066,11 +3069,13 @@ impl Default for Solver {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct LoopRun {
     pub collect_ty: Option<Ty>,
     pub break_ty: Option<Ty>,
 }
 
+#[derive(Clone)]
 pub(crate) struct FnRun {
     pub expected_ty: Ty,
 }
@@ -3101,6 +3106,7 @@ pub(crate) struct NativeFnSig {
     pub must_use: bool,
 }
 
+#[derive(Clone)]
 pub(crate) struct NativeBinding {
     pub id: NativeId,
     pub sig: NativeFnSig,
@@ -3129,6 +3135,7 @@ pub(crate) struct NativeBinding {
 /// This is a lint for the beginner trap of mutating a collection mid-loop, not an alias
 /// analysis: writes reached through a *different* binding (`let ys = xs; ys.push(..)`), a
 /// helper function's parameter, or a pact-bound method call are all knowingly missed.
+#[derive(Clone)]
 pub(crate) struct IterGuard {
     pub dec: DecId,
     pub path: Vec<GuardSeg>,

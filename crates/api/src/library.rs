@@ -31,6 +31,46 @@ impl<C> Library<C> {
         self.sources.push((name, src));
     }
 
+    /// A hash of what the checker takes from this library — every native's
+    /// name, module and shape, every adt's name and module, every shipped
+    /// source — so a solver prepared against one library is reused only
+    /// under a library that would prepare the same way.
+    pub fn fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for adt in &self.adts {
+            adt.name.hash(&mut h);
+            adt.module.hash(&mut h);
+            adt.variants.len().hash(&mut h);
+        }
+        for (id, entry) in self.natives.iter() {
+            id.index().hash(&mut h);
+            match entry {
+                ApiEntry::Function(f) => {
+                    0u8.hash(&mut h);
+                    f.name.hash(&mut h);
+                    f.module.hash(&mut h);
+                    f.parameters.len().hash(&mut h);
+                }
+                ApiEntry::Method(m) => {
+                    1u8.hash(&mut h);
+                    m.name.hash(&mut h);
+                    m.parameters.len().hash(&mut h);
+                }
+                ApiEntry::Constant(c) => {
+                    2u8.hash(&mut h);
+                    c.name.hash(&mut h);
+                }
+            }
+        }
+        for (name, src) in &self.sources {
+            name.hash(&mut h);
+            src.hash(&mut h);
+        }
+        self.intrinsics.len().hash(&mut h);
+        h.finish()
+    }
+
     pub fn sources(&self) -> &[(&'static str, &'static str)] {
         &self.sources
     }

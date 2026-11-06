@@ -464,7 +464,7 @@ impl From<Solver> for Resolutions {
             fn_effects: solver.fn_effects,
             script_effects: solver.script_effects,
             script_segments: solver.script_segments,
-            warnings: solver.warnings,
+            warnings: crate::load::unwrap_warnings(solver.warnings),
             decs: resolved_decs,
             adts: resolved_adts,
             pact_names,
