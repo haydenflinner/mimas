@@ -8,6 +8,7 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add_method(min);
     api.add_method(max);
     api.add_method(clamp);
+    api.add_method(pow);
     api.add_method(to_str);
     api.add_method(to);
     let id = api.add_method(to_float);
@@ -58,6 +59,23 @@ fn min<'gc>(a: i64, b: i64) -> i64 {
 /// ```
 fn max<'gc>(a: i64, b: i64) -> i64 {
     a.max(b)
+}
+
+#[native]
+/// Returns the number raised to the power `exponent`, an int. The exponent must not be
+/// negative (`2.pow(-1)` is a half: write `2.0.pow(-1.0)`), and a power past `int::MAX`
+/// is an error rather than a wrapped number.
+///
+/// ```mimas
+/// let a = 2.pow(10); // 1024
+/// let b = 7.pow(0);  // 1
+/// let c = (-3).pow(3); // -27
+/// ```
+fn pow<'gc>(n: i64, exponent: i64) -> Result<i64, RtErr> {
+    let e = u32::try_from(exponent)
+        .map_err(|_| RtErr::InvalidArgument(format!("pow needs an exponent of 0 or more, got {exponent}; a negative power is a float (`{n}.0.pow({exponent}.0)`)")))?;
+    n.checked_pow(e)
+        .ok_or_else(|| RtErr::InvalidArgument(format!("{n}.pow({exponent}) overflows int")))
 }
 
 #[native]

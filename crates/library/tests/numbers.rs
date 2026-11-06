@@ -229,6 +229,24 @@ test_run!(
     r#"(3.0).to_str()"# => r#""3""#,
 );
 
+test_run!(
+    int_pow,
+    "(2).pow(10)" => "1024",
+    "(7).pow(0)" => "1",
+    "(-3).pow(3)" => "-27",
+    "(0).pow(0)" => "1",
+    "(1).pow(62)" => "1",
+);
+
+// a negative exponent is a fraction, and a power past int::MAX is an
+// error, not a wrapped number
+test_fail!(
+    int_pow_rejects,
+    "let x = (2).pow(-1);",
+    "let x = (2).pow(63);",
+    "let x = (10).pow(19);",
+);
+
 // int has no float-only methods
 test_fail!(
     int_no_float_methods,
