@@ -60,3 +60,15 @@ fn item_matches_only_on_its_name() {
     let source = "struct P { x: int }";
     assert_eq!(node_text_at(source, 7).as_deref(), Some("P"));
 }
+
+// r[verify mimas.array.comprehension]
+#[test]
+fn comprehension_spans_its_bracket() {
+    // the loop a comprehension desugars to owns the whole `[ … ]`
+    let source = "let ys = [a for x in xs];";
+    let at = source.find("for").unwrap();
+    assert_eq!(node_text_at(source, at).as_deref(), Some("[a for x in xs]"));
+    let source = "let ys = [a for x in xs].len();";
+    let at = source.find("for").unwrap();
+    assert_eq!(node_text_at(source, at).as_deref(), Some("[a for x in xs]"));
+}

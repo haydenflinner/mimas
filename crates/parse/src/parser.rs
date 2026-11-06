@@ -1822,8 +1822,13 @@ impl<'s> Parser<'s> {
     /// the inner loop's list and flattens one level per extra clause —
     /// `for x in a { collect (for y in b { collect e }) }.flatten()`,
     /// which is Python's nesting order.
-    fn list_comprehension(&mut self, head: Expr) -> Expr {
-        let start = head.span().start();
+    ///
+    /// `start` is the opening `[` — the loop the comprehension becomes
+    /// spans the whole bracket, not just its head, so a `check` named
+    /// by its expression's snippet reads `[e for x in xs].all(..)` and
+    /// a hover on `for` lights the bracket. The caller re-spans the
+    /// node once the `]` is eaten.
+    fn list_comprehension(&mut self, head: Expr, start: usize) -> Expr {
         enum Clause {
             For(Pat, Expr),
             If(Option<Pat>, Expr),
@@ -2425,7 +2430,7 @@ impl<'s> Parser<'s> {
                     let mut element = p.struct_literals(true, Self::expr);
                     if first && p.at(TokKind::For) {
                         comp = true;
-                        element = p.list_comprehension(element);
+                        element = p.list_comprehension(element, start);
                     }
                     first = false;
                     element
@@ -2433,8 +2438,10 @@ impl<'s> Parser<'s> {
             });
             let expr = if comp {
                 // the For node `list_comprehension` built — later
-                // elements, if any, already drew their own errors
-                elements.into_iter().next().unwrap()
+                // elements, if any, already drew their own errors.
+                // Re-spanned now that the `]` is behind the cursor.
+                let comp = elements.into_iter().next().unwrap();
+                self.new_expr(comp.into_kind(), start)
             } else {
                 self.new_expr(Literal::Array(elements), start)
             };

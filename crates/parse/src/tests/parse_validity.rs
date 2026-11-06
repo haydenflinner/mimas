@@ -319,6 +319,25 @@ fn check_lines_stand_alone() {
     }
 }
 
+// r[verify mimas.array.comprehension]
+#[test]
+fn check_of_a_comprehension_is_named_by_the_whole_bracket() {
+    // the comprehension's loop node spans from `[` to `]`, so the
+    // registered name is the line's snippet — a host that scans the
+    // source for `check` lines finds it (it used to start at the head,
+    // `p > 0.0 for p in …`, and the bracketed check was "not registered")
+    for src in [
+        "[p > 0.0 for p in [1.0, 2.0]].all(|b| b)",
+        "[x for x in xs]",
+        "[x for x in xs if x > 0].len() > 0",
+        "[y for x in xs for y in x].sum() > 0",
+    ] {
+        let tests = check_item(&format!("check {src}\n"));
+        assert_eq!(tests.cases.len(), 1, "{src}");
+        assert_eq!(&tests.cases[0].name.lexeme, src);
+    }
+}
+
 #[test]
 fn check_word_still_lexes_as_ident() {
     // `check` is only special before a same-line `:`/`{`/expr
