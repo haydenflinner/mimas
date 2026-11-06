@@ -12,7 +12,7 @@
 //! followed by `xs.push(3)` would leave a stale "2" on the binding's name, so
 //! only the literal itself answers for its length.
 
-use std::collections::HashMap;
+use crate::FxHashMap;
 
 use parse::{Argument, Expr, ExprKind, Literal, expr::Access};
 use shared::{Located, Location};
@@ -155,7 +155,7 @@ impl Solver {
 
         // param name -> what the caller put in its slot (expr, literal default,
         // or nothing). `receiver` covers a method's leading `self` param.
-        let mut env: HashMap<String, ArgRef> = HashMap::new();
+        let mut env: FxHashMap<String, ArgRef> = FxHashMap::default();
         if let Some((param, recv)) = params.first().zip(receiver) {
             if let Some(name) = &param.name {
                 env.insert(name.clone(), ArgRef::Expr(recv));
@@ -194,13 +194,13 @@ impl Solver {
     /// through `env`, `xs.len()` reads `known_dims` of whatever fills `xs`, and
     /// everything else defers to ordinary const resolution. `Ok(None)` means
     /// "can't prove it" -- never an error on its own.
-    fn eval_where(&self, expr: &Expr, env: &HashMap<String, ArgRef>) -> Result<Option<Literal>> {
+    fn eval_where(&self, expr: &Expr, env: &FxHashMap<String, ArgRef>) -> Result<Option<Literal>> {
         reduce(expr, &|e| self.where_leaf(e, env)).map_err(|e| e.into_diag(self))
     }
 
     /// The `resolve` half of [`eval_where`]: idents look up `env` then the const
     /// table, and a `recv.len()` call answers from the receiver's known dims.
-    fn where_leaf(&self, e: &Expr, env: &HashMap<String, ArgRef>) -> Option<Literal> {
+    fn where_leaf(&self, e: &Expr, env: &FxHashMap<String, ArgRef>) -> Option<Literal> {
         match e.kind() {
             ExprKind::Ident(ident) => match env.get(&ident.lexeme) {
                 Some(ArgRef::Expr(arg)) => self.reduce_const_expr(arg).ok().flatten(),

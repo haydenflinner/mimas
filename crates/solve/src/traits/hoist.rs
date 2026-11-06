@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use crate::FxHashSet;
 
 use super::Query;
 use crate::{
@@ -10,7 +10,6 @@ use crate::{
     errors::{DuplicateImplDeclaration, DuplicatePactImpl, InvalidImplTarget},
     *,
 };
-use indexmap::IndexMap;
 use parse::{
     components::{Annotation, Binding},
     *,
@@ -343,7 +342,7 @@ impl Hoist for Impl {
             // methods on the adt (and collide like everything else if another pact already provides
             // the name). freshen the header so each impl's `self` slot is independent.
             if let Some(pid) = pid {
-                let provided: HashSet<String> = self
+                let provided: FxHashSet<String> = self
                     .items
                     .iter()
                     .filter_map(|i| match i.kind() {
@@ -395,8 +394,9 @@ impl Hoist for Pact {
         // and the pact's own name resolve to it within its own method types (see `resolve_name`)
         let pact_id = ctx.solver.pacts.push(shared::Pact {
             name: self.name.lexeme.clone(),
-            functions: IndexMap::new(),
-            constants: IndexMap::new(),
+            // `shared::Pact` keeps indexmap's own hasher: it is shared's type
+            functions: indexmap::IndexMap::default(),
+            constants: indexmap::IndexMap::default(),
         });
         shared::name_pact(pact_id.index(), &self.name.lexeme);
         let prev_self = ctx.solver.pact_self.replace(pact_id);

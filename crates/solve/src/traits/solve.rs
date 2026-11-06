@@ -11,7 +11,7 @@ use crate::{
 };
 use parse::{components::Binding, *};
 use shared::{Located, Location};
-use std::collections::HashMap;
+use crate::FxHashMap;
 
 /// Pick which native impl on `aid` named `name` dispatches for a receiver typed as `actual`.
 ///
@@ -53,7 +53,7 @@ fn pick_method_overload(
             matches.push(cand.clone());
             continue;
         };
-        let mut memo = HashMap::new();
+        let mut memo = FxHashMap::default();
         let mut pat = solver.substitute_anons(&recv_pat, &mut memo);
         if first_pat_str.is_empty() {
             first_pat_str = pat.to_string();

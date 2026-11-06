@@ -10,7 +10,7 @@
 //! loop's exit merge. Closure bodies share the enclosing flow but may run zero or many times,
 //! so pending bookkeeping for decs declared outside a closure is suspended inside it.
 //!
-//! The result -- `dec_uses: IndexMap<DecId, UseInfo>` -- is honest per-site counts
+//! The result -- `dec_uses: FxIndexMap<DecId, UseInfo>` -- is honest per-site counts
 //! (`Never`/`Once`/`Many`, saturating): `{0,1,ω}` grades for whoever reads them. The first
 //! lints built on it are unused binding, unused parameter, and dead store -- warnings on
 //! `Solver::warnings`, surfaced through `Resolutions`/`Loaded`, never errors. Script-rib
@@ -44,7 +44,7 @@
 //! on bindings and signatures -- `int` is ungraded), and Stage 3's certificate checks read
 //! the maps this pass fills without adding their own.
 
-use std::collections::{HashMap, HashSet};
+use crate::{FxHashMap, FxHashSet};
 
 use miette::Report;
 use parse::{
@@ -144,20 +144,20 @@ enum Caller {
 #[derive(Clone, Default)]
 struct Flow {
     /// dec -> the write sites whose value no read has consumed yet (last writers).
-    pending: HashMap<DecId, HashSet<Location>>,
+    pending: FxHashMap<DecId, FxHashSet<Location>>,
     /// dec -> write sites this path overwrote but did not itself produce. Arbitrated at
     /// merges: a span in here died on this path, and only stays a candidate if it died on
     /// every sibling path too.
-    killed: HashMap<DecId, HashSet<Location>>,
+    killed: FxHashMap<DecId, FxHashSet<Location>>,
     /// dec -> write sites a read on this path consumed. Any read makes the store live.
-    read_spans: HashMap<DecId, HashSet<Location>>,
+    read_spans: FxHashMap<DecId, FxHashSet<Location>>,
     /// Write sites created inside this path segment. Killing one is unconditional -- it
     /// can't exist on a sibling path -- so it reports straight away.
-    born: HashSet<Location>,
+    born: FxHashSet<Location>,
     /// dec -> the `(path, site, callee)` marks `#[consumes]` params took on this
     /// path. Unioned at merges: a region *maybe* consumed on any surviving path is
     /// gone from the join on -- matching Rust's move-out-of-one-branch behavior.
-    consumed: HashMap<DecId, Vec<ConsumeMark>>,
+    consumed: FxHashMap<DecId, Vec<ConsumeMark>>,
     diverged: bool,
 }
 
@@ -178,9 +178,9 @@ impl Flow {
     /// unreachable.
     fn merge(flows: impl IntoIterator<Item = Flow>) -> Flow {
         let arms: Vec<Flow> = flows.into_iter().filter(|f| !f.diverged).collect();
-        let mut pending: HashMap<DecId, HashSet<Location>> = HashMap::new();
-        let mut read_spans: HashMap<DecId, HashSet<Location>> = HashMap::new();
-        let mut killed: HashMap<DecId, HashSet<Location>> = HashMap::new();
+        let mut pending: FxHashMap<DecId, FxHashSet<Location>> = FxHashMap::default();
+        let mut read_spans: FxHashMap<DecId, FxHashSet<Location>> = FxHashMap::default();
+        let mut killed: FxHashMap<DecId, FxHashSet<Location>> = FxHashMap::default();
         for f in &arms {
             for (dec, spans) in &f.pending {
                 pending
@@ -214,8 +214,8 @@ impl Flow {
         // born restarts empty: a pending span inherited through a merge was written on a
         // path a sibling may still read from, so it isn't segment-local -- only writes
         // that happen after the merge can be eager-killed
-        let born: HashSet<Location> = HashSet::new();
-        let mut consumed: HashMap<DecId, Vec<ConsumeMark>> = HashMap::new();
+        let born: FxHashSet<Location> = FxHashSet::default();
+        let mut consumed: FxHashMap<DecId, Vec<ConsumeMark>> = FxHashMap::default();
         for f in &arms {
             for (dec, marks) in &f.consumed {
                 consumed.entry(*dec).or_default().extend(marks.iter().cloned());
@@ -236,12 +236,12 @@ struct Pass<'a> {
     solver: &'a Solver,
 
     /// dec -> read/write site counts; merged into `Solver::dec_uses` at the end.
-    uses: HashMap<DecId, UseInfo>,
+    uses: FxHashMap<DecId, UseInfo>,
     /// Bindings eligible for unused-warnings: (dec, where it came from).
     lint_targets: Vec<(DecId, Site)>,
     /// The scope each dec was bound in (scope_decs.len() at bind time), for the
     /// closure-isolation rule.
-    dec_scope: HashMap<DecId, usize>,
+    dec_scope: FxHashMap<DecId, usize>,
     /// Dead-store candidates: pending writes killed by overwrite or scope exit. Emitted only
     /// if the dec was read at all -- otherwise `unused binding` already owns the complaint.
     dead_candidates: Vec<(DecId, Location)>,
@@ -263,10 +263,10 @@ struct Pass<'a> {
     /// observed reaching a read -- but the back-edge carries it to next iteration's reads.
     /// A dec in this set keeps its body-end writes live (conservative: it can't see
     /// whether an intervening write beats the read, only that one exists).
-    loop_reads: Vec<HashSet<DecId>>,
+    loop_reads: Vec<FxHashSet<DecId>>,
     /// Decs whose use-after-consume already reported (one error per dead
     /// path, not per read of it).
-    consume_reported: HashSet<(DecId, Vec<String>)>,
+    consume_reported: FxHashSet<(DecId, Vec<String>)>,
     /// The spine root's bare-name consume check already ran at the
     /// access's deeper path -- `r.id` doesn't read all of `r`. Set by the
     /// access arms before walking `left`, cleared by the next read.
@@ -294,14 +294,14 @@ struct Pass<'a> {
     /// this is the current script segment.
     script_sites: Vec<Location>,
     /// Effects directly observed in each caller's own text.
-    own_fx: HashMap<Caller, Fx>,
+    own_fx: FxHashMap<Caller, Fx>,
     /// caller -> user-fn callee decs (the fixpoint's edges).
-    edges: HashMap<Caller, HashSet<DecId>>,
+    edges: FxHashMap<Caller, FxHashSet<DecId>>,
     /// `fn` name site -> dec, so a `Function` node can name its caller.
-    dec_by_site: HashMap<(usize, usize), DecId>,
+    dec_by_site: FxHashMap<(usize, usize), DecId>,
     /// pact member decs -- a call resolved to one dispatches to an impl this file can't see,
     /// so it's `unknown`, not an edge.
-    pact_members: HashSet<DecId>,
+    pact_members: FxHashSet<DecId>,
 }
 
 /// Fill `solver.dec_uses`, `solver.fn_effects`, `solver.script_effects`, `solver.warnings`.
@@ -311,14 +311,14 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> crate::errors::Result
     let mut errors: Vec<Report> = Vec::new();
     // call edges and per-caller effects gather across all asts before the fixpoint -- a fn in
     // file A can call a fn in file B
-    let mut edges: HashMap<DecId, HashSet<DecId>> = HashMap::new();
-    let mut fn_fx: HashMap<DecId, Fx> = HashMap::new();
+    let mut edges: FxHashMap<DecId, FxHashSet<DecId>> = FxHashMap::default();
+    let mut fn_fx: FxHashMap<DecId, Fx> = FxHashMap::default();
     // per file: (name, [(stmt site, own fx, callee edges)]) -- folded into
     // `script_effects`/`script_segments` after the fixpoint
-    let mut script_fx: Vec<(String, Vec<(Location, Fx, HashSet<DecId>)>)> = Vec::new();
+    let mut script_fx: Vec<(String, Vec<(Location, Fx, FxHashSet<DecId>)>)> = Vec::new();
 
     for ast in asts {
-        let mut dec_by_site = HashMap::new();
+        let mut dec_by_site = FxHashMap::default();
         for (id, dec) in solver.decs.iter() {
             if matches!(dec.kind, DecKind::Item { .. }) {
                 dec_by_site
@@ -328,16 +328,16 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> crate::errors::Result
         }
         let mut pass = Pass {
             solver,
-            uses: HashMap::new(),
+            uses: FxHashMap::default(),
             lint_targets: Vec::new(),
-            dec_scope: HashMap::new(),
+            dec_scope: FxHashMap::default(),
             dead_candidates: Vec::new(),
             warnings: Vec::new(),
             scope_decs: Vec::new(),
             closure_floors: Vec::new(),
             loop_floors: Vec::new(),
             loop_reads: Vec::new(),
-            consume_reported: HashSet::new(),
+            consume_reported: FxHashSet::default(),
             skip_root_check: false,
             in_lvalue: false,
             errors: Vec::new(),
@@ -346,8 +346,8 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> crate::errors::Result
             breaks: Vec::new(),
             callers: vec![Caller::Script(0)],
             script_sites: Vec::new(),
-            own_fx: HashMap::new(),
-            edges: HashMap::new(),
+            own_fx: FxHashMap::default(),
+            edges: FxHashMap::default(),
             dec_by_site,
             pact_members: solver.pact_members.values().copied().collect(),
         };
@@ -565,8 +565,8 @@ impl<'a> Pass<'a> {
             return;
         };
         for dec in decs {
-            let mut spans: HashSet<Location> = HashSet::new();
-            let mut live: HashSet<Location> = HashSet::new();
+            let mut spans: FxHashSet<Location> = FxHashSet::default();
+            let mut live: FxHashSet<Location> = FxHashSet::default();
             let exits = self.breaks.last().into_iter().flatten();
             for flow in std::iter::once(&self.flow)
                 .chain(self.retired.iter())
@@ -666,7 +666,7 @@ impl<'a> Pass<'a> {
             };
             self.warnings.push(report);
         }
-        let mut seen_deads = HashSet::new();
+        let mut seen_deads = FxHashSet::default();
         for &(dec, at) in &self.dead_candidates {
             let reads = self.uses.get(&dec).map_or(Use::Never, |u| u.reads);
             if reads == Use::Never {
@@ -1247,7 +1247,7 @@ impl<'a> Pass<'a> {
                 self.flow.born.clear();
                 self.breaks.push(Vec::new());
                 self.loop_floors.push(self.scope_decs.len());
-                self.loop_reads.push(HashSet::new());
+                self.loop_reads.push(FxHashSet::default());
                 self.push_scope();
                 self.bind(&f.binding, Site::Binding, false);
                 self.expr(&f.body);
@@ -1260,7 +1260,7 @@ impl<'a> Pass<'a> {
             ExprKind::While(w) => {
                 // the header re-evaluates per pass, so its reads count
                 // toward the back-edge set too
-                self.loop_reads.push(HashSet::new());
+                self.loop_reads.push(FxHashSet::default());
                 self.expr(&w.header);
                 let pre = self.flow.clone();
                 self.flow.born.clear();
@@ -1279,7 +1279,7 @@ impl<'a> Pass<'a> {
             ExprKind::Loop(l) => {
                 self.breaks.push(Vec::new());
                 self.loop_floors.push(self.scope_decs.len());
-                self.loop_reads.push(HashSet::new());
+                self.loop_reads.push(FxHashSet::default());
                 self.expr(&l.body);
                 self.loop_floors.pop();
                 let mut body_end = self.flow.clone();

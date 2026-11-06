@@ -31,10 +31,8 @@ use parse::{
     components::{Pat, PatKind},
 };
 use shared::Located;
-use std::{
-    collections::HashSet,
-    ops::{Deref, DerefMut},
-};
+use crate::FxHashSet;
+use std::ops::{Deref, DerefMut};
 
 /// Top-level entry. Enumerates uncovered example values up to a safety cap so the diagnostic
 /// can list "and N more" -- see `MissingReport`. `None` means the match is exhaustive.
@@ -452,8 +450,8 @@ impl Matrix {
     }
 
     /// The constructors that actually appear in the first column (with Or-flattening).
-    fn ctors_present(&self, ty: &Ty, solver: &Solver) -> HashSet<Ctor> {
-        let mut out = HashSet::new();
+    fn ctors_present(&self, ty: &Ty, solver: &Solver) -> FxHashSet<Ctor> {
+        let mut out = FxHashSet::default();
         for pats in self.iter() {
             let Some((first, rest)) = pats.split_first() else {
                 continue;

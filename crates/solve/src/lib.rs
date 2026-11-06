@@ -34,6 +34,14 @@ pub mod utils {
     pub use reduce::*;
 }
 
+/// The solver's maps are keyed by small ids (`NodeId`, `DecId`, `Vid`) and
+/// short names; SipHash was a tenth of a solve. Fx is the hasher rustc
+/// uses for the same shapes.
+pub type FxIndexMap<K, V> = indexmap::IndexMap<K, V, rustc_hash::FxBuildHasher>;
+pub type FxIndexSet<T> = indexmap::IndexSet<T, rustc_hash::FxBuildHasher>;
+pub type FxHashMap<K, V> = rustc_hash::FxHashMap<K, V>;
+pub type FxHashSet<T> = rustc_hash::FxHashSet<T>;
+
 mod exhaustion;
 mod frames;
 mod lens;

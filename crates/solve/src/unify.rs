@@ -15,12 +15,20 @@ impl Unification {
         #[cfg(feature = "logging")]
         println!("{}", crate::utils::Printer::ty_unification(ty, rule));
 
-        // todo, borrow checker driving me insane
-        let potential_err = UnificationError {
-            found: ty.to_string(),
-            expected: rule.to_string(),
-        };
+        // The mismatch's text renders both types, which a successful unify
+        // (the vast majority, recursing through every type argument) must
+        // not pay for: the match below reports a bare `()` and the text is
+        // written only once it is an error.
+        match Self::unify_inner(ty, rule, solver) {
+            Ok(sub) => Ok(sub),
+            Err(()) => Err(UnificationError {
+                found: ty.to_string(),
+                expected: rule.to_string(),
+            }),
+        }
+    }
 
+    fn unify_inner(ty: &mut Ty, rule: &mut Ty, solver: &Solver) -> Result<Substitution, ()> {
         match (ty, rule) {
             // Directly equal types
             (ty, rule) if ty == rule => Ok(Substitution::None),
@@ -53,9 +61,9 @@ impl Unification {
                     .iter_mut()
                     .zip(rhs_args.iter_mut())
                     .try_fold(Substitution::None, |sub, (l, r)| {
-                        Self::unify(l, r, solver).map(|v| sub.combo(v))
+                        Self::unify_inner(l, r, solver).map(|v| sub.combo(v))
                     })
-                    .map_err(|_| potential_err)
+                    .map_err(|_| ())
             }
 
             // `Self` fulfills its own pact's bound (it's some implementer), but a bound never
@@ -76,7 +84,7 @@ impl Unification {
                 {
                     Ok(Substitution::None)
                 } else {
-                    Err(potential_err)
+                    Err(())
                 }
             }
 
@@ -91,7 +99,7 @@ impl Unification {
                 }) {
                     Ok(Substitution::None)
                 } else {
-                    Err(potential_err)
+                    Err(())
                 }
             }
 
@@ -101,13 +109,13 @@ impl Unification {
                 let mut sub = Substitution::None;
                 for (l, r) in lhs.parameters.iter_mut().zip(rhs.parameters.iter_mut()) {
                     sub = sub.combo(
-                        Self::unify(&mut l.ty, &mut r.ty, solver)
-                            .map_err(|_| potential_err.clone())?,
+                        Self::unify_inner(&mut l.ty, &mut r.ty, solver)
+                            .map_err(|_| ())?,
                     );
                 }
                 sub = sub.combo(
-                    Self::unify(lhs.return_ty.as_mut(), rhs.return_ty.as_mut(), solver)
-                        .map_err(|_| potential_err)?,
+                    Self::unify_inner(lhs.return_ty.as_mut(), rhs.return_ty.as_mut(), solver)
+                        .map_err(|_| ())?,
                 );
                 Ok(sub)
             }
@@ -119,38 +127,38 @@ impl Unification {
                 if let (Len::Const(a), Len::Const(b)) = (lhs_len, rhs_len)
                     && a != b
                 {
-                    return Err(potential_err);
+                    return Err(());
                 }
-                Self::unify(ty, exp_ty, solver).map_err(|_| potential_err)
+                Self::unify_inner(ty, exp_ty, solver).map_err(|_| ())
             }
             (Ty::Dict(ty), Ty::Dict(exp_ty)) => {
-                Self::unify(ty, exp_ty, solver).map_err(|_| potential_err)
+                Self::unify_inner(ty, exp_ty, solver).map_err(|_| ())
             }
             (Ty::Tuple(lhs), Ty::Tuple(rhs)) if lhs.len() == rhs.len() => lhs
                 .iter_mut()
                 .zip(rhs.iter_mut())
                 .try_fold(Substitution::None, |sub, (l, r)| {
-                    Self::unify(l, r, solver).map(|v| sub.combo(v))
+                    Self::unify_inner(l, r, solver).map(|v| sub.combo(v))
                 })
-                .map_err(|_| potential_err),
+                .map_err(|_| ()),
             (Ty::Option(ty), Ty::Option(exp)) => {
-                Self::unify(ty, exp, solver).or(Err(potential_err))
+                Self::unify_inner(ty, exp, solver).or(Err(()))
             }
             (Ty::Result(ty), Ty::Result(exp)) => {
-                Self::unify(ty, exp, solver).or(Err(potential_err))
+                Self::unify_inner(ty, exp, solver).or(Err(()))
             }
 
             // ? fulfills T?
             (Ty::Null, Ty::Option(_)) | (Ty::Option(_), Ty::Null) => Ok(Substitution::None),
 
             // T fulfills T?
-            (ty, Ty::Option(rule)) => Self::unify(ty, rule.as_mut(), solver),
+            (ty, Ty::Option(rule)) => Self::unify_inner(ty, rule.as_mut(), solver),
 
             // T fulfills T! (auto-wrap as ok)
-            (ty, Ty::Result(rule)) => Self::unify(ty, rule.as_mut(), solver),
+            (ty, Ty::Result(rule)) => Self::unify_inner(ty, rule.as_mut(), solver),
 
             // Anything else is a mismatch
-            _ => Err(potential_err),
+            _ => Err(()),
         }
     }
 }

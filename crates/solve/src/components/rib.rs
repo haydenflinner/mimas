@@ -1,6 +1,6 @@
 #![allow(unused)] // temp
 
-use std::collections::HashMap;
+use crate::FxHashMap;
 
 use parse::{Expr, ExprKind, Ident, NodeId};
 use shared::{AdtId, Location, PactId};
@@ -187,20 +187,20 @@ impl Ribs {
 
 #[derive(Debug, Clone)]
 pub(crate) struct Rib {
-    pub(crate) table: HashMap<String, DecId>,
+    pub(crate) table: FxHashMap<String, DecId>,
     /// Every declaration a module-level name has had, with where its name appears in the
     /// source. A name declared more than once (two scripts each defining `struct Shape`)
     /// resolves, at each use, to the most recent declaration that precedes it -- reading
     /// order, so an include placed after your own struct wins from there on.
-    history: HashMap<String, Vec<(usize, DecId)>>,
+    history: FxHashMap<String, Vec<(usize, DecId)>>,
     pub(crate) kind: RibKind,
 }
 
 impl Rib {
     pub(crate) fn new(kind: RibKind) -> Self {
         Self {
-            table: HashMap::new(),
-            history: HashMap::new(),
+            table: FxHashMap::default(),
+            history: FxHashMap::default(),
             kind,
         }
     }

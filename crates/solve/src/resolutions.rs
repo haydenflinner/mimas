@@ -1,9 +1,10 @@
 #![allow(unused)] // temp
 
-use std::{collections::HashMap, sync::Arc};
+use crate::FxHashMap;
+use std::sync::Arc;
 
 use api::NativeId;
-use indexmap::IndexMap;
+use crate::FxIndexMap;
 use miette::NamedSource;
 use parse::{Literal, NodeId};
 use shared::{FileId, IdVec, Location, PactId, ParamId, TyNames};
@@ -15,27 +16,27 @@ use crate::{
 };
 
 pub struct Resolutions {
-    pub node_tys: IndexMap<NodeId, Ty>,
+    pub node_tys: FxIndexMap<NodeId, Ty>,
     /// The unit dimension the dims pass computed for each expr —
     /// `b.x + 2.0px` is `Float` in `node_tys` but `px` here.
-    pub node_dims: IndexMap<NodeId, shared::units::Dim>,
+    pub node_dims: FxIndexMap<NodeId, shared::units::Dim>,
     /// The unit dimension the expr's context demanded — `b.x + BALL` passed to a
     /// `px` param is `Any` in `node_dims` but `px` here.
-    pub want_dims: IndexMap<NodeId, shared::units::Dim>,
+    pub want_dims: FxIndexMap<NodeId, shared::units::Dim>,
     /// `print`/`dbg`/`warn` call site → the dimension of the reported value — codegen ships
     /// it on `Program` so the natives can print `25000 W` rather than `25000`.
-    pub print_dims: IndexMap<Location, shared::units::Dim>,
-    pub node_decs: IndexMap<NodeId, DecId>,
+    pub print_dims: FxIndexMap<Location, shared::units::Dim>,
+    pub node_decs: FxIndexMap<NodeId, DecId>,
     /// Read/write site counts per declaration -- the `{0,1,ω}` usage grades the
     /// lint suite is built on (`Use::Never` is what "unused" warnings report on).
-    pub dec_uses: IndexMap<DecId, UseInfo>,
+    pub dec_uses: FxIndexMap<DecId, UseInfo>,
     /// Inferred effect set per `fn` dec: the union of what its body can do, seeded by
     /// `#[effects]` declarations on natives. `Fx::unknown()`-flagged sets carry
     /// `Fx::UNAUDITED` -- something in the call chain couldn't be graded.
-    pub fn_effects: IndexMap<DecId, shared::Fx>,
+    pub fn_effects: FxIndexMap<DecId, shared::Fx>,
     /// Effect set of each file's top-level statements, keyed by the ast's name. Hosts
     /// running peer pages gate on this: `fx.fits(granted)` or the code doesn't eval.
-    pub script_effects: IndexMap<String, shared::Fx>,
+    pub script_effects: FxIndexMap<String, shared::Fx>,
     /// Per top-level statement: `(file name, site, inferred fx)` in source order.
     /// Spliced `use`-includes share one file name -- the site's byte span is what
     /// attributes each statement back to the include that wrote it.
@@ -46,15 +47,15 @@ pub struct Resolutions {
     pub decs: IdVec<DecId, ResolvedDecl>,
     pub adts: IdVec<AdtId, ResolvedAdt>,
     pub pact_names: IdVec<PactId, String>,
-    pub module_paths: HashMap<AdtId, Vec<String>>,
-    pub closure_captures: IndexMap<NodeId, Vec<DecId>>,
+    pub module_paths: FxHashMap<AdtId, Vec<String>>,
+    pub closure_captures: FxIndexMap<NodeId, Vec<DecId>>,
     /// Exprs whose array lengths the solver couldn't prove against a `[T; n]`
     /// contract -- emit wraps each in a runtime dim check (see `lens.rs`).
-    pub len_checks: IndexMap<NodeId, Vec<Option<usize>>>,
+    pub len_checks: FxIndexMap<NodeId, Vec<Option<usize>>>,
     /// `S::default()` calls the solver blessed: call node → the struct's adt.
     /// Emit lowers each to a `NewInstance` whose members are the types'
     /// defaults instead of a call.
-    pub default_ctors: IndexMap<NodeId, AdtId>,
+    pub default_ctors: FxIndexMap<NodeId, AdtId>,
     /// The `__contract_fail` native's id, for contract-failure lowering at emit.
     /// `None` in embeddings that never installed the stdlib.
     pub contract_native: Option<NativeId>,
@@ -69,16 +70,16 @@ pub struct Resolutions {
     /// operator method on an operand's adt (`v.add(w)` for `v + w`, `v.rsub(s)`
     /// for `s - v`). Emit lowers them as ordinary method calls rather than
     /// `Bin`/`Unary` ops.
-    pub op_decs: IndexMap<NodeId, OpDispatch>,
+    pub op_decs: FxIndexMap<NodeId, OpDispatch>,
     /// `<op> a` nodes whose operand is pact-typed (`!x` with `x: Dichotomy`):
     /// no single impl, so emit dispatches at runtime over the bound's
     /// implementers, exactly like a method call through the pact.
-    pub pact_ops: IndexMap<NodeId, PactOp>,
+    pub pact_ops: FxIndexMap<NodeId, PactOp>,
     /// The pacts each declared type param is bounded by (`<T: Draw>`): a method call on a
     /// `T`-typed receiver dispatches through them at runtime, like a pact-typed one.
-    pub param_bounds: IndexMap<ParamId, Vec<PactId>>,
+    pub param_bounds: FxIndexMap<ParamId, Vec<PactId>>,
     pub root: ResolvedModule,
-    pub sources: HashMap<FileId, NamedSource<Arc<str>>>,
+    pub sources: FxHashMap<FileId, NamedSource<Arc<str>>>,
 }
 
 /// A solved `a <op> b` → method call: `dec` is the `fn` inside the operand's
@@ -140,8 +141,8 @@ impl TyNames for Resolutions {
 /// Everything a file or module declares, in declaration order.
 #[derive(Debug, Clone, Default)]
 pub struct ResolvedModule {
-    pub items: IndexMap<String, DecId>,
-    pub modules: IndexMap<String, ResolvedModule>,
+    pub items: FxIndexMap<String, DecId>,
+    pub modules: FxIndexMap<String, ResolvedModule>,
 }
 
 impl ResolvedModule {
@@ -232,7 +233,7 @@ pub struct ResolvedAdt {
     /// parallel to the `args` on a `Ty::Adt`/`Ty::Identity` instantiation.
     pub type_params: Vec<ParamId>,
     pub implements: Vec<PactId>,
-    pub methods: IndexMap<String, DecId>,
+    pub methods: FxIndexMap<String, DecId>,
     pub dispatch_ids: Vec<AdtId>,
 }
 
@@ -329,7 +330,7 @@ impl From<Solver> for Resolutions {
             solver: &Solver,
             adt: AdtId,
             prefix: &[String],
-            out: &mut HashMap<AdtId, Vec<String>>,
+            out: &mut FxHashMap<AdtId, Vec<String>>,
         ) {
             for (name, field) in solver.adts[adt].as_struct().fields.iter() {
                 let Some(child) = field.ty.as_adt().copied() else {
@@ -344,13 +345,13 @@ impl From<Solver> for Resolutions {
                 module_paths(solver, child, &path, out);
             }
         }
-        let mut paths = HashMap::new();
-        for (name, &adt) in &solver.root_modules {
+        let mut paths = FxHashMap::default();
+        for (name, &adt) in solver.root_modules.iter() {
             paths.insert(adt, vec![name.clone()]);
             module_paths(&solver, adt, std::slice::from_ref(name), &mut paths);
         }
 
-        let mut owners: HashMap<DecId, AdtId> = HashMap::new();
+        let mut owners: FxHashMap<DecId, AdtId> = FxHashMap::default();
         for (aid, adt) in solver.adts.iter() {
             for field in adt.impls.values() {
                 owners.insert(field.dec, aid);
@@ -364,8 +365,8 @@ impl From<Solver> for Resolutions {
 
         // a pact impl's methods pair with the pact's members by name (a default the impl left out
         // is already the member's own dec)
-        let mut implements: HashMap<DecId, DecId> = HashMap::new();
-        for &(pid, aid) in &solver.pact_impls {
+        let mut implements: FxHashMap<DecId, DecId> = FxHashMap::default();
+        for &(pid, aid) in solver.pact_impls.iter() {
             for (name, field) in &solver.adts[aid].impls {
                 if let Some(&member) = solver.pact_members.get(&(pid, name.clone()))
                     && member != field.dec
@@ -496,7 +497,7 @@ pub struct GradeAudit {
     /// caller gave `load_files`. `UNAUDITED`-flagged sets contain calls the
     /// inference couldn't grade (unannotated natives, pact dispatch, closure
     /// callees) -- treat them as "could do anything" when gating.
-    pub script_effects: IndexMap<String, shared::Fx>,
+    pub script_effects: FxIndexMap<String, shared::Fx>,
     /// Per top-level statement: `(file name, site, inferred fx)` in source
     /// order -- a spliced `use`-closure attributes each include back to its
     /// byte range, so per-page verdicts exist even though the program is one file.

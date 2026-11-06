@@ -17,10 +17,10 @@
 //!   doesn't track) is *unknown*, and unknown never causes an error. So code that doesn't use
 //!   units is untouched, and units can be adopted one function at a time.
 
-use std::collections::HashMap;
+use crate::FxHashMap;
 
 use crate::components::TyExt;
-use indexmap::IndexMap;
+use crate::FxIndexMap;
 use itertools::Itertools;
 use miette::NamedSource;
 use parse::NodeId;
@@ -70,10 +70,20 @@ fn index_plain(x: Dim, y: Dim) -> bool {
     (x == units::INDEX && y.is_none()) || (y == units::INDEX && x.is_none())
 }
 
+/// A `rad` and a plain number interconvert freely -- radians are
+/// dimensionless and trig has always read a plain number as radians, so
+/// `theta + p.atan2(q)` needs no `.to("rad")` unwrap. What the dimension
+/// keeps out is other quantities: `theta + 3px` still clashes.
+fn angle_plain(x: Dim, y: Dim) -> bool {
+    (x == units::ANGLE && y.is_none()) || (y == units::ANGLE && x.is_none())
+}
+
 /// Two known dimensions that differ; `None` when either is unknown or they agree.
 fn clash(a: &D, b: &D) -> Option<(Dim, Dim)> {
     match (a, b) {
-        (D::Q(x) | D::Iv(x), D::Q(y) | D::Iv(y)) if x != y && !index_plain(*x, *y) => {
+        (D::Q(x) | D::Iv(x), D::Q(y) | D::Iv(y))
+            if x != y && !index_plain(*x, *y) && !angle_plain(*x, *y) =>
+        {
             Some((*x, *y))
         }
         (D::Arr(x), D::Arr(y)) => clash(x, y),
@@ -89,6 +99,10 @@ fn join(a: D, b: &D) -> D {
         (D::Q(x), D::Q(y)) if index_plain(*x, *y) => {
             D::Q(if x.is_none() { *y } else { *x })
         }
+        // `rad` dissolves into a plain operand instead -- a mixed sum is a
+        // plain radian count, so `theta = theta + atan2(..)` doesn't turn a
+        // plain accumulator into a quantity the next `theta * v` rejects.
+        (D::Q(x), D::Q(y)) if angle_plain(*x, *y) => PLAIN,
         (D::Arr(x), D::Arr(y)) => D::Arr(Box::new(join((**x).clone(), y))),
         _ => D::Any,
     }
@@ -98,32 +112,32 @@ struct Pass<'a> {
     solver: &'a Solver,
     ast: &'a Ast,
     /// Struct declarations by name (top level; the first of a name wins).
-    structs: HashMap<String, &'a Struct>,
+    structs: FxHashMap<String, &'a Struct>,
     /// Free functions by name, and methods / associated functions by (type, name).
-    fns: HashMap<String, &'a Function>,
-    methods: HashMap<(String, String), &'a Function>,
+    fns: FxHashMap<String, &'a Function>,
+    methods: FxHashMap<(String, String), &'a Function>,
     /// A function's declaration site, so a call resolved by the solver finds its signature.
-    fns_by_site: HashMap<(usize, usize), &'a Function>,
+    fns_by_site: FxHashMap<(usize, usize), &'a Function>,
     /// Declared enum names -- needed for `unit_of` to tell `enum A` from the ampere.
     enum_names: std::collections::HashSet<String>,
     /// Generic type-param names in scope (`fn f<T>`, `struct P<A, B>` fields read at a literal,
     /// an impl's target params). They name types, not units, so `unit_of` must not see them.
     ty_params: Vec<Vec<String>>,
-    env: HashMap<DecId, D>,
-    consts: HashMap<DecId, D>,
+    env: FxHashMap<DecId, D>,
+    consts: FxHashMap<DecId, D>,
     /// The declared return of each function being walked.
     rets: Vec<D>,
     /// Every expr's computed dimension — surfaces to `Resolutions::node_dims`
     /// so tools can name a node's unit (`b.x + BALL` is `px`).
-    dims: IndexMap<NodeId, Dim>,
+    dims: FxIndexMap<NodeId, Dim>,
     /// The dimension the surrounding context demanded of an expr (a call-arg
     /// slot's declared param dim) — surfaces to `Resolutions::want_dims`. An
     /// expr whose own dim is `Any` (`b.x` on a dimless `Vec2` field) can still
     /// carry the unit its slot required.
-    want_dims: IndexMap<NodeId, Dim>,
+    want_dims: FxIndexMap<NodeId, Dim>,
     /// `print`/`dbg`/`warn` call site → the dim of the reported value — surfaces to
     /// `Resolutions::print_dims` so the program can ship it to the natives.
-    print_dims: IndexMap<Location, Dim>,
+    print_dims: FxIndexMap<Location, Dim>,
     report: bool,
     errors: Vec<miette::Report>,
 }
@@ -133,13 +147,13 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> Result<()> {
         let mut pass = Pass {
             solver: &*solver,
             ast,
-            structs: HashMap::new(),
-            fns: HashMap::new(),
-            methods: HashMap::new(),
-            fns_by_site: HashMap::new(),
+            structs: FxHashMap::default(),
+            fns: FxHashMap::default(),
+            methods: FxHashMap::default(),
+            fns_by_site: FxHashMap::default(),
             enum_names: Default::default(),
             ty_params: Vec::new(),
-            env: HashMap::new(),
+            env: FxHashMap::default(),
             // unit constants (`kWh` reads as `1kWh`) carry their dimension — the
             // solver minted their decs without a `const` statement, so `bind_const`
             // never saw them; seed them here once.
@@ -147,11 +161,17 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> Result<()> {
                 .unit_consts
                 .values()
                 .map(|(dec, dim)| (*dec, D::Q(*dim)))
+                .chain(
+                    solver
+                        .const_dims
+                        .iter()
+                        .map(|(dec, dim)| (*dec, D::Q(*dim))),
+                )
                 .collect(),
             rets: Vec::new(),
-            dims: IndexMap::new(),
-            want_dims: IndexMap::new(),
-            print_dims: IndexMap::new(),
+            dims: FxIndexMap::default(),
+            want_dims: FxIndexMap::default(),
+            print_dims: FxIndexMap::default(),
             report: false,
             errors: Vec::new(),
         };

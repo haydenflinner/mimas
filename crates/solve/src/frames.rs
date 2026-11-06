@@ -11,7 +11,7 @@
 
 use std::rc::Rc;
 
-use indexmap::IndexMap;
+use crate::FxIndexMap;
 use parse::{
     Access, Call, Expr, ExprKind, Literal, NodeId,
     components::{Pat, PatKind},
@@ -57,7 +57,7 @@ impl FrameCol {
 /// A dataframe's columns as the solver sees them.
 #[derive(Debug, Clone)]
 pub(crate) struct FrameSchema {
-    pub cols: IndexMap<String, FrameCol>,
+    pub cols: FxIndexMap<String, FrameCol>,
     /// `false` when unseen columns may also be present (splices, opaque mixed sources).
     /// `pull` on an unlisted name only errors when closed.
     pub closed: bool,
@@ -69,7 +69,7 @@ pub(crate) type GroupInfo = Rc<(Rc<FrameSchema>, Vec<String>)>;
 impl FrameSchema {
     fn empty() -> Self {
         Self {
-            cols: IndexMap::new(),
+            cols: FxIndexMap::default(),
             closed: true,
         }
     }
@@ -382,7 +382,7 @@ impl Solver {
             at: at.location().into(),
             msg,
         })?;
-        let mut cols = IndexMap::new();
+        let mut cols = FxIndexMap::default();
         for (name, ty) in entries {
             let (ty, dim) = match ty {
                 shared::schema::SchemaTy::Int => (Ty::Int, None),
@@ -790,7 +790,7 @@ impl Solver {
         list: Option<&Expr>,
         at: &Expr,
     ) -> Result<FrameSchema> {
-        let mut cols = IndexMap::new();
+        let mut cols = FxIndexMap::default();
         for key in keys {
             cols.insert(key.clone(), input.col(self, at, key)?);
         }
@@ -1154,7 +1154,7 @@ impl Solver {
         else {
             return Ok(ty);
         };
-        let mut cols = IndexMap::new();
+        let mut cols = FxIndexMap::default();
         let mut closed = schema.closed;
         for item in items {
             match self.col_expr_name(item) {
@@ -1181,7 +1181,7 @@ impl Solver {
         let Some(names) = Self::str_list_arg(call, 0) else {
             return Ok(ty);
         };
-        let mut cols = IndexMap::new();
+        let mut cols = FxIndexMap::default();
         for n in names {
             cols.insert(
                 n.to_string(),
@@ -1271,7 +1271,7 @@ impl Solver {
         ) else {
             return Ok(());
         };
-        let mut cols = IndexMap::new();
+        let mut cols = FxIndexMap::default();
         for n in names {
             cols.insert(n.to_string(), schema.col(self, at, n)?);
         }

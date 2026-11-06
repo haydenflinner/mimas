@@ -128,6 +128,16 @@ impl Prepared {
     pub fn solve<'a>(&self, files: impl IntoIterator<Item = (&'a str, &'a str)>) -> Loaded {
         // the program's `unit` declarations build on the shipped table and
         // copy it before writing, so the next program starts clean
+        // `MIMAS_SOLVE_TIMING=1`: the solve's fixed costs, to stderr
+        let timing = std::env::var_os("MIMAS_SOLVE_TIMING").is_some();
+        let mut last = std::time::Instant::now();
+        let mut lap = move |step: &str| {
+            if timing {
+                let now = std::time::Instant::now();
+                eprintln!("PREPARED {step}: {:?}", now - last);
+                last = now;
+            }
+        };
         shared::units::install(&self.units);
         let user: Vec<(&str, &str)> = files.into_iter().collect();
         // shadowed operator words: a kit's `fn not` makes `not` a name in the
@@ -149,16 +159,21 @@ impl Prepared {
             errors.extend(parse_errors);
             asts.push(ast);
         }
+        lap("parse");
         let mut solver = self.solver.clone();
+        lap("clone solver");
         solver.set_sources(sources.clone());
+        lap("set_sources");
         if errors.is_empty() {
             if let Err(error) = solver.solve_all(asts.iter()) {
                 errors.push(error);
             }
         }
+        lap("solve_all");
         let mut warnings = self.shipped_warnings.clone();
         warnings.append(&mut solver.warnings);
         asts.extend(self.shipped_asts.iter().cloned());
+        lap("shipped asts");
         Loaded {
             asts,
             sources,

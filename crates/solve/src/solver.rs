@@ -11,7 +11,7 @@ use crate::{
     traits::*,
 };
 use api::{ApiAdt, ApiAdtKind, ApiEntry, ApiVariantFields, Library, NativeId};
-use indexmap::{IndexMap, IndexSet};
+use crate::{FxIndexMap, FxIndexSet};
 use miette::NamedSource;
 use parse::{
     ExprKind,
@@ -19,27 +19,51 @@ use parse::{
     *,
 };
 use shared::{FileId, IdVec, Literal as RawLiteral, Located, Location, PactId, ParamId};
-use std::{
-    collections::{BTreeSet, HashMap, HashSet},
-    rc::Rc,
-    sync::Arc,
-};
+use crate::{FxHashMap, FxHashSet};
+use std::{collections::BTreeSet, rc::Rc, sync::Arc};
+
+/// A table the prepared state (`load::Prepared`) shares with every solve
+/// cloned from it: reads go straight through, the first write copies
+/// (`Arc::make_mut`). A solve that never writes one pays a pointer copy
+/// for it instead of a deep clone — and since it is an `Arc`, solves on
+/// other threads could share the same table.
+#[derive(Clone, Default)]
+pub(crate) struct Shared<T>(Arc<T>);
+
+impl<T> Shared<T> {
+    pub(crate) fn new(t: T) -> Self {
+        Self(Arc::new(t))
+    }
+}
+
+impl<T> std::ops::Deref for Shared<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
+
+impl<T: Clone> std::ops::DerefMut for Shared<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        Arc::make_mut(&mut self.0)
+    }
+}
 
 #[derive(Clone)]
 pub struct Solver {
     pub(crate) decs: IdVec<DecId, Dec>,
     pub(crate) adts: IdVec<AdtId, Adt>,
-    pub(crate) pacts: IdVec<PactId, shared::Pact>,
-    pub(crate) pact_impls: HashSet<(PactId, AdtId)>,
-    pub(crate) pact_members: HashMap<(PactId, String), DecId>,
+    pub(crate) pacts: Shared<IdVec<PactId, shared::Pact>>,
+    pub(crate) pact_impls: Shared<FxHashSet<(PactId, AdtId)>>,
+    pub(crate) pact_members: Shared<FxHashMap<(PactId, String), DecId>>,
     pub(crate) pact_self: Option<PactId>,
-    pub(crate) node_to_vid: IndexMap<NodeId, Vid>,
-    pub(crate) node_decs: IndexMap<NodeId, DecId>,
-    pub(crate) op_decs: IndexMap<NodeId, crate::OpDispatch>,
-    pub(crate) pact_ops: IndexMap<NodeId, crate::PactOp>,
+    pub(crate) node_to_vid: FxIndexMap<NodeId, Vid>,
+    pub(crate) node_decs: FxIndexMap<NodeId, DecId>,
+    pub(crate) op_decs: FxIndexMap<NodeId, crate::OpDispatch>,
+    pub(crate) pact_ops: FxIndexMap<NodeId, crate::PactOp>,
     /// The pacts each declared type param is bounded by (`T: Draw`), by the param's id.
     /// Absent means unbounded. Fn and adt params share the map -- ids are global.
-    pub(crate) param_bounds: HashMap<ParamId, Vec<PactId>>,
+    pub(crate) param_bounds: FxHashMap<ParamId, Vec<PactId>>,
     /// Bounds named before their pact was hoisted (a struct's `<T: Draw>` is read in
     /// `hoist_types`, ahead of `hoist_pacts`) -- settled by `resolve_pending_bounds`.
     pub(crate) pending_bounds: Vec<(ParamId, Ident)>,
@@ -130,7 +154,7 @@ pub struct Solver {
     /// Modules brought in by a bare `use music;` (which binds the name,
     /// not the members) -- an unbound-name error that names a member of
     /// one of these gets the "you wanted `::*`" hint.
-    pub(crate) bare_module_uses: HashMap<String, AdtId>,
+    pub(crate) bare_module_uses: FxHashMap<String, AdtId>,
     /// Set while the prelude group (the built-in source and the library's
     /// own sources) is being solved -- `load_files` solves that group to
     /// completion before any user file, so a user `enum PosNeg` can't catch
@@ -138,7 +162,7 @@ pub struct Solver {
     /// land in `prelude_types`; a user type of the same name shadows it
     /// for user code, with a `shadowed_builtin` warning.
     pub(crate) in_prelude: bool,
-    pub(crate) prelude_types: HashSet<String>,
+    pub(crate) prelude_types: FxHashSet<String>,
 
     pub(crate) control_flow: ControlFlow,
     pub(crate) ribs: Ribs,
@@ -151,7 +175,7 @@ pub struct Solver {
     /// In-scope declared type params (`fn map<T, U>`, `impl Pair` re-entering `Pair<A, B>`),
     /// innermost last. `Ty::from_annotation` resolves a bare `T` through these before ribs,
     /// units, or builtins. Entries persist only for the duration of one item's solve.
-    pub(crate) type_params: Vec<HashMap<String, ParamId>>,
+    pub(crate) type_params: Vec<FxHashMap<String, ParamId>>,
 }
 
 // Public impls
@@ -226,8 +250,11 @@ impl Solver {
     }
 
     /// Install the per-file source map for diagnostic rendering. Call before `solve_all`.
-    pub fn set_sources(&mut self, sources: HashMap<FileId, NamedSource<Arc<str>>>) {
-        self.sources = sources;
+    pub fn set_sources(
+        &mut self,
+        sources: impl IntoIterator<Item = (FileId, NamedSource<Arc<str>>)>,
+    ) {
+        self.sources = sources.into_iter().collect();
     }
 
     /// Look up the `NamedSource` for a `Location`'s file. Falls back to an empty `<unknown>` source
@@ -377,7 +404,7 @@ impl Solver {
 
         // pre-allocate one Adt per named module so cross-file refs can resolve at hoist time.
         // nested decls (`module a::b;`) build the parent chain; the file's rib binds the leaf
-        let mut module_adts: HashMap<String, AdtId> = HashMap::new();
+        let mut module_adts: FxHashMap<String, AdtId> = FxHashMap::default();
         for name in module_names.iter().flatten() {
             let segments: Vec<String> = name.split("::").map(str::to_string).collect();
             let id = self.ensure_module_path(&segments);
@@ -1084,7 +1111,7 @@ impl Solver {
         sig: &NativeFnSig,
         recv_check: Option<(&Ty, Location)>,
     ) -> Result<Ty> {
-        let mut memo: HashMap<u32, Vid> = HashMap::new();
+        let mut memo: FxHashMap<u32, Vid> = FxHashMap::default();
         let materialized: Vec<Ty> = sig
             .params
             .iter()
@@ -1122,14 +1149,14 @@ impl Solver {
     /// The header's `Self` becomes `self_ty` -- the impl target when checking or grafting an impl,
     /// the bound when calling through one, or `Self` itself inside a default body.
     pub(crate) fn instantiate_pact_fn(&mut self, header: &FnHeader, self_ty: &Ty) -> Ty {
-        let mut memo: HashMap<Vid, Vid> = HashMap::new();
+        let mut memo: FxHashMap<Vid, Vid> = FxHashMap::default();
         self.fresh_vids(&Ty::Fn(header.clone()), self_ty, &mut memo)
     }
 
     /// Normalize `t`, then replace any still-unbound vid with a fresh memoized one and any `Self`
     /// with `self_ty`. Bound vids resolve to their concrete types and stay put; only the open
     /// slots get fresh handles.
-    fn fresh_vids(&mut self, t: &Ty, self_ty: &Ty, memo: &mut HashMap<Vid, Vid>) -> Ty {
+    fn fresh_vids(&mut self, t: &Ty, self_ty: &Ty, memo: &mut FxHashMap<Vid, Vid>) -> Ty {
         match t.clone().normalized(self) {
             Ty::Vid(v) => Ty::Vid(*memo.entry(v).or_insert_with(|| self.vid())),
             Ty::Skolem(_) => self_ty.clone(),
@@ -1172,14 +1199,14 @@ impl Solver {
         }
     }
 
-    fn materialize_slot(&mut self, t: &Option<Ty>, memo: &mut HashMap<u32, Vid>) -> Ty {
+    fn materialize_slot(&mut self, t: &Option<Ty>, memo: &mut FxHashMap<u32, Vid>) -> Ty {
         match t {
             Some(t) => self.substitute_anons(t, memo),
             None => Ty::Vid(self.vid()),
         }
     }
 
-    pub(crate) fn substitute_anons(&mut self, t: &Ty, memo: &mut HashMap<u32, Vid>) -> Ty {
+    pub(crate) fn substitute_anons(&mut self, t: &Ty, memo: &mut FxHashMap<u32, Vid>) -> Ty {
         match t {
             Ty::Anon(n) => Ty::Vid(*memo.entry(*n).or_insert_with(|| self.vid())),
             Ty::Array(v, len) => Ty::Array(Box::new(self.substitute_anons(v, memo)), *len),
@@ -1278,7 +1305,7 @@ impl Solver {
     fn install_user_adt(&mut self, api_adt: &ApiAdt) {
         debug_assert_eq!(self.adts.len(), api_adt.adt_id.index());
 
-        let mut variants = IndexMap::new();
+        let mut variants = FxIndexMap::default();
         for v in &api_adt.variants {
             let variant = self.build_variant(&v.fields);
             if let ApiVariantFields::Named(named) = &v.fields {
@@ -1301,8 +1328,8 @@ impl Solver {
             // host side as `Ty::Anon` slots instead
             type_params: vec![],
             variants,
-            impls: HashMap::new(),
-            native_overloads: HashMap::new(),
+            impls: FxHashMap::default(),
+            native_overloads: FxHashMap::default(),
             flags: match api_adt.kind {
                 ApiAdtKind::Enum => AdtFlags::IS_ENUM,
                 ApiAdtKind::Struct => AdtFlags::empty(),
@@ -1361,7 +1388,7 @@ impl Solver {
                 ..Default::default()
             }),
             ApiVariantFields::Named(named) => {
-                let mut fields_map = IndexMap::new();
+                let mut fields_map = FxIndexMap::default();
                 for (name, ty, _dim) in named {
                     let ident = Ident::synthetic(name.clone());
                     let dec = self.dec_id(&ident, ty.clone(), DecKind::Local, Vis::Public);
@@ -1758,7 +1785,7 @@ impl Solver {
     /// decl resolve `T` to the *same* id -- that's what lets a signature written once carry
     /// rigid params through both phases.
     pub(crate) fn push_type_params(&mut self, params: &[TypeParam]) {
-        let scope: HashMap<String, ParamId> =
+        let scope: FxHashMap<String, ParamId> =
             self.declare_type_params(params).into_iter().collect();
         self.type_params.push(scope);
     }
@@ -1894,7 +1921,7 @@ impl Solver {
     /// Re-enter the parameter scope of an already-declared adt -- `impl List` sees `List<T>`'s
     /// `T` with the same `ParamId` the enum's stored member types use.
     pub(crate) fn push_adt_params(&mut self, adt: AdtId) {
-        let scope: HashMap<String, ParamId> = self.adts[adt].type_params.iter().cloned().collect();
+        let scope: FxHashMap<String, ParamId> = self.adts[adt].type_params.iter().cloned().collect();
         self.type_params.push(scope);
     }
 
@@ -1948,7 +1975,7 @@ impl Solver {
         if !t.contains_params() {
             return t.clone();
         }
-        let mut map = HashMap::new();
+        let mut map = FxHashMap::default();
         self.substitute_params(t, &mut map)
     }
 
@@ -1960,7 +1987,7 @@ impl Solver {
         if !stored.contains_params() {
             return stored.clone();
         }
-        let mut map: HashMap<ParamId, Ty> = self.adts[aid]
+        let mut map: FxHashMap<ParamId, Ty> = self.adts[aid]
             .type_params
             .iter()
             .map(|(_, pid)| *pid)
@@ -1972,7 +1999,7 @@ impl Solver {
     /// Walk `t` swapping each `Ty::Param` for `map[pid]`; missing entries mint a fresh vid
     /// lazily (and memoize, so one param always gets one var per call). Recurses through every
     /// composite, including adt/identity type args.
-    pub(crate) fn substitute_params(&mut self, t: &Ty, map: &mut HashMap<ParamId, Ty>) -> Ty {
+    pub(crate) fn substitute_params(&mut self, t: &Ty, map: &mut FxHashMap<ParamId, Ty>) -> Ty {
         match t {
             Ty::Param(pid) => match map.get(pid) {
                 Some(ty) => ty.clone(),

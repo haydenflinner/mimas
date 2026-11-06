@@ -4,14 +4,12 @@ use crate::{
     components::{DecId, TyExt},
 };
 use bitflags::bitflags;
-use indexmap::IndexMap;
+use crate::FxIndexMap;
 use itertools::Itertools;
 use shared::Location;
 use shared::ParamId;
-use std::{
-    collections::HashMap,
-    ops::{Deref, DerefMut},
-};
+use crate::FxHashMap;
+use std::ops::{Deref, DerefMut};
 
 pub use shared::AdtId;
 
@@ -23,9 +21,9 @@ pub(crate) struct Adt {
     /// reference them as `Ty::Param` -- every *use* of the adt instantiates them (see
     /// `Solver::instantiated_adt`/`specialize`). Empty for non-generic types.
     pub type_params: Vec<(String, ParamId)>,
-    pub variants: IndexMap<String, Variant>,
-    pub impls: HashMap<String, Field>,
-    pub native_overloads: HashMap<String, Vec<Field>>,
+    pub variants: FxIndexMap<String, Variant>,
+    pub impls: FxHashMap<String, Field>,
+    pub native_overloads: FxHashMap<String, Vec<Field>>,
     pub flags: AdtFlags,
 }
 impl Adt {
@@ -41,19 +39,19 @@ impl Adt {
             )]
             .into_iter()
             .collect(),
-            impls: HashMap::new(),
-            native_overloads: HashMap::new(),
+            impls: FxHashMap::default(),
+            native_overloads: FxHashMap::default(),
             flags: AdtFlags::empty(),
         }
     }
 
-    pub fn new_enum(name: String, variants: IndexMap<String, Variant>) -> Self {
+    pub fn new_enum(name: String, variants: FxIndexMap<String, Variant>) -> Self {
         Self {
             name,
             type_params: vec![],
             variants,
-            impls: HashMap::new(),
-            native_overloads: HashMap::new(),
+            impls: FxHashMap::default(),
+            native_overloads: FxHashMap::default(),
             flags: AdtFlags::IS_ENUM,
         }
     }
@@ -72,8 +70,8 @@ impl Adt {
                 }),
             ))
             .collect(),
-            impls: HashMap::new(),
-            native_overloads: HashMap::new(),
+            impls: FxHashMap::default(),
+            native_overloads: FxHashMap::default(),
             flags: AdtFlags::empty(),
         }
     }
@@ -370,7 +368,7 @@ impl StructVariant {
 }
 
 #[derive(Debug, Clone, Default)]
-pub(crate) struct Fields(pub IndexMap<String, Field>);
+pub(crate) struct Fields(pub FxIndexMap<String, Field>);
 
 #[mutants::skip]
 impl std::fmt::Display for Fields {
@@ -389,7 +387,7 @@ impl std::fmt::Display for Fields {
 }
 
 impl Deref for Fields {
-    type Target = IndexMap<String, Field>;
+    type Target = FxIndexMap<String, Field>;
 
     fn deref(&self) -> &Self::Target {
         &self.0
