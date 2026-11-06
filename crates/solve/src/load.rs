@@ -130,12 +130,14 @@ impl Prepared {
         // copy it before writing, so the next program starts clean
         // `MIMAS_SOLVE_TIMING=1`: the solve's fixed costs, to stderr
         let timing = std::env::var_os("MIMAS_SOLVE_TIMING").is_some();
-        let mut last = std::time::Instant::now();
+        // `Instant::now` only when asked: on wasm32 it panics ("time not
+        // implemented"), and the shipped solver runs there
+        let mut last = timing.then(std::time::Instant::now);
         let mut lap = move |step: &str| {
-            if timing {
+            if let Some(prev) = last {
                 let now = std::time::Instant::now();
-                eprintln!("PREPARED {step}: {:?}", now - last);
-                last = now;
+                eprintln!("PREPARED {step}: {:?}", now - prev);
+                last = Some(now);
             }
         };
         shared::units::install(&self.units);

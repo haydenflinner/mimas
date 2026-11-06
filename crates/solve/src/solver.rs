@@ -382,12 +382,14 @@ impl Solver {
         // `MIMAS_SOLVE_TIMING=1` prints each phase's time to stderr — a
         // probe for "where does a solve go", costing nothing when unset.
         let timing = std::env::var_os("MIMAS_SOLVE_TIMING").is_some();
-        let mut last = std::time::Instant::now();
+        // `Instant::now` only when asked: on wasm32 it panics ("time not
+        // implemented"), and the shipped solver runs there
+        let mut last = timing.then(std::time::Instant::now);
         let mut lap = move |phase: &str| {
-            if timing {
+            if let Some(prev) = last {
                 let now = std::time::Instant::now();
-                eprintln!("SOLVE {phase}: {:?}", now - last);
-                last = now;
+                eprintln!("SOLVE {phase}: {:?}", now - prev);
+                last = Some(now);
             }
         };
         for ast in &asts {
