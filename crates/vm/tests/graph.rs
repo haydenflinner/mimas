@@ -30,7 +30,7 @@ let head: index = 0;
         panic!()
     };
     assert_eq!((items.len(), *more, *gap_at), (2, 0, 2));
-    let Obj::Instance { type_name, fields } = &g.objs[obj(&g, &items[0])] else {
+    let Obj::Instance { type_name, fields, .. } = &g.objs[obj(&g, &items[0])] else {
         panic!()
     };
     assert_eq!(type_name, "Node");
@@ -122,4 +122,32 @@ fn a_long_array_keeps_its_head_and_tail() {
     assert_eq!(int(&items[*gap_at - 1]), *gap_at as i64 - 1);
     assert_eq!(int(&items[*gap_at]), (*gap_at + more) as i64);
     assert_eq!(int(items.last().unwrap()), 99);
+}
+
+/// A struct the program never mutates is a value: its instances carry `value: true` so a
+/// host can draw them inline. One with a mutating method, or mutated anywhere, is not.
+#[test]
+fn value_types_are_flagged_on_the_graph() {
+    let mut vm = vm::Vm::compile(
+        "struct V2 { x: float, y: float }
+         struct Acc { total: float }
+         impl Acc { fn add(self, d: float) { self.total = self.total + d; } }
+         struct Seg { a: V2, b: V2, acc: Acc }
+         let s = Seg { a = V2 { x = 1.0, y = 2.0 }, b = V2 { x = 3.0, y = 4.0 }, acc = Acc { total = 0.0 } };",
+        |_| {},
+    )
+    .unwrap();
+    vm.run().unwrap();
+    let g = vm.locals_graph(Some(&["s"]));
+    let flags: Vec<(String, bool)> = g
+        .objs
+        .iter()
+        .filter_map(|o| match o {
+            Obj::Instance { type_name, value, .. } => Some((type_name.clone(), *value)),
+            _ => None,
+        })
+        .collect();
+    assert!(flags.contains(&("V2".into(), true)), "{flags:?}");
+    assert!(flags.contains(&("Acc".into(), false)), "{flags:?}");
+    assert!(flags.contains(&("Seg".into(), true)), "{flags:?}");
 }

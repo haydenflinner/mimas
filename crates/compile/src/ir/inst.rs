@@ -126,6 +126,14 @@ pub enum Inst {
     TraceEdge {
         callee: BodyId,
     },
+    /// The debugger's copy of `value` into `local`, a shadow slot the frame
+    /// view reads to rebuild a struct local the optimizer dissolved (see
+    /// `Body::shadows`). A side effect the interpreter runs as a move and
+    /// the perf lanes skip; the program itself never reads the slot.
+    Shadow {
+        local: Local,
+        value: InstId,
+    },
 }
 
 impl Inst {
@@ -176,7 +184,8 @@ impl Inst {
             | Inst::JumpIfFalse { .. }
             | Inst::ForNext { .. }
             | Inst::Switch { .. }
-            | Inst::TraceEdge { .. } => true,
+            | Inst::TraceEdge { .. }
+            | Inst::Shadow { .. } => true,
             // pure value producers: droppable when their result is unused.
             Inst::Constant(..)
             | Inst::GetLocal(..)
@@ -254,7 +263,8 @@ impl Inst {
             | Inst::JumpIfFalse { .. }
             | Inst::ForNext { .. }
             | Inst::Switch { .. }
-            | Inst::TraceEdge { .. } => false,
+            | Inst::TraceEdge { .. }
+            | Inst::Shadow { .. } => false,
         }
     }
 }
@@ -378,6 +388,7 @@ impl IrDisplay for Inst {
             }
             Inst::IsInstance { src, adt } => format!("is_instance {src} @{}", adt.index()),
             Inst::TraceEdge { callee } => format!("trace_edge @{}", callee.index()),
+            Inst::Shadow { local, value } => format!("shadow {local}: {value}"),
             Inst::Switch {
                 scrut,
                 base,

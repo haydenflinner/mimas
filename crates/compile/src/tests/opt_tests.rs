@@ -154,3 +154,24 @@ fn a_self_tail_call_becomes_a_jump() {
     assert!(!body.contains("call_direct"), "the tail call must be gone:\n{body}");
     assert!(body.contains("trace_edge"), "but its edge stays for the trace:\n{body}");
 }
+
+/// The debugger's shadows: a dissolved struct local's every store also lands in shadow
+/// registers, one per field once the class is split, so the frame view can rebuild it.
+#[test]
+fn a_dissolved_struct_local_keeps_a_shadow_per_field() {
+    let ir = optimized_ir("struct P { x: float, y: float }\nfn f(n: int) -> float { let p = P { x = 1.0, y = 0.0 }; for i in n { p = P { x = p.x * 2.0, y = p.y + 1.0 }; } p.x }");
+    let body = last_body(&ir);
+    // a shadow of each field at both stores, and no shadow of a whole struct
+    // (the structs themselves are dead here; `clean` drops them after this)
+    let made: Vec<String> = body
+        .lines()
+        .filter(|l| l.contains("make_instance"))
+        .filter_map(|l| l.split("[ ").nth(1)?.split(" ]").next().map(str::to_string))
+        .collect();
+    let shadows: Vec<&str> = body.lines().filter(|l| l.contains("shadow ")).collect();
+    assert_eq!(shadows.len(), 4, "{body}");
+    for s in &shadows {
+        let v = s.rsplit(": ").next().unwrap().trim();
+        assert!(!made.contains(&v.to_string()), "a shadow of a whole struct: {s}\n{body}");
+    }
+}

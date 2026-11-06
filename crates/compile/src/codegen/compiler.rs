@@ -4,7 +4,7 @@ use colored::Colorize;
 use shared::{FileId, Location, Ty};
 use solve::{
     ResolvedDeclKind, ResolvedModule,
-    components::{DecId, Vis},
+    components::{AdtId, DecId, Vis},
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -28,6 +28,10 @@ pub struct Compiler {
     pub(crate) ops: Vec<Op>,
     pub(crate) chunks: IdVec<BodyId, Chunk>,
     disasm: bool,
+    /// Keep the debugger's view of dissolved struct locals (`Inst::Shadow`
+    /// copies, see `codegen::opt`): on for a VM a step debugger will read,
+    /// off for a program that only runs -- the copies cost the interpreter.
+    shadows: bool,
     srcs: HashMap<FileId, Arc<str>>,
     /// Natives that read the live call stack: a body calling one is never
     /// inlined, so its frame stays real. See `opt`.
@@ -57,6 +61,7 @@ impl Compiler {
             ops: Vec::new(),
             chunks: IdVec::new(),
             disasm: false,
+            shadows: false,
             srcs: HashMap::new(),
             frame_natives: Default::default(),
             mutating_natives: Default::default(),
@@ -71,6 +76,12 @@ impl Compiler {
     /// call them keep their frames.
     pub fn with_frame_natives(mut self, ids: impl IntoIterator<Item = api::NativeId>) -> Self {
         self.frame_natives = ids.into_iter().collect();
+        self
+    }
+
+    /// Emit the debugger's shadow copies of dissolved struct locals.
+    pub fn with_shadows(mut self, on: bool) -> Self {
+        self.shadows = on;
         self
     }
 
@@ -212,12 +223,22 @@ impl Compiler {
         // need it to turn a global's `Local` into its absolute (base-0) entry-frame register.
         let mut entry_to_reg: IdVec<Local, Reg> = IdVec::new();
 
-        if super::opt::enabled() {
-            super::opt::optimize(ir, &self.frame_natives, &self.mutating_natives);
+        let value_adts = if super::opt::enabled() {
+            let values = super::opt::optimize(ir, &self.frame_natives, &self.mutating_natives, self.shadows);
             if std::env::var("MIMAS_DUMP_OPT").is_ok_and(|v| v == "1") {
                 eprintln!("{ir}");
             }
-        }
+            values
+        } else {
+            super::opt::value_adts(ir, &self.mutating_natives)
+        };
+        let value_adts: IdVec<AdtId, bool> = ir
+            .resolutions
+            .adts
+            .iter()
+            .map(|(id, _)| value_adts.contains(&id))
+            .collect::<Vec<_>>()
+            .into();
         for (body_id, body) in ir.bodies.iter_mut() {
             clean::clean(body);
 
@@ -664,6 +685,14 @@ impl Compiler {
                 .iter()
                 .map(|(local, name)| (name.clone(), local_to_reg[*local]))
                 .collect();
+            let shadows = body
+                .shadows
+                .iter()
+                .filter_map(|(local, sh)| {
+                    let name = body.artifacts.get(local)?;
+                    Some((name.clone(), sh.map(&|l| local_to_reg[*l])))
+                })
+                .collect();
             let args = u16::try_from(body.params.len()).unwrap();
             let reg_kinds: Vec<OperandKind> = regs.values().copied().collect();
             let regs = u16::try_from(regs.len()).unwrap();
@@ -714,6 +743,7 @@ impl Compiler {
                 params,
                 captures,
                 locals,
+                shadows,
                 locs,
                 kinds: reg_kinds,
             });
@@ -807,6 +837,7 @@ impl Compiler {
             field_dims,
             print_dims,
             field_tys,
+            value_adts,
             tests,
             units: shared::units::snapshot(),
         }
@@ -943,7 +974,7 @@ fn local_kinds(body: &Body, res: &solve::Resolutions) -> IdVec<Local, OperandKin
     let mut written: HashMap<Local, Option<OperandKind>> = HashMap::new();
     for (_, block) in body.blocks.iter() {
         for &iid in &block.stream {
-            if let Inst::SetLocal(l, v) = &body.instructions[iid]
+            if let Inst::SetLocal(l, v) | Inst::Shadow { local: l, value: v } = &body.instructions[iid]
                 && body.locals[*l] == DecId::DANGLING
             {
                 let k = fixed_kind(body, *v, &kinds);

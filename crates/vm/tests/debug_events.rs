@@ -148,3 +148,48 @@ fn debug_step_collects_garbage() {
         "arena kept growing while stepping: {mid} -> {end} live GC objects"
     );
 }
+
+/// A struct local the optimizer dissolves into registers (SSA + field phis, or slot SROA)
+/// still shows in the frame view, rebuilt from its shadow registers, and changes as the
+/// program rebinds or mutates it.
+#[test]
+fn a_dissolved_struct_local_still_shows_in_the_frame() {
+    let mut vm = Vm::compile_debug(
+        "struct P { x: float, y: float }
+         fn f(n: int) -> float {
+             let p = P { x = 1.0, y = 0.0 };
+             for i in n { p = P { x = p.x * 2.0, y = p.y + 1.0 }; }
+             p.x
+         }
+         fn g() -> float {
+             let q = P { x = 1.0, y = 1.0 };
+             q.x = 5.0;
+             q.x + q.y
+         }
+         let r = f(3);
+         let s = g();",
+        |_| {},
+    )
+    .expect("source should compile");
+    let mut seen: Vec<(String, Captured)> = Vec::new();
+    loop {
+        let (done, events) = vm.debug_step_events().expect("step should not fault");
+        for e in events {
+            if let DebugEvent::LocalChanged { name, value, .. } = e
+                && (name == "p" || name == "q")
+            {
+                seen.push((name, value));
+            }
+        }
+        if done {
+            break;
+        }
+    }
+    let p: Vec<&Captured> = seen.iter().filter(|(n, _)| n == "p").map(|(_, v)| v).collect();
+    let q: Vec<&Captured> = seen.iter().filter(|(n, _)| n == "q").map(|(_, v)| v).collect();
+    let inst = |x: f64, y: f64| Captured::Instance(vec![Captured::Float(x), Captured::Float(y)]);
+    assert!(p.contains(&&inst(1.0, 0.0)), "p never bound to its first value: {p:?}");
+    assert!(p.contains(&&inst(8.0, 3.0)), "p never reached its last value: {p:?}");
+    assert!(q.contains(&&inst(1.0, 1.0)), "q never bound: {q:?}");
+    assert!(q.contains(&&inst(5.0, 1.0)), "q's mutation not shown: {q:?}");
+}

@@ -3,7 +3,7 @@ use std::{collections::HashMap, rc::Rc, sync::Arc};
 use api::Registry;
 use compile::{
     AccessKind, BinOp, BodyId, Chunk, Constant, Decode, Decoder, Function, Module, OpCode,
-    OpFormatPart, Program, Reg, UnaryOp,
+    OpFormatPart, Program, Reg, Shadow, UnaryOp,
 };
 use gc_arena::{Arena, Gc, Rootable};
 use shared::{Error, FnHeader, IdVec, StrInterner};
@@ -223,6 +223,9 @@ pub struct Vm {
     pub(crate) field_names: Vec<Vec<String>>,
     /// Declared unit per field, parallel to `field_names` -- see [`Vm::graph`].
     pub(crate) field_dims: Vec<Vec<Option<shared::units::Dim>>>,
+    /// Per struct, whether the program never mutates it -- a value, which a host draws
+    /// inline (`Program::value_adts`).
+    pub(crate) value_adts: Vec<bool>,
     pub(crate) root: Rc<Module>,
     pub(crate) registry: Registry,
     /// bcgen-specialized body fns, one slot per `BodyId` (`None` = no generated
@@ -268,6 +271,7 @@ impl Vm {
             methods: Vec::new(),
             field_names: Vec::new(),
             field_dims: Vec::new(),
+            value_adts: Vec::new(),
             root: Rc::default(),
             registry: Registry::new(),
             bc: None,
@@ -301,9 +305,11 @@ impl Vm {
             field_dims,
             print_dims,
             field_tys: _,
+            value_adts,
             tests,
             units,
         } = program;
+        self.value_adts = value_adts.into_values().collect();
         self.units = units;
         self.entry = entry;
         self.code = Decoder { bytes, ip: 0 };
@@ -1210,6 +1216,12 @@ pub(crate) fn step_one<'gc>(
         OpCode::Jump => {
             code.ip = code.u32() as usize;
         }
+        OpCode::Shadow => {
+            // the debugger's copy of a dissolved struct local's part
+            let slot = Reg::decode(code);
+            let src = Reg::decode(code);
+            wr!(regs, slot, rd!(regs, src));
+        }
         OpCode::TraceEdge => {
             // an inlined call: count the edge the frame no longer takes
             let callee = code.u32();
@@ -1554,6 +1566,48 @@ pub(crate) fn step_one<'gc>(
         op => return cold_dispatch(code, regs, ctx, op, strs),
     }
     Ok(Flow::Next)
+}
+
+/// A frame's named locals in register order (which reads as declaration order), each as
+/// its live value: a slot's register, or a struct local the optimizer dissolved, rebuilt
+/// from its shadow registers (see [`compile::Shadow`]) -- a fresh instance per call, since
+/// the registers hold its parts and no object.
+pub(crate) fn frame_locals<'gc>(ctx: Ctx<'gc>, chunk: &Chunk, window: &[Val<'gc>]) -> Vec<(String, Val<'gc>)> {
+    let mut out: Vec<(usize, String, Val<'gc>)> = chunk
+        .locals
+        .iter()
+        .filter(|(name, _)| !chunk.shadows.contains_key(*name))
+        .map(|(name, reg)| (reg.index(), name.clone(), window[reg.index()]))
+        .collect();
+    for (name, sh) in &chunk.shadows {
+        let first = sh.leaves().iter().map(|r| r.index()).min().unwrap_or(usize::MAX);
+        out.push((first, name.clone(), shadow_val(ctx, sh, window)));
+    }
+    out.sort_by_key(|(i, _, _)| *i);
+    out.into_iter().map(|(_, n, v)| (n, v)).collect()
+}
+
+/// One named local of a frame -- see [`frame_locals`].
+pub(crate) fn frame_local<'gc>(ctx: Ctx<'gc>, chunk: &Chunk, window: &[Val<'gc>], name: &str) -> Option<Val<'gc>> {
+    if let Some(sh) = chunk.shadows.get(name) {
+        return Some(shadow_val(ctx, sh, window));
+    }
+    chunk.locals.get(name).map(|reg| window[reg.index()])
+}
+
+/// A shadow tree's value: a leaf's register, or a struct rebuilt from its parts. A
+/// struct whose every leaf is still `Null` reads as `Null` -- the local is not live yet.
+fn shadow_val<'gc>(ctx: Ctx<'gc>, sh: &Shadow<Reg>, window: &[Val<'gc>]) -> Val<'gc> {
+    match sh {
+        Shadow::Slot(r) => window[r.index()],
+        Shadow::Struct { adt, fields } => {
+            if sh.leaves().iter().all(|r| matches!(window[r.index()], Val::Null)) {
+                return Val::Null;
+            }
+            let vals: Vec<Val<'gc>> = fields.iter().map(|f| shadow_val(ctx, f, window)).collect();
+            Val::Instance(ctx.new_instance(adt.index() as u32, Fields::new(vals)))
+        }
+    }
 }
 
 /// Top-level binding `name`'s value — the receiver both
@@ -3237,24 +3291,20 @@ impl Vm {
         let chunks = &self.chunks;
         let chunk_names = &self.chunk_names;
         let field_names = &self.field_names;
-        self.arena.mutate(|_mc, state| {
+        self.arena.mutate(|mc, state| {
+            let ctx = state.ctx(mc);
             let struct_names = state.struct_names.borrow();
             let t = state.thread.borrow();
 
             // the entry frame's named locals = the program's globals (top-level `let`s) --
             // visible from every body, so deeper frames surface them too, sourced from
             // `t.regs[0..]` rather than the frame's own window.
-            let (entry_base, entry_locals): (usize, Vec<(String, Reg)>) = t
+            let entry_locals: Vec<(String, Val<'_>)> = t
                 .frames
                 .first()
                 .map(|f| {
-                    let mut locals: Vec<_> = chunks[f.chunk]
-                        .locals
-                        .iter()
-                        .map(|(name, &reg)| (name.clone(), reg))
-                        .collect();
-                    locals.sort_by_key(|(_, reg)| reg.index());
-                    (f.base, locals)
+                    let chunk = &chunks[f.chunk];
+                    frame_locals(ctx, chunk, &t.regs[f.base..f.base + chunk.regs as usize])
                 })
                 .unwrap_or_default();
 
@@ -3267,15 +3317,11 @@ impl Vm {
                     let registers: Vec<Captured> =
                         window.iter().copied().map(Val::capture).collect();
 
-                    // `chunk.locals` has no declared order (it's a name -> Reg map); sorting by
-                    // register index reads as "declaration order" for the common case, since
-                    // the compiler allocates locals' registers as it walks the source.
-                    let mut locals: Vec<(&String, Reg)> = chunk
-                        .locals
-                        .iter()
-                        .map(|(name, &reg)| (name, reg))
-                        .collect();
-                    locals.sort_by_key(|&(_, reg)| reg.index());
+                    // named locals in register order, which reads as "declaration order"
+                    // for the common case, since the compiler allocates locals' registers
+                    // as it walks the source; a dissolved struct local comes back rebuilt
+                    // from its shadow registers
+                    let locals: Vec<(String, Val<'_>)> = frame_locals(ctx, chunk, window);
                     // one `seen` set shared across every local in this frame (not reset between
                     // them) -- so two locals that alias into the same structure (a doubly-linked
                     // list's `a`/`b`/`c`, say) only get it expanded once between them, not once
@@ -3283,8 +3329,8 @@ impl Vm {
                     let mut seen = std::collections::HashSet::new();
                     let mut locals_inspect: Vec<(String, Inspect)> = locals
                         .iter()
-                        .map(|&(name, reg)| {
-                            let v = window[reg.index()];
+                        .map(|(name, v)| {
+                            let v = *v;
                             let mut i = v.inspect(&struct_names, field_names, &mut seen);
                             if matches!(i, Inspect::Cycle) {
                                 // `v` only reads as a cycle because another
@@ -3301,17 +3347,17 @@ impl Vm {
                         .collect();
                     let mut locals: Vec<(String, Captured)> = locals
                         .into_iter()
-                        .map(|(name, reg)| (name.clone(), registers[reg.index()].clone()))
+                        .map(|(name, v)| (name, v.capture()))
                         .collect();
 
                     // a deeper frame's globals: entry-frame locals it doesn't shadow itself,
                     // read out of `t.regs[0..]` where the entry frame lives.
                     if f.base != 0 {
-                        for (name, reg) in &entry_locals {
+                        for (name, val) in &entry_locals {
                             if locals.iter().any(|(n, _)| n == name) {
                                 continue;
                             }
-                            let val = t.regs[entry_base + reg.index()];
+                            let val = *val;
                             locals.push((name.clone(), val.capture()));
                             locals_inspect.push((
                                 name.clone(),
@@ -3344,12 +3390,13 @@ impl Vm {
     pub fn local_inspect(&mut self, name: &str) -> Option<Inspect> {
         let chunks = &self.chunks;
         let field_names = &self.field_names;
-        self.arena.mutate(|_mc, state| {
+        self.arena.mutate(|mc, state| {
+            let ctx = state.ctx(mc);
             let struct_names = state.struct_names.borrow();
             let t = state.thread.borrow();
             for f in t.frames.iter().rev() {
-                if let Some(&reg) = chunks[f.chunk].locals.get(name) {
-                    let v = t.regs[f.base + reg.index()];
+                let chunk = &chunks[f.chunk];
+                if let Some(v) = frame_local(ctx, chunk, &t.regs[f.base..f.base + chunk.regs as usize], name) {
                     let mut seen = std::collections::HashSet::new();
                     return Some(v.inspect(&struct_names, field_names, &mut seen));
                 }
@@ -3365,12 +3412,13 @@ impl Vm {
     pub fn local_inspect_literal(&mut self, name: &str, budget: usize) -> Option<Inspect> {
         let chunks = &self.chunks;
         let field_names = &self.field_names;
-        self.arena.mutate(|_mc, state| {
+        self.arena.mutate(|mc, state| {
+            let ctx = state.ctx(mc);
             let struct_names = state.struct_names.borrow();
             let t = state.thread.borrow();
             for f in t.frames.iter().rev() {
-                if let Some(&reg) = chunks[f.chunk].locals.get(name) {
-                    let v = t.regs[f.base + reg.index()];
+                let chunk = &chunks[f.chunk];
+                if let Some(v) = frame_local(ctx, chunk, &t.regs[f.base..f.base + chunk.regs as usize], name) {
                     return Some(v.inspect_literal(&struct_names, field_names, budget));
                 }
             }
@@ -3459,9 +3507,35 @@ impl Vm {
     where
         F: for<'gc> FnOnce(&mut crate::api::Api<'_, 'gc>),
     {
+        Self::compile_files_opts(files, install_lib, allowed, false)
+    }
+
+    /// [`Self::compile`] for a VM a step debugger will read: the optimizer
+    /// keeps shadow copies of every struct local it dissolves, so
+    /// [`Vm::frames`] and kin still show them (`compile::Shadow`). The
+    /// copies cost the interpreter, so a program that only runs is
+    /// compiled without.
+    pub fn compile_debug<F>(source: &str, install_lib: F) -> std::result::Result<Self, ExecuteError>
+    where
+        F: for<'gc> FnOnce(&mut crate::api::Api<'_, 'gc>),
+    {
+        Self::compile_files_opts(&[("<compile>", source)], install_lib, None, true)
+    }
+
+    /// [`Self::compile_files_gated`] plus the debugger's shadows (`debug`,
+    /// see [`Self::compile_debug`]).
+    pub fn compile_files_opts<F>(
+        files: &[(&str, &str)],
+        install_lib: F,
+        allowed: Option<shared::Fx>,
+        debug: bool,
+    ) -> std::result::Result<Self, ExecuteError>
+    where
+        F: for<'gc> FnOnce(&mut crate::api::Api<'_, 'gc>),
+    {
         let mut vm = Self::new();
         let library = vm.install_library(install_lib);
-        let built = Self::build_program(files, &library, allowed)?;
+        let built = Self::build_program(files, &library, allowed, debug)?;
 
         vm.warnings = built.warnings;
         vm.script_fx = built.script_fx;
@@ -3530,7 +3604,7 @@ impl Vm {
     {
         let mut probe = Self::new();
         let library = probe.install_library(install_lib);
-        let built = Self::build_program(files, &library, None)?;
+        let built = Self::build_program(files, &library, None, false)?;
         Ok((built.program, built.sources))
     }
 
@@ -3546,7 +3620,7 @@ impl Vm {
     {
         let mut probe = Self::new();
         let library = probe.install_library(install_lib);
-        let built = Self::build_program(files, &library, None)?;
+        let built = Self::build_program(files, &library, None, false)?;
         Ok((built.program, built.ir, built.sources))
     }
 
@@ -3569,6 +3643,7 @@ impl Vm {
         files: &[(&str, &str)],
         library: &::api::Library<()>,
         allowed: Option<shared::Fx>,
+        debug: bool,
     ) -> std::result::Result<BuiltProgram, ExecuteError> {
         use solve::Resolutions;
 
@@ -3624,6 +3699,7 @@ impl Vm {
         let program = compile::Compiler::new()
             .with_frame_natives(frame_natives)
             .with_mutating_natives(mutating_natives)
+            .with_shadows(debug)
             .compile(&mut ir);
         Ok(BuiltProgram {
             program,

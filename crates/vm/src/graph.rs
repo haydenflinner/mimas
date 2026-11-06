@@ -56,6 +56,10 @@ pub enum Obj {
     Instance {
         type_name: String,
         fields: Vec<GField>,
+        /// The program never mutates this struct, so the instance has no identity anyone
+        /// can observe: a host may draw it inline in its holder, like a scalar, rather
+        /// than as a box an arrow points at (`Program::value_adts`).
+        value: bool,
     },
 }
 
@@ -74,6 +78,8 @@ pub struct GraphNames {
     pub struct_names: Vec<String>,
     pub field_names: Vec<Vec<String>>,
     pub field_dims: Vec<Vec<Option<Dim>>>,
+    /// Per struct id, whether it is a value type -- see [`Obj::Instance::value`].
+    pub value_adts: Vec<bool>,
 }
 
 impl GraphNames {
@@ -204,7 +210,11 @@ impl Builder<'_> {
                         slot: b.slot(v),
                     })
                     .collect();
-                Obj::Instance { type_name, fields }
+                Obj::Instance {
+                    type_name,
+                    fields,
+                    value: names.value_adts.get(sid).copied().unwrap_or(false),
+                }
             }),
             leaf => {
                 let mut seen = std::collections::HashSet::new();
@@ -226,6 +236,7 @@ impl Vm {
             struct_names: self.struct_names(),
             field_names: self.field_names.clone(),
             field_dims: self.field_dims.clone(),
+            value_adts: self.value_adts.clone(),
         }
     }
 
@@ -235,7 +246,8 @@ impl Vm {
     pub fn locals_graph(&mut self, names: Option<&[&str]>) -> HeapGraph {
         let gn = self.graph_names();
         let chunks = &self.chunks;
-        self.arena.mutate(|_mc, state| {
+        self.arena.mutate(|mc, state| {
+            let ctx = state.ctx(mc);
             let t = state.thread.borrow();
             let mut roots: Vec<(String, Val<'_>)> = Vec::new();
             let want = |n: &str| names.is_none_or(|ns| ns.contains(&n));
@@ -245,13 +257,13 @@ impl Vm {
                 _ => Vec::new(),
             };
             for f in frames {
-                let mut locals: Vec<_> = chunks[f.chunk].locals.iter().collect();
-                locals.sort_by_key(|(_, reg)| reg.index());
-                for (name, reg) in locals {
-                    if !want(name) || roots.iter().any(|(n, _)| n == name) {
+                let chunk = &chunks[f.chunk];
+                let window = &t.regs[f.base..f.base + chunk.regs as usize];
+                for (name, v) in crate::vm::frame_locals(ctx, chunk, window) {
+                    if !want(&name) || roots.iter().any(|(n, _)| *n == name) {
                         continue;
                     }
-                    roots.push((name.clone(), t.regs[f.base + reg.index()]));
+                    roots.push((name, v));
                 }
             }
             gn.graph(roots)

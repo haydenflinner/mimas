@@ -165,13 +165,42 @@ leaves such a field read alone, `split_struct_phis` leaves such a
 class alone (`volatile_reads`). `vm/tests/opt_semantics.rs` pins it
 (`a_read_of_a_slot_written_later_is_a_snapshot`).
 
-Still open: the debugger. A dissolved struct local has no slot, so the
-step debugger's frame view no longer shows it; recording which
-registers hold its fields would let the view rebuild it. And a value
-escaping twice now draws as two boxes in a heap picture where it drew
-one shared node -- neither picture is "true" for a value, the honest
-rendering is inline in its holder like a scalar, which the host can do
-now that the compiler knows which adts are values.
+**The debugger's shadows.** A struct local the optimizer dissolves
+keeps its name for the frame view through `Body::shadows`, a tree per
+named local over the registers that now hold it (`compile::Shadow`:
+`Slot` a register, `Struct` a struct rebuilt from its parts).
+`scalar_replace` points the tree at the field slots it made, which are
+live under every later store, mutation included. `promote_locals`
+gives a promoted local (named, or a leaf of a tree) a shadow local and
+an `Inst::Shadow` copy right after each store -- the debugger's move,
+`Op::Shadow`, which the interpreter runs and bcgen, the JIT and wasm
+drop. The copies cost the interpreter (the solver 0.095 -> 0.109 s,
+the V2 loop 0.56 -> 0.60 s), so they are emitted only for a VM a
+debugger will read: `Compiler::with_shadows`, `Vm::compile_debug` /
+`compile_files_opts(.., debug)`; a program that only runs is compiled
+without, and a slot-SROA tree whose leaf then leaves its slot is
+dropped so the view shows null rather than a stale part. `split_struct_phis` treats a shadow of a class member as no
+escape and splits it with the class: the leaf becomes a struct of
+fresh leaves, every shadow into that leaf -- of a member, into the
+field values; of anything else, into reads of its fields -- so the
+tree is the same at every store, and a nested value splits again in
+its own turn. The chunk carries the tree by name (`Chunk::shadows`),
+and `Vm::frames`, `local_inspect` and `locals_graph` rebuild the
+struct from the registers (`frame_locals`), a fresh instance per
+read; a struct whose every leaf is still null is the local before its
+first store. The program never reads a shadow slot, so the
+optimizer's results are unchanged. Pinned by
+`a_dissolved_struct_local_still_shows_in_the_frame`
+(`vm/tests/debug_events.rs`) and
+`a_dissolved_struct_local_keeps_a_shadow_per_field`.
+
+**Value types for hosts.** `Program::value_adts` is the inferred set,
+one flag per adt, and `HeapGraph` carries it per instance
+(`Obj::Instance::value`, from `GraphNames::value_adts`) so a host can
+draw a value inline in its holder like a scalar instead of as a box
+an arrow points at -- a value has no identity to point at, and one
+held twice honestly reads twice. The host's `autodiagram` does that
+now.
 
 ## Tagged literals, spanned literal faults, prelude-first solving, `SeqSide`/`SortOrder`
 

@@ -21,7 +21,7 @@ pub(crate) fn optimized_ir(src: &str) -> String {
     let resolutions = solver.into();
     let mut ir = crate::Ir::new(resolutions, Default::default());
     ir.lower(&ast.unpack());
-    crate::codegen::opt::optimize(&mut ir, &Default::default(), &Default::default());
+    crate::codegen::opt::optimize(&mut ir, &Default::default(), &Default::default(), true);
     ir.to_string()
 }
 

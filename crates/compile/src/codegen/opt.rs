@@ -17,7 +17,7 @@ use solve::Resolutions;
 use solve::components::{AdtId, DecId, Ty};
 
 use crate::{
-    BlockId, Inst, InstId, Ir, Local,
+    BlockId, Inst, InstId, Ir, Local, Shadow,
     ir::{Block, Body, BodyId, FormatPart},
 };
 
@@ -37,7 +37,9 @@ pub(crate) fn enabled() -> bool {
 /// frame, so what they report stays true.
 /// `mutating_natives` are natives that mutate their receiver
 /// (`mutates_recv`): an adt that reaches one is not a value type.
-pub(crate) fn optimize(ir: &mut Ir, frame_natives: &HashSet<NativeId>, mutating_natives: &HashSet<NativeId>) {
+/// `shadows` keeps the debugger's copies of dissolved struct locals (see
+/// the shadows section below) -- a cost only a VM a debugger reads pays.
+pub(crate) fn optimize(ir: &mut Ir, frame_natives: &HashSet<NativeId>, mutating_natives: &HashSet<NativeId>, shadows: bool) -> HashSet<AdtId> {
     self_tail_calls(ir);
     inline_small_calls(ir, frame_natives);
     let values = value_adts(ir, mutating_natives);
@@ -62,7 +64,7 @@ pub(crate) fn optimize(ir: &mut Ir, frame_natives: &HashSet<NativeId>, mutating_
             continue;
         }
         for _ in 0..3 {
-            let a = promote_locals(body, res, &entry_locals);
+            let a = promote_locals(body, res, &entry_locals, shadows);
             let b = split_struct_phis(body, &values, res, &entry_locals);
             let c = forward_value_fields(body, &values);
             if !a && !b && !c {
@@ -70,7 +72,49 @@ pub(crate) fn optimize(ir: &mut Ir, frame_natives: &HashSet<NativeId>, mutating_
             }
         }
     }
+    values
 }
+
+// ------------------------------------------------------------ debugger shadows
+
+/// A struct local the optimizer dissolves still has a name the debugger
+/// shows, so the passes keep a `Body::shadows` tree per such local:
+/// `scalar_replace` points it at the field slots it made (always live, even
+/// under mutation), `promote_locals` gives a promoted leaf a shadow local
+/// that `Inst::Shadow` copies every store into, and `split_struct_phis`
+/// splits a shadow of a dissolved struct into one per field.
+///
+/// `l` is leaving the slot form: a named local, or a leaf of a tree. Returns
+/// the shadow local its stores copy into, if the debugger can see it.
+fn shadow_leaf_for(body: &mut Body, l: Local) -> Option<Local> {
+    if body.artifacts.contains_key(&l) {
+        let s = body.locals.push(DecId::DANGLING);
+        body.shadows.insert(l, Shadow::Slot(s));
+        return Some(s);
+    }
+    let root = body.shadow_leaf_root(l)?;
+    let s = body.locals.push(DecId::DANGLING);
+    let tree = body.shadows.get_mut(&root).unwrap();
+    tree.replace_leaf(&l, Shadow::Slot(s));
+    Some(s)
+}
+
+/// Leaf `s` of some tree becomes a struct of `adt` with fresh leaves, which
+/// are returned (`None` when `s` is in no tree).
+fn shadow_split_leaf(body: &mut Body, s: Local, adt: AdtId, n: usize) -> Option<Vec<Local>> {
+    let root = body.shadow_leaf_root(s)?;
+    let leaves: Vec<Local> = (0..n).map(|_| body.locals.push(DecId::DANGLING)).collect();
+    let tree = body.shadows.get_mut(&root).unwrap();
+    tree.replace_leaf(
+        &s,
+        Shadow::Struct {
+            adt,
+            fields: leaves.iter().map(|&l| Shadow::Slot(l)).collect(),
+        },
+    );
+    Some(leaves)
+}
+
 
 // ------------------------------------------------------------ inlining
 
@@ -321,6 +365,7 @@ fn remap(inst: &Inst, im: &[InstId], lm: &[Local], bm: &[BlockId]) -> Inst {
     match inst {
         Inst::Constant(c) => Inst::Constant(c.clone()),
         Inst::SetLocal(x, v) => Inst::SetLocal(l(x), i(v)),
+        Inst::Shadow { local, value } => Inst::Shadow { local: l(local), value: i(value) },
         Inst::GetLocal(x) => Inst::GetLocal(l(x)),
         Inst::SetEntry(x, v) => Inst::SetEntry(*x, i(v)),
         Inst::GetEntry(x) => Inst::GetEntry(*x),
@@ -593,7 +638,20 @@ fn scalar_replace(body: &mut Body) -> bool {
         let (nfields, ni) = root_adt[&r];
         let ms = &members[&r];
         let fields: Vec<Local> = (0..nfields).map(|_| body.locals.push(DecId::DANGLING)).collect();
-        let Inst::NewInstance { fields: vals, .. } = body.instructions[ni].clone() else { unreachable!() };
+        let Inst::NewInstance { fields: vals, adt } = body.instructions[ni].clone() else { unreachable!() };
+        // the debugger keeps seeing each named member: as the struct of the
+        // field slots themselves, live under every later store
+        for &m in ms {
+            let tree = Shadow::Struct {
+                adt,
+                fields: fields.iter().map(|&f| Shadow::Slot(f)).collect(),
+            };
+            if body.artifacts.contains_key(&m) {
+                body.shadows.insert(m, tree);
+            } else if let Some(root) = body.shadow_leaf_root(m) {
+                body.shadows.get_mut(&root).unwrap().replace_leaf(&m, tree);
+            }
+        }
         let root_write = single[&r];
         let copy_writes: HashSet<InstId> = ms.iter().filter(|&&m| m != r).map(|m| single[m]).collect();
         for bi in 0..body.blocks.len() {
@@ -784,7 +842,7 @@ fn cfg_of(body: &Body) -> Cfg {
 /// local that only ever holds a struct drops them, because the struct is
 /// about to stop existing (see `split_struct_phis`). Returns whether
 /// anything changed.
-fn promote_locals(body: &mut Body, res: &Resolutions, entry_locals: &[DecId]) -> bool {
+fn promote_locals(body: &mut Body, res: &Resolutions, entry_locals: &[DecId], shadows: bool) -> bool {
     split_critical_edges(body);
     let cfg = cfg_of(body);
     let pos = positions(body);
@@ -886,6 +944,28 @@ fn promote_locals(body: &mut Body, res: &Resolutions, entry_locals: &[DecId]) ->
     }
     promote.sort_by_key(|l| l.index());
     let promote_set: HashSet<Local> = promote.iter().copied().collect();
+    // the debugger's copy: every store to a local it can see also lands in a
+    // shadow slot, as an `Inst::Shadow` right after the store (the value
+    // operand follows the renaming below like any other). Without shadows a
+    // tree whose leaf is leaving its slot is dropped: the view shows the
+    // local's own unwritten slot, null, rather than a stale part
+    for &l in &promote {
+        if !shadows {
+            if let Some(root) = body.shadow_leaf_root(l) {
+                body.shadows.remove(&root);
+            }
+            continue;
+        }
+        let Some(s) = shadow_leaf_for(body, l) else { continue };
+        for &w in &writes[&l] {
+            let Inst::SetLocal(_, v) = body.instructions[w] else { continue };
+            let (blk, _) = pos[&w];
+            let sh = push_inst(body, Inst::Shadow { local: s, value: v }, body.locs[w]);
+            let st = &mut body.blocks[blk].stream;
+            let at = st.iter().position(|&x| x == w).map_or(st.len(), |i| i + 1);
+            st.insert(at, sh);
+        }
+    }
     // phis at the iterated dominance frontier of each local's definition blocks
     let mut phi_of: HashMap<(BlockId, Local), InstId> = HashMap::new();
     for &l in &promote {
@@ -994,7 +1074,7 @@ fn map_operands(inst: &mut Inst, f: &dyn Fn(InstId) -> InstId) {
     match inst {
         Inst::Constant(_) | Inst::GetLocal(_) | Inst::GetEntry(_) | Inst::Jump { .. } | Inst::NewArray | Inst::NewDict
         | Inst::RefBody(_) | Inst::Panic | Inst::TraceEdge { .. } => {}
-        Inst::SetLocal(_, v) | Inst::SetEntry(_, v) => *v = f(*v),
+        Inst::SetLocal(_, v) | Inst::SetEntry(_, v) | Inst::Shadow { value: v, .. } => *v = f(*v),
         Inst::BinOp { left, right, .. } => {
             *left = f(*left);
             *right = f(*right);
@@ -1173,11 +1253,14 @@ fn split_struct_phis(body: &mut Body, values: &HashSet<AdtId>, res: &Resolutions
         // compared, join a phi outside the class -- and gets a fresh struct
         // built from the field values there: no one can tell the copy apart.
         let mut escapes: Vec<(InstId, InstId)> = Vec::new(); // (member, use)
+        // the debugger's copies of members: split into one per field below
+        let mut shadow_users: Vec<(InstId, InstId, Local)> = Vec::new(); // (member, shadow inst, its leaf)
         for &m in &class {
             for &u in users.get(&m).map(|v| v.as_slice()).unwrap_or(&[]) {
                 match &body.instructions[u] {
                     Inst::GetField { src, slot, .. } if *src == m && (*slot as usize) < nf => {}
                     Inst::Phi(_) if class.contains(&u) => {}
+                    Inst::Shadow { local, value } if *value == m => shadow_users.push((m, u, *local)),
                     _ if is_value => escapes.push((m, u)),
                     _ => continue 'phi,
                 }
@@ -1236,8 +1319,51 @@ fn split_struct_phis(body: &mut Body, values: &HashSet<AdtId>, res: &Resolutions
                 }
             }
         }
-        if rewrites.is_empty() && escapes.is_empty() {
+        if rewrites.is_empty() && escapes.is_empty() && shadow_users.is_empty() {
             continue;
+        }
+        // shadows: the leaf becomes a struct of fresh leaves, and *every*
+        // shadow into that leaf -- of a member, split into the field values;
+        // of anything else (a leaf of the class, a struct from elsewhere),
+        // into reads of its fields -- so the tree is the same at each store
+        let mut split_leaves: HashMap<Local, Vec<Local>> = HashMap::new();
+        for &(_, _, s) in &shadow_users {
+            if split_leaves.contains_key(&s) {
+                continue;
+            }
+            if let Some(leaves) = shadow_split_leaf(body, s, adt.unwrap(), nf) {
+                split_leaves.insert(s, leaves);
+            }
+        }
+        if !split_leaves.is_empty() {
+            let all_shadows: Vec<(InstId, Local, InstId)> = body
+                .blocks
+                .values()
+                .flat_map(|b| b.stream.iter().copied())
+                .filter_map(|i| match body.instructions[i] {
+                    Inst::Shadow { local, value } if split_leaves.contains_key(&local) => Some((i, local, value)),
+                    _ => None,
+                })
+                .collect();
+            for (u, s, v) in all_shadows {
+                let leaves = split_leaves[&s].clone();
+                let (ublk, _) = pos[&u];
+                let loc = body.locs[u];
+                let mut insts: Vec<InstId> = Vec::new();
+                for (k, &leaf) in leaves.iter().enumerate() {
+                    let fv = if class.contains(&v) {
+                        field_of(body, v, k as u32, &mut field_phi, &pos)
+                    } else {
+                        let g = push_inst(body, Inst::GetField { src: v, slot: k as u32, kind: AccessKind::Direct }, loc);
+                        insts.push(g);
+                        g
+                    };
+                    insts.push(push_inst(body, Inst::Shadow { local: leaf, value: fv }, loc));
+                }
+                let st = &mut body.blocks[ublk].stream;
+                let at = st.iter().position(|&x| x == u).unwrap();
+                st.splice(at..at + 1, insts);
+            }
         }
         // escapes: a fresh struct from the field values, right before the use
         // (for a phi outside the class: at the end of the edge's block)
@@ -1396,7 +1522,7 @@ fn may_be_instance(t: &Ty) -> bool {
 /// is always sound: that is what makes it a *value type*. Fails closed: a
 /// receiver whose type the IR cannot recover disables value types for the
 /// whole program (`MIMAS_DUMP_OPT=1` says where).
-fn value_adts(ir: &Ir, mutating: &HashSet<NativeId>) -> HashSet<AdtId> {
+pub(crate) fn value_adts(ir: &Ir, mutating: &HashSet<NativeId>) -> HashSet<AdtId> {
     let entry_locals: Vec<DecId> = ir.bodies[BodyId::ZERO].locals.values().copied().collect();
     let mut mutable: HashSet<AdtId> = HashSet::new();
     let mut unknown: Option<String> = None;

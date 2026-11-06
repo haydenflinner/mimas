@@ -271,6 +271,7 @@ impl std::fmt::Display for Op {
 
             Op::Panic {} => write!(f, "panic"),
             Op::TraceEdge { callee } => write!(f, "trace_edge @{}", callee.index()),
+            Op::Shadow { slot, src } => write!(f, "{}{}{}", OpName("shadow"), slot, src),
             Op::IsInstance { dst, src, adt } => {
                 write!(f, "is_instance {dst} = {src} @{}", adt.index())
             }

@@ -54,6 +54,11 @@ pub struct Program {
     /// as Int everywhere may still declare `float`) and lets snapshot
     /// marking follow exactly the fields that can hold heap pointers.
     pub field_tys: IdVec<AdtId, Vec<Ty>>,
+    /// Per adt, whether the program never mutates it (no `set_field`, no
+    /// `set_index` into a tuple struct, no receiver-mutating native): such an
+    /// instance has no identity anyone can observe, so a host may draw it
+    /// inline in its holder like a scalar. Inferred by `codegen::opt`.
+    pub value_adts: IdVec<AdtId, bool>,
     /// Functions marked `#[test]`, in source order. Each name is a fn path in `root`.
     pub tests: Vec<String>,
     /// The program's `unit` declarations, snapshotted when it finished
@@ -198,6 +203,9 @@ pub struct Chunk {
     pub params: Vec<Reg>,
     pub captures: Vec<Reg>,
     pub locals: HashMap<String, Reg>,
+    /// Named struct locals the optimizer dissolved, by name: the registers to
+    /// rebuild each from (`locals` still maps the name to its unwritten slot).
+    pub shadows: HashMap<String, crate::Shadow<Reg>>,
     // chunk-relative byte offset -> loc that applies from that offset up to the next entry.
     // sorted and deduped against the previous loc -- hermes/v8-style sparse table. consult via
     // `loc_at`; an empty table or an ip before the first entry resolves to `Location::SYNTHETIC`.

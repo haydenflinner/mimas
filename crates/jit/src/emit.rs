@@ -258,6 +258,7 @@ fn analyze(ops: &[(usize, Op)], nregs: u32) -> Sh {
             | Op::Return { .. }
             | Op::Panic {}
             | Op::TraceEdge { .. }
+            | Op::Shadow { .. }
             | Op::Raise { .. } => {}
         }
     }
@@ -1459,6 +1460,8 @@ impl Em<'_> {
             }
             // JIT bodies bypass call tracing like bcgen ones; nothing to emit
             Op::TraceEdge { .. } => {}
+            // no debugger reads a JIT frame: the shadow copy is dropped
+            Op::Shadow { .. } => {}
             Op::Raise { val } => {
                 self.flush_seq();
                 self.mark_op(off, next);

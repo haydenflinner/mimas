@@ -54,6 +54,10 @@ macro_rules! for_each_op {
             Return       [ (val, Reg, reg) ];
             // an inlined call's footprint for the trace: `caller → callee` +1
             TraceEdge    [ (callee, BodyId, u32) ];
+            // the debugger's copy of a dissolved struct local's part into a shadow slot -- a
+            // move in the interpreter, nothing in the perf lanes. Like `StoreEntry`, no `dst`
+            // field, so fusion never retargets it.
+            Shadow       [ (slot, Reg, reg) (src, Reg, reg) ];
 
             // -- Errors/Termination -- //
             Panic        [ ];
@@ -647,6 +651,10 @@ impl Op {
                 args: args.iter().map(|arg| ctx.i2r(arg)).collect(),
             },
             Inst::TraceEdge { callee } => Op::TraceEdge { callee: *callee },
+            Inst::Shadow { local, value } => Op::Shadow {
+                slot: ctx.local_to_reg[*local],
+                src: ctx.i2r(value),
+            },
             Inst::GetField { src, slot, kind } => Op::GetField {
                 dst: ctx.reg(),
                 src: ctx.i2r(src),

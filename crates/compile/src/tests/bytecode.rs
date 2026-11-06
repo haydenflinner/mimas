@@ -132,6 +132,10 @@ fn decode_op(d: &mut Decoder) -> Op {
         OpCode::TraceEdge => Op::TraceEdge {
             callee: BodyId::decode(d),
         },
+        OpCode::Shadow => Op::Shadow {
+            slot: Reg::decode(d),
+            src: Reg::decode(d),
+        },
         OpCode::Raise => Op::Raise {
             val: Reg::decode(d),
         },

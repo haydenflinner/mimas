@@ -1750,6 +1750,8 @@ impl<'a> WFx<'a> {
             Inst::CallNative { id, args } => self.emit_native(iid, id.index() as u32, &args)?,
             // the wasm lane has no trace fixture: an inlined call's footprint is nothing
             Inst::TraceEdge { .. } => {}
+            // nor a debugger: the shadow copy is dropped
+            Inst::Shadow { .. } => {}
             Inst::Return(_) | Inst::Raise(_) | Inst::Panic => {
                 // terminators — consumed by the block loop
             }

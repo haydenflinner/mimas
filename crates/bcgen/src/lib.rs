@@ -424,6 +424,7 @@ fn analyze(ops: &[(usize, Op)], nregs: u32) -> Sh {
             | Op::Return { .. }
             | Op::Panic {}
             | Op::TraceEdge { .. }
+            | Op::Shadow { .. }
             | Op::Raise { .. } => {}
         }
     }
@@ -1876,6 +1877,8 @@ fn emit_op(
         // bcgen bodies bypass call tracing (see `fixtures::Trace`); the
         // inlined call's footprint is dropped with it
         Op::TraceEdge { .. } => {}
+        // no debugger reads a bcgen frame: the shadow copy is dropped
+        Op::Shadow { .. } => {}
         Op::Raise { val } => {
             wln!("let err = rd(regs, {});", reg(*val));
             wln!("let rv = Val::Raised(Gc::new(ctx.mutation(), err));");
