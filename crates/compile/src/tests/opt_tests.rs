@@ -64,10 +64,20 @@ fn an_escaping_struct_keeps_its_object() {
 
 #[test]
 fn a_rebound_local_keeps_its_objects() {
-    // `a` is written twice; `b` aliases the first object, which must survive
-    let ir = optimized_ir("struct V2 { x: float, y: float }\nfn f() -> float { let a = V2 { x = 1.0, y = 0.0 }; let b = a; a = V2 { x = 5.0, y = 0.0 }; b.x }");
+    // `a` is written twice; `b` aliases the first object, which must survive.
+    // `V2` is mutated somewhere (`zero`), so it is a reference type and the
+    // read stays a field read on a real object
+    let ir = optimized_ir("struct V2 { x: float, y: float }\nimpl V2 { fn zero(self) { self.x = 0.0; } }\nfn f() -> float { let a = V2 { x = 1.0, y = 0.0 }; let b = a; a = V2 { x = 5.0, y = 0.0 }; b.x }");
     let body = last_body(&ir);
     assert!(body.matches("make_instance").count() == 2 && body.contains("get_field"), "{body}");
+}
+
+#[test]
+fn a_rebound_value_local_reads_the_first_struct() {
+    // the same with `V2` a value type: `b.x` is the first struct's operand
+    let ir = optimized_ir("struct V2 { x: float, y: float }\nfn f() -> float { let a = V2 { x = 1.0, y = 0.0 }; let b = a; a = V2 { x = 5.0, y = 0.0 }; b.x }");
+    let body = last_body(&ir);
+    assert!(!body.contains("get_field"), "{body}");
 }
 
 #[test]
@@ -103,4 +113,44 @@ fn a_named_scalar_local_keeps_its_slot() {
     let body = last_body(&ir);
     assert!(body.lines().any(|l| l.contains("set l")), "the named local's stores must stay:\n{body}");
     assert!(body.lines().any(|l| l.contains("get l")), "and its reads:\n{body}");
+}
+
+#[test]
+fn a_value_struct_field_is_read_off_the_operand_even_when_it_escapes() {
+    let ir = optimized_ir("struct V { x: float, y: float }\nfn keep(p: V) -> float { p.x }\nfn f(k: float) -> float { let d = V { x = k, y = 2.0 }; keep(d) + d.y }");
+    let body = last_body(&ir);
+    assert!(!body.contains("get_field"), "field read should be the operand:\n{body}");
+}
+
+#[test]
+fn a_loop_carried_value_struct_that_escapes_is_rebuilt_at_the_escape() {
+    let ir = optimized_ir("struct V { x: float, y: float }\nfn keep(p: V) -> float { p.x }\nfn f(n: int) -> float { let v = V { x = 1.0, y = 0.0 }; for i in n { v = V { x = v.x * 2.0, y = v.y }; } keep(v) }");
+    let body = last_body(&ir);
+    assert!(!body.contains("get_field"), "{body}");
+    // one fresh struct for the escape, none for the loop
+    assert!(body.contains("make_instance"), "the escape needs an object:\n{body}");
+}
+
+#[test]
+fn a_mutated_adt_is_not_a_value_type() {
+    // the struct escapes into an array (a call would be inlined away), and
+    // `P` is mutated by `inc`, so the loop keeps real objects
+    let ir = optimized_ir("struct P { x: float }\nstruct H { p: P, x: float }\nimpl P { fn inc(self) { self.x = self.x + 1.0; } }\nfn f(n: int) -> H { let p = P { x = 1.0 }; for i in n { p = P { x = p.x * 2.0 }; } H { p = p, x = p.x } }");
+    let body = last_body(&ir);
+    assert!(body.contains("get_field"), "a reference type keeps its object through the loop:\n{body}");
+}
+
+#[test]
+fn a_value_type_escaping_into_an_array_is_rebuilt_there() {
+    let ir = optimized_ir("struct V { x: float, y: float }\nstruct H { p: V, x: float }\nfn f(n: int) -> H { let p = V { x = 1.0, y = 0.0 }; for i in n { p = V { x = p.x * 2.0, y = p.y }; } H { p = p, x = p.x } }");
+    let body = last_body(&ir);
+    assert!(!body.contains("get_field"), "{body}");
+}
+
+#[test]
+fn a_self_tail_call_becomes_a_jump() {
+    let ir = optimized_ir("fn count(n: int, acc: int) -> int { if n == 0 { acc } else { count(n - 1, acc + n) } }");
+    let body = last_body(&ir);
+    assert!(!body.contains("call_direct"), "the tail call must be gone:\n{body}");
+    assert!(body.contains("trace_edge"), "but its edge stays for the trace:\n{body}");
 }

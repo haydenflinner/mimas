@@ -115,13 +115,63 @@ it (they bypass call tracing already); the wasm lane has no trace.
 Per-op hits were never lost: copied instructions keep the callee's
 source spans in the loc table.
 
-Not done, measured as the next cost: an immutable struct that *escapes*
--- the walk's `x` is read by `g(x)` and stored into `Walk { x_end = x }`
--- keeps its class allocated, because a non-field use needs an object.
-Rematerializing a `make_instance` from the field values at such a use is
-sound for a class with no `set_field` (identity is unobservable), and is
-what would scalarize the walk itself; the solver's wasm arena is still
-6.3 MB per run for that reason.
+**Value types, inferred (round 3).** `value_adts` finds the adts no
+instruction in the program mutates: no `set_field` on one, no
+`set_index` into one (a tuple struct's `t.0 = v`), no native that
+mutates its receiver (`mutates_recv`, handed over by the VM as
+`Compiler::with_mutating_natives`). Since `==` is structural, an
+instance of such an adt has no identity anyone can observe, so copying
+one is always sound -- it is a value. Receivers are typed from the IR
+(`ty_of`: construction, typed locals and params, a field of a typed
+struct, an element of a typed array, an unwrapped option, a phi of
+agreeing inputs); a receiver whose type cannot be recovered and could
+be an instance fails closed and turns value types off for the program
+(`MIMAS_DUMP_OPT=1` says where). What a value type buys:
+`forward_value_fields` reads a field off a freshly built value as its
+operand whatever else the struct is used for (`let d = a.sub(b);
+keep(d); d.x`), and `split_struct_phis` lets a value-type class
+*escape* -- be returned, passed, stored, compared, join a phi outside
+the class -- by building a fresh struct from the field values right
+before the use (for a phi outside the class, at the end of that edge's
+block). A class may also have *leaves*: a value-type struct from
+outside the class (a param, a call result, an element) joining its
+phi, whose fields are read once right where it is defined -- so a
+loop seeded from a param runs unboxed too. The walk's `x` is such a
+class: unboxed through the loop, one `V2` built for `g(x)` and one for
+`Walk { x_end = x }` (solver wasm arena 6.3 -> 4.5 MB per run, 6.6 ->
+5.6 ms; interpreter 0.144 -> 0.095 s). A reference
+type (`Rng`, anything with an `inc`) keeps its objects and identity.
+
+**Self tail calls (round 3).** `self_tail_calls` turns a call of a body
+to itself whose value is returned straight away -- `fn count(n, acc)
+-> int { if n == 0 { acc } else { count(n - 1, acc + n) } }`, the
+lowering's forwarder chains between the call, the phi block and the
+return followed -- into a jump: the arguments are assigned to the params
+as one parallel assignment (an argument that is itself a param reads
+the slot, so a cycle like `swap(b, a, n - 1)` goes through a scratch
+local), a `trace_edge` keeps the self edge in the call graph, and
+control jumps to a header block that took over the entry block's
+instructions, so the entry block itself stays phi-free for SSA.
+`count(100000, 0)` runs where the frame limit used to say "recursion is
+too deep", and a walk can be written as the recurrence it is.
+
+**The alias rule.** Codegen aliases a `get l` to the slot's register
+rather than copying it, so such a read is not a snapshot: forwarding
+another value's reads to a `get` of a slot that is written later would
+see the later write (`let t = a; a = b; b = t`, or a param rebound by a
+tail call). Every forwarder refuses: `promote_locals` keeps a local
+whose store reads a written, unpromoted slot, `forward_value_fields`
+leaves such a field read alone, `split_struct_phis` leaves such a
+class alone (`volatile_reads`). `vm/tests/opt_semantics.rs` pins it
+(`a_read_of_a_slot_written_later_is_a_snapshot`).
+
+Still open: the debugger. A dissolved struct local has no slot, so the
+step debugger's frame view no longer shows it; recording which
+registers hold its fields would let the view rebuild it. And a value
+escaping twice now draws as two boxes in a heap picture where it drew
+one shared node -- neither picture is "true" for a value, the honest
+rendering is inline in its holder like a scalar, which the host can do
+now that the compiler knows which adts are values.
 
 ## Tagged literals, spanned literal faults, prelude-first solving, `SeqSide`/`SortOrder`
 

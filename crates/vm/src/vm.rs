@@ -3616,7 +3616,15 @@ impl Vm {
             ::api::ApiEntry::Function(f) if f.module.first().is_some_and(|m| m == "std") && f.module.get(1).is_some_and(|m| m == "debug") => Some(id),
             _ => None,
         });
-        let program = compile::Compiler::new().with_frame_natives(frame_natives).compile(&mut ir);
+        // a native that mutates its receiver keeps that adt a reference type
+        let mutating_natives = library.natives().filter_map(|(id, e)| match e {
+            ::api::ApiEntry::Method(m) if m.mutates_recv => Some(id),
+            _ => None,
+        });
+        let program = compile::Compiler::new()
+            .with_frame_natives(frame_natives)
+            .with_mutating_natives(mutating_natives)
+            .compile(&mut ir);
         Ok(BuiltProgram {
             program,
             ir,

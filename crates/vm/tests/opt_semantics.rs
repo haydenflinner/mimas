@@ -92,3 +92,63 @@ test_vm!(
     P,
     "{ let p = P { x = 0.0 }; for i in 3 { p = P { x = p.x + 1.0 }; } p.inc(); p.x }" => Float(4.0),
 );
+
+// ---- value types: an adt nothing mutates has no identity to observe
+
+const V: &str = "struct V { x: float, y: float }
+fn v(x: float, y: float) -> V { V { x = x, y = y } }
+fn keep(p: V) -> float { p.x + p.y }
+fn pick(c: bool, a: V, b: V) -> V { if c { a } else { b } }";
+
+test_vm!(
+    value_structs_escape_as_copies,
+    V,
+    "{ let d = v(1.0, 2.0); let xs = [d]; let ys = [d]; d.x + xs[0].y + ys[0].x }" => Float(4.0),
+    "{ let d = v(1.0, 2.0); keep(d) + d.x }" => Float(4.0),
+    "{ let p = v(1.0, 2.0); for i in 3 { p = v(p.x + 1.0, p.y); } keep(p) }" => Float(6.0),
+    "{ let a = v(1.0, 0.0); let b = v(2.0, 0.0); let c = pick(false, a, b); c.x + a.x }" => Float(3.0),
+    "{ let a = v(1.0, 0.0); let b = v(1.0, 0.0); a == b }" => Bool(true),
+);
+
+test_vm!(
+    a_mutated_adt_stays_a_reference,
+    P,
+    "{ let p = P { x = 1.0 }; let q = p; q.x = 5.0; p.x }" => Float(5.0),
+    "{ let p = P { x = 1.0 }; let xs = [p]; xs[0].x = 7.0; p.x }" => Float(7.0),
+);
+
+// ---- self tail calls: recursion as deep as you like, params rebound in parallel
+
+test_vm!(
+    self_tail_calls_do_not_grow_the_stack,
+    "fn count(n: int, acc: int) -> int { if n == 0 { acc } else { count(n - 1, acc + n) } }
+     fn swap(a: int, b: int, n: int) -> int { if n == 0 { a * 10 + b } else { swap(b, a, n - 1) } }
+     fn rot(a: int, b: int, c: int, n: int) -> int { if n == 0 { a * 100 + b * 10 + c } else { rot(b, c, a, n - 1) } }
+     fn thru(a: int, n: int) -> int { if n == 0 { a } else { thru(a, n - 1) } }",
+    "count(100000, 0)" => Int(5000050000),
+    "swap(1, 2, 3)" => Int(21),
+    "rot(1, 2, 3, 4)" => Int(231),
+    "thru(7, 50000)" => Int(7),
+);
+
+test_vm!(
+    a_read_of_a_slot_written_later_is_a_snapshot,
+    V,
+    "{ let n = 1.0; let d = v(n, 0.0); n = 5.0; d.x }" => Float(1.0),
+    "{ let n = 1.0; let d = v(n, 0.0); let e = d; n = 5.0; e.x + n }" => Float(6.0),
+);
+
+// ---- closures across a self tail call: captured by value, before the rebinding
+
+test_vm!(
+    closures_cross_a_tail_call,
+    "fn acc(f: (int) -> int, n: int) -> int { if n == 0 { f(1) } else { acc(|x| f(x) * 2, n - 1) } }
+     fn go(k: int, f: (int) -> int, n: int) -> int { if n == 0 { f(k) } else { go(k + 1, f, n - 1) } }
+     fn h(a: int, f: (int) -> int, n: int) -> int { if n == 0 { f(0) + a } else { h(a + 1, |x| a + x, n - 1) } }",
+    // a fresh closure per step, built from the current `f`
+    "acc(|x| x, 5)" => Int(32),
+    // a closure passed through a deep tail recursion untouched
+    "go(0, |x| x + 100, 20000)" => Int(20100),
+    // the closure captures `a` as it was, not as the call rebinds it
+    "h(0, |x| x, 2)" => Int(3),
+);

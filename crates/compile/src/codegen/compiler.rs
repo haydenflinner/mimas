@@ -32,6 +32,9 @@ pub struct Compiler {
     /// Natives that read the live call stack: a body calling one is never
     /// inlined, so its frame stays real. See `opt`.
     frame_natives: std::collections::HashSet<api::NativeId>,
+    /// Natives that mutate their receiver: an adt that reaches one is not a
+    /// value type. See `opt::value_adts`.
+    mutating_natives: std::collections::HashSet<api::NativeId>,
 }
 
 // fuse a comparison op + JumpIfFalse into its `B`-prefixed branch form. reg-reg comparisons carry
@@ -56,7 +59,13 @@ impl Compiler {
             disasm: false,
             srcs: HashMap::new(),
             frame_natives: Default::default(),
+            mutating_natives: Default::default(),
         }
+    }
+    /// Natives that mutate their receiver (`mutates_recv`).
+    pub fn with_mutating_natives(mut self, ids: impl IntoIterator<Item = api::NativeId>) -> Self {
+        self.mutating_natives = ids.into_iter().collect();
+        self
     }
     /// Natives that inspect the call stack (`std::debug::*`): bodies that
     /// call them keep their frames.
@@ -204,7 +213,7 @@ impl Compiler {
         let mut entry_to_reg: IdVec<Local, Reg> = IdVec::new();
 
         if super::opt::enabled() {
-            super::opt::optimize(ir, &self.frame_natives);
+            super::opt::optimize(ir, &self.frame_natives, &self.mutating_natives);
             if std::env::var("MIMAS_DUMP_OPT").is_ok_and(|v| v == "1") {
                 eprintln!("{ir}");
             }

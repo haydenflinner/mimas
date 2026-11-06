@@ -12,7 +12,9 @@ use std::collections::{HashMap, HashSet};
 
 use api::NativeId;
 use shared::Location;
-use solve::components::DecId;
+use parse::AccessKind;
+use solve::Resolutions;
+use solve::components::{AdtId, DecId, Ty};
 
 use crate::{
     BlockId, Inst, InstId, Ir, Local,
@@ -22,7 +24,7 @@ use crate::{
 use super::clean::uses;
 
 /// Callee bodies at most this many instructions long are inlined.
-const MAX_INLINE_INSTS: usize = 64;
+const MAX_INLINE_INSTS: usize = 160;
 /// A caller stops inlining once it has grown past this many instructions.
 const MAX_CALLER_INSTS: usize = 4096;
 
@@ -33,12 +35,19 @@ pub(crate) fn enabled() -> bool {
 /// `frame_natives` are natives that read the live call stack
 /// (`std::debug::caller_line` and kin): a body that calls one keeps its
 /// frame, so what they report stays true.
-pub(crate) fn optimize(ir: &mut Ir, frame_natives: &HashSet<NativeId>) {
+/// `mutating_natives` are natives that mutate their receiver
+/// (`mutates_recv`): an adt that reaches one is not a value type.
+pub(crate) fn optimize(ir: &mut Ir, frame_natives: &HashSet<NativeId>, mutating_natives: &HashSet<NativeId>) {
+    self_tail_calls(ir);
     inline_small_calls(ir, frame_natives);
+    let values = value_adts(ir, mutating_natives);
+    let entry_locals: Vec<DecId> = ir.bodies[BodyId::ZERO].locals.values().copied().collect();
+    let res = &ir.resolutions;
     for (bid, body) in ir.bodies.iter_mut() {
         if bid == BodyId::ZERO {
             continue;
         }
+        forward_value_fields(body, &values);
         // a round can expose the next: a field that held a struct becomes a
         // local holding a struct
         for _ in 0..4 {
@@ -53,9 +62,10 @@ pub(crate) fn optimize(ir: &mut Ir, frame_natives: &HashSet<NativeId>) {
             continue;
         }
         for _ in 0..3 {
-            let a = promote_locals(body);
-            let b = split_struct_phis(body);
-            if !a && !b {
+            let a = promote_locals(body, res, &entry_locals);
+            let b = split_struct_phis(body, &values, res, &entry_locals);
+            let c = forward_value_fields(body, &values);
+            if !a && !b && !c {
                 break;
             }
         }
@@ -774,7 +784,7 @@ fn cfg_of(body: &Body) -> Cfg {
 /// local that only ever holds a struct drops them, because the struct is
 /// about to stop existing (see `split_struct_phis`). Returns whether
 /// anything changed.
-fn promote_locals(body: &mut Body) -> bool {
+fn promote_locals(body: &mut Body, res: &Resolutions, entry_locals: &[DecId]) -> bool {
     split_critical_edges(body);
     let cfg = cfg_of(body);
     let pos = positions(body);
@@ -822,9 +832,10 @@ fn promote_locals(body: &mut Body) -> bool {
                 let Inst::SetLocal(_, v) = body.instructions[w] else { return false };
                 match &body.instructions[v] {
                     Inst::NewInstance { .. } => true,
-                    Inst::GetLocal(m) => struct_local.contains(m),
-                    Inst::Phi(br) => br.iter().all(|(_, x)| matches!(body.instructions[*x], Inst::NewInstance { .. })),
-                    _ => false,
+                    Inst::GetLocal(m) if struct_local.contains(m) => true,
+                    Inst::Phi(br) if br.iter().all(|(_, x)| matches!(body.instructions[*x], Inst::NewInstance { .. })) => true,
+                    // a typed struct from anywhere: a param, a field, an element
+                    _ => ty_of(res, entry_locals, body, v, 0).as_ref().and_then(adt_of_ty).is_some(),
                 }
             });
             if all {
@@ -850,6 +861,24 @@ fn promote_locals(body: &mut Body) -> bool {
             .map_or(true, |rs| rs.iter().all(|&r| ws.iter().any(|&w| dominated(w, r))));
         if ok {
             promote.push(l);
+        }
+    }
+    // a local whose store reads a slot that is written and stays a slot
+    // cannot be promoted: its reads would alias the slot, not snapshot it
+    loop {
+        let set: HashSet<Local> = promote.iter().copied().collect();
+        let before = promote.len();
+        promote.retain(|&l| {
+            writes[&l].iter().all(|&w| {
+                let Inst::SetLocal(_, v) = body.instructions[w] else { return false };
+                match body.instructions[v] {
+                    Inst::GetLocal(src) => set.contains(&src) || !writes.contains_key(&src),
+                    _ => true,
+                }
+            })
+        });
+        if promote.len() == before {
+            break;
         }
     }
     if promote.is_empty() {
@@ -1050,9 +1079,17 @@ fn map_operands(inst: &mut Inst, f: &dyn Fn(InstId) -> InstId) {
 /// another member phi -- no `set_field` (a write through one alias would
 /// have to reach the others), nothing stored, passed or compared. Returns
 /// whether anything changed.
-fn split_struct_phis(body: &mut Body) -> bool {
-    // candidate classes, seeded from phis whose inputs are all struct values
-    let is_struct = |v: InstId, body: &Body| matches!(body.instructions[v], Inst::NewInstance { .. } | Inst::Phi(_));
+fn split_struct_phis(body: &mut Body, values: &HashSet<AdtId>, res: &Resolutions, entry_locals: &[DecId]) -> bool {
+    // candidate classes, seeded from phis whose inputs are all struct values.
+    // For a value type an input may also be a *leaf*: a typed struct from
+    // outside the class -- a param, a call result, an element -- whose
+    // fields are read once, right where it is defined (immutable, so that
+    // is as good as any later point), and which keeps existing for its
+    // other uses.
+    let leaf_adt = |v: InstId, body: &Body| -> Option<AdtId> {
+        let id = adt_of_ty(&ty_of(res, entry_locals, body, v, 0)?)?;
+        values.contains(&id).then_some(id)
+    };
     let mut done_any = false;
     let phis: Vec<InstId> = body
         .instructions
@@ -1071,31 +1108,44 @@ fn split_struct_phis(body: &mut Body) -> bool {
         // the struct built before a loop is an input of the loop-head phi and
         // of the loop-exit phi alike, and both must come along
         let mut class: Vec<InstId> = Vec::new();
+        let mut leaves: Vec<InstId> = Vec::new();
         let mut work = vec![root];
         let mut nfields: Option<usize> = None;
+        let mut class_adt: Option<AdtId> = None;
         while let Some(v) = work.pop() {
-            if class.contains(&v) {
+            if class.contains(&v) || leaves.contains(&v) {
                 continue;
             }
             match &body.instructions[v] {
-                Inst::NewInstance { fields, .. } => {
-                    if nfields.is_some_and(|n| n != fields.len()) {
+                Inst::NewInstance { adt, fields } => {
+                    if nfields.is_some_and(|n| n != fields.len()) || class_adt.is_some_and(|a| a != *adt) {
                         continue 'phi;
                     }
                     nfields = Some(fields.len());
+                    class_adt = Some(*adt);
                 }
                 Inst::Phi(br) => {
                     if br.is_empty() {
                         continue 'phi;
                     }
                     for (_, x) in br {
-                        if !is_struct(*x, body) {
-                            continue 'phi;
-                        }
                         work.push(*x);
                     }
                 }
-                _ => continue 'phi,
+                _ => {
+                    let Some(id) = leaf_adt(v, body) else { continue 'phi };
+                    if class_adt.is_some_and(|a| a != id) {
+                        continue 'phi;
+                    }
+                    class_adt = Some(id);
+                    let n = res.adts[id].member_tys.len();
+                    if nfields.is_some_and(|m| m != n) {
+                        continue 'phi;
+                    }
+                    nfields = Some(n);
+                    leaves.push(v);
+                    continue;
+                }
             }
             for &u in users.get(&v).map(|x| x.as_slice()).unwrap_or(&[]) {
                 if matches!(body.instructions[u], Inst::Phi(_)) && in_stream.contains(&u) {
@@ -1105,17 +1155,36 @@ fn split_struct_phis(body: &mut Body) -> bool {
             class.push(v);
         }
         let Some(nf) = nfields else { continue };
-        // every use of every member: a field read on it, or feeding a member phi
+        // a field that is a read of a slot written later cannot be forwarded
+        let volatile = volatile_reads(body);
+        if class.iter().any(|&m| matches!(&body.instructions[m], Inst::NewInstance { fields, .. } if fields.iter().any(|f| volatile.contains(f)))) {
+            continue 'phi;
+        }
+        let adt = class_adt;
+        let is_value = adt.is_some_and(|a| values.contains(&a));
+        if !leaves.is_empty() && !is_value {
+            continue 'phi;
+        }
+        if !class.iter().any(|&m| matches!(body.instructions[m], Inst::Phi(_))) {
+            continue 'phi;
+        }
+        // every use of every member: a field read on it, or feeding a member
+        // phi. A value type may also escape -- be returned, passed, stored,
+        // compared, join a phi outside the class -- and gets a fresh struct
+        // built from the field values there: no one can tell the copy apart.
+        let mut escapes: Vec<(InstId, InstId)> = Vec::new(); // (member, use)
         for &m in &class {
             for &u in users.get(&m).map(|v| v.as_slice()).unwrap_or(&[]) {
                 match &body.instructions[u] {
                     Inst::GetField { src, slot, .. } if *src == m && (*slot as usize) < nf => {}
                     Inst::Phi(_) if class.contains(&u) => {}
+                    _ if is_value => escapes.push((m, u)),
                     _ => continue 'phi,
                 }
             }
         }
-        // one field-phi per (member phi, slot), built on demand
+        // one field-phi per (member phi, slot) and one field read per (leaf,
+        // slot), built on demand
         let mut field_phi: HashMap<(InstId, u32), InstId> = HashMap::new();
         fn field_of(
             body: &mut Body,
@@ -1142,7 +1211,19 @@ fn split_struct_phis(body: &mut Body) -> bool {
                     body.instructions[p] = Inst::Phi(inputs);
                     p
                 }
-                _ => unreachable!("class members are structs"),
+                _ => {
+                    // a leaf: read the field right after the leaf is defined
+                    if let Some(&g) = field_phi.get(&(v, slot)) {
+                        return g;
+                    }
+                    let blk = pos[&v].0;
+                    let g = push_inst(body, Inst::GetField { src: v, slot, kind: AccessKind::Direct }, body.locs[v]);
+                    field_phi.insert((v, slot), g);
+                    let st = &mut body.blocks[blk].stream;
+                    let at = st.iter().position(|&x| x == v).map_or(st.len(), |i| i + 1);
+                    st.insert(at, g);
+                    g
+                }
             }
         }
         let pos = positions(body);
@@ -1155,8 +1236,36 @@ fn split_struct_phis(body: &mut Body) -> bool {
                 }
             }
         }
-        if rewrites.is_empty() {
+        if rewrites.is_empty() && escapes.is_empty() {
             continue;
+        }
+        // escapes: a fresh struct from the field values, right before the use
+        // (for a phi outside the class: at the end of the edge's block)
+        for &(m, u) in &escapes {
+            let adt = adt.unwrap();
+            let fields: Vec<InstId> = (0..nf as u32).map(|k| field_of(body, m, k, &mut field_phi, &pos)).collect();
+            let fresh = push_inst(body, Inst::NewInstance { adt, fields }, body.locs[u]);
+            let (ublk, _) = pos[&u];
+            match &mut body.instructions[u] {
+                Inst::Phi(br) => {
+                    for (pb, v) in br.iter_mut() {
+                        if *v == m {
+                            let pb = *pb;
+                            *v = fresh;
+                            // before the predecessor's terminator
+                            let st = &mut body.blocks[pb].stream;
+                            let at = st.len().saturating_sub(1);
+                            st.insert(at, fresh);
+                        }
+                    }
+                }
+                other => {
+                    map_operands(other, &|x| if x == m { fresh } else { x });
+                    let st = &mut body.blocks[ublk].stream;
+                    let at = st.iter().position(|&x| x == u).unwrap();
+                    st.insert(at, fresh);
+                }
+            }
         }
         let map: HashMap<InstId, InstId> = rewrites.iter().copied().collect();
         let resolve = |x: InstId| -> InstId {
@@ -1175,4 +1284,382 @@ fn split_struct_phis(body: &mut Body) -> bool {
         done_any = true;
     }
     done_any
+}
+
+/// Reads of slots that are written somewhere in the body. Codegen aliases a
+/// `get l` to the slot's register rather than copying it, so such a read is
+/// *not* a snapshot: forwarding another value's reads to it would see the
+/// slot's later writes. Every forwarder below refuses to forward to one.
+fn volatile_reads(body: &Body) -> HashSet<InstId> {
+    let mut written: HashSet<Local> = HashSet::new();
+    for block in body.blocks.values() {
+        for &iid in &block.stream {
+            if let Inst::SetLocal(l, _) = body.instructions[iid] {
+                written.insert(l);
+            }
+        }
+    }
+    let mut out = HashSet::new();
+    for block in body.blocks.values() {
+        for &iid in &block.stream {
+            if let Inst::GetLocal(l) = body.instructions[iid]
+                && written.contains(&l)
+            {
+                out.insert(iid);
+            }
+        }
+    }
+    out
+}
+
+// ----------------------------------------------------------- value types
+
+/// The static type of an instruction's value, as far as the IR can say:
+/// construction, a typed local or param, a field of a typed struct, an
+/// element of a typed array, an unwrapped option, a phi of agreeing inputs.
+/// `None` is "don't know", and the callers fail closed on it.
+fn ty_of(res: &Resolutions, entry_locals: &[DecId], body: &Body, iid: InstId, depth: u32) -> Option<Ty> {
+    if depth > 8 {
+        return None;
+    }
+    let dec_ty = |dec: Option<&DecId>| -> Option<Ty> {
+        let dec = *dec?;
+        if dec == DecId::DANGLING {
+            return None;
+        }
+        Some(res.decs[dec].ty.clone())
+    };
+    match &body.instructions[iid] {
+        Inst::NewInstance { adt, .. } => Some(Ty::Adt(*adt, Vec::new())),
+        Inst::GetLocal(l) => dec_ty(body.locals.get(*l)),
+        Inst::GetEntry(l) => dec_ty(entry_locals.get(l.index())),
+        Inst::GetField { src, slot, .. } => match ty_of(res, entry_locals, body, *src, depth + 1)? {
+            Ty::Adt(id, _) | Ty::Identity(id, _) => res.adts[id].member_tys.get(*slot as usize).cloned(),
+            _ => None,
+        },
+        Inst::GetIndex { set, .. } => match ty_of(res, entry_locals, body, *set, depth + 1)? {
+            Ty::Array(elem, _) => Some(*elem),
+            _ => None,
+        },
+        Inst::Unwrap(v) => match ty_of(res, entry_locals, body, *v, depth + 1)? {
+            Ty::Option(inner) => Some(*inner),
+            other => Some(other),
+        },
+        Inst::Phi(br) => {
+            let mut out: Option<Ty> = None;
+            for (_, v) in br {
+                let t = ty_of(res, entry_locals, body, *v, depth + 1)?;
+                match &out {
+                    None => out = Some(t),
+                    Some(o) if *o == t => {}
+                    _ => return None,
+                }
+            }
+            out
+        }
+        Inst::Constant(c) => Some(match c {
+            crate::Constant::Int(_) => Ty::Int,
+            crate::Constant::Float(_) => Ty::Float,
+            crate::Constant::Bool(_) => Ty::Bool,
+            crate::Constant::Str(_) => Ty::Str,
+            crate::Constant::Null => Ty::Null,
+            crate::Constant::Array(_) => return None,
+        }),
+        Inst::BinOp { .. } | Inst::UnaryOp { .. } | Inst::ToFloat(_) | Inst::Sqrt(_) | Inst::Len(_) | Inst::In(..)
+        | Inst::IsInstance { .. } | Inst::IsRaised(_) | Inst::Format(_) => Some(Ty::Any),
+        Inst::NewArray | Inst::NewDict => Some(Ty::Any),
+        _ => None,
+    }
+}
+
+fn adt_of_ty(t: &Ty) -> Option<AdtId> {
+    match t {
+        Ty::Adt(id, _) | Ty::Identity(id, _) => Some(*id),
+        _ => None,
+    }
+}
+
+/// Whether a value of type `t` could be an instance: `Any`, a type variable
+/// or an option of one could, scalars, arrays and strings cannot.
+fn may_be_instance(t: &Ty) -> bool {
+    match t {
+        Ty::Adt(..) | Ty::Identity(..) | Ty::Any | Ty::Vid(_) => true,
+        Ty::Option(inner) => may_be_instance(inner),
+        _ => false,
+    }
+}
+
+/// The adts no instruction in the program mutates: no `set_field` on one,
+/// no `set_index` into one (a tuple struct's `t.0 = v`), no native that
+/// mutates its receiver (`mutates_recv`). An instance of such an adt has
+/// no identity anyone can observe -- `==` is structural -- so copying one
+/// is always sound: that is what makes it a *value type*. Fails closed: a
+/// receiver whose type the IR cannot recover disables value types for the
+/// whole program (`MIMAS_DUMP_OPT=1` says where).
+fn value_adts(ir: &Ir, mutating: &HashSet<NativeId>) -> HashSet<AdtId> {
+    let entry_locals: Vec<DecId> = ir.bodies[BodyId::ZERO].locals.values().copied().collect();
+    let mut mutable: HashSet<AdtId> = HashSet::new();
+    let mut unknown: Option<String> = None;
+    for (bid, body) in ir.bodies.iter() {
+        for block in body.blocks.values() {
+            for &iid in &block.stream {
+                let receiver = match &body.instructions[iid] {
+                    Inst::SetField { receiver, .. } => Some(*receiver),
+                    Inst::SetIndex { set, .. } => Some(*set),
+                    Inst::CallNative { id, args } if mutating.contains(id) => args.first().copied(),
+                    _ => None,
+                };
+                let Some(r) = receiver else { continue };
+                match ty_of(&ir.resolutions, &entry_locals, body, r, 0) {
+                    Some(t) => {
+                        if let Some(id) = adt_of_ty(&t) {
+                            mutable.insert(id);
+                        } else if may_be_instance(&t) {
+                            unknown.get_or_insert_with(|| format!("body @{} {iid}: receiver typed {t:?}", bid.index()));
+                        }
+                    }
+                    None => {
+                        unknown.get_or_insert_with(|| format!("body @{} {iid}: receiver of unknown type", bid.index()));
+                    }
+                }
+            }
+        }
+    }
+    if let Some(why) = unknown {
+        if std::env::var("MIMAS_DUMP_OPT").is_ok_and(|v| v == "1") {
+            eprintln!("value types off: {why}");
+        }
+        return HashSet::new();
+    }
+    ir.resolutions
+        .adts
+        .iter()
+        .map(|(id, _)| id)
+        .filter(|id| !mutable.contains(id))
+        .collect()
+}
+
+/// A field read off a freshly built value-type struct is its operand,
+/// whatever else the struct is used for: `let d = a.sub(b); keep(d); d.x`
+/// reads the operand, and the object lives on only for `keep`.
+fn forward_value_fields(body: &mut Body, values: &HashSet<AdtId>) -> bool {
+    let volatile = volatile_reads(body);
+    let mut map: HashMap<InstId, InstId> = HashMap::new();
+    for block in body.blocks.values() {
+        for &iid in &block.stream {
+            if let Inst::GetField { src, slot, .. } = body.instructions[iid]
+                && let Inst::NewInstance { adt, fields } = &body.instructions[src]
+                && values.contains(adt)
+                && let Some(&f) = fields.get(slot as usize)
+                && !volatile.contains(&f)
+            {
+                map.insert(iid, f);
+            }
+        }
+    }
+    if map.is_empty() {
+        return false;
+    }
+    let resolve = |x: InstId| -> InstId {
+        let mut x = x;
+        while let Some(&n) = map.get(&x) {
+            x = n;
+        }
+        x
+    };
+    for inst in body.instructions.values_mut() {
+        map_operands(inst, &resolve);
+    }
+    for block in body.blocks.values_mut() {
+        block.stream.retain(|iid| !map.contains_key(iid));
+    }
+    true
+}
+
+// ------------------------------------------------------------ tail calls
+
+/// A call of the body to itself whose value is returned straight away --
+/// `fn walk(x, k) -> … { if done { x } else { walk(next(x), k + 1) } }` --
+/// becomes a jump: the arguments are assigned to the params as one
+/// parallel assignment (an argument that *is* a param reads the slot, so
+/// the order matters and a cycle goes through a scratch local), a
+/// `trace_edge` keeps the self edge in the call graph, and control jumps
+/// to a header block that took over the entry block's instructions, so
+/// the entry block itself stays phi-free for SSA. Tail position means the
+/// call is the last thing in its block and that block either returns the
+/// call or jumps to a block holding only phis and a return of a phi the
+/// call feeds. Returns whether anything changed.
+fn self_tail_calls(ir: &mut Ir) -> bool {
+    let mut changed = false;
+    for bi in 1..ir.bodies.len() {
+        let bid = BodyId::from(bi as u32);
+        if !ir.bodies[bid].captures.is_empty() {
+            continue;
+        }
+        let mut header: Option<BlockId> = None;
+        loop {
+            let body = &ir.bodies[bid];
+            let users = users_of(body);
+            // find a candidate: (call inst, its block, the phi entry (block, phi) it feeds if any).
+            // The lowering puts forwarder blocks (a lone `jump`) between the
+            // call's block and the phi block, and the phi block jumps on to
+            // the block that returns: follow both chains.
+            let follow = |mut b: BlockId, body: &Body| -> BlockId {
+                for _ in 0..body.blocks.len() {
+                    let st = &body.blocks[b].stream;
+                    match (st.len(), st.first().map(|&i| &body.instructions[i])) {
+                        (1, Some(Inst::Jump { target })) => b = *target,
+                        _ => break,
+                    }
+                }
+                b
+            };
+            // the block that jumps straight into `t` along the chain from `from`
+            let last_before = |from: BlockId, t: BlockId, body: &Body| -> BlockId {
+                let mut b = from;
+                for _ in 0..body.blocks.len() {
+                    let st = &body.blocks[b].stream;
+                    match st.last().map(|&i| &body.instructions[i]) {
+                        Some(Inst::Jump { target }) if *target == t => return b,
+                        Some(Inst::Jump { target }) => b = *target,
+                        _ => break,
+                    }
+                }
+                b
+            };
+            let mut found: Option<(InstId, BlockId, Option<(BlockId, InstId)>)> = None;
+            'scan: for (blk, block) in body.blocks.iter() {
+                let n = block.stream.len();
+                for (i, &iid) in block.stream.iter().enumerate() {
+                    let Inst::CallDirect { body: callee, .. } = &body.instructions[iid] else { continue };
+                    if *callee != bid {
+                        continue;
+                    }
+                    let us = users.get(&iid).map(|v| v.as_slice()).unwrap_or(&[]);
+                    if us.len() != 1 || i + 2 != n {
+                        continue;
+                    }
+                    let u = us[0];
+                    let tail = block.stream[n - 1];
+                    match &body.instructions[tail] {
+                        Inst::Return(r) if *r == iid && tail == u => {
+                            found = Some((iid, blk, None));
+                            break 'scan;
+                        }
+                        Inst::Jump { target } => {
+                            let t = follow(*target, body);
+                            let ts = &body.blocks[t].stream;
+                            // `return call` after a chain of jumps
+                            if ts.len() == 1 && matches!(body.instructions[ts[0]], Inst::Return(r) if r == iid) {
+                                found = Some((iid, blk, None));
+                                break 'scan;
+                            }
+                            // phis, then on to a block that returns the phi the call feeds
+                            if !matches!(body.instructions[u], Inst::Phi(_)) || !ts.contains(&u) {
+                                continue;
+                            }
+                            let only_phis = ts.iter().take(ts.len().saturating_sub(1)).all(|&x| matches!(body.instructions[x], Inst::Phi(_)));
+                            let Some(&tl) = ts.last() else { continue };
+                            let ret_block = match &body.instructions[tl] {
+                                Inst::Jump { target } => follow(*target, body),
+                                _ => t,
+                            };
+                            let rs = &body.blocks[ret_block].stream;
+                            let returns_phi = if ret_block == t {
+                                matches!(body.instructions[tl], Inst::Return(v) if v == u)
+                            } else {
+                                rs.len() == 1 && matches!(body.instructions[rs[0]], Inst::Return(v) if v == u)
+                            };
+                            let pus = users.get(&u).map(|v| v.as_slice()).unwrap_or(&[]);
+                            if only_phis && returns_phi && pus.len() == 1 {
+                                let pred = last_before(blk, t, body);
+                                found = Some((iid, blk, Some((pred, u))));
+                                break 'scan;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            let Some((call, blk, phi)) = found else { break };
+            let body = &mut ir.bodies[bid];
+            let Inst::CallDirect { args, .. } = body.instructions[call].clone() else { unreachable!() };
+            let loc = body.locs[call];
+            // the header: the entry block's instructions move into it once
+            let h = *header.get_or_insert_with(|| {
+                let h = body.blocks.push(Block::new());
+                let moved = std::mem::take(&mut body.blocks[BlockId::ZERO].stream);
+                body.blocks[h].stream = moved;
+                let j = push_inst(body, Inst::Jump { target: h }, loc);
+                body.blocks[BlockId::ZERO].stream = vec![j];
+                // phis that named the entry block as predecessor now mean the header
+                for inst in body.instructions.values_mut() {
+                    if let Inst::Phi(br) = inst {
+                        for (p, _) in br.iter_mut() {
+                            if *p == BlockId::ZERO {
+                                *p = h;
+                            }
+                        }
+                    }
+                }
+                h
+            });
+            // the parallel assignment params <- args: an arg that reads a param
+            // slot (`get l_param`) must be consumed before that slot is written
+            let params = body.params.clone();
+            let reads_param = |v: InstId, body: &Body| -> Option<Local> {
+                match body.instructions[v] {
+                    Inst::GetLocal(l) if params.contains(&l) => Some(l),
+                    _ => None,
+                }
+            };
+            let mut pending: Vec<(Local, InstId)> = params.iter().copied().zip(args.iter().copied()).collect();
+            let mut tail: Vec<InstId> = vec![push_inst(body, Inst::TraceEdge { callee: bid }, loc)];
+            while !pending.is_empty() {
+                // an assignment whose target no other pending arg still reads
+                let pick = pending.iter().position(|&(dst, _)| {
+                    !pending.iter().any(|&(d2, a2)| d2 != dst && reads_param(a2, body) == Some(dst))
+                });
+                match pick {
+                    Some(i) => {
+                        let (dst, arg) = pending.remove(i);
+                        if reads_param(arg, body) == Some(dst) {
+                            continue; // `f(a, …)` passing `a` through: nothing to do
+                        }
+                        tail.push(push_inst(body, Inst::SetLocal(dst, arg), loc));
+                    }
+                    None => {
+                        // a cycle: park one param's current value in a scratch local
+                        let (_, arg) = pending[0];
+                        let src = reads_param(arg, body).unwrap();
+                        let tmp = body.locals.push(DecId::DANGLING);
+                        let read = push_inst(body, Inst::GetLocal(src), loc);
+                        let park = push_inst(body, Inst::SetLocal(tmp, read), loc);
+                        tail.push(read);
+                        tail.push(park);
+                        let tmp_read = push_inst(body, Inst::GetLocal(tmp), loc);
+                        tail.push(tmp_read);
+                        for p in pending.iter_mut() {
+                            if reads_param(p.1, body) == Some(src) {
+                                p.1 = tmp_read;
+                            }
+                        }
+                    }
+                }
+            }
+            tail.push(push_inst(body, Inst::Jump { target: h }, loc));
+            // splice: drop the call and what followed it, append the tail
+            let stream = &mut body.blocks[blk].stream;
+            let at = stream.iter().position(|&x| x == call).unwrap();
+            stream.truncate(at);
+            stream.extend(tail);
+            if let Some((pred, p)) = phi
+                && let Inst::Phi(br) = &mut body.instructions[p]
+            {
+                br.retain(|(b, v)| !(*b == pred && *v == call));
+            }
+            changed = true;
+        }
+    }
+    changed
 }
