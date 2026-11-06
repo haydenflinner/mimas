@@ -423,6 +423,7 @@ fn analyze(ops: &[(usize, Op)], nregs: u32) -> Sh {
             | Op::StoreEntry { .. }
             | Op::Return { .. }
             | Op::Panic {}
+            | Op::TraceEdge { .. }
             | Op::Raise { .. } => {}
         }
     }
@@ -1872,6 +1873,9 @@ fn emit_op(
             wln!("return Ok(Flow::Return(rv));");
         }
         Op::Panic {} => wln!("*io.op_ip = {offset}; return Err(RtErr::MatchPanicReached);"),
+        // bcgen bodies bypass call tracing (see `fixtures::Trace`); the
+        // inlined call's footprint is dropped with it
+        Op::TraceEdge { .. } => {}
         Op::Raise { val } => {
             wln!("let err = rd(regs, {});", reg(*val));
             wln!("let rv = Val::Raised(Gc::new(ctx.mutation(), err));");

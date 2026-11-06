@@ -4,11 +4,11 @@ use vm::Vm;
 
 #[test]
 fn trace_counts_ops_and_call_edges() {
-    // `add` is recursive so the optimizer leaves it a real call: a small
-    // leaf body would be inlined into `twice` and leave no edge to count
-    // (compile's `codegen::opt`).
+    // `add` is small enough to be inlined into `twice` (compile's
+    // `codegen::opt`): the edge is still counted, by the `TraceEdge` op
+    // the inliner leaves where the call was
     let mut vm = Vm::execute(
-        "fn add(a: int, b: int) -> int { if b == 0 { a } else { add(a + 1, b - 1) } }\n\
+        "fn add(a: int, b: int) -> int { a + b }\n\
          fn twice() -> int { add(1, 2) + add(3, 4) }\n\
          let TEST_VALUE = twice();",
         |_| {},

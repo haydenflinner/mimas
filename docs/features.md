@@ -69,12 +69,59 @@ as their bit pattern in a `Word`; result types come from the import's
 signature), instantiates fresh per run (the arena persists across calls
 of one instance), and reports the arena high-water mark.
 
-Not done, measured as the next costs: `local_kinds` types a synthetic
-(`DANGLING`) local from its writes in one pass, so a field local fed by
-another `DANGLING` local stays `Generic` (boxed) -- a fixpoint there
-would unbox more of the inlined chains; and locals written more than
-once (`x = hit.p` in the walk) are never scalarized, which SSA
-construction for locals would lift.
+**SSA for locals and phis of structs (round 2).** `promote_locals`
+turns a local into SSA values: every read becomes the definition that
+reaches it, phis go at the iterated dominance frontier of the local's
+stores (block dominators, immediate dominators and frontiers computed
+per body), and the slot disappears. Before that, `split_critical_edges`
+puts a forwarder on every `jump_if_false`/`for_next`/`switch` edge into
+a block with two or more predecessors, because codegen hosts phi copies
+only before an unconditional `jump` (`clean::thread_jumps` leaves a
+forwarder whose target opens with a phi). Promoted: unnamed locals
+(what inlining and scalar replacement make) and named locals whose
+every store is a struct -- built there, copied from another such local,
+or chosen by an `if`. Not promoted: params and captures, entry slots, a
+`for_next` loop variable (the op bumps the slot's register in place), a
+local with a read no store dominates, and *named scalar locals*: a read
+of a slot is already free (codegen aliases it to the slot's register),
+SSA would only add a phi copy per merge on top of the store the step
+debugger's frame view (`artifacts`) needs. `split_struct_phis` then
+dissolves a struct chosen by control flow -- `x = if c { V2 {…} } else
+{ V2 {…} }`, a loop-carried `v = V2 { x = v.x * 2.0, … }`: the class is
+a phi, its inputs, every phi a member feeds (the struct built before a
+loop feeds the loop-head *and* the loop-exit phi), and it qualifies
+when every use of every member is a `get_field` on it or membership in
+another member phi -- a field read off the phi becomes a phi of the
+field reads, a field read off a `make_instance` its operand, and no
+object is ever allocated. Codegen now emits a block's phi copies as one
+parallel assignment (ordered so no source is overwritten before it is
+read, a cycle broken through a scratch register), which a loop that
+swaps two values needs once several phis share a block.
+`MIMAS_SSA=0` keeps the slot form, as an A/B.
+
+A/B within one run (`wgbench`, release, machine under other builds --
+only same-run ratios mean anything): the `V2` loop's `run` body goes
+from 138 ops and 51 moves to 114 ops and 27 moves; interpreter 0.918 s
+→ 0.868 s, wasm lane unchanged (0.042 s); the solver 0.182 s → 0.174 s.
+Results identical.
+
+**Trace edges survive inlining.** An inlined call leaves an
+`Inst::TraceEdge { callee }` → `Op::TraceEdge` where the call was: the
+hot dispatcher bumps the trace fixture's `caller → callee` counter with
+the current frame's chunk, so `Vm::trace_take` -- the sonification
+substrate -- shows the same call graph it did before (`vm/tests/trace.rs`
+runs its original inlinable program again). bcgen and JIT bodies drop
+it (they bypass call tracing already); the wasm lane has no trace.
+Per-op hits were never lost: copied instructions keep the callee's
+source spans in the loc table.
+
+Not done, measured as the next cost: an immutable struct that *escapes*
+-- the walk's `x` is read by `g(x)` and stored into `Walk { x_end = x }`
+-- keeps its class allocated, because a non-field use needs an object.
+Rematerializing a `make_instance` from the field values at such a use is
+sound for a class with no `set_field` (identity is unobservable), and is
+what would scalarize the walk itself; the solver's wasm arena is still
+6.3 MB per run for that reason.
 
 ## Tagged literals, spanned literal faults, prelude-first solving, `SeqSide`/`SortOrder`
 

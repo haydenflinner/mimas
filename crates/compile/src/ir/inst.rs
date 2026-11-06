@@ -120,6 +120,12 @@ pub enum Inst {
     Raise(InstId),
     IsRaised(InstId),
     UnwrapRaised(InstId),
+    /// Where an inlined call used to be: bumps the trace's `caller → callee`
+    /// edge counter so the call graph a host listens to (`Vm::trace_take`)
+    /// still shows the call the optimizer removed. No frame, no result.
+    TraceEdge {
+        callee: BodyId,
+    },
 }
 
 impl Inst {
@@ -169,7 +175,8 @@ impl Inst {
             | Inst::Jump { .. }
             | Inst::JumpIfFalse { .. }
             | Inst::ForNext { .. }
-            | Inst::Switch { .. } => true,
+            | Inst::Switch { .. }
+            | Inst::TraceEdge { .. } => true,
             // pure value producers: droppable when their result is unused.
             Inst::Constant(..)
             | Inst::GetLocal(..)
@@ -246,7 +253,8 @@ impl Inst {
             | Inst::Jump { .. }
             | Inst::JumpIfFalse { .. }
             | Inst::ForNext { .. }
-            | Inst::Switch { .. } => false,
+            | Inst::Switch { .. }
+            | Inst::TraceEdge { .. } => false,
         }
     }
 }
@@ -369,6 +377,7 @@ impl IrDisplay for Inst {
                 )
             }
             Inst::IsInstance { src, adt } => format!("is_instance {src} @{}", adt.index()),
+            Inst::TraceEdge { callee } => format!("trace_edge @{}", callee.index()),
             Inst::Switch {
                 scrut,
                 base,

@@ -257,6 +257,7 @@ fn analyze(ops: &[(usize, Op)], nregs: u32) -> Sh {
             | Op::StoreEntry { .. }
             | Op::Return { .. }
             | Op::Panic {}
+            | Op::TraceEdge { .. }
             | Op::Raise { .. } => {}
         }
     }
@@ -1456,6 +1457,8 @@ impl Em<'_> {
                 self.fb.def_var(self.v.ekind, k);
                 self.fb.ins().jump(self.ex.eerr, &[]);
             }
+            // JIT bodies bypass call tracing like bcgen ones; nothing to emit
+            Op::TraceEdge { .. } => {}
             Op::Raise { val } => {
                 self.flush_seq();
                 self.mark_op(off, next);

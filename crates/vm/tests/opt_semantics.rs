@@ -64,3 +64,31 @@ test_vm!(
     "struct V { x: float }\nstruct W { v: V, k: float }\nfn f() -> float { let w = W { v = V { x = 2.0 }, k = 3.0 }; w.v.x = w.v.x + w.k; w.v.x }",
     "f()" => Float(5.0),
 );
+
+// ---- locals to SSA: loop-carried values, swaps, structs chosen by control flow
+
+test_vm!(
+    loop_carried_scalars_and_swaps,
+    "",
+    "{ let a = 1; let b = 2; for i in 3 { let t = a; a = b; b = t; } a * 10 + b }" => Int(21),
+    "{ let a = 1; let b = 2; let c = 3; for i in 4 { let t = a; a = b; b = c; c = t; } a * 100 + b * 10 + c }" => Int(231),
+    "{ let s = 0; let k = 1; while k < 6 { s = s + k; k = k + 1; } s }" => Int(15),
+    "{ let x = 0; let c = true; if c { x = 5; } else { x = 7; } x * 2 }" => Int(10),
+);
+
+test_vm!(
+    loop_carried_structs,
+    P,
+    "{ let p = P { x = 1.0 }; for i in 4 { p = P { x = p.x * 2.0 }; } p.x }" => Float(16.0),
+    "{ let p = P { x = 1.0 }; for i in 3 { p.x = p.x + 1.0; } p.x }" => Float(4.0),
+    // three swaps: p ends on the 9
+    "{ let p = P { x = 1.0 }; let q = P { x = 9.0 }; for i in 3 { let t = p; p = q; q = t; } p.x * 10.0 + q.x }" => Float(91.0),
+    // +1, ×2, +1, ×2, +1 from 1: 2, 4, 5, 10, 11
+    "{ let p = mk(1.0); for i in 5 { let c = i mod 2 == 0; p = if c { mk(p.x + 1.0) } else { P { x = p.x * 2.0 } }; } p.x }" => Float(11.0),
+);
+
+test_vm!(
+    a_struct_rebuilt_in_a_loop_then_mutated,
+    P,
+    "{ let p = P { x = 0.0 }; for i in 3 { p = P { x = p.x + 1.0 }; } p.inc(); p.x }" => Float(4.0),
+);

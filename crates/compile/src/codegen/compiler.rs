@@ -463,11 +463,36 @@ impl Compiler {
                         }
                         Inst::Jump { target, .. } => {
                             if let Some(copies) = phi_copies.get(&bid) {
-                                for &(dst, value) in copies {
-                                    let op = Op::Move {
-                                        dst,
-                                        src: inst_to_reg[value].unwrap(),
-                                    };
+                                // The copies are one parallel assignment: with several
+                                // phis in the target block a destination may be another
+                                // copy's source (a loop that swaps two values), so order
+                                // them so no source is overwritten before it is read, and
+                                // break a cycle through a scratch register.
+                                let mut pending: Vec<(Reg, Reg)> = copies
+                                    .iter()
+                                    .map(|&(dst, value)| (dst, inst_to_reg[value].unwrap()))
+                                    .filter(|(d, s)| d != s)
+                                    .collect();
+                                let mut moves: Vec<(Reg, Reg)> = Vec::new();
+                                while !pending.is_empty() {
+                                    if let Some(i) = pending.iter().position(|&(d, _)| {
+                                        !pending.iter().any(|&(d2, s2)| d2 != d && s2 == d)
+                                    }) {
+                                        moves.push(pending.remove(i));
+                                    } else {
+                                        // every destination is still needed: park one source
+                                        let (_, s) = pending[0];
+                                        let tmp = regs.push(regs[s]);
+                                        moves.push((tmp, s));
+                                        for p in pending.iter_mut() {
+                                            if p.1 == s {
+                                                p.1 = tmp;
+                                            }
+                                        }
+                                    }
+                                }
+                                for (dst, src) in moves {
+                                    let op = Op::Move { dst, src };
                                     // phi-copy moves sit at the predecessor's tail -- borrow the
                                     // jump's loc so a fault here attributes to the same source
                                     // range.

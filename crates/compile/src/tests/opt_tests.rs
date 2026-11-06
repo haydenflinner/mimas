@@ -83,3 +83,24 @@ fn recursion_is_not_inlined() {
     let fact = ir.split("body @1").nth(1).unwrap().split("body @").next().unwrap();
     assert!(fact.contains("call_direct @1"), "fact must still call itself:\n{fact}");
 }
+
+#[test]
+fn a_loop_carried_struct_becomes_field_phis() {
+    // `x` is a different struct every iteration; no struct is stored, read
+    // or kept -- its field flows through a phi at the loop head
+    let ir = optimized_ir("struct V2 { x: float, y: float }\nfn f(n: int) -> float { let v = V2 { x = 1.0, y = 0.0 }; for i in n { v = V2 { x = v.x * 2.0, y = v.y }; } v.x }");
+    let body = last_body(&ir);
+    assert!(!body.contains("get_field"), "field reads should be gone:\n{body}");
+    assert!(body.contains("phi"), "a loop-carried value needs a phi:\n{body}");
+}
+
+#[test]
+fn a_named_scalar_local_keeps_its_slot() {
+    // `t` holds ints: it is not promoted -- its reads are already free and
+    // the slot is what the debugger's frame view shows -- so no phi is added
+    // for it (the one the lowering makes for the loop's own value aside)
+    let ir = optimized_ir("fn f(n: int) -> int { let t = 0; for i in n { t = t + i; } t }");
+    let body = last_body(&ir);
+    assert!(body.lines().any(|l| l.contains("set l")), "the named local's stores must stay:\n{body}");
+    assert!(body.lines().any(|l| l.contains("get l")), "and its reads:\n{body}");
+}

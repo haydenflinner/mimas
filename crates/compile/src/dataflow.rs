@@ -298,6 +298,7 @@ fn operands_of(inst: &Inst) -> Vec<(InstId, Option<&'static str>)> {
         }
         Inst::NewInstance { fields, .. } => fields.iter().map(|f| (*f, None)).collect(),
         Inst::IsInstance { src, .. } => vec![(*src, None)],
+        Inst::TraceEdge { .. } => vec![],
     }
 }
 
@@ -322,6 +323,7 @@ fn node_label(ir: &Ir, inst: &Inst, body_names: &HashMap<BodyId, &str>) -> Strin
         Inst::Raise(_) => "raise".to_string(),
         Inst::IsRaised(_) => "is_raised".to_string(),
         Inst::UnwrapRaised(_) => "unwrap_raised".to_string(),
+        Inst::TraceEdge { callee } => format!("trace_edge {}", body_names.get(callee).copied().unwrap_or("?")),
         Inst::In(_, _, condition) => if *condition { "in" } else { "not in" }.to_string(),
         Inst::Format(_) => "format".to_string(),
         Inst::RefBody(body) => format!("fn {}", body_names.get(body).copied().unwrap_or("?")),

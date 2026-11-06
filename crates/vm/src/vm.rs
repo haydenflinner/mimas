@@ -1210,6 +1210,14 @@ pub(crate) fn step_one<'gc>(
         OpCode::Jump => {
             code.ip = code.u32() as usize;
         }
+        OpCode::TraceEdge => {
+            // an inlined call: count the edge the frame no longer takes
+            let callee = code.u32();
+            ctx.state()
+                .fixtures
+                .get::<crate::fixtures::Trace>()
+                .call(frames.last().unwrap().chunk.index() as u32, callee);
+        }
         OpCode::JumpIf => {
             let cond = Reg::decode(code);
             let target = code.u32() as usize;
@@ -2250,6 +2258,7 @@ pub fn cold_dispatch<'gc>(
             let err = rd!(regs, src);
             return Ok(Flow::Return(Val::Raised(Gc::new(ctx.mutation(), err))));
         }
+
         OpCode::IsRaised => {
             let dst = Reg::decode(code);
             let src = Reg::decode(code);

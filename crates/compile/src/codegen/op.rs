@@ -52,6 +52,8 @@ macro_rules! for_each_op {
             CallDirect   [ (dst, Reg, reg) (body, BodyId, u32) (args, Vec<Reg>, regs) ];
             CallNative   [ (dst, Reg, reg) (id, NativeId, u32) (args, Vec<Reg>, regs) ];
             Return       [ (val, Reg, reg) ];
+            // an inlined call's footprint for the trace: `caller → callee` +1
+            TraceEdge    [ (callee, BodyId, u32) ];
 
             // -- Errors/Termination -- //
             Panic        [ ];
@@ -644,6 +646,7 @@ impl Op {
                 body: *body,
                 args: args.iter().map(|arg| ctx.i2r(arg)).collect(),
             },
+            Inst::TraceEdge { callee } => Op::TraceEdge { callee: *callee },
             Inst::GetField { src, slot, kind } => Op::GetField {
                 dst: ctx.reg(),
                 src: ctx.i2r(src),

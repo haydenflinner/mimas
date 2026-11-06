@@ -129,6 +129,9 @@ fn decode_op(d: &mut Decoder) -> Op {
             val: Reg::decode(d),
         },
         OpCode::Panic => Op::Panic {},
+        OpCode::TraceEdge => Op::TraceEdge {
+            callee: BodyId::decode(d),
+        },
         OpCode::Raise => Op::Raise {
             val: Reg::decode(d),
         },
