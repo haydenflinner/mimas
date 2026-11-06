@@ -70,20 +70,10 @@ fn index_plain(x: Dim, y: Dim) -> bool {
     (x == units::INDEX && y.is_none()) || (y == units::INDEX && x.is_none())
 }
 
-/// A `rad` and a plain number interconvert freely -- radians are
-/// dimensionless and trig has always read a plain number as radians, so
-/// `theta + p.atan2(q)` needs no `.to("rad")` unwrap. What the dimension
-/// keeps out is other quantities: `theta + 3px` still clashes.
-fn angle_plain(x: Dim, y: Dim) -> bool {
-    (x == units::ANGLE && y.is_none()) || (y == units::ANGLE && x.is_none())
-}
-
 /// Two known dimensions that differ; `None` when either is unknown or they agree.
 fn clash(a: &D, b: &D) -> Option<(Dim, Dim)> {
     match (a, b) {
-        (D::Q(x) | D::Iv(x), D::Q(y) | D::Iv(y))
-            if x != y && !index_plain(*x, *y) && !angle_plain(*x, *y) =>
-        {
+        (D::Q(x) | D::Iv(x), D::Q(y) | D::Iv(y)) if x != y && !index_plain(*x, *y) => {
             Some((*x, *y))
         }
         (D::Arr(x), D::Arr(y)) => clash(x, y),
@@ -99,10 +89,6 @@ fn join(a: D, b: &D) -> D {
         (D::Q(x), D::Q(y)) if index_plain(*x, *y) => {
             D::Q(if x.is_none() { *y } else { *x })
         }
-        // `rad` dissolves into a plain operand instead -- a mixed sum is a
-        // plain radian count, so `theta = theta + atan2(..)` doesn't turn a
-        // plain accumulator into a quantity the next `theta * v` rejects.
-        (D::Q(x), D::Q(y)) if angle_plain(*x, *y) => PLAIN,
         (D::Arr(x), D::Arr(y)) => D::Arr(Box::new(join((**x).clone(), y))),
         _ => D::Any,
     }
@@ -161,12 +147,6 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> Result<()> {
                 .unit_consts
                 .values()
                 .map(|(dec, dim)| (*dec, D::Q(*dim)))
-                .chain(
-                    solver
-                        .const_dims
-                        .iter()
-                        .map(|(dec, dim)| (*dec, D::Q(*dim))),
-                )
                 .collect(),
             rets: Vec::new(),
             dims: FxIndexMap::default(),
