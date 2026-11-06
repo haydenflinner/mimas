@@ -11,7 +11,7 @@ use crate::{
     traits::*,
 };
 use api::{ApiAdt, ApiAdtKind, ApiEntry, ApiVariantFields, Library, NativeId};
-use indexmap::{IndexMap, IndexSet};
+use crate::{FxIndexMap, FxIndexSet};
 use miette::NamedSource;
 use parse::{
     ExprKind,
@@ -19,26 +19,51 @@ use parse::{
     *,
 };
 use shared::{FileId, IdVec, Literal as RawLiteral, Located, Location, PactId, ParamId};
-use std::{
-    collections::{BTreeSet, HashMap, HashSet},
-    rc::Rc,
-    sync::Arc,
-};
+use crate::{FxHashMap, FxHashSet};
+use std::{collections::BTreeSet, rc::Rc, sync::Arc};
 
+/// A table the prepared state (`load::Prepared`) shares with every solve
+/// cloned from it: reads go straight through, the first write copies
+/// (`Arc::make_mut`). A solve that never writes one pays a pointer copy
+/// for it instead of a deep clone — and since it is an `Arc`, solves on
+/// other threads could share the same table.
+#[derive(Clone, Default)]
+pub(crate) struct Shared<T>(Arc<T>);
+
+impl<T> Shared<T> {
+    pub(crate) fn new(t: T) -> Self {
+        Self(Arc::new(t))
+    }
+}
+
+impl<T> std::ops::Deref for Shared<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
+
+impl<T: Clone> std::ops::DerefMut for Shared<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        Arc::make_mut(&mut self.0)
+    }
+}
+
+#[derive(Clone)]
 pub struct Solver {
     pub(crate) decs: IdVec<DecId, Dec>,
     pub(crate) adts: IdVec<AdtId, Adt>,
-    pub(crate) pacts: IdVec<PactId, shared::Pact>,
-    pub(crate) pact_impls: HashSet<(PactId, AdtId)>,
-    pub(crate) pact_members: HashMap<(PactId, String), DecId>,
+    pub(crate) pacts: Shared<IdVec<PactId, shared::Pact>>,
+    pub(crate) pact_impls: Shared<FxHashSet<(PactId, AdtId)>>,
+    pub(crate) pact_members: Shared<FxHashMap<(PactId, String), DecId>>,
     pub(crate) pact_self: Option<PactId>,
-    pub(crate) node_to_vid: IndexMap<NodeId, Vid>,
-    pub(crate) node_decs: IndexMap<NodeId, DecId>,
-    pub(crate) op_decs: IndexMap<NodeId, crate::OpDispatch>,
-    pub(crate) pact_ops: IndexMap<NodeId, crate::PactOp>,
+    pub(crate) node_to_vid: FxIndexMap<NodeId, Vid>,
+    pub(crate) node_decs: FxIndexMap<NodeId, DecId>,
+    pub(crate) op_decs: FxIndexMap<NodeId, crate::OpDispatch>,
+    pub(crate) pact_ops: FxIndexMap<NodeId, crate::PactOp>,
     /// The pacts each declared type param is bounded by (`T: Draw`), by the param's id.
     /// Absent means unbounded. Fn and adt params share the map -- ids are global.
-    pub(crate) param_bounds: HashMap<ParamId, Vec<PactId>>,
+    pub(crate) param_bounds: FxHashMap<ParamId, Vec<PactId>>,
     /// Bounds named before their pact was hoisted (a struct's `<T: Draw>` is read in
     /// `hoist_types`, ahead of `hoist_pacts`) -- settled by `resolve_pending_bounds`.
     pub(crate) pending_bounds: Vec<(ParamId, Ident)>,
@@ -48,86 +73,88 @@ pub struct Solver {
     /// Where the instantiation under way is written, so `substitute_params` can record an
     /// obligation against it. `None` when the caller has no use site to blame.
     pub(crate) obligation_at: Option<Location>,
-    pub(crate) closure_captures: IndexMap<NodeId, IndexSet<DecId>>,
-    pub(crate) expected_closures: IndexMap<NodeId, Vec<FnParam>>,
+    pub(crate) closure_captures: FxIndexMap<NodeId, FxIndexSet<DecId>>,
+    pub(crate) expected_closures: FxIndexMap<NodeId, Vec<FnParam>>,
     vids: IdVec<Vid, ()>,
     subs: IdVec<Vid, Option<Ty>>,
-    node_visits: HashSet<NodeId>,
-    pub(crate) library: HashMap<String, AdtId>,
-    pub(crate) root_modules: IndexMap<String, AdtId>,
-    pub(crate) module_items: IndexMap<AdtId, IndexMap<String, DecId>>,
-    pub(crate) sources: HashMap<FileId, NamedSource<Arc<str>>>,
+    node_visits: FxHashSet<NodeId>,
+    pub(crate) library: Shared<FxHashMap<String, AdtId>>,
+    pub(crate) root_modules: Shared<FxIndexMap<String, AdtId>>,
+    pub(crate) module_items: Shared<FxIndexMap<AdtId, FxIndexMap<String, DecId>>>,
+    pub(crate) sources: FxHashMap<FileId, NamedSource<Arc<str>>>,
 
-    pub(crate) dec_to_native: HashMap<DecId, NativeBinding>,
+    pub(crate) dec_to_native: Shared<FxHashMap<DecId, NativeBinding>>,
 
     // dataframe schemas (see frames.rs): a frame's Ty stays the nominal `DataFrame` while
     // these carry its column map -- keyed by producing expr and by `let` binding.
-    pub(crate) frame_schemas: HashMap<NodeId, Rc<crate::frames::FrameSchema>>,
-    pub(crate) frame_decs: HashMap<DecId, Rc<crate::frames::FrameSchema>>,
+    pub(crate) frame_schemas: FxHashMap<NodeId, Rc<crate::frames::FrameSchema>>,
+    pub(crate) frame_decs: FxHashMap<DecId, Rc<crate::frames::FrameSchema>>,
     /// `__q_group`/`group_by` results: `(input schema, key columns)` by expr/binding.
-    pub(crate) group_schemas: HashMap<NodeId, crate::frames::GroupInfo>,
-    pub(crate) group_decs: HashMap<DecId, crate::frames::GroupInfo>,
+    pub(crate) group_schemas: FxHashMap<NodeId, crate::frames::GroupInfo>,
+    pub(crate) group_decs: FxHashMap<DecId, crate::frames::GroupInfo>,
     /// Unit dims of `25kW`-style literals, merged from every solved ast (`NodeId`s are
     /// globally unique, so one map is collision-free).
-    pub(crate) ast_quantities: HashMap<NodeId, shared::units::Dim>,
+    pub(crate) ast_quantities: FxHashMap<NodeId, shared::units::Dim>,
     /// The unit text as written for each literal in `ast_quantities`, so diagnostics can
     /// name `ft` rather than collapsing it to `length (m)`.
-    pub(crate) ast_quantity_units: HashMap<NodeId, String>,
+    pub(crate) ast_quantity_units: FxHashMap<NodeId, String>,
     /// Bare unit names resolved as constants (`kWh` reads as `1kWh`): unit text -> its
     /// synthetic `Constant` dec and dimension, deduped so every use points at one dec.
     /// r[impl mimas.unit.constant]
-    pub(crate) unit_consts: HashMap<String, (DecId, shared::units::Dim)>,
+    pub(crate) unit_consts: FxHashMap<String, (DecId, shared::units::Dim)>,
     /// Every expression's computed dimension, recorded by the dims pass —
     /// `b.x + 2.0px` is `px` here while its `node_tys` stays `Float`.
     /// Surfaces on [`Resolutions::node_dims`](crate::Resolutions).
-    pub(crate) node_dims: IndexMap<NodeId, shared::units::Dim>,
+    pub(crate) node_dims: FxIndexMap<NodeId, shared::units::Dim>,
     /// The dimension each expr's context demanded (a call arg's declared param
     /// dim) — an expr whose own dim is `Any` still knows the unit its slot wanted.
     /// Surfaces on [`Resolutions::want_dims`](crate::Resolutions).
-    pub(crate) want_dims: IndexMap<NodeId, shared::units::Dim>,
+    pub(crate) want_dims: FxIndexMap<NodeId, shared::units::Dim>,
     /// `print`/`dbg`/`warn` call site → the dimension the pass computed for the printed
     /// value — so the natives can render `25000 W` rather than a bare `25000`.
     /// Keyed by call location, the same span the `Prints` fixture attributes.
     /// Surfaces on [`Resolutions::print_dims`](crate::Resolutions).
-    pub(crate) print_dims: IndexMap<shared::Location, shared::units::Dim>,
+    pub(crate) print_dims: FxIndexMap<shared::Location, shared::units::Dim>,
     /// Dimensions of api-adt fields (`Input.dt` is `s`): `(adt name, field name)`.
     /// Populated by `install_user_adt` from `ApiVariantFields::Named` dims; the dims pass
     /// consults it when a `.field` read isn't on a source-declared struct.
-    pub(crate) field_dims: HashMap<(String, String), shared::units::Dim>,
+    pub(crate) field_dims: FxHashMap<(String, String), shared::units::Dim>,
     /// Declared unit of each source-struct member, through `?`/`[..]`:
     /// `(struct name, field name)`. `next: index?` and `kids: [idx]` both
     /// land as `INDEX`. Recorded by the dims pass; surfaces on
     /// [`ResolvedAdt::member_dims`](crate::ResolvedAdt).
-    pub(crate) member_units: HashMap<(String, String), shared::units::Dim>,
+    pub(crate) member_units: FxHashMap<(String, String), shared::units::Dim>,
     /// Exprs that fulfill a `[T; n]` position with a length the compiler couldn't
     /// prove -- emit wraps each in a runtime dim check (see `lens.rs`).
     /// Surfaces on [`Resolutions::len_checks`](crate::Resolutions).
-    pub(crate) len_checks: IndexMap<NodeId, Vec<Option<usize>>>,
+    pub(crate) len_checks: FxIndexMap<NodeId, Vec<Option<usize>>>,
     /// `S::default()` calls the solver blessed: call node → the struct's adt.
     /// Emit lowers each to a `NewInstance` with every member set to its
     /// type's default rather than a call.
-    pub(crate) default_ctors: IndexMap<NodeId, AdtId>,
+    pub(crate) default_ctors: FxIndexMap<NodeId, AdtId>,
 
     /// Per-declaration read/write site counts, filled by the grades pass -- the `{0,1,ω}`
     /// usage grades behind the lint suite. Surfaces on [`Resolutions::dec_uses`].
-    pub(crate) dec_uses: IndexMap<DecId, crate::grades::UseInfo>,
+    pub(crate) dec_uses: FxIndexMap<DecId, crate::grades::UseInfo>,
     /// Inferred effect sets for each `fn` dec (`#[effects]`-declared natives seed the
     /// fixpoint; user fns are the union of their callees). `Resolutions::fn_effects`.
-    pub(crate) fn_effects: IndexMap<DecId, shared::Fx>,
+    pub(crate) fn_effects: FxIndexMap<DecId, shared::Fx>,
     /// Effect set of each file's top-level statements, keyed by the ast's name. Script code
     /// isn't a dec, so page-eval effects surface here for a host to check against its caps.
-    pub(crate) script_effects: IndexMap<String, shared::Fx>,
+    pub(crate) script_effects: FxIndexMap<String, shared::Fx>,
     /// Per top-level statement: `(file name, site, inferred fx)` in source order. A host
     /// that splices `use`-includes into one file maps each site back onto its include's
     /// byte range -- how a peer page's contribution is attributed (and gated) separately.
     pub(crate) script_segments: Vec<(String, shared::Location, shared::Fx)>,
     /// Non-fatal diagnostics (the lint suite). Solve succeeds; hosts decide how to show them.
     /// Surfaces on `Loaded::warnings` and `Resolutions::warnings`.
-    pub(crate) warnings: Vec<miette::Report>,
+    /// Lints from the grades pass, behind `Rc` so a prepared solver (see
+    /// `load::Prepared`) clones; `Loaded` unwraps them on the way out.
+    pub(crate) warnings: Vec<std::rc::Rc<miette::Report>>,
     /// Modules brought in by a bare `use music;` (which binds the name,
     /// not the members) -- an unbound-name error that names a member of
     /// one of these gets the "you wanted `::*`" hint.
-    pub(crate) bare_module_uses: HashMap<String, AdtId>,
+    pub(crate) bare_module_uses: FxHashMap<String, AdtId>,
     /// Set while the prelude group (the built-in source and the library's
     /// own sources) is being solved -- `load_files` solves that group to
     /// completion before any user file, so a user `enum PosNeg` can't catch
@@ -135,7 +162,7 @@ pub struct Solver {
     /// land in `prelude_types`; a user type of the same name shadows it
     /// for user code, with a `shadowed_builtin` warning.
     pub(crate) in_prelude: bool,
-    pub(crate) prelude_types: HashSet<String>,
+    pub(crate) prelude_types: FxHashSet<String>,
 
     pub(crate) control_flow: ControlFlow,
     pub(crate) ribs: Ribs,
@@ -148,7 +175,7 @@ pub struct Solver {
     /// In-scope declared type params (`fn map<T, U>`, `impl Pair` re-entering `Pair<A, B>`),
     /// innermost last. `Ty::from_annotation` resolves a bare `T` through these before ribs,
     /// units, or builtins. Entries persist only for the duration of one item's solve.
-    pub(crate) type_params: Vec<HashMap<String, ParamId>>,
+    pub(crate) type_params: Vec<FxHashMap<String, ParamId>>,
 }
 
 // Public impls
@@ -159,52 +186,52 @@ impl Solver {
             subs: IdVec::new(),
             decs: IdVec::new(),
             adts: IdVec::new(),
-            pacts: IdVec::new(),
-            pact_impls: HashSet::new(),
-            pact_members: HashMap::new(),
+            pacts: Shared::new(IdVec::new()),
+            pact_impls: Shared::default(),
+            pact_members: Shared::default(),
             pact_self: None,
-            node_to_vid: IndexMap::new(),
-            node_decs: IndexMap::new(),
-            op_decs: IndexMap::new(),
-            pact_ops: IndexMap::new(),
-            closure_captures: IndexMap::new(),
-            expected_closures: IndexMap::new(),
+            node_to_vid: FxIndexMap::default(),
+            node_decs: FxIndexMap::default(),
+            op_decs: FxIndexMap::default(),
+            pact_ops: FxIndexMap::default(),
+            closure_captures: FxIndexMap::default(),
+            expected_closures: FxIndexMap::default(),
             control_flow: ControlFlow::new(),
-            node_visits: HashSet::new(),
+            node_visits: FxHashSet::default(),
             ribs: Ribs::default(),
             loop_stack: vec![],
             fn_stack: vec![],
-            library: HashMap::new(),
-            root_modules: IndexMap::new(),
-            module_items: IndexMap::new(),
-            sources: HashMap::new(),
-            dec_to_native: HashMap::new(),
-            frame_schemas: HashMap::new(),
-            frame_decs: HashMap::new(),
-            group_schemas: HashMap::new(),
-            group_decs: HashMap::new(),
-            ast_quantities: HashMap::new(),
-            ast_quantity_units: HashMap::new(),
-            unit_consts: HashMap::new(),
-            node_dims: IndexMap::new(),
-            want_dims: IndexMap::new(),
-            print_dims: IndexMap::new(),
-            field_dims: HashMap::new(),
-            member_units: HashMap::new(),
-            len_checks: IndexMap::new(),
-            default_ctors: IndexMap::new(),
-            dec_uses: IndexMap::new(),
-            fn_effects: IndexMap::new(),
-            script_effects: IndexMap::new(),
+            library: Shared::default(),
+            root_modules: Shared::default(),
+            module_items: Shared::default(),
+            sources: FxHashMap::default(),
+            dec_to_native: Shared::default(),
+            frame_schemas: FxHashMap::default(),
+            frame_decs: FxHashMap::default(),
+            group_schemas: FxHashMap::default(),
+            group_decs: FxHashMap::default(),
+            ast_quantities: FxHashMap::default(),
+            ast_quantity_units: FxHashMap::default(),
+            unit_consts: FxHashMap::default(),
+            node_dims: FxIndexMap::default(),
+            want_dims: FxIndexMap::default(),
+            print_dims: FxIndexMap::default(),
+            field_dims: FxHashMap::default(),
+            member_units: FxHashMap::default(),
+            len_checks: FxIndexMap::default(),
+            default_ctors: FxIndexMap::default(),
+            dec_uses: FxIndexMap::default(),
+            fn_effects: FxIndexMap::default(),
+            script_effects: FxIndexMap::default(),
             script_segments: Vec::new(),
             warnings: Vec::new(),
-            bare_module_uses: HashMap::new(),
+            bare_module_uses: FxHashMap::default(),
             in_prelude: false,
-            prelude_types: HashSet::new(),
+            prelude_types: FxHashSet::default(),
             non_value: None,
             iter_guards: vec![],
             type_params: vec![],
-            param_bounds: HashMap::new(),
+            param_bounds: FxHashMap::default(),
             pending_bounds: vec![],
             bound_obligations: vec![],
             obligation_at: None,
@@ -223,8 +250,11 @@ impl Solver {
     }
 
     /// Install the per-file source map for diagnostic rendering. Call before `solve_all`.
-    pub fn set_sources(&mut self, sources: HashMap<FileId, NamedSource<Arc<str>>>) {
-        self.sources = sources;
+    pub fn set_sources(
+        &mut self,
+        sources: impl IntoIterator<Item = (FileId, NamedSource<Arc<str>>)>,
+    ) {
+        self.sources = sources.into_iter().collect();
     }
 
     /// Look up the `NamedSource` for a `Location`'s file. Falls back to an empty `<unknown>` source
@@ -349,6 +379,17 @@ impl Solver {
 
     pub fn solve_all<'a>(&mut self, asts: impl IntoIterator<Item = &'a Ast>) -> Result<()> {
         let asts: Vec<_> = asts.into_iter().collect();
+        // `MIMAS_SOLVE_TIMING=1` prints each phase's time to stderr — a
+        // probe for "where does a solve go", costing nothing when unset.
+        let timing = std::env::var_os("MIMAS_SOLVE_TIMING").is_some();
+        let mut last = std::time::Instant::now();
+        let mut lap = move |phase: &str| {
+            if timing {
+                let now = std::time::Instant::now();
+                eprintln!("SOLVE {phase}: {:?}", now - last);
+                last = now;
+            }
+        };
         for ast in &asts {
             self.ast_quantities.extend(ast.quantities());
             self.ast_quantity_units.extend(
@@ -363,7 +404,7 @@ impl Solver {
 
         // pre-allocate one Adt per named module so cross-file refs can resolve at hoist time.
         // nested decls (`module a::b;`) build the parent chain; the file's rib binds the leaf
-        let mut module_adts: HashMap<String, AdtId> = HashMap::new();
+        let mut module_adts: FxHashMap<String, AdtId> = FxHashMap::default();
         for name in module_names.iter().flatten() {
             let segments: Vec<String> = name.split("::").map(str::to_string).collect();
             let id = self.ensure_module_path(&segments);
@@ -402,10 +443,15 @@ impl Solver {
         };
 
         run_phase(self, Self::hoist_types, &mut saved_ribs)?;
+        lap("hoist_types");
         run_phase(self, Self::hoist_pacts, &mut saved_ribs)?;
+        lap("hoist_pacts");
         run_phase(self, Self::hoist_callables, &mut saved_ribs)?;
+        lap("hoist_callables");
         run_phase(self, Self::resolve_pending_bounds, &mut saved_ribs)?;
+        lap("resolve_pending_bounds");
         run_phase(self, Self::hoist_constants, &mut saved_ribs)?;
+        lap("hoist_constants");
 
         // fixpoint: hoist_uses + solve_consts. each round may resolve more consts (e.g. a const
         // that references another module's const reduces only once that other const is bound).
@@ -414,7 +460,9 @@ impl Solver {
         let mut prev = self.resolved_constants();
         for _ in 0..FIXPOINT_CAP {
             run_phase(self, Self::hoist_uses, &mut saved_ribs)?;
+            lap("hoist_uses");
             run_phase(self, Self::solve_consts, &mut saved_ribs)?;
+            lap("solve_consts");
             let curr = self.resolved_constants();
             if curr == prev {
                 break;
@@ -423,7 +471,9 @@ impl Solver {
         }
 
         run_phase(self, Self::solve_types, &mut saved_ribs)?;
+        lap("solve_types");
         run_phase(self, Self::solve_bodies, &mut saved_ribs)?;
+        lap("solve_bodies");
 
         // body solving is the last chance for an impl-associated or block-scoped const to gain
         // its literal value. anything still at `Constant(None)` afterwards is unresolvable --
@@ -447,10 +497,13 @@ impl Solver {
         assert!(self.loop_stack.is_empty());
         // every bounded param that got filled: by a type that implements the pact?
         self.check_bounds()?;
+        lap("check_bounds");
         // last, once every node has its type: do the units add up?
         crate::dims::check(self, &asts)?;
+        lap("dims");
         // and, with decs resolved everywhere the walk reaches: the usage/effect grades
         crate::grades::check(self, &asts)?;
+        lap("grades");
         Ok(())
     }
 
@@ -1058,7 +1111,7 @@ impl Solver {
         sig: &NativeFnSig,
         recv_check: Option<(&Ty, Location)>,
     ) -> Result<Ty> {
-        let mut memo: HashMap<u32, Vid> = HashMap::new();
+        let mut memo: FxHashMap<u32, Vid> = FxHashMap::default();
         let materialized: Vec<Ty> = sig
             .params
             .iter()
@@ -1096,14 +1149,14 @@ impl Solver {
     /// The header's `Self` becomes `self_ty` -- the impl target when checking or grafting an impl,
     /// the bound when calling through one, or `Self` itself inside a default body.
     pub(crate) fn instantiate_pact_fn(&mut self, header: &FnHeader, self_ty: &Ty) -> Ty {
-        let mut memo: HashMap<Vid, Vid> = HashMap::new();
+        let mut memo: FxHashMap<Vid, Vid> = FxHashMap::default();
         self.fresh_vids(&Ty::Fn(header.clone()), self_ty, &mut memo)
     }
 
     /// Normalize `t`, then replace any still-unbound vid with a fresh memoized one and any `Self`
     /// with `self_ty`. Bound vids resolve to their concrete types and stay put; only the open
     /// slots get fresh handles.
-    fn fresh_vids(&mut self, t: &Ty, self_ty: &Ty, memo: &mut HashMap<Vid, Vid>) -> Ty {
+    fn fresh_vids(&mut self, t: &Ty, self_ty: &Ty, memo: &mut FxHashMap<Vid, Vid>) -> Ty {
         match t.clone().normalized(self) {
             Ty::Vid(v) => Ty::Vid(*memo.entry(v).or_insert_with(|| self.vid())),
             Ty::Skolem(_) => self_ty.clone(),
@@ -1146,14 +1199,14 @@ impl Solver {
         }
     }
 
-    fn materialize_slot(&mut self, t: &Option<Ty>, memo: &mut HashMap<u32, Vid>) -> Ty {
+    fn materialize_slot(&mut self, t: &Option<Ty>, memo: &mut FxHashMap<u32, Vid>) -> Ty {
         match t {
             Some(t) => self.substitute_anons(t, memo),
             None => Ty::Vid(self.vid()),
         }
     }
 
-    pub(crate) fn substitute_anons(&mut self, t: &Ty, memo: &mut HashMap<u32, Vid>) -> Ty {
+    pub(crate) fn substitute_anons(&mut self, t: &Ty, memo: &mut FxHashMap<u32, Vid>) -> Ty {
         match t {
             Ty::Anon(n) => Ty::Vid(*memo.entry(*n).or_insert_with(|| self.vid())),
             Ty::Array(v, len) => Ty::Array(Box::new(self.substitute_anons(v, memo)), *len),
@@ -1252,7 +1305,7 @@ impl Solver {
     fn install_user_adt(&mut self, api_adt: &ApiAdt) {
         debug_assert_eq!(self.adts.len(), api_adt.adt_id.index());
 
-        let mut variants = IndexMap::new();
+        let mut variants = FxIndexMap::default();
         for v in &api_adt.variants {
             let variant = self.build_variant(&v.fields);
             if let ApiVariantFields::Named(named) = &v.fields {
@@ -1275,8 +1328,8 @@ impl Solver {
             // host side as `Ty::Anon` slots instead
             type_params: vec![],
             variants,
-            impls: HashMap::new(),
-            native_overloads: HashMap::new(),
+            impls: FxHashMap::default(),
+            native_overloads: FxHashMap::default(),
             flags: match api_adt.kind {
                 ApiAdtKind::Enum => AdtFlags::IS_ENUM,
                 ApiAdtKind::Struct => AdtFlags::empty(),
@@ -1335,7 +1388,7 @@ impl Solver {
                 ..Default::default()
             }),
             ApiVariantFields::Named(named) => {
-                let mut fields_map = IndexMap::new();
+                let mut fields_map = FxIndexMap::default();
                 for (name, ty, _dim) in named {
                     let ident = Ident::synthetic(name.clone());
                     let dec = self.dec_id(&ident, ty.clone(), DecKind::Local, Vis::Public);
@@ -1732,7 +1785,7 @@ impl Solver {
     /// decl resolve `T` to the *same* id -- that's what lets a signature written once carry
     /// rigid params through both phases.
     pub(crate) fn push_type_params(&mut self, params: &[TypeParam]) {
-        let scope: HashMap<String, ParamId> =
+        let scope: FxHashMap<String, ParamId> =
             self.declare_type_params(params).into_iter().collect();
         self.type_params.push(scope);
     }
@@ -1868,7 +1921,7 @@ impl Solver {
     /// Re-enter the parameter scope of an already-declared adt -- `impl List` sees `List<T>`'s
     /// `T` with the same `ParamId` the enum's stored member types use.
     pub(crate) fn push_adt_params(&mut self, adt: AdtId) {
-        let scope: HashMap<String, ParamId> = self.adts[adt].type_params.iter().cloned().collect();
+        let scope: FxHashMap<String, ParamId> = self.adts[adt].type_params.iter().cloned().collect();
         self.type_params.push(scope);
     }
 
@@ -1922,7 +1975,7 @@ impl Solver {
         if !t.contains_params() {
             return t.clone();
         }
-        let mut map = HashMap::new();
+        let mut map = FxHashMap::default();
         self.substitute_params(t, &mut map)
     }
 
@@ -1934,7 +1987,7 @@ impl Solver {
         if !stored.contains_params() {
             return stored.clone();
         }
-        let mut map: HashMap<ParamId, Ty> = self.adts[aid]
+        let mut map: FxHashMap<ParamId, Ty> = self.adts[aid]
             .type_params
             .iter()
             .map(|(_, pid)| *pid)
@@ -1946,7 +1999,7 @@ impl Solver {
     /// Walk `t` swapping each `Ty::Param` for `map[pid]`; missing entries mint a fresh vid
     /// lazily (and memoize, so one param always gets one var per call). Recurses through every
     /// composite, including adt/identity type args.
-    pub(crate) fn substitute_params(&mut self, t: &Ty, map: &mut HashMap<ParamId, Ty>) -> Ty {
+    pub(crate) fn substitute_params(&mut self, t: &Ty, map: &mut FxHashMap<ParamId, Ty>) -> Ty {
         match t {
             Ty::Param(pid) => match map.get(pid) {
                 Some(ty) => ty.clone(),
@@ -3066,11 +3119,13 @@ impl Default for Solver {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct LoopRun {
     pub collect_ty: Option<Ty>,
     pub break_ty: Option<Ty>,
 }
 
+#[derive(Clone)]
 pub(crate) struct FnRun {
     pub expected_ty: Ty,
 }
@@ -3101,6 +3156,7 @@ pub(crate) struct NativeFnSig {
     pub must_use: bool,
 }
 
+#[derive(Clone)]
 pub(crate) struct NativeBinding {
     pub id: NativeId,
     pub sig: NativeFnSig,
@@ -3129,6 +3185,7 @@ pub(crate) struct NativeBinding {
 /// This is a lint for the beginner trap of mutating a collection mid-loop, not an alias
 /// analysis: writes reached through a *different* binding (`let ys = xs; ys.push(..)`), a
 /// helper function's parameter, or a pact-bound method call are all knowingly missed.
+#[derive(Clone)]
 pub(crate) struct IterGuard {
     pub dec: DecId,
     pub path: Vec<GuardSeg>,
