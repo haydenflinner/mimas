@@ -3073,6 +3073,73 @@ impl Vm {
         })
     }
 
+    /// [`Vm::resolve_for_scene`] over the elements of a top-level array
+    /// binding: `(index, scene)` for each element that is an instance whose
+    /// type has a one-argument `draw_method`, called and inspected in turn —
+    /// how a host paints a `[Card]` as a row of faces rather than a row of
+    /// records. `None` when `name` isn't a live local or holds no array;
+    /// empty when no element draws. An element whose call faults is left
+    /// out, the frames it opened unwound like any probe's.
+    pub fn resolve_elems_for_scene(
+        &mut self,
+        name: &str,
+        draw_method: &str,
+    ) -> Option<Vec<(usize, Inspect)>> {
+        shared::units::install(&self.units);
+        let Vm {
+            code,
+            chunks,
+            c_strs: strs,
+            signatures,
+            arena,
+            sources,
+            methods,
+            field_names,
+            bc,
+            ..
+        } = self;
+        arena.mutate(|mc, state| {
+            let ctx = state.ctx(mc);
+            let elems: Vec<(usize, Val<'_>, BodyId)> = {
+                let thread = state.thread.borrow_mut(mc);
+                let recv = top_level_receiver(&thread, chunks, name)?;
+                // any sequence shape — a list of instances may sit behind a
+                // demoted typed-array store
+                let n = recv.seq_len()?;
+                (0..n)
+                    .filter_map(|i| {
+                        let v = recv.seq_get(i)?;
+                        let Val::Instance(inst) = v else { return None };
+                        let sid = inst.0.borrow().struct_id as usize;
+                        let body = *methods.get(sid)?.get(draw_method)?;
+                        (chunks[body].args as usize == 1).then_some((i, v, body))
+                    })
+                    .collect()
+            };
+            let mut out = Vec::with_capacity(elems.len());
+            for (i, v, body) in elems {
+                let Ok(result) = inject_call(
+                    ctx,
+                    code,
+                    chunks,
+                    signatures,
+                    strs,
+                    sources,
+                    bc.as_deref(),
+                    body,
+                    &[v],
+                    &[],
+                ) else {
+                    continue;
+                };
+                let struct_names = state.struct_names.borrow();
+                let mut seen = std::collections::HashSet::new();
+                out.push((i, result.inspect(&struct_names, field_names, &mut seen)));
+            }
+            Some(out)
+        })
+    }
+
     /// Resolves `name` as a top-level local and calls `methods` on it in turn -- each a
     /// zero-arg method looked up on the value the previous call returned -- and inspects
     /// the last result. `resolve_chain(x, ["inv", "glyph"])` is the other end's glyph. `None`
