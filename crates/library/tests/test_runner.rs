@@ -26,6 +26,28 @@ pub fn render_display(preamble: &str, src: &str) -> String {
         .expect("TEST_VALUE displayed")
 }
 
+/// One case that came out wrong, for [`report`]: a `MISMATCH` line a
+/// script can read back (`file`, source, got, want — tab-separated,
+/// newlines escaped) plus the readable diff.
+pub fn miss(file: &str, src: &str, actual: &str, expected: &str) -> String {
+    let esc = |s: &str| s.replace('\\', "\\\\").replace('\n', "\\n").replace('\t', "\\t");
+    format!(
+        "MISMATCH\t{file}\t{}\t{}\t{}\n  `{src}`\n    got  {actual}\n    want {expected}",
+        esc(src),
+        esc(actual),
+        esc(expected)
+    )
+}
+
+/// Every case in a `test_run!` runs; the test fails once, listing all
+/// the misses, so a change that moves many expectations shows them in
+/// one run instead of one per run.
+pub fn report(misses: Vec<String>) {
+    if !misses.is_empty() {
+        panic!("{} case(s) came out wrong:\n{}", misses.len(), misses.join("\n"));
+    }
+}
+
 #[macro_export]
 macro_rules! test_fail {
     ($(#[$attr:meta])* $name:ident, $($src:expr),+ $(,)?) => {
@@ -49,10 +71,14 @@ macro_rules! test_run {
         #[test]
         $(#[$attr])*
         fn $name() {
+            let mut misses = Vec::new();
             $({
                 let actual = $crate::test_runner::render("", $src);
-                pretty_assertions::assert_eq!(actual, $expected, "failed on `{}`", $src);
+                if actual != $expected {
+                    misses.push($crate::test_runner::miss(file!(), $src, &actual, $expected));
+                }
             })*
+            $crate::test_runner::report(misses);
         }
     };
     ($(#[$attr:meta])* $name:ident, $preamble:expr, $($src:expr => $expected:expr),* $(,)?) => {
@@ -60,10 +86,14 @@ macro_rules! test_run {
         #[test]
         $(#[$attr])*
         fn $name() {
+            let mut misses = Vec::new();
             $({
                 let actual = $crate::test_runner::render($preamble, $src);
-                pretty_assertions::assert_eq!(actual, $expected, "failed on `{}`", $src);
+                if actual != $expected {
+                    misses.push($crate::test_runner::miss(file!(), $src, &actual, $expected));
+                }
             })*
+            $crate::test_runner::report(misses);
         }
     };
 }
@@ -79,10 +109,14 @@ macro_rules! test_run_display {
         #[test]
         $(#[$attr])*
         fn $name() {
+            let mut misses = Vec::new();
             $({
                 let actual = $crate::test_runner::render_display("", $src);
-                pretty_assertions::assert_eq!(actual, $expected, "failed on `{}`", $src);
+                if actual != $expected {
+                    misses.push($crate::test_runner::miss(file!(), $src, &actual, $expected));
+                }
             })*
+            $crate::test_runner::report(misses);
         }
     };
     ($(#[$attr:meta])* $name:ident, $preamble:expr, $($src:expr => $expected:expr),* $(,)?) => {
@@ -90,10 +124,14 @@ macro_rules! test_run_display {
         #[test]
         $(#[$attr])*
         fn $name() {
+            let mut misses = Vec::new();
             $({
                 let actual = $crate::test_runner::render_display($preamble, $src);
-                pretty_assertions::assert_eq!(actual, $expected, "failed on `{}`", $src);
+                if actual != $expected {
+                    misses.push($crate::test_runner::miss(file!(), $src, &actual, $expected));
+                }
             })*
+            $crate::test_runner::report(misses);
         }
     };
 }

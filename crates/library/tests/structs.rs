@@ -36,11 +36,11 @@ test_run!(
      const NESTED = [[RIGHT], [DOWN RIGHT]];
      fn poke() -> float { let ds = DIRS; ds[0] = DOWN; ds[0].dx }",
     "DIRS.len()" => "2",
-    "DIRS[1].dy" => "1",
-    "NESTED[1][1].dx" => "1",
-    "poke()" => "0",
-    "DIRS[0].dx" => "1",
-    "{ let s = 0.0; for d in DIRS { s = s + d.dx + d.dy } s }" => "2",
+    "DIRS[1].dy" => "1.0",
+    "NESTED[1][1].dx" => "1.0",
+    "poke()" => "0.0",
+    "DIRS[0].dx" => "1.0",
+    "{ let s = 0.0; for d in DIRS { s = s + d.dx + d.dy } s }" => "2.0",
 );
 
 // An operator through a pact: the built-in `pact Opp { fn inv(self)

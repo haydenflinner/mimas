@@ -160,7 +160,7 @@ fn open_reads_void_transform_and_params() {
     );
     pretty_assertions::assert_eq!(
         void_summary,
-        "Spawn camera false [1, 0, 5, 0, 1, 10] [true,1]"
+        "Spawn camera false [1.0, 0.0, 5.0, 0.0, 1.0, 10.0] [true,1]"
     );
 
     std::fs::remove_file(&path).ok();

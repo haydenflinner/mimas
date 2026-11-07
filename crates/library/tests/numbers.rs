@@ -61,16 +61,16 @@ test_run!(
 test_run!(
     // r[verify mimas.num.convert]
     int_to_float,
-    "(3).to_float()" => "3",
-    "(0).to_float()" => "0",
-    "(-2).to_float()" => "-2",
+    "(3).to_float()" => "3.0",
+    "(0).to_float()" => "0.0",
+    "(-2).to_float()" => "-2.0",
 );
 
 // to_float yields a real float (chains into float-only methods)
 test_run!(
     int_to_float_is_float,
     "(2).to_float().sqrt()" => "1.4142135623730951",
-    "(9).to_float().sqrt()" => "3",
+    "(9).to_float().sqrt()" => "3.0",
 );
 
 test_run!(
@@ -99,27 +99,27 @@ test_run!(
 
 test_run!(
     float_floor,
-    "(3.7).floor()" => "3",
-    "(3.0).floor()" => "3",
-    "(-3.2).floor()" => "-4",
-    "(-3.0).floor()" => "-3",
+    "(3.7).floor()" => "3.0",
+    "(3.0).floor()" => "3.0",
+    "(-3.2).floor()" => "-4.0",
+    "(-3.0).floor()" => "-3.0",
 );
 
 test_run!(
     float_ceil,
-    "(3.2).ceil()" => "4",
-    "(3.0).ceil()" => "3",
-    "(-3.7).ceil()" => "-3",
-    "(-3.0).ceil()" => "-3",
+    "(3.2).ceil()" => "4.0",
+    "(3.0).ceil()" => "3.0",
+    "(-3.7).ceil()" => "-3.0",
+    "(-3.0).ceil()" => "-3.0",
 );
 
 test_run!(
     float_round,
-    "(3.2).round()" => "3",
-    "(3.5).round()" => "4",
-    "(2.5).round()" => "3",
-    "(-3.5).round()" => "-4",
-    "(-2.5).round()" => "-3",
+    "(3.2).round()" => "3.0",
+    "(3.5).round()" => "4.0",
+    "(2.5).round()" => "3.0",
+    "(-3.5).round()" => "-4.0",
+    "(-2.5).round()" => "-3.0",
 );
 
 // to_int truncates toward zero (as i64), not floor
@@ -142,14 +142,14 @@ test_run!(
 test_run!(
     float_to_int_differs_from_floor,
     "(-3.5).to_int()" => "-3",
-    "(-3.5).floor()" => "-4",
+    "(-3.5).floor()" => "-4.0",
 );
 
 test_run!(
     float_abs,
     "(4.5).abs()" => "4.5",
-    "(0.0).abs()" => "0",
-    "(-4.0).abs()" => "4",
+    "(0.0).abs()" => "0.0",
+    "(-4.0).abs()" => "4.0",
     "(-2.5).abs()" => "2.5",
 );
 
@@ -157,22 +157,22 @@ test_run!(
     float_max,
     "(2.5).max(7.5)" => "7.5",
     "(7.5).max(2.5)" => "7.5",
-    "(3.0).max(-1.0)" => "3",
+    "(3.0).max(-1.0)" => "3.0",
 );
 
 test_run!(
     float_min,
     "(2.5).min(7.5)" => "2.5",
     "(7.5).min(2.5)" => "2.5",
-    "(-1.0).min(3.0)" => "-1",
+    "(-1.0).min(3.0)" => "-1.0",
 );
 
 test_run!(
     float_sqrt,
-    "(9.0).sqrt()" => "3",
-    "(4.0).sqrt()" => "2",
+    "(9.0).sqrt()" => "3.0",
+    "(4.0).sqrt()" => "2.0",
     "(2.0).sqrt()" => "1.4142135623730951",
-    "(0.0).sqrt()" => "0",
+    "(0.0).sqrt()" => "0.0",
 );
 
 test_run!(
@@ -198,7 +198,7 @@ test_run!(
 
 test_run!(
     float_methods_chain,
-    "(-2.5).abs().floor()" => "2",
+    "(-2.5).abs().floor()" => "2.0",
     "(7.3).floor().to_int()" => "7",
 );
 
@@ -226,7 +226,7 @@ test_run!(
 test_run!(
     float_to_str,
     r#"(3.5).to_str()"# => r#""3.5""#,
-    r#"(3.0).to_str()"# => r#""3""#,
+    r#"(3.0).to_str()"# => "\"3.0\"",
 );
 
 test_run!(
@@ -319,14 +319,14 @@ test_fail!(math_pi_not_int, "use std::math::PI; let _: int = PI;");
 
 test_run!(
     float_trig_and_friends,
-    "(0.0).sin()" => "0",
-    "(0.0).cos()" => "1",
+    "(0.0).sin()" => "0.0",
+    "(0.0).cos()" => "1.0",
     "(1.0).atan2(1.0).to(\"rad\") * 4.0 == std::math::PI" => "true",
-    "(2.0).pow(10.0)" => "1024",
-    "(1.0).exp().ln()" => "1",
-    "(5.5).clamp(0.0, 1.0)" => "1",
-    "(-2.5).clamp(0.0, 1.0)" => "0",
-    "(-3.0).signum()" => "-1",
+    "(2.0).pow(10.0)" => "1024.0",
+    "(1.0).exp().ln()" => "1.0",
+    "(5.5).clamp(0.0, 1.0)" => "1.0",
+    "(-2.5).clamp(0.0, 1.0)" => "0.0",
+    "(-3.0).signum()" => "-1.0",
     "std::math::TAU == 2.0 * std::math::PI" => "true",
 );
 
@@ -336,3 +336,38 @@ test_fail!(
     "1.5.min;",
     r#"f"{3.max}";"#,
 );
+
+// r[verify mimas.num.text]
+// a float's text reads back as the same float: `print`, `"{x}"` and
+// `to_str()` agree, a whole number keeps its `.0`, and the corners are
+// spelled as the constants that name them
+test_run!(
+    float_text_is_a_float_literal,
+    "(2.0).to_str()" => "\"2.0\"",
+    "(0.0).to_str()" => "\"0.0\"",
+    "(-0.0).to_str()" => "\"-0.0\"",
+    "(0.1).to_str()" => "\"0.1\"",
+    "(0.1 + 0.2).to_str()" => "\"0.30000000000000004\"",
+    "(1e21).to_str()" => "\"1e21\"",
+    "(1.0 / 0.0).to_str()" => "\"float::INF\"",
+    "(-1.0 / 0.0).to_str()" => "\"float::NEG_INF\"",
+    "(0.0 / 0.0).to_str()" => "\"float::NAN\"",
+    "f\"{2.0} and {7}\"" => "\"2.0 and 7\"",
+    "[1.0, 2.5, 3.0]" => "[1.0, 2.5, 3.0]",
+    "360.0" => "360.0",
+);
+
+// r[verify mimas.num.text]
+// the primitive serde: a float's text is mimas source, and reading it
+// back prints the same text again
+#[test]
+fn float_text_round_trips_through_the_lexer() {
+    for src in [
+        "2.0", "0.0", "-0.0", "0.1", "0.1 + 0.2", "1e21", "1e-7", "1.0 / 0.0", "-1.0 / 0.0",
+        "0.0 / 0.0", "float::MAX", "float::MIN_POSITIVE", "123456789.125", "1.0 / 3.0",
+    ] {
+        let text = test_runner::render("", src);
+        let again = test_runner::render("", &text);
+        assert_eq!(again, text, "{src} printed {text}, which read back as {again}");
+    }
+}

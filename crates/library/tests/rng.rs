@@ -110,7 +110,7 @@ let b = float::random(10.0);
     rng.script([0.5]);
     vm.run().expect("rng test ran");
     assert_eq!(rng.scripted(), 0, "scripted draw was never consumed");
-    assert_eq!(vm.resolve_name_to_string("a").unwrap().unwrap(), "5");
+    assert_eq!(vm.resolve_name_to_string("a").unwrap().unwrap(), "5.0");
     let b = vm.resolve_name_to_string("b").unwrap().unwrap();
 
     // unscripted baseline: the scripted draw still advanced the stream,

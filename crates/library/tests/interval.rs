@@ -5,25 +5,25 @@ mod test_runner;
 test_run!(
     interval_constructors,
     "",
-    "Interval::pm(100.0, 0.1).lo" => "90",
-    "Interval::pm(100.0, 0.1).hi" => "110",
-    "Interval::within(5.0, 2.0).lo" => "3",
-    "Interval::span(2.0, 6.0).mid" => "4",
-    "Interval::of(1.0, 2.0, 4.0).hi" => "4",
-    "Interval::exact(3.0).width()" => "0",
+    "Interval::pm(100.0, 0.1).lo" => "90.0",
+    "Interval::pm(100.0, 0.1).hi" => "110.0",
+    "Interval::within(5.0, 2.0).lo" => "3.0",
+    "Interval::span(2.0, 6.0).mid" => "4.0",
+    "Interval::of(1.0, 2.0, 4.0).hi" => "4.0",
+    "Interval::exact(3.0).width()" => "0.0",
 );
 
 test_run!(
     interval_arithmetic_carries_the_bounds,
     "let g = Interval::pm(30.0, 0.1);",
-    "(60.0 - g).lo" => "27",
-    "(60.0 - g).hi" => "33",
-    "(60.0 - g).mid" => "30",
-    "(g * 2.0).hi" => "66",
-    "(2.0 * g).lo" => "54",
-    "(g / Interval::pm(2.0, 0.5)).lo" => "9",
-    "(-g).hi" => "-27",
-    "Interval::of(1.0, 2.0, 4.0).pow(2.0).hi" => "16",
+    "(60.0 - g).lo" => "27.0",
+    "(60.0 - g).hi" => "33.0",
+    "(60.0 - g).mid" => "30.0",
+    "(g * 2.0).hi" => "66.0",
+    "(2.0 * g).lo" => "54.0",
+    "(g / Interval::pm(2.0, 0.5)).lo" => "9.0",
+    "(-g).hi" => "-27.0",
+    "Interval::of(1.0, 2.0, 4.0).pow(2.0).hi" => "16.0",
     "g.contains(31.0)" => "true",
     "g.contains(40.0)" => "false",
 );
@@ -42,7 +42,7 @@ test_run!(
     "Interval::span(1.0, 10.0).ln().lo <= 0.0" => "true",
     "Interval::span(1.0, 10.0).ln().lo > -0.0000001" => "true",
     "(Interval::span(1.0, 10.0).ln().hi - 2.302585092994046).abs() < 0.0000000000001" => "true",
-    "Interval::of(0.0, 1.0, 9.0).sqrt().hi" => "3",
+    "Interval::of(0.0, 1.0, 9.0).sqrt().hi" => "3.0",
 );
 
 // `sqrt`/`ln` clamp to their domain, like `pow`: the part below zero
@@ -50,10 +50,10 @@ test_run!(
 test_run!(
     interval_functions_clamp_their_domains,
     "",
-    "Interval::of(-4.0, 4.0, 9.0).sqrt().lo" => "0",
-    "Interval::of(-4.0, 4.0, 9.0).sqrt().hi" => "3",
-    "Interval::of(-4.0, 4.0, 9.0).sqrt().mid" => "2",
-    "Interval::span(-2.0, -1.0).sqrt().hi" => "0",
+    "Interval::of(-4.0, 4.0, 9.0).sqrt().lo" => "0.0",
+    "Interval::of(-4.0, 4.0, 9.0).sqrt().hi" => "3.0",
+    "Interval::of(-4.0, 4.0, 9.0).sqrt().mid" => "2.0",
+    "Interval::span(-2.0, -1.0).sqrt().hi" => "0.0",
     "Interval::span(-1.0, 4.0).ln().hi > 1.38" => "true",
     "Interval::span(-1.0, 4.0).ln().hi < 1.39" => "true",
     "Interval::span(-1.0, 4.0).ln().lo < -1000000.0" => "true",
@@ -64,16 +64,16 @@ test_run!(
 test_run!(
     interval_min_max_take_the_envelopes,
     "let a = Interval::of(0.0, 1.0, 5.0); let b = Interval::of(3.0, 4.0, 8.0);",
-    "a.min(b).lo" => "0",
-    "a.min(b).hi" => "5",
-    "a.max(b).lo" => "3",
-    "a.max(b).hi" => "8",
-    "a.min(b).mid" => "1",
-    "a.min(Interval::of(2.0, 3.0, 4.0)).hi" => "4",
-    "a.max(Interval::of(2.0, 3.0, 4.0)).lo" => "2",
+    "a.min(b).lo" => "0.0",
+    "a.min(b).hi" => "5.0",
+    "a.max(b).lo" => "3.0",
+    "a.max(b).hi" => "8.0",
+    "a.min(b).mid" => "1.0",
+    "a.min(Interval::of(2.0, 3.0, 4.0)).hi" => "4.0",
+    "a.max(Interval::of(2.0, 3.0, 4.0)).lo" => "2.0",
     "a.min(4.5).hi" => "4.5",
-    "a.max(7).lo" => "7",
-    "a.max(7).mid" => "7",
+    "a.max(7).lo" => "7.0",
+    "a.max(7).mid" => "7.0",
 );
 
 // ordering is *certain*: true only if it holds for every value in both ranges
@@ -98,9 +98,9 @@ test_run!(
 test_run!(
     interval_sampling_is_a_triangular_draw,
     "let x = Interval::of(0.0, 2.0, 10.0);",
-    "x.sample(0.0)" => "0",
-    "x.sample(1.0)" => "10",
-    "x.sample(0.2)" => "2",
+    "x.sample(0.0)" => "0.0",
+    "x.sample(1.0)" => "10.0",
+    "x.sample(0.2)" => "2.0",
 );
 
 // `±` — the interval literal: `x ± d` is `Interval::within(x, d)` (an absolute
@@ -109,16 +109,16 @@ test_run!(
 test_run!(
     plus_minus_literal,
     "let pct = 25.0;",
-    "(30000 ± 10%).lo" => "27000",
-    "(30000 ± 10%).mid" => "30000",
-    "(30000 ± 10%).hi" => "33000",
+    "(30000 ± 10%).lo" => "27000.0",
+    "(30000 ± 10%).mid" => "30000.0",
+    "(30000 ± 10%).hi" => "33000.0",
     "(100.0 ± 0.5).lo" => "99.5",
     "(100.0 ± 0.5).hi" => "100.5",
-    "(1000.0 ± pct%).lo" => "750",
+    "(1000.0 ± pct%).lo" => "750.0",
     // a negative tolerance is the same width — `within`/`pm` take it absolute
-    "(100.0 ± -3.0).lo" => "97",
-    "(30kW ± 10%).lo" => "27000",
-    "(30s ± 0.5s).mid" => "30",
+    "(100.0 ± -3.0).lo" => "97.0",
+    "(30kW ± 10%).lo" => "27000.0",
+    "(30s ± 0.5s).mid" => "30.0",
 );
 test_fail!(
     plus_minus_rejects_mismatched_dims,

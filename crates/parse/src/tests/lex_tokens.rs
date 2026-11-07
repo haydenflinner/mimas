@@ -21,6 +21,13 @@ tok_test!(hex_underscore_tail: "0xFF_FF" => Hex("FF"), Ident("_FF"));
 tok_test!(float_exponent: "1.5e3" => Float(1500.0));
 tok_test!(float_exponent_signed: "1.5e+3 1.5e-3" => Float(1500.0), Float(0.0015));
 tok_test!(float_exponent_with_underscores: "1.5e1_0" => Float(15000000000.0));
+// r[verify mimas.num.text]
+// the whole literal parses in one go, so a float's own text reads back as
+// the same float — a mantissa times `10^exp` rounded twice, and `float::MAX`
+// as it prints came back as infinity
+tok_test!(float_exponent_reads_back_at_the_top: "1.7976931348623157e308" => Float(f64::MAX));
+tok_test!(float_exponent_reads_back_at_the_bottom: "5e-324 2.2250738585072014e-308" => Float(5e-324), Float(f64::MIN_POSITIVE));
+tok_test!(float_exponent_is_correctly_rounded: "1e-7 1e21 1e23" => Float(1e-7), Float(1e21), Float(1e23));
 tok_test!(float_exponent_then_code: "1.5e2+1" => Float(150.0), Plus, Int(1));
 tok_test!(float_e_without_digits: "1.5else" => Float(1.5), Else);
 // r[verify mimas.num.exponent]

@@ -6,14 +6,14 @@ test_run!(
     // r[verify mimas.unit.literal]
     unit_literals_are_base_unit_floats,
     "",
-    "25kW.to(\"W\")" => "25000",
-    "(25kW * 4h).to(\"kWh\")" => "100",
-    "(25kW * 4h).to(\"J\")" => "360000000",
-    "(0.14usd/kWh * 100kWh).to(\"usd\")" => "14",
+    "25kW.to(\"W\")" => "25000.0",
+    "(25kW * 4h).to(\"kWh\")" => "100.0",
+    "(25kW * 4h).to(\"J\")" => "360000000.0",
+    "(0.14usd/kWh * 100kWh).to(\"usd\")" => "14.0",
     "90deg.to(\"rad\") > 1.57" => "true",
-    "((6pct * 200.0) * 100.0).round()" => "1200",
-    "(0.7prob * 100.0).round()" => "70",
-    "(25bp * 200.0 * 100.0).round()" => "50",
+    "((6pct * 200.0) * 100.0).round()" => "1200.0",
+    "(0.7prob * 100.0).round()" => "70.0",
+    "(25bp * 200.0 * 100.0).round()" => "50.0",
     "(2.2logit > 2.0 && 2.2logit < 2.5)" => "true",
     "(3km / 2h).to(\"m/s\") < 0.42" => "true",
     "5kW.to(\"W\") == 5000.0" => "true",
@@ -28,7 +28,7 @@ test_run!(
      let plan = Plan { load = LOAD, tariff = 0.14usd/kWh };",
     "cost(energy(plan.load, 8h), plan.tariff).to(\"usd\") < 28.01" => "true",
     "cost(energy(plan.load, 8h), plan.tariff).to(\"usd\") > 27.99" => "true",
-    "(plan.load * 2.0).to(\"kW\")" => "50",
+    "(plan.load * 2.0).to(\"kW\")" => "50.0",
 );
 
 // `x.to(unit)`: a literal unit the checker knows can't raise — plain `float`.
@@ -38,10 +38,10 @@ test_run!(
     to_returns_plain_float_for_literal_units,
     "let u = \"W\";
      let bad = \"watt?\";",
-    "25kW.to(\"W\")" => "25000",
-    "25kW.to(u)?" => "25000",
+    "25kW.to(\"W\")" => "25000.0",
+    "25kW.to(u)?" => "25000.0",
     "5.0.to(bad)?" => "null",
-    "25kW.to(bad) absolve |_| -1.0" => "-1",
+    "25kW.to(bad) absolve |_| -1.0" => "-1.0",
 );
 
 // `x.to(1unit)`: the argument itself is a quantity and `to` divides by its scale —
@@ -51,11 +51,11 @@ test_run!(
     // r[verify mimas.unit.to]
     to_accepts_a_quantity_unit,
     "let deg_s = 1deg/s;",
-    "90deg.to(1deg)" => "90",
-    "(1turn / 1s).to(1deg/s)" => "360",
-    "(0.14usd/kWh * 100kWh).to(1usd)" => "14",
+    "90deg.to(1deg)" => "90.0",
+    "(1turn / 1s).to(1deg/s)" => "360.0",
+    "(0.14usd/kWh * 100kWh).to(1usd)" => "14.0",
     "(3km / 2h).to(1m/s) < 0.42" => "true",
-    "(1turn / 1s).to(deg_s)?" => "360",
+    "(1turn / 1s).to(deg_s)?" => "360.0",
 );
 
 // r[verify mimas.unit.constant]
@@ -66,19 +66,19 @@ test_run!(
 test_run!(
     unit_names_are_constants,
     "const RATE = 720deg/s;",
-    "(25kW * 4h).to(kWh)" => "100",
-    "(25kW * 4h) / kWh" => "100",
-    "(1turn / 1s).to(deg/s)" => "360",
-    "((1turn / 1s) / (deg/s))" => "360",
-    "(0.14usd/kWh * 100kWh) / usd" => "14",
+    "(25kW * 4h).to(kWh)" => "100.0",
+    "(25kW * 4h) / kWh" => "100.0",
+    "(1turn / 1s).to(deg/s)" => "360.0",
+    "((1turn / 1s) / (deg/s))" => "360.0",
+    "(0.14usd/kWh * 100kWh) / usd" => "14.0",
     "((0.14usd/kWh).to(usd/kWh) - 0.14).abs() < 1e-12" => "true",
-    "(2.5 * m).to(cm)" => "250",
+    "(2.5 * m).to(cm)" => "250.0",
     "(deg / s == 1deg / 1s)" => "true",
     "(kWh == 1kWh)" => "true",
     "pct == 0.01" => "true",
-    "RATE.to(deg/s)" => "720",
-    "{ let u = kWh; (25kW * 4h).to(u)? }" => "100",
-    "(m * m).to(m*m)" => "1",
+    "RATE.to(deg/s)" => "720.0",
+    "{ let u = kWh; (25kW * 4h).to(u)? }" => "100.0",
+    "(m * m).to(m*m)" => "1.0",
 );
 
 #[test]
@@ -111,13 +111,13 @@ test_run!(
     "(200gon.to(\"turn\") - 0.5).abs() < 1.0e-9" => "true",
     // trig eats angles and plain radians alike; inverses give angles back
     "((90deg).sin() - 1.0).abs() < 1.0e-12" => "true",
-    "(std::math::PI / 2.0).sin() - (90deg).sin()" => "0",
-    "(1.0).atan2(0.0).to(\"deg\") - 90.0" => "0",
-    "(0.0).asin().to(\"deg\")" => "0",
+    "(std::math::PI / 2.0).sin() - (90deg).sin()" => "0.0",
+    "(1.0).atan2(0.0).to(\"deg\") - 90.0" => "0.0",
+    "(0.0).asin().to(\"deg\")" => "0.0",
     // angles compose: add across units, divide by time for angular velocity
-    "(90deg + 0.25turn).to(\"deg\")" => "180",
+    "(90deg + 0.25turn).to(\"deg\")" => "180.0",
     "(90deg + 0.25turn).to(\"turn\")" => "0.5",
-    "((1turn / 1s) * 2s).to(\"deg\")" => "720",
+    "((1turn / 1s) * 2s).to(\"deg\")" => "720.0",
 );
 
 fn rejected(src: &str, needle: &str) {
@@ -236,8 +236,8 @@ test_run!(
     interval_arithmetic_carries_units,
     "fn saved() -> Interval<usd> { Interval::pm(30000.0usd, 0.1) * 1.0 }
      let g = Interval::pm(2kW, 0.5) * Interval::pm(4h, 0.25);",
-    "saved().lo.to(\"usd\")" => "27000",
-    "g.mid.to(\"kWh\")" => "8",
+    "saved().lo.to(\"usd\")" => "27000.0",
+    "g.mid.to(\"kWh\")" => "8.0",
     "g.hi.to(\"kWh\") > 11.2" => "true",
     "(g * 2.0).width().to(\"kWh\") > 0.0" => "true",
 );
@@ -288,8 +288,8 @@ test_run!(
      let df = from_csv(\"month,kwh\\njan,7400\\nfeb,6900\\n\")!;
      let xs = df.pull_as(\"kwh\", \"kWh\")!;
      let total: kWh = xs.sum();",
-    "total.to(\"kWh\")" => "14300",
-    "xs[0].to(\"MJ\")" => "26640",
+    "total.to(\"kWh\")" => "14300.0",
+    "xs[0].to(\"MJ\")" => "26640.0",
 );
 
 #[cfg(feature = "dataframe")]
@@ -324,8 +324,8 @@ test_run!(
     "let q = 5.5kg.to_int();
      let x: kg = q;",
     "q" => "5",
-    "x.to(\"g\")" => "5000",
-    "q.to(\"kg\")" => "5",
+    "x.to(\"g\")" => "5000.0",
+    "q.to(\"kg\")" => "5.0",
     // a plain float's to_int is untouched -- still a dimensionless int
     "3.7.to_int() + 1" => "4",
 );
@@ -352,15 +352,15 @@ fn to_int_quantities_are_still_dimension_checked() {
 test_run!(
     studio_units,
     "",
-    "4b.to(\"bit\")" => "4",
-    "2meas.to(\"beat\")" => "8",
-    "(1phrase).to(\"beat\")" => "16",
-    "(120bpm * 30s).to(\"beat\")" => "60",
-    "(30cpm * 1min).to(\"meas\")" => "30",
+    "4b.to(\"bit\")" => "4.0",
+    "2meas.to(\"beat\")" => "8.0",
+    "(1phrase).to(\"beat\")" => "16.0",
+    "(120bpm * 30s).to(\"beat\")" => "60.0",
+    "(30cpm * 1min).to(\"meas\")" => "30.0",
     "132bpm.to(\"beat/s\")" => "2.2",
-    "(1oct).to(\"st\")" => "12",
-    "(1KiB).to(\"bit\")" => "8192",
-    "(1B).to(\"bit\")" => "8",
+    "(1oct).to(\"st\")" => "12.0",
+    "(1KiB).to(\"bit\")" => "8192.0",
+    "(1B).to(\"bit\")" => "8.0",
 );
 
 #[test]
@@ -398,10 +398,10 @@ test_run!(
     "j" => "1",
     "i < xs.len()" => "true",
     // index arithmetic keeps the dim; a ratio of indexes is a plain number
-    "(i * 2).to(\"idx\")" => "2",
-    "i / i" => "1",
+    "(i * 2).to(\"idx\")" => "2.0",
+    "i / i" => "1.0",
     // reading one back as a plain number
-    "i.to(\"index\")" => "1",
+    "i.to(\"index\")" => "1.0",
 );
 
 test_run!(
@@ -430,7 +430,7 @@ test_run!(
     "x_i" => "5",
     "_i" => "99",
     // the dim is still `index` — `_i` is a spelling, not a new unit
-    "i.to(\"index\")" => "0",
+    "i.to(\"index\")" => "0.0",
 );
 
 #[test]
@@ -477,15 +477,15 @@ test_run!(
      unit sprint = 2tile;
      unit dozen = 12;
      const W = 18tile;",
-    "W" => "18",
-    "(W + 2tile)" => "20",
-    "(3league).to(\"mi\")" => "9",
+    "W" => "18.0",
+    "(W + 2tile)" => "20.0",
+    "(3league).to(\"mi\")" => "9.0",
     "((1league).to(\"m\") > 4828 && (1league).to(\"m\") < 4829)" => "true",
-    "(W / 2.0).to(\"tile\")" => "9",
-    "(1sprint).to(\"tile\")" => "2",
+    "(W / 2.0).to(\"tile\")" => "9.0",
+    "(1sprint).to(\"tile\")" => "2.0",
     // a custom unit converts between its own spellings
-    "(9mi).to(\"league\")" => "3",
-    "2dozen" => "24",
+    "(9mi).to(\"league\")" => "3.0",
+    "2dozen" => "24.0",
 );
 
 #[test]

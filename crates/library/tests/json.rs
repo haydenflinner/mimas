@@ -135,7 +135,7 @@ test_run!(
     as_float_on_int_number,
     "use std::parse;
      let v = parse::from_json(\"9\")!;",
-    "v.as_float()!" => "9",
+    "v.as_float()!" => "9.0",
 );
 
 test_run!(
@@ -156,7 +156,7 @@ test_run!(
     as_float_on_zero,
     "use std::parse;
      let v = parse::from_json(\"0\")!;",
-    "v.as_float()!" => "0",
+    "v.as_float()!" => "0.0",
 );
 
 // wrong variant -> null
@@ -185,7 +185,7 @@ test_run!(
      let v = parse::from_json(\"[10, 20, 30]\")!;
      let a = v.as_array()!;
      let first = a[0];",
-    "first.as_float()!" => "10",
+    "first.as_float()!" => "10.0",
 );
 
 test_run!(
@@ -229,7 +229,7 @@ test_run!(
      let v = parse::from_json(\"{\\\"n\\\": 7}\")!;
      let d = v.as_dict()!;
      let nv = d[\"n\"]!;",
-    "nv.as_float()!" => "7",
+    "nv.as_float()!" => "7.0",
 );
 
 test_run!(
@@ -261,7 +261,7 @@ test_run!(
      let user0 = users[0];
      let u = user0.as_dict()!;
      let ageval = u[\"age\"]!;",
-    "ageval.as_float()!" => "30",
+    "ageval.as_float()!" => "30.0",
 );
 
 // malformed json -> from_json raises; `!` on a raise faults the VM

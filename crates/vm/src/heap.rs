@@ -576,9 +576,7 @@ impl<'gc> Ctx<'gc> {
             Val::Bool(b) => out.push_str(if b { "true" } else { "false" }),
             // -- alloc
             Val::Int(i) => out.push_str(itoa::Buffer::new().format(i)),
-            Val::Float(f) => {
-                let _ = write!(out, "{f}");
-            }
+            Val::Float(f) => shared::write_float(out, f),
             Val::Str(s) => {
                 if quote {
                     let _ = write!(out, "{:?}", s.as_str());

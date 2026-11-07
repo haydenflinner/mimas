@@ -428,17 +428,19 @@ fn format(n: f64, places: usize) -> Result<String, RtErr> {
 }
 
 #[native]
-/// Returns the number as a string, using the fewest digits that still read back as the same
-/// `float`. A whole number has no `.0`. For a fixed number of decimal places, use
+/// Returns the number as a string that reads back as the same `float`: the fewest digits
+/// that do, a whole number keeping its `.0`, and `float::INF` / `float::NAN` for the
+/// corners. It is what `print` and `"{x}"` show. For a fixed number of decimal places, use
 /// [`format`](#format).
 ///
 /// ```mimas
 /// let a = 0.1.to_str();         // "0.1"
-/// let b = 2.0.to_str();         // "2"
+/// let b = 2.0.to_str();         // "2.0"
 /// let c = (0.1 + 0.2).to_str(); // "0.30000000000000004"
+/// let d = 1e21.to_str();        // "1e21"
 /// ```
 fn to_str(n: f64) -> String {
-    n.to_string()
+    shared::float_text(n)
 }
 
 #[native]

@@ -891,7 +891,7 @@ test_run_display!(
          5km
          3km
      };",
-    r#"df.pull("dist")![0] + 100m"# => "5100",
+    r#"df.pull("dist")![0] + 100m"# => "5100.0",
 );
 
 // ---- unit columns inside query/mutate expressions -------------------------------------
@@ -936,7 +936,7 @@ test_run!(
          df
          derive cost = price * n
      };",
-    r#"out.pull("cost")!.sum().to("usd")"# => "16",
+    r#"out.pull("cost")!.sum().to("usd")"# => "16.0",
 );
 
 // the method api runs the same checks on its explicit column expressions
@@ -945,7 +945,7 @@ test_run!(
     MASSES,
     r#"df.filter(col("mass") > 2kg)!.pull("item")!.join(",")"# => r#""b""#,
     r#"df.filter(col("mass").is_in([0.5kg, 3kg]))!.pull("item")!.join(",")"# => r#""b,c""#,
-    r#"df.mutate([(col("mass") / col("mass")).alias("one")])!.pull("one")![0] + 1.0"# => "2",
+    r#"df.mutate([(col("mass") / col("mass")).alias("one")])!.pull("one")![0] + 1.0"# => "2.0",
 );
 
 // mismatched dims inside a column expr are check-time errors in the query verbs…

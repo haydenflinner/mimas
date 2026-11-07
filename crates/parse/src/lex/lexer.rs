@@ -250,7 +250,15 @@ impl<'s> Lexer<'s> {
     /// an `e` that isn't followed by `digits` (or `sign + digits`) is simply left alone --
     /// `1.5else` is `1.5` then the identifier `else`. Returns `None` when no exponent was
     /// consumed, so the caller knows whether to keep an `Int` or mint a `Float`.
-    fn with_exponent(&mut self, mantissa: f64) -> Option<f64> {
+    ///
+    /// The value is the whole literal's text parsed in one go, not the
+    /// mantissa times `10^exp`: that product rounds twice, so
+    /// `1.7976931348623157e308` (`float::MAX` as it prints) overflowed to
+    /// infinity and `1e-7` could miss the nearest double by a bit. A
+    /// float's text has to read back as the float that printed it.
+    // r[impl mimas.num.text]
+    fn with_exponent(&mut self, start: usize, mantissa: f64) -> Option<f64> {
+        let source = self.source;
         let stream = &mut self.char_stream;
         if !stream.match_peek('e') {
             return None;
@@ -262,7 +270,8 @@ impl<'s> Lexer<'s> {
         match exp {
             Ok(exp) => {
                 stream.chomp_peeks();
-                Some(mantissa * 10f64.powi(exp))
+                let text = source[start..stream.position()].replace('_', "");
+                Some(text.parse::<f64>().unwrap_or(mantissa * 10f64.powi(exp)))
             }
             Err(_) => {
                 stream.reset_peeks();
@@ -522,14 +531,14 @@ impl<'s> Lex<'s, Tok<TokKind<'s>>, TokKind<'s>> for Lexer<'s> {
                 }
             }
         } else if let Some(mantissa) = self.construct_float(true, false) {
-            let float = self.with_exponent(mantissa).unwrap_or(mantissa);
+            let float = self.with_exponent(start, mantissa).unwrap_or(mantissa);
             self.with_unit(TokKind::Float(float), float)
         } else if rest.starts_with(|c: char| c.is_ascii_digit()) {
             match self.construct_integer(true) {
                 // r[impl mimas.num.exponent]
                 // `1e-6`, `2e3`: an exponent on an int mantissa makes a float;
                 // `1e` or `1else` is an int then whatever follows, as before
-                Some(int) => match self.with_exponent(int as f64) {
+                Some(int) => match self.with_exponent(start, int as f64) {
                     Some(float) => self.with_unit(TokKind::Float(float), float),
                     None => self.with_unit(TokKind::Int(int), int as f64),
                 },

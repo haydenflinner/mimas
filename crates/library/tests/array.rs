@@ -348,8 +348,8 @@ test_run!(
 
 test_run!(
     sum_float,
-    "[1.0, 2.0, 3.0].sum()" => "6",
-    "[1.5, 2.5].sum()" => "4",
+    "[1.0, 2.0, 3.0].sum()" => "6.0",
+    "[1.5, 2.5].sum()" => "4.0",
 );
 
 // empty float sum is 0.0 (renders `-0`, a whole-float display quirk); equals 0.0 numerically

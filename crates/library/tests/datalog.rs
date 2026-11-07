@@ -328,5 +328,5 @@ test_run!(
         rel weight(id: int, w: int) from w
         rel avg(m: float)
         avg(m) if agg m = mean(x) in weight(_, x)
-    }.1"# => "[5]",
+    }.1"# => "[5.0]",
 );

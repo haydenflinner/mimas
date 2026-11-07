@@ -30,16 +30,16 @@ let b = V { x = 3.0, y = 4.0 };
 test_run!(
     binary_ops_dispatch_to_impl_methods,
     VEC,
-    "(a + b).x" => "4",
-    "(a + b).y" => "6",
-    "(a - b).y" => "-2",
-    "(a * 2.0).x" => "2",
-    "(a & b).x" => "4",
-    "(a | b).y" => "-2",
-    "(-a).y" => "-2",
+    "(a + b).x" => "4.0",
+    "(a + b).y" => "6.0",
+    "(a - b).y" => "-2.0",
+    "(a * 2.0).x" => "2.0",
+    "(a & b).x" => "4.0",
+    "(a | b).y" => "-2.0",
+    "(-a).y" => "-2.0",
     // `!a` calls `a.inv()` — and `not a` spells the same call
-    "(!a).x" => "2",
-    "(not a).x" => "2",
+    "(!a).x" => "2.0",
+    "(not a).x" => "2.0",
     // bool has no `inv`: `!` stays the builtin rule
     "!false" => "true",
 );
@@ -48,10 +48,10 @@ test_run!(
     r_named_methods_cover_left_owned_ops,
     VEC,
     // `s - v` finds `v.rsub(s)` — `self` is the right operand
-    "(10.0 - a).x" => "9",
-    "(10.0 - a).y" => "8",
-    "(2.0 * b).y" => "8",
-    "(b * 2.0).y" => "8",
+    "(10.0 - a).x" => "9.0",
+    "(10.0 - a).y" => "8.0",
+    "(2.0 * b).y" => "8.0",
+    "(b * 2.0).y" => "8.0",
 );
 
 test_run!(
@@ -66,8 +66,8 @@ test_run!(
 test_run!(
     compound_assign_runs_the_method,
     VEC,
-    "{ let c = a; c += b; c.x }" => "4",
-    "{ let c = a; c -= b; c.x }" => "-2",
+    "{ let c = a; c += b; c.x }" => "4.0",
+    "{ let c = a; c -= b; c.x }" => "-2.0",
 );
 
 test_run!(
@@ -82,11 +82,11 @@ test_run!(
 test_run!(
     vec2_native_ops,
     "use std::math::Vec2; let v = Vec2::new(3.0, 4.0);",
-    "(v * 2.0).x" => "6",
-    "(2.0 * v).y" => "8",
-    "(v / 2.0).y" => "2",
-    "(-v).x" => "-3",
-    "(v + Vec2::new(1.0, 1.0)).x" => "4",
+    "(v * 2.0).x" => "6.0",
+    "(2.0 * v).y" => "8.0",
+    "(v / 2.0).y" => "2.0",
+    "(-v).x" => "-3.0",
+    "(v + Vec2::new(1.0, 1.0)).x" => "4.0",
 );
 
 // `nand`/`nor` run as builtin gates on bools (eager — no short-circuit) and
@@ -111,13 +111,13 @@ test_run!(
 test_run!(
     nand_nor_dispatch_to_impl_methods,
     VEC,
-    "(a nand b).x" => "2",
-    "(a ⍲ b).y" => "4",
+    "(a nand b).x" => "2.0",
+    "(a ⍲ b).y" => "4.0",
     // the word and the glyph spell the same call
     "(a nand b).x == (a ⍲ b).x" => "true",
-    "(a nor b).x" => "3",
+    "(a nor b).x" => "3.0",
     // `2.0 nor v` finds `v.rnor(2.0)` — self owns the impl on the right
-    "(2.0 nor b).x" => "-1",
+    "(2.0 nor b).x" => "-1.0",
 );
 
 // not an operator impl: a method named `add` with extra required params is an

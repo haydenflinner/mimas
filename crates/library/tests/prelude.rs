@@ -25,11 +25,11 @@ fn print_names_the_unit() {
     assert_eq!(
         lines,
         [
-            "25000 W",
+            "25000.0 W",
             "0.11430000000000001 m/px",
             "42",
-            "dbg value: 3 s",
-            "5 kg",
+            "dbg value: 3.0 s",
+            "5.0 kg",
         ]
     );
 }

@@ -995,7 +995,7 @@ impl std::fmt::Display for Captured {
             Captured::Null => f.write_str("null"),
             Captured::Bool(b) => write!(f, "{b}"),
             Captured::Int(i) => write!(f, "{i}"),
-            Captured::Float(n) => write!(f, "{n}"),
+            Captured::Float(n) => f.write_str(&shared::float_text(*n)),
             Captured::Str(s) => write!(f, "{s:?}"),
             Captured::Array(items) => {
                 f.write_str("[")?;

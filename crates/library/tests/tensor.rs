@@ -114,7 +114,7 @@ test_run_display!(
 test_run!(
     item_extracts_a_scalar_float,
     T,
-    "tensor([[1.0, 2.0], [3.0, 4.0]])!.sum()!.item()!" => "10",
+    "tensor([[1.0, 2.0], [3.0, 4.0]])!.sum()!.item()!" => "10.0",
 );
 
 // -- the ML-shaped smoke test: an MLP layer, pure natives -------------------------------------
