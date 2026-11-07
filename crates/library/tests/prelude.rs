@@ -35,11 +35,12 @@ fn print_names_the_unit() {
 }
 
 // a bare expression at the top level echoes its value at its line once a
-// host turns echoes on; a let, a print (unit) and a check line stay silent
-// r[verify mimas.echo] r[verify mimas.stmt.trailing]
+// host turns echoes on, and so does a top-level `let NAME`; a print (unit),
+// a check line, a destructuring let and a let inside a fn stay silent
+// r[verify mimas.echo] r[verify mimas.stmt.trailing] r[verify mimas.echo.let]
 #[test]
 fn top_level_expressions_echo() {
-    let src = "3 + 5\nlet x = 2;\nx * 3\nprint(\"hi\");\nfn f() -> int { 7 }\nf()\n\"go\" + \"!\"";
+    let src = "3 + 5\nlet x = 2;\nx * 3\nprint(\"hi\");\nfn f() -> int { let y = 9; y - 2 }\nf()\nlet (a, b) = (1, 2);\n\"go\" + \"!\"";
     let mut vm = vm::Vm::compile(src, library::std).expect("compiles");
     vm.fixture::<vm::fixtures::Echoes>().on.set(true);
     vm.run().expect("runs");
@@ -47,21 +48,36 @@ fn top_level_expressions_echo() {
         .fixture::<vm::fixtures::Echoes>()
         .take()
         .into_iter()
-        .map(|(loc, text, value)| (loc.span.start(), text, matches!(value, vm::Inspect::Int(_) | vm::Inspect::Str(_))))
+        .map(|(loc, text, value)| (&src[loc.span.start()..loc.span.start() + 5], text, matches!(value, vm::Inspect::Int(_) | vm::Inspect::Str(_))))
         .collect::<Vec<_>>();
     assert_eq!(
         lines,
         [
-            (0, "8".to_string(), true),
-            (17, "6".to_string(), true),
-            (56, "7".to_string(), true),
-            (60, "\"go!\"".to_string(), true),
+            ("3 + 5", "8".to_string(), true),
+            ("let x", "2".to_string(), true),
+            ("x * 3", "6".to_string(), true),
+            ("f()\nl", "7".to_string(), true),
+            ("\"go\" ", "\"go!\"".to_string(), true),
         ]
     );
     // off by default: a plain run records nothing
     let mut vm = vm::Vm::compile(src, library::std).expect("compiles");
     vm.run().expect("runs");
     assert!(vm.fixture::<vm::fixtures::Echoes>().take().is_empty());
+}
+
+// an echo carries its unit, a `let`'s and a bare expression's alike — the
+// value a host shows beside the line reads `28.0 usd`, not `28.0`
+// r[verify mimas.echo.let]
+#[test]
+fn echoes_carry_units() {
+    let src = "let pv = 25kW;\nlet bill = pv * 8h * 0.14usd/kWh;\n3kg + 2kg\nlet n = 4;\nlet m = { let inner = 7; inner + 1 };\nfor i in 0..2 { let j = i; }";
+    let mut vm = vm::Vm::compile(src, library::std).expect("compiles");
+    vm.fixture::<vm::fixtures::Echoes>().on.set(true);
+    vm.run().expect("runs");
+    let texts: Vec<String> = vm.fixture::<vm::fixtures::Echoes>().take().into_iter().map(|(_, t, _)| t).collect();
+    // a `let` inside a block or a loop is not a top-level binding: no echo
+    assert_eq!(texts, ["25000.0 W", "28.0 usd", "5.0 kg", "4", "8"]);
 }
 
 // panic has type `!`, so a panicking match/if arm coerces to the other arm's type

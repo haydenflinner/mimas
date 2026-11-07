@@ -29,6 +29,9 @@ pub struct Ir {
     pub(crate) current_body: BodyId,
     body_stack: Vec<BodyId>,
     pub(crate) current_loc: Location,
+    /// How many statements deep the lowering is: 1 for a statement written directly in a
+    /// file's top level, more inside a block, loop or fn body. A `let` echoes only at 1.
+    pub(crate) stmt_depth: u32,
 }
 
 impl Ir {
@@ -47,6 +50,7 @@ impl Ir {
             tests: Vec::new(),
             closure_bodies: HashMap::new(),
             current_loc: Location::SYNTHETIC,
+            stmt_depth: 0,
         }
     }
 

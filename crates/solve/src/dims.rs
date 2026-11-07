@@ -394,6 +394,11 @@ impl<'a> Pass<'a> {
                     }
                     None => got,
                 };
+                // a top-level `let`'s echo prints with its unit, like `print` does
+                // r[impl mimas.echo.let]
+                if let Some(dim) = d.dim().filter(|x| !x.is_none()) {
+                    self.print_dims.insert(stmt.location(), dim);
+                }
                 self.bind(&l.left, d);
             }
             StmtKind::Assignment(a) => {
@@ -412,7 +417,11 @@ impl<'a> Pass<'a> {
                 }
             }
             StmtKind::Expr(e) => {
-                self.expr(e);
+                // a bare expression's echo carries its unit (`25kW * 8h` shows `720000000 J`)
+                // r[impl mimas.echo]
+                if let Some(dim) = self.expr(e).dim().filter(|x| !x.is_none()) {
+                    self.print_dims.insert(stmt.location(), dim);
+                }
             }
             StmtKind::Item(item) => self.item(item),
             // `unit` decls register into the units table at parse — nothing to check

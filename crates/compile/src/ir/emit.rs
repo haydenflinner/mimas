@@ -31,11 +31,32 @@ pub(crate) trait Lower {
 
 impl Ir {
     pub(crate) fn stmt(&mut self, stmt: &Stmt) -> Option<()> {
+        self.stmt_depth += 1;
+        let done = self.stmt_at(stmt);
+        self.stmt_depth -= 1;
+        done
+    }
+
+    fn stmt_at(&mut self, stmt: &Stmt) -> Option<()> {
         self.with_loc(stmt.location(), |ir| match stmt.kind() {
             StmtKind::Let(s) => {
                 let value = s.right.lower(ir)?;
                 match s.else_branch.as_ref() {
-                    None => ir.pattern(&s.left, Some(value))?,
+                    None => {
+                        ir.pattern(&s.left, Some(value))?;
+                        // A top-level `let NAME = …` hands its bound value to `echo` too, at
+                        // the let's line: a host shows a number beside the `let` that made
+                        // it, the way a bare expression shows its value.
+                        // r[impl mimas.echo.let]
+                        if ir.current_body == crate::ir::BodyId::ZERO
+                            && ir.stmt_depth == 1
+                            && !ir.is_terminated()
+                            && matches!(s.left.kind(), PatKind::Ident(_))
+                            && let Some(nid) = ir.resolutions.echo_native
+                        {
+                            ir.current().call_native(nid, vec![value]);
+                        }
+                    }
                     Some(else_expr) => {
                         let otherwise = ir.push_block("let_else");
                         let cont = ir.push_block("let_cont");
