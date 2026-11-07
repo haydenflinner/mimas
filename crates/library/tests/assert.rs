@@ -123,3 +123,43 @@ fn tests_list_runs() {
     assert_eq!(results[1].name, "add(1, 2) == 4");
     assert!(!results[1].passed(), "{:?}", results[1]);
 }
+
+// r[verify check.report.call]
+#[test]
+fn predicate_failure_shows_its_arguments() {
+    let pre = "fn near(a: float, b: float) -> bool { (a - b).abs() < 0.01 }\n\
+               fn half(x: float) -> float { x / 2.0 }\n";
+    let err = test_runner::try_execute(&format!("{pre}assert!(near(half(3.0), 1.0));"))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("assertion failed: near(1.5, 1.0) is false"), "{err}");
+    let err = test_runner::try_execute(&format!("{pre}assert!(!(near(half(2.0), 1.0)));"))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("assertion failed: near(1.0, 1.0) is true"), "{err}");
+}
+
+#[test]
+fn predicate_arguments_evaluate_once() {
+    // each argument runs once whether the check passes or fails
+    test_runner::try_execute(
+        "fn tick(c: [int]) -> int { c.push(1); c.len() }\n\
+         fn is_one(n: int) -> bool { n == 1 }\n\
+         let c = [];\n\
+         assert!(is_one(tick(c)));\n\
+         assert!(c.len() == 1);",
+    )
+    .unwrap();
+}
+
+test_run!(
+    predicate_arguments_keep_their_typing,
+    "fn any_of(xs: [int], f: (int) -> bool) -> bool { for x in xs { if f(x) { return true; } } false }\n\
+     fn count(xs: [str]) -> int { xs.len() }\n\
+     fn pos(n: int) -> bool { n > 0 }",
+    r#"{ assert!(any_of([1, -2], |x| x > 0)); 0 }"# => "0",
+    r#"{ assert!(any_of([1, -2], pos)); 0 }"# => "0",
+    r#"{ assert!(count([]) == 0); 0 }"# => "0",
+    r#"{ assert!(!(any_of([], pos))); 0 }"# => "0",
+    r#"{ assert!([1, 2].contains(1 + 1)); 0 }"# => "0",
+);

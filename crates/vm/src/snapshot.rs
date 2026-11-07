@@ -15,8 +15,9 @@
 //! * Only `regs`-reachable state survives — that's the same root set the collector keeps.
 //!   `Stashed` handles are host-side and invalid after restore (`restore` resets the root set,
 //!   so a stale handle fails loudly via [`Ctx::holds`] rather than silently reading an orphaned
-//!   object). Values that can't be cloned out — a `DataFrame`, `PlExpr`, `GroupBy`, or
-//!   `DarklyImage` held mid-game — make the snapshot itself fail with
+//!   object). A `DataFrame` or `PlExpr` clones out as a node (polars shares its
+//!   columns, so that is a handle copy). Values that can't be cloned out — a `GroupBy`,
+//!   `DarklyImage` or `Tensor` held mid-game — make the snapshot itself fail with
 //!   [`SnapError::Unshareable`]; the host's fallback is replaying inputs from frame 0.
 //!
 //! Sharing and cycles are preserved: every `Gc` object is a node in `nodes`, keyed by pointer
@@ -77,6 +78,14 @@ pub enum SnapNode {
         function: u32,
         captures: Vec<SnapVal>,
     },
+    /// A data frame — polars columns are `Arc`-shared, so the clone is a
+    /// handle copy, and a write after restore copies on write like any
+    /// other polars mutation. Restores as a fresh object holding it.
+    #[cfg(feature = "dataframe")]
+    DataFrame(polars::frame::DataFrame),
+    /// A query expression: immutable, cloned whole.
+    #[cfg(feature = "dataframe")]
+    PlExpr(polars::prelude::Expr),
 }
 
 /// A call [`Frame`] as plain data — `chunk`/`ip` are only meaningful to the snapshot's program.
@@ -176,10 +185,11 @@ impl<'gc> Snapper<'gc> {
             Val::Dict(d) => self.node(Gc::as_ptr(d.0) as *const (), v),
             Val::Instance(i) => self.node(Gc::as_ptr(i.0) as *const (), v),
             Val::Closure(c) => self.node(Gc::as_ptr(c.0) as *const (), v),
+            // r[impl game.state.dataframe]
             #[cfg(feature = "dataframe")]
-            Val::DataFrame(_) => return Err(SnapError::Unshareable("dataframe")),
+            Val::DataFrame(d) => self.node(Gc::as_ptr(d.0) as *const (), v),
             #[cfg(feature = "dataframe")]
-            Val::PlExpr(_) => return Err(SnapError::Unshareable("expr")),
+            Val::PlExpr(e) => self.node(Gc::as_ptr(e.0) as *const (), v),
             #[cfg(feature = "dataframe")]
             Val::GroupBy(_) => return Err(SnapError::Unshareable("group_by")),
             #[cfg(feature = "darkly")]
@@ -248,6 +258,10 @@ impl<'gc> Snapper<'gc> {
                     .collect::<Result<_, _>>()?;
                 SnapNode::Closure { function, captures }
             }
+            #[cfg(feature = "dataframe")]
+            Val::DataFrame(d) => SnapNode::DataFrame(d.0.borrow().0.clone()),
+            #[cfg(feature = "dataframe")]
+            Val::PlExpr(e) => SnapNode::PlExpr(Gc::as_ref(e.0).0.clone()),
             _ => unreachable!("only container vals queue as nodes"),
         };
         Ok(())
@@ -371,6 +385,10 @@ impl Vm {
                         Val::Instance(ctx.new_instance(*struct_id, Fields::new(Vec::new())))
                     }
                     SnapNode::Closure { .. } => continue,
+                    #[cfg(feature = "dataframe")]
+                    SnapNode::DataFrame(df) => Val::DataFrame(ctx.new_dataframe(df.clone())),
+                    #[cfg(feature = "dataframe")]
+                    SnapNode::PlExpr(e) => Val::PlExpr(ctx.new_plexpr(e.clone())),
                 });
             }
             let regs = snap
@@ -408,6 +426,8 @@ impl Vm {
                         inst.0.borrow_mut(mc).fields = Fields::new(vals);
                     }
                     (SnapNode::Closure { .. }, _) => {} // built whole in `thaw_closure`
+                    #[cfg(feature = "dataframe")]
+                    (SnapNode::DataFrame(_) | SnapNode::PlExpr(_), _) => {} // whole at pre-allocation
                     _ => unreachable!("thawed node kind matches its snapshot kind"),
                 }
             }

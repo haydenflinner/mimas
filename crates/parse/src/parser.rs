@@ -3163,8 +3163,68 @@ impl<'s> Parser<'s> {
                 let op_text = if inn.condition { "in" } else { "!in" };
                 self.rewrite_assert_in(start, inn.left, inn.right, !inn.condition, op_text)
             }
+            // r[impl check.report.call]
+            ExprKind::Call(call) => self.rewrite_assert_call(start, call, false),
+            ExprKind::Unary(u) if u.op == UnaryOp::Not => {
+                match Self::skip_groups(&u.right).kind().clone() {
+                    ExprKind::Call(call) => self.rewrite_assert_call(start, call, true),
+                    _ => self.rewrite_assert_bool(start, inner),
+                }
+            }
             _ => self.rewrite_assert_bool(start, inner),
         }
+    }
+
+    /// A predicate call: each argument is evaluated once into a temp so a
+    /// failure can say what the call saw — `is_root_of(2.0, 1.414…) is false`
+    /// rather than the source text alone. Literals and closures stay inline
+    /// (a closure's parameter types come from the call) and print as written.
+    fn rewrite_assert_call(&mut self, start: usize, call: Call, negated: bool) -> Expr {
+        let callee = self.source_of(&call.left);
+        let mut lets = Vec::new();
+        let mut args = Vec::new();
+        let mut parts = vec![FStringPart::Literal(format!("assertion failed: {callee}("))];
+        for (i, arg) in call.arguments.into_iter().enumerate() {
+            if i > 0 {
+                parts.push(FStringPart::Literal(", ".into()));
+            }
+            if let Some(name) = &arg.name {
+                parts.push(FStringPart::Literal(format!("{name} = ")));
+            }
+            let value = match arg.value.kind() {
+                ExprKind::Literal(_) | ExprKind::Closure(_) => {
+                    parts.push(FStringPart::Literal(self.source_of(&arg.value)));
+                    arg.value
+                }
+                ExprKind::Ident(_) => {
+                    parts.push(FStringPart::Expr(arg.value.clone()));
+                    arg.value
+                }
+                _ => {
+                    self.assert_id += 1;
+                    let ident = self.ident_at(format!("__assert_arg_{}", self.assert_id), start);
+                    lets.push(self.synthetic_let(ident.clone(), arg.value, start));
+                    let use_site = self.new_expr(ident, start);
+                    parts.push(FStringPart::Expr(use_site.clone()));
+                    use_site
+                }
+            };
+            args.push(Argument {
+                name: arg.name,
+                value,
+            });
+        }
+        parts.push(FStringPart::Literal(
+            if negated { ") is true" } else { ") is false" }.into(),
+        ));
+        let rebuilt = self.new_expr(Call::new(call.left, args), start);
+        let condition = if negated {
+            rebuilt
+        } else {
+            self.new_expr(Unary::new(UnaryOp::Not, rebuilt), start)
+        };
+        let message = self.new_expr(FString::new(parts), start);
+        self.assert_lets_if(start, lets, condition, message)
     }
 
     fn skip_groups(mut expr: &Expr) -> &Expr {

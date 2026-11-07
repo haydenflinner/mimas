@@ -1204,3 +1204,19 @@ test_fail!(
     r#"use std::polars::*;
        let _ = from_json("[1,2,3]")!;"#,
 );
+
+// A data frame held in program state snapshots and restores: game pages
+// carry their top-level `let`s across a replay checkpoint or an edit,
+// and a table is a fine thing for a top-level `let` to hold.
+// r[verify game.state.dataframe]
+#[test]
+fn a_dataframe_survives_snapshot_and_restore() {
+    let src = format!("{EMPLOYEES}\nlet same = df;\nlet q = col(\"age\") > 30;");
+    let mut vm = vm::Vm::execute(&src, library::std).expect("compiled and ran");
+    let before = vm.resolve_name_to_string("df").unwrap().unwrap();
+    let snap = vm.snapshot().expect("a dataframe snapshots");
+    vm.restore(&snap).expect("restore");
+    assert_eq!(vm.resolve_name_to_string("df").unwrap().unwrap(), before);
+    assert_eq!(vm.resolve_name_to_string("same").unwrap().unwrap(), before);
+    assert!(vm.resolve_name_to_string("q").unwrap().is_ok());
+}

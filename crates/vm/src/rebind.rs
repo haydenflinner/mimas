@@ -211,6 +211,18 @@ impl<'a> Tx<'a> {
             // elements carry over as-is (typed tags ride with the contents)
             SnapNode::IntArray(items) => SnapNode::IntArray(items.clone()),
             SnapNode::FloatArray(items) => SnapNode::FloatArray(items.clone()),
+            // derived data: when the edit's own run made one in this place,
+            // the edit's wins (it reflects the edited query); else it carries
+            #[cfg(feature = "dataframe")]
+            SnapNode::DataFrame(df) => match hint {
+                Some(SnapNode::DataFrame(fresh)) => SnapNode::DataFrame(fresh.clone()),
+                _ => SnapNode::DataFrame(df.clone()),
+            },
+            #[cfg(feature = "dataframe")]
+            SnapNode::PlExpr(e) => match hint {
+                Some(SnapNode::PlExpr(fresh)) => SnapNode::PlExpr(fresh.clone()),
+                _ => SnapNode::PlExpr(e.clone()),
+            },
             SnapNode::Dict(items) => {
                 let h = match hint {
                     Some(SnapNode::Dict(h)) => Some(h),
