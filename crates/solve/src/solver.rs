@@ -2725,7 +2725,19 @@ impl Solver {
             // dec so the grades pass counts the read (`None` here left every `self`
             // param looking unread, so `unused parameter self` fired on every impl
             // method). `Self` and pact signatures bind nothing, so they keep `None`.
-            (ty, self.ribs.resolve(ident))
+            let dec = self.ribs.resolve(ident);
+            // r[impl mimas.self.param]
+            // a value `self` in a body that never declared it (`fn f(x: int)
+            // -> Self { self }`) has nothing to read -- it used to reach
+            // codegen unresolved and panic there
+            if dec.is_none() && ident.lexeme == "self" {
+                return Err(SelfOutOfContext {
+                    src: self.src(read_location),
+                    at: read_location.into(),
+                }
+                .into());
+            }
+            (ty, dec)
         } else {
             match self.ribs.resolve(ident) {
                 Some(dec_id) => {

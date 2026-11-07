@@ -239,6 +239,9 @@ struct Pass<'a> {
     uses: FxHashMap<DecId, UseInfo>,
     /// Bindings eligible for unused-warnings: (dec, where it came from).
     lint_targets: Vec<(DecId, Site)>,
+    /// Walking the methods of an `impl Pact for T`: their signatures are
+    /// the pact's, so their parameters aren't linted.
+    in_pact_impl: bool,
     /// The scope each dec was bound in (scope_decs.len() at bind time), for the
     /// closure-isolation rule.
     dec_scope: FxHashMap<DecId, usize>,
@@ -330,6 +333,7 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> crate::errors::Result
             solver,
             uses: FxHashMap::default(),
             lint_targets: Vec::new(),
+            in_pact_impl: false,
             dec_scope: FxHashMap::default(),
             dead_candidates: Vec::new(),
             warnings: Vec::new(),
@@ -957,9 +961,11 @@ impl<'a> Pass<'a> {
             ItemKind::Function(f) => self.function(f),
             ItemKind::Const(c) => self.expr(&c.right),
             ItemKind::Impl(imp) => {
+                let was = std::mem::replace(&mut self.in_pact_impl, imp.pact.is_some());
                 for inner in &imp.items {
                     self.item(inner);
                 }
+                self.in_pact_impl = was;
             }
             ItemKind::Pact(pact) => {
                 for member in &pact.items {
@@ -978,9 +984,15 @@ impl<'a> Pass<'a> {
                         self.callers.push(caller);
                         self.own_fx.entry(caller).or_insert(Fx::empty());
                         self.in_fn(|s| {
+                            // the pact fixes a default method's parameters: every
+                            // impl takes them, so one the default ignores (`self`
+                            // included) is the contract, not a mistake to lint
+                            // r[impl mimas.lint.pact-default]
+                            let linted = s.lint_targets.len();
                             for p in parameters {
                                 s.bind(&p.left, Site::Param, false);
                             }
+                            s.lint_targets.truncate(linted);
                             s.expr(body);
                         });
                         self.callers.pop();
@@ -1044,12 +1056,19 @@ impl<'a> Pass<'a> {
         // an entry even when the body ends up pure -- `fn_effects` should answer for
         // every walked fn, not only effectful ones
         self.own_fx.entry(caller).or_insert(Fx::empty());
+        let pact_sig = std::mem::take(&mut self.in_pact_impl);
         self.in_fn(|s| {
+            // r[impl mimas.lint.pact-default]
+            let linted = s.lint_targets.len();
             for p in &f.parameters {
                 s.bind(&p.left, Site::Param, false);
             }
+            if pact_sig {
+                s.lint_targets.truncate(linted);
+            }
             s.expr(&f.body);
         });
+        self.in_pact_impl = pact_sig;
         self.callers.pop();
     }
 
@@ -1220,9 +1239,18 @@ impl<'a> Pass<'a> {
             }
             ExprKind::Closure(c) => {
                 // captures are reads of unknown multiplicity -- ω them
+                // r[impl mimas.lint.capture-reads]
+                // and a capture reads the store it captures: the pending
+                // write is live (reads inside the body skip outer decs)
                 if let Some(caps) = self.solver.closure_captures.get(&e.id()) {
                     for &dec in caps {
                         self.uses.entry(dec).or_default().reads = Use::Many;
+                        for reads in &mut self.loop_reads {
+                            reads.insert(dec);
+                        }
+                        if let Some(spans) = self.flow.pending.remove(&dec) {
+                            self.flow.read_spans.entry(dec).or_default().extend(spans);
+                        }
                     }
                 }
                 let saved_retired = std::mem::take(&mut self.retired);

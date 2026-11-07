@@ -589,3 +589,12 @@ test_ty!(
      }",
     "check(V { x = 1 }, W { y = 2 })" => Bool,
 );
+
+// r[verify mimas.self.param]
+// a body that reads `self` without declaring it is an error, not a codegen
+// panic (fuzz: `fn vary(self, _v: VaryAt)` mangled to `fn vary(self_v : VaryAt)`)
+test_fail!(
+    self_read_without_a_self_param,
+    "pact P { fn g(self) -> int; fn f(x: int) -> Self { self } }",
+    "struct W { n: int } impl W { fn f(x: int) -> int { self.n } }",
+);

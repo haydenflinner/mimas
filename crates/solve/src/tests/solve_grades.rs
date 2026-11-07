@@ -153,6 +153,34 @@ fn self_param_reads_count() {
     assert!(w.is_empty(), "{w:?}");
 }
 
+// r[verify mimas.lint.pact-default]
+#[test]
+fn pact_default_params_are_the_contract() {
+    let _t = TestResetter;
+    // the pact fixes a default method's signature: a default that ignores a
+    // parameter (or `self`) is still the shape every impl must take
+    let w = warns("pact P { fn fit(self, p: float, v: float) -> float { 1.0 } fn locked(self) -> bool { false } }");
+    assert!(w.is_empty(), "{w:?}");
+    // a local in the default body is still linted
+    let w = warns("pact P { fn f(self) -> float { let unused = 2.0; self.g() } fn g(self) -> float; }");
+    assert_eq!(w, ["unused variable `unused`"]);
+}
+
+#[test]
+fn pact_impl_params_are_the_contract() {
+    let _t = TestResetter;
+    let w = warns("pact P { fn f(self, p: float) -> float; } struct W { x: float } impl P for W { fn f(self, p: float) -> float { 1.0 } }");
+    assert!(w.is_empty(), "{w:?}");
+}
+
+// r[verify mimas.lint.capture-reads]
+#[test]
+fn a_store_read_only_by_a_closure_is_live() {
+    let _t = TestResetter;
+    let w = warns("fn f() -> int { let g = [1, 2]; let h = |i: int| g[i]; h(0) }");
+    assert!(w.is_empty(), "{w:?}");
+}
+
 #[test]
 fn unused_self_param_still_warns() {
     let _t = TestResetter;
