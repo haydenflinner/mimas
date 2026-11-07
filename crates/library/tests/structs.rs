@@ -3,6 +3,7 @@ mod test_runner;
 
 // `Foo { x }` is field punning — `Foo { x = x }` — and mixes with explicit fields
 test_run!(
+    // r[verify mimas.struct.shorthand]
     struct_field_punning,
     "struct W { x: int, y: int }
      let x = 1;

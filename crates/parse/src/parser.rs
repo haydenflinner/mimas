@@ -2519,6 +2519,7 @@ impl<'s> Parser<'s> {
                     break;
                 }
                 let field = self.require_ident();
+                // r[impl mimas.struct.shorthand]
                 // shorthand: `Foo { x }` is `Foo { x = x }`
                 let value = if self.at(TokKind::Comma) || self.at(TokKind::RightBrace) {
                     self.new_expr(field.clone(), field.location.span().start())
@@ -4160,6 +4161,7 @@ impl<'s> Parser<'s> {
                             let sub = if p.eat(TokKind::Equal) {
                                 p.pattern()
                             } else {
+                                // r[impl mimas.struct.shorthand]
                                 // shorthand: `Foo { x }` is `Foo { x = x }`
                                 Pat::from(name.clone())
                             };
