@@ -4707,6 +4707,7 @@ dependencies = [
  "mimas-shared",
  "mutants",
  "pretty_assertions",
+ "rustc-hash 2.1.2",
  "thiserror 1.0.69",
  "walkdir",
 ]

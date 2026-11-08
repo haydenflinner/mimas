@@ -5,7 +5,7 @@ use api::{
     Library, NativeId, Registry,
 };
 use compile::{BinOp, UnaryOp};
-use shared::{Fx, Literal, Ty};
+use shared::{Fx, Literal, Ty, units::Dim};
 
 pub use api::{LitFault, LitValidator};
 
@@ -512,6 +512,7 @@ impl<'a, 'gc> Api<'a, 'gc> {
             recv_ty: None,
             ty,
             value,
+            dim: None,
             doc: doc.into(),
         });
     }
@@ -532,6 +533,7 @@ impl<'a, 'gc> Api<'a, 'gc> {
             recv_ty: Some(recv_ty),
             ty,
             value,
+            dim: None,
             doc: doc.into(),
         });
     }
@@ -615,12 +617,27 @@ impl<'b, 'a, 'gc> ModuleApi<'b, 'a, 'gc> {
         value: Literal,
         doc: impl Into<String>,
     ) {
+        self.constant_dim(name, ty, value, None, doc);
+    }
+
+    /// [`constant`](Self::constant) whose value measures a `dim` quantity —
+    /// `PI` is `rad`. The runtime value stays a bare count; the solver's
+    /// dims pass reads the dimension for unit checking.
+    pub fn constant_dim(
+        &mut self,
+        name: impl Into<String>,
+        ty: Ty,
+        value: Literal,
+        dim: Option<Dim>,
+        doc: impl Into<String>,
+    ) {
         self.parent.library.constant(ApiConstant {
             name: name.into(),
             module: self.path.clone(),
             recv_ty: None,
             ty,
             value,
+            dim,
             doc: doc.into(),
         });
     }

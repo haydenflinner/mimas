@@ -120,6 +120,31 @@ test_run!(
     "((1turn / 1s) * 2s).to(\"deg\")" => "720.0",
 );
 
+// r[verify mimas.unit.trig]
+test_run!(
+    angles_mix_with_plain_numbers_as_radians,
+    "let theta = 0.0;
+     theta = theta + (1.0).atan2(0.0);
+     let as_float: float = 90deg;",
+    // `theta + atan2(..)` stays a plain radian count — no `.to("rad")` needed
+    "(theta - std::math::PI / 2.0).abs() < 1.0e-12" => "true",
+    "as_float > 1.5" => "true",
+    "90deg + 0.5 > 2.0" => "true",
+    "1.57 < 90deg" => "true",
+    "(if true { 1.0 } else { 90deg }) > 0.9" => "true",
+);
+
+// r[verify mimas.unit.trig]
+test_run!(
+    math_constants_are_angles,
+    "let theta = std::math::PI;",
+    // `theta = PI` stays an angle — `.to("deg")` reads it back
+    "theta.to(\"deg\") - 180.0" => "0.0",
+    "std::math::TAU.to(\"turn\") - 1.0" => "0.0",
+    "(2.0 * std::math::PI - std::math::TAU).abs() < 1.0e-12" => "true",
+    "theta + 1.0 > std::math::PI" => "true",
+);
+
 fn rejected(src: &str, needle: &str) {
     let err = test_runner::try_execute(src).expect_err(&format!("`{src}` should be rejected"));
     let text = format!("{err:?}");
@@ -138,6 +163,9 @@ fn nonsense_arithmetic_is_rejected() {
     rejected("let a = 5kW == 3m;", "cannot compare");
     rejected("let a = [5kW, 3s];", "a list mixes");
     rejected("let a = if true { 5kW } else { 3s };", "branches disagree");
+    // rad mixes with plain numbers only — a quantity still clashes
+    rejected("let a = 90deg + 3px;", "cannot add");
+    rejected("let a = 90deg == 3s;", "cannot compare");
     // inside an f-string interpolation too
     rejected("let a = f\"{5kW + 3s}\";", "cannot add");
 }

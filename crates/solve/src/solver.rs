@@ -102,6 +102,10 @@ pub struct Solver {
     /// synthetic `Constant` dec and dimension, deduped so every use points at one dec.
     /// r[impl mimas.unit.constant]
     pub(crate) unit_consts: FxHashMap<String, (DecId, shared::units::Dim)>,
+    /// Library constants declared with a dimension (`PI` is `rad`): the
+    /// constant's dec -> its dimension, seeded into the dims pass like
+    /// `unit_consts` so the constant's uses type as quantities.
+    pub(crate) const_dims: Vec<(DecId, shared::units::Dim)>,
     /// Every expression's computed dimension, recorded by the dims pass —
     /// `b.x + 2.0px` is `px` here while its `node_tys` stays `Float`.
     /// Surfaces on [`Resolutions::node_dims`](crate::Resolutions).
@@ -218,6 +222,7 @@ impl Solver {
             ast_quantities: FxHashMap::default(),
             ast_quantity_units: FxHashMap::default(),
             unit_consts: FxHashMap::default(),
+            const_dims: Vec::new(),
             node_dims: FxIndexMap::default(),
             want_dims: FxIndexMap::default(),
             print_dims: FxIndexMap::default(),
@@ -1647,6 +1652,9 @@ impl Solver {
                         DecKind::Constant(Some(lit)),
                         Vis::Public,
                     );
+                    if let Some(dim) = c.dim {
+                        self.const_dims.push((dec_id, dim));
+                    }
                     // an assoc constant (`Player::MAX_HEALTH`) lands in the adt's impls,
                     // same slot a lang `impl` const hoists into
                     if let Some(recv) = &c.recv_ty {

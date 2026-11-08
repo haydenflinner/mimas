@@ -148,6 +148,9 @@ pub struct ApiConstant {
     pub recv_ty: Option<Ty>,
     pub ty: Ty,
     pub value: Literal,
+    /// A quantity the constant measures (`PI` is `rad`), independent of `ty`:
+    /// the runtime value stays a bare count, the solver reads the dimension.
+    pub dim: Option<shared::units::Dim>,
     pub doc: String,
 }
 

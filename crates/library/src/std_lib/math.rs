@@ -8,17 +8,20 @@ use vm::{
 
 pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     let mut m = api.module("std::math");
-    m.constant(
+    // r[impl mimas.unit.trig]
+    m.constant_dim(
         "PI",
         Ty::Float,
         Literal::Float(std::f64::consts::PI),
+        Some(shared::units::ANGLE),
         "The ratio of a circle's circumference to its diameter, about `3.14159`. An angle of `PI` \
          radians is half a turn.",
     );
-    m.constant(
+    m.constant_dim(
         "TAU",
         Ty::Float,
         Literal::Float(std::f64::consts::TAU),
+        Some(shared::units::ANGLE),
         "A full turn in radians, equal to `2.0 * PI` (about `6.28319`).",
     );
     m.constant(
