@@ -680,17 +680,21 @@ impl Compiler {
                 .iter()
                 .map(|local| local_to_reg[*local])
                 .collect();
-            let locals = body
-                .artifacts
+            // r[impl mimas.inspect.by-name]
+            // One name, one register: when a top-level `let` and a block local share a
+            // name, the `let` is the one a host reading by name means; between two
+            // locals, the later declaration (the shadowing one) wins.
+            let named = named_locals(&body, &ir.resolutions);
+            let locals = named
                 .iter()
-                .map(|(local, name)| (name.clone(), local_to_reg[*local]))
+                .map(|(name, local)| (name.clone(), local_to_reg[*local]))
                 .collect();
             let shadows = body
                 .shadows
                 .iter()
                 .filter_map(|(local, sh)| {
                     let name = body.artifacts.get(local)?;
-                    Some((name.clone(), sh.map(&|l| local_to_reg[*l])))
+                    (named.get(name) == Some(local)).then(|| (name.clone(), sh.map(&|l| local_to_reg[*l])))
                 })
                 .collect();
             let args = u16::try_from(body.params.len()).unwrap();
@@ -995,6 +999,26 @@ fn local_kinds(body: &Body, res: &solve::Resolutions) -> IdVec<Local, OperandKin
 
 /// The class an inst's result has without looking through phis: fixed by the op where the op
 /// decides it, else the solved type of the expr it lowered from.
+/// Each source name in `body` mapped to the one local a by-name read resolves to:
+/// a top-level `let` over a block local of the same name, then the later declaration.
+fn named_locals(body: &Body, res: &solve::Resolutions) -> HashMap<String, Local> {
+    let rank = |l: Local| {
+        let dec = body.locals[l];
+        let global = dec != DecId::DANGLING && matches!(res.decs[dec].kind, ResolvedDeclKind::Global);
+        (global, l.index())
+    };
+    let mut out: HashMap<String, Local> = HashMap::new();
+    for (&local, name) in &body.artifacts {
+        match out.get(name) {
+            Some(&have) if rank(have) >= rank(local) => {}
+            _ => {
+                out.insert(name.clone(), local);
+            }
+        }
+    }
+    out
+}
+
 fn fixed_kind(body: &Body, iid: InstId, locals: &IdVec<Local, OperandKind>) -> Option<OperandKind> {
     use BinOp::*;
     use OperandKind as K;
