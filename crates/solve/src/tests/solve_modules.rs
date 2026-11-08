@@ -175,3 +175,53 @@ test_multi_file_fail!(
     foo => "module @; pub const BAR: int = 0;",
     fizz => "module @; use foo; pub fn buzz() { let x = foo; }";
 );
+
+// r[verify mimas.use.block]
+// a `use` inside a block binds in the block, like a `let` -- it used to write
+// into the file's import rib, leaking the name file-wide.
+test_multi_file!(
+    block_use_binds_in_scope,
+    foo => "module @; pub const BAR: int = 0;",
+    fizz => "module @; pub fn f() -> int { use foo::BAR; BAR }";
+    "fizz::f()" => Int,
+);
+
+test_multi_file_fail!(
+    block_use_does_not_leak,
+    foo => "module @; pub const BAR: int = 0;",
+    fizz => "module @; fn f() -> int { use foo::BAR; BAR } fn g() -> int { BAR }";
+);
+
+// r[verify mimas.module.privacy]
+// naming a private member *through* `use` is itself the error -- it used to
+// wait for a read of the imported name.
+test_multi_file_fail!(
+    private_member_errors_at_use,
+    foo => "module @; const SECRET: int = 0;",
+    main => "use foo::SECRET;";
+);
+
+// r[verify mimas.use.forms]
+// `::*` brings in the members *visible* here -- a private member never lands.
+test_multi_file!(
+    glob_imports_only_public,
+    foo => "module @; const SECRET: int = 0; pub const BAR: int = 1;",
+    fizz => "module @; use foo::*; pub fn bar() -> int { BAR }";
+    "fizz::bar()" => Int,
+);
+
+test_multi_file_fail!(
+    glob_never_imports_private,
+    foo => "module @; const SECRET: int = 0; pub const BAR: int = 1;",
+    main => "use foo::*; let a = BAR; let b = SECRET;";
+);
+
+// r[verify mimas.use.shadow]
+// a name the file declares itself always wins over one a `use` pulls in --
+// decided by scope order, not by which hoisting pass happened to run first.
+test_multi_file!(
+    own_fn_beats_import,
+    foo => "module @; pub fn buzz() -> int { 7 }",
+    main => "module @; use foo::buzz; pub fn buzz() -> str { \"\" } pub fn g() -> str { buzz() }";
+    "main::g()" => Str,
+);

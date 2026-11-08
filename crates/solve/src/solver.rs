@@ -155,6 +155,11 @@ pub struct Solver {
     /// not the members) -- an unbound-name error that names a member of
     /// one of these gets the "you wanted `::*`" hint.
     pub(crate) bare_module_uses: FxHashMap<String, AdtId>,
+    /// Each `use` item's resolved bindings, by the item's node id. A use
+    /// resolves once; every phase (and `visit_stmt`, for block-level uses)
+    /// installs the same decs into the current ribs instead of re-walking
+    /// the path and minting fresh decs each time.
+    pub(crate) resolved_uses: FxHashMap<NodeId, ResolvedUse>,
     /// Set while the prelude group (the built-in source and the library's
     /// own sources) is being solved -- `load_files` solves that group to
     /// completion before any user file, so a user `enum PosNeg` can't catch
@@ -226,6 +231,7 @@ impl Solver {
             script_segments: Vec::new(),
             warnings: Vec::new(),
             bare_module_uses: FxHashMap::default(),
+            resolved_uses: FxHashMap::default(),
             in_prelude: false,
             prelude_types: FxHashSet::default(),
             non_value: None,
@@ -236,7 +242,8 @@ impl Solver {
             bound_obligations: vec![],
             obligation_at: None,
         };
-        solver.ribs.push_import();
+        // root frame: [Import, Module, Script] -- see `Ribs::default` for why
+        // the import rib sits beneath the module rib.
         solver.ribs.push_script();
 
         // todo, this is a bit brittle
@@ -428,15 +435,17 @@ impl Solver {
                     let rib = saved_ribs[i]
                         .take()
                         .unwrap_or_else(|| Rib::new(RibKind::Module(module_adts[name])));
-                    solver.ribs.push_rib(rib);
+                    // [Import, Module, Script] like the root frame: the file's
+                    // own items outrank what its `use`s pull in.
                     solver.ribs.push_import();
+                    solver.ribs.push_rib(rib);
                     solver.ribs.push_script();
                 }
                 phase(solver, ast)?;
                 if let Some(name) = module {
                     solver.ribs.pop_script();
-                    solver.ribs.pop_import();
                     let rib = solver.ribs.pop_module();
+                    solver.ribs.pop_import();
                     solver.sync_module_adt(module_adts[name], &rib);
                     saved_ribs[i] = Some(rib);
                 }
@@ -565,8 +574,12 @@ impl Solver {
 
     fn hoist_callables(&mut self, ast: &Ast) -> Result<()> {
         Self::for_each_item(ast, |item| {
-            if let ItemKind::Use(us) = item.kind() {
-                let _ = self.process_use(us, item.location());
+            if let ItemKind::Use(_) = item.kind() {
+                // best effort: an imported type must land before the fns
+                // below hoist so a signature can name it. Whatever can't
+                // resolve yet (a use of a member hoisted in *this* pass)
+                // retries -- and reports -- at `hoist_uses`.
+                let _ = self.process_use(item);
             }
             Ok(())
         })?;
@@ -614,10 +627,10 @@ impl Solver {
 
     fn hoist_uses(&mut self, ast: &Ast) -> Result<()> {
         Self::for_each_item(ast, |item| {
-            let ItemKind::Use(us) = item.kind() else {
+            let ItemKind::Use(_) = item.kind() else {
                 return Ok(());
             };
-            self.process_use(us, item.location())
+            self.process_use(item)
         })
     }
 
@@ -627,8 +640,10 @@ impl Solver {
 
     fn solve_types(&mut self, ast: &Ast) -> Result<()> {
         Self::for_each_item(ast, |item| {
-            if let ItemKind::Use(us) = item.kind() {
-                self.process_use(us, item.location())?;
+            if let ItemKind::Use(_) = item.kind() {
+                // repopulate the phase's import rib (all resolves are cached
+                // by now -- `hoist_uses` reported anything that failed)
+                self.process_use(item)?;
             }
             Ok(())
         })?;
@@ -823,22 +838,63 @@ impl Solver {
         }
     }
 
-    fn process_use(&mut self, us: &Use, location: Location) -> Result<()> {
+    /// Brings a `use` item's names into scope. The path is resolved once per
+    /// item (`resolved_uses`) and the result installed wherever this call finds
+    /// scope: the phases each install into the file's import rib (module files
+    /// get a fresh one per phase; a script's root rib just takes the same decs
+    /// again), and a `use` inside a block binds in that block, scoped like a
+    /// `let`. The import rib sits *below* the module rib in the stack, so the
+    /// file's own declarations always win -- by lookup order, nothing to check.
+    // r[impl mimas.use.forms]
+    fn process_use(&mut self, item: &Item) -> Result<()> {
+        let ItemKind::Use(us) = item.kind() else {
+            return Ok(());
+        };
         // `use "page";` is the host's business (it splices that script in first)
         if matches!(us, Use::Host(_)) {
             return Ok(());
         }
+        let bindings = match self.resolve_use(us, item)? {
+            ResolvedUse::Named(bindings) => bindings,
+            ResolvedUse::Glob(adt) => self.visible_members(adt),
+        };
+        // r[impl mimas.use.shadow] -- the import rib sits beneath the module
+        // rib; r[impl mimas.use.block] -- inside a block, the current rib.
+        let rib = if self.ribs.current_kind() == RibKind::Script {
+            self.ribs.import_mut()
+        } else {
+            self.ribs.current_mut()
+        };
+        for (name, dec) in bindings {
+            rib.insert(Ident::synthetic(name), dec);
+        }
+        Ok(())
+    }
+
+    /// What `us` resolves to, computed once and kept on the item's id. Failures
+    /// cache nothing -- the early best-effort pass can silently miss items a
+    /// later phase hoists, and `hoist_uses` reports whatever never resolved.
+    fn resolve_use(&mut self, us: &Use, item: &Item) -> Result<ResolvedUse> {
+        if let Some(resolved) = self.resolved_uses.get(&item.id()) {
+            return Ok(resolved.clone());
+        }
+        let resolved = self.compute_use(us, item)?;
+        self.resolved_uses.insert(item.id(), resolved.clone());
+        Ok(resolved)
+    }
+
+    /// Walks a `use`'s path to its target and returns the bindings it puts in
+    /// scope, noting each segment's resolution for tooling as it goes.
+    fn compute_use(&mut self, us: &Use, item: &Item) -> Result<ResolvedUse> {
         let walk_segments: Vec<&Ident> = match us {
             Use::Singular(path, item) => path.iter().chain(std::iter::once(item)).collect(),
             Use::Multi(path, _) | Use::All(path) => path.iter().collect(),
-            Use::Host(_) => unreachable!("handled above"),
+            Use::Host(_) => unreachable!("handled by process_use"),
         };
 
         let first = *walk_segments.first().unwrap();
-        let mut target = ImportBinding {
-            name: first.lexeme.clone(),
-            ty: self
-                .library
+        let mut target = (
+            self.library
                 .get(&first.lexeme)
                 .cloned()
                 .map(Ty::adt)
@@ -847,89 +903,105 @@ impl Solver {
                     at: first.location.into(),
                     name: first.lexeme.clone(),
                 })?,
-            dec: None,
-            constant: false,
-        };
-        self.note(first, target.ty.clone(), None);
+            None,
+        );
+        self.note(first, target.0.clone(), None);
 
         for ident in walk_segments.iter().skip(1) {
-            let Some(adt) = target.ty.as_adt().copied() else {
+            let Some(adt) = target.0.as_adt().copied() else {
                 Err(InvalidUseTarget {
                     src: self.src(ident.location),
                     at: ident.location.into(),
                 })?
             };
-            target = self.module_field(adt, ident)?;
-            self.note(ident, target.ty.clone(), target.dec);
+            let (ty, dec) = self.module_field(adt, ident)?;
+            // r[impl mimas.module.privacy] -- naming a private member through
+            // `use` fails here, on the `use`, not wherever it might be read.
+            self.check_vis(dec, ident.location)?;
+            self.note(ident, ty.clone(), Some(dec));
+            target = (ty, Some(dec));
         }
 
-        let imports: Vec<ImportBinding> = match us {
-            Use::Host(_) => unreachable!("handled above"),
-            Use::Singular(_, _) => {
+        match us {
+            Use::Host(_) => unreachable!("handled by process_use"),
+            Use::Singular(_, item) => {
                 // `use music` binds `music` -- the module itself, which
                 // `music::` already names -- it does NOT import `pat`.
                 // Remember it so an unbound `pat` can say why.
-                if let Some(adt) = target.ty.as_adt().copied()
+                if let Some(adt) = target.0.as_adt().copied()
                     && self.adts[adt].flags.contains(AdtFlags::IS_MODULE)
                 {
-                    self.bare_module_uses.insert(target.name.clone(), adt);
+                    self.bare_module_uses.insert(item.lexeme.clone(), adt);
                 }
-                vec![target]
+                let dec = match target.1 {
+                    Some(dec) => dec,
+                    // `use m;` -- the module's own name. Root modules live in
+                    // `library`, not in a module's fields, so no field dec
+                    // exists to reuse; mint the binding's dec here, once.
+                    None => self.dec_id(
+                        &Ident::synthetic(item.lexeme.clone()),
+                        target.0.clone(),
+                        DecKind::Item {
+                            defaults: vec![],
+                            wheres: vec![],
+                        },
+                        Vis::Public,
+                    ),
+                };
+                Ok(ResolvedUse::Named(vec![(item.lexeme.clone(), dec)]))
             }
             Use::Multi(_, items) => {
-                let Some(adt) = target.ty.as_adt().copied() else {
+                let Some(adt) = target.0.as_adt().copied() else {
                     Err(InvalidUseTarget {
-                        src: self.src(location),
-                        at: location.into(),
+                        src: self.src(item.location()),
+                        at: item.location().into(),
                     })?
                 };
                 items
                     .iter()
                     .map(|i| {
-                        let binding = self.module_field(adt, i)?;
-                        self.note(i, binding.ty.clone(), binding.dec);
-                        Ok(binding)
+                        let (ty, dec) = self.module_field(adt, i)?;
+                        // r[impl mimas.module.privacy]
+                        self.check_vis(dec, i.location)?;
+                        self.note(i, ty.clone(), Some(dec));
+                        Ok((i.lexeme.clone(), dec))
                     })
-                    .collect::<Result<Vec<_>>>()?
+                    .collect::<Result<Vec<_>>>()
+                    .map(ResolvedUse::Named)
             }
             Use::All(_) => {
-                let Some(adt) = target.ty.as_adt().copied() else {
+                let Some(adt) = target.0.as_adt().copied() else {
                     Err(InvalidUseTarget {
-                        src: self.src(location),
-                        at: location.into(),
+                        src: self.src(item.location()),
+                        at: item.location().into(),
                     })?
                 };
-                let module = &self.adts[adt];
-                if !module.flags.contains(AdtFlags::IS_MODULE) {
+                if !self.adts[adt].flags.contains(AdtFlags::IS_MODULE) {
                     Err(InvalidUseTarget {
-                        src: self.src(location),
-                        at: location.into(),
+                        src: self.src(item.location()),
+                        at: item.location().into(),
                     })?
                 }
-                module
-                    .as_struct()
-                    .fields
-                    .iter()
-                    .map(|(name, field)| ImportBinding {
-                        name: name.clone(),
-                        ty: field.ty.clone(),
-                        dec: Some(field.dec),
-                        constant: field.constant,
-                    })
-                    .chain(module.impls.iter().map(|(name, field)| ImportBinding {
-                        name: name.clone(),
-                        ty: field.ty.clone(),
-                        dec: Some(field.dec),
-                        constant: field.constant,
-                    }))
-                    .collect()
+                Ok(ResolvedUse::Glob(adt))
             }
-        };
-
-        for import in imports {
-            self.declare_import(import)?;
         }
-        Ok(())
+    }
+
+    /// The members `use m::*` puts in scope right now: every field and impl
+    /// member of `adt` visible from the module being solved -- a `::*` never
+    /// pulls a private name. Collected at each install so members hoisted in a
+    /// later phase (a glob processed before the target's fns) still land.
+    // r[impl mimas.use.forms]
+    fn visible_members(&self, adt: AdtId) -> Vec<(String, DecId)> {
+        let module = &self.adts[adt];
+        module
+            .as_struct()
+            .fields
+            .iter()
+            .chain(module.impls.iter())
+            .filter(|(_, field)| self.check_vis(field.dec, Location::default()).is_ok())
+            .map(|(name, field)| (name.clone(), field.dec))
+            .collect()
     }
 
     /// Pre-binds every `const` declared directly inside this block into the current rib so refs
@@ -1017,7 +1089,9 @@ impl Solver {
         }
     }
 
-    fn module_field(&self, adt: AdtId, ident: &Ident) -> Result<ImportBinding> {
+    /// One `use` path segment off module `adt`: the member's type (for `note`)
+    /// and its dec (the binding and the visibility check).
+    fn module_field(&self, adt: AdtId, ident: &Ident) -> Result<(Ty, DecId)> {
         let module = &self.adts[adt];
         if !module.flags.contains(AdtFlags::IS_MODULE) {
             Err(InvalidUseTarget {
@@ -1031,19 +1105,13 @@ impl Solver {
             .fields
             .get(&ident.lexeme)
             .or_else(|| module.impls.get(&ident.lexeme))
-            .cloned()
             .ok_or_else(|| FieldNotFound {
                 src: self.src(ident.location),
                 at: ident.location.into(),
                 field_name: ident.lexeme.clone(),
             })?;
 
-        Ok(ImportBinding {
-            name: ident.lexeme.clone(),
-            ty: field.ty,
-            dec: Some(field.dec),
-            constant: field.constant,
-        })
+        Ok((field.ty.clone(), field.dec))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2589,9 +2657,10 @@ impl Solver {
                 // block-scoped consts get solved here, top-level consts are handled by the
                 // hoist_constants/solve_consts fixpoint
                 ItemKind::Const(con) => self.solve_const(con, item.id()).map(|_| ())?,
-                // re-runs `process_use` so the imports land in the body-solve phase's fresh
-                // import rib (hoist_uses pushed them, but its rib was popped at phase end).
-                ItemKind::Use(us) => self.process_use(us, item.location())?,
+                // top-level uses install into this phase's import rib; a use
+                // inside a block binds in its block and resolves here, where
+                // every module's members are already hoisted.
+                ItemKind::Use(_) => self.process_use(item)?,
                 ItemKind::Poison(poison) => poison.escaped(),
                 // a `space`'s fields must all be axes -- types implementing `Opp`
                 ItemKind::Struct(st) if item.attrs().iter().any(|a| a.name.lexeme == "space") => {
@@ -2964,48 +3033,6 @@ impl Solver {
         self.declare_internal(ident, Some(node_id), ty)
     }
 
-    fn declare_import(&mut self, import: ImportBinding) -> Result<Ty> {
-        let ident = Ident::synthetic(import.name);
-        // A name this file declares itself always wins over one pulled in through `use`
-        // (singular, multi, or wildcard alike) -- mirrors a C++ using-directive: names it
-        // brings in are visible only where nothing declared directly in the importing scope
-        // already claims that name, so the file's own `fn square` can't be silently shadowed
-        // by an unrelated `img::square` just because `use img::*;` happens to come first (or
-        // second -- source order never mattered here, since Import and Module are sibling
-        // ribs, not nested lexical scopes; see `Ribs::resolve`).
-        //
-        // Checking (and, crucially, *removing*) rather than just skipping the insert: for a
-        // plain script file (no `module` decl), `run_phase` never pushes a fresh per-phase rib
-        // pair (that only happens for named modules -- see the `if let Some(name) = module`
-        // guard in `solve_all`), so every phase's `process_use` call writes into the *same*,
-        // never-popped Import rib. `hoist_callables` runs its own `process_use` pass *before*
-        // hoisting local `fn`/`impl` items (so an imported type can appear in a local
-        // signature), which means the very first time this runs, `square` isn't hoisted into
-        // the module rib yet -- `module_lookup` misses, the import goes in unshadowed, and
-        // every later pass (now correctly seeing the local decl) would just skip re-inserting,
-        // leaving that first pass's wrong entry sitting there uncorrected. Removing it here
-        // instead self-heals regardless of which pass got there first.
-        if self.ribs.module_lookup(&ident).is_some() {
-            self.ribs.import_mut().remove(&ident);
-            return Ok(import.ty);
-        }
-        let dec_id = if let Some(dec) = import.dec {
-            dec
-        } else {
-            let kind = if import.constant {
-                DecKind::Constant(None)
-            } else {
-                DecKind::Item {
-                    defaults: vec![],
-                    wheres: vec![],
-                }
-            };
-            self.dec_id(&ident, import.ty.clone(), kind, Vis::Public)
-        };
-        self.ribs.import_mut().insert(ident, dec_id);
-        Ok(import.ty)
-    }
-
     fn declare_internal(&mut self, ident: &Ident, node_id: Option<NodeId>, ty: Ty) -> Result<Ty> {
         #[cfg(feature = "logging")]
         println!("{}", crate::utils::Printer::declare(ident, &ty));
@@ -3262,9 +3289,14 @@ pub struct NativeModuleFn {
     pub native_id: NativeId,
 }
 
-struct ImportBinding {
-    name: String,
-    ty: Ty,
-    dec: Option<DecId>,
-    constant: bool,
+/// What a `use` item resolved to, kept on its node id so every scope it lands
+/// in takes the same decs. `Named` bindings install as-is; `Glob` re-collects
+/// the module's visible members at each install.
+#[derive(Debug, Clone)]
+pub(crate) enum ResolvedUse {
+    /// `use m;`, `use m::x;`, `use m::{x, y};` -- each name to one dec.
+    Named(Vec<(String, DecId)>),
+    /// `use m::*;` -- the module's members visible *here*, re-collected at
+    /// each install so members hoisted in a later phase still land.
+    Glob(AdtId),
 }

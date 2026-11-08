@@ -14,8 +14,15 @@ pub(crate) struct Ribs {
 
 impl Default for Ribs {
     fn default() -> Self {
+        // The import rib sits *below* the module rib: resolving walks innermost
+        // out, so every name a file declares itself beats every name a `use`
+        // pulls in -- a using-directive's precedence, but by stack order, with
+        // nothing to check or repair at insert time.
         Self {
-            inner: vec![Rib::new(RibKind::Module(AdtId::DANGLING))],
+            inner: vec![
+                Rib::new(RibKind::Import),
+                Rib::new(RibKind::Module(AdtId::DANGLING)),
+            ],
         }
     }
 }
@@ -215,13 +222,6 @@ impl Rib {
         self.table.insert(ident.lexeme, dec_id);
     }
 
-    /// Removes a binding, if present. Used to undo an import that was wrongly inserted into
-    /// this rib before a same-named local declaration existed to shadow it -- see
-    /// `Solver::declare_import`.
-    pub(crate) fn remove(&mut self, ident: &Ident) {
-        self.table.remove(&ident.lexeme);
-    }
-
     fn get(&self, ident: &Ident) -> Option<DecId> {
         // a redeclared module-level name: the latest declaration at or before this use
         if let Some(decls) = self.history.get(&ident.lexeme)
@@ -249,7 +249,8 @@ pub(crate) enum RibKind {
     /// rib -- used to attribute decs to their owning module for visibility checks.
     Module(AdtId),
     /// A file/module-level import scope. Imports are visible across function boundaries, but are
-    /// not exported when a module rib is closed into an ADT.
+    /// not exported when a module rib is closed into an ADT. Sits below its file's module rib so
+    /// the file's own declarations always outrank what a `use` pulls in.
     Import,
     /// An ordinary lexical scope: a block, loop, match arm, or closure body.
     Block,
