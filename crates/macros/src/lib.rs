@@ -40,6 +40,10 @@ pub fn native(_attr: TokenStream, item: TokenStream) -> TokenStream {
         Ok(effects) => effects,
         Err(e) => return e.to_compile_error().into(),
     };
+    let ctor = match ctor_submission(&input.sig.ident, &mut input.attrs) {
+        Ok(ctor) => ctor,
+        Err(e) => return e.to_compile_error().into(),
+    };
     match convert::expand_conversion(&mut input) {
         Ok((_, mutating)) => {
             // `submit!` expands to an unnamed const, which an `impl` block rejects -- the meta
@@ -59,7 +63,7 @@ pub fn native(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 input.block.stmts.insert(0, meta);
             }
             let mutates = mutates_submissions(&input.sig.ident, &mutating);
-            TokenStream::from(quote!(#input #src #mutates #effects))
+            TokenStream::from(quote!(#input #src #mutates #effects #ctor))
         }
         Err(e) => e.to_compile_error().into(),
     }
@@ -126,6 +130,7 @@ fn expand_mimas(attr: TokenStream, item: TokenStream) -> Result<TokenStream2, sy
         syn::Item::Fn(mut function) => {
             let src = src_submission(&function.sig.ident, function.sig.ident.span());
             let effects = effects_submission(&function.sig.ident, &mut function.attrs)?;
+            let ctor = ctor_submission(&function.sig.ident, &mut function.attrs)?;
             let (_, mutating) = convert::expand_conversion(&mut function)?;
             let params = param_names(&function.sig);
             let grades = grades(&mut function.attrs, &params)?;
@@ -140,7 +145,7 @@ fn expand_mimas(attr: TokenStream, item: TokenStream) -> Result<TokenStream2, sy
             }
             let mutates = mutates_submissions(&function.sig.ident, &mutating);
             let registration = register::fn_registration(&function.sig.ident, module.as_deref());
-            Ok(quote!(#function #registration #src #mutates #effects))
+            Ok(quote!(#function #registration #src #mutates #effects #ctor))
         }
         // struct / enum: emit the same impls the derives would (so don't *also* `#[derive]`
         // them) plus the `add_adt` submission
@@ -385,6 +390,34 @@ pub(crate) fn effects_submission(
             #vm::api::NativeEffects {
                 path: ::std::concat!(::std::module_path!(), "::", #name),
                 effects: #bits,
+            }
+        }
+    }))
+}
+
+/// Ships a field-constructor declaration to install time keyed by the item's full Rust path,
+/// for `vm::api::ctor_for` to join onto the registered `ApiMethod` (see `vm::api::NativeCtor`).
+/// The `#[ctor]` helper attribute is drained from `attrs` so it never reaches rustc. The fn
+/// promises arg `i` is verbatim field `i` of its receiver adt — the install check compares
+/// param names to field names — which makes a `T::f(const…)` call reduce to the struct
+/// literal, so a `const` may hold one (`mimas.const.ctor`).
+pub(crate) fn ctor_submission(
+    fn_ident: &Ident,
+    attrs: &mut Vec<syn::Attribute>,
+) -> Result<Option<TokenStream2>, syn::Error> {
+    let Some(pos) = attrs.iter().position(|a| a.path().is_ident("ctor")) else {
+        return Ok(None);
+    };
+    let attr = attrs.remove(pos);
+    attr.meta.require_path_only().map_err(|_| {
+        syn::Error::new_spanned(&attr, "`#[ctor]` takes no arguments")
+    })?;
+    let vm = vm_path();
+    let name = fn_ident.to_string();
+    Ok(Some(quote! {
+        #vm::inventory::submit! {
+            #vm::api::NativeCtor {
+                path: ::std::concat!(::std::module_path!(), "::", #name),
             }
         }
     }))

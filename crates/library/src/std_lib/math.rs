@@ -96,6 +96,7 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
 /// let y = v.y; // 4.0
 /// ```
 #[native]
+#[ctor]
 fn vec2_new(x: f32, y: f32) -> Vec2 {
     Vec2::new(x, y)
 }
@@ -487,6 +488,7 @@ fn quat_rotate_vec3(q: Quat, v: Vec3) -> Vec3 {
 /// let v = Vec3::new(1.0, 2.0, 3.0);
 /// ```
 #[native]
+#[ctor]
 fn vec3_new(x: f32, y: f32, z: f32) -> Vec3 {
     Vec3::new(x, y, z)
 }

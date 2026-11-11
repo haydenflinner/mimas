@@ -44,6 +44,38 @@ test_run!(
     "{ let s = 0.0; for d in DIRS { s = s + d.dx + d.dy } s }" => "2.0",
 );
 
+// A `#[ctor]` assoc fn packs its args into the receiver's named fields and
+// nothing else, so a const may hold the call: `Vec2::new(1.0, 0.0)` is the
+// `Vec2 { x = 1.0, y = 0.0 }` struct literal spelled as a call. Bare and
+// inside a const array (each use site allocates fresh, like a struct const).
+test_run!(
+    // r[verify mimas.const.ctor]
+    const_holds_a_ctor_call,
+    "use std::math::{Vec2, Vec3};
+     const ORIGIN = Vec2::new(0.0, 0.0);
+     const P = Vec2::new(1.0 + 1.0, 3.0);
+     const POINTS = [Vec2::new(1.0, 0.0), Vec2::new(0.0, 1.0)];
+     const NESTED = [[Vec3::new(1.0, 2.0, 3.0)], [Vec3::new(4.0, 5.0, 6.0)]];
+     fn poke() -> float { let ps = POINTS; ps[0] = Vec2::new(9.0, 9.0); ps[0].x }",
+    "ORIGIN.x" => "0.0",
+    "ORIGIN.y" => "0.0",
+    "P.x" => "2.0",
+    "POINTS.len()" => "2",
+    "POINTS[1].y" => "1.0",
+    "NESTED[0][0].z" => "3.0",
+    "poke()" => "9.0",
+    "POINTS[0].x" => "1.0",
+);
+
+// Only a `#[ctor]` call may sit in a const: an ordinary assoc fn, a
+// non-ctor arg, or a named arg all stay compile errors.
+test_fail!(
+    non_ctor_calls_stay_non_const,
+    "use std::math::Vec2; const V = Vec2::from_angle(0.5rad);",
+    "use std::math::Vec2; fn y() -> float { 2.0 } const V = Vec2::new(1.0, y());",
+    "use std::math::Vec2; const V = Vec2::new(x = 1.0, y = 2.0);",
+);
+
 // An operator through a pact: the built-in `pact Opp { fn inv(self)
 // -> Self; }` declares `!`'s method, so `!x` on a `Opp`-typed value
 // calls whichever implementer's `inv` the value turns out to be, at
@@ -192,12 +224,20 @@ fn space_fields_must_be_axes() {
         "`d: Data` isn't an axis",
     );
     reject("space Empty {}", "a `space` needs at least one axis");
-    // a number is an axis for a space's static flip, not an `Opp`-typed value
-    reject(
-        "fn f(o: Opp) -> Opp { !o }\nlet x = f(3.0);",
-        "mismatched types",
-    );
 }
+
+// r[verify mimas.opp.number]
+// r[verify mimas.pact.primitive]
+// a number goes where an `Opp` is expected too: the chain tests the value's
+// kind at run time and its flip is negation
+test_run!(
+    numbers_pass_as_opp_values,
+    "fn flip(o: Opp) -> Opp { !o }
+     fn involutive(o: Opp) -> bool { !(!o) == o }",
+    "flip(3.0) == -3.0" => "true",
+    "flip(2) == -2" => "true",
+    "involutive(1.5) && involutive(-4)" => "true",
+);
 
 // r[verify mimas.struct.update]
 // `S { f = v, ..base }`: the listed fields change, the rest are read from

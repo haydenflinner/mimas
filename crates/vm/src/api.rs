@@ -136,6 +136,20 @@ pub struct NativeEffects {
 
 inventory::collect!(NativeEffects);
 
+/// A native's field-constructor declaration, submitted via [`inventory`] and keyed by the
+/// item's full Rust path exactly like [`NativeMutates`]. `#[ctor]` on a `#[native]`/`#[mimas]`
+/// fn emits this; the install path joins it onto [`ApiMethod::ctor`]. A field constructor's
+/// argument `i` is verbatim field `i` of its receiver adt, so a `T::f(const…)` call reduces
+/// at solve to the struct literal `T { f = const, … }` — a `const` may hold one.
+///
+/// Subject to the same link-pruning footgun as [`NativeMeta`]: a pruned submission degrades
+/// to a runtime-only ctor — never a wrong constant, just the old `NonConstantValue`.
+pub struct NativeCtor {
+    pub path: &'static str,
+}
+
+inventory::collect!(NativeCtor);
+
 pub type NativeFnReg = for<'a, 'gc> fn(&mut Api<'a, 'gc>);
 
 pub struct Api<'a, 'gc> {
@@ -187,6 +201,13 @@ static EFFECTS_BY_PATH: std::sync::LazyLock<std::collections::HashMap<&'static s
             .map(|e| (e.path, Fx::from_bits_truncate(e.effects)))
             .collect()
     });
+static CTOR_BY_PATH: std::sync::LazyLock<std::collections::HashSet<&'static str>> =
+    std::sync::LazyLock::new(|| {
+        inventory::iter::<NativeCtor>
+            .into_iter()
+            .map(|c| c.path)
+            .collect()
+    });
 
 /// Look up what `#[native]`/`#[mimas]` submitted for the fn at `path` (`type_name_of_val(&f)`)
 /// and pair `arity` slots with their declared names, dropping the `skip` leading ones the arity
@@ -235,6 +256,36 @@ fn validator_for(path: &str) -> Option<api::LitValidator> {
 /// means unannotated: effect inference reads the call as `Fx::unknown()`.
 fn effects_for(path: &str) -> Option<Fx> {
     EFFECTS_BY_PATH.get(path).copied()
+}
+
+/// Whether `path` was submitted as a field constructor -- see [`NativeCtor`]. Retries the
+/// impl-name-stripped path like [`meta_entry`] (`#[mimas] impl` methods submit `module::name`
+/// but register `module::T::name`).
+fn ctor_for(path: &str) -> bool {
+    CTOR_BY_PATH.contains(path)
+        || path
+            .rsplit_once("::")
+            .and_then(|(rest, last)| rest.rsplit_once("::").map(|(head, _)| (head, last)))
+            .is_some_and(|(head, last)| CTOR_BY_PATH.contains(format!("{head}::{last}").as_str()))
+}
+
+/// Field names of `recv_ty`'s single named-field variant, for the `#[ctor]` contract check
+/// (arg names must be the field names, in order — `install_assoc` panics otherwise, at
+/// registration time, not at the user's const).
+fn ctor_field_names(api: &Api<'_, '_>, recv_ty: &Ty) -> Option<Vec<String>> {
+    let Ty::Adt(adt_id, _) = recv_ty else {
+        return None;
+    };
+    let adt = api.library.adts().iter().find(|a| a.adt_id == *adt_id)?;
+    let [variant] = adt.variants.as_slice() else {
+        return None;
+    };
+    match &variant.fields {
+        api::ApiVariantFields::Named(fields) => {
+            Some(fields.iter().map(|(name, _, _)| name.clone()).collect())
+        }
+        _ => None,
+    }
 }
 
 /// `(consumes, consumes_recv, must_use)` for `path`: the `consumes` indices of
@@ -489,6 +540,7 @@ impl<'a, 'gc> Api<'a, 'gc> {
             consumes: Vec::new(),
             consumes_recv: false,
             must_use: false,
+            ctor: false,
             doc: String::new(),
             validate: None,
             src: None,
@@ -737,6 +789,21 @@ macro_rules! impl_into_fn {
                     ).map_err(RtErr::from)?;)*
                     self(ctx $(, $arg)*).into_native_result(ctx)
                 });
+                // r[impl mimas.const.ctor]
+                // `#[ctor]` says arg i is verbatim field i — verify that
+                // against the adt's declared fields now, at registration:
+                // wrong names would silently build a different struct in a
+                // user's `const`.
+                let ctor = ctor_for(std::any::type_name_of_val(&self));
+                if ctor {
+                    let names = ctor_field_names(api, &recv_ty).unwrap_or_else(|| {
+                        panic!("#[ctor] `{name}` needs a named-field adt receiver")
+                    });
+                    assert_eq!(
+                        param_names, names,
+                        "#[ctor] `{name}`: parameters must be the receiver's fields, in order"
+                    );
+                }
                 let id = api.library.method(ApiMethod {
                     recv_ty,
                     name,
@@ -751,6 +818,7 @@ macro_rules! impl_into_fn {
                     consumes,
                     consumes_recv,
                     must_use,
+                    ctor,
                     doc,
                     validate: validator_for(std::any::type_name_of_val(&self)),
                     src,
@@ -827,6 +895,7 @@ macro_rules! impl_into_method {
                     consumes,
                     consumes_recv,
                     must_use,
+                    ctor: false,
                     doc,
                     validate: validator_for(std::any::type_name_of_val(&self)),
                     src: src_for(std::any::type_name_of_val(&self)),

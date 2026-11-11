@@ -63,10 +63,11 @@ pub fn expand_impl(mut block: ItemImpl) -> Result<TokenStream2, syn::Error> {
                     shim.block.stmts.insert(0, meta);
                 }
                 let src = crate::src_submission(&shim.sig.ident, method.sig.ident.span());
-                // `#[effects]` keys on the shim's path too -- install looks the registered
-                // fn (the shim) up, not the method's own name
+                // `#[effects]`/`#[ctor]` key on the shim's path too -- install looks the
+                // registered fn (the shim) up, not the method's own name
                 let effects = crate::effects_submission(&shim.sig.ident, &mut method.attrs)?;
-                out.extend(quote!(#shim #src #muts #effects));
+                let ctor = crate::ctor_submission(&shim.sig.ident, &mut method.attrs)?;
+                out.extend(quote!(#shim #src #muts #effects #ctor));
                 adds.extend(add);
             }
             ImplItem::Const(c) => {

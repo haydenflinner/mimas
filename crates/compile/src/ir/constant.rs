@@ -182,6 +182,10 @@ impl Constant {
                     .map(|&d| &ir.resolutions.decs[d].kind),
                 Some(solve::ResolvedDeclKind::Variant { .. })
             ),
+            // r[impl mimas.const.ctor]
+            // a `#[ctor]` call (`Vec2::new(..)`) is the only call solve lets into
+            // a const; it builds a struct, so each use site emits it
+            ExprKind::Call(_) => true,
             _ => false,
         }
     }
@@ -286,3 +290,4 @@ impl From<bool> for Constant {
         Self::Bool(value)
     }
 }
+

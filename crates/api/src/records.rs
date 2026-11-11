@@ -135,6 +135,13 @@ pub struct ApiMethod<C> {
     pub consumes_recv: bool,
     /// See [`ApiFunction::must_use`].
     pub must_use: bool,
+    /// `#[ctor]` — the associated fn is a *field constructor*: arg `i`
+    /// is verbatim the receiver adt's field `i` (install checks the
+    /// names). A `T::f(const…)` call then reduces at solve to the
+    /// struct literal `T { f = const, … }`, so a `const` may hold one.
+    /// Never set on a fn that computes — `Spline::new` re-solves its
+    /// knots and stays a runtime call.
+    pub ctor: bool,
     pub doc: String,
     pub validate: Option<LitValidator>,
     pub src: Option<NativeSrc>,
