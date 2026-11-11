@@ -1151,7 +1151,7 @@ impl Solver {
             consumes,
             consumes_recv: false,
             must_use,
-            ctor: false,
+            ctor: None,
         };
         // first instantiation fills the dec's vid, later ident resolutions detect that this is
         // a native and re-instantiate so each call gets its own type vars.
@@ -1545,7 +1545,7 @@ impl Solver {
                         consumes: f.consumes.clone(),
                         consumes_recv: false,
                         must_use: f.must_use,
-                        ctor: false,
+                        ctor: None,
                     };
                     let ident = Ident::synthetic(f.name.clone());
                     let ty = self.instantiate_native(&sig, None).expect("no recv");
@@ -1601,7 +1601,7 @@ impl Solver {
                         consumes: m.consumes.clone(),
                         consumes_recv: m.consumes_recv,
                         must_use: m.must_use,
-                        ctor: m.ctor,
+                        ctor: m.ctor.clone(),
                     };
                     let ident = Ident::synthetic(m.name.clone());
                     let ty = self.instantiate_native(&sig, None).expect("no recv check");
@@ -2939,13 +2939,14 @@ impl Solver {
         .map_err(|e| e.into_diag(self))
     }
 
-    /// `T::f(...)` where `f` is a `#[ctor]` native: arg `i` is verbatim field `i` of `T`'s
-    /// single named-field variant, so the call *is* a struct literal in disguise. Returns
-    /// the name expr (the `T` path -- cloned, so its `node_tys` still resolves) and the
-    /// adt's field names in declaration order. Positional args only: a named arg would need
+    /// `T::f(...)` where `f` is a field-constructor native: each field of `T`'s single
+    /// named-field variant comes verbatim from a parameter, so the call *is* a struct
+    /// literal in disguise. Returns the name expr (the `T` path -- cloned, so its
+    /// `node_tys` still resolves), `(field name, arg index)` pairs in declaration order,
+    /// and the arity the call must match. Positional args only: a named arg would need
     /// field-name matching rather than position, and stays a runtime call.
     // r[impl mimas.const.ctor]
-    fn const_ctor_fields(&self, expr: &Expr) -> Option<(Expr, Vec<String>)> {
+    fn const_ctor_fields(&self, expr: &Expr) -> Option<(Expr, Vec<(String, u8)>, usize)> {
         let ExprKind::Call(call) = expr.kind() else {
             return None;
         };
@@ -2955,9 +2956,7 @@ impl Solver {
         };
         let dec = *self.node_decs.get(&call.left.id())?;
         let binding = self.dec_to_native.get(&dec)?;
-        if !binding.sig.ctor {
-            return None;
-        }
+        let map = binding.sig.ctor.as_ref()?;
         let Ty::Adt(adt_id, _) = binding.sig.recv.clone()?.normalized(self) else {
             return None;
         };
@@ -2966,28 +2965,30 @@ impl Solver {
             .fields
             .keys()
             .cloned()
+            .zip(map.iter().copied())
             .collect();
-        Some((left.clone(), fields))
+        Some((left.clone(), fields, binding.sig.params.len()))
     }
 
-    /// The `Literal::Struct` a const ctor call reduces to -- each arg reduced in turn.
-    /// A non-const or erroring arg declines the whole call (the caller's `NonConstantValue`
-    /// then reports it like any other unreduced call).
+    /// The `Literal::Struct` a const ctor call reduces to -- each field's arg reduced in
+    /// turn. A non-const or erroring arg declines the whole call (the caller's
+    /// `NonConstantValue` then reports it like any other unreduced call).
     fn const_ctor_literal(&self, expr: &Expr) -> Option<Literal> {
         let ExprKind::Call(call) = expr.kind() else {
             return None;
         };
-        let (name, field_names) = self.const_ctor_fields(expr)?;
-        if call.arguments.len() != field_names.len()
-            || call.arguments.iter().any(|a| a.name.is_some())
+        let (name, field_args, arity) = self.const_ctor_fields(expr)?;
+        if call.arguments.len() != arity || call.arguments.iter().any(|a| a.name.is_some())
         {
             return None;
         }
-        let mut fields = Vec::with_capacity(field_names.len());
-        for (key, arg) in field_names.iter().zip(&call.arguments) {
-            let lit = self.reduce_const_expr(&arg.value).ok()??;
+        let mut fields = Vec::with_capacity(field_args.len());
+        for (key, index) in field_args {
+            let lit = self
+                .reduce_const_expr(&call.arguments[index as usize].value)
+                .ok()??;
             fields.push((
-                parse::FieldKey::Ident(Ident::synthetic(key.clone())),
+                parse::FieldKey::Ident(Ident::synthetic(key)),
                 lit.into_expr(),
             ));
         }
@@ -3030,10 +3031,11 @@ impl Solver {
             ExprKind::Evaluation(e) => self.is_const_expr(&e.left) && self.is_const_expr(&e.right),
             ExprKind::Equality(e) => self.is_const_expr(&e.left) && self.is_const_expr(&e.right),
             ExprKind::Logical(l) => self.is_const_expr(&l.left) && self.is_const_expr(&l.right),
-            // `Vec2::new(1.0, 2.0)`: a `#[ctor]` call whose args are all const reduces to the
-            // struct literal, so a `const` may hold it (r[mimas.const.ctor])
+            // `Vec2::new(1.0, 2.0)`: a field-constructor call whose args are all const
+            // reduces to the struct literal, so a `const` may hold it (r[mimas.const.ctor])
             ExprKind::Call(call) => {
-                self.const_ctor_fields(expr).is_some()
+                self.const_ctor_fields(expr)
+                    .is_some_and(|(_, _, arity)| call.arguments.len() == arity)
                     && call
                         .arguments
                         .iter()
@@ -3279,10 +3281,10 @@ pub(crate) struct NativeFnSig {
     pub consumes_recv: bool,
     /// `#[must_use]` -- the grades pass warns on a discarded result.
     pub must_use: bool,
-    /// `#[ctor]` at registration: arg `i` is verbatim field `i` of the receiver's
-    /// named-field adt, so a `T::f(const…)` call reduces to `T { f = const, … }`
-    /// and a `const` may hold it (r[mimas.const.ctor]).
-    pub ctor: bool,
+    /// A field constructor — `Some(map)` where `map[i]` is the parameter supplying the
+    /// receiver's field `i` (declared order), so a `T::f(const…)` call reduces to
+    /// `T { f = const, … }` and a `const` may hold it (r[mimas.const.ctor]).
+    pub ctor: Option<Vec<u8>>,
 }
 
 #[derive(Clone)]

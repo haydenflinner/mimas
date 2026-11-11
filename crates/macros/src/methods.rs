@@ -64,9 +64,15 @@ pub fn expand_impl(mut block: ItemImpl) -> Result<TokenStream2, syn::Error> {
                 }
                 let src = crate::src_submission(&shim.sig.ident, method.sig.ident.span());
                 // `#[effects]`/`#[ctor]` key on the shim's path too -- install looks the
-                // registered fn (the shim) up, not the method's own name
+                // registered fn (the shim) up, not the method's own name. Ctor inference
+                // reads the method's own body, which the generated shim can't see.
                 let effects = crate::effects_submission(&shim.sig.ident, &mut method.attrs)?;
-                let ctor = crate::ctor_submission(&shim.sig.ident, &mut method.attrs)?;
+                let ctor = crate::ctor_submission(
+                    &shim.sig.ident,
+                    &mut method.attrs,
+                    &method.sig,
+                    &method.block,
+                )?;
                 out.extend(quote!(#shim #src #muts #effects #ctor));
                 adds.extend(add);
             }

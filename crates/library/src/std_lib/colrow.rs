@@ -39,10 +39,10 @@ macro_rules! vecfam {
             use super::*;
 
             /// `Type::new(..)` — same as the `Type { x = .. }` literal;
-            /// `#[ctor]` lets a `const` hold one (r[impl mimas.const.ctor]).
+            /// the body is just that literal, so a `const` may hold one
+            /// (r[impl mimas.const.ctor]).
             #[native]
             #[effects()]
-            #[ctor]
             pub fn new<'gc>(_ctx: Ctx<'gc> $(, $f: f64)+) -> $V {
                 $V { $($f),+ }
             }

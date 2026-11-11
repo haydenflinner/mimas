@@ -135,13 +135,17 @@ pub struct ApiMethod<C> {
     pub consumes_recv: bool,
     /// See [`ApiFunction::must_use`].
     pub must_use: bool,
-    /// `#[ctor]` — the associated fn is a *field constructor*: arg `i`
-    /// is verbatim the receiver adt's field `i` (install checks the
-    /// names). A `T::f(const…)` call then reduces at solve to the
-    /// struct literal `T { f = const, … }`, so a `const` may hold one.
-    /// Never set on a fn that computes — `Spline::new` re-solves its
-    /// knots and stays a runtime call.
-    pub ctor: bool,
+    /// The associated fn is a *field constructor*: `Some(map)` where
+    /// `map[i]` is the parameter supplying the receiver adt's field `i`
+    /// (declared order), so the call *is* the struct literal. The usual
+    /// case is inferred — the `#[native]`/`#[mimas]` macro sees a body
+    /// that only packs its params (`Self { x, y }`) — while `#[ctor]`
+    /// declares the positional contract (`map[i] = i`) for a fn whose
+    /// body it can't see. A `T::f(const…)` call then reduces at solve
+    /// to the struct literal, so a `const` may hold one. Never a fn
+    /// that computes — `Spline::new` re-solves its knots and stays a
+    /// runtime call.
+    pub ctor: Option<Vec<u8>>,
     pub doc: String,
     pub validate: Option<LitValidator>,
     pub src: Option<NativeSrc>,

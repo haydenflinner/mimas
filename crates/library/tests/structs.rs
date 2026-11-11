@@ -44,8 +44,9 @@ test_run!(
     "{ let s = 0.0; for d in DIRS { s = s + d.dx + d.dy } s }" => "2.0",
 );
 
-// A `#[ctor]` assoc fn packs its args into the receiver's named fields and
-// nothing else, so a const may hold the call: `Vec2::new(1.0, 0.0)` is the
+// A field-ctor assoc fn packs its args into the receiver's named fields and
+// nothing else — inferred from its literal body — so a const may hold the
+// call: `Vec2::new(1.0, 0.0)` is the
 // `Vec2 { x = 1.0, y = 0.0 }` struct literal spelled as a call. Bare and
 // inside a const array (each use site allocates fresh, like a struct const).
 test_run!(
@@ -67,7 +68,7 @@ test_run!(
     "POINTS[0].x" => "1.0",
 );
 
-// Only a `#[ctor]` call may sit in a const: an ordinary assoc fn, a
+// Only a field-ctor call may sit in a const: an ordinary assoc fn, a
 // non-ctor arg, or a named arg all stay compile errors.
 test_fail!(
     non_ctor_calls_stay_non_const,

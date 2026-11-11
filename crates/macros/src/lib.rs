@@ -40,7 +40,12 @@ pub fn native(_attr: TokenStream, item: TokenStream) -> TokenStream {
         Ok(effects) => effects,
         Err(e) => return e.to_compile_error().into(),
     };
-    let ctor = match ctor_submission(&input.sig.ident, &mut input.attrs) {
+    let ctor = match ctor_submission(
+        &input.sig.ident,
+        &mut input.attrs,
+        &input.sig,
+        &input.block,
+    ) {
         Ok(ctor) => ctor,
         Err(e) => return e.to_compile_error().into(),
     };
@@ -130,7 +135,12 @@ fn expand_mimas(attr: TokenStream, item: TokenStream) -> Result<TokenStream2, sy
         syn::Item::Fn(mut function) => {
             let src = src_submission(&function.sig.ident, function.sig.ident.span());
             let effects = effects_submission(&function.sig.ident, &mut function.attrs)?;
-            let ctor = ctor_submission(&function.sig.ident, &mut function.attrs)?;
+            let ctor = ctor_submission(
+                &function.sig.ident,
+                &mut function.attrs,
+                &function.sig,
+                &function.block,
+            )?;
             let (_, mutating) = convert::expand_conversion(&mut function)?;
             let params = param_names(&function.sig);
             let grades = grades(&mut function.attrs, &params)?;
@@ -395,29 +405,101 @@ pub(crate) fn effects_submission(
     }))
 }
 
+/// Infers a field constructor from a body that is one struct literal over its parameters —
+/// `fn new(x, y) -> Self { Self { x, y } }` — returning each field's supplying parameter in
+/// user-facing order (the head `Ctx`/`self` slot excluded, matching `param_names`). A field
+/// fed by anything but a bare parameter — a computation, a member access, a `..` rest — is
+/// not field packing, so `None`, and the fn stays a runtime call.
+fn infer_ctor_map(
+    sig: &syn::Signature,
+    block: &syn::Block,
+) -> Option<Vec<(String, u8)>> {
+    let tail = match block.stmts.as_slice() {
+        [syn::Stmt::Expr(expr, None)] => Some(expr),
+        [syn::Stmt::Expr(syn::Expr::Return(ret), Some(_))] => ret.expr.as_deref(),
+        _ => None,
+    }?;
+    let syn::Expr::Struct(lit) = tail else {
+        return None;
+    };
+    if lit.rest.is_some() {
+        return None;
+    }
+    // user-facing params, in order: a head `Ctx` or `self` slot isn't one
+    // (`#[native]` fns may omit `Ctx` — `convert` inserts it — so detect it
+    // by type, not position, or the indices shift)
+    let params: Vec<String> = sig
+        .inputs
+        .iter()
+        .skip_while(|arg| match arg {
+            syn::FnArg::Receiver(_) => true,
+            syn::FnArg::Typed(t) => match &*t.ty {
+                syn::Type::Path(tp) => tp
+                    .path
+                    .segments
+                    .last()
+                    .is_some_and(|s| s.ident == "Ctx"),
+                _ => false,
+            },
+        })
+        .filter_map(|arg| match arg {
+            syn::FnArg::Typed(t) => match &*t.pat {
+                syn::Pat::Ident(i) => Some(i.ident.to_string()),
+                _ => None,
+            },
+            syn::FnArg::Receiver(_) => None,
+        })
+        .collect();
+    lit.fields
+        .iter()
+        .map(|fv| {
+            let syn::Member::Named(field) = &fv.member else {
+                return None;
+            };
+            let syn::Expr::Path(path) = &fv.expr else {
+                return None;
+            };
+            let name = path.path.get_ident()?.to_string();
+            let index = params.iter().position(|p| *p == name)? as u8;
+            Some((field.to_string(), index))
+        })
+        .collect()
+}
+
 /// Ships a field-constructor declaration to install time keyed by the item's full Rust path,
-/// for `vm::api::ctor_for` to join onto the registered `ApiMethod` (see `vm::api::NativeCtor`).
-/// The `#[ctor]` helper attribute is drained from `attrs` so it never reaches rustc. The fn
-/// promises arg `i` is verbatim field `i` of its receiver adt — the install check compares
-/// param names to field names — which makes a `T::f(const…)` call reduce to the struct
-/// literal, so a `const` may hold one (`mimas.const.ctor`).
+/// for `vm::api::ctor_entry` to join onto the registered `ApiMethod` (see
+/// `vm::api::NativeCtor`). Usually the fn needs no marker: `infer_ctor_map` reads a body that
+/// only packs its params into a struct literal and submits the field→param map it found.
+/// The explicit `#[ctor]` helper attribute — drained from `attrs` so it never reaches rustc —
+/// declares the positional contract (field `i` is arg `i`) for a fn whose body the macro
+/// can't see; install verifies names and arity either way, so a `T::f(const…)` call reduces
+/// to the struct literal and a `const` may hold one (`mimas.const.ctor`).
 pub(crate) fn ctor_submission(
     fn_ident: &Ident,
     attrs: &mut Vec<syn::Attribute>,
+    sig: &syn::Signature,
+    block: &syn::Block,
 ) -> Result<Option<TokenStream2>, syn::Error> {
-    let Some(pos) = attrs.iter().position(|a| a.path().is_ident("ctor")) else {
+    let map = if let Some(pos) = attrs.iter().position(|a| a.path().is_ident("ctor")) {
+        let attr = attrs.remove(pos);
+        attr.meta.require_path_only().map_err(|_| {
+            syn::Error::new_spanned(&attr, "`#[ctor]` takes no arguments")
+        })?;
+        Some(Vec::new())
+    } else {
+        infer_ctor_map(sig, block)
+    };
+    let Some(map) = map else {
         return Ok(None);
     };
-    let attr = attrs.remove(pos);
-    attr.meta.require_path_only().map_err(|_| {
-        syn::Error::new_spanned(&attr, "`#[ctor]` takes no arguments")
-    })?;
     let vm = vm_path();
     let name = fn_ident.to_string();
+    let fields = map.iter().map(|(field, index)| quote!((#field, #index)));
     Ok(Some(quote! {
         #vm::inventory::submit! {
             #vm::api::NativeCtor {
                 path: ::std::concat!(::std::module_path!(), "::", #name),
+                map: &[#(#fields),*],
             }
         }
     }))
