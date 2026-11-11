@@ -144,7 +144,10 @@ fn contract_failure_names_the_inner_dimension() {
 
 #[test]
 fn where_failure_renders_the_predicate_span() {
-    let src = "fn f(n: int) -> int where n > 0 { n }\nfn z() -> int { -2 }\nf(z());";
+    // `from_angle` computes (it isn't a field ctor), so `z` stays opaque to
+    // the const folder and the where check stays runtime — a foldable arg
+    // would be caught statically instead
+    let src = "use std::math::Vec2;\nfn f(n: int) -> int where n > 0 { n }\nfn z() -> int { Vec2::from_angle(0.5rad).x.to_int() }\nf(z());";
     let Err(err) = vm::Vm::execute(src, library::std) else {
         panic!("expected a contract failure")
     };

@@ -84,6 +84,15 @@ pub struct Solver {
 
     pub(crate) dec_to_native: Shared<FxHashMap<DecId, NativeBinding>>,
 
+    /// Mimas `fn`s recorded at solve (`Function::solve`), for the const call
+    /// fold: dec → params + solved body. Populated per program — not `Shared`.
+    pub(crate) const_items: FxHashMap<DecId, ConstItem>,
+    /// `true` while the early solve_consts fixpoint runs: a `const` whose rhs
+    /// holds a call to a Mimas fn defers rather than erroring — the callee's
+    /// body isn't solved (and so not recorded for the fold) until
+    /// `solve_bodies`. False everywhere else; the post-bodies retry errors.
+    pub(crate) defer_call_consts: bool,
+
     // dataframe schemas (see frames.rs): a frame's Ty stays the nominal `DataFrame` while
     // these carry its column map -- keyed by producing expr and by `let` binding.
     pub(crate) frame_schemas: FxHashMap<NodeId, Rc<crate::frames::FrameSchema>>,
@@ -214,6 +223,8 @@ impl Solver {
             module_items: Shared::default(),
             sources: FxHashMap::default(),
             dec_to_native: Shared::default(),
+            const_items: FxHashMap::default(),
+            defer_call_consts: false,
             frame_schemas: FxHashMap::default(),
             frame_decs: FxHashMap::default(),
             group_schemas: FxHashMap::default(),
@@ -480,6 +491,7 @@ impl Solver {
         // re-run while the count of consts-with-known-values grows, capped as a safety net.
         const FIXPOINT_CAP: usize = 16;
         let mut prev = self.resolved_constants();
+        self.defer_call_consts = true;
         for _ in 0..FIXPOINT_CAP {
             run_phase(self, Self::hoist_uses, &mut saved_ribs)?;
             lap("hoist_uses");
@@ -491,11 +503,18 @@ impl Solver {
             }
             prev = curr;
         }
+        self.defer_call_consts = false;
 
         run_phase(self, Self::solve_types, &mut saved_ribs)?;
         lap("solve_types");
         run_phase(self, Self::solve_bodies, &mut saved_ribs)?;
         lap("solve_bodies");
+
+        // a `const` that deferred on a Mimas-fn call now has the callee bodies
+        // it needs — retry (r[mimas.const.eval]); anything still unresolvable
+        // errors for real this time
+        run_phase(self, Self::solve_consts, &mut saved_ribs)?;
+        lap("solve_consts (deferred)");
 
         // body solving is the last chance for an impl-associated or block-scoped const to gain
         // its literal value. anything still at `Constant(None)` afterwards is unresolvable --
@@ -755,6 +774,12 @@ impl Solver {
         }
 
         if !self.is_const_expr(right) {
+            // a call to a Mimas fn can't fold until `solve_bodies` records the
+            // callee — defer to the retry pass instead of erroring early
+            // (r[mimas.const.eval])
+            if self.defer_call_consts && self.calls_unsolved_fn(right) {
+                return Ok(ty);
+            }
             Err(NonConstantValue {
                 src: self.src(right.location()),
                 at: right.location().into(),
@@ -2919,7 +2944,32 @@ impl Solver {
     /// value is already known. Errors (e.g. divide-by-zero) propagate up as diagnostics --
     /// reduce returns raw location-tagged errors and we materialize them with source here.
     pub(crate) fn reduce_const_expr(&self, expr: &Expr) -> Result<Option<Literal>> {
-        crate::utils::reduce(expr, &|e| {
+        let env = ConstEnv::default();
+        self.reduce_const_in(expr, &env).map_err(|e| e.into_diag(self))
+    }
+
+    /// `reduce` with a param/`let` env: the resolve callback answers idents
+    /// from `env` before the const table and folds field-ctor and Mimas-fn
+    /// calls. Blocks, ifs and accesses have no stock `reduce` arm — they're
+    /// intercepted here (and re-entered from the callback when nested inside
+    /// a stock arm's operand).
+    fn reduce_const_in(
+        &self,
+        expr: &Expr,
+        env: &ConstEnv,
+    ) -> crate::utils::ReduceResult<Option<Literal>> {
+        match expr.kind() {
+            ExprKind::Block(b) => return self.reduce_block(b, env),
+            ExprKind::If(i) => return self.reduce_if(i, env),
+            // `v.x`/`xs[i]` need the literal receiver — `reduce` has no arm
+            // for them. `T::m`/`E::V` stay leaves: `resolve` answers variants
+            // and assoc consts there.
+            ExprKind::Access(Access::Dot { .. } | Access::Square { .. }) => {
+                return self.reduce_access(expr, env);
+            }
+            _ => {}
+        }
+        let out = crate::utils::reduce(expr, &|e| {
             if self.is_unit_variant(e) {
                 // `Team::Blue` as a value is the variant's empty struct literal --
                 // emitted at each use site like any struct const
@@ -2929,14 +2979,425 @@ impl Solver {
                     base: None,
                 }));
             }
-            if let Some(lit) = self.const_ctor_literal(e) {
-                return Some(lit);
+            if let Some(&dec) = self.node_decs.get(&e.id()) {
+                if let Some(lit) = env.lits.get(&dec) {
+                    return Some(lit.clone());
+                }
+                if let Some(lit) = self.decs[dec].kind.const_value() {
+                    return Some(lit.clone());
+                }
             }
-            self.node_decs
-                .get(&e.id())
-                .and_then(|&dec| self.decs[dec].kind.const_value().cloned())
-        })
-        .map_err(|e| e.into_diag(self))
+            match e.kind() {
+                ExprKind::Call(_) => self
+                    .const_ctor_literal(e, env)
+                    .or_else(|| self.fold_mimas_call(e, env)),
+                // the stock walker has no Block/If/Access arm — they decline to
+                // resolve and land here, where the env-aware walk folds them
+                ExprKind::Block(_) | ExprKind::If(_) | ExprKind::Access(_) => {
+                    match self.reduce_const_in(e, env) {
+                        Ok(lit) => lit,
+                        Err(err) => {
+                            let mut slot = env.err.borrow_mut();
+                            if slot.is_none() {
+                                *slot = Some(err);
+                            }
+                            None
+                        }
+                    }
+                }
+                _ => None,
+            }
+        })?;
+        if let Some(err) = env.err.borrow_mut().take() {
+            return Err(err);
+        }
+        match out {
+            Some(lit) => self.reify_literal(lit, env),
+            None => Ok(None),
+        }
+    }
+
+    /// `reduce` only *checks* a literal's field exprs — it keeps them as
+    /// written, so a `Literal` produced inside a fold env can still carry
+    /// `self.x * k` where the use site has no `self`. Re-fold every embedded
+    /// expr to its literal so the value that lands on the dec is closed.
+    fn reify_literal(
+        &self,
+        lit: Literal,
+        env: &ConstEnv,
+    ) -> crate::utils::ReduceResult<Option<Literal>> {
+        let reify = |e: &Expr| -> crate::utils::ReduceResult<Option<Expr>> {
+            Ok(self.reduce_const_in(e, env)?.map(|l| l.into_expr()))
+        };
+        let reify_elems = |elems: Vec<Expr>| -> crate::utils::ReduceResult<Option<Vec<Expr>>> {
+            let mut out = Vec::with_capacity(elems.len());
+            for e in &elems {
+                let Some(lit) = reify(e)? else {
+                    return Ok(None);
+                };
+                out.push(lit);
+            }
+            Ok(Some(out))
+        };
+        match lit {
+            Literal::Struct(mut s) => {
+                for (_, field) in s.fields.iter_mut() {
+                    let Some(lit) = reify(field)? else {
+                        return Ok(None);
+                    };
+                    *field = lit;
+                }
+                if let Some(base) = s.base.as_mut() {
+                    let Some(lit) = reify(base)? else {
+                        return Ok(None);
+                    };
+                    *base = lit;
+                }
+                Ok(Some(Literal::Struct(s)))
+            }
+            Literal::Array(elems) => Ok(reify_elems(elems)?.map(Literal::Array)),
+            Literal::Tuple(elems) => Ok(reify_elems(elems)?.map(Literal::Tuple)),
+            Literal::Dictionary(fields) => {
+                let mut out = Vec::with_capacity(fields.len());
+                for (key, value) in &fields {
+                    let Some(lit) = reify(value)? else {
+                        return Ok(None);
+                    };
+                    out.push((key.clone(), lit));
+                }
+                Ok(Some(Literal::Dictionary(out)))
+            }
+            _ => Ok(Some(lit)),
+        }
+    }
+
+    /// `f(args…)` / `recv.f(args…)` where `f` is a recorded Mimas fn: bind the
+    /// params to the reduced args (defaults filling the tail) and fold the
+    /// body. Anything non-const, a wrong arity, or a cycle declines to `None`
+    /// and the call stays a runtime call outside a `const`.
+    // r[impl mimas.const.eval]
+    fn fold_mimas_call(&self, expr: &Expr, env: &ConstEnv) -> Option<Literal> {
+        let ExprKind::Call(call) = expr.kind() else {
+            return None;
+        };
+        let (dec, item, recv) = self.mimas_callee(call)?;
+        if env.visiting.contains(&dec) {
+            return None;
+        }
+        let mut inner = ConstEnv {
+            visiting: {
+                let mut v = env.visiting.clone();
+                v.insert(dec);
+                v
+            },
+            err: env.err.clone(),
+            ..ConstEnv::default()
+        };
+        let offset = match recv {
+            Some(recv_expr) => {
+                let lit = self.reduce_const_in(recv_expr, env).ok()??;
+                inner.lits.insert(item.params[0], lit);
+                1
+            }
+            None => 0,
+        };
+        let params = &item.params[offset..];
+        let defaults = match &self.decs[dec].kind {
+            DecKind::Item { defaults, .. } => defaults.as_slice(),
+            _ => &[],
+        };
+        if call.arguments.len() > params.len() {
+            return None;
+        }
+        for (i, &param) in params.iter().enumerate() {
+            let lit = match call.arguments.get(i) {
+                Some(arg) => {
+                    if arg.name.is_some() {
+                        return None;
+                    }
+                    self.reduce_const_in(&arg.value, env).ok()??
+                }
+                None => defaults.get(offset + i)?.clone()?,
+            };
+            inner.lits.insert(param, lit);
+        }
+        self.reduce_const_in(&item.body, &inner).ok()?
+    }
+
+    /// The recorded Mimas fn a call invokes, plus its receiver expr for a
+    /// dot-call (`recv.f(..)` — the access's left). For a `T::f(recv, ..)`
+    /// call `self` is just arg 0; a bare `f(..)` call on a method has no
+    /// receiver to bind and is never const.
+    fn mimas_callee<'e>(
+        &self,
+        call: &'e Call,
+    ) -> Option<(DecId, &ConstItem, Option<&'e Expr>)> {
+        let dec = *self.node_decs.get(&call.left.id())?;
+        if self.dec_to_native.contains_key(&dec) {
+            return None;
+        }
+        let item = self.const_items.get(&dec)?;
+        if item.params.len() < usize::from(item.method) {
+            return None;
+        }
+        let recv = match call.left.kind() {
+            ExprKind::Access(Access::Dot { left, .. }) if item.method => Some(left),
+            ExprKind::Ident(_) if item.method => return None,
+            _ => None,
+        };
+        Some((dec, item, recv))
+    }
+
+    /// Reduce a block under an env that grows a binding per `let`: the only
+    /// statements a const block may hold are `let`s and expression
+    /// statements (both must fold), anything else is a side effect.
+    fn reduce_block(
+        &self,
+        block: &parse::Block,
+        env: &ConstEnv,
+    ) -> crate::utils::ReduceResult<Option<Literal>> {
+        let mut scoped = env.clone();
+        for stmt in &block.body {
+            match stmt.kind() {
+                StmtKind::Let(let_stmt) if let_stmt.else_branch.is_none() => {
+                    let Some(lit) = self.reduce_const_in(&let_stmt.right, &scoped)? else {
+                        return Ok(None);
+                    };
+                    let Some(ident) = let_stmt.left.as_ident() else {
+                        return Ok(None);
+                    };
+                    let Some(&dec) = self
+                        .node_decs
+                        .get(&let_stmt.left.id())
+                        .or_else(|| self.node_decs.get(&ident.id))
+                    else {
+                        return Ok(None);
+                    };
+                    scoped.lits.insert(dec, lit);
+                }
+                StmtKind::Expr(expr) => {
+                    if self.reduce_const_in(expr, &scoped)?.is_none() {
+                        return Ok(None);
+                    }
+                }
+                _ => return Ok(None),
+            }
+        }
+        match &block.yielded_expr {
+            Some(tail) => self.reduce_const_in(tail, &scoped),
+            None => Ok(Some(Literal::Unit)),
+        }
+    }
+
+    /// `if cond { a } else { b }` folds when the condition does: reduce it and
+    /// take the branch it names. A missing `else` yields `Unit` on `false`.
+    fn reduce_if(
+        &self,
+        if_expr: &parse::If,
+        env: &ConstEnv,
+    ) -> crate::utils::ReduceResult<Option<Literal>> {
+        if if_expr.binding.is_some() {
+            return Ok(None);
+        }
+        match self.reduce_const_in(&if_expr.condition, env)? {
+            Some(Literal::True) => self.reduce_const_in(&if_expr.main_body, env),
+            Some(Literal::False) => match &if_expr.else_expr {
+                Some(else_expr) => self.reduce_const_in(else_expr, env),
+                None => Ok(Some(Literal::Unit)),
+            },
+            _ => Ok(None),
+        }
+    }
+
+    /// `v.f`, `v[0]` and `self.f` project onto a literal: fold the receiver,
+    /// then read the field or element out of the `Literal` it produced.
+    fn reduce_access(
+        &self,
+        expr: &Expr,
+        env: &ConstEnv,
+    ) -> crate::utils::ReduceResult<Option<Literal>> {
+        let ExprKind::Access(access) = expr.kind() else {
+            return Ok(None);
+        };
+        // a callable (a method value) resolves through node_decs -- a bare
+        // `v.f` used as a value is not a field projection and stays non-const
+        if let Some(&dec) = self.node_decs.get(&expr.id())
+            && self
+                .sub(self.decs[dec].vid)
+                .is_some_and(|ty| matches!(ty, Ty::Fn(_)))
+        {
+            return Ok(None);
+        }
+        let (recv, key): (Literal, &Expr) = match access {
+            Access::Dot {
+                left,
+                right,
+                kind: AccessKind::Direct,
+            } => match self.reduce_const_in(left, env)? {
+                Some(recv) => (recv, right),
+                None => return Ok(None),
+            },
+            Access::Square {
+                left,
+                key,
+                kind: AccessKind::Direct,
+            } => match self.reduce_const_in(left, env)? {
+                Some(recv) => (recv, key),
+                None => return Ok(None),
+            },
+            _ => return Ok(None),
+        };
+        match access {
+            Access::Square { .. } => match (recv, self.reduce_const_in(key, env)?) {
+                (Literal::Array(elems) | Literal::Tuple(elems), Some(Literal::Int(i))) => {
+                    let Some(elem) = elems.get(i as usize) else {
+                        return Ok(None);
+                    };
+                    self.reduce_const_in(elem, env)
+                }
+                _ => Ok(None),
+            },
+            _ => {
+                let name = match key.kind() {
+                    ExprKind::Ident(ident) => FieldName::Ident(&ident.lexeme),
+                    ExprKind::Literal(Literal::Int(i)) => FieldName::Index(*i as usize),
+                    _ => return Ok(None),
+                };
+                self.project_field(&recv, &name)
+            }
+        }
+    }
+
+    /// Read field `name` off a `Literal::Struct` (or an element off a
+    /// `Literal::Tuple`), folding the stored field expr to its literal. Any
+    /// other literal shape declines.
+    fn project_field(
+        &self,
+        recv: &Literal,
+        name: &FieldName<'_>,
+    ) -> crate::utils::ReduceResult<Option<Literal>> {
+        let expr = match (recv, name) {
+            (Literal::Struct(s), _) => s
+                .fields
+                .iter()
+                .find(|(key, _)| match (key, name) {
+                    (FieldKey::Ident(i), FieldName::Ident(n)) => i.lexeme == **n,
+                    (FieldKey::Int(a), FieldName::Index(b)) => a == b,
+                    _ => false,
+                })
+                .map(|(_, expr)| expr),
+            (Literal::Tuple(elems), FieldName::Index(i)) => elems.get(*i),
+            _ => None,
+        };
+        let Some(expr) = expr else {
+            return Ok(None);
+        };
+        self.reduce_const_in(expr, &ConstEnv::default())
+    }
+
+    /// `xs[i]`/`v.f` count as const when the receiver and key are -- the fold
+    /// is what actually proves the projection exists.
+    fn is_const_access(&self, expr: &Expr, scope: &mut ConstScope) -> bool {
+        let ExprKind::Access(access) = expr.kind() else {
+            return false;
+        };
+        // a callable dec on the access itself (a method/assoc value) is not a
+        // field projection
+        if let Some(&dec) = self.node_decs.get(&expr.id())
+            && self
+                .sub(self.decs[dec].vid)
+                .is_some_and(|ty| matches!(ty, Ty::Fn(_)))
+        {
+            return false;
+        }
+        match access {
+            Access::Dot { left, kind: AccessKind::Direct, .. } => {
+                self.is_const_expr_in(left, scope)
+            }
+            Access::Square {
+                left,
+                key,
+                kind: AccessKind::Direct,
+            } => self.is_const_expr_in(left, scope) && self.is_const_expr_in(key, scope),
+            Access::DoubleColon { .. } => self
+                .node_decs
+                .get(&expr.id())
+                .is_some_and(|&dec| self.decs[dec].kind.is_constant()),
+            _ => false,
+        }
+    }
+
+    /// `f(args…)`/`recv.f(args…)` is const when `f` is a recorded Mimas fn,
+    /// the receiver and every arg are const, and the body under its params is
+    /// a const expression. A callee already being folded (recursion) is not.
+    fn is_const_mimas_call(&self, call: &Call, scope: &mut ConstScope) -> bool {
+        let Some((dec, item, recv)) = self.mimas_callee(call) else {
+            return false;
+        };
+        if scope.visiting.contains(&dec) {
+            return false;
+        }
+        let offset = match recv {
+            Some(recv_expr) => {
+                if !self.is_const_expr_in(recv_expr, scope) {
+                    return false;
+                }
+                1
+            }
+            None => 0,
+        };
+        let params = &item.params[offset..];
+        let defaults = match &self.decs[dec].kind {
+            DecKind::Item { defaults, .. } => {
+                defaults.get(offset..).unwrap_or(&[])
+            }
+            _ => &[],
+        };
+        let required = params
+            .len()
+            .saturating_sub(defaults.iter().filter(|d| d.is_some()).count());
+        if call.arguments.len() > params.len()
+            || call.arguments.len() < required
+            || call.arguments.iter().any(|a| a.name.is_some())
+            || !call
+                .arguments
+                .iter()
+                .all(|a| self.is_const_expr_in(&a.value, scope))
+        {
+            return false;
+        }
+        let mut inner = scope.clone();
+        inner.decs.extend(item.params.iter().copied());
+        inner.visiting.insert(dec);
+        self.is_const_expr_in(&item.body, &mut inner)
+    }
+
+    /// Does `expr` call a Mimas fn anywhere? Used by the early `solve_consts`
+    /// fixpoint to tell "fails because a callee's body isn't recorded yet"
+    /// (deferrable — `solve_bodies` may make it fold) from "fails on its own
+    /// terms" (error now).
+    fn calls_unsolved_fn(&self, expr: &Expr) -> bool {
+        struct Probe<'s> {
+            solver: &'s Solver,
+            hit: bool,
+        }
+        impl parse::visit::Visitor for Probe<'_> {
+            fn expr(&mut self, expr: &Expr) {
+                if let ExprKind::Call(call) = expr.kind()
+                    && let Some(&dec) = self.solver.node_decs.get(&call.left.id())
+                    && matches!(self.solver.decs[dec].kind, DecKind::Item { .. })
+                    && !self.solver.dec_to_native.contains_key(&dec)
+                {
+                    self.hit = true;
+                }
+            }
+        }
+        let mut probe = Probe {
+            solver: self,
+            hit: false,
+        };
+        parse::visit::walk_expr(expr, &mut probe);
+        probe.hit
     }
 
     /// `T::f(...)` where `f` is a field-constructor native: each field of `T`'s single
@@ -2950,8 +3411,7 @@ impl Solver {
         let ExprKind::Call(call) = expr.kind() else {
             return None;
         };
-        let ExprKind::Access(parse::Access::DoubleColon { left, .. }) = call.left.kind()
-        else {
+        let ExprKind::Access(parse::Access::DoubleColon { .. }) = call.left.kind() else {
             return None;
         };
         let dec = *self.node_decs.get(&call.left.id())?;
@@ -2967,13 +3427,16 @@ impl Solver {
             .cloned()
             .zip(map.iter().copied())
             .collect();
-        Some((left.clone(), fields, binding.sig.params.len()))
+        // the call node is the literal's `name`: the type ident `left` is a
+        // path head, so nothing notes a ty or dec on it — the call itself
+        // types as the adt, which is what `Literal::Struct` emit needs
+        Some((expr.clone(), fields, binding.sig.params.len()))
     }
 
     /// The `Literal::Struct` a const ctor call reduces to -- each field's arg reduced in
     /// turn. A non-const or erroring arg declines the whole call (the caller's
     /// `NonConstantValue` then reports it like any other unreduced call).
-    fn const_ctor_literal(&self, expr: &Expr) -> Option<Literal> {
+    fn const_ctor_literal(&self, expr: &Expr, env: &ConstEnv) -> Option<Literal> {
         let ExprKind::Call(call) = expr.kind() else {
             return None;
         };
@@ -2985,7 +3448,7 @@ impl Solver {
         let mut fields = Vec::with_capacity(field_args.len());
         for (key, index) in field_args {
             let lit = self
-                .reduce_const_expr(&call.arguments[index as usize].value)
+                .reduce_const_in(&call.arguments[index as usize].value, env)
                 .ok()??;
             fields.push((
                 parse::FieldKey::Ident(Ident::synthetic(key)),
@@ -3012,36 +3475,96 @@ impl Solver {
     }
 
     pub(crate) fn is_const_expr(&self, expr: &Expr) -> bool {
+        self.is_const_expr_in(expr, &mut ConstScope::default())
+    }
+
+    /// `is_const_expr` under a [`ConstScope`]: the same syntactic whitelist plus
+    /// param/`let` decs from the calls and blocks being folded.
+    fn is_const_expr_in(&self, expr: &Expr, scope: &mut ConstScope) -> bool {
         if self.is_unit_variant(expr) {
             return true;
         }
         match expr.kind() {
-            ExprKind::Ident(_) => self
-                .node_decs
-                .get(&expr.id())
-                .is_some_and(|&dec| self.decs[dec].kind.is_constant()),
+            ExprKind::Ident(_) => self.node_decs.get(&expr.id()).is_some_and(|&dec| {
+                scope.decs.contains(&dec) || self.decs[dec].kind.is_constant()
+            }),
             // elements may be anything const, structs and dicts included: an
             // array holding one allocates at each use site (`emit_const_dec`)
             ExprKind::Literal(parse::Literal::Array(elems) | parse::Literal::Tuple(elems)) => {
-                elems.iter().all(|e| self.is_const_expr(e))
+                elems.iter().all(|e| self.is_const_expr_in(e, scope))
             }
             ExprKind::Literal(_) => true,
-            ExprKind::Grouping(g) => self.is_const_expr(&g.inner),
-            ExprKind::Unary(u) => self.is_const_expr(&u.right),
-            ExprKind::Evaluation(e) => self.is_const_expr(&e.left) && self.is_const_expr(&e.right),
-            ExprKind::Equality(e) => self.is_const_expr(&e.left) && self.is_const_expr(&e.right),
-            ExprKind::Logical(l) => self.is_const_expr(&l.left) && self.is_const_expr(&l.right),
-            // `Vec2::new(1.0, 2.0)`: a field-constructor call whose args are all const
-            // reduces to the struct literal, so a `const` may hold it (r[mimas.const.ctor])
+            ExprKind::Grouping(g) => self.is_const_expr_in(&g.inner, scope),
+            ExprKind::Unary(u) => self.is_const_expr_in(&u.right, scope),
+            ExprKind::Evaluation(e) => {
+                self.is_const_expr_in(&e.left, scope) && self.is_const_expr_in(&e.right, scope)
+            }
+            ExprKind::Equality(e) => {
+                self.is_const_expr_in(&e.left, scope) && self.is_const_expr_in(&e.right, scope)
+            }
+            ExprKind::Logical(l) => {
+                self.is_const_expr_in(&l.left, scope) && self.is_const_expr_in(&l.right, scope)
+            }
             ExprKind::Call(call) => {
-                self.const_ctor_fields(expr)
+                // `Vec2::new(1.0, 2.0)`: a field-constructor call whose args are
+                // all const reduces to the struct literal (r[mimas.const.ctor])
+                let ctor = self
+                    .const_ctor_fields(expr)
                     .is_some_and(|(_, _, arity)| call.arguments.len() == arity)
                     && call
                         .arguments
                         .iter()
-                        .all(|a| a.name.is_none() && self.is_const_expr(&a.value))
+                        .all(|a| a.name.is_none() && self.is_const_expr_in(&a.value, scope));
+                // `f(const…)` where `f`'s body is itself a const expression
+                ctor || self.is_const_mimas_call(call, scope)
             }
+            ExprKind::Block(block) => self.is_const_block(block, scope),
+            ExprKind::If(if_expr) => {
+                if_expr.binding.is_none()
+                    && self.is_const_expr_in(&if_expr.condition, scope)
+                    && self.is_const_expr_in(&if_expr.main_body, scope)
+                    && if_expr
+                        .else_expr
+                        .as_ref()
+                        .is_none_or(|e| self.is_const_expr_in(e, scope))
+            }
+            ExprKind::Access(_) => self.is_const_access(expr, scope),
             _ => false,
+        }
+    }
+
+    /// A block is const when it holds only `let`s over const rhs's and const
+    /// expression statements — bound names enter the scope as it walks.
+    fn is_const_block(&self, block: &parse::Block, scope: &mut ConstScope) -> bool {
+        let mut scoped = scope.clone();
+        for stmt in &block.body {
+            match stmt.kind() {
+                StmtKind::Let(let_stmt) if let_stmt.else_branch.is_none() => {
+                    if !self.is_const_expr_in(&let_stmt.right, &mut scoped) {
+                        return false;
+                    }
+                    let Some(ident) = let_stmt.left.as_ident() else {
+                        return false;
+                    };
+                    if let Some(&dec) = self
+                        .node_decs
+                        .get(&let_stmt.left.id())
+                        .or_else(|| self.node_decs.get(&ident.id))
+                    {
+                        scoped.decs.insert(dec);
+                    }
+                }
+                StmtKind::Expr(expr) => {
+                    if !self.is_const_expr_in(expr, &mut scoped) {
+                        return false;
+                    }
+                }
+                _ => return false,
+            }
+        }
+        match &block.yielded_expr {
+            Some(tail) => self.is_const_expr_in(tail, &mut scoped),
+            None => true,
         }
     }
 
@@ -3389,4 +3912,51 @@ pub(crate) enum ResolvedUse {
     /// `use m::*;` -- the module's members visible *here*, re-collected at
     /// each install so members hoisted in a later phase still land.
     Glob(AdtId),
+}
+
+/// The name a pact member key spells: `mul#1` is an overload of `mul`.
+/// r[impl mimas.pact.overload]
+pub fn pact_key_base(key: &str) -> &str {
+    key.split('#').next().unwrap_or(key)
+}
+
+/// A Mimas `fn` recorded for the const call fold (`Function::solve`). A `const`
+/// may call one when the call's args are constant and the body is itself a
+/// const expression — the call reduces by folding the body under a
+/// param → literal env. `params` is every parameter's dec in declaration order
+/// (`self` first for a method); `body`'s `node_decs` are in place.
+// r[impl mimas.const.eval]
+#[derive(Clone)]
+pub(crate) struct ConstItem {
+    pub params: Vec<DecId>,
+    pub body: Expr,
+    /// The first parameter is `self` — a dot-call supplies the receiver.
+    pub method: bool,
+}
+
+/// Scope state for the `is_const_expr` walk: decs that count as constant (a
+/// called fn's params, `let`s bound in a const block) and the callees already
+/// being folded — a recursive call has no finite literal, so it isn't const.
+/// Cloned into block/call scope.
+#[derive(Clone, Default)]
+struct ConstScope {
+    decs: FxHashSet<DecId>,
+    visiting: FxHashSet<DecId>,
+}
+
+/// The value-side twin of [`ConstScope`] for `reduce_const_in`: dec → literal
+/// bindings for params and `let`s in the bodies being folded and the callees
+/// already being folded. `err` is shared across clones — the first nested
+/// fold error wins.
+#[derive(Clone, Default)]
+struct ConstEnv {
+    lits: FxHashMap<DecId, Literal>,
+    visiting: FxHashSet<DecId>,
+    err: Rc<std::cell::RefCell<Option<crate::utils::ReduceError>>>,
+}
+
+/// A field projection target: `v.x` by name, `v.0`/`t[i]` by position.
+enum FieldName<'e> {
+    Ident(&'e str),
+    Index(usize),
 }

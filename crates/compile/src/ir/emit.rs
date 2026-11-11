@@ -1421,15 +1421,39 @@ impl Emit for Literal {
                 return Some(dict);
             }
             Literal::Struct(s) => {
+                // a const-folded unit variant arrives as an empty struct
+                // literal naming the `E::V` access — lower the access, not a
+                // struct instance
+                if s.fields.is_empty()
+                    && s.base.is_none()
+                    && matches!(
+                        ir.resolutions
+                            .node_decs
+                            .get(&s.name.id())
+                            .map(|&d| &ir.resolutions.decs[d].kind),
+                        Some(solve::ResolvedDeclKind::Variant { .. })
+                    )
+                {
+                    return s.name.lower(ir);
+                }
                 let adt = match ir
                     .resolutions
                     .node_tys
                     .get(&s.name.id())
                     .or_else(|| ir.resolutions.node_tys.get(&id))
-                    .unwrap()
                 {
-                    Ty::Adt(adt, _) | Ty::Identity(adt, _) => *adt,
-                    _ => unreachable!(),
+                    Some(Ty::Adt(adt, _) | Ty::Identity(adt, _)) => *adt,
+                    // synthesized literals (const folds reified to exprs)
+                    // carry untyped nodes — the name's dec is the adt itself
+                    _ => match ir
+                        .resolutions
+                        .node_decs
+                        .get(&s.name.id())
+                        .map(|&d| &ir.resolutions.decs[d].kind)
+                    {
+                        Some(solve::ResolvedDeclKind::Adt(adt)) => *adt,
+                        _ => unreachable!("struct literal emits without a typed or declared name"),
+                    },
                 };
 
                 // todo, wonder if we can avoid double alloc here

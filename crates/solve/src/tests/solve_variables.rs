@@ -230,7 +230,10 @@ test_fail!(non_const_array, "const A = [foo()];");
 test_fail!(
     // r[verify mimas.const.compile-time]
     const_non_literal,
-    "fn foo() -> int { 0 } const BUZZ = foo();"
+    // a call is still a compile error when the callee's body can't fold --
+    // a `match` isn't const
+    "fn foo() -> int { match 1 { 1 => 0, _ => 1 } }
+     const BUZZ = foo();"
 );
 test_fail!(
     const_reassignment,
@@ -297,7 +300,8 @@ test_fail!(const_destructure_extra_member, "const (A) = (1, 2);");
 test_fail!(const_destructure_non_tuple, "const (A, B) = 5;");
 test_fail!(
     const_destructure_non_const_rhs,
-    "fn f() -> int { 1 } const (A, B) = (f(), 2);"
+    "fn f() -> int { match 0 { _ => 1 } }
+     const (A, B) = (f(), 2);"
 );
 test_fail!(const_destructure_literal_pat, "const 1 = 1;");
 test_fail!(const_destructure_redundant_name, "const (A, A) = (1, 2);");

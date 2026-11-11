@@ -69,12 +69,69 @@ test_run!(
 );
 
 // Only a field-ctor call may sit in a const: an ordinary assoc fn, a
-// non-ctor arg, or a named arg all stay compile errors.
+// non-const arg, or a named arg all stay compile errors.
 test_fail!(
     non_ctor_calls_stay_non_const,
     "use std::math::Vec2; const V = Vec2::from_angle(0.5rad);",
-    "use std::math::Vec2; fn y() -> float { 2.0 } const V = Vec2::new(1.0, y());",
+    "use std::math::Vec2; const V = Vec2::new(Vec2::from_angle(0.5rad).x, 2.0);",
     "use std::math::Vec2; const V = Vec2::new(x = 1.0, y = 2.0);",
+);
+
+// A `const` may call a Mimas fn whose whole body folds: params bind to the
+// literal args, `let`s inside the block bind in turn, `if` picks its branch,
+// and the tail expr is the value. Field access on a literal struct and
+// defaults work too.
+test_run!(
+    // r[verify mimas.const.eval]
+    const_calls_a_folding_fn,
+    "fn sq(x: int) -> int { x * x }
+     fn area(w: int, h: int) -> int { let s = w * h; s }
+     fn pick(c) -> int { if c { 1 } else { 2 } }
+     fn add(a: int, b = 10) -> int { a + b }
+     struct V { x: float, y: float }
+     fn norm2(v: V) -> float { v.x * v.x + v.y * v.y }
+     fn via() -> int { sq(6) }
+     const A = sq(5);
+     const B = area(6, 7);
+     const C = pick(1 == 1) + add(1);
+     const D = norm2(V { x = 3.0, y = 4.0 });
+     const E = via();
+     const XS = [sq(1), sq(2), sq(3)];",
+    "A" => "25",
+    "B" => "42",
+    "C" => "12",
+    "D" => "25.0",
+    "E" => "36",
+    "XS[2]" => "9",
+);
+
+// A method folds the same way — the dot-call's receiver is `self`'s literal.
+test_run!(
+    // r[verify mimas.const.eval]
+    const_calls_a_folding_method,
+    "struct V { x: float, y: float }
+     impl V {
+         fn scale(self, k: float) -> V { V { x = self.x * k, y = self.y * k } }
+         fn origin() -> V { V { x = 0.0, y = 0.0 } }
+     }
+     const BIG = V { x = 3.0, y = 4.0 }.scale(2.0);
+     const ZERO = V::origin();",
+    "BIG.x" => "6.0",
+    "BIG.y" => "8.0",
+    "ZERO.x" => "0.0",
+);
+
+// A call stays a runtime call — and a compile error in a `const` — when the
+// body doesn't fold: a non-const callee, a `let` over a runtime value, an
+// assignment or `return`, a non-const arg, or recursion.
+test_fail!(
+    non_folding_calls_stay_non_const,
+    "use std::math::Vec2; fn f(x: int) -> int { x + 1 } const A = f(Vec2::from_angle(0.5rad).x.to_int());",
+    "use std::math::Vec2; fn f(x: float) -> float { let y = Vec2::from_angle(0.5rad).x; x + y } const A = f(1);",
+    "fn f(x: int) -> int { x = x + 1; x } const A = f(1);",
+    "fn f(x: int) -> int { return x } const A = f(1);",
+    "fn f(x: int) -> int { if x > 0 { f(x - 1) } else { 0 } } const A = f(3);",
+    "use std::math::Vec2; fn f(x: float) -> float { Vec2::from_angle(0.5rad).x + x } const A = f(1.0);",
 );
 
 // An operator through a pact: the built-in `pact Opp { fn inv(self)

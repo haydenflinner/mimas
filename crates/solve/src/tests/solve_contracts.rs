@@ -23,10 +23,11 @@ test_fail!(
 
 test_success!(
     where_unknown_defers,
-    // `g()`'s return value isn't const -- no static answer, no error; the
-    // callee's entry check carries it
+    // `g()`'s body doesn't fold (a `match` isn't const) -- no static answer,
+    // no error; the callee's entry check carries it. A folding body would
+    // hand the where a literal and fail statically instead
     "fn f(n: int) -> int where n > 0 { n }
-     fn g() -> int { 0 }
+     fn g() -> int { match 1 { 1 => 2, _ => 3 } }
      f(g());"
 );
 

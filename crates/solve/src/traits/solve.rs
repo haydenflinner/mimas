@@ -1931,6 +1931,25 @@ impl Solve for Function {
         solver.pop_type_params();
         solver.ribs.pop();
 
+        // a `const` may call this fn if its body folds: record the body (its
+        // node_decs are now in place) keyed by the fn's own dec so a call
+        // site can bind params to literal args and fold (r[mimas.const.eval])
+        if let Some(&dec) = solver.node_decs.get(&id) {
+            let params = self
+                .parameters
+                .iter()
+                .filter_map(|b| solver.node_decs.get(&b.left.id()).copied())
+                .collect();
+            solver.const_items.insert(
+                dec,
+                crate::solver::ConstItem {
+                    params,
+                    body: self.body.clone(),
+                    method: self.is_method(),
+                },
+            );
+        }
+
         Ok(Ty::Fn(fn_data.clone()))
     }
 }
