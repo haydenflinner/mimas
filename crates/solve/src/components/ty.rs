@@ -164,11 +164,13 @@ impl TyExt for Ty {
                 if !names_a_type(solver, &ident)
                     && shared::units::lookup(&ident.lexeme).is_some() =>
             {
-                Ok(if shared::units::lookup(&ident.lexeme).unwrap().0 == shared::units::INDEX {
-                    Ty::Int
-                } else {
-                    Ty::Float
-                })
+                Ok(
+                    if shared::units::lookup(&ident.lexeme).unwrap().0 == shared::units::INDEX {
+                        Ty::Int
+                    } else {
+                        Ty::Float
+                    },
+                )
             }
             // `Pair<int, str>` (or `mod::Pair<int, str>`) applies a generic adt;
             // `Interval<kW>` is an `Interval` to the type checker -- the unit is the
@@ -180,7 +182,12 @@ impl TyExt for Ty {
                     Annotation::Path(ty.clone())
                 };
                 let name_ident = ty.last().expect("applied annotation has a head");
-                let head = Ty::from_annotation(head_ann, solver)?.normalized(solver);
+                // the head resolves bare (`Adt(id, [])`) -- the `Annotation::Ty`
+                // self-fill must not give it the impl's params
+                let head = match &head_ann {
+                    Annotation::Ty(ident) => ident.query(solver)?.normalized(solver),
+                    _ => Ty::from_annotation(head_ann, solver)?.normalized(solver),
+                };
                 let Some((aid, head_args)) = head.applied() else {
                     Err(crate::errors::NotGeneric {
                         src: solver.src(name_ident.location),
@@ -237,7 +244,26 @@ impl TyExt for Ty {
                 Ok(Ty::Float)
             }
             Annotation::Ty(ident) => {
-                let ty = ident.query(solver)?;
+                let mut ty = ident.query(solver)?;
+                // `-> LL` inside `impl LL` reads as `Self` -- the adt applied to
+                // its own in-scope params. bare `List` anywhere else is the
+                // missing-`<T>` slip: the arity error names it.
+                if let Ty::Adt(aid, args) = &ty
+                    && args.is_empty()
+                    && !solver.adts[*aid].type_params.is_empty()
+                {
+                    if solver.impl_target() == Some(*aid) {
+                        ty = solver.impl_target_ty().unwrap();
+                    } else {
+                        Err(crate::errors::GenericArity {
+                            src: solver.src(ident.location),
+                            at: ident.location.into(),
+                            name: solver.adts[*aid].name.clone(),
+                            expected: solver.adts[*aid].type_params.len(),
+                            found: 0,
+                        })?
+                    }
+                }
                 let dec = solver.ribs.resolve(&ident);
                 solver.note(&ident, ty.clone(), dec);
                 Ok(ty)

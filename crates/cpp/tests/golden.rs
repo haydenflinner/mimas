@@ -49,8 +49,9 @@ main();
 fn unsupported_gets_diagnostic() {
     let src = "int main() { int x = 1; return *(int*)&x; }\n";
     let out = cpp::transpile(src).unwrap();
-    assert!(out
-        .diagnostics
-        .iter()
-        .any(|d| d.message.contains("dereference") || d.message.contains("address-of")));
+    assert!(
+        out.diagnostics
+            .iter()
+            .any(|d| d.message.contains("dereference") || d.message.contains("address-of"))
+    );
 }

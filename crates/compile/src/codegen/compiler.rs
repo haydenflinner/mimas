@@ -224,7 +224,12 @@ impl Compiler {
         let mut entry_to_reg: IdVec<Local, Reg> = IdVec::new();
 
         let value_adts = if super::opt::enabled() {
-            let values = super::opt::optimize(ir, &self.frame_natives, &self.mutating_natives, self.shadows);
+            let values = super::opt::optimize(
+                ir,
+                &self.frame_natives,
+                &self.mutating_natives,
+                self.shadows,
+            );
             if std::env::var("MIMAS_DUMP_OPT").is_ok_and(|v| v == "1") {
                 eprintln!("{ir}");
             }
@@ -694,7 +699,8 @@ impl Compiler {
                 .iter()
                 .filter_map(|(local, sh)| {
                     let name = body.artifacts.get(local)?;
-                    (named.get(name) == Some(local)).then(|| (name.clone(), sh.map(&|l| local_to_reg[*l])))
+                    (named.get(name) == Some(local))
+                        .then(|| (name.clone(), sh.map(&|l| local_to_reg[*l])))
                 })
                 .collect();
             let args = u16::try_from(body.params.len()).unwrap();
@@ -806,6 +812,20 @@ impl Compiler {
             .collect::<Vec<_>>()
             .into();
 
+        // A variant's own adt id is what an instance carries as `struct_id`;
+        // map it to the variant's position in its enum so a host can read a
+        // variant as its ordinal. Structs list only themselves and stay `None`.
+        let mut variant_ordinals: IdVec<_, Option<u32>> =
+            vec![None; ir.resolutions.adts.len()].into();
+        for (i, adt) in ir.resolutions.adts.values().enumerate() {
+            for (ord, did) in adt.dispatch_ids.iter().enumerate() {
+                let d = did.index();
+                if d != i && d < variant_ordinals.len() {
+                    variant_ordinals[AdtId::from(d as u32)] = Some(ord as u32);
+                }
+            }
+        }
+
         let field_dims: IdVec<_, Vec<Option<shared::units::Dim>>> = ir
             .resolutions
             .adts
@@ -838,6 +858,7 @@ impl Compiler {
             struct_names,
             methods,
             field_names,
+            variant_ordinals,
             field_dims,
             print_dims,
             field_tys,
@@ -978,7 +999,8 @@ fn local_kinds(body: &Body, res: &solve::Resolutions) -> IdVec<Local, OperandKin
     let mut written: HashMap<Local, Option<OperandKind>> = HashMap::new();
     for (_, block) in body.blocks.iter() {
         for &iid in &block.stream {
-            if let Inst::SetLocal(l, v) | Inst::Shadow { local: l, value: v } = &body.instructions[iid]
+            if let Inst::SetLocal(l, v) | Inst::Shadow { local: l, value: v } =
+                &body.instructions[iid]
                 && body.locals[*l] == DecId::DANGLING
             {
                 let k = fixed_kind(body, *v, &kinds);
@@ -1004,7 +1026,8 @@ fn local_kinds(body: &Body, res: &solve::Resolutions) -> IdVec<Local, OperandKin
 fn named_locals(body: &Body, res: &solve::Resolutions) -> HashMap<String, Local> {
     let rank = |l: Local| {
         let dec = body.locals[l];
-        let global = dec != DecId::DANGLING && matches!(res.decs[dec].kind, ResolvedDeclKind::Global);
+        let global =
+            dec != DecId::DANGLING && matches!(res.decs[dec].kind, ResolvedDeclKind::Global);
         (global, l.index())
     };
     let mut out: HashMap<String, Local> = HashMap::new();

@@ -75,9 +75,13 @@ impl std::fmt::Display for Literal {
                 fields
                     .iter()
                     .map(|(name, value)| format!("{name} = {value}"))
-                    .join(", ")
-                ,
-                base.as_ref().map_or(String::new(), |b| if fields.is_empty() { format!("..{b}") } else { format!(", ..{b}") })
+                    .join(", "),
+                base.as_ref()
+                    .map_or(String::new(), |b| if fields.is_empty() {
+                        format!("..{b}")
+                    } else {
+                        format!(", ..{b}")
+                    })
             )),
             Literal::Tuple(exprs) => f.pad(&format!(
                 "({})",

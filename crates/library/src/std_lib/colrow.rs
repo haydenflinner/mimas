@@ -372,14 +372,28 @@ mod tests {
 
     #[test]
     fn transpose_preserves_field_order() {
-        let v = Col4 { x: 1.0, y: 2.0, z: 3.0, w: 4.0 };
-        let r = Row4 { x: v.x, y: v.y, z: v.z, w: v.w };
+        let v = Col4 {
+            x: 1.0,
+            y: 2.0,
+            z: 3.0,
+            w: 4.0,
+        };
+        let r = Row4 {
+            x: v.x,
+            y: v.y,
+            z: v.z,
+            w: v.w,
+        };
         assert_eq!((r.x, r.y, r.z, r.w), (1.0, 2.0, 3.0, 4.0));
     }
 
     #[test]
     fn len_and_norm() {
-        let v = Col3 { x: 3.0, y: 4.0, z: 0.0 };
+        let v = Col3 {
+            x: 3.0,
+            y: 4.0,
+            z: 0.0,
+        };
         assert_eq!((v.x * v.x + v.y * v.y + v.z * v.z).sqrt(), 5.0);
     }
 }

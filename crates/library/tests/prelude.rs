@@ -48,7 +48,13 @@ fn top_level_expressions_echo() {
         .fixture::<vm::fixtures::Echoes>()
         .take()
         .into_iter()
-        .map(|(loc, text, value)| (&src[loc.span.start()..loc.span.start() + 5], text, matches!(value, vm::Inspect::Int(_) | vm::Inspect::Str(_))))
+        .map(|(loc, text, value)| {
+            (
+                &src[loc.span.start()..loc.span.start() + 5],
+                text,
+                matches!(value, vm::Inspect::Int(_) | vm::Inspect::Str(_)),
+            )
+        })
         .collect::<Vec<_>>();
     assert_eq!(
         lines,
@@ -75,7 +81,12 @@ fn echoes_carry_units() {
     let mut vm = vm::Vm::compile(src, library::std).expect("compiles");
     vm.fixture::<vm::fixtures::Echoes>().on.set(true);
     vm.run().expect("runs");
-    let texts: Vec<String> = vm.fixture::<vm::fixtures::Echoes>().take().into_iter().map(|(_, t, _)| t).collect();
+    let texts: Vec<String> = vm
+        .fixture::<vm::fixtures::Echoes>()
+        .take()
+        .into_iter()
+        .map(|(_, t, _)| t)
+        .collect();
     // a `let` inside a block or a loop is not a top-level binding: no echo
     assert_eq!(texts, ["25000.0 W", "28.0 usd", "5.0 kg", "4", "8"]);
 }

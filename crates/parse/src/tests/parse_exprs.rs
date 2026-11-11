@@ -942,7 +942,9 @@ expr_test!(
     "pat\"bd*2 <cp hh>\"",
     Call::new(
         ident_expr!("__lit_pat"),
-        vec![Argument::new(Literal::String("bd*2 <cp hh>".to_string()).into_expr())]
+        vec![Argument::new(
+            Literal::String("bd*2 <cp hh>".to_string()).into_expr()
+        )]
     )
 );
 
@@ -951,7 +953,9 @@ expr_test!(
     "keys\"a \\\"b\\\"\"",
     Call::new(
         ident_expr!("__lit_keys"),
-        vec![Argument::new(Literal::String("a \"b\"".to_string()).into_expr())]
+        vec![Argument::new(
+            Literal::String("a \"b\"".to_string()).into_expr()
+        )]
     )
 );
 

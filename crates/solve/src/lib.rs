@@ -43,6 +43,7 @@ pub type FxHashMap<K, V> = rustc_hash::FxHashMap<K, V>;
 pub type FxHashSet<T> = rustc_hash::FxHashSet<T>;
 
 mod exhaustion;
+pub use exhaustion::missing_patterns;
 mod frames;
 mod lens;
 mod load;

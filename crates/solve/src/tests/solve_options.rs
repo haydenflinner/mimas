@@ -1,3 +1,4 @@
+use super::solve_test_utils::*;
 use crate::components::Ty::*;
 
 test_ty!(
@@ -151,3 +152,72 @@ test_fail!(
 );
 
 test_fail!(coalesce_assign_on_non_option, "let a = 0; a ??= 1;");
+
+// `x == null` where x can never hold null names the missing `?` on the
+// declaration rather than reporting a bare mismatch on the `null`.
+#[test]
+fn never_null_eq_message() {
+    let _t = TestResetter;
+    let e = TEST_SESSION
+        .with(|s| {
+            s.borrow_mut().run(
+                "struct N { v: int }\nlet n = N { v = 0 };\nlet c = n == null;",
+                "test",
+            )
+        })
+        .unwrap_err();
+    let rendered = format!("{e:?}");
+    assert!(rendered.contains("`N` can never be `null`"), "{rendered}");
+    assert!(rendered.contains("always `false`"), "{rendered}");
+    assert!(rendered.contains("`N?`"), "{rendered}");
+}
+
+#[test]
+fn never_null_ne_message() {
+    let _t = TestResetter;
+    let e = TEST_SESSION
+        .with(|s| s.borrow_mut().run("let x = 3;\nlet c = x != null;", "test"))
+        .unwrap_err();
+    let rendered = format!("{e:?}");
+    assert!(rendered.contains("`int` can never be `null`"), "{rendered}");
+    assert!(rendered.contains("always `true`"), "{rendered}");
+}
+
+#[test]
+fn never_null_eq_reversed() {
+    let _t = TestResetter;
+    let e = TEST_SESSION
+        .with(|s| s.borrow_mut().run("let x = 3;\nlet c = null == x;", "test"))
+        .unwrap_err();
+    let rendered = format!("{e:?}");
+    assert!(rendered.contains("`int` can never be `null`"), "{rendered}");
+}
+
+// the field-declaration case: `self.head == null` where head was
+// declared `Node` instead of `Node?`.
+test_fail!(
+    never_null_eq_method_field,
+    "struct L { head: int }
+     impl L {
+         fn is_empty(self) -> bool { self.head == null }
+     }"
+);
+
+// `null` in a non-compare position gets the same `?` advice through
+// the general unification error.
+#[test]
+fn null_mismatch_let_message() {
+    let _t = TestResetter;
+    let e = TEST_SESSION
+        .with(|s| s.borrow_mut().run("let a: int = null;", "test"))
+        .unwrap_err();
+    let rendered = format!("{e:?}");
+    assert!(rendered.contains("`int` is never `null`"), "{rendered}");
+    assert!(rendered.contains("`int?`"), "{rendered}");
+}
+
+test_fail!(null_mismatch_argument, "fn f(a: int) {} f(null);");
+
+// controls: options still compare to `null`, and `null == null` is fine.
+test_success!(null_eq_option_ok, "let a: int? = null; let c = a == null;");
+test_success!(null_eq_null_ok, "let c = null == null;");

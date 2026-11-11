@@ -336,3 +336,74 @@ test_fail!(
     "struct Dot { x: int }
      fn label<T: Dot>(x: T) -> str { \"\" }",
 );
+
+test_success!(
+    bare_adt_in_own_impl_is_self,
+    "struct Node<T> { v: T, next: Node<T>? }
+     struct LL<T> { head: Node<T>?, tail: Node<T>? }
+     impl LL {
+         fn new() -> LL {
+             LL { head = null, tail = null }
+         }
+     }
+     let l = LL::new();"
+);
+
+// `impl LL` on `struct LL<T>` puts `T` in scope -- `-> LL` inside means
+// `LL<T>` like `Self`. the bare-adt fill also fires for a self-field
+// (`next: Node` = `Node<T>`) but not for an applied head (`Node<T>`).
+test_success!(
+    bare_adt_self_fill_keeps_applied_heads,
+    "struct Node<T> { v: T, next: Node<T>? }
+     enum List<T> { E, C { first: T, rest: List<T> } }
+     impl List {
+         fn push(self, v: T) -> List {
+             List::C { first = v, rest = self }
+         }
+     }
+     let l = List::E.push(1);"
+);
+
+// outside the impl there are no params to mean: `let x: List` was
+// `Adt(List, [])` -- an arity mismatch against `List<?>` that printed as
+// `expected List but found List`. now it's the arity error up front.
+#[test]
+fn bare_generic_annotation_is_an_arity_error() {
+    use super::solve_test_utils::*;
+    let _t = TestResetter;
+    let e = TEST_SESSION
+        .with(|s| {
+            s.borrow_mut().run(
+                "enum List<T> { E, C { first: T, rest: List<T> } }
+         let x: List = List::E;",
+                "test",
+            )
+        })
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("type argument"), "{e}");
+}
+
+// a generic adt's `Self` renders with its args when they differ -- two
+// `Self`s on one line was the diagnostic that hid the bare-`LL` arity bug.
+#[test]
+fn identity_display_keeps_args() {
+    use super::solve_test_utils::*;
+    let _t = TestResetter;
+    let e = TEST_SESSION
+        .with(|s| {
+            s.borrow_mut().run(
+                "struct Box<T> { v: T }
+         impl Box {
+             fn take(self, other: Self) { }
+         }
+         let b: Box<str> = Box { v = \"s\" };
+         b.take(Box { v = 1 });",
+                "test",
+            )
+        })
+        .unwrap_err();
+    let msg = format!("{e:?}");
+    assert!(!msg.contains("expected Self but found Self"), "{msg}");
+    assert!(msg.contains("Box<"), "{msg}");
+}

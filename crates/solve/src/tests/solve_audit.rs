@@ -94,10 +94,7 @@ test_fail!(
      let b: int = a;"
 );
 // cross-type equality must be rejected, not silently false
-test_fail!(
-    equality_across_types,
-    "let bad = 1 == \"s\";"
-);
+test_fail!(equality_across_types, "let bad = 1 == \"s\";");
 
 // ---- 21. Recursive types / occurs ---------------------------------------------------
 test_fail!(

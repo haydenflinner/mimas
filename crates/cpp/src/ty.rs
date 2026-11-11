@@ -125,12 +125,16 @@ impl CTy {
 
     /// `T x = <clone of e>` so `vector`/`map`/`set`/struct copies keep C++
     /// value semantics (mimas shares the reference otherwise).
-    pub fn copy_expr(&self, e: &str, structs: &std::collections::HashMap<String, Vec<String>>) -> String {
+    pub fn copy_expr(
+        &self,
+        e: &str,
+        structs: &std::collections::HashMap<String, Vec<String>>,
+    ) -> String {
         match self {
             CTy::Arr(..) | CTy::Set(_) => format!("(for __e in {e} collect __e)"),
-            CTy::Dict(_) => format!(
-                "{{ let __d = ~{{}}; for (__k, __v) in {e} {{ __d[__k] = __v; }} __d }}"
-            ),
+            CTy::Dict(_) => {
+                format!("{{ let __d = ~{{}}; for (__k, __v) in {e} {{ __d[__k] = __v; }} __d }}")
+            }
             CTy::Struct(n) => match structs.get(n) {
                 Some(fields) => {
                     let assigns = fields

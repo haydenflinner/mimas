@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use api::NativeId;
 use indexmap::IndexMap;
 use parse::AccessKind;
-use shared::{Error, FnHeader, IdVec, Location, Result, StrId, StrInterner};
 pub use shared::Ty;
+use shared::{Error, FnHeader, IdVec, Location, Result, StrId, StrInterner};
 pub use solve::components::AdtId;
 pub use solve::components::Vis;
 
@@ -37,6 +37,12 @@ pub struct Program {
     /// inspector, say). Tuple-struct members show up as their positional index stringified
     /// ("0", "1", ..), matching `solve::ResolvedAdt::fields`, which this is copied from.
     pub field_names: IdVec<AdtId, Vec<String>>,
+    /// For an adt that is one enum variant's layout, its index in the enum's
+    /// declaration order (`Out::Playing` → 0, `Out::Won` → 1, `Out::Draw` → 2);
+    /// `None` for structs and single-variant layouts that are their own adt.
+    /// Lets a host read a variant instance as its channel ordinal the way the
+    /// old int flags read — `Playing` is falsy, any decided variant is not.
+    pub variant_ordinals: IdVec<AdtId, Option<u32>>,
     /// Declared unit per field, parallel to `field_names` -- copied from
     /// `solve::ResolvedAdt::member_dims`. A host's value diagram reads
     /// `index` fields as pointers into an array.

@@ -63,10 +63,7 @@ pub(crate) fn declarator<'n>(l: &mut Lower<'n>, mut node: Node<'n>) -> Decl<'n> 
             }
             "reference_declarator" => {
                 d.is_ref = true;
-                if let Some(inner) = l
-                    .f(node, "declarator")
-                    .or_else(|| node.named_child(0))
-                {
+                if let Some(inner) = l.f(node, "declarator").or_else(|| node.named_child(0)) {
                     node = inner;
                     continue;
                 }
@@ -74,10 +71,7 @@ pub(crate) fn declarator<'n>(l: &mut Lower<'n>, mut node: Node<'n>) -> Decl<'n> 
             }
             "pointer_declarator" => {
                 d.is_ptr = true;
-                if let Some(inner) = l
-                    .f(node, "declarator")
-                    .or_else(|| node.named_child(0))
-                {
+                if let Some(inner) = l.f(node, "declarator").or_else(|| node.named_child(0)) {
                     node = inner;
                     continue;
                 }
@@ -87,20 +81,14 @@ pub(crate) fn declarator<'n>(l: &mut Lower<'n>, mut node: Node<'n>) -> Decl<'n> 
                 if let Some(size) = l.f(node, "size") {
                     d.dims.push(size);
                 }
-                if let Some(inner) = l
-                    .f(node, "declarator")
-                    .or_else(|| node.named_child(0))
-                {
+                if let Some(inner) = l.f(node, "declarator").or_else(|| node.named_child(0)) {
                     node = inner;
                     continue;
                 }
                 break;
             }
             "parenthesized_declarator" | "attributed_declarator" => {
-                if let Some(inner) = l
-                    .f(node, "declarator")
-                    .or_else(|| node.named_child(0))
-                {
+                if let Some(inner) = l.f(node, "declarator").or_else(|| node.named_child(0)) {
                     node = inner;
                     continue;
                 }
@@ -133,7 +121,10 @@ pub(crate) fn declarator<'n>(l: &mut Lower<'n>, mut node: Node<'n>) -> Decl<'n> 
                 }
                 break;
             }
-            "identifier" | "field_identifier" | "type_identifier" | "destructor_name"
+            "identifier"
+            | "field_identifier"
+            | "type_identifier"
+            | "destructor_name"
             | "qualified_identifier" => {
                 d.name = unqual(l.node_text(node)).to_string();
                 break;
@@ -170,7 +161,9 @@ pub(crate) fn unqual(name: &str) -> &str {
 /// Map a type-specifier node (`primitive_type`, `type_identifier`,
 /// `template_type`, ...) to a [`CTy`].
 pub(crate) fn spec_type<'n>(l: &mut Lower<'n>, node: Option<Node<'n>>) -> CTy {
-    let Some(node) = node else { return CTy::Unknown };
+    let Some(node) = node else {
+        return CTy::Unknown;
+    };
     match node.kind() {
         "auto" | "placeholder_type_specifier" => CTy::Unknown,
         "primitive_type" | "sized_type_specifier" => prim(l.node_text(node), l, node),
@@ -191,10 +184,7 @@ pub(crate) fn spec_type<'n>(l: &mut Lower<'n>, node: Option<Node<'n>>) -> CTy {
             named(l, name, node)
         }
         "template_type" => {
-            let raw_name = l
-                .f(node, "name")
-                .map(|n| l.node_text(n))
-                .unwrap_or("?");
+            let raw_name = l.f(node, "name").map(|n| l.node_text(n)).unwrap_or("?");
             let name = unqual(raw_name);
             let args: Vec<CTy> = l
                 .f(node, "arguments")
@@ -254,8 +244,9 @@ fn named<'a>(l: &mut Lower<'a>, name: &str, node: Node<'a>) -> CTy {
     match unqual(name) {
         "string" | "string_view" | "wstring" | "u8string" => CTy::Str,
         "size_t" | "ssize_t" | "ptrdiff_t" | "intptr_t" | "uintptr_t" | "int8_t" | "int16_t"
-        | "int32_t" | "int64_t" | "uint8_t" | "uint16_t" | "uint32_t" | "uint64_t"
-        | "time_t" => CTy::Int,
+        | "int32_t" | "int64_t" | "uint8_t" | "uint16_t" | "uint32_t" | "uint64_t" | "time_t" => {
+            CTy::Int
+        }
         "auto" => CTy::Unknown,
         other => {
             if let Some(super::Alias::Ty(t)) = l.aliases.get(other) {
@@ -277,8 +268,13 @@ fn named<'a>(l: &mut Lower<'a>, name: &str, node: Node<'a>) -> CTy {
 fn template_arg<'n>(l: &mut Lower<'n>, node: Node<'n>) -> CTy {
     match node.kind() {
         "number_literal" | "identifier" => CTy::Unknown,
-        "type_descriptor" | "template_type" | "type_identifier" | "primitive_type"
-        | "sized_type_specifier" | "qualified_identifier" | "auto"
+        "type_descriptor"
+        | "template_type"
+        | "type_identifier"
+        | "primitive_type"
+        | "sized_type_specifier"
+        | "qualified_identifier"
+        | "auto"
         | "placeholder_type_specifier" => spec_type(l, Some(node)),
         _ => CTy::Unknown,
     }
@@ -286,9 +282,10 @@ fn template_arg<'n>(l: &mut Lower<'n>, node: Node<'n>) -> CTy {
 
 fn template<'a>(l: &mut Lower<'a>, node: Node<'a>, name: &str, args: Vec<CTy>) -> CTy {
     match name {
-        "vector" | "array" | "deque" | "list" | "initializer_list" | "valarray" => {
-            CTy::Arr(Box::new(args.first().cloned().unwrap_or(CTy::Unknown)), SeqKind::Vector)
-        }
+        "vector" | "array" | "deque" | "list" | "initializer_list" | "valarray" => CTy::Arr(
+            Box::new(args.first().cloned().unwrap_or(CTy::Unknown)),
+            SeqKind::Vector,
+        ),
         "stack" => CTy::Arr(
             Box::new(args.first().cloned().unwrap_or(CTy::Unknown)),
             SeqKind::Stack,
@@ -305,9 +302,9 @@ fn template<'a>(l: &mut Lower<'a>, node: Node<'a>, name: &str, args: Vec<CTy>) -
                 SeqKind::PQueue { min },
             )
         }
-        "set" | "unordered_set" | "multiset" | "unordered_multiset" => CTy::Set(Box::new(
-            args.first().cloned().unwrap_or(CTy::Unknown),
-        )),
+        "set" | "unordered_set" | "multiset" | "unordered_multiset" => {
+            CTy::Set(Box::new(args.first().cloned().unwrap_or(CTy::Unknown)))
+        }
         "map" | "unordered_map" | "multimap" | "unordered_multimap" => {
             let key_ok = matches!(args.first(), Some(CTy::Str) | Some(CTy::Char) | None);
             if !key_ok {
@@ -325,7 +322,9 @@ fn template<'a>(l: &mut Lower<'a>, node: Node<'a>, name: &str, args: Vec<CTy>) -
             args.get(1).cloned().unwrap_or(CTy::Unknown),
         ]),
         "tuple" => CTy::Tuple(args),
-        "optional" | "expected" => CTy::Opt(Box::new(args.first().cloned().unwrap_or(CTy::Unknown))),
+        "optional" | "expected" => {
+            CTy::Opt(Box::new(args.first().cloned().unwrap_or(CTy::Unknown)))
+        }
         "shared_ptr" | "unique_ptr" | "weak_ptr" => {
             l.diag(
                 DiagKind::Approximate,

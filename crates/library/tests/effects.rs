@@ -95,10 +95,7 @@ fn gate_is_per_file() {
         .err()
         .expect("helper's rng must not fit a doc grant");
     let msg = err.to_string();
-    assert!(
-        msg.contains("own") || msg.contains("helper"),
-        "{msg}"
-    );
+    assert!(msg.contains("own") || msg.contains("helper"), "{msg}");
 }
 
 #[test]
@@ -109,7 +106,9 @@ fn unannotated_native_needs_unaudited_grant() {
     assert!(
         vm::Vm::compile_files_gated(&files, library::std, Some(Fx::ANY & !Fx::UNAUDITED)).is_err()
     );
-    assert!(vm::Vm::compile_files_gated(&files, library::std, Some(Fx::ANY | Fx::UNAUDITED)).is_ok());
+    assert!(
+        vm::Vm::compile_files_gated(&files, library::std, Some(Fx::ANY | Fx::UNAUDITED)).is_ok()
+    );
 }
 
 #[test]

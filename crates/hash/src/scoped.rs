@@ -274,7 +274,8 @@ impl Globals {
         queue: &mut VecDeque<String>,
         seen: &mut HashSet<String>,
     ) {
-        let Ok(ast) = Parser::new_extending(Lexer::new(source, 0, "globals".into())).try_into_ast() else {
+        let Ok(ast) = Parser::new_extending(Lexer::new(source, 0, "globals".into())).try_into_ast()
+        else {
             return;
         };
         for stmt in ast.stmts() {

@@ -1,9 +1,21 @@
 use crate::{
     Error, Solver,
     components::{Len, Ty, Vid},
-    errors::TypeMismatch,
+    errors::{NullMismatch, TypeMismatch},
 };
 use shared::Location;
+
+/// `null` against a settled, definitely-non-optional type — the
+/// mismatch gets its own `?`-advice wording wherever it can appear
+/// (bind, argument, return, pattern).
+fn never_null(nullish: &Ty, other: &Ty) -> Option<String> {
+    (matches!(nullish, Ty::Null)
+        && !matches!(
+            other,
+            Ty::Option(_) | Ty::Null | Ty::Any | Ty::Never | Ty::Vid(_)
+        ))
+    .then(|| other.to_string())
+}
 
 pub(crate) struct Unification;
 impl Unification {
@@ -24,6 +36,7 @@ impl Unification {
             Err(()) => Err(UnificationError {
                 found: ty.to_string(),
                 expected: rule.to_string(),
+                never_null: never_null(ty, rule).or_else(|| never_null(rule, ty)),
             }),
         }
     }
@@ -95,7 +108,8 @@ impl Unification {
             (prim @ Ty::Bool, Ty::Pacts(pids)) | (Ty::Pacts(pids), prim @ Ty::Bool) => {
                 let aid = solver.builtin_adt(prim);
                 if aid.is_some_and(|aid| {
-                    pids.iter().all(|pid| solver.pact_impls.contains(&(*pid, aid)))
+                    pids.iter()
+                        .all(|pid| solver.pact_impls.contains(&(*pid, aid)))
                 }) {
                     Ok(Substitution::None)
                 } else {
@@ -108,10 +122,8 @@ impl Unification {
             (Ty::Fn(lhs), Ty::Fn(rhs)) if lhs.parameters.len() == rhs.parameters.len() => {
                 let mut sub = Substitution::None;
                 for (l, r) in lhs.parameters.iter_mut().zip(rhs.parameters.iter_mut()) {
-                    sub = sub.combo(
-                        Self::unify_inner(&mut l.ty, &mut r.ty, solver)
-                            .map_err(|_| ())?,
-                    );
+                    sub =
+                        sub.combo(Self::unify_inner(&mut l.ty, &mut r.ty, solver).map_err(|_| ())?);
                 }
                 sub = sub.combo(
                     Self::unify_inner(lhs.return_ty.as_mut(), rhs.return_ty.as_mut(), solver)
@@ -141,12 +153,8 @@ impl Unification {
                     Self::unify_inner(l, r, solver).map(|v| sub.combo(v))
                 })
                 .map_err(|_| ()),
-            (Ty::Option(ty), Ty::Option(exp)) => {
-                Self::unify_inner(ty, exp, solver).or(Err(()))
-            }
-            (Ty::Result(ty), Ty::Result(exp)) => {
-                Self::unify_inner(ty, exp, solver).or(Err(()))
-            }
+            (Ty::Option(ty), Ty::Option(exp)) => Self::unify_inner(ty, exp, solver).or(Err(())),
+            (Ty::Result(ty), Ty::Result(exp)) => Self::unify_inner(ty, exp, solver).or(Err(())),
 
             // ? fulfills T?
             (Ty::Null, Ty::Option(_)) | (Ty::Option(_), Ty::Null) => Ok(Substitution::None),
@@ -200,6 +208,9 @@ impl Substitution {
 pub struct UnificationError {
     found: String,
     expected: String,
+    /// The never-null type when a bare `null` met a settled
+    /// non-optional — gets the `?`-advice `NullMismatch` wording.
+    never_null: Option<String>,
 }
 impl UnificationError {
     pub(crate) fn recursive(vid: Vid, ty: &Ty) -> Self {
@@ -209,10 +220,21 @@ impl UnificationError {
                 "a non-recursive type (`{}` occurs within it)",
                 crate::utils::Printer::vid(&vid)
             ),
+            never_null: None,
         }
     }
 
     pub(crate) fn into_type_mismatch(self, solver: &Solver, location: Location) -> Error {
+        if let Some(ty) = self.never_null {
+            return NullMismatch {
+                src: solver.src(location),
+                at: location.into(),
+                expected: crate::errors::elide(self.expected),
+                found: crate::errors::elide(self.found),
+                ty: crate::errors::elide(ty),
+            }
+            .into();
+        }
         TypeMismatch {
             src: solver.src(location),
             at: location.into(),

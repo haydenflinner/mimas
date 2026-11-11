@@ -1,14 +1,14 @@
 use super::ty::Ty;
+use crate::FxHashMap;
+use crate::FxIndexMap;
 use crate::{
     Solver,
     components::{DecId, TyExt},
 };
 use bitflags::bitflags;
-use crate::FxIndexMap;
 use itertools::Itertools;
 use shared::Location;
 use shared::ParamId;
-use crate::FxHashMap;
 use std::ops::{Deref, DerefMut};
 
 pub use shared::AdtId;
@@ -302,10 +302,7 @@ impl Variant {
         let self_name = name.split("::").next().unwrap_or(name);
         let ph = |ty: &Ty| format!("<{}>", ty.to_string().replace("Self", self_name));
         match self {
-            Variant::Tuple(t) => format!(
-                "{name}({})",
-                t.members.iter().map(|m| ph(m)).join(", ")
-            ),
+            Variant::Tuple(t) => format!("{name}({})", t.members.iter().map(|m| ph(m)).join(", ")),
             Variant::Struct(s) if s.fields.is_empty() => format!("{name} {{}}"),
             Variant::Struct(s) => {
                 let mut shown = s

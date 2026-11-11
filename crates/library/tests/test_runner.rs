@@ -30,7 +30,11 @@ pub fn render_display(preamble: &str, src: &str) -> String {
 /// script can read back (`file`, source, got, want — tab-separated,
 /// newlines escaped) plus the readable diff.
 pub fn miss(file: &str, src: &str, actual: &str, expected: &str) -> String {
-    let esc = |s: &str| s.replace('\\', "\\\\").replace('\n', "\\n").replace('\t', "\\t");
+    let esc = |s: &str| {
+        s.replace('\\', "\\\\")
+            .replace('\n', "\\n")
+            .replace('\t', "\\t")
+    };
     format!(
         "MISMATCH\t{file}\t{}\t{}\t{}\n  `{src}`\n    got  {actual}\n    want {expected}",
         esc(src),
@@ -44,7 +48,11 @@ pub fn miss(file: &str, src: &str, actual: &str, expected: &str) -> String {
 /// one run instead of one per run.
 pub fn report(misses: Vec<String>) {
     if !misses.is_empty() {
-        panic!("{} case(s) came out wrong:\n{}", misses.len(), misses.join("\n"));
+        panic!(
+            "{} case(s) came out wrong:\n{}",
+            misses.len(),
+            misses.join("\n")
+        );
     }
 }
 

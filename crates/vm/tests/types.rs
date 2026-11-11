@@ -119,5 +119,11 @@ test_vm!(
 // an enum can't pick its own variant; a generic member has no value to default
 // to; and the ctor takes no arguments.
 test_fail!(default_ctor_enum, "enum E { A, B } let e = E::default();");
-test_fail!(default_ctor_generic_member, "struct P<T> { x: T } let p = P::default();");
-test_fail!(default_ctor_with_args, "struct S { a: int } let s = S::default(1);");
+test_fail!(
+    default_ctor_generic_member,
+    "struct P<T> { x: T } let p = P::default();"
+);
+test_fail!(
+    default_ctor_with_args,
+    "struct S { a: int } let s = S::default(1);"
+);

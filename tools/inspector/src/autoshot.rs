@@ -111,7 +111,10 @@ fn script() -> VecDeque<Action> {
         // With ports, `n`'s single output jack should show two wires leaving it, landing on
         // `mult`'s two separate input jacks.
         StartEdit,
-        EditReplace("use typst::*;", "use typst::*;\n\nfn square(n: int) -> int {\n    n * n\n}"),
+        EditReplace(
+            "use typst::*;",
+            "use typst::*;\n\nfn square(n: int) -> int {\n    n * n\n}",
+        ),
         ApplyEdit,
         SetDataflowFunction("square"),
         Wait(8),
@@ -262,10 +265,7 @@ fn script() -> VecDeque<Action> {
 /// drives itself through `script()` and exits when done instead of waiting on a human. `main`
 /// should call this before `.run()` either way -- it's a no-op without the flag.
 pub fn install(app: &mut App) {
-    let Some(dir) = std::env::args()
-        .skip_while(|a| a != "--screenshots")
-        .nth(1)
-    else {
+    let Some(dir) = std::env::args().skip_while(|a| a != "--screenshots").nth(1) else {
         return;
     };
     let dir = PathBuf::from(dir);

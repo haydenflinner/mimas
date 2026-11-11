@@ -30,8 +30,16 @@ fn the_elements_of_a_list_draw_in_turn() {
     assert_eq!(got, [(0, 10), (1, 30)]);
     assert_eq!(vm.depth(), depth);
     // a list whose elements have no `draw` is an empty answer; a non-list is none
-    assert!(vm.resolve_elems_for_scene("blanks", "draw").unwrap().is_empty());
-    assert!(vm.resolve_elems_for_scene("nums", "draw").unwrap().is_empty());
+    assert!(
+        vm.resolve_elems_for_scene("blanks", "draw")
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        vm.resolve_elems_for_scene("nums", "draw")
+            .unwrap()
+            .is_empty()
+    );
     assert!(vm.resolve_elems_for_scene("one", "draw").is_none());
     assert!(vm.resolve_elems_for_scene("nope", "draw").is_none());
 }

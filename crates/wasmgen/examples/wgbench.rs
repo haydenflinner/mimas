@@ -44,14 +44,17 @@ fn median(mut v: Vec<f64>) -> f64 {
 }
 
 fn main() {
-    let path = std::env::args().nth(1).expect("usage: wgbench <file.mim> [--no-print]");
+    let path = std::env::args()
+        .nth(1)
+        .expect("usage: wgbench <file.mim> [--no-print]");
     let drop_print = std::env::args().any(|a| a == "--no-print");
     let src = fs::read_to_string(&path).expect("read script");
     let src = if drop_print { strip_print(&src) } else { src };
 
     // one compile feeds both lanes
-    let (program, ir, sources) = Vm::compile_parts_ir(&[("main", src.as_str())], mimas::library::std)
-        .unwrap_or_else(|e| panic!("compile: {e}"));
+    let (program, ir, sources) =
+        Vm::compile_parts_ir(&[("main", src.as_str())], mimas::library::std)
+            .unwrap_or_else(|e| panic!("compile: {e}"));
     // map native ids -> names: `print` is captured, the float methods get real
     // bodies (a stub returning 0 makes any program with `cos`/`atan2`/`clamp`
     // do different work on the two lanes, and the comparison lies)
@@ -66,22 +69,37 @@ fn main() {
         };
         let k = id.index() as u32;
         match name.as_str() {
-            "float::abs" => { math.insert(k, mimas_wasmgen::MathOp::Abs); }
-            "float::min" => { math.insert(k, mimas_wasmgen::MathOp::Min); }
-            "float::max" => { math.insert(k, mimas_wasmgen::MathOp::Max); }
-            "float::floor" => { math.insert(k, mimas_wasmgen::MathOp::Floor); }
-            "float::to" => { math.insert(k, mimas_wasmgen::MathOp::Identity); }
+            "float::abs" => {
+                math.insert(k, mimas_wasmgen::MathOp::Abs);
+            }
+            "float::min" => {
+                math.insert(k, mimas_wasmgen::MathOp::Min);
+            }
+            "float::max" => {
+                math.insert(k, mimas_wasmgen::MathOp::Max);
+            }
+            "float::floor" => {
+                math.insert(k, mimas_wasmgen::MathOp::Floor);
+            }
+            "float::to" => {
+                math.insert(k, mimas_wasmgen::MathOp::Identity);
+            }
             _ => {}
         }
         names.insert(k, name);
     }
-    let w = emit_waffle_ir(&ir, &program.strs, &Opts::default(), None, Some(&math), 0, 0).unwrap_or_else(|e| panic!("emit_waffle_ir: {e}"));
+    let w = emit_waffle_ir(
+        &ir,
+        &program.strs,
+        &Opts::default(),
+        None,
+        Some(&math),
+        0,
+        0,
+    )
+    .unwrap_or_else(|e| panic!("emit_waffle_ir: {e}"));
     let total = ir.bodies.len();
-    println!(
-        "waffle: {}/{} bodies emitted",
-        w.bodies.len(),
-        total
-    );
+    println!("waffle: {}/{} bodies emitted", w.bodies.len(), total);
     for s in &w.skipped {
         println!("  skip b{:<3} {}", s.body, s.reason);
     }
@@ -90,10 +108,10 @@ fn main() {
         return;
     }
 
-
     // ---- wasm side: stub every env import, capture print args ----
     let prints: Arc<Mutex<Vec<Vec<Val>>>> = Arc::new(Mutex::new(Vec::new()));
-    let stubbed: Arc<Mutex<std::collections::BTreeSet<String>>> = Arc::new(Mutex::new(Default::default()));
+    let stubbed: Arc<Mutex<std::collections::BTreeSet<String>>> =
+        Arc::new(Mutex::new(Default::default()));
     let engine = Engine::default();
     let module = Module::new(&engine, &w.bytes[..]).unwrap_or_else(|e| panic!("wasm: {e}"));
     let mut linker: Linker<()> = Linker::new(&engine);
@@ -162,7 +180,9 @@ fn main() {
                             *r = match (&body, &t) {
                                 (Some(f), wasmtime::ValType::F64) => Val::F64(f(params).to_bits()),
                                 // a `Word` result carries a float as its bit pattern
-                                (Some(f), wasmtime::ValType::I64) => Val::I64(f(params).to_bits() as i64),
+                                (Some(f), wasmtime::ValType::I64) => {
+                                    Val::I64(f(params).to_bits() as i64)
+                                }
                                 _ => val_zero(t),
                             };
                         }
@@ -255,7 +275,11 @@ fn main() {
             .map(|v| match v {
                 Val::F64(b) => format!("{}", f64::from_bits(*b)),
                 // a float handed over as its bit pattern reads back as one
-                Val::I64(i) if (*i as u64) >> 52 & 0x7ff > 0x380 && (*i as u64) >> 52 & 0x7ff < 0x480 => format!("{} (f64 bits)", f64::from_bits(*i as u64)),
+                Val::I64(i)
+                    if (*i as u64) >> 52 & 0x7ff > 0x380 && (*i as u64) >> 52 & 0x7ff < 0x480 =>
+                {
+                    format!("{} (f64 bits)", f64::from_bits(*i as u64))
+                }
                 other => format!("{other:?}"),
             })
             .collect();
@@ -263,6 +287,10 @@ fn main() {
     }
     let st = stubbed.lock().unwrap();
     if !st.is_empty() {
-        println!("imports stubbed to zero ({}): {}", st.len(), st.iter().cloned().collect::<Vec<_>>().join(", "));
+        println!(
+            "imports stubbed to zero ({}): {}",
+            st.len(),
+            st.iter().cloned().collect::<Vec<_>>().join(", ")
+        );
     }
 }

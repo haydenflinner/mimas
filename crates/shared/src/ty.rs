@@ -527,7 +527,17 @@ impl Ty {
             Ty::Param(id) => names
                 .param(*id)
                 .unwrap_or_else(|| format!("T{}", id.index())),
-            Ty::Identity(_, _) | Ty::Skolem(_) => "Self".into(),
+            // `Identity` prints `Self` only for the bare self type -- `LL<T>`
+            // vs `LL<int>` must not collapse to `Self` vs `Self`.
+            Ty::Identity(aid, args) if args.is_empty() => "Self".into(),
+            Ty::Identity(aid, args) => match names.adt(*aid) {
+                Some(name) => format!(
+                    "{name}<{}>",
+                    args.iter().map(|a| a.display(names)).join(", ")
+                ),
+                None => format!("Self<{}>", args.iter().map(|a| a.display(names)).join(", ")),
+            },
+            Ty::Skolem(_) => "Self".into(),
             Ty::Adt(id, args) => match names.adt(*id) {
                 // module adts are spelled `<module:foo>` internally
                 Some(name) => match name

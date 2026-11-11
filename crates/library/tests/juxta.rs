@@ -93,7 +93,10 @@ fn shadowing_an_operator_word_warns_with_a_code() {
     let audit = vm::Vm::audit_files(&files, library::std).unwrap();
     // the rendered report carries the code a host filters on
     assert!(
-        audit.warnings.iter().any(|w| format!("{w:?}").contains("shadowed_builtin")),
+        audit
+            .warnings
+            .iter()
+            .any(|w| format!("{w:?}").contains("shadowed_builtin")),
         "{:?}",
         audit.warnings
     );
@@ -166,7 +169,10 @@ fn a_kits_shadowing_reaches_the_page_that_uses_it() {
     // `use`s it reads `and` as that fn. `ops` is a page the user also
     // uses that never asked for the kit -- its `and` stays the operator.
     let files = [
-        ("page", "use \"kit\";\nuse \"ops\";\nlet _x = and(1, 1);\nlet _z = both();"),
+        (
+            "page",
+            "use \"kit\";\nuse \"ops\";\nlet _x = and(1, 1);\nlet _z = both();",
+        ),
         ("kit", "fn and(a: int, b: int) -> int { a * b }"),
         ("ops", "fn both() -> bool { true and !false }"),
     ];

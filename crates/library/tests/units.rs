@@ -467,7 +467,10 @@ fn index_never_mixes_with_quantities() {
     rejected("let i: index = 5kg;", "expected int but found float");
     rejected("let i = 1index + 3px;", "cannot add");
     // `2s` isn't even an int -- the type check fires before the dim one
-    rejected("let i: index = 0;\ni += 2s;", "expected int but found float");
+    rejected(
+        "let i: index = 0;\ni += 2s;",
+        "expected int but found float",
+    );
     rejected("let i = 1index == 3usd;", "cannot compare");
     rejected("let i = [0index, 2m.to_int()];", "a list mixes");
     rejected("let a: index = 5kW;", "expected int but found float");
@@ -480,9 +483,15 @@ fn index_never_mixes_with_quantities() {
         "fn f(i: index) -> int { i }\nlet a = f(3px.to_int());",
         "argument `i` of `f`",
     );
-    rejected("struct S { i: index }\nlet s = S { i = 2m };", "expected int but found float");
+    rejected(
+        "struct S { i: index }\nlet s = S { i = 2m };",
+        "expected int but found float",
+    );
     // an index can't flow into a quantity slot either
-    rejected("let i: index = 0;\nlet p: px = i;", "declared type doesn't match");
+    rejected(
+        "let i: index = 0;\nlet p: px = i;",
+        "declared type doesn't match",
+    );
 }
 
 #[test]
@@ -519,12 +528,24 @@ test_run!(
 #[test]
 fn declared_units_are_dimension_checked() {
     // two fresh dims don't mix, and neither mixes with builtins
-    rejected("unit tile; unit elixir; let a = 4tile + 2elixir;", "cannot add");
+    rejected(
+        "unit tile; unit elixir; let a = 4tile + 2elixir;",
+        "cannot add",
+    );
     rejected("unit tile; let a = 4tile + 2px;", "cannot add");
     rejected("unit tile; let a = 4tile + 2.0;", "cannot add");
-    rejected("unit tile; let a: tile = 5px;", "declared type doesn't match");
-    rejected("unit tile; let a: px = 5tile;", "declared type doesn't match");
-    rejected("unit tile; fn f(x: tile) -> tile { x }\nlet a = f(3s);", "argument `x` of `f`");
+    rejected(
+        "unit tile; let a: tile = 5px;",
+        "declared type doesn't match",
+    );
+    rejected(
+        "unit tile; let a: px = 5tile;",
+        "declared type doesn't match",
+    );
+    rejected(
+        "unit tile; fn f(x: tile) -> tile { x }\nlet a = f(3s);",
+        "argument `x` of `f`",
+    );
     // a derived unit is exactly its dimension
     rejected("unit league = 3mi; let a = 1league + 1s;", "cannot add");
     rejected("unit tile; let a = 2tile.to(\"px\");", "cannot express");
@@ -557,14 +578,10 @@ fn declared_units_flow_through_types() {
 
 #[test]
 fn declared_units_compose_in_derived_decls() {
-    test_runner::try_execute(
-        "unit tile;\nunit speed = 1tile/s;\nlet a: speed = 3tile / 1s;",
-    )
-    .unwrap();
-    test_runner::try_execute(
-        "unit tile;\nunit room = 1tile*tile;\nlet a: room = 3tile * 2tile;",
-    )
-    .unwrap();
+    test_runner::try_execute("unit tile;\nunit speed = 1tile/s;\nlet a: speed = 3tile / 1s;")
+        .unwrap();
+    test_runner::try_execute("unit tile;\nunit room = 1tile*tile;\nlet a: room = 3tile * 2tile;")
+        .unwrap();
 }
 
 #[test]

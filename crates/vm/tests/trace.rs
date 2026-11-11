@@ -19,14 +19,22 @@ fn trace_counts_ops_and_call_edges() {
     assert_eq!(hits.len() % 2, 0, "hits are (ip, count) pairs");
     assert!(!hits.is_empty(), "ops were recorded");
     assert!(hits.iter().skip(1).step_by(2).all(|n| *n > 0));
-    assert_eq!(calls.len() % 3, 0, "calls are (caller, callee, count) triples");
+    assert_eq!(
+        calls.len() % 3,
+        0,
+        "calls are (caller, callee, count) triples"
+    );
 
     let map = vm.trace_map();
     let body = |name: &str| map.iter().find(|c| c.name == name).unwrap().body as u32;
     let add = body("add");
     let twice = body("twice");
     let edge = calls.chunks(3).find(|t| t[0] == twice && t[1] == add);
-    assert_eq!(edge.map(|t| t[2]), Some(2), "twice→add fired twice: {calls:?}");
+    assert_eq!(
+        edge.map(|t| t[2]),
+        Some(2),
+        "twice→add fired twice: {calls:?}"
+    );
 
     // Every hit ip resolves inside some chunk's code range and through
     // its loc table to a span (or nothing before the first entry).

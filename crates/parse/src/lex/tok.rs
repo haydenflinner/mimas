@@ -411,8 +411,14 @@ impl TokKind<'_> {
     pub(crate) fn is_unit_spec(self) -> bool {
         matches!(
             self,
-            TokKind::Int(_) | TokKind::Float(_) | TokKind::Quantity(..) | TokKind::Ident(_)
-                | TokKind::Star | TokKind::Slash | TokKind::Caret | TokKind::Minus
+            TokKind::Int(_)
+                | TokKind::Float(_)
+                | TokKind::Quantity(..)
+                | TokKind::Ident(_)
+                | TokKind::Star
+                | TokKind::Slash
+                | TokKind::Caret
+                | TokKind::Minus
         )
     }
 }
@@ -423,8 +429,5 @@ impl TokKind<'_> {
 /// argument. (`and`/`or`/`not` aren't names at all: they lex as the
 /// `&&`/`||`/prefix-`!` operators — see the lexer's keyword table.)
 pub(crate) fn is_operator_word(name: &str) -> bool {
-    matches!(
-        name,
-        "mod" | "xor" | "nand" | "nor" | "as" | "is" | "elif"
-    )
+    matches!(name, "mod" | "xor" | "nand" | "nor" | "as" | "is" | "elif")
 }

@@ -159,17 +159,22 @@ fn pact_default_params_are_the_contract() {
     let _t = TestResetter;
     // the pact fixes a default method's signature: a default that ignores a
     // parameter (or `self`) is still the shape every impl must take
-    let w = warns("pact P { fn fit(self, p: float, v: float) -> float { 1.0 } fn locked(self) -> bool { false } }");
+    let w = warns(
+        "pact P { fn fit(self, p: float, v: float) -> float { 1.0 } fn locked(self) -> bool { false } }",
+    );
     assert!(w.is_empty(), "{w:?}");
     // a local in the default body is still linted
-    let w = warns("pact P { fn f(self) -> float { let unused = 2.0; self.g() } fn g(self) -> float; }");
+    let w =
+        warns("pact P { fn f(self) -> float { let unused = 2.0; self.g() } fn g(self) -> float; }");
     assert_eq!(w, ["unused variable `unused`"]);
 }
 
 #[test]
 fn pact_impl_params_are_the_contract() {
     let _t = TestResetter;
-    let w = warns("pact P { fn f(self, p: float) -> float; } struct W { x: float } impl P for W { fn f(self, p: float) -> float { 1.0 } }");
+    let w = warns(
+        "pact P { fn f(self, p: float) -> float; } struct W { x: float } impl P for W { fn f(self, p: float) -> float { 1.0 } }",
+    );
     assert!(w.is_empty(), "{w:?}");
 }
 
@@ -362,10 +367,7 @@ fn bare_use_member_gets_the_glob_hint() {
         );
     });
     let e = err("use musi; let _x = pat;").unwrap();
-    assert!(
-        e.contains("`use musi` imports the module's name"),
-        "{e}"
-    );
+    assert!(e.contains("`use musi` imports the module's name"), "{e}");
 }
 
 #[test]
@@ -445,8 +447,7 @@ fn consuming_a_temporary_is_free() {
 
 /// Struct decl used by the field-path tests. A free fn builds values so each
 /// test source can stay on one line after `PDECL`.
-const PDECL: &str =
-    "struct P { id: int, other: int, list: [int] } fn pctor() -> P { P { id = 1, other = 2, list = [0] } } ";
+const PDECL: &str = "struct P { id: int, other: int, list: [int] } fn pctor() -> P { P { id = 1, other = 2, list = [0] } } ";
 
 #[test]
 fn consuming_an_indexed_element_is_refused() {
@@ -455,8 +456,10 @@ fn consuming_an_indexed_element_is_refused() {
     // `a[i]` can't name which element died -- bind it (`let x = a[i]`) first
     let e = err("fn f() { let arr = [1, 2]; close(arr[0]); }").unwrap();
     assert!(e.contains("can't be consumed"), "{e}");
-    let e = err(&format!("{PDECL} fn f() {{ let p = pctor(); close(p.list[0]); }}"))
-        .unwrap();
+    let e = err(&format!(
+        "{PDECL} fn f() {{ let p = pctor(); close(p.list[0]); }}"
+    ))
+    .unwrap();
     assert!(e.contains("can't be consumed"), "{e}");
 }
 
@@ -487,9 +490,10 @@ fn reading_the_parent_after_field_consume_errors() {
     native_opts("close", 1, &[0], false, Some(Fx::empty()));
     native_opts("touch", 1, &[], false, Some(Fx::empty()));
     // whole `r` reads every member -- dead `r.id` included
-    let e =
-        err(&format!("{PDECL} fn f() {{ let r = pctor(); close(r.id); touch(r); }}"))
-            .unwrap();
+    let e = err(&format!(
+        "{PDECL} fn f() {{ let r = pctor(); close(r.id); touch(r); }}"
+    ))
+    .unwrap();
     assert!(e.contains("consumed by `close`"), "{e}");
 }
 
@@ -532,7 +536,9 @@ fn consuming_a_loopvar_field_is_fine() {
     native_opts("close", 1, &[0], false, Some(Fx::empty()));
     // each iteration binds `r` fresh -- its fields can die there (the asteroids
     // `squish::drop(r.id)` shape)
-    run(&format!("{PDECL} fn f() {{ for r in [pctor()] {{ close(r.id); }} }}"));
+    run(&format!(
+        "{PDECL} fn f() {{ for r in [pctor()] {{ close(r.id); }} }}"
+    ));
 }
 
 #[test]
@@ -669,10 +675,7 @@ fn truly_dead_store_inside_loop_still_warns() {
     let w = warns("fn f(n: int) { let x = 0; while x < n { x += 1; } x = 0; }");
     // x is read (in `x < n`) so unused-binding doesn't own it; the `x = 0`
     // overwrite past the loop is dead
-    assert!(
-        w.iter().any(|m| m.contains("never read")),
-        "{w:?}"
-    );
+    assert!(w.iter().any(|m| m.contains("never read")), "{w:?}");
 }
 
 #[test]

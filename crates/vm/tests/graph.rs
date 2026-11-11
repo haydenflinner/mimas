@@ -30,7 +30,10 @@ let head: index = 0;
         panic!()
     };
     assert_eq!((items.len(), *more, *gap_at), (2, 0, 2));
-    let Obj::Instance { type_name, fields, .. } = &g.objs[obj(&g, &items[0])] else {
+    let Obj::Instance {
+        type_name, fields, ..
+    } = &g.objs[obj(&g, &items[0])]
+    else {
         panic!()
     };
     assert_eq!(type_name, "Node");
@@ -143,7 +146,9 @@ fn value_types_are_flagged_on_the_graph() {
         .objs
         .iter()
         .filter_map(|o| match o {
-            Obj::Instance { type_name, value, .. } => Some((type_name.clone(), *value)),
+            Obj::Instance {
+                type_name, value, ..
+            } => Some((type_name.clone(), *value)),
             _ => None,
         })
         .collect();

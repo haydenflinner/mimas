@@ -42,7 +42,11 @@ test_ok!(
 );
 // `mut` is only an error right before a binding; alone it's an ordinary name
 test_ok!(mut_is_still_a_name, "let mut = 1;", "let mut: int = 1;");
-test_fail!(let_mut_is_rejected, "let mut i = 0;", "let mut (a, b) = (1, 2);");
+test_fail!(
+    let_mut_is_rejected,
+    "let mut i = 0;",
+    "let mut (a, b) = (1, 2);"
+);
 test_fail!(unexpected_token_close_paren, "a = );", "a = ;");
 test_fail!(unexpected_token_double_colon_leading, "a = ::;");
 
@@ -680,10 +684,19 @@ fn a_declared_fn_takes_back_an_operator_word() {
     let lexer = crate::lex::Lexer::new(src, 0, "test".into());
     assert!(crate::Parser::new(lexer).try_into_ast().is_ok());
     // only the declared words: `or` stays the operator here
-    assert_eq!(crate::lex::shadowed_words("fn not(a: int) -> int { a }"), [false, false, true]);
-    assert_eq!(crate::lex::shadowed_words("pub fn and(a: int) -> int { a }"), [true, false, false]);
+    assert_eq!(
+        crate::lex::shadowed_words("fn not(a: int) -> int { a }"),
+        [false, false, true]
+    );
+    assert_eq!(
+        crate::lex::shadowed_words("pub fn and(a: int) -> int { a }"),
+        [true, false, false]
+    );
     // a mention in a comment, a longer name, or `fn` inside a word doesn't count
-    assert_eq!(crate::lex::shadowed_words("// fn not(x)\nfn notify() {}\nlet defn not = 1"), [false; 3]);
+    assert_eq!(
+        crate::lex::shadowed_words("// fn not(x)\nfn notify() {}\nlet defn not = 1"),
+        [false; 3]
+    );
 }
 
 #[test]
@@ -722,21 +735,35 @@ fn opp_is_an_enum_and_its_flip() {
     assert!(crate::Parser::new(lexer).try_into_ast().is_err());
     // r[verify mimas.enum.glyph]
     // an enum's plain variants may carry glyphs too -- all or none
-    let lexer = crate::lex::Lexer::new("enum Suit { Spades \"♠\", Hearts \"♥\" }", 0, "test".into());
+    let lexer =
+        crate::lex::Lexer::new("enum Suit { Spades \"♠\", Hearts \"♥\" }", 0, "test".into());
     let ast = crate::Parser::new(lexer).try_into_ast().unwrap();
     let kinds: Vec<String> = ast.stmts().iter().map(|s| s.to_string()).collect();
     assert_eq!(kinds.len(), 2, "{kinds:?}");
-    assert!(kinds[1].starts_with("impl Suit") && kinds[1].contains("fn glyph(self) -> str"), "{kinds:?}");
-    for src in ["enum Suit { Spades \"♠\", Hearts }", "enum E { A \"a\", B(int) \"b\" }"] {
+    assert!(
+        kinds[1].starts_with("impl Suit") && kinds[1].contains("fn glyph(self) -> str"),
+        "{kinds:?}"
+    );
+    for src in [
+        "enum Suit { Spades \"♠\", Hearts }",
+        "enum E { A \"a\", B(int) \"b\" }",
+    ] {
         let lexer = crate::lex::Lexer::new(src, 0, "test".into());
         assert!(crate::Parser::new(lexer).try_into_ast().is_err(), "{src}");
     }
     // r[verify mimas.notation.user]
     // `notation x(…)` is `fn __lit_x(…)`; the word stays a name elsewhere
-    let lexer = crate::lex::Lexer::new("notation rpn(s: str) -> int { 1 }\nlet notation = 2;", 0, "test".into());
+    let lexer = crate::lex::Lexer::new(
+        "notation rpn(s: str) -> int { 1 }\nlet notation = 2;",
+        0,
+        "test".into(),
+    );
     let ast = crate::Parser::new(lexer).try_into_ast().unwrap();
     let kinds: Vec<String> = ast.stmts().iter().map(|s| s.to_string()).collect();
-    assert!(kinds[0].starts_with("fn __lit_rpn(s: str) -> int"), "{kinds:?}");
+    assert!(
+        kinds[0].starts_with("fn __lit_rpn(s: str) -> int"),
+        "{kinds:?}"
+    );
     assert_eq!(kinds.len(), 2, "{kinds:?}");
     // emoji are names: an opp's ends can be glyphs themselves
     let lexer = crate::lex::Lexer::new("opp Sky { ☀, ☾ }\nlet x = !Sky::☀;", 0, "test".into());
@@ -747,7 +774,11 @@ fn opp_is_an_enum_and_its_flip() {
         assert!(crate::Parser::new(lexer).try_into_ast().is_ok(), "{src}");
     }
     // exactly two plain ends
-    for src in ["opp Tri { A, B, C }", "opp One { A }", "opp P { A(int), B }"] {
+    for src in [
+        "opp Tri { A, B, C }",
+        "opp One { A }",
+        "opp P { A(int), B }",
+    ] {
         let lexer = crate::lex::Lexer::new(src, 0, "test".into());
         assert!(crate::Parser::new(lexer).try_into_ast().is_err(), "{src}");
     }

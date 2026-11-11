@@ -18,11 +18,11 @@ mod methods {
 }
 
 mod std_lib {
+    pub(crate) mod colrow;
     #[cfg(feature = "darkly")]
     pub(crate) mod darkly;
     #[cfg(feature = "dataframe")]
     pub(crate) mod dataframe;
-    pub(crate) mod colrow;
     pub(crate) mod debug;
     pub(crate) mod fs;
     pub(crate) mod interval;

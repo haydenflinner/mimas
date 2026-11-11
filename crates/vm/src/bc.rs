@@ -12,8 +12,8 @@
 //! interpreter's own code path, so a partially specialized module can never drift
 //! from the VM — only from not being faster yet.
 
-use crate::vm::step_one;
 use crate::State;
+use crate::vm::step_one;
 use gc_arena::Mutation;
 
 /// Frame depth at which generated bodies still enter calls inline (push the
@@ -2227,15 +2227,7 @@ pub mod jit {
             }
             // SAFETY: `tbl` is the JIT module's `BodyFn` table, indexed by body.
             let f: BodyFn = std::mem::transmute(*tbl.add(body as usize));
-            enter_run_pop(
-                env,
-                BodyId::from(body),
-                dst,
-                args_idx,
-                nargs,
-                &[],
-                f,
-            )
+            enter_run_pop(env, BodyId::from(body), dst, args_idx, nargs, &[], f)
         }
     }
 

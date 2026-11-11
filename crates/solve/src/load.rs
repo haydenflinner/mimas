@@ -75,7 +75,10 @@ impl Prepared {
             .chain(library.sources().iter().copied())
             .map(|(n, t)| (n.to_string(), t.to_string()))
             .collect();
-        let files: Vec<(&str, &str)> = shipped.iter().map(|(n, t)| (n.as_str(), t.as_str())).collect();
+        let files: Vec<(&str, &str)> = shipped
+            .iter()
+            .map(|(n, t)| (n.as_str(), t.as_str()))
+            .collect();
         let inherited = parse::lex::inherited_shadow(&files);
         let mut asts = Vec::new();
         let mut sources = HashMap::new();
@@ -156,7 +159,8 @@ impl Prepared {
         let mut errors = Vec::new();
         for (file_id, (name, text)) in user.iter().enumerate() {
             sources.insert(file_id, NamedSource::new(*name, Arc::from(*text)));
-            let lexer = Lexer::new(text, file_id, name.to_string()).with_inherited(inherited[file_id]);
+            let lexer =
+                Lexer::new(text, file_id, name.to_string()).with_inherited(inherited[file_id]);
             let (ast, parse_errors) = Parser::new_extending(lexer).into_ast();
             errors.extend(parse_errors);
             asts.push(ast);

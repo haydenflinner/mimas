@@ -245,8 +245,7 @@ pub(crate) fn grades(
     let mut kept = Vec::with_capacity(attrs.len());
     for attr in std::mem::take(attrs) {
         if attr.path().is_ident("consumes") {
-            let names =
-                attr.parse_args_with(Punctuated::<Ident, Token![,]>::parse_terminated)?;
+            let names = attr.parse_args_with(Punctuated::<Ident, Token![,]>::parse_terminated)?;
             for name in names {
                 let wanted = name.to_string();
                 match params.iter().position(|p| p == &wanted) {

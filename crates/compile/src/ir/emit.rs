@@ -1961,7 +1961,13 @@ fn dispatch_pact_method(
         .adts
         .iter()
         .filter(|(_, adt)| pids.iter().all(|p| adt.implements.contains(p)))
-        .map(|(_, adt)| (adt.methods[method], adt.dispatch_ids.clone(), adt.name == "bool"))
+        .map(|(_, adt)| {
+            (
+                adt.methods[method],
+                adt.dispatch_ids.clone(),
+                adt.name == "bool",
+            )
+        })
         .collect();
     let candidates: Vec<_> = candidates
         .into_iter()
@@ -1977,8 +1983,11 @@ fn dispatch_pact_method(
     for (body, ids, is_bool) in candidates {
         // a `bool` implementer (`impl Opp for bool`) has no instance id to
         // test: its arm asks whether the value is `true` or `false`
-        let tests: Vec<Option<AdtId>> =
-            if is_bool { vec![None] } else { ids.into_iter().map(Some).collect() };
+        let tests: Vec<Option<AdtId>> = if is_bool {
+            vec![None]
+        } else {
+            ids.into_iter().map(Some).collect()
+        };
         for id in tests {
             let hit = ir.push_block("pact_hit");
             let next = ir.push_block("pact_next");
@@ -1987,8 +1996,12 @@ fn dispatch_pact_method(
                 None => {
                     let t = ir.current().constant(Constant::Bool(true));
                     let f = ir.current().constant(Constant::Bool(false));
-                    let is_t = ir.current().bin(BinOp::Identity, recv, t, OperandKind::Generic);
-                    let is_f = ir.current().bin(BinOp::Identity, recv, f, OperandKind::Generic);
+                    let is_t = ir
+                        .current()
+                        .bin(BinOp::Identity, recv, t, OperandKind::Generic);
+                    let is_f = ir
+                        .current()
+                        .bin(BinOp::Identity, recv, f, OperandKind::Generic);
                     ir.current().bin(BinOp::Or, is_t, is_f, OperandKind::Bool)
                 }
             };

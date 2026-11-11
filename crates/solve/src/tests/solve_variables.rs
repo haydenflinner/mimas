@@ -528,4 +528,7 @@ test_success!(
 );
 
 // a tuple variant names its constructor (a fn), not a value
-test_fail!(const_tuple_variant_ctor, "enum Shape { Dot, Box(int) } const B = Shape::Box;");
+test_fail!(
+    const_tuple_variant_ctor,
+    "enum Shape { Dot, Box(int) } const B = Shape::Box;"
+);

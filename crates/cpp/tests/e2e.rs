@@ -22,11 +22,7 @@ fn run_cpp(src: &str) -> (String, Vec<String>) {
 
 fn assert_prints(src: &str, expected: &[&str]) {
     let (mim, got) = run_cpp(src);
-    assert_eq!(
-        got,
-        expected,
-        "wrong output for transpiled program:\n{mim}"
-    );
+    assert_eq!(got, expected, "wrong output for transpiled program:\n{mim}");
 }
 
 #[test]

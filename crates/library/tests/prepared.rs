@@ -20,7 +20,10 @@ fn prepared_solves_programs_apart() {
     assert!(a.errors.is_empty(), "{:?}", a.errors);
     // … is unknown to the next: the table went back to the shipped state
     let b = prepared.solve([("b", "let x = 4tile;")]);
-    assert!(!b.errors.is_empty(), "`tile` leaked from the previous program");
+    assert!(
+        !b.errors.is_empty(),
+        "`tile` leaked from the previous program"
+    );
     // … and a third program with its own declaration is unaffected
     let c = prepared.solve([("c", "unit tile\nlet x = 4tile;")]);
     assert!(c.errors.is_empty(), "{:?}", c.errors);
@@ -29,14 +32,22 @@ fn prepared_solves_programs_apart() {
     let d = prepared.solve([("d", "enum PosNeg { Up, Down }\nlet p = PosNeg::Up;")]);
     assert!(d.errors.is_empty(), "{:?}", d.errors);
     let e = prepared.solve([("e", "let p = PosNeg::Pos;")]);
-    assert!(e.errors.is_empty(), "the built-in `PosNeg` came back: {:?}", e.errors);
+    assert!(
+        e.errors.is_empty(),
+        "the built-in `PosNeg` came back: {:?}",
+        e.errors
+    );
 
     // what the one-shot loader says, the prepared one says
     let src = "fn f(n: int) -> int { n * 2 }\nlet q = f(3);\n";
     let one = solve::load_files([("page", src)], &lib);
     let two = prepared.solve([("page", src)]);
     assert!(one.errors.is_empty() && two.errors.is_empty());
-    assert_eq!(one.asts.len(), two.asts.len(), "the shipped asts follow the program's");
+    assert_eq!(
+        one.asts.len(),
+        two.asts.len(),
+        "the shipped asts follow the program's"
+    );
     assert_eq!(one.asts[0].name(), "page");
     assert_eq!(one.warnings.len(), two.warnings.len());
 }

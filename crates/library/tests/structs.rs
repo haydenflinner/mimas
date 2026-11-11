@@ -181,13 +181,22 @@ fn space_fields_must_be_axes() {
     let reject = |src: &str, needle: &str| {
         let err = test_runner::try_execute(src).expect_err(src);
         let text = format!("{err:?}");
-        assert!(text.contains(needle), "`{src}`: expected `{needle}` in:\n{text}");
+        assert!(
+            text.contains(needle),
+            "`{src}`: expected `{needle}` in:\n{text}"
+        );
     };
     reject("space Bad { name: str }", "`name: str` isn't an axis");
-    reject("struct Data { n: int }\nspace Bad { d: Data }", "`d: Data` isn't an axis");
+    reject(
+        "struct Data { n: int }\nspace Bad { d: Data }",
+        "`d: Data` isn't an axis",
+    );
     reject("space Empty {}", "a `space` needs at least one axis");
     // a number is an axis for a space's static flip, not an `Opp`-typed value
-    reject("fn f(o: Opp) -> Opp { !o }\nlet x = f(3.0);", "mismatched types");
+    reject(
+        "fn f(o: Opp) -> Opp { !o }\nlet x = f(3.0);",
+        "mismatched types",
+    );
 }
 
 // r[verify mimas.struct.update]
@@ -212,10 +221,19 @@ fn struct_update_is_checked() {
     let rejected = |src: &str, needle: &str| {
         let err = test_runner::try_execute(src).expect_err("should be rejected");
         let text = format!("{err:?}");
-        assert!(text.contains(needle), "`{src}`: expected `{needle}` in:\n{text}");
+        assert!(
+            text.contains(needle),
+            "`{src}`: expected `{needle}` in:\n{text}"
+        );
     };
-    rejected("struct P { x: int, y: int }\nstruct Q { x: int, y: int }\nlet q = Q { x = 1, y = 2 };\nlet p = P { x = 3, ..q };", "mismatch");
-    rejected("enum E { A { x: int, y: int }, B { x: int, y: int } }\nlet b = E::B { x = 1, y = 2 };\nlet a = E::A { x = 3, ..b };", "needs a struct");
+    rejected(
+        "struct P { x: int, y: int }\nstruct Q { x: int, y: int }\nlet q = Q { x = 1, y = 2 };\nlet p = P { x = 3, ..q };",
+        "mismatch",
+    );
+    rejected(
+        "enum E { A { x: int, y: int }, B { x: int, y: int } }\nlet b = E::B { x = 1, y = 2 };\nlet a = E::A { x = 3, ..b };",
+        "needs a struct",
+    );
 }
 
 // -- bounded type params with the std in scope -------------------------------

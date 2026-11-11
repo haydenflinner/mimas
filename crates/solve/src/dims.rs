@@ -19,8 +19,8 @@
 
 use crate::FxHashMap;
 
-use crate::components::TyExt;
 use crate::FxIndexMap;
+use crate::components::TyExt;
 use itertools::Itertools;
 use miette::NamedSource;
 use parse::NodeId;
@@ -96,9 +96,7 @@ fn join(a: D, b: &D) -> D {
     match (&a, b) {
         (D::Q(x), D::Q(y)) | (D::Iv(x), D::Iv(y)) if x == y => a,
         // `index` absorbs a plain operand, so `if .. { i } else { 0 }` stays an index
-        (D::Q(x), D::Q(y)) if index_plain(*x, *y) => {
-            D::Q(if x.is_none() { *y } else { *x })
-        }
+        (D::Q(x), D::Q(y)) if index_plain(*x, *y) => D::Q(if x.is_none() { *y } else { *x }),
         // `rad` dissolves into a plain operand instead -- a mixed sum is a
         // plain radian count, so `theta = theta + atan2(..)` doesn't turn a
         // plain accumulator into a quantity the next `theta * v` rejects.
@@ -1034,7 +1032,10 @@ impl<'a> Pass<'a> {
         // remember the arg's dim at the call site so the program can ship
         // it to the native.
         if let ExprKind::Ident(_) = c.left.kind()
-            && matches!(self.solver.decs[dec].name.as_str(), "print" | "dbg" | "warn")
+            && matches!(
+                self.solver.decs[dec].name.as_str(),
+                "print" | "dbg" | "warn"
+            )
             && let Some(d) = args.first().and_then(D::dim)
             && !d.is_none()
         {

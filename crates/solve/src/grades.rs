@@ -218,7 +218,10 @@ impl Flow {
         let mut consumed: FxHashMap<DecId, Vec<ConsumeMark>> = FxHashMap::default();
         for f in &arms {
             for (dec, marks) in &f.consumed {
-                consumed.entry(*dec).or_default().extend(marks.iter().cloned());
+                consumed
+                    .entry(*dec)
+                    .or_default()
+                    .extend(marks.iter().cloned());
             }
         }
         Flow {
@@ -400,7 +403,9 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> crate::errors::Result
                 entry.writes.tick();
             }
         }
-        solver.warnings.extend(warnings.into_iter().map(std::rc::Rc::new));
+        solver
+            .warnings
+            .extend(warnings.into_iter().map(std::rc::Rc::new));
     }
 
     // fixpoint: fn_effects[f] |= union fn_fx[callee] until stable. Each round only adds bits,
@@ -475,8 +480,7 @@ impl<'a> Pass<'a> {
         let Some(marks) = self.flow.consumed.get(&dec) else {
             return;
         };
-        let Some((segs, consumed_at, by)) =
-            marks.iter().find(|(s, ..)| paths_overlap(s, path))
+        let Some((segs, consumed_at, by)) = marks.iter().find(|(s, ..)| paths_overlap(s, path))
         else {
             return;
         };
@@ -883,16 +887,11 @@ impl<'a> Pass<'a> {
                             && let Some(marks) = self.flow.consumed.get(&dec)
                         {
                             let fields = field_prefix(&path);
-                            let pure_field =
-                                fields.len() == path.len() && !fields.is_empty();
-                            let reads_slot =
-                                !matches!(a.op, AssignmentOp::Identity) || !pure_field;
-                            if let Some((segs, consumed_at, by)) = marks.iter().find(
-                                |(s, ..)| {
-                                    paths_overlap(s, &fields)
-                                        && (reads_slot || s.len() < fields.len())
-                                },
-                            ) && self.consume_reported.insert((dec, segs.clone()))
+                            let pure_field = fields.len() == path.len() && !fields.is_empty();
+                            let reads_slot = !matches!(a.op, AssignmentOp::Identity) || !pure_field;
+                            if let Some((segs, consumed_at, by)) = marks.iter().find(|(s, ..)| {
+                                paths_overlap(s, &fields) && (reads_slot || s.len() < fields.len())
+                            }) && self.consume_reported.insert((dec, segs.clone()))
                             {
                                 let mut name = self.solver.decs[dec].name.clone();
                                 for s in segs {
@@ -912,9 +911,7 @@ impl<'a> Pass<'a> {
                             }
                             // the store reborns its subtree: marks at or under
                             // the target die (a whole-binding mark never does)
-                            if pure_field
-                                && let Some(ms) = self.flow.consumed.get_mut(&dec)
-                            {
+                            if pure_field && let Some(ms) = self.flow.consumed.get_mut(&dec) {
                                 ms.retain(|(s, ..)| {
                                     s.is_empty() || !s.starts_with(fields.as_slice())
                                 });

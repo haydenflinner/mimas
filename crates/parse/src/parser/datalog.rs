@@ -184,7 +184,10 @@ impl<'s> Parser<'s> {
                 .into_iter()
                 .enumerate()
                 .map(|(k, (field, ann))| {
-                    (field.unwrap_or_else(|| Ident::new(format!("_{k}"), name.location)), ann)
+                    (
+                        field.unwrap_or_else(|| Ident::new(format!("_{k}"), name.location)),
+                        ann,
+                    )
                 })
                 .collect()
         } else {
@@ -264,7 +267,8 @@ impl<'s> Parser<'s> {
                         Item::Neg(self.dl_atom(rels))
                     }
                     TokKind::Ident("agg")
-                        if matches!(self.nth(1), TokKind::Ident(_)) && self.nth(2) == TokKind::Equal =>
+                        if matches!(self.nth(1), TokKind::Ident(_))
+                            && self.nth(2) == TokKind::Equal =>
                     {
                         self.advance();
                         let var = self.require_ident();
@@ -275,7 +279,12 @@ impl<'s> Parser<'s> {
                         self.expect(TokKind::RightParenthesis);
                         self.expect(TokKind::In);
                         let atom = self.dl_atom(rels);
-                        Item::Agg { var, func, arg, atom }
+                        Item::Agg {
+                            var,
+                            func,
+                            arg,
+                            atom,
+                        }
                     }
                     _ if is_rel(self, 0) => Item::Atom(self.dl_atom(rels)),
                     _ => Item::Cond(self.expr()),
@@ -397,13 +406,21 @@ impl<'s> Parser<'s> {
             let Some(rel) = names.iter().position(|n| *n == clause.head.lexeme) else {
                 self.dl_error(
                     clause.head.location,
-                    format!("`{}` isn't a relation of this `datalog` block", clause.head.lexeme),
+                    format!(
+                        "`{}` isn't a relation of this `datalog` block",
+                        clause.head.lexeme
+                    ),
                     self.dl_declared(&names),
                 );
                 continue;
             };
             if clause.head_args.len() != arity[rel] {
-                self.dl_arity(clause.head_loc, &names[rel], clause.head_args.len(), arity[rel]);
+                self.dl_arity(
+                    clause.head_loc,
+                    &names[rel],
+                    clause.head_args.len(),
+                    arity[rel],
+                );
                 continue;
             }
             let reads_rel = clause
@@ -461,9 +478,9 @@ impl<'s> Parser<'s> {
 
         for (s, rules) in by_stratum.into_iter().enumerate() {
             // clauses with no positive atom can't feed themselves: once, at the stratum's start
-            let (looped, once): (Vec<_>, Vec<_>) = rules.into_iter().partition(|(_, c)| {
-                c.body.iter().flatten().any(|i| matches!(i, Item::Atom(_)))
-            });
+            let (looped, once): (Vec<_>, Vec<_>) = rules
+                .into_iter()
+                .partition(|(_, c)| c.body.iter().flatten().any(|i| matches!(i, Item::Atom(_))));
             for (rel, clause) in once {
                 if let Some(nest) = self.dl_nest(&b, s, rel, clause, &names, &arity) {
                     stmts.push(nest);
@@ -526,7 +543,11 @@ impl<'s> Parser<'s> {
         } else {
             format!(
                 "declared here: {}",
-                names.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", ")
+                names
+                    .iter()
+                    .map(|n| format!("`{n}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )
         }
     }
@@ -664,8 +685,18 @@ impl<'s> Parser<'s> {
                     scratch += 1;
                     let rel = &names[atom.rel];
                     let single = arity[atom.rel] == 1;
-                    let (t, j, flag) = (format!("__dl_nt{k}"), format!("__dl_nj{k}"), format!("__dl_nf{k}"));
-                    let column = |c: usize| if single { b.id(&t) } else { b.field(b.id(&t), c) };
+                    let (t, j, flag) = (
+                        format!("__dl_nt{k}"),
+                        format!("__dl_nj{k}"),
+                        format!("__dl_nf{k}"),
+                    );
+                    let column = |c: usize| {
+                        if single {
+                            b.id(&t)
+                        } else {
+                            b.field(b.id(&t), c)
+                        }
+                    };
                     let mut filter: Option<Expr> = None;
                     for (c, arg) in atom.args.into_iter().enumerate() {
                         let test = match arg {
@@ -677,7 +708,10 @@ impl<'s> Parser<'s> {
                                 self.dl_error(
                                     v.location,
                                     format!("`{}` in a negated atom isn't bound", v.lexeme),
-                                    format!("bind `{}` in an atom to its left, or write `_`", v.lexeme),
+                                    format!(
+                                        "bind `{}` in an atom to its left, or write `_`",
+                                        v.lexeme
+                                    ),
                                 );
                                 ok = false;
                                 continue;
@@ -689,7 +723,10 @@ impl<'s> Parser<'s> {
                             Some(prev) => b.e(Logical::new(prev, LogicalOp::And, test)),
                         });
                     }
-                    let hit = vec![b.assign(&flag, b.e(Literal::True)), b.stmt(Break::new(None))];
+                    let hit = vec![
+                        b.assign(&flag, b.e(Literal::True)),
+                        b.stmt(Break::new(None)),
+                    ];
                     let elem = b.e(Access::Square {
                         left: b.id(&format!("__dl_{rel}")),
                         key: b.id(&j),
@@ -700,19 +737,38 @@ impl<'s> Parser<'s> {
                         None => hit,
                     };
                     let len = b.method(b.id(&format!("__dl_{rel}")), "len", vec![]);
-                    let scan = For::new(b.pat(&j), b.e(Range::new(b.int(0), len, false)), b.block(scan_body, None));
+                    let scan = For::new(
+                        b.pat(&j),
+                        b.e(Range::new(b.int(0), len, false)),
+                        b.block(scan_body, None),
+                    );
                     wraps.push(Wrap::Pre {
                         stmts: vec![b.let_(&flag, None, b.e(Literal::False)), b.stmt(scan)],
                         cond: Some(b.e(Unary::new(UnaryOp::Not, b.id(&flag)))),
                     });
                 }
-                Item::Agg { var, func, arg, atom } => {
+                Item::Agg {
+                    var,
+                    func,
+                    arg,
+                    atom,
+                } => {
                     let k = scratch;
                     scratch += 1;
                     let rel = &names[atom.rel];
                     let single = arity[atom.rel] == 1;
-                    let (t, j, acc) = (format!("__dl_at{k}"), format!("__dl_aj{k}"), format!("__dl_aa{k}"));
-                    let column = |c: usize| if single { b.id(&t) } else { b.field(b.id(&t), c) };
+                    let (t, j, acc) = (
+                        format!("__dl_at{k}"),
+                        format!("__dl_aj{k}"),
+                        format!("__dl_aa{k}"),
+                    );
+                    let column = |c: usize| {
+                        if single {
+                            b.id(&t)
+                        } else {
+                            b.field(b.id(&t), c)
+                        }
+                    };
                     // the atom's own new names bind per tuple, visible to `f`'s argument only
                     let mut locals = vec![];
                     let mut local_names: Vec<String> = vec![];
@@ -720,7 +776,10 @@ impl<'s> Parser<'s> {
                     for (c, a) in atom.args.into_iter().enumerate() {
                         let test = match a {
                             Arg::Wild(_) => continue,
-                            Arg::Var(v) if bound.contains(&v.lexeme) && !local_names.contains(&v.lexeme) => {
+                            Arg::Var(v)
+                                if bound.contains(&v.lexeme)
+                                    && !local_names.contains(&v.lexeme) =>
+                            {
                                 b.cmp(column(c), EqualityOp::Equal, b.e(v))
                             }
                             Arg::Var(v) if local_names.contains(&v.lexeme) => {
@@ -760,7 +819,10 @@ impl<'s> Parser<'s> {
                     let f = func.lexeme.as_str();
                     match (f, arg) {
                         ("count", None) => {
-                            let step = b.assign(&acc, b.e(Evaluation::new(b.id(&acc), EvaluationOp::Plus, b.int(1))));
+                            let step = b.assign(
+                                &acc,
+                                b.e(Evaluation::new(b.id(&acc), EvaluationOp::Plus, b.int(1))),
+                            );
                             wraps.push(Wrap::Pre {
                                 stmts: vec![
                                     b.let_(&acc, None, b.int(0)),
@@ -796,7 +858,11 @@ impl<'s> Parser<'s> {
                             };
                             let step = match f {
                                 "min" | "max" => {
-                                    let op = if f == "min" { EqualityOp::Less } else { EqualityOp::Greater };
+                                    let op = if f == "min" {
+                                        EqualityOp::Less
+                                    } else {
+                                        EqualityOp::Greater
+                                    };
                                     b.if_stmt(
                                         b.cmp(at(b.id("__dl_ai")), op, b.id(&acc)),
                                         b.block(vec![b.assign(&acc, at(b.id("__dl_ai")))], None),
@@ -804,19 +870,31 @@ impl<'s> Parser<'s> {
                                 }
                                 _ => b.assign(
                                     &acc,
-                                    b.e(Evaluation::new(b.id(&acc), EvaluationOp::Plus, at(b.id("__dl_ai")))),
+                                    b.e(Evaluation::new(
+                                        b.id(&acc),
+                                        EvaluationOp::Plus,
+                                        at(b.id("__dl_ai")),
+                                    )),
                                 ),
                             };
                             let fold = For::new(
                                 b.pat("__dl_ai"),
-                                b.e(Range::new(b.int(1), b.method(b.id(&vals), "len", vec![]), false)),
+                                b.e(Range::new(
+                                    b.int(1),
+                                    b.method(b.id(&vals), "len", vec![]),
+                                    false,
+                                )),
                                 b.block(vec![step], None),
                             );
                             let value = if f == "mean" {
                                 b.e(Evaluation::new(
                                     b.method(b.id(&acc), "to_float", vec![]),
                                     EvaluationOp::Divide,
-                                    b.method(b.method(b.id(&vals), "len", vec![]), "to_float", vec![]),
+                                    b.method(
+                                        b.method(b.id(&vals), "len", vec![]),
+                                        "to_float",
+                                        vec![],
+                                    ),
                                 ))
                             } else {
                                 b.id(&acc)
@@ -833,11 +911,17 @@ impl<'s> Parser<'s> {
                         (_, arg) => {
                             let want = match f {
                                 "count" => "`count()` takes no argument",
-                                "sum" | "min" | "max" | "mean" => "this aggregate takes one argument",
+                                "sum" | "min" | "max" | "mean" => {
+                                    "this aggregate takes one argument"
+                                }
                                 _ => "use count(), sum(e), min(e), max(e) or mean(e)",
                             };
                             let _ = arg;
-                            self.dl_error(func.location, format!("`{f}` isn't an aggregate of this shape"), want.into());
+                            self.dl_error(
+                                func.location,
+                                format!("`{f}` isn't an aggregate of this shape"),
+                                want.into(),
+                            );
                             ok = false;
                         }
                     }
@@ -848,14 +932,17 @@ impl<'s> Parser<'s> {
                     if let ExprKind::Call(call) = e.kind()
                         && let ExprKind::Ident(callee) = call.left.kind()
                     {
-                        let unbound = call.arguments.iter().find_map(|arg| match arg.value.kind() {
-                            ExprKind::Ident(id)
-                                if id.lexeme == "_" || !bound.contains(&id.lexeme) =>
-                            {
-                                Some(id.lexeme.clone())
-                            }
-                            _ => None,
-                        });
+                        let unbound =
+                            call.arguments
+                                .iter()
+                                .find_map(|arg| match arg.value.kind() {
+                                    ExprKind::Ident(id)
+                                        if id.lexeme == "_" || !bound.contains(&id.lexeme) =>
+                                    {
+                                        Some(id.lexeme.clone())
+                                    }
+                                    _ => None,
+                                });
                         if let Some(var) = unbound {
                             let label = format!(
                                 "{} -- as a condition, `{var}` would have to be bound by an atom to its left",
@@ -863,7 +950,10 @@ impl<'s> Parser<'s> {
                             );
                             self.dl_error(
                                 call.left.location(),
-                                format!("`{}` isn't a relation of this `datalog` block", callee.lexeme),
+                                format!(
+                                    "`{}` isn't a relation of this `datalog` block",
+                                    callee.lexeme
+                                ),
                                 label,
                             );
                             ok = false;
@@ -926,7 +1016,11 @@ impl<'s> Parser<'s> {
                 }
                 Wrap::For(v, e) => {
                     let at = v.location;
-                    b.stmt(For::new(Pat::new(PatKind::Ident(v), at), e, b.block(vec![inner], None)))
+                    b.stmt(For::new(
+                        Pat::new(PatKind::Ident(v), at),
+                        e,
+                        b.block(vec![inner], None),
+                    ))
                 }
                 Wrap::Scan {
                     index,
@@ -976,14 +1070,34 @@ impl Build {
     }
 
     fn let_(&self, name: &str, ann: Option<Annotation>, value: Expr) -> Stmt {
-        Stmt::new(Let { left: self.pat(name), annotation: ann, right: value, else_branch: None }.into(), NodeId::new(), self.0)
+        Stmt::new(
+            Let {
+                left: self.pat(name),
+                annotation: ann,
+                right: value,
+                else_branch: None,
+            }
+            .into(),
+            NodeId::new(),
+            self.0,
+        )
     }
 
     /// `let v = value`, located at the user's variable so diagnostics land on it.
     fn let_at(&self, v: Ident, value: Expr) -> Stmt {
         let at = v.location;
         let pat = Pat::new(PatKind::Ident(v), at);
-        Stmt::new(Let { left: pat, annotation: None, right: value, else_branch: None }.into(), NodeId::new(), at)
+        Stmt::new(
+            Let {
+                left: pat,
+                annotation: None,
+                right: value,
+                else_branch: None,
+            }
+            .into(),
+            NodeId::new(),
+            at,
+        )
     }
 
     fn assign(&self, name: &str, value: Expr) -> Stmt {
@@ -1061,7 +1175,11 @@ impl Build {
         let add = vec![
             call(rel, "push", vec![self.id("__dl_h")]),
             call("__dl_bk", "push", vec![self.id("__dl_h")]),
-            call(&index, "insert", vec![self.id("__dl_k"), self.id("__dl_bk")]),
+            call(
+                &index,
+                "insert",
+                vec![self.id("__dl_k"), self.id("__dl_bk")],
+            ),
         ];
         let body = vec![
             self.let_("__dl_h", None, value),
@@ -1069,6 +1187,10 @@ impl Build {
             self.let_("__dl_bk", None, bucket),
             self.if_stmt(fresh, self.block(add, None)),
         ];
-        Stmt::new(StmtKind::Expr(self.block(body, None)), NodeId::new(), self.0)
+        Stmt::new(
+            StmtKind::Expr(self.block(body, None)),
+            NodeId::new(),
+            self.0,
+        )
     }
 }

@@ -16,7 +16,11 @@ pub fn write_float(out: &mut impl Write, f: f64) {
     if f.is_nan() {
         out.write_str("float::NAN")
     } else if f.is_infinite() {
-        out.write_str(if f > 0.0 { "float::INF" } else { "float::NEG_INF" })
+        out.write_str(if f > 0.0 {
+            "float::INF"
+        } else {
+            "float::NEG_INF"
+        })
     } else {
         write!(out, "{f:?}")
     }
@@ -62,7 +66,11 @@ mod tests {
         for v in [1e21, 1e-7, 1e300, 5e-324, 123456789012345680000.0] {
             let text = float_text(v);
             assert!(text.contains('e'), "{text}");
-            assert_eq!(text.parse::<f64>().unwrap().to_bits(), v.to_bits(), "{text}");
+            assert_eq!(
+                text.parse::<f64>().unwrap().to_bits(),
+                v.to_bits(),
+                "{text}"
+            );
         }
     }
 }

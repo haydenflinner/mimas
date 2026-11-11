@@ -632,11 +632,8 @@ fn emit_body(w: &mut String, program: &Program, body: usize) {
     let _ = writeln!(w, "    loop {{");
     let _ = writeln!(w, "        match code.ip {{");
     let n_ops = ops.len();
-    let off_idx: HashMap<usize, usize> = ops
-        .iter()
-        .enumerate()
-        .map(|(i, (o, _))| (*o, i))
-        .collect();
+    let off_idx: HashMap<usize, usize> =
+        ops.iter().enumerate().map(|(i, (o, _))| (*o, i)).collect();
     let mut is_tgt = vec![false; n_ops];
     for (_, op) in &ops {
         for t in edge_targets(op) {
@@ -713,8 +710,7 @@ fn emit_body(w: &mut String, program: &Program, body: usize) {
             });
             interior_ok
         };
-        let mut wrap = validate(&region)
-            && edge_targets(&ops[term].1).contains(&head);
+        let mut wrap = validate(&region) && edge_targets(&ops[term].1).contains(&head);
         if !wrap {
             // `reach`: op indices whose block can get back to `head` — the
             // only edges worth chasing. A block joins when its terminator
@@ -728,9 +724,9 @@ fn emit_body(w: &mut String, program: &Program, body: usize) {
                 while b < wend {
                     let e = chain_end(b);
                     let edges = edge_targets(&ops[e].1);
-                    let mut hits = edges.iter().any(|t| {
-                        *t == head || off_idx.get(t).is_some_and(|m| reach.contains(m))
-                    });
+                    let mut hits = edges
+                        .iter()
+                        .any(|t| *t == head || off_idx.get(t).is_some_and(|m| reach.contains(m)));
                     // a conditional's implicit not-taken edge continues to
                     // the next block — `e + 1` is a block start
                     if !hits
@@ -784,10 +780,7 @@ fn emit_body(w: &mut String, program: &Program, body: usize) {
                 // check. `enext` is the next op *emitted* in this run; in a
                 // sparse loop region the two differ.
                 let next = ops.get(j + 1).map(|(o, _)| *o).unwrap_or(usize::MAX);
-                let enext = idxs
-                    .get(k + 1)
-                    .map(|&m| ops[m].0)
-                    .unwrap_or(usize::MAX);
+                let enext = idxs.get(k + 1).map(|&m| ops[m].0).unwrap_or(usize::MAX);
                 if gates {
                     w.push_str(if j > 0 && may_pause(&ops[j - 1].1) {
                         "            gatep!();\n"
@@ -798,11 +791,11 @@ fn emit_body(w: &mut String, program: &Program, body: usize) {
                 let mut arm = String::new();
                 let t = |x: usize| term_tail(k, enext, x);
                 emit_op(&mut arm, &sh, program, *off, next, op, &t);
-                w.push_str(&defer(&arm, &sh, if gates {
-                    0
-                } else {
-                    (restock - 1 - k) as u64
-                }));
+                w.push_str(&defer(
+                    &arm,
+                    &sh,
+                    if gates { 0 } else { (restock - 1 - k) as u64 },
+                ));
             }
         };
         if wrap {
@@ -854,10 +847,7 @@ fn emit_body(w: &mut String, program: &Program, body: usize) {
             // all read it.
             let _ = writeln!(w, "            code.ip = {head};");
             if pure {
-                let _ = writeln!(
-                    w,
-                    "            if bcn >= {blen}u64 {{ bcn -= {blen}u64;"
-                );
+                let _ = writeln!(w, "            if bcn >= {blen}u64 {{ bcn -= {blen}u64;");
                 emit_ops(w, &region, false, blen, &tail_fast);
                 let _ = writeln!(w, "            }} else {{");
                 emit_ops(w, &region, true, blen, &tail_gated);
@@ -869,9 +859,7 @@ fn emit_body(w: &mut String, program: &Program, body: usize) {
             let _ = writeln!(w, "            }}");
         } else {
             let _ = writeln!(w, "            {head} => {{");
-            emit_ops(w, &seq, true, 0, &|_k, _n, t| {
-                format!("code.ip = {t};")
-            });
+            emit_ops(w, &seq, true, 0, &|_k, _n, t| format!("code.ip = {t};"));
             let _ = writeln!(w, "            }}");
         }
     }
@@ -984,9 +972,11 @@ fn edge_targets(op: &Op) -> Vec<usize> {
         Op::Jump { target } | Op::JumpIf { target, .. } | Op::ForNext { target, .. } => {
             vec![t(target)]
         }
-        Op::Switch {
-            table, default, ..
-        } => table.iter().map(t).chain(std::iter::once(t(default))).collect(),
+        Op::Switch { table, default, .. } => table
+            .iter()
+            .map(t)
+            .chain(std::iter::once(t(default)))
+            .collect(),
         Op::BIntLt { target, .. }
         | Op::BIntLe { target, .. }
         | Op::BIntGt { target, .. }
@@ -1296,10 +1286,7 @@ fn emit_call_fast(
             c.regs
         );
         let _ = writeln!(s, "    }}");
-        let _ = writeln!(
-            s,
-            "    thread.frames.last_mut().unwrap().ip = code.ip;"
-        );
+        let _ = writeln!(s, "    thread.frames.last_mut().unwrap().ip = code.ip;");
         let _ = writeln!(
             s,
             "    thread.frames.push(Frame {{ chunk: {callee}, ip: {}, return_reg: {}u32, base: new_base }});",
@@ -1583,7 +1570,9 @@ fn emit_op(
             wln!("*io.op_ip = {offset};");
             wln!("match ({se}, {ie}) {{");
             wln!("    (Val::Array(a), Val::Int(i)) => {{");
-            wln!("        let Ok(u) = usize::try_from(i) else {{ return Err(RtErr::IndexOutOfBounds) }};");
+            wln!(
+                "        let Ok(u) = usize::try_from(i) else {{ return Err(RtErr::IndexOutOfBounds) }};"
+            );
             wln!("        let mut arr = a.0.borrow_mut(&ctx);");
             wln!("        if u >= arr.len() {{ return Err(RtErr::IndexOutOfBounds) }};");
             wln!("        arr[u] = {ve};");
@@ -1605,7 +1594,9 @@ fn emit_op(
             wln!("*io.op_ip = {offset};");
             wln!("let v = match ({se}, {ie}) {{");
             wln!("    (Val::Array(a), Val::Int(i)) => {{");
-            wln!("        let Ok(u) = usize::try_from(i) else {{ return Err(RtErr::IndexOutOfBounds) }};");
+            wln!(
+                "        let Ok(u) = usize::try_from(i) else {{ return Err(RtErr::IndexOutOfBounds) }};"
+            );
             wln!("        let arr = a.0.borrow();");
             wln!("        if u >= arr.len() {{ return Err(RtErr::IndexOutOfBounds) }};");
             wln!("        arr[u]");
@@ -1633,7 +1624,9 @@ fn emit_op(
             wln!("    let v = match receiver {{");
             wln!("        Val::Instance(i) => i.0.borrow().fields[{slot}],");
             wln!("        Val::Array(a) => a.0.borrow()[{slot}],");
-            wln!("        Val::Null => {{ *io.op_ip = {offset}; return Err(RtErr::UnwrappedNull); }}");
+            wln!(
+                "        Val::Null => {{ *io.op_ip = {offset}; return Err(RtErr::UnwrappedNull); }}"
+            );
             wln!(
                 "        other => {{ *io.op_ip = {offset}; return Err(RtErr::Custom(format!(\"no fields on {{:?}}\", other.capture()))); }}"
             );
@@ -1658,39 +1651,37 @@ fn emit_op(
             wln!("}}");
             wln!("code.ip = {next};");
         }
-        Op::LoadConst { dst, constant } => {
-            match (sh.int(*dst), sh.float(*dst), sh.bool(*dst)) {
-                (Some(d), _, _) if matches!(constant, Constant::Int(_)) => {
-                    let Constant::Int(v) = constant else {
-                        unreachable!()
-                    };
-                    wln!("{d} = {v}i64; r{}ok = true; code.ip = {next};", dst.index(),);
-                }
-                (_, Some(d), _) if matches!(constant, Constant::Float(_)) => {
-                    let Constant::Float(v) = constant else {
-                        unreachable!()
-                    };
-                    wln!(
-                        "{d} = f64::from_bits({}u64); r{}ok = true; code.ip = {next};",
-                        v.to_bits(),
-                        dst.index(),
-                    );
-                }
-                (_, _, Some(d)) if matches!(constant, Constant::Bool(_)) => {
-                    let Constant::Bool(v) = constant else {
-                        unreachable!()
-                    };
-                    wln!("{d} = {v}; r{}ok = true; code.ip = {next};", dst.index(),);
-                }
-                _ => {
-                    wln!(
-                        "wr(regs, {}, constant_to_val({}, ctx, strs)); code.ip = {next};",
-                        reg(*dst),
-                        konst(constant)
-                    );
-                }
+        Op::LoadConst { dst, constant } => match (sh.int(*dst), sh.float(*dst), sh.bool(*dst)) {
+            (Some(d), _, _) if matches!(constant, Constant::Int(_)) => {
+                let Constant::Int(v) = constant else {
+                    unreachable!()
+                };
+                wln!("{d} = {v}i64; r{}ok = true; code.ip = {next};", dst.index(),);
             }
-        }
+            (_, Some(d), _) if matches!(constant, Constant::Float(_)) => {
+                let Constant::Float(v) = constant else {
+                    unreachable!()
+                };
+                wln!(
+                    "{d} = f64::from_bits({}u64); r{}ok = true; code.ip = {next};",
+                    v.to_bits(),
+                    dst.index(),
+                );
+            }
+            (_, _, Some(d)) if matches!(constant, Constant::Bool(_)) => {
+                let Constant::Bool(v) = constant else {
+                    unreachable!()
+                };
+                wln!("{d} = {v}; r{}ok = true; code.ip = {next};", dst.index(),);
+            }
+            _ => {
+                wln!(
+                    "wr(regs, {}, constant_to_val({}, ctx, strs)); code.ip = {next};",
+                    reg(*dst),
+                    konst(constant)
+                );
+            }
+        },
         Op::LoadBody { dst, body } => {
             wln!(
                 "wr(regs, {}, Val::Fn(BodyId::from({}u32))); code.ip = {next};",
@@ -1737,7 +1728,11 @@ fn emit_op(
                     reg(*cond)
                 ),
             };
-            wln!("if {c} {{ {} }} else {{ {} }}", tail(tgt(target)), tail(next));
+            wln!(
+                "if {c} {{ {} }} else {{ {} }}",
+                tail(tgt(target)),
+                tail(next)
+            );
         }
         Op::ForNext { idx, bound, target } => {
             // shadowed-but-flag-clear falls back to `step`, whose arm hits the
@@ -2072,12 +2067,8 @@ fn emit_op(
             }
             wln!("code.ip = {next};");
         }
-        Op::BoolEq { dst, left, right } => {
-            emit_bool(&mut s, sh, *dst, *left, *right, next, "==")
-        }
-        Op::BoolNe { dst, left, right } => {
-            emit_bool(&mut s, sh, *dst, *left, *right, next, "!=")
-        }
+        Op::BoolEq { dst, left, right } => emit_bool(&mut s, sh, *dst, *left, *right, next, "=="),
+        Op::BoolNe { dst, left, right } => emit_bool(&mut s, sh, *dst, *left, *right, next, "!="),
         Op::AddInt { dst, left, right } => emit_int_arith(
             &mut s,
             sh,
@@ -2230,12 +2221,12 @@ fn emit_op(
         Op::FloatNe { dst, left, right } => emit_float_eval(
             &mut s, sh, offset, *dst, *left, *right, next, "!=", "NotEqual",
         ),
-        Op::StrEq { dst, left, right } => {
-            emit_str_eval(&mut s, sh, offset, *dst, *left, *right, next, "==", "Identity")
-        }
-        Op::StrNe { dst, left, right } => {
-            emit_str_eval(&mut s, sh, offset, *dst, *left, *right, next, "!=", "NotEqual")
-        }
+        Op::StrEq { dst, left, right } => emit_str_eval(
+            &mut s, sh, offset, *dst, *left, *right, next, "==", "Identity",
+        ),
+        Op::StrNe { dst, left, right } => emit_str_eval(
+            &mut s, sh, offset, *dst, *left, *right, next, "!=", "NotEqual",
+        ),
         Op::AddIntImm { dst, left, val } => emit_int_arith_imm(
             &mut s,
             sh,

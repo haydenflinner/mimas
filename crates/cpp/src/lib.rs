@@ -96,10 +96,9 @@ pub fn transpile(source: &str) -> Result<Output, Error> {
     parser
         .set_language(&arborium_cpp::language().into())
         .expect("tree-sitter-cpp should load");
-    let tree = parser.parse(source, None).ok_or(Error::Parse {
-        line: 0,
-        col: 0,
-    })?;
+    let tree = parser
+        .parse(source, None)
+        .ok_or(Error::Parse { line: 0, col: 0 })?;
     let root = tree.root_node();
     if root.has_error() {
         // find the shallowest error for a decent position
@@ -144,4 +143,3 @@ impl Diag {
         }
     }
 }
-

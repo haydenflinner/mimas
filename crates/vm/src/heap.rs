@@ -124,6 +124,12 @@ pub struct State<'gc> {
     /// `Instance` (e.g. `to_dataframe`, converting an array of structs into DataFrame columns
     /// named after their declared fields). Filled in by `Vm::load_program`.
     pub field_names: Gc<'gc, RefLock<Vec<Vec<String>>>>,
+    /// For a `struct_id` that is an enum variant's layout, the variant's index
+    /// in declaration order (`Some`); `None` for structs. Indexed like
+    /// `struct_names` -- the third table [`Val::inspect`] needs, so an
+    /// `Instance` can carry its variant ordinal into [`Inspect::Instance`].
+    /// Filled in by `Vm::load_program`.
+    pub variant_ordinals: Gc<'gc, RefLock<Vec<Option<u32>>>>,
     /// Swapped for a fresh set every time a program is loaded, which is what invalidates the
     /// handles the host took out against the previous one -- see `Ctx::reset_roots`.
     pub roots: Gc<'gc, Lock<DynamicRootSet<'gc>>>,
@@ -153,6 +159,7 @@ impl<'gc> State<'gc> {
         let fixtures = Gc::new(mc, crate::fixtures::Fixtures::default());
         let struct_names = Gc::new(mc, RefLock::new(Vec::new()));
         let field_names = Gc::new(mc, RefLock::new(Vec::new()));
+        let variant_ordinals = Gc::new(mc, RefLock::new(Vec::new()));
         State {
             strings: InternedStrings::new(mc),
             thread,
@@ -161,6 +168,7 @@ impl<'gc> State<'gc> {
             fixtures,
             struct_names,
             field_names,
+            variant_ordinals,
             roots: Gc::new(mc, Lock::new(DynamicRootSet::new(mc))),
             paused: Cell::new(false),
             mem: crate::mem::MemBudget::default(),
@@ -267,8 +275,9 @@ impl<'gc> Ctx<'gc> {
     pub fn inspect(self, value: Val<'gc>) -> crate::Inspect {
         let struct_names = self.state.struct_names.borrow();
         let field_names = self.state.field_names.borrow();
+        let variant_ordinals = self.state.variant_ordinals.borrow();
         let mut seen = std::collections::HashSet::new();
-        value.inspect(&struct_names, &field_names, &mut seen)
+        value.inspect(&struct_names, &field_names, &variant_ordinals, &mut seen)
     }
 
     /// Emit a non-fatal diagnostic at the current call site: the host gets a

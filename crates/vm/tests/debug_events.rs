@@ -185,11 +185,28 @@ fn a_dissolved_struct_local_still_shows_in_the_frame() {
             break;
         }
     }
-    let p: Vec<&Captured> = seen.iter().filter(|(n, _)| n == "p").map(|(_, v)| v).collect();
-    let q: Vec<&Captured> = seen.iter().filter(|(n, _)| n == "q").map(|(_, v)| v).collect();
+    let p: Vec<&Captured> = seen
+        .iter()
+        .filter(|(n, _)| n == "p")
+        .map(|(_, v)| v)
+        .collect();
+    let q: Vec<&Captured> = seen
+        .iter()
+        .filter(|(n, _)| n == "q")
+        .map(|(_, v)| v)
+        .collect();
     let inst = |x: f64, y: f64| Captured::Instance(vec![Captured::Float(x), Captured::Float(y)]);
-    assert!(p.contains(&&inst(1.0, 0.0)), "p never bound to its first value: {p:?}");
-    assert!(p.contains(&&inst(8.0, 3.0)), "p never reached its last value: {p:?}");
+    assert!(
+        p.contains(&&inst(1.0, 0.0)),
+        "p never bound to its first value: {p:?}"
+    );
+    assert!(
+        p.contains(&&inst(8.0, 3.0)),
+        "p never reached its last value: {p:?}"
+    );
     assert!(q.contains(&&inst(1.0, 1.0)), "q never bound: {q:?}");
-    assert!(q.contains(&&inst(5.0, 1.0)), "q's mutation not shown: {q:?}");
+    assert!(
+        q.contains(&&inst(5.0, 1.0)),
+        "q's mutation not shown: {q:?}"
+    );
 }

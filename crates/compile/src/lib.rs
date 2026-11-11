@@ -25,8 +25,8 @@ pub use ir::*;
 #[macro_use]
 mod codegen {
     mod clean;
-    pub(crate) mod opt;
     mod compiler;
+    pub(crate) mod opt;
     #[macro_use]
     mod op;
     mod program;

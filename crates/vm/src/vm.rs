@@ -221,6 +221,11 @@ pub struct Vm {
     /// Declared field names per struct, indexed by `struct_id` like `methods` -- see
     /// [`Val::inspect`] and [`Vm::frames`]'s `locals_inspect`.
     pub(crate) field_names: Vec<Vec<String>>,
+    /// For a `struct_id` that is an enum variant's layout, the variant's
+    /// declaration-order index (`Some`); `None` for structs -- the third table
+    /// [`Val::inspect`] needs, so an inspected `Instance` carries its variant
+    /// ordinal (a numeric channel reads `Playing` as 0 like the old int flags).
+    pub(crate) variant_ordinals: Vec<Option<u32>>,
     /// Declared unit per field, parallel to `field_names` -- see [`Vm::graph`].
     pub(crate) field_dims: Vec<Vec<Option<shared::units::Dim>>>,
     /// Per struct, whether the program never mutates it -- a value, which a host draws
@@ -270,6 +275,7 @@ impl Vm {
             chunk_names: HashMap::default(),
             methods: Vec::new(),
             field_names: Vec::new(),
+            variant_ordinals: Vec::new(),
             field_dims: Vec::new(),
             value_adts: Vec::new(),
             root: Rc::default(),
@@ -302,6 +308,7 @@ impl Vm {
             struct_names,
             methods,
             field_names,
+            variant_ordinals,
             field_dims,
             print_dims,
             field_tys: _,
@@ -339,12 +346,15 @@ impl Vm {
         self.methods = methods.into_values().collect();
         let field_names: Vec<Vec<String>> = field_names.into_values().collect();
         self.field_names = field_names.clone();
+        let variant_ordinals: Vec<Option<u32>> = variant_ordinals.into_values().collect();
+        self.variant_ordinals = variant_ordinals.clone();
         self.field_dims = field_dims.into_values().collect();
         let chunks = &self.chunks;
         let code_len = self.code.bytes.len();
         self.arena.mutate(|mc, state| {
             *state.struct_names.borrow_mut(mc) = struct_names.into_values().collect();
             *state.field_names.borrow_mut(mc) = field_names;
+            *state.variant_ordinals.borrow_mut(mc) = variant_ordinals;
             // refresh the debug fixture's loc tables so `std::dbg` maps (chunk, ip) → loc
             // against the program just loaded, never a stale one
             let dbg = state.fixtures.get::<DebugInfo>();
@@ -481,7 +491,8 @@ impl Vm {
     /// Calls in progress on the thread, the entry frame included (`1` between host calls once the
     /// entry body has run).
     pub fn depth(&self) -> usize {
-        self.arena.mutate(|_, state| state.thread.borrow().frames.len())
+        self.arena
+            .mutate(|_, state| state.thread.borrow().frames.len())
     }
 
     /// Collect fully and measure the live heap (see [`crate::mem`]): returns the live bytes. When
@@ -506,7 +517,11 @@ impl Vm {
             m.live.set(live);
             m.since.set(0);
             let ops = m.signal.get() & crate::mem::SIG_OPS;
-            let fatal = if live > m.limit.get() { crate::mem::SIG_FATAL } else { 0 };
+            let fatal = if live > m.limit.get() {
+                crate::mem::SIG_FATAL
+            } else {
+                0
+            };
             m.signal.set(ops | fatal);
         });
         live
@@ -642,7 +657,12 @@ impl Vm {
                     .locs
                     .iter()
                     .map(|(ip, loc)| {
-                        (*ip, loc.file_id as u32, loc.span.start as u32, loc.span.end as u32)
+                        (
+                            *ip,
+                            loc.file_id as u32,
+                            loc.span.start as u32,
+                            loc.span.end as u32,
+                        )
                     })
                     .collect(),
             })
@@ -1015,7 +1035,13 @@ fn run_dispatch<'gc>(
         if mem_signal != 0 {
             if mem_signal & crate::mem::SIG_FATAL != 0 || fuel == usize::MAX {
                 let limit = ctx.state().mem.limit.get();
-                return Err(locate(RtErr::OutOfMemory { limit }, code.ip, thread, chunks, sources));
+                return Err(locate(
+                    RtErr::OutOfMemory { limit },
+                    code.ip,
+                    thread,
+                    chunks,
+                    sources,
+                ));
             }
             if let Some(top) = thread.frames.last_mut() {
                 top.ip = code.ip;
@@ -1572,7 +1598,11 @@ pub(crate) fn step_one<'gc>(
 /// its live value: a slot's register, or a struct local the optimizer dissolved, rebuilt
 /// from its shadow registers (see [`compile::Shadow`]) -- a fresh instance per call, since
 /// the registers hold its parts and no object.
-pub(crate) fn frame_locals<'gc>(ctx: Ctx<'gc>, chunk: &Chunk, window: &[Val<'gc>]) -> Vec<(String, Val<'gc>)> {
+pub(crate) fn frame_locals<'gc>(
+    ctx: Ctx<'gc>,
+    chunk: &Chunk,
+    window: &[Val<'gc>],
+) -> Vec<(String, Val<'gc>)> {
     let mut out: Vec<(usize, String, Val<'gc>)> = chunk
         .locals
         .iter()
@@ -1580,7 +1610,12 @@ pub(crate) fn frame_locals<'gc>(ctx: Ctx<'gc>, chunk: &Chunk, window: &[Val<'gc>
         .map(|(name, reg)| (reg.index(), name.clone(), window[reg.index()]))
         .collect();
     for (name, sh) in &chunk.shadows {
-        let first = sh.leaves().iter().map(|r| r.index()).min().unwrap_or(usize::MAX);
+        let first = sh
+            .leaves()
+            .iter()
+            .map(|r| r.index())
+            .min()
+            .unwrap_or(usize::MAX);
         out.push((first, name.clone(), shadow_val(ctx, sh, window)));
     }
     out.sort_by_key(|(i, _, _)| *i);
@@ -1588,7 +1623,12 @@ pub(crate) fn frame_locals<'gc>(ctx: Ctx<'gc>, chunk: &Chunk, window: &[Val<'gc>
 }
 
 /// One named local of a frame -- see [`frame_locals`].
-pub(crate) fn frame_local<'gc>(ctx: Ctx<'gc>, chunk: &Chunk, window: &[Val<'gc>], name: &str) -> Option<Val<'gc>> {
+pub(crate) fn frame_local<'gc>(
+    ctx: Ctx<'gc>,
+    chunk: &Chunk,
+    window: &[Val<'gc>],
+    name: &str,
+) -> Option<Val<'gc>> {
     if let Some(sh) = chunk.shadows.get(name) {
         return Some(shadow_val(ctx, sh, window));
     }
@@ -1601,7 +1641,11 @@ fn shadow_val<'gc>(ctx: Ctx<'gc>, sh: &Shadow<Reg>, window: &[Val<'gc>]) -> Val<
     match sh {
         Shadow::Slot(r) => window[r.index()],
         Shadow::Struct { adt, fields } => {
-            if sh.leaves().iter().all(|r| matches!(window[r.index()], Val::Null)) {
+            if sh
+                .leaves()
+                .iter()
+                .all(|r| matches!(window[r.index()], Val::Null))
+            {
                 return Val::Null;
             }
             let vals: Vec<Val<'gc>> = fields.iter().map(|f| shadow_val(ctx, f, window)).collect();
@@ -2806,6 +2850,7 @@ impl Vm {
         // or each call would read the previous call's return value as its first global.
         let (slot, ran) = self.call_batched(body_id)?;
         let field_names = &self.field_names;
+        let variant_ordinals = &self.variant_ordinals;
         let out = self.arena.mutate(|mc, state| {
             let ctx = state.ctx(mc);
             let val = {
@@ -2819,7 +2864,10 @@ impl Vm {
             let struct_names = state.struct_names.borrow();
             let mut seen = std::collections::HashSet::new();
             let extra = read(&val);
-            Ok((val.inspect(&struct_names, field_names, &mut seen), extra))
+            Ok((
+                val.inspect(&struct_names, field_names, variant_ordinals, &mut seen),
+                extra,
+            ))
         });
         if out.is_err() {
             self.reset_to_entry();
@@ -2950,6 +2998,7 @@ impl Vm {
             sources,
             methods,
             field_names,
+            variant_ordinals,
             bc,
             ..
         } = self;
@@ -2996,7 +3045,12 @@ impl Vm {
 
             let struct_names = state.struct_names.borrow();
             let mut seen = std::collections::HashSet::new();
-            let result = thread.regs[return_slot].inspect(&struct_names, field_names, &mut seen);
+            let result = thread.regs[return_slot].inspect(
+                &struct_names,
+                field_names,
+                variant_ordinals,
+                &mut seen,
+            );
             thread.regs.truncate(return_slot);
             Some(result)
         })
@@ -3020,6 +3074,7 @@ impl Vm {
             sources,
             methods,
             field_names,
+            variant_ordinals,
             bc,
             ..
         } = self;
@@ -3063,6 +3118,7 @@ impl Vm {
                         return Some(SceneResult::Drawn(result.inspect(
                             &struct_names,
                             field_names,
+                            variant_ordinals,
                             &mut seen,
                         )));
                     }
@@ -3095,6 +3151,7 @@ impl Vm {
             sources,
             methods,
             field_names,
+            variant_ordinals,
             bc,
             ..
         } = self;
@@ -3134,7 +3191,10 @@ impl Vm {
                 };
                 let struct_names = state.struct_names.borrow();
                 let mut seen = std::collections::HashSet::new();
-                out.push((i, result.inspect(&struct_names, field_names, &mut seen)));
+                out.push((
+                    i,
+                    result.inspect(&struct_names, field_names, variant_ordinals, &mut seen),
+                ));
             }
             Some(out)
         })
@@ -3156,6 +3216,7 @@ impl Vm {
             sources,
             methods: tables,
             field_names,
+            variant_ordinals,
             bc,
             ..
         } = self;
@@ -3190,7 +3251,7 @@ impl Vm {
             }
             let struct_names = state.struct_names.borrow();
             let mut seen = std::collections::HashSet::new();
-            Some(value.inspect(&struct_names, field_names, &mut seen))
+            Some(value.inspect(&struct_names, field_names, variant_ordinals, &mut seen))
         })
     }
 
@@ -3219,6 +3280,7 @@ impl Vm {
             sources,
             methods,
             field_names,
+            variant_ordinals,
             bc,
             ..
         } = self;
@@ -3262,7 +3324,7 @@ impl Vm {
             // deck's four `Suit` objects) expands per alias — `repr`
             // can't spell aliasing — while a real cycle still marks
             // `Cycle` for the printer to refuse.
-            Some(result.inspect_literal(&struct_names, field_names, 100_000))
+            Some(result.inspect_literal(&struct_names, field_names, variant_ordinals, 100_000))
         })
     }
 
@@ -3358,6 +3420,7 @@ impl Vm {
         let chunks = &self.chunks;
         let chunk_names = &self.chunk_names;
         let field_names = &self.field_names;
+        let variant_ordinals = &self.variant_ordinals;
         self.arena.mutate(|mc, state| {
             let ctx = state.ctx(mc);
             let struct_names = state.struct_names.borrow();
@@ -3398,7 +3461,8 @@ impl Vm {
                         .iter()
                         .map(|(name, v)| {
                             let v = *v;
-                            let mut i = v.inspect(&struct_names, field_names, &mut seen);
+                            let mut i =
+                                v.inspect(&struct_names, field_names, variant_ordinals, &mut seen);
                             if matches!(i, Inspect::Cycle) {
                                 // `v` only reads as a cycle because another
                                 // local already expanded this shared object —
@@ -3407,7 +3471,12 @@ impl Vm {
                                 // resolves to real content (e.g. `let w =
                                 // world` in game-kit's loop).
                                 let mut fresh = std::collections::HashSet::new();
-                                i = v.inspect(&struct_names, field_names, &mut fresh);
+                                i = v.inspect(
+                                    &struct_names,
+                                    field_names,
+                                    variant_ordinals,
+                                    &mut fresh,
+                                );
                             }
                             (name.clone(), i)
                         })
@@ -3428,7 +3497,12 @@ impl Vm {
                             locals.push((name.clone(), val.capture()));
                             locals_inspect.push((
                                 name.clone(),
-                                val.inspect(&struct_names, field_names, &mut seen),
+                                val.inspect(
+                                    &struct_names,
+                                    field_names,
+                                    variant_ordinals,
+                                    &mut seen,
+                                ),
                             ));
                         }
                     }
@@ -3457,15 +3531,26 @@ impl Vm {
     pub fn local_inspect(&mut self, name: &str) -> Option<Inspect> {
         let chunks = &self.chunks;
         let field_names = &self.field_names;
+        let variant_ordinals = &self.variant_ordinals;
         self.arena.mutate(|mc, state| {
             let ctx = state.ctx(mc);
             let struct_names = state.struct_names.borrow();
             let t = state.thread.borrow();
             for f in t.frames.iter().rev() {
                 let chunk = &chunks[f.chunk];
-                if let Some(v) = frame_local(ctx, chunk, &t.regs[f.base..f.base + chunk.regs as usize], name) {
+                if let Some(v) = frame_local(
+                    ctx,
+                    chunk,
+                    &t.regs[f.base..f.base + chunk.regs as usize],
+                    name,
+                ) {
                     let mut seen = std::collections::HashSet::new();
-                    return Some(v.inspect(&struct_names, field_names, &mut seen));
+                    return Some(v.inspect(
+                        &struct_names,
+                        field_names,
+                        variant_ordinals,
+                        &mut seen,
+                    ));
                 }
             }
             None
@@ -3479,14 +3564,25 @@ impl Vm {
     pub fn local_inspect_literal(&mut self, name: &str, budget: usize) -> Option<Inspect> {
         let chunks = &self.chunks;
         let field_names = &self.field_names;
+        let variant_ordinals = &self.variant_ordinals;
         self.arena.mutate(|mc, state| {
             let ctx = state.ctx(mc);
             let struct_names = state.struct_names.borrow();
             let t = state.thread.borrow();
             for f in t.frames.iter().rev() {
                 let chunk = &chunks[f.chunk];
-                if let Some(v) = frame_local(ctx, chunk, &t.regs[f.base..f.base + chunk.regs as usize], name) {
-                    return Some(v.inspect_literal(&struct_names, field_names, budget));
+                if let Some(v) = frame_local(
+                    ctx,
+                    chunk,
+                    &t.regs[f.base..f.base + chunk.regs as usize],
+                    name,
+                ) {
+                    return Some(v.inspect_literal(
+                        &struct_names,
+                        field_names,
+                        variant_ordinals,
+                        budget,
+                    ));
                 }
             }
             None
@@ -3728,7 +3824,11 @@ impl Vm {
         let sources = loaded.sources;
         let warnings = loaded.warnings;
         let resolutions = Resolutions::from(loaded.solver);
-        let script_fx = resolutions.script_effects.iter().map(|(f, fx)| (f.clone(), *fx)).collect();
+        let script_fx = resolutions
+            .script_effects
+            .iter()
+            .map(|(f, fx)| (f.clone(), *fx))
+            .collect();
         let script_segments = resolutions.script_segments.clone();
         // The gate sits between solve and codegen: a file whose inferred
         // effects escape `allowed` is refused before a single op is built.
@@ -3755,7 +3855,12 @@ impl Vm {
         // `std::debug` reads the call stack, so a body that calls into it
         // must keep a frame of its own: the optimizer leaves it un-inlined
         let frame_natives = library.natives().filter_map(|(id, e)| match e {
-            ::api::ApiEntry::Function(f) if f.module.first().is_some_and(|m| m == "std") && f.module.get(1).is_some_and(|m| m == "debug") => Some(id),
+            ::api::ApiEntry::Function(f)
+                if f.module.first().is_some_and(|m| m == "std")
+                    && f.module.get(1).is_some_and(|m| m == "debug") =>
+            {
+                Some(id)
+            }
             _ => None,
         });
         // a native that mutates its receiver keeps that adt a reference type
@@ -3799,7 +3904,8 @@ impl Vm {
         shared::units::clear();
         let inherited = parse::lex::inherited_shadow(files);
         for (file_id, (name, source)) in files.iter().enumerate() {
-            let lexer = Lexer::new(source, file_id, (*name).into()).with_inherited(inherited[file_id]);
+            let lexer =
+                Lexer::new(source, file_id, (*name).into()).with_inherited(inherited[file_id]);
             let ast = Parser::new_extending(lexer)
                 .try_into_ast()
                 .map_err(|mut errs| FunctionDataflowError::from(errs.swap_remove(0)))?;

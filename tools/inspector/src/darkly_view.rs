@@ -26,8 +26,8 @@ use bevy::image::Image;
 use bevy::text::{Font, TextColor};
 use bevy::ui::widget::ImageNode;
 use bevy::ui::{
-    BackgroundColor, BorderColor, BorderRadius, FlexDirection, Node, Overflow, OverflowAxis, UiRect,
-    Val,
+    BackgroundColor, BorderColor, BorderRadius, FlexDirection, Node, Overflow, OverflowAxis,
+    UiRect, Val,
 };
 use bevy::utils::default;
 use bevy_immediate::Imm;
@@ -125,9 +125,13 @@ fn extract_composite(path: &str) -> Result<(), String> {
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     let mut archive =
         zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| e.to_string())?;
-    let mut entry = archive.by_name("composite.png").map_err(|e| e.to_string())?;
+    let mut entry = archive
+        .by_name("composite.png")
+        .map_err(|e| e.to_string())?;
     let mut png_bytes = Vec::new();
-    entry.read_to_end(&mut png_bytes).map_err(|e| e.to_string())?;
+    entry
+        .read_to_end(&mut png_bytes)
+        .map_err(|e| e.to_string())?;
     drop(entry);
 
     let dest = std::path::Path::new("assets").join(COMPOSITE_ASSET_PATH);
@@ -146,7 +150,10 @@ fn panel_node() -> (Node, BorderColor, BackgroundColor) {
             border_radius: BorderRadius::all(Val::Px(4.)),
             flex_grow: 1.0,
             min_height: Val::Px(0.),
-            overflow: Overflow { x: OverflowAxis::Clip, y: OverflowAxis::Scroll },
+            overflow: Overflow {
+                x: OverflowAxis::Clip,
+                y: OverflowAxis::Scroll,
+            },
             ..default()
         },
         BorderColor::all(theme::overlay0()),
@@ -162,46 +169,48 @@ pub(crate) fn render(ui: &mut Imm<CapsUi>, font: bevy::asset::Handle<Font>, view
         })
         .text(format!("std::darkly::open({EXAMPLE_PATH:?})"));
 
-    ui.ch_id("darkly_panel").on_spawn_insert(panel_node).add(|ui| {
-        if let Some(handle) = view.composite.clone() {
-            // fixed width, auto height: preserves the composite's own aspect ratio (1920x1080
-            // here) instead of showing it at native pixel size, which would blow well past the
-            // panel.
-            ui.ch_id("composite")
-                .on_spawn_insert(|| Node {
-                    width: Val::Px(480.),
-                    height: Val::Auto,
-                    margin: UiRect::bottom(Val::Px(10.)),
-                    ..default()
-                })
-                .on_spawn_insert(move || ImageNode::new(handle.clone()));
-        }
+    ui.ch_id("darkly_panel")
+        .on_spawn_insert(panel_node)
+        .add(|ui| {
+            if let Some(handle) = view.composite.clone() {
+                // fixed width, auto height: preserves the composite's own aspect ratio (1920x1080
+                // here) instead of showing it at native pixel size, which would blow well past the
+                // panel.
+                ui.ch_id("composite")
+                    .on_spawn_insert(|| Node {
+                        width: Val::Px(480.),
+                        height: Val::Auto,
+                        margin: UiRect::bottom(Val::Px(10.)),
+                        ..default()
+                    })
+                    .on_spawn_insert(move || ImageNode::new(handle.clone()));
+            }
 
-        if let Some(err) = &view.error {
-            ui.ch_id("error")
-                .on_spawn_insert({
-                    let font = font.clone();
-                    move || (TextColor(theme::red()), crate::text_font(font))
-                })
-                .text(err.clone());
-            return;
-        }
-        let Some(text) = &view.text else {
-            ui.ch_id("loading")
-                .on_spawn_insert({
-                    let font = font.clone();
-                    move || (TextColor(theme::subtext0()), crate::text_font(font))
-                })
-                .text("(loading...)");
-            return;
-        };
-        for (row, line) in text.lines().enumerate() {
-            ui.ch_id(row)
-                .on_spawn_insert({
-                    let font = font.clone();
-                    move || (TextColor(theme::text()), crate::text_font(font))
-                })
-                .text(line.to_string());
-        }
-    });
+            if let Some(err) = &view.error {
+                ui.ch_id("error")
+                    .on_spawn_insert({
+                        let font = font.clone();
+                        move || (TextColor(theme::red()), crate::text_font(font))
+                    })
+                    .text(err.clone());
+                return;
+            }
+            let Some(text) = &view.text else {
+                ui.ch_id("loading")
+                    .on_spawn_insert({
+                        let font = font.clone();
+                        move || (TextColor(theme::subtext0()), crate::text_font(font))
+                    })
+                    .text("(loading...)");
+                return;
+            };
+            for (row, line) in text.lines().enumerate() {
+                ui.ch_id(row)
+                    .on_spawn_insert({
+                        let font = font.clone();
+                        move || (TextColor(theme::text()), crate::text_font(font))
+                    })
+                    .text(line.to_string());
+            }
+        });
 }

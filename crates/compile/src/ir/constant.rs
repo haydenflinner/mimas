@@ -133,7 +133,10 @@ impl Constant {
         if let Literal::Struct(s) = &lit
             && s.fields.is_empty()
             && matches!(
-                ir.resolutions.node_decs.get(&s.name.id()).map(|&d| &ir.resolutions.decs[d].kind),
+                ir.resolutions
+                    .node_decs
+                    .get(&s.name.id())
+                    .map(|&d| &ir.resolutions.decs[d].kind),
                 Some(solve::ResolvedDeclKind::Variant { .. })
             )
         {
@@ -156,7 +159,9 @@ impl Constant {
     pub(crate) fn needs_alloc(ir: &Ir, lit: &Literal) -> bool {
         match lit {
             Literal::Dictionary(_) | Literal::Struct(_) => true,
-            Literal::Array(es) | Literal::Tuple(es) => es.iter().any(|e| Self::expr_needs_alloc(ir, e)),
+            Literal::Array(es) | Literal::Tuple(es) => {
+                es.iter().any(|e| Self::expr_needs_alloc(ir, e))
+            }
             _ => false,
         }
     }
@@ -171,7 +176,10 @@ impl Constant {
             },
             // a unit variant (`Team::Blue`) is an instance, built at each use
             ExprKind::Access(parse::Access::DoubleColon { .. }) => matches!(
-                ir.resolutions.node_decs.get(&expr.id()).map(|&d| &ir.resolutions.decs[d].kind),
+                ir.resolutions
+                    .node_decs
+                    .get(&expr.id())
+                    .map(|&d| &ir.resolutions.decs[d].kind),
                 Some(solve::ResolvedDeclKind::Variant { .. })
             ),
             _ => false,

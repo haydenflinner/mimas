@@ -77,6 +77,8 @@ pub struct HeapGraph {
 pub struct GraphNames {
     pub struct_names: Vec<String>,
     pub field_names: Vec<Vec<String>>,
+    /// Variant layout id -> declaration-order index -- see [`Program::variant_ordinals`].
+    pub variant_ordinals: Vec<Option<u32>>,
     pub field_dims: Vec<Vec<Option<Dim>>>,
     /// Per struct id, whether it is a value type -- see [`Obj::Instance::value`].
     pub value_adts: Vec<bool>,
@@ -221,6 +223,7 @@ impl Builder<'_> {
                 Slot::Leaf(leaf.inspect(
                     &self.names.struct_names,
                     &self.names.field_names,
+                    &self.names.variant_ordinals,
                     &mut seen,
                 ))
             }
@@ -235,6 +238,7 @@ impl Vm {
         GraphNames {
             struct_names: self.struct_names(),
             field_names: self.field_names.clone(),
+            variant_ordinals: self.variant_ordinals.clone(),
             field_dims: self.field_dims.clone(),
             value_adts: self.value_adts.clone(),
         }

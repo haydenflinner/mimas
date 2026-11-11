@@ -35,18 +35,14 @@ fn retained_arrays_hit_the_memory_budget() {
     assert!(err.contains("used more than 8 MB of memory"), "{err}");
 }
 
-
 #[test]
 fn settle_measures_what_is_live() {
-    let mut vm = compile(
-        "let keep = [];\nlet i = 0;\nwhile i < 250000 { keep.push(i); i += 1; }",
-    );
+    let mut vm = compile("let keep = [];\nlet i = 0;\nwhile i < 250000 { keep.push(i); i += 1; }");
     vm.run().unwrap();
     // 250k ints in a typed store: ~2 MB of buffer (capacity rounds up)
     let live = vm.mem_settle();
     assert!(live >= 2 * MB - MB / 8 && live < 8 * MB, "{live}");
 }
-
 
 #[test]
 fn a_program_over_budget_stays_over() {
@@ -61,4 +57,3 @@ fn a_program_over_budget_stays_over() {
     let err = vm.call_fn_result("f").unwrap_err().to_string();
     assert!(err.contains("MB of memory"), "{err}");
 }
-

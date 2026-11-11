@@ -45,9 +45,16 @@ let view = {
 ";
     for _ in 0..8 {
         let mut vm = vm::Vm::execute(src, library::std).expect("compiled");
-        assert_eq!(vm.resolve_name_to_string("rows").unwrap().unwrap(), "[1, 2, 3]");
+        assert_eq!(
+            vm.resolve_name_to_string("rows").unwrap().unwrap(),
+            "[1, 2, 3]"
+        );
         assert_eq!(vm.resolve_name_to_string("view").unwrap().unwrap(), "42");
-        assert!(matches!(vm.local_inspect("rows"), Some(vm::Inspect::Array(_))), "{:?}", vm.local_inspect("rows"));
+        assert!(
+            matches!(vm.local_inspect("rows"), Some(vm::Inspect::Array(_))),
+            "{:?}",
+            vm.local_inspect("rows")
+        );
     }
 }
 

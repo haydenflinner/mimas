@@ -860,8 +860,8 @@ impl Solver {
                 ty => ty,
             }),
             Err(fault) => {
-                let at = Self::fault_span(call, &fault)
-                    .unwrap_or_else(|| call.left.location().into());
+                let at =
+                    Self::fault_span(call, &fault).unwrap_or_else(|| call.left.location().into());
                 Err(BadLiteralArg {
                     src: self.src(call.left.location()),
                     at,

@@ -220,10 +220,7 @@ impl<'a> Lower<'a> {
 
     /// Register a variable's type in the current scope.
     pub fn bind(&mut self, name: &str, ty: CTy) {
-        self.scopes
-            .last_mut()
-            .unwrap()
-            .insert(name.to_string(), ty);
+        self.scopes.last_mut().unwrap().insert(name.to_string(), ty);
     }
 
     pub fn lookup(&self, name: &str) -> Option<&CTy> {
@@ -264,5 +261,10 @@ impl<'a> Lower<'a> {
 /// Collapse a node to a single line for embedding in comments.
 pub(crate) fn one_line(s: &str) -> String {
     let s = s.trim();
-    if let Some(i) = s.find('\n') { &s[..i] } else { s }.to_string()
+    if let Some(i) = s.find('\n') {
+        &s[..i]
+    } else {
+        s
+    }
+    .to_string()
 }

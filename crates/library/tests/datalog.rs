@@ -203,16 +203,40 @@ fn datalog_errors() {
         )
     };
     // unknown relations
-    rejected(&block("paht(a, b) if edge(a, b)"), "`paht` isn't a relation");
-    rejected(&block("path(a, b) if edgee(a, b)"), "`edgee` isn't a relation");
-    rejected(&block("path(a, b) if edgee(a, _)"), "`edgee` isn't a relation");
+    rejected(
+        &block("paht(a, b) if edge(a, b)"),
+        "`paht` isn't a relation",
+    );
+    rejected(
+        &block("path(a, b) if edgee(a, b)"),
+        "`edgee` isn't a relation",
+    );
+    rejected(
+        &block("path(a, b) if edgee(a, _)"),
+        "`edgee` isn't a relation",
+    );
     // arity
-    rejected(&block("path(a, b) if edge(a)"), "relation `edge` has 2 fields, but this names 1");
-    rejected(&block("path(a) if edge(a, _)"), "relation `path` has 2 fields, but this names 1");
-    rejected(&block("edge(1, 2, 3)"), "relation `edge` has 2 fields, but this names 3");
+    rejected(
+        &block("path(a, b) if edge(a)"),
+        "relation `edge` has 2 fields, but this names 1",
+    );
+    rejected(
+        &block("path(a) if edge(a, _)"),
+        "relation `path` has 2 fields, but this names 1",
+    );
+    rejected(
+        &block("edge(1, 2, 3)"),
+        "relation `edge` has 2 fields, but this names 3",
+    );
     // the head needs the body's variables
-    rejected(&block("path(a, c) if edge(a, b)"), "head variable `c` isn't bound by the rule's body");
-    rejected(&block("path(a, _) if edge(a, b)"), "`_` can't stand in a head");
+    rejected(
+        &block("path(a, c) if edge(a, b)"),
+        "head variable `c` isn't bound by the rule's body",
+    );
+    rejected(
+        &block("path(a, _) if edge(a, b)"),
+        "`_` can't stand in a head",
+    );
     // declarations
     rejected(
         "let r = datalog { rel e(a: int) rel e(b: int) };",
@@ -220,7 +244,10 @@ fn datalog_errors() {
     );
     rejected("let r = datalog { rel e() };", "relation `e` has no fields");
     // a seed of the wrong shape is a type error at the seed
-    rejected("let r = datalog { rel e(a: int, b: int) from [1, 2] };", "mismatched types");
+    rejected(
+        "let r = datalog { rel e(a: int, b: int) from [1, 2] };",
+        "mismatched types",
+    );
     // stratification: a relation can't depend on its own negation or aggregate
     rejected(
         &block("path(a, b) if edge(a, b), !path(b, a)"),
@@ -231,10 +258,19 @@ fn datalog_errors() {
         "depends on a negation or aggregate of `path`",
     );
     // a negated atom can't bind
-    rejected(&block("path(a, b) if edge(a, b), !edge(a, c)"), "`c` in a negated atom isn't bound");
+    rejected(
+        &block("path(a, b) if edge(a, b), !edge(a, c)"),
+        "`c` in a negated atom isn't bound",
+    );
     // aggregate shapes
-    rejected(&block("path(a, n) if edge(a, _), agg n = count(a) in edge(a, _)"), "`count` isn't an aggregate of this shape");
-    rejected(&block("path(a, n) if edge(a, _), agg n = median(b) in edge(a, b)"), "`median` isn't an aggregate of this shape");
+    rejected(
+        &block("path(a, n) if edge(a, _), agg n = count(a) in edge(a, _)"),
+        "`count` isn't an aggregate of this shape",
+    );
+    rejected(
+        &block("path(a, n) if edge(a, _), agg n = median(b) in edge(a, b)"),
+        "`median` isn't an aggregate of this shape",
+    );
 }
 
 // Ascent's language, run in mimas: `relation` with positional types, `<--`, `if`/`let`/`for`

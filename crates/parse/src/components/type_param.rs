@@ -42,7 +42,11 @@ impl Display for TypeParam {
         if self.bounds.is_empty() {
             f.pad(&self.name.to_string())
         } else {
-            f.pad(&format!("{}: {}", self.name, self.bounds.iter().join(" + ")))
+            f.pad(&format!(
+                "{}: {}",
+                self.name,
+                self.bounds.iter().join(" + ")
+            ))
         }
     }
 }

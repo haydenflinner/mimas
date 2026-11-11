@@ -4,8 +4,8 @@ use arborium_tree_sitter::Node;
 
 use super::cty::{declarator, spec_type};
 use super::{Lower, one_line};
-use crate::ty::CTy;
 use crate::DiagKind;
+use crate::ty::CTy;
 
 impl<'a> Lower<'a> {
     /// Lower one statement node.
@@ -96,7 +96,9 @@ impl<'a> Lower<'a> {
 
     /// `e;` — with the ostream/istream chain special cases first.
     fn expr_stmt(&mut self, node: Node<'a>) {
-        let Some(inner) = self.first(node) else { return };
+        let Some(inner) = self.first(node) else {
+            return;
+        };
         self.expr_stmt_inner(inner);
     }
 
@@ -146,8 +148,8 @@ impl<'a> Lower<'a> {
         let Some((base, decls)) = super::item::decl_parts(self, node) else {
             return;
         };
-        let is_const = self.node_text(node).contains("const")
-            || self.node_text(node).starts_with("constexpr");
+        let is_const =
+            self.node_text(node).contains("const") || self.node_text(node).starts_with("constexpr");
         let is_static = self.node_text(node).starts_with("static");
         if is_static && !global {
             self.diag(
@@ -162,7 +164,14 @@ impl<'a> Lower<'a> {
         let _ = base;
     }
 
-    fn decl_one(&mut self, node: Node<'a>, d: &super::cty::Decl<'a>, ty: CTy, is_const: bool, _g: bool) {
+    fn decl_one(
+        &mut self,
+        node: Node<'a>,
+        d: &super::cty::Decl<'a>,
+        ty: CTy,
+        is_const: bool,
+        _g: bool,
+    ) {
         // structured binding: `auto [a, b] = t`
         if let Some(names) = &d.binding_names {
             if let Some(init) = d.init {
@@ -184,10 +193,7 @@ impl<'a> Lower<'a> {
             "let"
         };
         self.bind(name, ty.clone());
-        let annot = ty
-            .annot()
-            .map(|a| format!(": {a}"))
-            .unwrap_or_default();
+        let annot = ty.annot().map(|a| format!(": {a}")).unwrap_or_default();
         if let Some(init) = d.init {
             let init = self.init_expr(node, &ty, init, d);
             self.line(&format!("{kw} {name}{annot} = {init};"));
@@ -221,14 +227,18 @@ impl<'a> Lower<'a> {
     /// Whether an init expression is literal enough for `const`.
     fn is_const_literal(&mut self, node: Node<'a>) -> bool {
         match node.kind() {
-            "number_literal" | "string_literal" | "true" | "false" | "char_literal"
+            "number_literal"
+            | "string_literal"
+            | "true"
+            | "false"
+            | "char_literal"
             | "concatenated_string_literal" => true,
             "unary_expression" => self
                 .f(node, "argument")
                 .is_some_and(|a| self.is_const_literal(a)),
-            "parenthesized_expression" => self
-                .first(node)
-                .is_some_and(|a| self.is_const_literal(a)),
+            "parenthesized_expression" => {
+                self.first(node).is_some_and(|a| self.is_const_literal(a))
+            }
             "binary_expression" => {
                 let l = self.f(node, "left");
                 let r = self.f(node, "right");
@@ -264,7 +274,13 @@ impl<'a> Lower<'a> {
 
     /// The right-hand side of `let name = <init>` from `= e`, `(args)`, or
     /// `{a, b}` initializer forms.
-    fn init_expr(&mut self, _node: Node<'a>, ty: &CTy, init: Node<'a>, d: &super::cty::Decl<'a>) -> String {
+    fn init_expr(
+        &mut self,
+        _node: Node<'a>,
+        ty: &CTy,
+        init: Node<'a>,
+        d: &super::cty::Decl<'a>,
+    ) -> String {
         match init.kind() {
             "initializer_list" => self.brace_init(ty, init),
             "argument_list" => self.ctor_args(ty, init), // `T x(a, b)`
@@ -275,8 +291,17 @@ impl<'a> Lower<'a> {
                 let e = self.expr(init);
                 // value-semantics copy for containers/structs bound from an lvalue
                 if !d.init_is_paren
-                    && matches!(ty, CTy::Arr(..) | CTy::Dict(_) | CTy::Set(_) | CTy::Struct(_))
-                    && matches!(init.kind(), "identifier" | "field_expression" | "subscript_expression" | "qualified_identifier")
+                    && matches!(
+                        ty,
+                        CTy::Arr(..) | CTy::Dict(_) | CTy::Set(_) | CTy::Struct(_)
+                    )
+                    && matches!(
+                        init.kind(),
+                        "identifier"
+                            | "field_expression"
+                            | "subscript_expression"
+                            | "qualified_identifier"
+                    )
                 {
                     return ty.copy_expr(&e, &self.struct_defaults());
                 }
@@ -294,10 +319,24 @@ impl<'a> Lower<'a> {
             .collect();
         match ty {
             CTy::Arr(..) | CTy::Set(_) => {
-                format!("[{}]", items.iter().map(|i| self.expr(*i)).collect::<Vec<_>>().join(", "))
+                format!(
+                    "[{}]",
+                    items
+                        .iter()
+                        .map(|i| self.expr(*i))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
             }
             CTy::Tuple(_) => {
-                format!("({})", items.iter().map(|i| self.expr(*i)).collect::<Vec<_>>().join(", "))
+                format!(
+                    "({})",
+                    items
+                        .iter()
+                        .map(|i| self.expr(*i))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
             }
             CTy::Dict(_) => {
                 // `{{k, v}, ...}` pairs -> `~{ k = v }`? dict literal keys are
@@ -324,11 +363,22 @@ impl<'a> Lower<'a> {
                         .join(", ");
                     format!("{name} {{ {fields} }}")
                 } else {
-                    self.diag(DiagKind::Unsupported, init, "aggregate init of unknown struct");
+                    self.diag(
+                        DiagKind::Unsupported,
+                        init,
+                        "aggregate init of unknown struct",
+                    );
                     format!("{name} {{}}")
                 }
             }
-            _ => format!("[{}]", items.iter().map(|i| self.expr(*i)).collect::<Vec<_>>().join(", ")),
+            _ => format!(
+                "[{}]",
+                items
+                    .iter()
+                    .map(|i| self.expr(*i))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
         }
     }
 
@@ -372,7 +422,10 @@ impl<'a> Lower<'a> {
                 }
             }
             CTy::Float => {
-                format!("{}.to_float()", argv.first().cloned().unwrap_or_else(|| "0".into()))
+                format!(
+                    "{}.to_float()",
+                    argv.first().cloned().unwrap_or_else(|| "0".into())
+                )
             }
             _ => argv.first().cloned().unwrap_or_else(|| "0".into()),
         }
@@ -552,10 +605,7 @@ impl<'a> Lower<'a> {
                 if lhs.kind() != "identifier" {
                     return None;
                 }
-                (
-                    self.node_text(lhs).to_string(),
-                    self.f(inner, "right")?,
-                )
+                (self.node_text(lhs).to_string(), self.f(inner, "right")?)
             }
             _ => return None,
         };
@@ -593,17 +643,15 @@ impl<'a> Lower<'a> {
         if !ok {
             return None;
         }
-        Some((
-            var,
-            self.expr(lo),
-            self.expr(hi),
-            inclusive,
-        ))
+        Some((var, self.expr(lo), self.expr(hi), inclusive))
     }
 
     /// `for (T x : v)` -> `for x in v`.
     fn range_for(&mut self, node: Node<'a>) {
-        let right = self.f(node, "right").map(|r| self.expr(r)).unwrap_or_default();
+        let right = self
+            .f(node, "right")
+            .map(|r| self.expr(r))
+            .unwrap_or_default();
         // binding: declaration-ish `type declarator`
         let decl = self.f(node, "declarator");
         let name = decl
@@ -686,9 +734,7 @@ impl<'a> Lower<'a> {
                     .into_iter()
                     .filter(|c| c.kind() != "comment" && Some(*c) != value)
                     .collect();
-                let ends_break = stmts
-                    .last()
-                    .is_some_and(|s| s.kind() == "break_statement");
+                let ends_break = stmts.last().is_some_and(|s| s.kind() == "break_statement");
                 let head = match value {
                     Some(v) => {
                         let v = self.expr(v);
@@ -745,12 +791,10 @@ pub(crate) fn unwrap_parens<'n>(_l: &Lower<'n>, node: Node<'n>) -> Node<'n> {
     let mut cur = node;
     loop {
         match cur.kind() {
-            "parenthesized_expression" | "condition_clause" => {
-                match cur.named_child(0) {
-                    Some(inner) => cur = inner,
-                    None => return cur,
-                }
-            }
+            "parenthesized_expression" | "condition_clause" => match cur.named_child(0) {
+                Some(inner) => cur = inner,
+                None => return cur,
+            },
             _ => return cur,
         }
     }

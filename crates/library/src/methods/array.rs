@@ -83,14 +83,12 @@ fn new<'gc>() -> Vec<anon::T<'gc>> {
 /// grid[0].push(1);
 /// // grid is [[0, 0, 1], [0, 0]]
 /// ```
-fn new_filled<'gc>(
-    ctx: Ctx<'gc>,
-    val: anon::T<'gc>,
-    len: i64,
-) -> Result<Vec<anon::T<'gc>>, RtErr> {
+fn new_filled<'gc>(ctx: Ctx<'gc>, val: anon::T<'gc>, len: i64) -> Result<Vec<anon::T<'gc>>, RtErr> {
     let len = len.max(0) as usize;
     ctx.check_alloc_n(len, std::mem::size_of::<Val>())?;
-    Ok((0..len).map(|_| anon::Anon(ctx.deep_clone(val.0))).collect())
+    Ok((0..len)
+        .map(|_| anon::Anon(ctx.deep_clone(val.0)))
+        .collect())
 }
 
 #[native]
@@ -163,7 +161,11 @@ fn shuffle<'gc>(ctx: Ctx<'gc>, arr: &mut Vec<anon::T<'gc>>) {
 /// ```mimas
 /// let xs = [1, 2] + 3; // [1, 2, 3]
 /// ```
-fn add<'gc>(ctx: Ctx<'gc>, arr: &[anon::T<'gc>], val: anon::T<'gc>) -> Result<Vec<anon::T<'gc>>, RtErr> {
+fn add<'gc>(
+    ctx: Ctx<'gc>,
+    arr: &[anon::T<'gc>],
+    val: anon::T<'gc>,
+) -> Result<Vec<anon::T<'gc>>, RtErr> {
     ctx.check_alloc_n(arr.len() + 1, std::mem::size_of::<Val>())?;
     ctx.charge(std::mem::size_of::<Val>());
     let mut out = arr.to_vec();
@@ -189,7 +191,10 @@ fn union<'gc>(
         Ok(v) => v.iter().map(|x| anon::Anon(*x)).collect(),
         Err(_) => out.clone(),
     };
-    ctx.check_alloc_n(out.len().saturating_add(more.len()), std::mem::size_of::<Val>())?;
+    ctx.check_alloc_n(
+        out.len().saturating_add(more.len()),
+        std::mem::size_of::<Val>(),
+    )?;
     ctx.charge(more.len() * std::mem::size_of::<Val>());
     out.extend(more);
     Ok(out)
@@ -218,11 +223,7 @@ fn sub<'gc>(_ctx: Ctx<'gc>, arr: &[anon::T<'gc>], val: anon::T<'gc>) -> Vec<anon
 /// ```mimas
 /// let xs = [1, 2, 3] - [3, 9]; // [1, 2]
 /// ```
-fn minus<'gc>(
-    _ctx: Ctx<'gc>,
-    arr: &[anon::T<'gc>],
-    other: Array<'gc>,
-) -> Vec<anon::T<'gc>> {
+fn minus<'gc>(_ctx: Ctx<'gc>, arr: &[anon::T<'gc>], other: Array<'gc>) -> Vec<anon::T<'gc>> {
     let mut out = arr.to_vec();
     match other.0.try_borrow() {
         Ok(v) => {
@@ -257,7 +258,10 @@ fn extend<'gc>(ctx: Ctx<'gc>, arr: &mut Vec<Val<'gc>>, other: Array<'gc>) -> Res
             arr.clone()
         }
     };
-    ctx.check_alloc_n(arr.len().saturating_add(copy.len()), std::mem::size_of::<Val>())?;
+    ctx.check_alloc_n(
+        arr.len().saturating_add(copy.len()),
+        std::mem::size_of::<Val>(),
+    )?;
     ctx.charge(copy.len() * std::mem::size_of::<Val>());
     arr.extend(copy);
     Ok(())

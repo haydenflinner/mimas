@@ -294,8 +294,12 @@ impl Session {
         let steps = self.steps;
         let line_steps = self.line_steps;
         let generation = self.generation.wrapping_add(1);
-        let mut replayed =
-            Self::compile(new_source, self.path.clone(), self.show_internals, generation)?;
+        let mut replayed = Self::compile(
+            new_source,
+            self.path.clone(),
+            self.show_internals,
+            generation,
+        )?;
         for _ in 0..steps {
             replayed.step();
         }
@@ -314,8 +318,13 @@ impl Session {
         let generation = self.generation.wrapping_add(1);
         let display_source = std::fs::read_to_string(&self.path)
             .unwrap_or_else(|e| panic!("failed to read {}: {e}", self.path.display()));
-        *self = Self::compile(display_source, self.path.clone(), show_internals, generation)
-            .unwrap_or_else(|e| panic!("script should compile: {e}"));
+        *self = Self::compile(
+            display_source,
+            self.path.clone(),
+            show_internals,
+            generation,
+        )
+        .unwrap_or_else(|e| panic!("script should compile: {e}"));
     }
 
     pub(crate) fn step(&mut self) {
@@ -365,8 +374,8 @@ impl Session {
             return;
         }
         let start = self.current_loc();
-        let start_line = start
-            .map(|(file, offset)| (file, line_byte_range(&self.display_source, offset)));
+        let start_line =
+            start.map(|(file, offset)| (file, line_byte_range(&self.display_source, offset)));
         for _ in 0..1_000_000 {
             self.step();
             if self.finished || self.error.is_some() {
@@ -575,8 +584,16 @@ fn error_text_style(font: Handle<Font>) -> (TextColor, TextFont) {
 /// line is "current" changes as the program steps, on the same set of row entities.
 fn line_row_bundle(is_current: bool) -> (Node, BackgroundColor) {
     (
-        Node { flex_direction: FlexDirection::Row, flex_wrap: FlexWrap::NoWrap, ..default() },
-        BackgroundColor(if is_current { theme::yellow() } else { Color::NONE }),
+        Node {
+            flex_direction: FlexDirection::Row,
+            flex_wrap: FlexWrap::NoWrap,
+            ..default()
+        },
+        BackgroundColor(if is_current {
+            theme::yellow()
+        } else {
+            Color::NONE
+        }),
     )
 }
 
@@ -587,10 +604,20 @@ fn line_row_bundle(is_current: bool) -> (Node, BackgroundColor) {
 /// of overflowing it -- and a squeezed span's text then *word-wraps* inside its own shrunk box,
 /// scrambling the line across several visual rows. `NoWrap` on top is belt-and-suspenders
 /// against that same wrapping.
-fn line_span_style(is_current: bool, font: Handle<Font>) -> (Node, TextColor, TextFont, TextLayout) {
-    let color = if is_current { theme::text() } else { theme::subtext1() };
+fn line_span_style(
+    is_current: bool,
+    font: Handle<Font>,
+) -> (Node, TextColor, TextFont, TextLayout) {
+    let color = if is_current {
+        theme::text()
+    } else {
+        theme::subtext1()
+    };
     (
-        Node { flex_shrink: 0.0, ..default() },
+        Node {
+            flex_shrink: 0.0,
+            ..default()
+        },
         TextColor(color),
         text_font(font),
         TextLayout::linebreak(LineBreak::NoWrap),
@@ -695,7 +722,11 @@ fn source_panel_node() -> (Node, BorderColor, BackgroundColor) {
 /// `overflow`, so it sizes to its natural content height instead of the panel's clipped viewport.
 /// See `SourceContentMarker`.
 fn content_wrapper_node() -> Node {
-    Node { flex_direction: FlexDirection::Column, flex_shrink: 0.0, ..default() }
+    Node {
+        flex_direction: FlexDirection::Column,
+        flex_shrink: 0.0,
+        ..default()
+    }
 }
 
 /// Approximate row height for the source panel's text rows at `UI_FONT_SIZE`, used only to
@@ -763,10 +794,14 @@ fn inspect_lines(name: &str, value: &Inspect, depth: usize, out: &mut Vec<String
             }
             out.push(format!("{indent}}}"));
         }
-        Inspect::Instance { type_name, fields } if fields.is_empty() => {
+        Inspect::Instance {
+            type_name, fields, ..
+        } if fields.is_empty() => {
             out.push(format!("{indent}{name}: {type_name} {{}}"));
         }
-        Inspect::Instance { type_name, fields } => {
+        Inspect::Instance {
+            type_name, fields, ..
+        } => {
             out.push(format!("{indent}{name}: {type_name} {{"));
             for (k, v) in fields {
                 inspect_lines(k, v, depth + 1, out);
@@ -1078,47 +1113,46 @@ fn ui_system(
 
             // controls row
             ui.ch().on_spawn_insert(row_node).add(|ui| {
-                let mut step_btn = ui
-                    .ch_id("step")
-                    .on_spawn_insert(button_node)
-                    .add(|ui| {
-                        ui.ch().on_spawn_insert(|| text_style(font.clone())).text("Step");
-                    });
+                let mut step_btn = ui.ch_id("step").on_spawn_insert(button_node).add(|ui| {
+                    ui.ch()
+                        .on_spawn_insert(|| text_style(font.clone()))
+                        .text("Step");
+                });
                 if step_btn.clicked() {
                     session.step();
                 }
 
-                let mut run_btn = ui
-                    .ch_id("run")
-                    .on_spawn_insert(button_node)
-                    .add(|ui| {
-                        ui.ch().on_spawn_insert(|| text_style(font.clone())).text("Run to end");
-                    });
+                let mut run_btn = ui.ch_id("run").on_spawn_insert(button_node).add(|ui| {
+                    ui.ch()
+                        .on_spawn_insert(|| text_style(font.clone()))
+                        .text("Run to end");
+                });
                 if run_btn.clicked() {
                     session.run_to_end();
                 }
 
-                let mut reset_btn = ui
-                    .ch_id("reset")
-                    .on_spawn_insert(button_node)
-                    .add(|ui| {
-                        ui.ch().on_spawn_insert(|| text_style(font.clone())).text("Reset");
-                    });
+                let mut reset_btn = ui.ch_id("reset").on_spawn_insert(button_node).add(|ui| {
+                    ui.ch()
+                        .on_spawn_insert(|| text_style(font.clone()))
+                        .text("Reset");
+                });
                 if reset_btn.clicked() {
                     session.reload();
                 }
 
-                let mut internals_btn = ui
-                    .ch_id("internals")
-                    .on_spawn_insert(button_node)
-                    .add(|ui| {
-                        let label = if session.show_internals {
-                            "Hide internals"
-                        } else {
-                            "See deeper"
-                        };
-                        ui.ch().on_spawn_insert(|| text_style(font.clone())).text(label);
-                    });
+                let mut internals_btn =
+                    ui.ch_id("internals")
+                        .on_spawn_insert(button_node)
+                        .add(|ui| {
+                            let label = if session.show_internals {
+                                "Hide internals"
+                            } else {
+                                "See deeper"
+                            };
+                            ui.ch()
+                                .on_spawn_insert(|| text_style(font.clone()))
+                                .text(label);
+                        });
                 if internals_btn.clicked() {
                     session.show_internals = !session.show_internals;
                 }
@@ -1127,44 +1161,61 @@ fn ui_system(
                     .ch_id("dataflow_toggle")
                     .on_spawn_insert(button_node)
                     .add(|ui| {
-                        let label = if dataflow_view.active { "Debugger" } else { "Dataflow" };
-                        ui.ch().on_spawn_insert(|| text_style(font.clone())).text(label);
+                        let label = if dataflow_view.active {
+                            "Debugger"
+                        } else {
+                            "Dataflow"
+                        };
+                        ui.ch()
+                            .on_spawn_insert(|| text_style(font.clone()))
+                            .text(label);
                     });
                 if dataflow_btn.clicked() {
                     dataflow_view.active = !dataflow_view.active;
                     darkly_view.active = false;
                 }
 
-                let mut darkly_btn = ui
-                    .ch_id("darkly_toggle")
-                    .on_spawn_insert(button_node)
-                    .add(|ui| {
-                        let label = if darkly_view.active { "Debugger" } else { "Darkly" };
-                        ui.ch().on_spawn_insert(|| text_style(font.clone())).text(label);
-                    });
+                let mut darkly_btn =
+                    ui.ch_id("darkly_toggle")
+                        .on_spawn_insert(button_node)
+                        .add(|ui| {
+                            let label = if darkly_view.active {
+                                "Debugger"
+                            } else {
+                                "Darkly"
+                            };
+                            ui.ch()
+                                .on_spawn_insert(|| text_style(font.clone()))
+                                .text(label);
+                        });
                 if darkly_btn.clicked() {
                     darkly_view.active = !darkly_view.active;
                     dataflow_view.active = false;
                 }
 
-                let mut locals_btn = ui
-                    .ch_id("locals_toggle")
-                    .on_spawn_insert(button_node)
-                    .add(|ui| {
-                        let label = if show_locals.0 { "Hide locals" } else { "Locals" };
-                        ui.ch().on_spawn_insert(|| text_style(font.clone())).text(label);
-                    });
+                let mut locals_btn =
+                    ui.ch_id("locals_toggle")
+                        .on_spawn_insert(button_node)
+                        .add(|ui| {
+                            let label = if show_locals.0 {
+                                "Hide locals"
+                            } else {
+                                "Locals"
+                            };
+                            ui.ch()
+                                .on_spawn_insert(|| text_style(font.clone()))
+                                .text(label);
+                        });
                 if locals_btn.clicked() {
                     show_locals.0 = !show_locals.0;
                 }
 
                 if editor.editing {
-                    let mut apply_btn = ui
-                        .ch_id("apply")
-                        .on_spawn_insert(button_node)
-                        .add(|ui| {
-                            ui.ch().on_spawn_insert(|| text_style(font.clone())).text("Apply");
-                        });
+                    let mut apply_btn = ui.ch_id("apply").on_spawn_insert(button_node).add(|ui| {
+                        ui.ch()
+                            .on_spawn_insert(|| text_style(font.clone()))
+                            .text("Apply");
+                    });
                     if apply_btn.clicked() {
                         match session.apply_edit(editor.buffer.clone()) {
                             Ok(()) => {
@@ -1175,23 +1226,22 @@ fn ui_system(
                         }
                     }
 
-                    let mut cancel_btn = ui
-                        .ch_id("cancel")
-                        .on_spawn_insert(button_node)
-                        .add(|ui| {
-                            ui.ch().on_spawn_insert(|| text_style(font.clone())).text("Cancel");
+                    let mut cancel_btn =
+                        ui.ch_id("cancel").on_spawn_insert(button_node).add(|ui| {
+                            ui.ch()
+                                .on_spawn_insert(|| text_style(font.clone()))
+                                .text("Cancel");
                         });
                     if cancel_btn.clicked() {
                         editor.editing = false;
                         editor.error = None;
                     }
                 } else {
-                    let mut edit_btn = ui
-                        .ch_id("edit")
-                        .on_spawn_insert(button_node)
-                        .add(|ui| {
-                            ui.ch().on_spawn_insert(|| text_style(font.clone())).text("Edit");
-                        });
+                    let mut edit_btn = ui.ch_id("edit").on_spawn_insert(button_node).add(|ui| {
+                        ui.ch()
+                            .on_spawn_insert(|| text_style(font.clone()))
+                            .text("Edit");
+                    });
                     if edit_btn.clicked() {
                         editor.buffer = session.display_source.clone();
                         editor.editing = true;
@@ -1203,7 +1253,9 @@ fn ui_system(
                         // approximation the read-only panel's own auto-scroll already makes.
                         editor.open_at_line = session
                             .current_loc()
-                            .map(|(_, offset)| session.display_source[..offset].matches('\n').count())
+                            .map(|(_, offset)| {
+                                session.display_source[..offset].matches('\n').count()
+                            })
                             .unwrap_or(0);
                     }
                 }
@@ -1266,29 +1318,34 @@ fn ui_system(
 
             if dataflow_view.active {
                 dataflow_view.refresh(&session.display_source, session.generation);
-                ui.ch_id("dataflow_name_row").on_spawn_insert(row_node).add(|ui| {
-                    ui.ch()
-                        .on_spawn_insert(|| dim_text_style(font.clone()))
-                        .text("function:");
-                    ui.ch_id("dataflow_name")
-                        .on_spawn_insert({
-                            let font = font.clone();
-                            move || {
-                                (
-                                    Node { width: Val::Px(220.0), ..default() },
-                                    text_style(font),
-                                    EditableText::default(),
-                                    TextCursorStyle {
-                                        color: theme::text(),
-                                        selection_color: theme::overlay0(),
-                                        unfocused_selection_color: theme::overlay0(),
-                                        selected_text_color: None,
-                                    },
-                                )
-                            }
-                        })
-                        .input_text(&mut dataflow_view.function_name);
-                });
+                ui.ch_id("dataflow_name_row")
+                    .on_spawn_insert(row_node)
+                    .add(|ui| {
+                        ui.ch()
+                            .on_spawn_insert(|| dim_text_style(font.clone()))
+                            .text("function:");
+                        ui.ch_id("dataflow_name")
+                            .on_spawn_insert({
+                                let font = font.clone();
+                                move || {
+                                    (
+                                        Node {
+                                            width: Val::Px(220.0),
+                                            ..default()
+                                        },
+                                        text_style(font),
+                                        EditableText::default(),
+                                        TextCursorStyle {
+                                            color: theme::text(),
+                                            selection_color: theme::overlay0(),
+                                            unfocused_selection_color: theme::overlay0(),
+                                            selected_text_color: None,
+                                        },
+                                    )
+                                }
+                            })
+                            .input_text(&mut dataflow_view.function_name);
+                    });
                 if let Some(err) = dataflow_view.error.clone() {
                     ui.ch_id("dataflow_error")
                         .on_spawn_insert(|| error_text_style(font.clone()))
@@ -1309,213 +1366,227 @@ fn ui_system(
             // body: the existing debugger panels on the left, the Typst preview pane on the
             // right -- a vertically split pane inside the app itself, no separate browser tab.
             ui.ch_id("body").on_spawn_insert(body_row_node).add(|ui| {
-                ui.ch_id("main").on_spawn_insert(main_column_node).add(|ui| {
-                    // source panel: the whole program, current line highlighted. Always the
-                    // full source (not a window around the current line) so the highlight
-                    // moves through a stable view instead of the view itself jumping around.
-                    // The panel scrolls (it's clipped to whatever space is left, see
-                    // `source_panel_node`), and auto-scrolls to keep the current line in view.
-                    let lines = all_lines(&session.display_source, current_offset);
-                    let current_row = lines.iter().position(|&(_, _, is_current)| is_current);
+                ui.ch_id("main")
+                    .on_spawn_insert(main_column_node)
+                    .add(|ui| {
+                        // source panel: the whole program, current line highlighted. Always the
+                        // full source (not a window around the current line) so the highlight
+                        // moves through a stable view instead of the view itself jumping around.
+                        // The panel scrolls (it's clipped to whatever space is left, see
+                        // `source_panel_node`), and auto-scrolls to keep the current line in view.
+                        let lines = all_lines(&session.display_source, current_offset);
+                        let current_row = lines.iter().position(|&(_, _, is_current)| is_current);
 
-                    let mut source_panel = ui
-                        .ch_id("source")
-                        .on_spawn_insert(source_panel_node)
-                        .on_spawn_observe(on_source_scroll);
-                    // only re-apply the auto-scroll when the highlighted line actually moved --
-                    // not every frame, or it would fight a manual scroll to a different line.
-                    let prev_row = auto_scroll.last_row;
-                    let row_changed = current_row.is_some() && current_row != prev_row;
-                    if let Some(row) = current_row {
-                        let target_y =
-                            ((row as f32 - SOURCE_ROWS_ABOVE) * SOURCE_ROW_HEIGHT_PX).max(0.0);
-                        source_panel = source_panel.on_change_insert(row_changed, move || {
-                            ScrollPosition(Vec2::new(0.0, target_y))
-                        });
-                    }
-                    auto_scroll.last_row = current_row;
-                    // Which lines actually need their row/span bundles reinserted this frame --
-                    // unlike the scroll-jump above (gated to just "did the highlight move"),
-                    // this also has to cover "the highlight disappeared" (current_row: Some ->
-                    // None, e.g. the program finished) so the old current line's highlight
-                    // actually clears. A whole-file edit invalidates every line's tokenization at
-                    // once (an edit can reshuffle which identifier lands at a given index), so
-                    // that forces every line dirty for one frame instead of just the two whose
-                    // `is_current` flipped -- see `AutoScrollState::last_generation`. Without this
-                    // gating, reinserting every line's (and every token's) style bundle
-                    // unconditionally every frame was making bevy_ui re-measure the whole source
-                    // panel every frame regardless of whether anything changed, visibly janking
-                    // scroll compared to the edit-mode buffer (one `EditableText` entity, no
-                    // per-token ECS churn).
-                    let highlight_changed = current_row != prev_row;
-                    let generation_changed = auto_scroll.last_generation != Some(session.generation);
-                    auto_scroll.last_generation = Some(session.generation);
-                    source_panel.add(|ui| {
-                        if editor.editing {
-                            // a raw editable buffer, not a per-line list -- there's no "current
-                            // line" highlight to preserve while editing, and the underlying
-                            // `EditableText` widget already handles multi-line text/newlines on
-                            // its own.
-                            ui.ch_id("editor_text")
-                                .on_spawn_insert({
-                                    let font = font.clone();
-                                    let open_at_line = editor.open_at_line;
-                                    move || {
-                                        (
-                                            Node {
-                                                width: Val::Percent(100.0),
-                                                flex_grow: 1.0,
-                                                overflow: Overflow::clip(),
-                                                ..default()
-                                            },
-                                            text_style(font),
-                                            EditableText {
-                                                // Queued rather than set directly on the
-                                                // `PlainEditor`: `apply_text_edits` (bevy_text)
-                                                // processes these *after* `input_text`'s own
-                                                // initial `set_text`, so by the time these
-                                                // `Down` moves run, there's real, laid-out
-                                                // content for the cursor to move down through.
-                                                pending_edits: vec![TextEdit::Down(false); open_at_line],
-                                                ..default()
-                                            },
-                                            TextScroll::default(),
-                                            TextCursorStyle {
-                                                color: theme::text(),
-                                                selection_color: theme::overlay0(),
-                                                unfocused_selection_color: theme::overlay0(),
-                                                selected_text_color: None,
-                                            },
-                                        )
-                                    }
-                                })
-                                .on_spawn_observe(on_editor_scroll)
-                                .input_text(&mut editor.buffer);
-                        } else if lines.is_empty() {
-                            ui.ch()
-                                .on_spawn_insert(|| dim_text_style(font.clone()))
-                                .text("(no source loaded)");
-                        } else {
-                            // wrapped in its own naturally-sized child (not spread as direct
-                            // children of "source" itself) so `on_source_scroll` has something
-                            // whose `ComputedNode` reports the *real* total content height,
-                            // unclipped by the panel's own `Overflow::Scroll` -- see
-                            // `SourceContentMarker`.
-                            ui.ch_id("source_content")
-                                .on_spawn_insert(content_wrapper_node)
-                                .on_spawn_insert(|| SourceContentMarker)
-                                .add(|ui| {
-                                    for (idx, (line_no, line_text, is_current)) in
-                                        lines.into_iter().enumerate()
-                                    {
-                                        // see the `line_dirty`/`generation_changed` comment
-                                        // above: only the (at most two) lines whose highlight
-                                        // actually flipped need their bundles reinserted most
-                                        // frames, and every line does on a generation change.
-                                        let line_dirty = generation_changed
-                                            || (highlight_changed
-                                                && (Some(idx) == current_row
-                                                    || Some(idx) == prev_row));
-                                        ui.ch_id(line_no)
-                                            .on_change_insert(line_dirty, move || {
-                                                line_row_bundle(is_current)
-                                            })
-                                            .add(|ui| {
-                                                ui.ch_id("prefix")
-                                                    .on_change_insert(line_dirty, {
-                                                        let font = font.clone();
-                                                        move || line_span_style(is_current, font)
-                                                    })
-                                                    .text(format!("{line_no:>4} | "));
-                                                for (tok_idx, (text, is_ident)) in
-                                                    tokenize_line(&line_text).into_iter().enumerate()
-                                                {
-                                                    let mut span =
-                                                        ui.ch_id(("tok", tok_idx)).on_change_insert(
-                                                            line_dirty,
-                                                            {
+                        let mut source_panel = ui
+                            .ch_id("source")
+                            .on_spawn_insert(source_panel_node)
+                            .on_spawn_observe(on_source_scroll);
+                        // only re-apply the auto-scroll when the highlighted line actually moved --
+                        // not every frame, or it would fight a manual scroll to a different line.
+                        let prev_row = auto_scroll.last_row;
+                        let row_changed = current_row.is_some() && current_row != prev_row;
+                        if let Some(row) = current_row {
+                            let target_y =
+                                ((row as f32 - SOURCE_ROWS_ABOVE) * SOURCE_ROW_HEIGHT_PX).max(0.0);
+                            source_panel = source_panel.on_change_insert(row_changed, move || {
+                                ScrollPosition(Vec2::new(0.0, target_y))
+                            });
+                        }
+                        auto_scroll.last_row = current_row;
+                        // Which lines actually need their row/span bundles reinserted this frame --
+                        // unlike the scroll-jump above (gated to just "did the highlight move"),
+                        // this also has to cover "the highlight disappeared" (current_row: Some ->
+                        // None, e.g. the program finished) so the old current line's highlight
+                        // actually clears. A whole-file edit invalidates every line's tokenization at
+                        // once (an edit can reshuffle which identifier lands at a given index), so
+                        // that forces every line dirty for one frame instead of just the two whose
+                        // `is_current` flipped -- see `AutoScrollState::last_generation`. Without this
+                        // gating, reinserting every line's (and every token's) style bundle
+                        // unconditionally every frame was making bevy_ui re-measure the whole source
+                        // panel every frame regardless of whether anything changed, visibly janking
+                        // scroll compared to the edit-mode buffer (one `EditableText` entity, no
+                        // per-token ECS churn).
+                        let highlight_changed = current_row != prev_row;
+                        let generation_changed =
+                            auto_scroll.last_generation != Some(session.generation);
+                        auto_scroll.last_generation = Some(session.generation);
+                        source_panel.add(|ui| {
+                            if editor.editing {
+                                // a raw editable buffer, not a per-line list -- there's no "current
+                                // line" highlight to preserve while editing, and the underlying
+                                // `EditableText` widget already handles multi-line text/newlines on
+                                // its own.
+                                ui.ch_id("editor_text")
+                                    .on_spawn_insert({
+                                        let font = font.clone();
+                                        let open_at_line = editor.open_at_line;
+                                        move || {
+                                            (
+                                                Node {
+                                                    width: Val::Percent(100.0),
+                                                    flex_grow: 1.0,
+                                                    overflow: Overflow::clip(),
+                                                    ..default()
+                                                },
+                                                text_style(font),
+                                                EditableText {
+                                                    // Queued rather than set directly on the
+                                                    // `PlainEditor`: `apply_text_edits` (bevy_text)
+                                                    // processes these *after* `input_text`'s own
+                                                    // initial `set_text`, so by the time these
+                                                    // `Down` moves run, there's real, laid-out
+                                                    // content for the cursor to move down through.
+                                                    pending_edits: vec![
+                                                        TextEdit::Down(false);
+                                                        open_at_line
+                                                    ],
+                                                    ..default()
+                                                },
+                                                TextScroll::default(),
+                                                TextCursorStyle {
+                                                    color: theme::text(),
+                                                    selection_color: theme::overlay0(),
+                                                    unfocused_selection_color: theme::overlay0(),
+                                                    selected_text_color: None,
+                                                },
+                                            )
+                                        }
+                                    })
+                                    .on_spawn_observe(on_editor_scroll)
+                                    .input_text(&mut editor.buffer);
+                            } else if lines.is_empty() {
+                                ui.ch()
+                                    .on_spawn_insert(|| dim_text_style(font.clone()))
+                                    .text("(no source loaded)");
+                            } else {
+                                // wrapped in its own naturally-sized child (not spread as direct
+                                // children of "source" itself) so `on_source_scroll` has something
+                                // whose `ComputedNode` reports the *real* total content height,
+                                // unclipped by the panel's own `Overflow::Scroll` -- see
+                                // `SourceContentMarker`.
+                                ui.ch_id("source_content")
+                                    .on_spawn_insert(content_wrapper_node)
+                                    .on_spawn_insert(|| SourceContentMarker)
+                                    .add(|ui| {
+                                        for (idx, (line_no, line_text, is_current)) in
+                                            lines.into_iter().enumerate()
+                                        {
+                                            // see the `line_dirty`/`generation_changed` comment
+                                            // above: only the (at most two) lines whose highlight
+                                            // actually flipped need their bundles reinserted most
+                                            // frames, and every line does on a generation change.
+                                            let line_dirty = generation_changed
+                                                || (highlight_changed
+                                                    && (Some(idx) == current_row
+                                                        || Some(idx) == prev_row));
+                                            ui.ch_id(line_no)
+                                                .on_change_insert(line_dirty, move || {
+                                                    line_row_bundle(is_current)
+                                                })
+                                                .add(|ui| {
+                                                    ui.ch_id("prefix")
+                                                        .on_change_insert(line_dirty, {
+                                                            let font = font.clone();
+                                                            move || {
+                                                                line_span_style(is_current, font)
+                                                            }
+                                                        })
+                                                        .text(format!("{line_no:>4} | "));
+                                                    for (tok_idx, (text, is_ident)) in
+                                                        tokenize_line(&line_text)
+                                                            .into_iter()
+                                                            .enumerate()
+                                                    {
+                                                        let mut span = ui
+                                                            .ch_id(("tok", tok_idx))
+                                                            .on_change_insert(line_dirty, {
                                                                 let font = font.clone();
                                                                 move || {
-                                                                    line_span_style(is_current, font)
+                                                                    line_span_style(
+                                                                        is_current, font,
+                                                                    )
                                                                 }
-                                                            },
-                                                        );
-                                                    if is_ident {
-                                                        let ident = text.clone();
-                                                        span = span
-                                                            .on_change_insert(line_dirty, move || {
-                                                                HoverIdent(ident)
-                                                            })
-                                                            .on_spawn_observe(on_ident_over)
-                                                            .on_spawn_observe(on_ident_out);
+                                                            });
+                                                        if is_ident {
+                                                            let ident = text.clone();
+                                                            span = span
+                                                                .on_change_insert(
+                                                                    line_dirty,
+                                                                    move || HoverIdent(ident),
+                                                                )
+                                                                .on_spawn_observe(on_ident_over)
+                                                                .on_spawn_observe(on_ident_out);
+                                                        }
+                                                        span.text(text);
                                                     }
-                                                    span.text(text);
-                                                }
-                                            });
-                                    }
-                                });
-                        }
-                    });
+                                                });
+                                        }
+                                    });
+                            }
+                        });
 
-                    // call stack, oldest frame first (matches ThreadState.frames order) --
-                    // hidden by default, see `ShowLocals`.
-                    if show_locals.0 {
-                    ui.ch_id("frames").on_spawn_insert(row_node).add(|ui| {
-                        for (depth, frame) in frames.iter().enumerate() {
-                            ui.ch_id(depth).on_spawn_insert(frame_panel_node).add(|ui| {
-                                let title = if depth == 0 {
-                                    "script".to_string()
-                                } else {
-                                    frame
-                                        .function_name
-                                        .clone()
-                                        .unwrap_or_else(|| "<closure>".to_string())
-                                };
-                                ui.ch_id("header")
-                                    .on_spawn_insert(|| text_style(font.clone()))
-                                    .text(title);
+                        // call stack, oldest frame first (matches ThreadState.frames order) --
+                        // hidden by default, see `ShowLocals`.
+                        if show_locals.0 {
+                            ui.ch_id("frames").on_spawn_insert(row_node).add(|ui| {
+                                for (depth, frame) in frames.iter().enumerate() {
+                                    ui.ch_id(depth).on_spawn_insert(frame_panel_node).add(|ui| {
+                                        let title = if depth == 0 {
+                                            "script".to_string()
+                                        } else {
+                                            frame
+                                                .function_name
+                                                .clone()
+                                                .unwrap_or_else(|| "<closure>".to_string())
+                                        };
+                                        ui.ch_id("header")
+                                            .on_spawn_insert(|| text_style(font.clone()))
+                                            .text(title);
 
-                                // structural inspector: every local, name-labeled all the way
-                                // down (struct name + field names, not `frame.locals`'s flat
-                                // positional dump) -- what makes a value inspectable by default
-                                // instead of only the ones a script bothers to implement a pact
-                                // rendering for.
-                                let mut inspect_rows = Vec::new();
-                                for (name, val) in &frame.locals_inspect {
-                                    inspect_lines(name, val, 0, &mut inspect_rows);
-                                }
-                                for (row, line) in inspect_rows.into_iter().enumerate() {
-                                    ui.ch_id(("local", row))
-                                        .on_spawn_insert(|| text_style(font.clone()))
-                                        .text(line);
-                                }
+                                        // structural inspector: every local, name-labeled all the way
+                                        // down (struct name + field names, not `frame.locals`'s flat
+                                        // positional dump) -- what makes a value inspectable by default
+                                        // instead of only the ones a script bothers to implement a pact
+                                        // rendering for.
+                                        let mut inspect_rows = Vec::new();
+                                        for (name, val) in &frame.locals_inspect {
+                                            inspect_lines(name, val, 0, &mut inspect_rows);
+                                        }
+                                        for (row, line) in inspect_rows.into_iter().enumerate() {
+                                            ui.ch_id(("local", row))
+                                                .on_spawn_insert(|| text_style(font.clone()))
+                                                .text(line);
+                                        }
 
-                                if show_internals {
-                                    ui.ch_id("chunk_ip")
-                                        .on_spawn_insert(|| dim_text_style(font.clone()))
-                                        .text(format!(
-                                            "chunk #{} @ip={}",
-                                            frame.chunk.index(),
-                                            frame.ip
-                                        ));
-                                    for (reg, val) in frame.registers.iter().enumerate() {
-                                        ui.ch_id(("reg", reg))
-                                            .on_spawn_insert(|| dim_text_style(font.clone()))
-                                            .text(format!("r{reg} = {val}"));
-                                    }
+                                        if show_internals {
+                                            ui.ch_id("chunk_ip")
+                                                .on_spawn_insert(|| dim_text_style(font.clone()))
+                                                .text(format!(
+                                                    "chunk #{} @ip={}",
+                                                    frame.chunk.index(),
+                                                    frame.ip
+                                                ));
+                                            for (reg, val) in frame.registers.iter().enumerate() {
+                                                ui.ch_id(("reg", reg))
+                                                    .on_spawn_insert(|| {
+                                                        dim_text_style(font.clone())
+                                                    })
+                                                    .text(format!("r{reg} = {val}"));
+                                            }
+                                        }
+                                    });
                                 }
                             });
                         }
                     });
-                    }
-                });
 
                 // Typst preview pane: a live cetz-rendered tree of the running program's linked
                 // Node chain, updated whenever `typst_preview.update` produces a new image.
                 // Hidden along with `TYPST_PREVIEW_ENABLED`.
                 if TYPST_PREVIEW_ENABLED {
-                    ui.ch_id("preview").on_spawn_insert(preview_panel_node).add(|ui| {
-                        match current_preview.handle.clone() {
+                    ui.ch_id("preview")
+                        .on_spawn_insert(preview_panel_node)
+                        .add(|ui| match current_preview.handle.clone() {
                             Some(handle) => {
                                 ui.ch_id("image")
                                     .on_spawn_insert(|| Node {
@@ -1531,8 +1602,7 @@ fn ui_system(
                                     .on_spawn_insert(|| dim_text_style(font.clone()))
                                     .text("(no chain to show yet)");
                             }
-                        }
-                    });
+                        });
                 }
             });
 

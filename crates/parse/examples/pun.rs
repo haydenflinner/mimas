@@ -4,7 +4,7 @@
 //! field's own name is shortened, and the file is written back. A file
 //! that does not parse is left alone and reported.
 use parse::lex::Lexer;
-use parse::{walk_stmts, Expr, ExprKind, FieldKey, Literal, Parser, Visitor};
+use parse::{Expr, ExprKind, FieldKey, Literal, Parser, Visitor, walk_stmts};
 use shared::Located;
 
 /// `(key start, value end, name)` for every `name = name` field.
@@ -15,15 +15,22 @@ struct Puns<'s> {
 
 impl Visitor for Puns<'_> {
     fn expr(&mut self, e: &Expr) {
-        let ExprKind::Literal(Literal::Struct(s)) = e.kind() else { return };
+        let ExprKind::Literal(Literal::Struct(s)) = e.kind() else {
+            return;
+        };
         for (key, value) in &s.fields {
             let FieldKey::Ident(key) = key else { continue };
-            let ExprKind::Ident(i) = value.kind() else { continue };
+            let ExprKind::Ident(i) = value.kind() else {
+                continue;
+            };
             if i.lexeme != key.lexeme {
                 continue;
             }
             let (ks, ke) = (key.location.span().start(), key.location.span().end());
-            let (vs, ve) = (value.location().span().start(), value.location().span().end());
+            let (vs, ve) = (
+                value.location().span().start(),
+                value.location().span().end(),
+            );
             // already short: the value *is* the key token
             if vs < ke || self.src.get(ke..vs).map(str::trim) != Some("=") {
                 continue;
@@ -41,10 +48,18 @@ fn main() {
         let src = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{path}: {e}"));
         let (ast, diags) = Parser::new(Lexer::new(&src, 0, path.clone())).into_ast();
         if !diags.is_empty() {
-            eprintln!("{path}: skipped, {} parse diagnostic(s): {} {:?}", diags.len(), diags[0], diags[0]);
+            eprintln!(
+                "{path}: skipped, {} parse diagnostic(s): {} {:?}",
+                diags.len(),
+                diags[0],
+                diags[0]
+            );
             continue;
         }
-        let mut puns = Puns { src: &src, found: Vec::new() };
+        let mut puns = Puns {
+            src: &src,
+            found: Vec::new(),
+        };
         walk_stmts(ast.stmts(), &mut puns);
         if puns.found.is_empty() {
             continue;
@@ -56,12 +71,18 @@ fn main() {
         }
         // the rewrite must still parse to the same number of statements
         let (ast2, diags2) = Parser::new(Lexer::new(&out, 0, path.clone())).into_ast();
-        assert!(diags2.is_empty() && ast2.stmts().len() == ast.stmts().len(), "{path}: rewrite broke the parse");
+        assert!(
+            diags2.is_empty() && ast2.stmts().len() == ast.stmts().len(),
+            "{path}: rewrite broke the parse"
+        );
         println!("{path}: {}", puns.found.len());
         total += puns.found.len();
         if !dry {
             std::fs::write(path, out).unwrap();
         }
     }
-    eprintln!("{total} field(s) shortened{}", if dry { " (dry run)" } else { "" });
+    eprintln!(
+        "{total} field(s) shortened{}",
+        if dry { " (dry run)" } else { "" }
+    );
 }

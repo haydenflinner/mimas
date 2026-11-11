@@ -38,7 +38,12 @@ use crate::theme;
 const SHAPE_BORDER_WIDTH: f32 = 2.0;
 /// Text color for the to-string fallback popup -- deliberately plain (no `img::Color` involved,
 /// there's no script-chosen color to use), just legible against the popup's card background.
-const FALLBACK_TEXT_COLOR: Rgba = Rgba { r: 30, g: 30, b: 30, a: 255 };
+const FALLBACK_TEXT_COLOR: Rgba = Rgba {
+    r: 30,
+    g: 30,
+    b: 30,
+    a: 255,
+};
 
 /// Which identifier the mouse is currently over in the source panel (`None` when it's over
 /// nothing hoverable), the scene last extracted for it, and the last parse/extraction failure.
@@ -88,8 +93,11 @@ impl SceneView {
                 }
             },
             Some(SceneResult::Fallback(text)) => {
-                self.shape =
-                    Some(Shape::Text { value: text, size: 16.0, color: FALLBACK_TEXT_COLOR });
+                self.shape = Some(Shape::Text {
+                    value: text,
+                    size: 16.0,
+                    color: FALLBACK_TEXT_COLOR,
+                });
                 self.error = None;
             }
             // `name` isn't a live top-level local right now (stale hover, or an identifier
@@ -134,9 +142,23 @@ impl From<Rgba> for BevyColor {
 /// name-labeled reflection could tell us about a value, narrowed down to exactly the shapes and
 /// combinators `img` defines. Parsed once per `refresh` (not re-parsed on every render frame).
 pub(crate) enum Shape {
-    Circle { radius: f32, outline: bool, color: Rgba },
-    Ellipse { width: f32, height: f32, outline: bool, color: Rgba },
-    Rectangle { width: f32, height: f32, outline: bool, color: Rgba },
+    Circle {
+        radius: f32,
+        outline: bool,
+        color: Rgba,
+    },
+    Ellipse {
+        width: f32,
+        height: f32,
+        outline: bool,
+        color: Rgba,
+    },
+    Rectangle {
+        width: f32,
+        height: f32,
+        outline: bool,
+        color: Rgba,
+    },
     // `outline` isn't read yet -- `Triangle`'s renderer is a placeholder (see `DrawKind::
     // Triangle`) until real polygon rendering exists to make use of it.
     Triangle {
@@ -145,14 +167,44 @@ pub(crate) enum Shape {
         outline: bool,
         color: Rgba,
     },
-    Text { value: String, size: f32, color: Rgba },
-    Line { x: f32, y: f32, color: Rgba },
-    Overlay { top: Box<Shape>, bottom: Box<Shape> },
-    OverlayXy { top: Box<Shape>, dx: f32, dy: f32, bottom: Box<Shape> },
-    Beside { left: Box<Shape>, right: Box<Shape> },
-    Above { top: Box<Shape>, bottom: Box<Shape> },
-    EmptyScene { width: f32, height: f32 },
-    PlaceImage { pic: Box<Shape>, x: f32, y: f32, background: Box<Shape> },
+    Text {
+        value: String,
+        size: f32,
+        color: Rgba,
+    },
+    Line {
+        x: f32,
+        y: f32,
+        color: Rgba,
+    },
+    Overlay {
+        top: Box<Shape>,
+        bottom: Box<Shape>,
+    },
+    OverlayXy {
+        top: Box<Shape>,
+        dx: f32,
+        dy: f32,
+        bottom: Box<Shape>,
+    },
+    Beside {
+        left: Box<Shape>,
+        right: Box<Shape>,
+    },
+    Above {
+        top: Box<Shape>,
+        bottom: Box<Shape>,
+    },
+    EmptyScene {
+        width: f32,
+        height: f32,
+    },
+    PlaceImage {
+        pic: Box<Shape>,
+        x: f32,
+        y: f32,
+        background: Box<Shape>,
+    },
 }
 
 fn field<'a>(fields: &'a [(String, Inspect)], name: &str) -> Option<&'a Inspect> {
@@ -183,22 +235,80 @@ fn field_str(fields: &[(String, Inspect)], name: &str) -> String {
 
 fn named_color(name: &str) -> Rgba {
     match name {
-        "red" => Rgba { r: 214, g: 73, b: 73, a: 255 },
-        "green" => Rgba { r: 91, g: 168, b: 110, a: 255 },
-        "blue" => Rgba { r: 82, g: 126, b: 214, a: 255 },
-        "yellow" => Rgba { r: 224, g: 196, b: 87, a: 255 },
-        "orange" => Rgba { r: 224, g: 150, b: 74, a: 255 },
-        "purple" => Rgba { r: 158, g: 101, b: 196, a: 255 },
-        "black" => Rgba { r: 30, g: 30, b: 30, a: 255 },
-        "white" => Rgba { r: 245, g: 245, b: 245, a: 255 },
-        "gray" | "grey" => Rgba { r: 140, g: 140, b: 140, a: 255 },
-        "transparent" => Rgba { r: 0, g: 0, b: 0, a: 0 },
-        _ => Rgba { r: 110, g: 110, b: 110, a: 255 },
+        "red" => Rgba {
+            r: 214,
+            g: 73,
+            b: 73,
+            a: 255,
+        },
+        "green" => Rgba {
+            r: 91,
+            g: 168,
+            b: 110,
+            a: 255,
+        },
+        "blue" => Rgba {
+            r: 82,
+            g: 126,
+            b: 214,
+            a: 255,
+        },
+        "yellow" => Rgba {
+            r: 224,
+            g: 196,
+            b: 87,
+            a: 255,
+        },
+        "orange" => Rgba {
+            r: 224,
+            g: 150,
+            b: 74,
+            a: 255,
+        },
+        "purple" => Rgba {
+            r: 158,
+            g: 101,
+            b: 196,
+            a: 255,
+        },
+        "black" => Rgba {
+            r: 30,
+            g: 30,
+            b: 30,
+            a: 255,
+        },
+        "white" => Rgba {
+            r: 245,
+            g: 245,
+            b: 245,
+            a: 255,
+        },
+        "gray" | "grey" => Rgba {
+            r: 140,
+            g: 140,
+            b: 140,
+            a: 255,
+        },
+        "transparent" => Rgba {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 0,
+        },
+        _ => Rgba {
+            r: 110,
+            g: 110,
+            b: 110,
+            a: 255,
+        },
     }
 }
 
 fn parse_color(inspect: &Inspect) -> Rgba {
-    let Inspect::Instance { type_name, fields } = inspect else {
+    let Inspect::Instance {
+        type_name, fields, ..
+    } = inspect
+    else {
         return named_color("");
     };
     match type_name.as_str() {
@@ -224,15 +334,20 @@ fn parse_outline(inspect: Option<&Inspect>) -> bool {
 }
 
 fn parse_shape(inspect: &Inspect) -> Option<Shape> {
-    let Inspect::Instance { type_name, fields } = inspect else {
+    let Inspect::Instance {
+        type_name, fields, ..
+    } = inspect
+    else {
         return None;
     };
     let color = || field(fields, "color").map(parse_color).unwrap_or_default();
     let outline = || parse_outline(field(fields, "mode"));
     Some(match type_name.as_str() {
-        "Image::Circle" => {
-            Shape::Circle { radius: field_f32(fields, "radius"), outline: outline(), color: color() }
-        }
+        "Image::Circle" => Shape::Circle {
+            radius: field_f32(fields, "radius"),
+            outline: outline(),
+            color: color(),
+        },
         "Image::Ellipse" => Shape::Ellipse {
             width: field_f32(fields, "width"),
             height: field_f32(fields, "height"),
@@ -245,17 +360,21 @@ fn parse_shape(inspect: &Inspect) -> Option<Shape> {
             outline: outline(),
             color: color(),
         },
-        "Image::Triangle" => {
-            Shape::Triangle { side: field_f32(fields, "side"), outline: outline(), color: color() }
-        }
+        "Image::Triangle" => Shape::Triangle {
+            side: field_f32(fields, "side"),
+            outline: outline(),
+            color: color(),
+        },
         "Image::Text" => Shape::Text {
             value: field_str(fields, "value"),
             size: field_f32(fields, "size"),
             color: color(),
         },
-        "Image::Line" => {
-            Shape::Line { x: field_f32(fields, "x"), y: field_f32(fields, "y"), color: color() }
-        }
+        "Image::Line" => Shape::Line {
+            x: field_f32(fields, "x"),
+            y: field_f32(fields, "y"),
+            color: color(),
+        },
         "Image::Overlay" => Shape::Overlay {
             top: Box::new(parse_shape(field(fields, "top")?)?),
             bottom: Box::new(parse_shape(field(fields, "bottom")?)?),
@@ -296,16 +415,22 @@ fn measure(shape: &Shape) -> (f32, f32) {
         Shape::Ellipse { width, height, .. } => (*width, *height),
         Shape::Rectangle { width, height, .. } => (*width, *height),
         Shape::Triangle { side, .. } => (*side, side * 0.866),
-        Shape::Text { value, size, .. } => {
-            ((value.chars().count().max(1) as f32) * size * 0.62, size * 1.3)
-        }
+        Shape::Text { value, size, .. } => (
+            (value.chars().count().max(1) as f32) * size * 0.62,
+            size * 1.3,
+        ),
         Shape::Line { x, y, .. } => (x.abs().max(2.0), y.abs().max(2.0)),
         Shape::Overlay { top, bottom } => {
             let (tw, th) = measure(top);
             let (bw, bh) = measure(bottom);
             (tw.max(bw), th.max(bh))
         }
-        Shape::OverlayXy { top, dx, dy, bottom } => {
+        Shape::OverlayXy {
+            top,
+            dx,
+            dy,
+            bottom,
+        } => {
             let (tw, th) = measure(top);
             let (bw, bh) = measure(bottom);
             let min_x = dx.min(0.0);
@@ -340,45 +465,88 @@ struct DrawCmd {
 }
 
 enum DrawKind {
-    Ellipse { outline: bool, color: Rgba },
-    Rect { outline: bool, color: Rgba },
+    Ellipse {
+        outline: bool,
+        color: Rgba,
+    },
+    Rect {
+        outline: bool,
+        color: Rgba,
+    },
     /// `img` can construct a triangle, but bevy_ui has no arbitrary-polygon primitive to draw
     /// one with -- rendered as a dashed placeholder box with a `\u{25b3}` glyph rather than
     /// silently drawing the wrong shape. Real triangle rendering needs either a custom mesh or
     /// gizmos, deliberately deferred rather than faked here.
-    Triangle { color: Rgba },
-    Text { value: String, size: f32, color: Rgba },
+    Triangle {
+        color: Rgba,
+    },
+    Text {
+        value: String,
+        size: f32,
+        color: Rgba,
+    },
     /// Same honesty policy as `Triangle`: an actually-diagonal line needs UI-node rotation this
     /// doesn't attempt yet, so this draws the line's bounding box, not the line.
-    Line { color: Rgba },
+    Line {
+        color: Rgba,
+    },
 }
 
 fn arrange(shape: &Shape, x: f32, y: f32, out: &mut Vec<DrawCmd>) {
     match shape {
-        Shape::Circle { radius, outline, color } => out.push(DrawCmd {
+        Shape::Circle {
+            radius,
+            outline,
+            color,
+        } => out.push(DrawCmd {
             x,
             y,
             w: radius * 2.0,
             h: radius * 2.0,
-            kind: DrawKind::Ellipse { outline: *outline, color: *color },
+            kind: DrawKind::Ellipse {
+                outline: *outline,
+                color: *color,
+            },
         }),
-        Shape::Ellipse { width, height, outline, color } => out.push(DrawCmd {
+        Shape::Ellipse {
+            width,
+            height,
+            outline,
+            color,
+        } => out.push(DrawCmd {
             x,
             y,
             w: *width,
             h: *height,
-            kind: DrawKind::Ellipse { outline: *outline, color: *color },
+            kind: DrawKind::Ellipse {
+                outline: *outline,
+                color: *color,
+            },
         }),
-        Shape::Rectangle { width, height, outline, color } => out.push(DrawCmd {
+        Shape::Rectangle {
+            width,
+            height,
+            outline,
+            color,
+        } => out.push(DrawCmd {
             x,
             y,
             w: *width,
             h: *height,
-            kind: DrawKind::Rect { outline: *outline, color: *color },
+            kind: DrawKind::Rect {
+                outline: *outline,
+                color: *color,
+            },
         }),
         Shape::Triangle { color, .. } => {
             let (w, h) = measure(shape);
-            out.push(DrawCmd { x, y, w, h, kind: DrawKind::Triangle { color: *color } });
+            out.push(DrawCmd {
+                x,
+                y,
+                w,
+                h,
+                kind: DrawKind::Triangle { color: *color },
+            });
         }
         Shape::Text { value, size, color } => {
             let (w, h) = measure(shape);
@@ -387,12 +555,22 @@ fn arrange(shape: &Shape, x: f32, y: f32, out: &mut Vec<DrawCmd>) {
                 y,
                 w,
                 h,
-                kind: DrawKind::Text { value: value.clone(), size: *size, color: *color },
+                kind: DrawKind::Text {
+                    value: value.clone(),
+                    size: *size,
+                    color: *color,
+                },
             });
         }
         Shape::Line { color, .. } => {
             let (w, h) = measure(shape);
-            out.push(DrawCmd { x, y, w, h, kind: DrawKind::Line { color: *color } });
+            out.push(DrawCmd {
+                x,
+                y,
+                w,
+                h,
+                kind: DrawKind::Line { color: *color },
+            });
         }
         Shape::Overlay { top, bottom } => {
             // `bottom` has to land in `out` (and so on screen -- later entries paint over
@@ -404,7 +582,12 @@ fn arrange(shape: &Shape, x: f32, y: f32, out: &mut Vec<DrawCmd>) {
             arrange(bottom, x + (w - bw) / 2.0, y + (h - bh) / 2.0, out);
             arrange(top, x + (w - tw) / 2.0, y + (h - th) / 2.0, out);
         }
-        Shape::OverlayXy { top, dx, dy, bottom } => {
+        Shape::OverlayXy {
+            top,
+            dx,
+            dy,
+            bottom,
+        } => {
             let (bw, bh) = measure(bottom);
             let _ = (bw, bh);
             let min_x = dx.min(0.0);
@@ -427,7 +610,12 @@ fn arrange(shape: &Shape, x: f32, y: f32, out: &mut Vec<DrawCmd>) {
             arrange(bottom, x + (w - bw) / 2.0, y + th, out);
         }
         Shape::EmptyScene { .. } => {}
-        Shape::PlaceImage { pic, x: px, y: py, background } => {
+        Shape::PlaceImage {
+            pic,
+            x: px,
+            y: py,
+            background,
+        } => {
             arrange(background, x, y, out);
             let (pw, ph) = measure(pic);
             arrange(pic, x + px - pw / 2.0, y + py - ph / 2.0, out);
@@ -501,25 +689,37 @@ pub(crate) fn render_popup(ui: &mut Imm<CapsUi>, font: Handle<Font>, root: &Shap
                     DrawKind::Rect { outline, color } => {
                         let (border, background) = fill_or_outline(*outline, *color);
                         ui.ch_id(("scene_rect", i)).on_change_insert(true, move || {
-                            (node.clone(), BorderColor::all(border), BackgroundColor(background))
-                        });
-                    }
-                    DrawKind::Ellipse { outline, color } => {
-                        let (border, background) = fill_or_outline(*outline, *color);
-                        let radius = cmd.w.min(cmd.h) / 2.0;
-                        ui.ch_id(("scene_ellipse", i)).on_change_insert(true, move || {
                             (
-                                Node { border_radius: BorderRadius::all(Val::Px(radius)), ..node.clone() },
+                                node.clone(),
                                 BorderColor::all(border),
                                 BackgroundColor(background),
                             )
                         });
                     }
+                    DrawKind::Ellipse { outline, color } => {
+                        let (border, background) = fill_or_outline(*outline, *color);
+                        let radius = cmd.w.min(cmd.h) / 2.0;
+                        ui.ch_id(("scene_ellipse", i))
+                            .on_change_insert(true, move || {
+                                (
+                                    Node {
+                                        border_radius: BorderRadius::all(Val::Px(radius)),
+                                        ..node.clone()
+                                    },
+                                    BorderColor::all(border),
+                                    BackgroundColor(background),
+                                )
+                            });
+                    }
                     DrawKind::Triangle { color } => {
                         let c = *color;
                         ui.ch_id(("scene_triangle", i))
                             .on_change_insert(true, move || {
-                                (node.clone(), BorderColor::all(BevyColor::from(c)), BackgroundColor(BevyColor::NONE))
+                                (
+                                    node.clone(),
+                                    BorderColor::all(BevyColor::from(c)),
+                                    BackgroundColor(BevyColor::NONE),
+                                )
                             })
                             .add(|ui| {
                                 ui.ch()
@@ -541,8 +741,9 @@ pub(crate) fn render_popup(ui: &mut Imm<CapsUi>, font: Handle<Font>, root: &Shap
                         let size = *size;
                         let font = font.clone();
                         let value = value.clone();
-                        ui.ch_id(("scene_text", i)).on_change_insert(true, move || node.clone()).add(
-                            move |ui| {
+                        ui.ch_id(("scene_text", i))
+                            .on_change_insert(true, move || node.clone())
+                            .add(move |ui| {
                                 ui.ch()
                                     .on_change_insert(true, move || {
                                         let mut f = crate::text_font(font.clone());
@@ -554,13 +755,16 @@ pub(crate) fn render_popup(ui: &mut Imm<CapsUi>, font: Handle<Font>, root: &Shap
                                         )
                                     })
                                     .text(value.clone());
-                            },
-                        );
+                            });
                     }
                     DrawKind::Line { color } => {
                         let c = *color;
                         ui.ch_id(("scene_line", i)).on_change_insert(true, move || {
-                            (node.clone(), BorderColor::all(BevyColor::from(c)), BackgroundColor(BevyColor::NONE))
+                            (
+                                node.clone(),
+                                BorderColor::all(BevyColor::from(c)),
+                                BackgroundColor(BevyColor::NONE),
+                            )
                         });
                     }
                 }

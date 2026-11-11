@@ -10,8 +10,8 @@ use arborium_tree_sitter::Node;
 use super::cty::{spec_type, unqual};
 use super::stmt::unwrap_parens;
 use super::{FnSig, Lower};
-use crate::ty::{CTy, SeqKind};
 use crate::DiagKind;
+use crate::ty::{CTy, SeqKind};
 
 /// mimas keywords — a C++ identifier colliding with one gets `_` appended.
 const RESERVED: &[&str] = &[
@@ -34,16 +34,39 @@ impl<'a> Lower<'a> {
     pub(crate) fn is_expr(&self, node: Node<'a>) -> bool {
         matches!(
             node.kind(),
-            "identifier" | "this" | "number_literal" | "string_literal" | "char_literal"
-                | "concatenated_string_literal" | "true" | "false" | "null" | "nullptr"
-                | "user_defined_literal" | "binary_expression" | "unary_expression"
-                | "update_expression" | "assignment_expression" | "conditional_expression"
-                | "call_expression" | "field_expression" | "subscript_expression"
-                | "parenthesized_expression" | "comma_expression" | "cast_expression"
-                | "new_expression" | "delete_expression" | "sizeof_expression"
-                | "lambda_expression" | "initializer_list" | "qualified_identifier"
-                | "template_function" | "template_method" | "throw_expression"
-                | "co_await_expression" | "fold_expression"
+            "identifier"
+                | "this"
+                | "number_literal"
+                | "string_literal"
+                | "char_literal"
+                | "concatenated_string_literal"
+                | "true"
+                | "false"
+                | "null"
+                | "nullptr"
+                | "user_defined_literal"
+                | "binary_expression"
+                | "unary_expression"
+                | "update_expression"
+                | "assignment_expression"
+                | "conditional_expression"
+                | "call_expression"
+                | "field_expression"
+                | "subscript_expression"
+                | "parenthesized_expression"
+                | "comma_expression"
+                | "cast_expression"
+                | "new_expression"
+                | "delete_expression"
+                | "sizeof_expression"
+                | "lambda_expression"
+                | "initializer_list"
+                | "qualified_identifier"
+                | "template_function"
+                | "template_method"
+                | "throw_expression"
+                | "co_await_expression"
+                | "fold_expression"
         )
     }
 
@@ -68,16 +91,28 @@ impl<'a> Lower<'a> {
                 inner.unwrap_or_else(|| self.node_text(node).to_string())
             }
             "parenthesized_expression" => {
-                format!("({})", self.first(node).map(|e| self.expr(e)).unwrap_or_default())
+                format!(
+                    "({})",
+                    self.first(node).map(|e| self.expr(e)).unwrap_or_default()
+                )
             }
             "binary_expression" => self.binary(node),
             "unary_expression" | "pointer_expression" => self.unary(node),
             "update_expression" => self.update(node),
             "assignment_expression" => self.assign(node),
             "conditional_expression" => {
-                let c = self.f(node, "condition").map(|c| self.expr_unparen(c)).unwrap_or_default();
-                let t = self.f(node, "consequence").map(|c| self.expr(c)).unwrap_or_default();
-                let f = self.f(node, "alternative").map(|c| self.expr(c)).unwrap_or_default();
+                let c = self
+                    .f(node, "condition")
+                    .map(|c| self.expr_unparen(c))
+                    .unwrap_or_default();
+                let t = self
+                    .f(node, "consequence")
+                    .map(|c| self.expr(c))
+                    .unwrap_or_default();
+                let f = self
+                    .f(node, "alternative")
+                    .map(|c| self.expr(c))
+                    .unwrap_or_default();
                 format!("(if {c} {{ {t} }} else {{ {f} }})")
             }
             "call_expression" => self.call(node),
@@ -127,7 +162,11 @@ impl<'a> Lower<'a> {
                     .collect::<Vec<_>>();
                 format!(
                     "[{}]",
-                    items.iter().map(|i| self.expr(*i)).collect::<Vec<_>>().join(", ")
+                    items
+                        .iter()
+                        .map(|i| self.expr(*i))
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 )
             }
             "qualified_identifier" => self.qualified(node),
@@ -169,16 +208,20 @@ impl<'a> Lower<'a> {
         // `x` inside a method where `x` is a member and not a local -> `self.x`
         if let Some(owner) = self.cur_struct.clone()
             && self.lookup(name).is_none()
-                && let Some(info) = self.structs.get(&owner)
-                    && info.fields.iter().any(|(f, _)| f == name) {
-                        return format!("{}.{}", self.self_name, sanitize(name));
-                    }
+            && let Some(info) = self.structs.get(&owner)
+            && info.fields.iter().any(|(f, _)| f == name)
+        {
+            return format!("{}.{}", self.self_name, sanitize(name));
+        }
         sanitize(name)
     }
 
     /// `std::x` / `ns::x` — the namespace is flattened; `std` silently.
     fn qualified(&mut self, node: Node<'a>) -> String {
-        let scope = self.f(node, "scope").map(|s| self.node_text(s)).unwrap_or("");
+        let scope = self
+            .f(node, "scope")
+            .map(|s| self.node_text(s))
+            .unwrap_or("");
         let name = self
             .f(node, "name")
             .or_else(|| self.f(node, "value"))
@@ -186,7 +229,11 @@ impl<'a> Lower<'a> {
             .unwrap_or_else(|| self.node_text(node));
         let name = unqual(name);
         if name == "npos" || name == "endl" {
-            return if name == "npos" { "-1".into() } else { "\"\\n\"".into() };
+            return if name == "npos" {
+                "-1".into()
+            } else {
+                "\"\\n\"".into()
+            };
         }
         if let Some(e) = self.enum_const(node, scope, name) {
             return e;
@@ -238,7 +285,12 @@ impl<'a> Lower<'a> {
 
     fn string_lit(&mut self, node: Node<'a>) -> String {
         let mut t = self.node_text(node).to_string();
-        if t.starts_with("R\"") || t.starts_with("u8\"") || t.starts_with("u\"") || t.starts_with("U\"") || t.starts_with("L\"") {
+        if t.starts_with("R\"")
+            || t.starts_with("u8\"")
+            || t.starts_with("u\"")
+            || t.starts_with("U\"")
+            || t.starts_with("L\"")
+        {
             // raw/unicode prefix -> keep the quoted body
             if let Some(start) = t.find('"') {
                 if t.starts_with("R\"") {
@@ -329,10 +381,18 @@ impl<'a> Lower<'a> {
         // `s.find(x) != npos` / `s.find(x) != s.end()` -> `x in s`
         if op == "!=" || op == "==" {
             if let Some(found) = self.find_vs_end(l, r) {
-                return if op == "!=" { found } else { format!("!({found})") };
+                return if op == "!=" {
+                    found
+                } else {
+                    format!("!({found})")
+                };
             }
             if let Some(found) = self.find_vs_end(r, l) {
-                return if op == "!=" { found } else { format!("!({found})") };
+                return if op == "!=" {
+                    found
+                } else {
+                    format!("!({found})")
+                };
             }
         }
         // cout/cin chains can nest (`cout << (a << b)` is nonsense anyway) —
@@ -412,7 +472,11 @@ impl<'a> Lower<'a> {
         match op {
             "!" | "-" | "+" | "~" => format!("{op}{}", self.expr_paren(arg)),
             "*" => {
-                self.diag(DiagKind::Approximate, node, "dereference erased — mimas shares refs");
+                self.diag(
+                    DiagKind::Approximate,
+                    node,
+                    "dereference erased — mimas shares refs",
+                );
                 self.expr(arg)
             }
             "&" => {
@@ -427,9 +491,18 @@ impl<'a> Lower<'a> {
     fn expr_paren(&mut self, node: Node<'a>) -> String {
         let e = self.expr(node);
         match node.kind() {
-            "identifier" | "this" | "number_literal" | "string_literal" | "char_literal"
-            | "true" | "false" | "call_expression" | "field_expression"
-            | "subscript_expression" | "parenthesized_expression" | "qualified_identifier" => e,
+            "identifier"
+            | "this"
+            | "number_literal"
+            | "string_literal"
+            | "char_literal"
+            | "true"
+            | "false"
+            | "call_expression"
+            | "field_expression"
+            | "subscript_expression"
+            | "parenthesized_expression"
+            | "qualified_identifier" => e,
             _ => format!("({e})"),
         }
     }
@@ -437,7 +510,10 @@ impl<'a> Lower<'a> {
     /// `++x` / `x++` in expression position — statement position is handled by
     /// `expr_stmt_inner` (`x += 1`).
     fn update(&mut self, node: Node<'a>) -> String {
-        let arg = self.f(node, "argument").map(|a| self.expr(a)).unwrap_or_default();
+        let arg = self
+            .f(node, "argument")
+            .map(|a| self.expr(a))
+            .unwrap_or_default();
         let op = self.node_text(node);
         let delta = if op.contains("--") { "-= 1" } else { "+= 1" };
         let prefix = op.starts_with("++") || op.starts_with("--");
@@ -456,9 +532,7 @@ impl<'a> Lower<'a> {
         let op = self.assign_op(node).to_string();
 
         // `std::tie(a, b) = e` / `(a, b) = e`
-        if lhs_n.kind() == "call_expression"
-            && self.call_name(lhs_n).as_deref() == Some("tie")
-        {
+        if lhs_n.kind() == "call_expression" && self.call_name(lhs_n).as_deref() == Some("tie") {
             let vars: Vec<String> = self
                 .f(lhs_n, "arguments")
                 .map(|a| self.children(a))
@@ -486,11 +560,12 @@ impl<'a> Lower<'a> {
             "+=" | "-=" | "*=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" | "/=" => {
                 // dict subscript lvalue: `m[k] += 1` -> `m[k] = (m[k] ?? 0) + 1`
                 if let CTy::Dict(v) = &lhs_ty
-                    && lhs_n.kind() == "subscript_expression" {
-                        let base_op = op.trim_end_matches('=');
-                        let def = v.default_init(&self.struct_defaults());
-                        return format!("{lhs} = ({lhs} ?? {def}) {base_op} {rhs}");
-                    }
+                    && lhs_n.kind() == "subscript_expression"
+                {
+                    let base_op = op.trim_end_matches('=');
+                    let def = v.default_init(&self.struct_defaults());
+                    return format!("{lhs} = ({lhs} ?? {def}) {base_op} {rhs}");
+                }
                 format!("{lhs} {op} {rhs}")
             }
             "??=" => format!("{lhs} ??= {rhs}"),
@@ -598,12 +673,12 @@ impl<'a> Lower<'a> {
     fn new_expr(&mut self, node: Node<'a>) -> String {
         let ty = spec_type(self, self.f(node, "type"));
         // `new T[n]` — the declarator is a `new_declarator` with a `length`
-        if let Some(len) = self
-            .f(node, "declarator")
-            .and_then(|d| self.f(d, "length"))
-        {
+        if let Some(len) = self.f(node, "declarator").and_then(|d| self.f(d, "length")) {
             let len = self.expr(len);
-            return format!("array::new_filled({}, {len})", ty.default_init(&self.struct_defaults()));
+            return format!(
+                "array::new_filled({}, {len})",
+                ty.default_init(&self.struct_defaults())
+            );
         }
         let args = self
             .f(node, "arguments")
@@ -619,7 +694,10 @@ impl<'a> Lower<'a> {
         match ty {
             CTy::Struct(name) => format!("{name}::new({args})"),
             CTy::Arr(elem, _) if !args.is_empty() => {
-                format!("array::new_filled({}, {args})", elem.default_init(&self.struct_defaults()))
+                format!(
+                    "array::new_filled({}, {args})",
+                    elem.default_init(&self.struct_defaults())
+                )
             }
             _ => {
                 self.diag(DiagKind::Approximate, node, "`new` erased to a value");
@@ -635,7 +713,9 @@ impl<'a> Lower<'a> {
         let mut parts = Vec::new();
         if let Some(pl) = params {
             for p in pl.named_children(&mut pl.walk()) {
-                if p.kind() == "parameter_declaration" || p.kind() == "optional_parameter_declaration" {
+                if p.kind() == "parameter_declaration"
+                    || p.kind() == "optional_parameter_declaration"
+                {
                     let base = spec_type(self, self.f(p, "type"));
                     let d = super::cty::declarator(self, self.f(p, "declarator").unwrap_or(p));
                     let ty = self.wrap_type(base, &d);
@@ -694,7 +774,11 @@ impl<'a> Lower<'a> {
             "template_function" | "template_method" => {
                 // `f<T>(args)` / `static_cast<T>(x)`
                 let text = self.node_text(f);
-                text.split('<').next().map(unqual).unwrap_or(text).to_string()
+                text.split('<')
+                    .next()
+                    .map(unqual)
+                    .unwrap_or(text)
+                    .to_string()
             }
             _ => return None,
         })
@@ -733,7 +817,11 @@ impl<'a> Lower<'a> {
                     CTy::Struct(name) => format!("{name}::new({})", argv.join(", ")),
                     CTy::Arr(elem, _) => match argv.len() {
                         0 => "array::new()".into(),
-                        1 => format!("array::new_filled({}, {})", elem.default_init(&self.struct_defaults()), argv[0]),
+                        1 => format!(
+                            "array::new_filled({}, {})",
+                            elem.default_init(&self.struct_defaults()),
+                            argv[0]
+                        ),
                         _ => format!("array::new_filled({}, {})", argv[1], argv[0]),
                     },
                     _ => self.cast_to(&ty, argv.first().cloned().unwrap_or_default(), node),
@@ -775,17 +863,40 @@ impl<'a> Lower<'a> {
                     argv.first().cloned().unwrap_or_else(|| "true".into())
                 );
             }
-            "exit" => return format!("std::sys::exit({})", argv.first().cloned().unwrap_or_else(|| "0".into())),
+            "exit" => {
+                return format!(
+                    "std::sys::exit({})",
+                    argv.first().cloned().unwrap_or_else(|| "0".into())
+                );
+            }
             // ----- math -----
             "abs" | "fabs" | "labs" => return format!("{}.abs()", argv[0]),
             "sqrt" | "sqrtf" => return format!("{}.sqrt()", argv[0]),
-            "pow" | "powf" => return format!("{}.pow({})", argv[0], argv.get(1).cloned().unwrap_or("2".into())),
+            "pow" | "powf" => {
+                return format!(
+                    "{}.pow({})",
+                    argv[0],
+                    argv.get(1).cloned().unwrap_or("2".into())
+                );
+            }
             "floor" => return format!("{}.floor()", argv[0]),
             "ceil" => return format!("{}.ceil()", argv[0]),
             "round" | "lround" | "llround" => return format!("{}.round()", argv[0]),
             "fmod" => return format!("{} % {}", argv[0], argv.get(1).cloned().unwrap_or_default()),
-            "min" | "fmin" => return format!("{}.min({})", argv[0], argv.get(1).cloned().unwrap_or_default()),
-            "max" | "fmax" => return format!("{}.max({})", argv[0], argv.get(1).cloned().unwrap_or_default()),
+            "min" | "fmin" => {
+                return format!(
+                    "{}.min({})",
+                    argv[0],
+                    argv.get(1).cloned().unwrap_or_default()
+                );
+            }
+            "max" | "fmax" => {
+                return format!(
+                    "{}.max({})",
+                    argv[0],
+                    argv.get(1).cloned().unwrap_or_default()
+                );
+            }
             "gcd" | "lcm" => {
                 self.diag(DiagKind::Unsupported, node, format!("std::{name}"));
                 return format!("panic(\"cpp: std::{name}\")");
@@ -805,18 +916,19 @@ impl<'a> Lower<'a> {
             }
             "isupper" => return format!("({0} >= \"A\" && {0} <= \"Z\")", argv[0]),
             "islower" => return format!("({0} >= \"a\" && {0} <= \"z\")", argv[0]),
-            "isspace" => return format!("({0} == \" \" || {0} == \"\\t\" || {0} == \"\\n\")", argv[0]),
+            "isspace" => {
+                return format!(
+                    "({0} == \" \" || {0} == \"\\t\" || {0} == \"\\n\")",
+                    argv[0]
+                );
+            }
             "toupper" => return format!("{}.to_upper()", argv[0]),
             "tolower" => return format!("{}.to_lower()", argv[0]),
             "size" | "ssize" => return format!("{}.len()", argv[0]),
             "data" => return argv[0].clone(),
             "move" | "forward" | "as_const" => return argv[0].clone(),
             "swap" => {
-                self.diag(
-                    DiagKind::Note,
-                    node,
-                    "std::swap in expression position",
-                );
+                self.diag(DiagKind::Note, node, "std::swap in expression position");
                 return format!(
                     "{{ let __t = {0}; {0} = {1}; {1} = __t; () }}",
                     argv[0],
@@ -872,9 +984,7 @@ impl<'a> Lower<'a> {
                 if args.len() >= 3 {
                     let v = self.iter_arg(args[0]);
                     let x = self.expr(args[2]);
-                    return format!(
-                        "(for __e in {v} {{ if __e == {x} {{ collect 1; }} }}).len()"
-                    );
+                    return format!("(for __e in {v} {{ if __e == {x} {{ collect 1; }} }}).len()");
                 }
             }
             "find" => {
@@ -922,9 +1032,7 @@ impl<'a> Lower<'a> {
                 if args.len() >= 3 {
                     let v = self.iter_arg(args[0]);
                     let x = self.expr(args[2]);
-                    return format!(
-                        "{{ for __i in {v}.len() {{ {v}[__i] = {x} + __i; }}; () }}"
-                    );
+                    return format!("{{ for __i in {v}.len() {{ {v}[__i] = {x} + __i; }}; () }}");
                 }
             }
             "next_permutation" | "prev_permutation" | "nth_element" | "partial_sort"
@@ -948,18 +1056,18 @@ impl<'a> Lower<'a> {
         // is a member) -> `self.m(x)`
         if let Some(owner) = self.cur_struct.clone()
             && self.lookup(name).is_none()
-                && self
-                    .structs
-                    .get(&owner)
-                    .is_some_and(|i| i.methods.iter().any(|m| m == name))
-            {
-                let key = format!("{owner}::{name}");
-                let call = format!("{}.{}({})", self.self_name, sanitize(name), argv.join(", "));
-                if let Some(sig) = self.fns.get(&key).cloned() {
-                    return self.out_call_rewrite(call, &sig, args, node);
-                }
-                return call;
+            && self
+                .structs
+                .get(&owner)
+                .is_some_and(|i| i.methods.iter().any(|m| m == name))
+        {
+            let key = format!("{owner}::{name}");
+            let call = format!("{}.{}({})", self.self_name, sanitize(name), argv.join(", "));
+            if let Some(sig) = self.fns.get(&key).cloned() {
+                return self.out_call_rewrite(call, &sig, args, node);
             }
+            return call;
+        }
         // user function — check for out-param desugar
         if let Some(sig) = self.fns.get(name).cloned() {
             let call = format!("{}({})", sanitize(name), argv.join(", "));
@@ -970,23 +1078,24 @@ impl<'a> Lower<'a> {
         }
         // constructor call `Foo(args)` — struct name in call position
         if let Some(info) = self.structs.get(name)
-            && (!info.fields.is_empty() || info.has_ctor) {
-                if info.has_ctor {
-                    return format!("{name}::new({})", argv.join(", "));
-                }
-                // aggregate positional init
-                let fields = info
-                    .fields
-                    .iter()
-                    .enumerate()
-                    .map(|(i, (fname, _))| {
-                        let v = argv.get(i).cloned().unwrap_or_else(|| "0".into());
-                        format!("{fname} = {v}")
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                return format!("{name} {{ {fields} }}");
+            && (!info.fields.is_empty() || info.has_ctor)
+        {
+            if info.has_ctor {
+                return format!("{name}::new({})", argv.join(", "));
             }
+            // aggregate positional init
+            let fields = info
+                .fields
+                .iter()
+                .enumerate()
+                .map(|(i, (fname, _))| {
+                    let v = argv.get(i).cloned().unwrap_or_else(|| "0".into());
+                    format!("{fname} = {v}")
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            return format!("{name} {{ {fields} }}");
+        }
         format!("{name}({})", argv.join(", "))
     }
 
@@ -1039,7 +1148,10 @@ impl<'a> Lower<'a> {
             CTy::Arr(_, SeqKind::PQueue { min }) => match mname.as_str() {
                 "push" | "emplace" => {
                     let _ = min; // min/max order is not preserved — queue stays sorted
-                    return format!("{{ {recv}.push({}); {recv}.sort_by_int({recv}); () }}", arg0());
+                    return format!(
+                        "{{ {recv}.push({}); {recv}.sort_by_int({recv}); () }}",
+                        arg0()
+                    );
                 }
                 "top" => {
                     return if *min {
@@ -1077,7 +1189,10 @@ impl<'a> Lower<'a> {
                     );
                 }
                 "erase" => {
-                    let idx = args.first().map(|a| self.iter_index(*a)).unwrap_or_else(|| "0".into());
+                    let idx = args
+                        .first()
+                        .map(|a| self.iter_index(*a))
+                        .unwrap_or_else(|| "0".into());
                     return format!(
                         "{{ {recv} = for (j, y) in {recv}.enumerate() {{ if j != {idx} {{ collect y; }} }}; () }}"
                     );
@@ -1116,7 +1231,10 @@ impl<'a> Lower<'a> {
                 }
                 "substr" => {
                     let i = arg0();
-                    let len = argv.get(1).cloned().unwrap_or_else(|| format!("{recv}.len()"));
+                    let len = argv
+                        .get(1)
+                        .cloned()
+                        .unwrap_or_else(|| format!("{recv}.len()"));
                     return format!(
                         "(for __j in ({i}..({i} + {len})) collect {recv}[__j]).join(\"\")"
                     );
@@ -1125,22 +1243,24 @@ impl<'a> Lower<'a> {
                 "starts_with" => return format!("{recv}.starts_with({})", arg0()),
                 "ends_with" => return format!("{recv}.ends_with({})", arg0()),
                 "compare" => return format!("({recv} == {})", arg0()),
-                "count" => {
-                    return format!("({recv}.find_all({})! ?? []).len()", arg0())
-                }
+                "count" => return format!("({recv}.find_all({})! ?? []).len()", arg0()),
                 "find" => {
                     // C++ find returns a position (-1 = npos); split is literal
                     return format!(
                         "({{ let __p = {recv}.split({}); if __p.len() > 1 {{ __p[0].len() }} else {{ -1 }} }})",
                         arg0()
-                    )
+                    );
                 }
                 "rfind" | "find_first_of" | "find_last_of" => {
                     self.diag(DiagKind::Unsupported, node, format!("string::{mname}"));
                     return format!("panic(\"cpp: str::{mname}\")");
                 }
                 "insert" | "replace" | "erase" => {
-                    self.diag(DiagKind::Approximate, node, format!("str::{mname} approximated"));
+                    self.diag(
+                        DiagKind::Approximate,
+                        node,
+                        format!("str::{mname} approximated"),
+                    );
                     return recv;
                 }
                 _ => {}
@@ -1148,9 +1268,7 @@ impl<'a> Lower<'a> {
             CTy::Dict(v) => match mname.as_str() {
                 "at" => return format!("{recv}[{}]!", arg0()),
                 "contains" => return format!("({} in {recv})", arg0()),
-                "count" => {
-                    return format!("(if {} in {recv} {{ 1 }} else {{ 0 }})", arg0())
-                }
+                "count" => return format!("(if {} in {recv} {{ 1 }} else {{ 0 }})", arg0()),
                 "insert" | "emplace" | "insert_or_assign" => {
                     // m.insert({k, v}) / m[k] — `{k, v}` arrives as initializer_list
                     if let Some(a) = args.first() {
@@ -1196,12 +1314,14 @@ impl<'a> Lower<'a> {
             },
             CTy::Set(_) => match mname.as_str() {
                 "insert" | "emplace" => {
-                    return format!("{{ if !({} in {recv}) {{ {recv}.push({}); }}; () }}", arg0(), arg0());
+                    return format!(
+                        "{{ if !({} in {recv}) {{ {recv}.push({}); }}; () }}",
+                        arg0(),
+                        arg0()
+                    );
                 }
                 "contains" => return format!("({} in {recv})", arg0()),
-                "count" => {
-                    return format!("(if {} in {recv} {{ 1 }} else {{ 0 }})", arg0())
-                }
+                "count" => return format!("(if {} in {recv} {{ 1 }} else {{ 0 }})", arg0()),
                 "erase" => {
                     return format!(
                         "{{ {recv} = for __e in {recv} {{ if __e != {} {{ collect __e; }} }}; () }}",
@@ -1248,7 +1368,11 @@ impl<'a> Lower<'a> {
             "find" => format!("({} in {recv})", arg0()),
             "count" | "contains" => format!("({} in {recv})", arg0()),
             "insert" | "emplace_hint" => {
-                self.diag(DiagKind::Approximate, node, format!("`{mname}` on unknown receiver"));
+                self.diag(
+                    DiagKind::Approximate,
+                    node,
+                    format!("`{mname}` on unknown receiver"),
+                );
                 format!("{recv}.push({})", argv.last().cloned().unwrap_or_default())
             }
             _ => {
@@ -1262,17 +1386,22 @@ impl<'a> Lower<'a> {
 
     /// The shared out-param call rewrite: `f(a, b)` with out-params becomes a
     /// destructuring bind of the tuple return.
-    fn out_call_rewrite(&mut self, call: String, sig: &FnSig, args: &[Node<'a>], _node: Node<'a>) -> String {
+    fn out_call_rewrite(
+        &mut self,
+        call: String,
+        sig: &FnSig,
+        args: &[Node<'a>],
+        _node: Node<'a>,
+    ) -> String {
         let outs = sig.out_params();
         let mut lvals = Vec::new();
         for &i in &outs {
             let Some(a) = args.get(i) else { continue };
-            if !matches!(a.kind(), "identifier" | "subscript_expression" | "field_expression") {
-                self.diag(
-                    DiagKind::Unsupported,
-                    *a,
-                    "out-param arg is not an lvalue",
-                );
+            if !matches!(
+                a.kind(),
+                "identifier" | "subscript_expression" | "field_expression"
+            ) {
+                self.diag(DiagKind::Unsupported, *a, "out-param arg is not an lvalue");
                 continue;
             }
             lvals.push(self.lvalue(*a));
@@ -1313,9 +1442,10 @@ impl<'a> Lower<'a> {
             "call_expression" => {
                 if let Some(f) = self.f(node, "function")
                     && f.kind() == "field_expression"
-                        && let Some(a) = self.f(f, "argument") {
-                            return self.expr(a);
-                        }
+                    && let Some(a) = self.f(f, "argument")
+                {
+                    return self.expr(a);
+                }
                 self.expr(node)
             }
             "binary_expression" => {
@@ -1363,13 +1493,15 @@ impl<'a> Lower<'a> {
         let node = unwrap_parens(self, node);
         if node.kind() == "call_expression"
             && let Some(f) = self.f(node, "function")
-                && let Some(a) = self.f(f, "argument") {
-                    return self.expr_ty(a).elem();
-                }
+            && let Some(a) = self.f(f, "argument")
+        {
+            return self.expr_ty(a).elem();
+        }
         if node.kind() == "binary_expression"
-            && let Some(l) = self.f(node, "left") {
-                return self.iter_elem_ty(l);
-            }
+            && let Some(l) = self.f(node, "left")
+        {
+            return self.iter_elem_ty(l);
+        }
         self.expr_ty(node).elem()
     }
 
@@ -1388,8 +1520,7 @@ impl<'a> Lower<'a> {
 
     /// `cout << a << b << endl` — returns the value args (endl filtered) when
     /// the chain's head is an output stream.
-    pub(crate) fn ostream_chain(&mut self, node: Node<'a>) -> Option<Vec<Node<'a>>>
-    {
+    pub(crate) fn ostream_chain(&mut self, node: Node<'a>) -> Option<Vec<Node<'a>>> {
         let node = unwrap_parens(self, node);
         if node.kind() != "binary_expression" {
             return None;
@@ -1410,9 +1541,7 @@ impl<'a> Lower<'a> {
         let head = chain[0];
         let head_name = match head.kind() {
             "identifier" => self.node_text(head).to_string(),
-            "qualified_identifier" | "field_expression" => {
-                unqual(self.node_text(head)).to_string()
-            }
+            "qualified_identifier" | "field_expression" => unqual(self.node_text(head)).to_string(),
             _ => return None,
         };
         if !matches!(head_name.as_str(), "cout" | "cerr" | "clog" | "wcout") {
@@ -1500,7 +1629,10 @@ impl<'a> Lower<'a> {
                 .map(|c| self.expr_ty(c))
                 .unwrap_or(CTy::Unknown),
             "unary_expression" => {
-                let op = self.f(node, "operator").map(|o| self.node_text(o)).unwrap_or("");
+                let op = self
+                    .f(node, "operator")
+                    .map(|o| self.node_text(o))
+                    .unwrap_or("");
                 if op == "!" {
                     CTy::Bool
                 } else {
@@ -1510,9 +1642,7 @@ impl<'a> Lower<'a> {
                 }
             }
             "update_expression" | "assignment_expression" => {
-                let l = self
-                    .f(node, "left")
-                    .or_else(|| self.f(node, "argument"));
+                let l = self.f(node, "left").or_else(|| self.f(node, "argument"));
                 l.map(|a| self.expr_ty(a)).unwrap_or(CTy::Unknown)
             }
             "binary_expression" => {
@@ -1554,9 +1684,10 @@ impl<'a> Lower<'a> {
                     .unwrap_or_default();
                 if let CTy::Struct(name) = self.expr_ty(a)
                     && let Some(info) = self.structs.get(&name)
-                        && let Some((_, t)) = info.fields.iter().find(|(f, _)| *f == fname) {
-                            return t.clone();
-                        }
+                    && let Some((_, t)) = info.fields.iter().find(|(f, _)| *f == fname)
+                {
+                    return t.clone();
+                }
                 match fname.as_str() {
                     "first" => self.expr_ty(a).elem(),
                     "second" => {
@@ -1596,11 +1727,10 @@ impl<'a> Lower<'a> {
                     "len" | "size" | "length" | "count" | "find" => CTy::Int,
                     "empty" | "is_empty" | "contains" | "has_value" | "starts_with"
                     | "ends_with" => CTy::Bool,
-                    "pop" | "pop_back" | "front" | "back" | "top" | "at" | "value" => {
-                        self.f(f, "argument")
-                            .map(|a| self.expr_ty(a).elem())
-                            .unwrap_or(CTy::Unknown)
-                    }
+                    "pop" | "pop_back" | "front" | "back" | "top" | "at" | "value" => self
+                        .f(f, "argument")
+                        .map(|a| self.expr_ty(a).elem())
+                        .unwrap_or(CTy::Unknown),
                     "substr" | "c_str" | "data" | "to_str" => CTy::Str,
                     "to_int" => CTy::Int,
                     "to_float" => CTy::Float,

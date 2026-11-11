@@ -1,3 +1,4 @@
+use crate::FxHashMap;
 use crate::{
     Error, FnRun, LoopRun, Result, Solver, Unification, array,
     components::{
@@ -11,7 +12,6 @@ use crate::{
 };
 use parse::{components::Binding, *};
 use shared::{Located, Location};
-use crate::FxHashMap;
 
 /// Pick which native impl on `aid` named `name` dispatches for a receiver typed as `actual`.
 ///
@@ -194,10 +194,7 @@ pub(crate) fn op_dispatch(
     rhs: &Ty,
     location: Location,
 ) -> Result<Option<Ty>> {
-    for (recv_ty, name, arg, swap) in [
-        (lhs, names.0, right, false),
-        (rhs, names.1, left, true),
-    ] {
+    for (recv_ty, name, arg, swap) in [(lhs, names.0, right, false), (rhs, names.1, left, true)] {
         if is_primitive(recv_ty) {
             continue;
         }
@@ -326,9 +323,12 @@ fn pact_unary_dispatch(
     ty: &Ty,
     pids: &[shared::PactId],
 ) -> Option<Ty> {
-    let header = pids
-        .iter()
-        .find_map(|pid| solver.pacts[pid].functions.get(name).map(|(h, _)| h.clone()))?;
+    let header = pids.iter().find_map(|pid| {
+        solver.pacts[pid]
+            .functions
+            .get(name)
+            .map(|(h, _)| h.clone())
+    })?;
     if header.parameters.len() != usize::from(header.is_method) {
         return None;
     }
@@ -1515,7 +1515,14 @@ impl Solve for Equality {
             }
             if let Some(names) = cmp_method_names(self.op)
                 && let Some(ty) = op_dispatch(
-                    solver, id, names, &self.left, &self.right, &lhs_n, &rhs_n, location,
+                    solver,
+                    id,
+                    names,
+                    &self.left,
+                    &self.right,
+                    &lhs_n,
+                    &rhs_n,
+                    location,
                 )?
             {
                 return Ok(ty);
@@ -1571,6 +1578,36 @@ impl Solve for Equality {
                 // inference for unresolved operands keeps pinning rhs to lhs as before.
                 let l = lhs.clone().normalized(solver);
                 let r = rhs.clone().normalized(solver);
+                // `x == null` where x can never be null: the declaration is
+                // what's wrong, not the `null` -- label the operand and name
+                // the `?` it wants rather than a bare type mismatch.
+                let settled = |t: &Ty| {
+                    !matches!(
+                        t,
+                        Ty::Option(_) | Ty::Null | Ty::Any | Ty::Never | Ty::Vid(_)
+                    )
+                };
+                let never_null = if matches!(r, Ty::Null) && settled(&l) {
+                    Some((self.left.location(), l.to_string()))
+                } else if matches!(l, Ty::Null) && settled(&r) {
+                    Some((self.right.location(), r.to_string()))
+                } else {
+                    None
+                };
+                if let Some((at, ty)) = never_null {
+                    let (op, answer) = match self.op {
+                        EqualityOp::Equal => ("==", "false"),
+                        _ => ("!=", "true"),
+                    };
+                    return Err(NeverNull {
+                        src: solver.src(location),
+                        at: at.into(),
+                        ty,
+                        op,
+                        answer,
+                    }
+                    .into());
+                }
                 if matches!(r, Ty::Option(_)) && !matches!(l, Ty::Option(_) | Ty::Vid(_)) {
                     self.left.fulfill_ty(self.right.query(solver)?, solver)
                 } else {
@@ -2954,7 +2991,10 @@ fn check_member_defaultable(
             if visiting.contains(&inner) {
                 Err(fail(
                     solver,
-                    format!("`{member}` recurses through `{}` -- no default", solver.adts[inner].name),
+                    format!(
+                        "`{member}` recurses through `{}` -- no default",
+                        solver.adts[inner].name
+                    ),
                 ))?
             }
             visiting.push(inner);

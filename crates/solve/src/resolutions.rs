@@ -3,8 +3,8 @@
 use crate::FxHashMap;
 use std::sync::Arc;
 
-use api::NativeId;
 use crate::FxIndexMap;
+use api::NativeId;
 use miette::NamedSource;
 use parse::{Literal, NodeId};
 use shared::{FileId, IdVec, Location, PactId, ParamId, TyNames};

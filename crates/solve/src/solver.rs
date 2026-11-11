@@ -3,15 +3,15 @@ use crate::{
     components::*,
     errors::{
         AssignToConst, AssignToLoopVar, AssignToStringIndex, BareNullBinding, BoundNotSatisfied,
-        CheckIsNotCallable,
-        ExtraTupleMembers, FieldNotFound, InvalidAssignTarget, InvalidPattern, InvalidUseTarget,
-        IteratingHere, MissingTupleMembers, MultipleConstDeclarations, MutateWhileIterating,
-        NonConstantValue, NotAPact, NotFound, SelfOutOfContext,
+        CheckIsNotCallable, ExtraTupleMembers, FieldNotFound, InvalidAssignTarget, InvalidPattern,
+        InvalidUseTarget, IteratingHere, MissingTupleMembers, MultipleConstDeclarations,
+        MutateWhileIterating, NonConstantValue, NotAPact, NotFound, SelfOutOfContext,
     },
     traits::*,
 };
-use api::{ApiAdt, ApiAdtKind, ApiEntry, ApiVariantFields, Library, NativeId};
+use crate::{FxHashMap, FxHashSet};
 use crate::{FxIndexMap, FxIndexSet};
+use api::{ApiAdt, ApiAdtKind, ApiEntry, ApiVariantFields, Library, NativeId};
 use miette::NamedSource;
 use parse::{
     ExprKind,
@@ -19,7 +19,6 @@ use parse::{
     *,
 };
 use shared::{FileId, IdVec, Literal as RawLiteral, Located, Location, PactId, ParamId};
-use crate::{FxHashMap, FxHashSet};
 use std::{collections::BTreeSet, rc::Rc, sync::Arc};
 
 /// A table the prepared state (`load::Prepared`) shares with every solve
@@ -345,7 +344,9 @@ impl Solver {
                 Ty::Adt(a, _) | Ty::Identity(a, _) => Some(*a),
                 other => self.builtin_adt(other),
             };
-            let axis = opp.zip(aid).is_some_and(|(p, a)| self.pact_impls.contains(&(p, a)));
+            let axis = opp
+                .zip(aid)
+                .is_some_and(|(p, a)| self.pact_impls.contains(&(p, a)));
             if !axis {
                 let name = match &field.name {
                     parse::FieldKey::Ident(i) => i.lexeme.clone(),
@@ -366,10 +367,15 @@ impl Solver {
     /// The primitive whose library adt `aid` is (`bool` for the `bool`
     /// namespace) -- the reverse of [`Self::builtin_adt`] for the scalars.
     pub(crate) fn primitive_of(&self, aid: AdtId) -> Option<Ty> {
-        [("int", Ty::Int), ("float", Ty::Float), ("str", Ty::Str), ("bool", Ty::Bool)]
-            .into_iter()
-            .find(|(name, _)| self.library.get(*name) == Some(&aid))
-            .map(|(_, ty)| ty)
+        [
+            ("int", Ty::Int),
+            ("float", Ty::Float),
+            ("str", Ty::Str),
+            ("bool", Ty::Bool),
+        ]
+        .into_iter()
+        .find(|(name, _)| self.library.get(*name) == Some(&aid))
+        .map(|(_, ty)| ty)
     }
 
     pub(crate) fn builtin_adt(&self, ty: &Ty) -> Option<AdtId> {
@@ -1764,6 +1770,16 @@ impl Solver {
         vid
     }
 
+    /// The type solving recorded for `node_id`, normalized — `None` when the
+    /// node never got one (unreached, or an error stopped the solve first).
+    /// Read-only counterpart of `Resolutions::node_tys` for callers that
+    /// already hold the `Solver`.
+    pub fn node_ty(&self, node_id: NodeId) -> Option<Ty> {
+        self.node_to_vid
+            .get(&node_id)
+            .map(|vid| Ty::Vid(*vid).normalized(self))
+    }
+
     /// This exists as a shim to provide information to the IR that it would otherwise be able to
     /// find. Take the given example:
     ///
@@ -1871,10 +1887,7 @@ impl Solver {
     /// The `ParamId` of each declared param, with its bounds registered in `param_bounds`.
     /// Hoisting and body-solving both pass through here for one decl; the ids agree (see
     /// `param_id_of`) and a bound registers once.
-    pub(crate) fn declare_type_params(
-        &mut self,
-        params: &[TypeParam],
-    ) -> Vec<(String, ParamId)> {
+    pub(crate) fn declare_type_params(&mut self, params: &[TypeParam]) -> Vec<(String, ParamId)> {
         params
             .iter()
             .map(|p| {
@@ -1970,15 +1983,10 @@ impl Solver {
             let ty = ty.normalized(self);
             let ok = match &ty {
                 Ty::Vid(_) | Ty::Never => true,
-                Ty::Adt(aid, _) | Ty::Identity(aid, _) => {
-                    self.pact_impls.contains(&(pact, *aid))
-                }
+                Ty::Adt(aid, _) | Ty::Identity(aid, _) => self.pact_impls.contains(&(pact, *aid)),
                 Ty::Pacts(pids) => pids.contains(&pact),
                 Ty::Skolem(p) => *p == pact,
-                Ty::Param(p) => self
-                    .param_bounds
-                    .get(p)
-                    .is_some_and(|b| b.contains(&pact)),
+                Ty::Param(p) => self.param_bounds.get(p).is_some_and(|b| b.contains(&pact)),
                 other => self
                     .builtin_adt(other)
                     .is_some_and(|aid| self.pact_impls.contains(&(pact, aid))),
@@ -1999,7 +2007,8 @@ impl Solver {
     /// Re-enter the parameter scope of an already-declared adt -- `impl List` sees `List<T>`'s
     /// `T` with the same `ParamId` the enum's stored member types use.
     pub(crate) fn push_adt_params(&mut self, adt: AdtId) {
-        let scope: FxHashMap<String, ParamId> = self.adts[adt].type_params.iter().cloned().collect();
+        let scope: FxHashMap<String, ParamId> =
+            self.adts[adt].type_params.iter().cloned().collect();
         self.type_params.push(scope);
     }
 
@@ -2020,11 +2029,7 @@ impl Solver {
     /// `Ty::Adt(aid, args)` with a fresh vid for every declared param -- what a ctor use
     /// (`L::C`, `Pair { .. }`) starts from before unification pins the args down.
     pub(crate) fn instantiated_adt(&mut self, aid: AdtId) -> Ty {
-        let params: Vec<ParamId> = self.adts[aid]
-            .type_params
-            .iter()
-            .map(|(_, p)| *p)
-            .collect();
+        let params: Vec<ParamId> = self.adts[aid].type_params.iter().map(|(_, p)| *p).collect();
         let args = params
             .into_iter()
             .map(|pid| {
@@ -2449,13 +2454,11 @@ impl Solver {
                     Some(d) => d,
                     // `m = 5`: the name resolves -- as a constant, and constants
                     // can't be assigned
-                    None if shared::units::parse(&root.lexeme).is_some() => {
-                        Err(AssignToConst {
-                            src: self.src(root.location),
-                            at: root.location.into(),
-                            name: root.lexeme.clone(),
-                        })?
-                    }
+                    None if shared::units::parse(&root.lexeme).is_some() => Err(AssignToConst {
+                        src: self.src(root.location),
+                        at: root.location.into(),
+                        name: root.lexeme.clone(),
+                    })?,
                     None => Err(NotFound {
                         src: self.src(root.location),
                         at: root.location.into(),
@@ -2563,12 +2566,8 @@ impl Solver {
                             // elements, so a list rhs falls through here to
                             // `union`/`minus`, the same call `xs + ys` makes.
                             let op = match *op {
-                                parse::AssignmentOp::PlusEqual => {
-                                    Some(parse::EvaluationOp::Plus)
-                                }
-                                parse::AssignmentOp::MinusEqual => {
-                                    Some(parse::EvaluationOp::Minus)
-                                }
+                                parse::AssignmentOp::PlusEqual => Some(parse::EvaluationOp::Plus),
+                                parse::AssignmentOp::MinusEqual => Some(parse::EvaluationOp::Minus),
                                 _ => None,
                             };
                             let seq = match op {
@@ -2856,14 +2855,15 @@ impl Solver {
                     // `deg / s` composes through ordinary quantity arithmetic. Everything
                     // declared -- bindings, natives, pacts -- wins before this fires.
                     // r[impl mimas.unit.constant]
-                    } else if let Some((dim, scale)) = shared::units::parse(&ident.lexeme)
-                    {
+                    } else if let Some((dim, scale)) = shared::units::parse(&ident.lexeme) {
                         self.unit_const(ident, dim, scale)
                     } else {
                         // a tagged literal whose tag no native backs: say so in the
                         // literal's own spelling, not the lowered `__lit_` name
                         let name = match ident.lexeme.strip_prefix("__lit_") {
-                            Some(tag) => format!("{tag}\"…\" (no `{tag}` literal tag is registered)"),
+                            Some(tag) => {
+                                format!("{tag}\"…\" (no `{tag}` literal tag is registered)")
+                            }
                             None => ident.lexeme.clone(),
                         };
                         // `check(x)` touching the word parsed as a call --
@@ -2936,11 +2936,13 @@ impl Solver {
     /// `E::V` naming a field-less enum variant (`opp Team { Blue, Red }`'s
     /// `Team::Blue`): a value with nothing to compute, so a `const` may be one.
     pub(crate) fn is_unit_variant(&self, expr: &Expr) -> bool {
-        matches!(expr.kind(), ExprKind::Access(parse::Access::DoubleColon { .. }))
-            && self.node_decs.get(&expr.id()).is_some_and(|&dec| {
-                matches!(self.decs[dec].kind, DecKind::Variant { layout, .. }
+        matches!(
+            expr.kind(),
+            ExprKind::Access(parse::Access::DoubleColon { .. })
+        ) && self.node_decs.get(&expr.id()).is_some_and(|&dec| {
+            matches!(self.decs[dec].kind, DecKind::Variant { layout, .. }
                     if self.adts[layout].as_singular().is_some_and(|v| v.is_empty()))
-            })
+        })
     }
 
     pub(crate) fn is_const_expr(&self, expr: &Expr) -> bool {

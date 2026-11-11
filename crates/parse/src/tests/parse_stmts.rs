@@ -98,7 +98,7 @@ stmt_test!(
         Literal::Struct(StructLiteral {
             name: ident_expr!("Foo"),
             fields: vec![],
-        base: None,
+            base: None,
         })
         .into_expr(),
         Some(Annotation::Ty(ident!("Foo"))),

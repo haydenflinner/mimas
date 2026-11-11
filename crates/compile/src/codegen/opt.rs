@@ -11,8 +11,8 @@
 use std::collections::{HashMap, HashSet};
 
 use api::NativeId;
-use shared::Location;
 use parse::AccessKind;
+use shared::Location;
 use solve::Resolutions;
 use solve::components::{AdtId, DecId, Ty};
 
@@ -39,7 +39,12 @@ pub(crate) fn enabled() -> bool {
 /// (`mutates_recv`): an adt that reaches one is not a value type.
 /// `shadows` keeps the debugger's copies of dissolved struct locals (see
 /// the shadows section below) -- a cost only a VM a debugger reads pays.
-pub(crate) fn optimize(ir: &mut Ir, frame_natives: &HashSet<NativeId>, mutating_natives: &HashSet<NativeId>, shadows: bool) -> HashSet<AdtId> {
+pub(crate) fn optimize(
+    ir: &mut Ir,
+    frame_natives: &HashSet<NativeId>,
+    mutating_natives: &HashSet<NativeId>,
+    shadows: bool,
+) -> HashSet<AdtId> {
     self_tail_calls(ir);
     inline_small_calls(ir, frame_natives);
     let values = value_adts(ir, mutating_natives);
@@ -115,14 +120,18 @@ fn shadow_split_leaf(body: &mut Body, s: Local, adt: AdtId, n: usize) -> Option<
     Some(leaves)
 }
 
-
 // ------------------------------------------------------------ inlining
 
 /// Can `bid` be copied into its callers: a small, capture-free body that
 /// never reaches itself through direct calls, never `raise`s (`Op::Raise`
 /// returns from the *frame*, which a copy no longer has), and calls no
 /// native that reads the frame stack.
-fn inlinable(ir: &Ir, bid: BodyId, calls: &HashMap<BodyId, Vec<BodyId>>, frame_natives: &HashSet<NativeId>) -> bool {
+fn inlinable(
+    ir: &Ir,
+    bid: BodyId,
+    calls: &HashMap<BodyId, Vec<BodyId>>,
+    frame_natives: &HashSet<NativeId>,
+) -> bool {
     if bid == BodyId::ZERO {
         return false;
     }
@@ -202,7 +211,11 @@ fn inline_small_calls(ir: &mut Ir, frame_natives: &HashSet<NativeId>) {
             continue;
         }
         loop {
-            let size: usize = ir.bodies[caller].blocks.values().map(|b| b.stream.len()).sum();
+            let size: usize = ir.bodies[caller]
+                .blocks
+                .values()
+                .map(|b| b.stream.len())
+                .sum();
             if size > MAX_CALLER_INSTS {
                 break;
             }
@@ -239,7 +252,11 @@ fn postorder(calls: &HashMap<BodyId, Vec<BodyId>>, n: usize) -> Vec<BodyId> {
 }
 
 /// The first direct call in `body` to a small callee other than itself.
-fn find_call(body: &Body, small: &HashSet<BodyId>, me: BodyId) -> Option<(BlockId, InstId, BodyId)> {
+fn find_call(
+    body: &Body,
+    small: &HashSet<BodyId>,
+    me: BodyId,
+) -> Option<(BlockId, InstId, BodyId)> {
     for (bid, block) in body.blocks.iter() {
         for &iid in &block.stream {
             if let Inst::CallDirect { body: callee, .. } = &body.instructions[iid]
@@ -294,9 +311,17 @@ fn inline_at(body: &mut Body, block: BlockId, iid: InstId, callee: BodyId, snap:
     };
     let call_loc = body.locs[iid].clone();
     // fresh ids for everything the callee owns
-    let local_map: Vec<Local> = snap.locals.iter().map(|&dec| body.locals.push(dec)).collect();
+    let local_map: Vec<Local> = snap
+        .locals
+        .iter()
+        .map(|&dec| body.locals.push(dec))
+        .collect();
     let ret = body.locals.push(DecId::DANGLING);
-    let block_map: Vec<BlockId> = snap.blocks.iter().map(|_| body.blocks.push(Block::new())).collect();
+    let block_map: Vec<BlockId> = snap
+        .blocks
+        .iter()
+        .map(|_| body.blocks.push(Block::new()))
+        .collect();
     let cont = body.blocks.push(Block::new());
     let inst_map: Vec<InstId> = snap
         .insts
@@ -320,7 +345,11 @@ fn inline_at(body: &mut Body, block: BlockId, iid: InstId, callee: BodyId, snap:
         for &old in stream {
             out.push(inst_map[old.index()]);
             if matches!(snap.insts[old.index()], Inst::Return(_)) {
-                let j = push_inst(body, Inst::Jump { target: cont }, snap.locs[old.index()].clone());
+                let j = push_inst(
+                    body,
+                    Inst::Jump { target: cont },
+                    snap.locs[old.index()].clone(),
+                );
                 out.push(j);
             }
         }
@@ -328,17 +357,30 @@ fn inline_at(body: &mut Body, block: BlockId, iid: InstId, callee: BodyId, snap:
     }
     // split the call's block: params bound, jump in; the rest moves to `cont`
     let stream = std::mem::take(&mut body.blocks[block].stream);
-    let at = stream.iter().position(|&x| x == iid).expect("call in its block");
+    let at = stream
+        .iter()
+        .position(|&x| x == iid)
+        .expect("call in its block");
     let (pre, post) = stream.split_at(at);
     let mut head = pre.to_vec();
     // the call's footprint for the trace's call graph
     let te = push_inst(body, Inst::TraceEdge { callee }, call_loc);
     head.push(te);
     for (p, arg) in snap.params.iter().zip(&args) {
-        let s = push_inst(body, Inst::SetLocal(local_map[p.index()], *arg), call_loc.clone());
+        let s = push_inst(
+            body,
+            Inst::SetLocal(local_map[p.index()], *arg),
+            call_loc.clone(),
+        );
         head.push(s);
     }
-    let j = push_inst(body, Inst::Jump { target: block_map[0] }, call_loc.clone());
+    let j = push_inst(
+        body,
+        Inst::Jump {
+            target: block_map[0],
+        },
+        call_loc.clone(),
+    );
     head.push(j);
     body.blocks[block].stream = head;
     body.instructions[iid] = Inst::GetLocal(ret);
@@ -365,30 +407,85 @@ fn remap(inst: &Inst, im: &[InstId], lm: &[Local], bm: &[BlockId]) -> Inst {
     match inst {
         Inst::Constant(c) => Inst::Constant(c.clone()),
         Inst::SetLocal(x, v) => Inst::SetLocal(l(x), i(v)),
-        Inst::Shadow { local, value } => Inst::Shadow { local: l(local), value: i(value) },
+        Inst::Shadow { local, value } => Inst::Shadow {
+            local: l(local),
+            value: i(value),
+        },
         Inst::GetLocal(x) => Inst::GetLocal(l(x)),
         Inst::SetEntry(x, v) => Inst::SetEntry(*x, i(v)),
         Inst::GetEntry(x) => Inst::GetEntry(*x),
-        Inst::BinOp { left, op, right, kind } => Inst::BinOp { left: i(left), op: *op, right: i(right), kind: *kind },
-        Inst::UnaryOp { op, right } => Inst::UnaryOp { op: *op, right: i(right) },
-        Inst::JumpIfFalse { condition, target } => Inst::JumpIfFalse { condition: i(condition), target: b(target) },
+        Inst::BinOp {
+            left,
+            op,
+            right,
+            kind,
+        } => Inst::BinOp {
+            left: i(left),
+            op: *op,
+            right: i(right),
+            kind: *kind,
+        },
+        Inst::UnaryOp { op, right } => Inst::UnaryOp {
+            op: *op,
+            right: i(right),
+        },
+        Inst::JumpIfFalse { condition, target } => Inst::JumpIfFalse {
+            condition: i(condition),
+            target: b(target),
+        },
         Inst::Jump { target } => Inst::Jump { target: b(target) },
-        Inst::Switch { scrut, base, table, default } => Inst::Switch {
+        Inst::Switch {
+            scrut,
+            base,
+            table,
+            default,
+        } => Inst::Switch {
             scrut: i(scrut),
             base: *base,
             table: table.iter().map(b).collect(),
             default: b(default),
         },
         Inst::Phi(branches) => Inst::Phi(branches.iter().map(|(bb, v)| (b(bb), i(v))).collect()),
-        Inst::ForNext { idx, bound, target } => Inst::ForNext { idx: i(idx), bound: i(bound), target: b(target) },
+        Inst::ForNext { idx, bound, target } => Inst::ForNext {
+            idx: i(idx),
+            bound: i(bound),
+            target: b(target),
+        },
         Inst::NewArray => Inst::NewArray,
         Inst::NewDict => Inst::NewDict,
-        Inst::SetIndex { set, index, value } => Inst::SetIndex { set: i(set), index: i(index), value: i(value) },
-        Inst::GetIndex { set, index, kind } => Inst::GetIndex { set: i(set), index: i(index), kind: *kind },
-        Inst::GetField { src, slot, kind } => Inst::GetField { src: i(src), slot: *slot, kind: *kind },
-        Inst::SetField { receiver, slot, value } => Inst::SetField { receiver: i(receiver), slot: *slot, value: i(value) },
-        Inst::Push { array, value } => Inst::Push { array: i(array), value: i(value) },
-        Inst::Insert { dict, key, value } => Inst::Insert { dict: i(dict), key: *key, value: i(value) },
+        Inst::SetIndex { set, index, value } => Inst::SetIndex {
+            set: i(set),
+            index: i(index),
+            value: i(value),
+        },
+        Inst::GetIndex { set, index, kind } => Inst::GetIndex {
+            set: i(set),
+            index: i(index),
+            kind: *kind,
+        },
+        Inst::GetField { src, slot, kind } => Inst::GetField {
+            src: i(src),
+            slot: *slot,
+            kind: *kind,
+        },
+        Inst::SetField {
+            receiver,
+            slot,
+            value,
+        } => Inst::SetField {
+            receiver: i(receiver),
+            slot: *slot,
+            value: i(value),
+        },
+        Inst::Push { array, value } => Inst::Push {
+            array: i(array),
+            value: i(value),
+        },
+        Inst::Insert { dict, key, value } => Inst::Insert {
+            dict: i(dict),
+            key: *key,
+            value: i(value),
+        },
         Inst::Len(v) => Inst::Len(i(v)),
         Inst::ToFloat(v) => Inst::ToFloat(i(v)),
         Inst::Sqrt(v) => Inst::Sqrt(i(v)),
@@ -405,13 +502,31 @@ fn remap(inst: &Inst, im: &[InstId], lm: &[Local], bm: &[BlockId]) -> Inst {
                 .collect(),
         ),
         Inst::RefBody(x) => Inst::RefBody(*x),
-        Inst::MakeClosure { body, captures } => Inst::MakeClosure { body: *body, captures: captures.iter().map(i).collect() },
-        Inst::Call { callee, args } => Inst::Call { callee: i(callee), args: args.iter().map(i).collect() },
-        Inst::CallDirect { body, args } => Inst::CallDirect { body: *body, args: args.iter().map(i).collect() },
-        Inst::CallNative { id, args } => Inst::CallNative { id: *id, args: args.iter().map(i).collect() },
+        Inst::MakeClosure { body, captures } => Inst::MakeClosure {
+            body: *body,
+            captures: captures.iter().map(i).collect(),
+        },
+        Inst::Call { callee, args } => Inst::Call {
+            callee: i(callee),
+            args: args.iter().map(i).collect(),
+        },
+        Inst::CallDirect { body, args } => Inst::CallDirect {
+            body: *body,
+            args: args.iter().map(i).collect(),
+        },
+        Inst::CallNative { id, args } => Inst::CallNative {
+            id: *id,
+            args: args.iter().map(i).collect(),
+        },
         Inst::Return(v) => Inst::Return(i(v)),
-        Inst::NewInstance { adt, fields } => Inst::NewInstance { adt: *adt, fields: fields.iter().map(i).collect() },
-        Inst::IsInstance { src, adt } => Inst::IsInstance { src: i(src), adt: *adt },
+        Inst::NewInstance { adt, fields } => Inst::NewInstance {
+            adt: *adt,
+            fields: fields.iter().map(i).collect(),
+        },
+        Inst::IsInstance { src, adt } => Inst::IsInstance {
+            src: i(src),
+            adt: *adt,
+        },
         Inst::Panic => Inst::Panic,
         Inst::Raise(v) => Inst::Raise(i(v)),
         Inst::IsRaised(v) => Inst::IsRaised(i(v)),
@@ -443,7 +558,9 @@ fn successors(body: &Body) -> Vec<Vec<BlockId>> {
             let mut out = Vec::new();
             for &iid in &b.stream {
                 match &body.instructions[iid] {
-                    Inst::Jump { target } | Inst::JumpIfFalse { target, .. } | Inst::ForNext { target, .. } => out.push(*target),
+                    Inst::Jump { target }
+                    | Inst::JumpIfFalse { target, .. }
+                    | Inst::ForNext { target, .. } => out.push(*target),
                     Inst::Switch { table, default, .. } => {
                         out.extend(table.iter().copied());
                         out.push(*default);
@@ -456,61 +573,135 @@ fn successors(body: &Body) -> Vec<Vec<BlockId>> {
         .collect()
 }
 
-/// Immediate-dominator-free dominance: `dom[b]` is the set of blocks on every
-/// path from the entry to `b` (itself included). Unreachable blocks get an
-/// empty set, so nothing in them counts as dominated. Bodies are small; the
-/// plain iterative solve is fine.
-fn dominators(body: &Body) -> Vec<HashSet<BlockId>> {
+/// `dom[b]` as a bitset row: the blocks on every path from the entry to `b`
+/// (itself included). Unreachable blocks keep a zero row, so nothing in them
+/// counts as dominated.
+struct Dom {
+    rows: Vec<u64>,
+    words: usize,
+}
+
+impl Dom {
+    fn row(&self, b: usize) -> &[u64] {
+        &self.rows[b * self.words..(b + 1) * self.words]
+    }
+    fn row_mut(&mut self, b: usize) -> &mut [u64] {
+        &mut self.rows[b * self.words..(b + 1) * self.words]
+    }
+    /// Does `d` dominate `b`?
+    fn contains(&self, b: BlockId, d: BlockId) -> bool {
+        self.row(b.index())[d.index() / 64] & (1 << (d.index() % 64)) != 0
+    }
+    fn reachable(&self, b: usize) -> bool {
+        self.row(b).iter().any(|&w| w != 0)
+    }
+    fn len(&self, b: usize) -> usize {
+        self.row(b).iter().map(|w| w.count_ones() as usize).sum()
+    }
+    /// The strict dominators of `b`.
+    fn strict(&self, b: BlockId) -> impl Iterator<Item = BlockId> + '_ {
+        self.row(b.index())
+            .iter()
+            .enumerate()
+            .flat_map(move |(wi, &w)| {
+                (0..64).filter_map(move |bit| {
+                    if w & (1 << bit) != 0 {
+                        let d = BlockId::from((wi * 64 + bit) as u32);
+                        (d != b).then_some(d)
+                    } else {
+                        None
+                    }
+                })
+            })
+    }
+}
+
+/// Dominance as the greatest fixpoint of `dom[b] = {b} ∪ ⋂ dom[p]` over
+/// reachable preds — same meet as the old `HashSet` solve, but rows are
+/// word-parallel bitsets and the sweep runs in reverse postorder, which is
+/// near-topological for a forward flow: it converges in passes on the order
+/// of the deepest loop nest, where an arbitrary order could take one pass
+/// per block, and each meet is a run of word ANDs instead of hashed clones.
+/// On a spliced game's few-thousand-block body the difference is the one
+/// between milliseconds and minutes.
+fn dominators(body: &Body) -> Dom {
     let n = body.blocks.len();
     let succ = successors(body);
-    let mut preds: Vec<Vec<BlockId>> = vec![Vec::new(); n];
-    for (i, ss) in succ.iter().enumerate() {
-        for &t in ss {
-            preds[t.index()].push(BlockId::from(i as u32));
-        }
-    }
-    let all: HashSet<BlockId> = (0..n).map(|i| BlockId::from(i as u32)).collect();
-    let mut reach = HashSet::new();
-    let mut work = vec![BlockId::ZERO];
-    while let Some(b) = work.pop() {
-        if reach.insert(b) {
-            work.extend(succ[b.index()].iter().copied());
-        }
-    }
-    let mut dom: Vec<HashSet<BlockId>> = (0..n)
-        .map(|i| {
-            let b = BlockId::from(i as u32);
-            if b == BlockId::ZERO {
-                HashSet::from([b])
-            } else if reach.contains(&b) {
-                all.clone()
+    let preds = predecessors(&succ);
+    let words = n.div_ceil(64);
+
+    // Postorder DFS over the reachable region; `order` is the reverse —
+    // the reverse postorder sweep order — and `rank` its inverse.
+    let mut rank = vec![u32::MAX; n];
+    let mut order: Vec<u32> = Vec::new();
+    {
+        let mut seen = vec![false; n];
+        let mut post: Vec<u32> = Vec::with_capacity(n);
+        let mut stack: Vec<(u32, usize)> = vec![(0, 0)];
+        seen[0] = true;
+        while let Some(top) = stack.last_mut() {
+            let (b, ci) = (top.0, top.1);
+            if ci < succ[b as usize].len() {
+                let t = succ[b as usize][ci].index() as u32;
+                top.1 += 1;
+                if !seen[t as usize] {
+                    seen[t as usize] = true;
+                    stack.push((t, 0));
+                }
             } else {
-                HashSet::new()
+                post.push(b);
+                stack.pop();
             }
-        })
-        .collect();
+        }
+        for b in post.into_iter().rev() {
+            rank[b as usize] = order.len() as u32;
+            order.push(b);
+        }
+    }
+
+    let mut dom = Dom {
+        rows: vec![0; n * words],
+        words,
+    };
+    // Descending solve: reachable non-entry rows start at the whole
+    // reachable universe; entry's row is itself.
+    let mut all = vec![0u64; words];
+    for &b in &order {
+        all[b as usize / 64] |= 1 << (b as usize % 64);
+    }
+    for &b in &order[1..] {
+        dom.row_mut(b as usize).copy_from_slice(&all);
+    }
+    dom.rows[0] |= 1;
+
+    let mut next = vec![0u64; words];
     let mut changed = true;
     while changed {
         changed = false;
-        for i in 1..n {
-            let b = BlockId::from(i as u32);
-            if !reach.contains(&b) {
-                continue;
-            }
-            let mut next: Option<HashSet<BlockId>> = None;
-            for &p in &preds[i] {
-                if !reach.contains(&p) {
+        for &b in &order[1..] {
+            let bi = b as usize;
+            let mut seeded = false;
+            for &p in &preds[bi] {
+                let pi = p.index();
+                if rank[pi] == u32::MAX {
                     continue;
                 }
-                next = Some(match next {
-                    None => dom[p.index()].clone(),
-                    Some(acc) => acc.intersection(&dom[p.index()]).copied().collect(),
-                });
+                let row = dom.row(pi);
+                if seeded {
+                    for (nw, &pw) in next.iter_mut().zip(row) {
+                        *nw &= pw;
+                    }
+                } else {
+                    next.copy_from_slice(row);
+                    seeded = true;
+                }
             }
-            let mut next = next.unwrap_or_default();
-            next.insert(b);
-            if next != dom[i] {
-                dom[i] = next;
+            if !seeded {
+                continue;
+            }
+            next[bi / 64] |= 1 << (bi % 64);
+            if next != dom.row(bi) {
+                dom.row_mut(bi).copy_from_slice(&next);
                 changed = true;
             }
         }
@@ -546,7 +737,9 @@ fn scalar_replace(body: &mut Body) -> bool {
     let dom = dominators(body);
     let dominated = |w: InstId, r: InstId| -> bool {
         match (pos.get(&w), pos.get(&r)) {
-            (Some(&(bw, pw)), Some(&(br, pr))) => (bw == br && pw < pr) || (bw != br && dom[br.index()].contains(&bw)),
+            (Some(&(bw, pw)), Some(&(br, pr))) => {
+                (bw == br && pw < pr) || (bw != br && dom.contains(br, bw))
+            }
             _ => false,
         }
     };
@@ -573,7 +766,10 @@ fn scalar_replace(body: &mut Body) -> bool {
             continue;
         }
         let w = ws[0];
-        if reads.get(&l).map_or(true, |rs| rs.iter().all(|&r| dominated(w, r))) {
+        if reads
+            .get(&l)
+            .map_or(true, |rs| rs.iter().all(|&r| dominated(w, r)))
+        {
             single.insert(l, w);
         }
     }
@@ -582,7 +778,9 @@ fn scalar_replace(body: &mut Body) -> bool {
     let mut root_of: HashMap<Local, Local> = HashMap::new(); // member -> root
     let mut root_adt: HashMap<Local, (usize, InstId)> = HashMap::new(); // root -> (nfields, the make_instance)
     for (&l, &w) in &single {
-        let Inst::SetLocal(_, v) = body.instructions[w] else { unreachable!() };
+        let Inst::SetLocal(_, v) = body.instructions[w] else {
+            unreachable!()
+        };
         if let Inst::NewInstance { fields, .. } = &body.instructions[v]
             && single_use(v)
         {
@@ -598,7 +796,9 @@ fn scalar_replace(body: &mut Body) -> bool {
             if root_of.contains_key(&l) {
                 continue;
             }
-            let Inst::SetLocal(_, v) = body.instructions[w] else { unreachable!() };
+            let Inst::SetLocal(_, v) = body.instructions[w] else {
+                unreachable!()
+            };
             if let Inst::GetLocal(src) = body.instructions[v]
                 && single_use(v)
                 && let Some(&r) = root_of.get(&src)
@@ -620,8 +820,13 @@ fn scalar_replace(body: &mut Body) -> bool {
             for &g in reads.get(&m).map(|v| v.as_slice()).unwrap_or(&[]) {
                 for &u in users.get(&g).map(|v| v.as_slice()).unwrap_or(&[]) {
                     match &body.instructions[u] {
-                        Inst::GetField { src, slot, .. } if *src == g && (*slot as usize) < nfields => {}
-                        Inst::SetField { receiver, slot, value } if *receiver == g && *value != g && (*slot as usize) < nfields => {}
+                        Inst::GetField { src, slot, .. }
+                            if *src == g && (*slot as usize) < nfields => {}
+                        Inst::SetField {
+                            receiver,
+                            slot,
+                            value,
+                        } if *receiver == g && *value != g && (*slot as usize) < nfields => {}
                         Inst::SetLocal(dst, v) if *v == g && root_of.get(dst) == Some(&r) => {}
                         _ => continue 'root,
                     }
@@ -637,8 +842,12 @@ fn scalar_replace(body: &mut Body) -> bool {
     for r in ok_roots {
         let (nfields, ni) = root_adt[&r];
         let ms = &members[&r];
-        let fields: Vec<Local> = (0..nfields).map(|_| body.locals.push(DecId::DANGLING)).collect();
-        let Inst::NewInstance { fields: vals, adt } = body.instructions[ni].clone() else { unreachable!() };
+        let fields: Vec<Local> = (0..nfields)
+            .map(|_| body.locals.push(DecId::DANGLING))
+            .collect();
+        let Inst::NewInstance { fields: vals, adt } = body.instructions[ni].clone() else {
+            unreachable!()
+        };
         // the debugger keeps seeing each named member: as the struct of the
         // field slots themselves, live under every later store
         for &m in ms {
@@ -653,7 +862,8 @@ fn scalar_replace(body: &mut Body) -> bool {
             }
         }
         let root_write = single[&r];
-        let copy_writes: HashSet<InstId> = ms.iter().filter(|&&m| m != r).map(|m| single[m]).collect();
+        let copy_writes: HashSet<InstId> =
+            ms.iter().filter(|&&m| m != r).map(|m| single[m]).collect();
         for bi in 0..body.blocks.len() {
             let bid = BlockId::from(bi as u32);
             let stream = std::mem::take(&mut body.blocks[bid].stream);
@@ -686,7 +896,9 @@ fn scalar_replace(body: &mut Body) -> bool {
                 for &u in users.get(&g).map(|v| v.as_slice()).unwrap_or(&[]) {
                     body.instructions[u] = match &body.instructions[u] {
                         Inst::GetField { slot, .. } => Inst::GetLocal(fields[*slot as usize]),
-                        Inst::SetField { slot, value, .. } => Inst::SetLocal(fields[*slot as usize], *value),
+                        Inst::SetField { slot, value, .. } => {
+                            Inst::SetLocal(fields[*slot as usize], *value)
+                        }
                         // the copy was dropped from its stream; leave a harmless
                         // dead read in its place
                         Inst::SetLocal(..) => Inst::GetLocal(fields[0]),
@@ -778,9 +990,7 @@ fn split_critical_edges(body: &mut Body) -> bool {
 
 struct Cfg {
     succ: Vec<Vec<BlockId>>,
-    preds: Vec<Vec<BlockId>>,
-    dom: Vec<HashSet<BlockId>>,
-    idom: Vec<Option<BlockId>>,
+    dom: Dom,
     children: Vec<Vec<BlockId>>,
     frontier: Vec<HashSet<BlockId>>,
 }
@@ -792,16 +1002,12 @@ fn cfg_of(body: &Body) -> Cfg {
     let n = body.blocks.len();
     let mut idom: Vec<Option<BlockId>> = vec![None; n];
     for i in 1..n {
-        if dom[i].is_empty() {
+        if !dom.reachable(i) {
             continue;
         }
         // the immediate dominator is the strict dominator dominated by all others
         let b = BlockId::from(i as u32);
-        idom[i] = dom[i]
-            .iter()
-            .filter(|&&d| d != b)
-            .max_by_key(|d| dom[d.index()].len())
-            .copied();
+        idom[i] = dom.strict(b).max_by_key(|d| dom.len(d.index()));
     }
     let mut children: Vec<Vec<BlockId>> = vec![Vec::new(); n];
     for (i, d) in idom.iter().enumerate() {
@@ -812,11 +1018,11 @@ fn cfg_of(body: &Body) -> Cfg {
     let mut frontier: Vec<HashSet<BlockId>> = vec![HashSet::new(); n];
     for i in 0..n {
         let b = BlockId::from(i as u32);
-        if preds[i].len() < 2 || dom[i].is_empty() {
+        if preds[i].len() < 2 || !dom.reachable(i) {
             continue;
         }
         for &p in &preds[i] {
-            if dom[p.index()].is_empty() {
+            if !dom.reachable(p.index()) {
                 continue;
             }
             let mut runner = Some(p);
@@ -829,7 +1035,12 @@ fn cfg_of(body: &Body) -> Cfg {
             }
         }
     }
-    Cfg { succ, preds, dom, idom, children, frontier }
+    Cfg {
+        succ,
+        dom,
+        children,
+        frontier,
+    }
 }
 
 /// Promote locals to SSA values: every read of a promoted local becomes
@@ -842,13 +1053,20 @@ fn cfg_of(body: &Body) -> Cfg {
 /// local that only ever holds a struct drops them, because the struct is
 /// about to stop existing (see `split_struct_phis`). Returns whether
 /// anything changed.
-fn promote_locals(body: &mut Body, res: &Resolutions, entry_locals: &[DecId], shadows: bool) -> bool {
+fn promote_locals(
+    body: &mut Body,
+    res: &Resolutions,
+    entry_locals: &[DecId],
+    shadows: bool,
+) -> bool {
     split_critical_edges(body);
     let cfg = cfg_of(body);
     let pos = positions(body);
     let dominated = |w: InstId, r: InstId| -> bool {
         match (pos.get(&w), pos.get(&r)) {
-            (Some(&(bw, pw)), Some(&(br, pr))) => (bw == br && pw < pr) || (bw != br && cfg.dom[br.index()].contains(&bw)),
+            (Some(&(bw, pw)), Some(&(br, pr))) => {
+                (bw == br && pw < pr) || (bw != br && cfg.dom.contains(br, bw))
+            }
             _ => false,
         }
     };
@@ -887,13 +1105,24 @@ fn promote_locals(body: &mut Body, res: &Resolutions, entry_locals: &[DecId], sh
                 continue;
             }
             let all = ws.iter().all(|&w| {
-                let Inst::SetLocal(_, v) = body.instructions[w] else { return false };
+                let Inst::SetLocal(_, v) = body.instructions[w] else {
+                    return false;
+                };
                 match &body.instructions[v] {
                     Inst::NewInstance { .. } => true,
                     Inst::GetLocal(m) if struct_local.contains(m) => true,
-                    Inst::Phi(br) if br.iter().all(|(_, x)| matches!(body.instructions[*x], Inst::NewInstance { .. })) => true,
+                    Inst::Phi(br)
+                        if br.iter().all(|(_, x)| {
+                            matches!(body.instructions[*x], Inst::NewInstance { .. })
+                        }) =>
+                    {
+                        true
+                    }
                     // a typed struct from anywhere: a param, a field, an element
-                    _ => ty_of(res, entry_locals, body, v, 0).as_ref().and_then(adt_of_ty).is_some(),
+                    _ => ty_of(res, entry_locals, body, v, 0)
+                        .as_ref()
+                        .and_then(adt_of_ty)
+                        .is_some(),
                 }
             });
             if all {
@@ -914,9 +1143,9 @@ fn promote_locals(body: &mut Body, res: &Resolutions, entry_locals: &[DecId], sh
         if named && !struct_local.contains(&l) {
             continue;
         }
-        let ok = reads
-            .get(&l)
-            .map_or(true, |rs| rs.iter().all(|&r| ws.iter().any(|&w| dominated(w, r))));
+        let ok = reads.get(&l).map_or(true, |rs| {
+            rs.iter().all(|&r| ws.iter().any(|&w| dominated(w, r)))
+        });
         if ok {
             promote.push(l);
         }
@@ -928,7 +1157,9 @@ fn promote_locals(body: &mut Body, res: &Resolutions, entry_locals: &[DecId], sh
         let before = promote.len();
         promote.retain(|&l| {
             writes[&l].iter().all(|&w| {
-                let Inst::SetLocal(_, v) = body.instructions[w] else { return false };
+                let Inst::SetLocal(_, v) = body.instructions[w] else {
+                    return false;
+                };
                 match body.instructions[v] {
                     Inst::GetLocal(src) => set.contains(&src) || !writes.contains_key(&src),
                     _ => true,
@@ -956,9 +1187,13 @@ fn promote_locals(body: &mut Body, res: &Resolutions, entry_locals: &[DecId], sh
             }
             continue;
         }
-        let Some(s) = shadow_leaf_for(body, l) else { continue };
+        let Some(s) = shadow_leaf_for(body, l) else {
+            continue;
+        };
         for &w in &writes[&l] {
-            let Inst::SetLocal(_, v) = body.instructions[w] else { continue };
+            let Inst::SetLocal(_, v) = body.instructions[w] else {
+                continue;
+            };
             let (blk, _) = pos[&w];
             let sh = push_inst(body, Inst::Shadow { local: s, value: v }, body.locs[w]);
             let st = &mut body.blocks[blk].stream;
@@ -974,7 +1209,11 @@ fn promote_locals(body: &mut Body, res: &Resolutions, entry_locals: &[DecId], sh
         while let Some(b) = work.pop() {
             for &f in &cfg.frontier[b.index()] {
                 if placed.insert(f) {
-                    let loc = body.blocks[f].stream.first().map(|&i| body.locs[i]).unwrap_or_default();
+                    let loc = body.blocks[f]
+                        .stream
+                        .first()
+                        .map(|&i| body.locs[i])
+                        .unwrap_or_default();
                     let phi = push_inst(body, Inst::Phi(Vec::new()), loc);
                     body.blocks[f].stream.insert(0, phi);
                     phi_of.insert((f, l), phi);
@@ -1018,7 +1257,11 @@ fn promote_locals(body: &mut Body, res: &Resolutions, entry_locals: &[DecId], sh
                     let def = match stack.get(&l).and_then(|s| s.last()) {
                         Some(&d) => d,
                         None => *undef.get_or_insert_with(|| {
-                            let u = push_inst(body, Inst::Constant(crate::Constant::Null), Location::default());
+                            let u = push_inst(
+                                body,
+                                Inst::Constant(crate::Constant::Null),
+                                Location::default(),
+                            );
                             body.blocks[BlockId::ZERO].stream.insert(0, u);
                             u
                         }),
@@ -1040,7 +1283,11 @@ fn promote_locals(body: &mut Body, res: &Resolutions, entry_locals: &[DecId], sh
                     let def = match stack.get(&l).and_then(|st| st.last()) {
                         Some(&d) => d,
                         None => *undef.get_or_insert_with(|| {
-                            let u = push_inst(body, Inst::Constant(crate::Constant::Null), Location::default());
+                            let u = push_inst(
+                                body,
+                                Inst::Constant(crate::Constant::Null),
+                                Location::default(),
+                            );
                             body.blocks[BlockId::ZERO].stream.insert(0, u);
                             u
                         }),
@@ -1064,7 +1311,9 @@ fn promote_locals(body: &mut Body, res: &Resolutions, entry_locals: &[DecId], sh
         map_operands(inst, &|x| resolve(x, &rewrite));
     }
     for block in body.blocks.values_mut() {
-        block.stream.retain(|iid| !dropped_reads.contains(iid) && !drop_stores.contains(iid));
+        block
+            .stream
+            .retain(|iid| !dropped_reads.contains(iid) && !drop_stores.contains(iid));
     }
     true
 }
@@ -1072,8 +1321,15 @@ fn promote_locals(body: &mut Body, res: &Resolutions, entry_locals: &[DecId], sh
 /// `inst` with every instruction operand mapped (locals and blocks untouched).
 fn map_operands(inst: &mut Inst, f: &dyn Fn(InstId) -> InstId) {
     match inst {
-        Inst::Constant(_) | Inst::GetLocal(_) | Inst::GetEntry(_) | Inst::Jump { .. } | Inst::NewArray | Inst::NewDict
-        | Inst::RefBody(_) | Inst::Panic | Inst::TraceEdge { .. } => {}
+        Inst::Constant(_)
+        | Inst::GetLocal(_)
+        | Inst::GetEntry(_)
+        | Inst::Jump { .. }
+        | Inst::NewArray
+        | Inst::NewDict
+        | Inst::RefBody(_)
+        | Inst::Panic
+        | Inst::TraceEdge { .. } => {}
         Inst::SetLocal(_, v) | Inst::SetEntry(_, v) | Inst::Shadow { value: v, .. } => *v = f(*v),
         Inst::BinOp { left, right, .. } => {
             *left = f(*left);
@@ -1101,7 +1357,9 @@ fn map_operands(inst: &mut Inst, f: &dyn Fn(InstId) -> InstId) {
             *index = f(*index);
         }
         Inst::GetField { src, .. } => *src = f(*src),
-        Inst::SetField { receiver, value, .. } => {
+        Inst::SetField {
+            receiver, value, ..
+        } => {
             *receiver = f(*receiver);
             *value = f(*value);
         }
@@ -1110,8 +1368,15 @@ fn map_operands(inst: &mut Inst, f: &dyn Fn(InstId) -> InstId) {
             *value = f(*value);
         }
         Inst::Insert { value, .. } => *value = f(*value),
-        Inst::Len(v) | Inst::ToFloat(v) | Inst::Sqrt(v) | Inst::Unwrap(v) | Inst::UnwrapUnit(v) | Inst::Return(v)
-        | Inst::Raise(v) | Inst::IsRaised(v) | Inst::UnwrapRaised(v) => *v = f(*v),
+        Inst::Len(v)
+        | Inst::ToFloat(v)
+        | Inst::Sqrt(v)
+        | Inst::Unwrap(v)
+        | Inst::UnwrapUnit(v)
+        | Inst::Return(v)
+        | Inst::Raise(v)
+        | Inst::IsRaised(v)
+        | Inst::UnwrapRaised(v) => *v = f(*v),
         Inst::In(a, b, _) => {
             *a = f(*a);
             *b = f(*b);
@@ -1159,7 +1424,12 @@ fn map_operands(inst: &mut Inst, f: &dyn Fn(InstId) -> InstId) {
 /// another member phi -- no `set_field` (a write through one alias would
 /// have to reach the others), nothing stored, passed or compared. Returns
 /// whether anything changed.
-fn split_struct_phis(body: &mut Body, values: &HashSet<AdtId>, res: &Resolutions, entry_locals: &[DecId]) -> bool {
+fn split_struct_phis(
+    body: &mut Body,
+    values: &HashSet<AdtId>,
+    res: &Resolutions,
+    entry_locals: &[DecId],
+) -> bool {
     // candidate classes, seeded from phis whose inputs are all struct values.
     // For a value type an input may also be a *leaf*: a typed struct from
     // outside the class -- a param, a call result, an element -- whose
@@ -1180,7 +1450,11 @@ fn split_struct_phis(body: &mut Body, values: &HashSet<AdtId>, res: &Resolutions
     'phi: for &root in &phis {
         // a class rewrite changes the uses the next class sees: recount
         let users = users_of(body);
-        let in_stream: HashSet<InstId> = body.blocks.values().flat_map(|b| b.stream.iter().copied()).collect();
+        let in_stream: HashSet<InstId> = body
+            .blocks
+            .values()
+            .flat_map(|b| b.stream.iter().copied())
+            .collect();
         if !in_stream.contains(&root) {
             continue;
         }
@@ -1198,7 +1472,9 @@ fn split_struct_phis(body: &mut Body, values: &HashSet<AdtId>, res: &Resolutions
             }
             match &body.instructions[v] {
                 Inst::NewInstance { adt, fields } => {
-                    if nfields.is_some_and(|n| n != fields.len()) || class_adt.is_some_and(|a| a != *adt) {
+                    if nfields.is_some_and(|n| n != fields.len())
+                        || class_adt.is_some_and(|a| a != *adt)
+                    {
                         continue 'phi;
                     }
                     nfields = Some(fields.len());
@@ -1213,7 +1489,9 @@ fn split_struct_phis(body: &mut Body, values: &HashSet<AdtId>, res: &Resolutions
                     }
                 }
                 _ => {
-                    let Some(id) = leaf_adt(v, body) else { continue 'phi };
+                    let Some(id) = leaf_adt(v, body) else {
+                        continue 'phi;
+                    };
                     if class_adt.is_some_and(|a| a != id) {
                         continue 'phi;
                     }
@@ -1245,7 +1523,10 @@ fn split_struct_phis(body: &mut Body, values: &HashSet<AdtId>, res: &Resolutions
         if !leaves.is_empty() && !is_value {
             continue 'phi;
         }
-        if !class.iter().any(|&m| matches!(body.instructions[m], Inst::Phi(_))) {
+        if !class
+            .iter()
+            .any(|&m| matches!(body.instructions[m], Inst::Phi(_)))
+        {
             continue 'phi;
         }
         // every use of every member: a field read on it, or feeding a member
@@ -1260,7 +1541,9 @@ fn split_struct_phis(body: &mut Body, values: &HashSet<AdtId>, res: &Resolutions
                 match &body.instructions[u] {
                     Inst::GetField { src, slot, .. } if *src == m && (*slot as usize) < nf => {}
                     Inst::Phi(_) if class.contains(&u) => {}
-                    Inst::Shadow { local, value } if *value == m => shadow_users.push((m, u, *local)),
+                    Inst::Shadow { local, value } if *value == m => {
+                        shadow_users.push((m, u, *local))
+                    }
                     _ if is_value => escapes.push((m, u)),
                     _ => continue 'phi,
                 }
@@ -1300,7 +1583,15 @@ fn split_struct_phis(body: &mut Body, values: &HashSet<AdtId>, res: &Resolutions
                         return g;
                     }
                     let blk = pos[&v].0;
-                    let g = push_inst(body, Inst::GetField { src: v, slot, kind: AccessKind::Direct }, body.locs[v]);
+                    let g = push_inst(
+                        body,
+                        Inst::GetField {
+                            src: v,
+                            slot,
+                            kind: AccessKind::Direct,
+                        },
+                        body.locs[v],
+                    );
                     field_phi.insert((v, slot), g);
                     let st = &mut body.blocks[blk].stream;
                     let at = st.iter().position(|&x| x == v).map_or(st.len(), |i| i + 1);
@@ -1341,7 +1632,9 @@ fn split_struct_phis(body: &mut Body, values: &HashSet<AdtId>, res: &Resolutions
                 .values()
                 .flat_map(|b| b.stream.iter().copied())
                 .filter_map(|i| match body.instructions[i] {
-                    Inst::Shadow { local, value } if split_leaves.contains_key(&local) => Some((i, local, value)),
+                    Inst::Shadow { local, value } if split_leaves.contains_key(&local) => {
+                        Some((i, local, value))
+                    }
                     _ => None,
                 })
                 .collect();
@@ -1354,11 +1647,26 @@ fn split_struct_phis(body: &mut Body, values: &HashSet<AdtId>, res: &Resolutions
                     let fv = if class.contains(&v) {
                         field_of(body, v, k as u32, &mut field_phi, &pos)
                     } else {
-                        let g = push_inst(body, Inst::GetField { src: v, slot: k as u32, kind: AccessKind::Direct }, loc);
+                        let g = push_inst(
+                            body,
+                            Inst::GetField {
+                                src: v,
+                                slot: k as u32,
+                                kind: AccessKind::Direct,
+                            },
+                            loc,
+                        );
                         insts.push(g);
                         g
                     };
-                    insts.push(push_inst(body, Inst::Shadow { local: leaf, value: fv }, loc));
+                    insts.push(push_inst(
+                        body,
+                        Inst::Shadow {
+                            local: leaf,
+                            value: fv,
+                        },
+                        loc,
+                    ));
                 }
                 let st = &mut body.blocks[ublk].stream;
                 let at = st.iter().position(|&x| x == u).unwrap();
@@ -1369,7 +1677,9 @@ fn split_struct_phis(body: &mut Body, values: &HashSet<AdtId>, res: &Resolutions
         // (for a phi outside the class: at the end of the edge's block)
         for &(m, u) in &escapes {
             let adt = adt.unwrap();
-            let fields: Vec<InstId> = (0..nf as u32).map(|k| field_of(body, m, k, &mut field_phi, &pos)).collect();
+            let fields: Vec<InstId> = (0..nf as u32)
+                .map(|k| field_of(body, m, k, &mut field_phi, &pos))
+                .collect();
             let fresh = push_inst(body, Inst::NewInstance { adt, fields }, body.locs[u]);
             let (ublk, _) = pos[&u];
             match &mut body.instructions[u] {
@@ -1444,7 +1754,13 @@ fn volatile_reads(body: &Body) -> HashSet<InstId> {
 /// construction, a typed local or param, a field of a typed struct, an
 /// element of a typed array, an unwrapped option, a phi of agreeing inputs.
 /// `None` is "don't know", and the callers fail closed on it.
-fn ty_of(res: &Resolutions, entry_locals: &[DecId], body: &Body, iid: InstId, depth: u32) -> Option<Ty> {
+fn ty_of(
+    res: &Resolutions,
+    entry_locals: &[DecId],
+    body: &Body,
+    iid: InstId,
+    depth: u32,
+) -> Option<Ty> {
     if depth > 8 {
         return None;
     }
@@ -1459,10 +1775,14 @@ fn ty_of(res: &Resolutions, entry_locals: &[DecId], body: &Body, iid: InstId, de
         Inst::NewInstance { adt, .. } => Some(Ty::Adt(*adt, Vec::new())),
         Inst::GetLocal(l) => dec_ty(body.locals.get(*l)),
         Inst::GetEntry(l) => dec_ty(entry_locals.get(l.index())),
-        Inst::GetField { src, slot, .. } => match ty_of(res, entry_locals, body, *src, depth + 1)? {
-            Ty::Adt(id, _) | Ty::Identity(id, _) => res.adts[id].member_tys.get(*slot as usize).cloned(),
-            _ => None,
-        },
+        Inst::GetField { src, slot, .. } => {
+            match ty_of(res, entry_locals, body, *src, depth + 1)? {
+                Ty::Adt(id, _) | Ty::Identity(id, _) => {
+                    res.adts[id].member_tys.get(*slot as usize).cloned()
+                }
+                _ => None,
+            }
+        }
         Inst::GetIndex { set, .. } => match ty_of(res, entry_locals, body, *set, depth + 1)? {
             Ty::Array(elem, _) => Some(*elem),
             _ => None,
@@ -1491,8 +1811,15 @@ fn ty_of(res: &Resolutions, entry_locals: &[DecId], body: &Body, iid: InstId, de
             crate::Constant::Null => Ty::Null,
             crate::Constant::Array(_) => return None,
         }),
-        Inst::BinOp { .. } | Inst::UnaryOp { .. } | Inst::ToFloat(_) | Inst::Sqrt(_) | Inst::Len(_) | Inst::In(..)
-        | Inst::IsInstance { .. } | Inst::IsRaised(_) | Inst::Format(_) => Some(Ty::Any),
+        Inst::BinOp { .. }
+        | Inst::UnaryOp { .. }
+        | Inst::ToFloat(_)
+        | Inst::Sqrt(_)
+        | Inst::Len(_)
+        | Inst::In(..)
+        | Inst::IsInstance { .. }
+        | Inst::IsRaised(_)
+        | Inst::Format(_) => Some(Ty::Any),
         Inst::NewArray | Inst::NewDict => Some(Ty::Any),
         _ => None,
     }
@@ -1541,11 +1868,15 @@ pub(crate) fn value_adts(ir: &Ir, mutating: &HashSet<NativeId>) -> HashSet<AdtId
                         if let Some(id) = adt_of_ty(&t) {
                             mutable.insert(id);
                         } else if may_be_instance(&t) {
-                            unknown.get_or_insert_with(|| format!("body @{} {iid}: receiver typed {t:?}", bid.index()));
+                            unknown.get_or_insert_with(|| {
+                                format!("body @{} {iid}: receiver typed {t:?}", bid.index())
+                            });
                         }
                     }
                     None => {
-                        unknown.get_or_insert_with(|| format!("body @{} {iid}: receiver of unknown type", bid.index()));
+                        unknown.get_or_insert_with(|| {
+                            format!("body @{} {iid}: receiver of unknown type", bid.index())
+                        });
                     }
                 }
             }
@@ -1657,7 +1988,9 @@ fn self_tail_calls(ir: &mut Ir) -> bool {
             'scan: for (blk, block) in body.blocks.iter() {
                 let n = block.stream.len();
                 for (i, &iid) in block.stream.iter().enumerate() {
-                    let Inst::CallDirect { body: callee, .. } = &body.instructions[iid] else { continue };
+                    let Inst::CallDirect { body: callee, .. } = &body.instructions[iid] else {
+                        continue;
+                    };
                     if *callee != bid {
                         continue;
                     }
@@ -1676,7 +2009,9 @@ fn self_tail_calls(ir: &mut Ir) -> bool {
                             let t = follow(*target, body);
                             let ts = &body.blocks[t].stream;
                             // `return call` after a chain of jumps
-                            if ts.len() == 1 && matches!(body.instructions[ts[0]], Inst::Return(r) if r == iid) {
+                            if ts.len() == 1
+                                && matches!(body.instructions[ts[0]], Inst::Return(r) if r == iid)
+                            {
                                 found = Some((iid, blk, None));
                                 break 'scan;
                             }
@@ -1684,7 +2019,10 @@ fn self_tail_calls(ir: &mut Ir) -> bool {
                             if !matches!(body.instructions[u], Inst::Phi(_)) || !ts.contains(&u) {
                                 continue;
                             }
-                            let only_phis = ts.iter().take(ts.len().saturating_sub(1)).all(|&x| matches!(body.instructions[x], Inst::Phi(_)));
+                            let only_phis = ts
+                                .iter()
+                                .take(ts.len().saturating_sub(1))
+                                .all(|&x| matches!(body.instructions[x], Inst::Phi(_)));
                             let Some(&tl) = ts.last() else { continue };
                             let ret_block = match &body.instructions[tl] {
                                 Inst::Jump { target } => follow(*target, body),
@@ -1694,7 +2032,8 @@ fn self_tail_calls(ir: &mut Ir) -> bool {
                             let returns_phi = if ret_block == t {
                                 matches!(body.instructions[tl], Inst::Return(v) if v == u)
                             } else {
-                                rs.len() == 1 && matches!(body.instructions[rs[0]], Inst::Return(v) if v == u)
+                                rs.len() == 1
+                                    && matches!(body.instructions[rs[0]], Inst::Return(v) if v == u)
                             };
                             let pus = users.get(&u).map(|v| v.as_slice()).unwrap_or(&[]);
                             if only_phis && returns_phi && pus.len() == 1 {
@@ -1709,7 +2048,9 @@ fn self_tail_calls(ir: &mut Ir) -> bool {
             }
             let Some((call, blk, phi)) = found else { break };
             let body = &mut ir.bodies[bid];
-            let Inst::CallDirect { args, .. } = body.instructions[call].clone() else { unreachable!() };
+            let Inst::CallDirect { args, .. } = body.instructions[call].clone() else {
+                unreachable!()
+            };
             let loc = body.locs[call];
             // the header: the entry block's instructions move into it once
             let h = *header.get_or_insert_with(|| {
@@ -1739,12 +2080,15 @@ fn self_tail_calls(ir: &mut Ir) -> bool {
                     _ => None,
                 }
             };
-            let mut pending: Vec<(Local, InstId)> = params.iter().copied().zip(args.iter().copied()).collect();
+            let mut pending: Vec<(Local, InstId)> =
+                params.iter().copied().zip(args.iter().copied()).collect();
             let mut tail: Vec<InstId> = vec![push_inst(body, Inst::TraceEdge { callee: bid }, loc)];
             while !pending.is_empty() {
                 // an assignment whose target no other pending arg still reads
                 let pick = pending.iter().position(|&(dst, _)| {
-                    !pending.iter().any(|&(d2, a2)| d2 != dst && reads_param(a2, body) == Some(dst))
+                    !pending
+                        .iter()
+                        .any(|&(d2, a2)| d2 != dst && reads_param(a2, body) == Some(dst))
                 });
                 match pick {
                     Some(i) => {

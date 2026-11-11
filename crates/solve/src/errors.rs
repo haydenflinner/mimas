@@ -54,6 +54,21 @@ pub struct TypeMismatch {
     pub found: String,
 }
 
+/// `null` where a settled non-optional type was required: the `?` in
+/// the declaration is what's missing, not a different value.
+#[derive(Error, Debug, Diagnostic)]
+#[error("`{ty}` is never `null`")]
+#[diagnostic(help("write the type `{ty}?` to allow `null`"))]
+pub struct NullMismatch {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("expected {expected} but found {found}")]
+    pub at: SourceSpan,
+    pub expected: String,
+    pub found: String,
+    pub ty: String,
+}
+
 #[allow(unused)]
 #[derive(Error, Debug, Diagnostic)]
 #[error("cannot infer parameter type")]
@@ -727,6 +742,23 @@ pub struct InvalidComparison {
     pub at: SourceSpan,
 }
 
+/// `x == null` where `x`'s type can never hold null — the declaration
+/// is what's wrong, not the `null` literal.
+#[derive(Error, Debug, Diagnostic)]
+#[error("`{ty}` can never be `null`")]
+#[diagnostic(help(
+    "this `{op}` is always `{answer}` — write the type `{ty}?` if it should be able to hold `null`"
+))]
+pub struct NeverNull {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("this is `{ty}`")]
+    pub at: SourceSpan,
+    pub ty: String,
+    pub op: &'static str,
+    pub answer: &'static str,
+}
+
 #[derive(Error, Debug, Diagnostic)]
 #[error("attempted to divide by zero")]
 pub struct DivideByZero {
@@ -976,7 +1008,9 @@ pub struct NoSuchColumn {
 /// doesn't compile. The validator supplies the message; see `api::LitValidator`.
 #[derive(Error, Debug, Diagnostic)]
 #[error("`..base` needs a struct")]
-#[diagnostic(help("an enum variant's fields can't be filled from another value -- its base might be a different variant"))]
+#[diagnostic(help(
+    "an enum variant's fields can't be filled from another value -- its base might be a different variant"
+))]
 pub struct UpdateNeedsStruct {
     #[source_code]
     pub src: NamedSource<Arc<str>>,
@@ -1161,7 +1195,9 @@ pub struct ShadowedBuiltin {
 
 #[derive(Error, Debug, Diagnostic)]
 #[error("`{name}` isn't in scope -- `use {module}` imports the module's name, not its members")]
-#[diagnostic(help("write `use {module}::*;` to bring its members into scope -- or say `{module}::{name}`"))]
+#[diagnostic(help(
+    "write `use {module}::*;` to bring its members into scope -- or say `{module}::{name}`"
+))]
 pub struct BareImportMember {
     #[source_code]
     pub src: NamedSource<Arc<str>>,

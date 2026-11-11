@@ -4,8 +4,8 @@ use arborium_tree_sitter::Node;
 
 use super::cty::{declarator, spec_type, unqual};
 use super::{Alias, FnSig, Lower, StructInfo, one_line};
-use crate::ty::CTy;
 use crate::DiagKind;
+use crate::ty::CTy;
 
 impl<'a> Lower<'a> {
     /// Entry: collect signatures first (call sites need them for the out-param
@@ -114,15 +114,16 @@ impl<'a> Lower<'a> {
                                     | "parenthesized_declarator"
                             ) {
                                 if c.kind() == "init_declarator"
-                                    && let Some(v) = self.f(c, "value") {
-                                        let inner = self.f(c, "declarator").unwrap();
-                                        let d = declarator(self, inner);
-                                        let ty = self.wrap_type(base.clone(), &d);
-                                        info.fields.push((d.name.clone(), ty));
-                                        let val = self.expr(v);
-                                        info.defaults.insert(d.name, val);
-                                        continue;
-                                    }
+                                    && let Some(v) = self.f(c, "value")
+                                {
+                                    let inner = self.f(c, "declarator").unwrap();
+                                    let d = declarator(self, inner);
+                                    let ty = self.wrap_type(base.clone(), &d);
+                                    info.fields.push((d.name.clone(), ty));
+                                    let val = self.expr(v);
+                                    info.defaults.insert(d.name, val);
+                                    continue;
+                                }
                                 let d = declarator(self, c);
                                 let ty = self.wrap_type(base.clone(), &d);
                                 if let Some(dv) = default_node {
@@ -162,11 +163,22 @@ impl<'a> Lower<'a> {
                             }
                         }
                     }
-                    "template_declaration" | "access_specifier" | "comment"
-                    | "friend_declaration" | "using_declaration" | "declaration"
-                    | "type_definition" | "alias_declaration" | "enum_specifier"
-                    | "struct_specifier" | "field_declaration_list" | "storage_class_specifier"
-                    | "preproc_if" | "preproc_ifdef" | "preproc_else" | "preproc_endif" => {}
+                    "template_declaration"
+                    | "access_specifier"
+                    | "comment"
+                    | "friend_declaration"
+                    | "using_declaration"
+                    | "declaration"
+                    | "type_definition"
+                    | "alias_declaration"
+                    | "enum_specifier"
+                    | "struct_specifier"
+                    | "field_declaration_list"
+                    | "storage_class_specifier"
+                    | "preproc_if"
+                    | "preproc_ifdef"
+                    | "preproc_else"
+                    | "preproc_endif" => {}
                     _ => {}
                 }
             }
@@ -196,7 +208,8 @@ impl<'a> Lower<'a> {
                 loop {
                     match cur.kind() {
                         "function_declarator" => return Some(self.sig_from(t, cur)),
-                        "reference_declarator" | "pointer_declarator"
+                        "reference_declarator"
+                        | "pointer_declarator"
                         | "parenthesized_declarator" => {
                             cur = self.f(cur, "declarator")?;
                         }
@@ -217,9 +230,12 @@ impl<'a> Lower<'a> {
         let mut ret_is_unit = matches!(ret, CTy::Unit) || ret_node.is_none();
         // `auto f() -> T` trailing return
         if matches!(ret, CTy::Unknown)
-            && let Some(tr) = self.f(fdecl, "return_type").or_else(|| self.f(fdecl, "type")) {
-                ret = spec_type(self, Some(tr));
-            }
+            && let Some(tr) = self
+                .f(fdecl, "return_type")
+                .or_else(|| self.f(fdecl, "type"))
+        {
+            ret = spec_type(self, Some(tr));
+        }
         let _ = &mut ret_is_unit;
         let params_node = self.f(fdecl, "parameters");
         let mut params = Vec::new();
@@ -236,7 +252,10 @@ impl<'a> Lower<'a> {
                             && !d.is_const
                             && !matches!(
                                 ty,
-                                CTy::Arr(..) | CTy::Dict(_) | CTy::Set(_) | CTy::Struct(_)
+                                CTy::Arr(..)
+                                    | CTy::Dict(_)
+                                    | CTy::Set(_)
+                                    | CTy::Struct(_)
                                     | CTy::Tuple(_)
                             );
                         params.push((d.name, ty, out));
@@ -268,8 +287,13 @@ impl<'a> Lower<'a> {
                 self.line(&format!("// cpp: {}", one_line(self.node_text(node))));
             }
             "preproc_def" => self.preproc_def(node),
-            "preproc_function_def" | "preproc_if" | "preproc_ifdef" | "preproc_else"
-            | "preproc_elif" | "preproc_endif" | "preproc_defined" => {
+            "preproc_function_def"
+            | "preproc_if"
+            | "preproc_ifdef"
+            | "preproc_else"
+            | "preproc_elif"
+            | "preproc_endif"
+            | "preproc_defined" => {
                 self.diag(
                     DiagKind::Note,
                     node,
@@ -355,7 +379,9 @@ impl<'a> Lower<'a> {
         loop {
             match cur.kind() {
                 "function_declarator" => return true,
-                "reference_declarator" | "pointer_declarator" | "parenthesized_declarator"
+                "reference_declarator"
+                | "pointer_declarator"
+                | "parenthesized_declarator"
                 | "init_declarator" => {
                     let Some(inner) = self.f(cur, "declarator") else {
                         return false;
@@ -385,15 +411,24 @@ impl<'a> Lower<'a> {
     /// `//` and `/* */` comments pass through as mimas `//` lines.
     fn comment(&mut self, node: Node<'a>) {
         for l in self.node_text(node).lines() {
-            let l = l.trim().trim_start_matches("/*").trim_start_matches('*').trim_start_matches("//").trim_end_matches("*/").trim();
+            let l = l
+                .trim()
+                .trim_start_matches("/*")
+                .trim_start_matches('*')
+                .trim_start_matches("//")
+                .trim_end_matches("*/")
+                .trim();
             self.line(&format!("// {l}"));
         }
     }
 
     fn lower_enum(&mut self, node: Node<'a>) {
         let name = self.f(node, "name").map(|n| self.node_text(n).to_string());
-        let scoped = self.node_text(node).contains("enum class") || self.node_text(node).contains("enum struct");
-        let Some(body) = self.f(node, "body") else { return };
+        let scoped = self.node_text(node).contains("enum class")
+            || self.node_text(node).contains("enum struct");
+        let Some(body) = self.f(node, "body") else {
+            return;
+        };
         if scoped && let Some(name) = name.clone() {
             // `enum class E { A, B }` -> `enum E { A, B }`
             let mut variants = Vec::new();
@@ -524,11 +559,7 @@ impl<'a> Lower<'a> {
                     .children(init)
                     .into_iter()
                     .find(|c| c.kind() == "argument_list")
-                    .and_then(|a| {
-                        self.children(a)
-                            .into_iter()
-                            .find(|c| c.kind() != "comment")
-                    })
+                    .and_then(|a| self.children(a).into_iter().find(|c| c.kind() != "comment"))
                     .map(|v| self.expr(v))
                     .unwrap_or_else(|| "0".into());
                 if let Some(e) = field_exprs.iter_mut().find(|(n, _)| *n == fname) {
@@ -604,10 +635,7 @@ impl<'a> Lower<'a> {
         // out-param epilogue: a void function's fallthrough returns the outs.
         let outs = sig.out_params();
         if !outs.is_empty() && sig.ret_is_unit {
-            let names: Vec<String> = outs
-                .iter()
-                .map(|i| sig.params[*i].0.clone())
-                .collect();
+            let names: Vec<String> = outs.iter().map(|i| sig.params[*i].0.clone()).collect();
             self.line(&format!("return {};", tuple_or_single(&names)));
         } else if !outs.is_empty() {
             self.diag(
@@ -630,7 +658,9 @@ impl<'a> Lower<'a> {
     /// `param_list` node -> `name: ty, name=default` text.
     fn param_list(&mut self, params: Option<Node<'a>>) -> String {
         let mut parts = Vec::new();
-        let Some(pl) = params else { return String::new() };
+        let Some(pl) = params else {
+            return String::new();
+        };
         for p in pl.named_children(&mut pl.walk()) {
             match p.kind() {
                 "parameter_declaration" | "optional_parameter_declaration" => {
@@ -668,9 +698,14 @@ fn sig_name<'a>(l: &mut Lower<'a>, node: Node<'a>) -> String {
     let mut cur = decl;
     loop {
         match cur.kind() {
-            "function_declarator" | "reference_declarator" | "pointer_declarator"
-            | "parenthesized_declarator" | "init_declarator" => {
-                let Some(inner) = l.f(cur, "declarator") else { return String::new() };
+            "function_declarator"
+            | "reference_declarator"
+            | "pointer_declarator"
+            | "parenthesized_declarator"
+            | "init_declarator" => {
+                let Some(inner) = l.f(cur, "declarator") else {
+                    return String::new();
+                };
                 cur = inner;
             }
             _ => return unqual(l.node_text(cur)).to_string(),
@@ -700,10 +735,23 @@ pub(crate) fn decl_parts<'n>(
     let mut out = Vec::new();
     for c in node.named_children(&mut node.walk()) {
         match c.kind() {
-            "primitive_type" | "sized_type_specifier" | "type_identifier" | "template_type"
-            | "qualified_identifier" | "auto" | "placeholder_type_specifier" | "type_qualifier"
-            | "storage_class_specifier" | "decltype" | "struct_specifier" | "class_specifier"
-            | "enum_specifier" | "union_specifier" | "comment" | "virtual" | "virtual_specifier" => {}
+            "primitive_type"
+            | "sized_type_specifier"
+            | "type_identifier"
+            | "template_type"
+            | "qualified_identifier"
+            | "auto"
+            | "placeholder_type_specifier"
+            | "type_qualifier"
+            | "storage_class_specifier"
+            | "decltype"
+            | "struct_specifier"
+            | "class_specifier"
+            | "enum_specifier"
+            | "union_specifier"
+            | "comment"
+            | "virtual"
+            | "virtual_specifier" => {}
             _ => {
                 let d = declarator(l, c);
                 let ty = l.wrap_type(base.clone(), &d);

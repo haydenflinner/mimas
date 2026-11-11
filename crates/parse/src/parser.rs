@@ -390,7 +390,9 @@ impl<'s> Parser<'s> {
                 BlockElement::Stmt(self.new_stmt(item, start))
             }
             // `space Politics { econ: Dial, power: Dial }` -- axes taken together
-            TokKind::Ident("space") if self.opp_intro() => BlockElement::Stmt(self.space_stmt(start)),
+            TokKind::Ident("space") if self.opp_intro() => {
+                BlockElement::Stmt(self.space_stmt(start))
+            }
             kind if kind.starts_item() => {
                 let item = self.item();
                 self.end_item(&item);
@@ -630,14 +632,19 @@ impl<'s> Parser<'s> {
         }
         match self.nth(1) {
             TokKind::Colon | TokKind::LeftBrace => true,
-            TokKind::Ident(_) | TokKind::FString(_) | TokKind::Tagged(..) | TokKind::Bang | TokKind::NotWord => true,
+            TokKind::Ident(_)
+            | TokKind::FString(_)
+            | TokKind::Tagged(..)
+            | TokKind::Bang
+            | TokKind::NotWord => true,
             // `check (a * b).same(c)`, `check [1 2] == xs`, `check -x < 0`:
             // a gap after the word opens a check, as it does before a name;
             // `check(x)` and `check[i]` touching the word stay a call and
             // an index
-            TokKind::LeftParenthesis | TokKind::LeftSquare | TokKind::TildeLeftBrace | TokKind::Minus => {
-                kw_end < after
-            }
+            TokKind::LeftParenthesis
+            | TokKind::LeftSquare
+            | TokKind::TildeLeftBrace
+            | TokKind::Minus => kw_end < after,
             kind => Literal::try_from(kind).is_ok(),
         }
     }
@@ -687,7 +694,11 @@ impl<'s> Parser<'s> {
             while !self.at_line_start() && self.peek().is_unit_spec() {
                 rhs.push(self.advance().kind());
             }
-            spec_text = Some(self.src.inner()[rhs_start..self.cursor()].trim().to_string());
+            spec_text = Some(
+                self.src.inner()[rhs_start..self.cursor()]
+                    .trim()
+                    .to_string(),
+            );
             match unit_spec(&rhs) {
                 Some(spec) => {
                     if let Err(msg) = shared::units::declare(&name.lexeme, Some(spec)) {
@@ -702,7 +713,10 @@ impl<'s> Parser<'s> {
                 None => self.error(Misdirection {
                     src: self.src(),
                     at: self.location(rhs_start).into(),
-                    msg: format!("`{}` isn't a quantity", spec_text.clone().unwrap_or_default()),
+                    msg: format!(
+                        "`{}` isn't a quantity",
+                        spec_text.clone().unwrap_or_default()
+                    ),
                     label: "a number and unit names — `3mi`, `1852 m/h`, `12`".into(),
                 }),
             }
@@ -1177,7 +1191,8 @@ impl<'s> Parser<'s> {
                     src: self.src(),
                     at: self.location(start).into(),
                     msg: "an enum's glyphs cover every plain variant or none".into(),
-                    label: "give each variant a glyph: `enum Suit { Spades \"♠\", Hearts \"♥\" }`".into(),
+                    label: "give each variant a glyph: `enum Suit { Spades \"♠\", Hearts \"♥\" }`"
+                        .into(),
                 });
             } else if self.depth == 1 {
                 // `item()` parses its body one level under `nested`, so a
@@ -1190,7 +1205,8 @@ impl<'s> Parser<'s> {
                 let at = self.location(start);
                 let item = self.glyph_fn(&head, &arms, start);
                 let imp = Impl::new(Ident::new(head.lexeme.clone(), at), None, vec![item]);
-                self.pending.push(self.new_stmt(Item::new(imp.into(), at, false), start));
+                self.pending
+                    .push(self.new_stmt(Item::new(imp.into(), at, false), start));
             }
         }
         Enum {
@@ -1209,7 +1225,10 @@ impl<'s> Parser<'s> {
             .iter()
             .map(|(from, text)| {
                 MatchCase::new(
-                    Pat::new(PatKind::Variant(Box::new(self.opp_path(head, from, start))), at),
+                    Pat::new(
+                        PatKind::Variant(Box::new(self.opp_path(head, from, start))),
+                        at,
+                    ),
                     None,
                     self.new_expr(Literal::String(text.clone()), start),
                 )
@@ -1243,33 +1262,33 @@ impl<'s> Parser<'s> {
     fn enum_members(&mut self) -> (Vec<(Ident, Member)>, Vec<Option<String>>) {
         let mut glyphs = Vec::new();
         let members = self.list(TokKind::RightBrace, TokKind::is_ident, |p| {
-                let name = p.require_ident();
-                let glyph = match p.peek() {
-                    TokKind::String(s) => {
-                        p.advance();
-                        Some(chompy::utils::unescape(s, &['\\'], &['"']))
-                    }
-                    _ => None,
-                };
-                glyphs.push(glyph);
-                let member = if p.eat(TokKind::LeftParenthesis) {
-                    Member::Tuple(p.list(
-                        TokKind::RightParenthesis,
-                        TokKind::starts_annotation,
-                        Self::annotation,
-                    ))
-                } else if p.eat(TokKind::LeftBrace) {
-                    Member::Struct(p.list(TokKind::RightBrace, TokKind::is_ident, |p| {
-                        StructField {
-                            public: true,
-                            ..p.named_field()
-                        }
-                    }))
-                } else {
-                    Member::Struct(vec![])
-                };
-                (name, member)
-            });
+            let name = p.require_ident();
+            let glyph = match p.peek() {
+                TokKind::String(s) => {
+                    p.advance();
+                    Some(chompy::utils::unescape(s, &['\\'], &['"']))
+                }
+                _ => None,
+            };
+            glyphs.push(glyph);
+            let member = if p.eat(TokKind::LeftParenthesis) {
+                Member::Tuple(p.list(
+                    TokKind::RightParenthesis,
+                    TokKind::starts_annotation,
+                    Self::annotation,
+                ))
+            } else if p.eat(TokKind::LeftBrace) {
+                Member::Struct(
+                    p.list(TokKind::RightBrace, TokKind::is_ident, |p| StructField {
+                        public: true,
+                        ..p.named_field()
+                    }),
+                )
+            } else {
+                Member::Struct(vec![])
+            };
+            (name, member)
+        });
         (members, glyphs)
     }
 
@@ -1334,7 +1353,8 @@ impl<'s> Parser<'s> {
                     src: self.src(),
                     at: self.location(start).into(),
                     msg: "an `opp`'s glyphs come in a pair".into(),
-                    label: "give both ends a glyph or neither: `opp Sky { Sun \"☀\", Moon \"☾\" }`".into(),
+                    label: "give both ends a glyph or neither: `opp Sky { Sun \"☀\", Moon \"☾\" }`"
+                        .into(),
                 });
                 None
             }
@@ -1377,7 +1397,10 @@ impl<'s> Parser<'s> {
         let id = |name: &str| Ident::new(name, at);
         let case = |from: &Ident, to: &Ident| {
             MatchCase::new(
-                Pat::new(PatKind::Variant(Box::new(self.opp_path(head, from, start))), at),
+                Pat::new(
+                    PatKind::Variant(Box::new(self.opp_path(head, from, start))),
+                    at,
+                ),
                 None,
                 self.opp_path(head, to, start),
             )
@@ -1800,17 +1823,19 @@ impl<'s> Parser<'s> {
     /// `{` opens the body, not `P`'s fields). Shared by `for` loops and
     /// the clauses of a `[e for x in xs]` comprehension.
     fn iter_target(&mut self) -> Expr {
-        self.with_juxta(Juxta::Off, |p| p.struct_literals(false, |p| {
-            let iterator = p.expr();
-            let inclusive = p.at(TokKind::DoubleDotEqual);
-            if !p.infix_binds() || (!inclusive && !p.at(TokKind::DoubleDot)) {
-                return iterator;
-            }
-            p.advance();
-            let start = iterator.span().start();
-            let end = p.expr();
-            p.new_expr(Range::new(iterator, end, inclusive), start)
-        }))
+        self.with_juxta(Juxta::Off, |p| {
+            p.struct_literals(false, |p| {
+                let iterator = p.expr();
+                let inclusive = p.at(TokKind::DoubleDotEqual);
+                if !p.infix_binds() || (!inclusive && !p.at(TokKind::DoubleDot)) {
+                    return iterator;
+                }
+                p.advance();
+                let start = iterator.span().start();
+                let end = p.expr();
+                p.new_expr(Range::new(iterator, end, inclusive), start)
+            })
+        })
     }
 
     // r[impl mimas.array.comprehension]
@@ -1938,8 +1963,7 @@ impl<'s> Parser<'s> {
         });
         // what follows the condition is the body, never an argument —
         // `if c "heads" else "tails"` can't read `"heads"` as `c("heads")`
-        let condition =
-            self.with_juxta(Juxta::Off, |p| p.struct_literals(false, Self::expr));
+        let condition = self.with_juxta(Juxta::Off, |p| p.struct_literals(false, Self::expr));
 
         // a trailing `= 5` means the user reached for another language's syntax --
         // catch it before the body parse swallows the token. the rest of the condition gets
@@ -2338,14 +2362,24 @@ impl<'s> Parser<'s> {
             let end = self.cursor();
             let quote = start + tag.len();
             let callee = self.new_expr(
-                Ident::new(format!("__lit_{tag}"), Location::new(self.file_id, Span::new(start, quote))),
+                Ident::new(
+                    format!("__lit_{tag}"),
+                    Location::new(self.file_id, Span::new(start, quote)),
+                ),
                 start,
             );
             let value = Expr::new(
-                ExprKind::Literal(Literal::String(chompy::utils::unescape(&body, &['\\'], &['"']))),
+                ExprKind::Literal(Literal::String(chompy::utils::unescape(
+                    &body,
+                    &['\\'],
+                    &['"'],
+                ))),
                 Location::new(self.file_id, Span::new(quote, end)),
             );
-            let expr = self.new_expr(Call::new(callee, vec![Argument { name: None, value }]), start);
+            let expr = self.new_expr(
+                Call::new(callee, vec![Argument { name: None, value }]),
+                start,
+            );
             return self.chain_accesses(expr);
         }
         let TokKind::FString(content) = self.peek() else {
@@ -3093,7 +3127,10 @@ impl<'s> Parser<'s> {
     fn juxta_apply(&mut self, left: Expr) -> Expr {
         let start = left.span().start();
         let arg = self.with_juxta(Juxta::Off, Self::unary);
-        let arg = Argument { name: None, value: arg };
+        let arg = Argument {
+            name: None,
+            value: arg,
+        };
         self.new_expr(Call::new(left, vec![arg]), start)
     }
 
@@ -4384,10 +4421,7 @@ fn valid_unit_name(name: &str) -> bool {
 /// position, evaluates the spec, and declares. Returns whether the table
 /// gained a new name — that's what calls for a relex.
 fn declare_units(source: &str, tokens: &[Tok<TokKind<'_>>]) -> bool {
-    let toks: Vec<&Tok<TokKind>> = tokens
-        .iter()
-        .filter(|t| !t.kind().is_comment())
-        .collect();
+    let toks: Vec<&Tok<TokKind>> = tokens.iter().filter(|t| !t.kind().is_comment()).collect();
     // (name, spec tokens) at each top-level `unit` decl site; `None` for a
     // bare `unit name;`.
     let mut sites: Vec<(&str, Option<Vec<TokKind>>)> = vec![];
@@ -4395,8 +4429,11 @@ fn declare_units(source: &str, tokens: &[Tok<TokKind<'_>>]) -> bool {
     let mut depth = 0usize;
     while i + 1 < toks.len() {
         match toks[i].kind() {
-            TokKind::LeftBrace | TokKind::TildeLeftBrace | TokKind::LeftParenthesis
-            | TokKind::LeftSquare | TokKind::HookLeftSquare => depth += 1,
+            TokKind::LeftBrace
+            | TokKind::TildeLeftBrace
+            | TokKind::LeftParenthesis
+            | TokKind::LeftSquare
+            | TokKind::HookLeftSquare => depth += 1,
             TokKind::RightBrace | TokKind::RightParenthesis | TokKind::RightSquare => {
                 depth = depth.saturating_sub(1)
             }

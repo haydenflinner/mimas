@@ -1138,6 +1138,11 @@ pub enum Inspect {
     Instance {
         type_name: String,
         fields: Vec<(String, Inspect)>,
+        /// The variant's index in its enum's declaration order when this
+        /// instance is one of an enum's layouts (`Out::Playing` → 0);
+        /// `None` for a struct. Lets a numeric channel read a variant the
+        /// way it read the old int flags — a `w.over` of `Playing` is 0.
+        variant: Option<u32>,
     },
     Fn(BodyId),
     Raised(Box<Inspect>),
@@ -1174,6 +1179,7 @@ impl<'gc> Val<'gc> {
         self,
         struct_names: &[String],
         field_names: &[Vec<String>],
+        variant_ordinals: &[Option<u32>],
         seen: &mut std::collections::HashSet<*const ()>,
     ) -> Inspect {
         // unlike `capture_at`'s guard, this never un-marks a pointer on the way back out --
@@ -1201,7 +1207,7 @@ impl<'gc> Val<'gc> {
                 Inspect::Array(
                     a.0.borrow()
                         .iter()
-                        .map(|v| v.inspect(struct_names, field_names, seen))
+                        .map(|v| v.inspect(struct_names, field_names, variant_ordinals, seen))
                         .collect(),
                 )
             }),
@@ -1211,7 +1217,7 @@ impl<'gc> Val<'gc> {
                         a.0.borrow()
                             .to_vals()
                             .iter()
-                            .map(|v| v.inspect(struct_names, field_names, seen))
+                            .map(|v| v.inspect(struct_names, field_names, variant_ordinals, seen))
                             .collect(),
                     )
                 })
@@ -1223,7 +1229,7 @@ impl<'gc> Val<'gc> {
                         .map(|(k, v)| {
                             (
                                 k.as_str().to_string(),
-                                v.inspect(struct_names, field_names, seen),
+                                v.inspect(struct_names, field_names, variant_ordinals, seen),
                             )
                         })
                         .collect(),
@@ -1246,16 +1252,24 @@ impl<'gc> Val<'gc> {
                             .and_then(|n| n.get(i))
                             .cloned()
                             .unwrap_or_else(|| i.to_string());
-                        (name, v.inspect(struct_names, field_names, seen))
+                        (
+                            name,
+                            v.inspect(struct_names, field_names, variant_ordinals, seen),
+                        )
                     })
                     .collect();
-                Inspect::Instance { type_name, fields }
+                let variant = variant_ordinals.get(struct_id).copied().flatten();
+                Inspect::Instance {
+                    type_name,
+                    fields,
+                    variant,
+                }
             }),
             Val::Fn(body_id) => Inspect::Fn(body_id),
             Val::Raised(s) => Inspect::Raised(Box::new(guarded(
                 Gc::as_ptr(s) as *const (),
                 seen,
-                |seen| (*s).inspect(struct_names, field_names, seen),
+                |seen| (*s).inspect(struct_names, field_names, variant_ordinals, seen),
             ))),
             Val::Closure(_) => Inspect::Other,
             #[cfg(feature = "dataframe")]
@@ -1282,6 +1296,7 @@ impl<'gc> Val<'gc> {
         self,
         struct_names: &[String],
         field_names: &[Vec<String>],
+        variant_ordinals: &[Option<u32>],
         mut budget: usize,
     ) -> Inspect {
         fn guarded(
@@ -1303,6 +1318,7 @@ impl<'gc> Val<'gc> {
             v: Val<'gc>,
             struct_names: &[String],
             field_names: &[Vec<String>],
+            variant_ordinals: &[Option<u32>],
             seen: &mut std::collections::HashSet<*const ()>,
             budget: &mut usize,
         ) -> Inspect {
@@ -1312,44 +1328,81 @@ impl<'gc> Val<'gc> {
                 Val::Int(i) => Inspect::Int(i),
                 Val::Float(f) => Inspect::Float(f),
                 Val::Str(s) => Inspect::Str(s.as_str().to_string()),
-                Val::Array(a) => {
-                    guarded(Gc::as_ptr(a.0) as *const (), seen, budget, |seen, budget| {
+                Val::Array(a) => guarded(
+                    Gc::as_ptr(a.0) as *const (),
+                    seen,
+                    budget,
+                    |seen, budget| {
                         Inspect::Array(
                             a.0.borrow()
                                 .iter()
-                                .map(|v| walk(*v, struct_names, field_names, seen, budget))
+                                .map(|v| {
+                                    walk(
+                                        *v,
+                                        struct_names,
+                                        field_names,
+                                        variant_ordinals,
+                                        seen,
+                                        budget,
+                                    )
+                                })
                                 .collect(),
                         )
-                    })
-                }
-                Val::IntArray(a) | Val::FloatArray(a) => {
-                    guarded(Gc::as_ptr(a.0) as *const (), seen, budget, |seen, budget| {
+                    },
+                ),
+                Val::IntArray(a) | Val::FloatArray(a) => guarded(
+                    Gc::as_ptr(a.0) as *const (),
+                    seen,
+                    budget,
+                    |seen, budget| {
                         Inspect::Array(
                             a.0.borrow()
                                 .to_vals()
                                 .iter()
-                                .map(|v| walk(*v, struct_names, field_names, seen, budget))
+                                .map(|v| {
+                                    walk(
+                                        *v,
+                                        struct_names,
+                                        field_names,
+                                        variant_ordinals,
+                                        seen,
+                                        budget,
+                                    )
+                                })
                                 .collect(),
                         )
-                    })
-                }
-                Val::Dict(d) => {
-                    guarded(Gc::as_ptr(d.0) as *const (), seen, budget, |seen, budget| {
+                    },
+                ),
+                Val::Dict(d) => guarded(
+                    Gc::as_ptr(d.0) as *const (),
+                    seen,
+                    budget,
+                    |seen, budget| {
                         Inspect::Dict(
                             d.0.borrow()
                                 .iter()
                                 .map(|(k, v)| {
                                     (
                                         k.as_str().to_string(),
-                                        walk(*v, struct_names, field_names, seen, budget),
+                                        walk(
+                                            *v,
+                                            struct_names,
+                                            field_names,
+                                            variant_ordinals,
+                                            seen,
+                                            budget,
+                                        ),
                                     )
                                 })
                                 .collect(),
                         )
-                    })
-                }
-                Val::Instance(inst) => {
-                    guarded(Gc::as_ptr(inst.0) as *const (), seen, budget, |seen, budget| {
+                    },
+                ),
+                Val::Instance(inst) => guarded(
+                    Gc::as_ptr(inst.0) as *const (),
+                    seen,
+                    budget,
+                    |seen, budget| {
                         let inst_ref = inst.0.borrow();
                         let struct_id = inst_ref.struct_id as usize;
                         let type_name = struct_names
@@ -1366,26 +1419,48 @@ impl<'gc> Val<'gc> {
                                     .and_then(|n| n.get(i))
                                     .cloned()
                                     .unwrap_or_else(|| i.to_string());
-                                (name, walk(*v, struct_names, field_names, seen, budget))
+                                (
+                                    name,
+                                    walk(
+                                        *v,
+                                        struct_names,
+                                        field_names,
+                                        variant_ordinals,
+                                        seen,
+                                        budget,
+                                    ),
+                                )
                             })
                             .collect();
-                        Inspect::Instance { type_name, fields }
-                    })
-                }
+                        let variant = variant_ordinals.get(struct_id).copied().flatten();
+                        Inspect::Instance {
+                            type_name,
+                            fields,
+                            variant,
+                        }
+                    },
+                ),
                 Val::Fn(body_id) => Inspect::Fn(body_id),
                 Val::Raised(s) => Inspect::Raised(Box::new(guarded(
                     Gc::as_ptr(s) as *const (),
                     seen,
                     budget,
-                    |seen, budget| walk(*s, struct_names, field_names, seen, budget),
+                    |seen, budget| {
+                        walk(
+                            *s,
+                            struct_names,
+                            field_names,
+                            variant_ordinals,
+                            seen,
+                            budget,
+                        )
+                    },
                 ))),
                 Val::Closure(_) => Inspect::Other,
                 #[cfg(feature = "dataframe")]
-                Val::DataFrame(d) => {
-                    guarded(Gc::as_ptr(d.0) as *const (), seen, budget, |_, _| {
-                        inspect_frame(&d.0.borrow().0)
-                    })
-                }
+                Val::DataFrame(d) => guarded(Gc::as_ptr(d.0) as *const (), seen, budget, |_, _| {
+                    inspect_frame(&d.0.borrow().0)
+                }),
                 #[cfg(feature = "dataframe")]
                 Val::PlExpr(_) | Val::GroupBy(_) => Inspect::Other,
                 #[cfg(feature = "darkly")]
@@ -1394,7 +1469,14 @@ impl<'gc> Val<'gc> {
                 Val::Tensor(_) => Inspect::Other,
             }
         }
-        walk(self, struct_names, field_names, &mut seen, &mut budget)
+        walk(
+            self,
+            struct_names,
+            field_names,
+            variant_ordinals,
+            &mut seen,
+            &mut budget,
+        )
     }
 }
 

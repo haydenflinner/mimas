@@ -132,11 +132,17 @@ fn predicate_failure_shows_its_arguments() {
     let err = test_runner::try_execute(&format!("{pre}assert!(near(half(3.0), 1.0));"))
         .unwrap_err()
         .to_string();
-    assert!(err.contains("assertion failed: near(1.5, 1.0) is false"), "{err}");
+    assert!(
+        err.contains("assertion failed: near(1.5, 1.0) is false"),
+        "{err}"
+    );
     let err = test_runner::try_execute(&format!("{pre}assert!(!(near(half(2.0), 1.0)));"))
         .unwrap_err()
         .to_string();
-    assert!(err.contains("assertion failed: near(1.0, 1.0) is true"), "{err}");
+    assert!(
+        err.contains("assertion failed: near(1.0, 1.0) is true"),
+        "{err}"
+    );
 }
 
 #[test]

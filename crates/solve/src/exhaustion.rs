@@ -21,6 +21,7 @@
 //!
 //! tldr we did it joe!
 
+use crate::FxHashSet;
 use crate::{
     Solver,
     components::{AdtFlags, AdtId, Ty, TyExt, Variant},
@@ -31,7 +32,6 @@ use parse::{
     components::{Pat, PatKind},
 };
 use shared::Located;
-use crate::FxHashSet;
 use std::ops::{Deref, DerefMut};
 
 /// Top-level entry. Enumerates uncovered example values up to a safety cap so the diagnostic
@@ -66,6 +66,120 @@ pub(crate) fn missing_witnesses(
         capped,
         variant_defs,
     })
+}
+
+/// Every missing pattern, rendered as *source* — the arm skeletons a
+/// "fill the match" quick-fix inserts. `None` means the match is
+/// exhaustive. Unlike [`missing_witnesses`] nothing is trimmed for
+/// display; a scrutinee whose value space can't be enumerated (`int`,
+/// `str`…) yields a single `_`. Payload positions bind names the body can
+/// use (`{ dx, dy }`, `x?`, `U(x0)`), not the `_` placeholders the
+/// diagnostic summary shows.
+pub fn missing_patterns(
+    cases: &[MatchCase],
+    scrut_ty: &Ty,
+    solver: &Solver,
+) -> Option<Vec<String>> {
+    let mut buf: Vec<Vec<Witness>> = Vec::new();
+    Matrix::for_cases(cases).collect_witnesses(std::slice::from_ref(scrut_ty), solver, &mut buf);
+    if buf.is_empty() {
+        return None;
+    }
+    Some(
+        buf.into_iter()
+            .map(|w| render_arm_pat(w.into_iter().next().unwrap_or(Witness::Wildcard), solver))
+            .collect(),
+    )
+}
+
+/// `render_witness`'s sibling that emits *parseable* pattern text. The
+/// diagnostic renderer writes display syntax (`Dir::D { dx: _ }`); arms
+/// need `=`-style field patterns, and bind names wherever a wildcard sat
+/// so the skeleton is usable without re-typing the pattern.
+fn render_arm_pat(w: Witness, solver: &Solver) -> String {
+    match w {
+        Witness::Wildcard => "_".into(),
+        Witness::Ctor(ctor, subs) => match ctor {
+            Ctor::Bool(true) => "true".into(),
+            Ctor::Bool(false) => "false".into(),
+            Ctor::Null => "null".into(),
+            Ctor::Lit => "_".into(),
+            Ctor::Some => match subs.into_iter().next() {
+                None | Some(Witness::Wildcard) => "x?".into(),
+                Some(sub) => {
+                    let p = render_arm_pat(sub, solver);
+                    // `x?` chains need parens — `x??` lexes as `x ??`
+                    if p.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                        format!("{p}?")
+                    } else {
+                        format!("({p})?")
+                    }
+                }
+            },
+            Ctor::Tuple(_) => format!(
+                "({})",
+                subs.into_iter()
+                    .enumerate()
+                    .map(|(i, s)| match s {
+                        Witness::Wildcard => format!("x{i}"),
+                        _ => render_arm_pat(s, solver),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Ctor::Variant(adt, name) => {
+                let adt_data = &solver.adts[adt];
+                let qualified = format!("{}::{}", adt_data.name, name);
+                arm_adt_pat(&qualified, &adt_data.variants[&name], subs, solver)
+            }
+            Ctor::Single(adt) => {
+                let adt_data = &solver.adts[adt];
+                arm_adt_pat(
+                    &adt_data.name,
+                    adt_data.variants.values().next().unwrap(),
+                    subs,
+                    solver,
+                )
+            }
+        },
+    }
+}
+
+/// The payload half of [`render_arm_pat`]: struct variants bind their
+/// field names (`{ dx, dy }`), tuple payloads get positional `x0`/`x1`
+/// names when the witness only proves presence.
+fn arm_adt_pat(name: &str, variant: &Variant, subs: Vec<Witness>, solver: &Solver) -> String {
+    match variant {
+        Variant::Tuple(tv) if tv.members.is_empty() => name.into(),
+        Variant::Tuple(_) => format!(
+            "{}({})",
+            name,
+            subs.into_iter()
+                .enumerate()
+                .map(|(i, s)| match s {
+                    Witness::Wildcard => format!("x{i}"),
+                    _ => render_arm_pat(s, solver),
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Variant::Struct(sv) => {
+            let fields: Vec<_> = sv
+                .fields
+                .keys()
+                .zip(subs)
+                .map(|(k, w)| match w {
+                    Witness::Wildcard => k.clone(),
+                    _ => format!("{} = {}", k, render_arm_pat(w, solver)),
+                })
+                .collect();
+            if fields.is_empty() {
+                name.into()
+            } else {
+                format!("{} {{ {} }}", name, fields.join(", "))
+            }
+        }
+    }
 }
 
 /// First source-defined enum variant named anywhere in a witness tree, as a label pointing at its

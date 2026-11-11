@@ -56,7 +56,10 @@ pub const SHADOWABLE_WORDS: [(&str, &str); 3] = [("and", "&&"), ("or", "||"), ("
 
 /// `Some(symbol)` when `name` is an operator word a fn may shadow.
 pub fn shadowable_word_symbol(name: &str) -> Option<&'static str> {
-    SHADOWABLE_WORDS.iter().find(|(w, _)| *w == name).map(|(_, s)| *s)
+    SHADOWABLE_WORDS
+        .iter()
+        .find(|(w, _)| *w == name)
+        .map(|(_, s)| *s)
 }
 
 /// Which operator words `source` declares as fns -- a line-level scan for
@@ -108,7 +111,9 @@ pub fn shadow_sets(pages: &[(&str, &str)]) -> Vec<[bool; 3]> {
     }
     let mut memo = vec![None; pages.len()];
     let mut busy = vec![false; pages.len()];
-    (0..pages.len()).map(|i| set_of(i, pages, &mut memo, &mut busy)).collect()
+    (0..pages.len())
+        .map(|i| set_of(i, pages, &mut memo, &mut busy))
+        .collect()
 }
 
 /// The `use "…"` names `text` includes, lowercased.
@@ -168,7 +173,11 @@ pub fn shadow_table(source: &str) -> Vec<(usize, [bool; 3])> {
             (name, &source[s..end])
         })
         .collect();
-    starts.iter().map(|s| s.0).zip(shadow_sets(&pages)).collect()
+    starts
+        .iter()
+        .map(|s| s.0)
+        .zip(shadow_sets(&pages))
+        .collect()
 }
 
 /// The set of the last table entry starting at or before `pos`.
@@ -610,7 +619,9 @@ impl<'s> Lex<'s, Tok<TokKind<'s>>, TokKind<'s>> for Lexer<'s> {
             // tagged literal: `pat"bd sd"`, `keys"right@5 up@2"`. Keywords
             // never tag (`f"…"` was taken above as the f-string).
             match kind {
-                TokKind::Ident(tag) if self.source[self.char_stream.position()..].starts_with('"') => {
+                TokKind::Ident(tag)
+                    if self.source[self.char_stream.position()..].starts_with('"') =>
+                {
                     self.match_chomp('"');
                     let body = &self.source[self.char_stream.position()..];
                     TokKind::Tagged(tag, self.construct_quoted(start, body, string_end(body)))

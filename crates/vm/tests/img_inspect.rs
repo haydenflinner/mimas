@@ -43,7 +43,10 @@ fn struct_variant_reports_variant_name_and_field_names() {
         .call_method_on_first_instance_inspect("draw")
         .expect("should find the Scene instance and call draw()");
 
-    let Inspect::Instance { type_name, fields } = result else {
+    let Inspect::Instance {
+        type_name, fields, ..
+    } = result
+    else {
         panic!("expected an Instance, got {result:?}");
     };
     // variant names come back qualified as "EnumName::Variant", not just "Variant" -- matches
@@ -56,6 +59,7 @@ fn struct_variant_reports_variant_name_and_field_names() {
     let Inspect::Instance {
         type_name: top_name,
         fields: top_fields,
+        ..
     } = &fields[0].1
     else {
         panic!("expected `top` to be an Instance, got {:?}", fields[0].1);
@@ -71,6 +75,7 @@ fn struct_variant_reports_variant_name_and_field_names() {
     let Inspect::Instance {
         type_name: color_name,
         fields: color_fields,
+        ..
     } = &top_fields[1].1
     else {
         panic!(

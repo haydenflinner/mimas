@@ -117,7 +117,11 @@ fn layout(graph: &DataflowGraph) -> Vec<NodePos> {
     }
     let mut depth = vec![0u32; n];
     for i in 0..n {
-        depth[i] = incoming[i].iter().map(|&src| depth[src] + 1).max().unwrap_or(0);
+        depth[i] = incoming[i]
+            .iter()
+            .map(|&src| depth[src] + 1)
+            .max()
+            .unwrap_or(0);
     }
     let max_depth = depth.iter().copied().max().unwrap_or(0) as usize;
     let mut columns: Vec<Vec<usize>> = vec![Vec::new(); max_depth + 1];
@@ -131,8 +135,10 @@ fn layout(graph: &DataflowGraph) -> Vec<NodePos> {
         let max_rows = columns.iter().map(|c| c.len()).max().unwrap_or(1);
         let offset = (max_rows.saturating_sub(members.len())) as f32 * ROW_HEIGHT / 2.0;
         for (row, &node_idx) in members.iter().enumerate() {
-            positions[node_idx] =
-                NodePos { x: col as f32 * COLUMN_WIDTH, y: offset + row as f32 * ROW_HEIGHT };
+            positions[node_idx] = NodePos {
+                x: col as f32 * COLUMN_WIDTH,
+                y: offset + row as f32 * ROW_HEIGHT,
+            };
         }
     }
     positions
@@ -214,11 +220,7 @@ fn on_dataflow_scroll(trigger: On<Pointer<Scroll>>, mut positions: Query<&mut Sc
 
 /// Renders `graph` into `ui` as a pannable canvas of boxes and right-angle wires. `text_font`/
 /// `text_color` style every node's label.
-pub(crate) fn render(
-    ui: &mut Imm<CapsUi>,
-    font: bevy::asset::Handle<Font>,
-    graph: &DataflowGraph,
-) {
+pub(crate) fn render(ui: &mut Imm<CapsUi>, font: bevy::asset::Handle<Font>, graph: &DataflowGraph) {
     let positions = layout(graph);
     let (edge_dest, node_inputs) = port_layout(graph, &positions);
     let port_color = theme::overlay1();
@@ -258,7 +260,9 @@ pub(crate) fn render(
                     })
                     .add(|ui| {
                         ui.ch()
-                            .on_spawn_insert(move || (TextColor(theme::text()), crate::text_font(label_font)))
+                            .on_spawn_insert(move || {
+                                (TextColor(theme::text()), crate::text_font(label_font))
+                            })
                             .text(node.label.clone());
                     });
 
@@ -267,7 +271,13 @@ pub(crate) fn render(
                 // still one port with two wires soldered to it, same as a real jack with a
                 // splitter -- it's the *input* side where multiplicity needs separate pins).
                 if node.kind != NodeKind::Out {
-                    draw_port(ui, ("df_port_out", i), pos.x + NODE_WIDTH, pos.y + NODE_HEIGHT / 2.0, port_color);
+                    draw_port(
+                        ui,
+                        ("df_port_out", i),
+                        pos.x + NODE_WIDTH,
+                        pos.y + NODE_HEIGHT / 2.0,
+                        port_color,
+                    );
                 }
                 // input jacks -- one per operand this node actually consumes, each its own point
                 // on the left edge (see `port_layout`), labeled when the operand has a
@@ -332,25 +342,33 @@ fn draw_edge(
     let mid_x = (from_x + to_x) / 2.0;
 
     let wire = theme::overlay1();
-    let seg = |ui: &mut Imm<CapsUi>, id: (&'static str, usize, u8), x: f32, y: f32, w: f32, h: f32| {
-        ui.ch_id(id).on_spawn_insert(move || {
-            (
-                Node {
-                    position_type: PositionType::Absolute,
-                    left: Val::Px(x),
-                    top: Val::Px(y),
-                    width: Val::Px(w.max(WIRE_THICKNESS)),
-                    height: Val::Px(h.max(WIRE_THICKNESS)),
-                    ..default()
-                },
-                BackgroundColor(wire),
-            )
-        });
-    };
+    let seg =
+        |ui: &mut Imm<CapsUi>, id: (&'static str, usize, u8), x: f32, y: f32, w: f32, h: f32| {
+            ui.ch_id(id).on_spawn_insert(move || {
+                (
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: Val::Px(x),
+                        top: Val::Px(y),
+                        width: Val::Px(w.max(WIRE_THICKNESS)),
+                        height: Val::Px(h.max(WIRE_THICKNESS)),
+                        ..default()
+                    },
+                    BackgroundColor(wire),
+                )
+            });
+        };
 
     // three-segment right-angle route: out of `from`'s right edge, across to the horizontal
     // midpoint, up/down to `to`'s row, then in to `to`'s left edge.
-    seg(ui, ("df_edge_h1", edge_idx, 0), from_x, from_y - WIRE_THICKNESS / 2.0, mid_x - from_x, WIRE_THICKNESS);
+    seg(
+        ui,
+        ("df_edge_h1", edge_idx, 0),
+        from_x,
+        from_y - WIRE_THICKNESS / 2.0,
+        mid_x - from_x,
+        WIRE_THICKNESS,
+    );
     seg(
         ui,
         ("df_edge_v", edge_idx, 1),
@@ -359,5 +377,12 @@ fn draw_edge(
         WIRE_THICKNESS,
         (to_y - from_y).abs(),
     );
-    seg(ui, ("df_edge_h2", edge_idx, 2), mid_x, to_y - WIRE_THICKNESS / 2.0, to_x - mid_x, WIRE_THICKNESS);
+    seg(
+        ui,
+        ("df_edge_h2", edge_idx, 2),
+        mid_x,
+        to_y - WIRE_THICKNESS / 2.0,
+        to_x - mid_x,
+        WIRE_THICKNESS,
+    );
 }

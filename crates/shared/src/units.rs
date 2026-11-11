@@ -398,10 +398,7 @@ pub fn declare(name: &str, spec: Option<(Dim, f64)>) -> Result<(Dim, f64), Strin
                 Some(spec) => spec == existing,
                 // `unit tile;` again is the same decl iff tile's base slot
                 // still says `tile`
-                None => existing
-                    .0
-                    .custom_slot()
-                    .is_some_and(|i| c.bases[i] == name),
+                None => existing.0.custom_slot().is_some_and(|i| c.bases[i] == name),
             };
             return if same {
                 Ok(existing)

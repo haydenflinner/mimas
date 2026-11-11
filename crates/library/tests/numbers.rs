@@ -363,11 +363,26 @@ test_run!(
 #[test]
 fn float_text_round_trips_through_the_lexer() {
     for src in [
-        "2.0", "0.0", "-0.0", "0.1", "0.1 + 0.2", "1e21", "1e-7", "1.0 / 0.0", "-1.0 / 0.0",
-        "0.0 / 0.0", "float::MAX", "float::MIN_POSITIVE", "123456789.125", "1.0 / 3.0",
+        "2.0",
+        "0.0",
+        "-0.0",
+        "0.1",
+        "0.1 + 0.2",
+        "1e21",
+        "1e-7",
+        "1.0 / 0.0",
+        "-1.0 / 0.0",
+        "0.0 / 0.0",
+        "float::MAX",
+        "float::MIN_POSITIVE",
+        "123456789.125",
+        "1.0 / 3.0",
     ] {
         let text = test_runner::render("", src);
         let again = test_runner::render("", &text);
-        assert_eq!(again, text, "{src} printed {text}, which read back as {again}");
+        assert_eq!(
+            again, text,
+            "{src} printed {text}, which read back as {again}"
+        );
     }
 }
