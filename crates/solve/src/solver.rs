@@ -127,6 +127,14 @@ pub struct Solver {
     /// Keyed by call location, the same span the `Prints` fixture attributes.
     /// Surfaces on [`Resolutions::print_dims`](crate::Resolutions).
     pub(crate) print_dims: FxIndexMap<shared::Location, shared::units::Dim>,
+    /// Top-level echo site → how its quantity shows (the unit as written).
+    /// Surfaces on [`Resolutions::echo_units`](crate::Resolutions).
+    pub(crate) echo_units: FxIndexMap<shared::Location, shared::units::Shown>,
+    /// The type each bare-brace literal's slot expects (`{ x: 1 }` passed where a
+    /// `Pt` goes), noted by `fulfill_ty` before the literal is solved — a struct
+    /// hint makes it that struct, anything else leaves it a dict.
+    /// r[impl mimas.record.context]
+    pub(crate) record_hints: FxHashMap<NodeId, Ty>,
     /// Dimensions of api-adt fields (`Input.dt` is `s`): `(adt name, field name)`.
     /// Populated by `install_user_adt` from `ApiVariantFields::Named` dims; the dims pass
     /// consults it when a `.field` read isn't on a source-declared struct.
@@ -236,6 +244,8 @@ impl Solver {
             node_dims: FxIndexMap::default(),
             want_dims: FxIndexMap::default(),
             print_dims: FxIndexMap::default(),
+            echo_units: FxIndexMap::default(),
+            record_hints: FxHashMap::default(),
             field_dims: FxHashMap::default(),
             member_units: FxHashMap::default(),
             len_checks: FxIndexMap::default(),
@@ -2737,6 +2747,8 @@ impl Solver {
                             expected_ty: expected.clone(),
                         });
                         self.control_flow.enter();
+                        // r[impl mimas.record.context] a literal the body yields fills the return type
+                        self.hint_records(body, &expected);
                         let body_ty = body.query(self)?;
                         self.fn_stack.pop();
                         self.control_flow.exit();
@@ -2929,6 +2941,51 @@ impl Solver {
     }
 
     /// Records what `ident` resolved to. This is only used by tooling.
+    /// Notes `ty` as the expected type of every bare-brace literal `expr` is or
+    /// directly holds — through `(…)`, array literals, and the value a block, an
+    /// `if` branch or a `match` arm yields, so `let ps: [Pt] =
+    /// [{ x: 1 }, { x: 2 }]` fills two `Pt`s. The first hint a literal gets wins.
+    /// r[impl mimas.record.context]
+    pub(crate) fn hint_records(&mut self, expr: &Expr, ty: &Ty) {
+        match expr.kind() {
+            ExprKind::Literal(Literal::Record(_)) => {
+                self.record_hints.entry(expr.id()).or_insert_with(|| ty.clone());
+            }
+            ExprKind::Literal(Literal::Array(items)) => {
+                let inner = match ty.clone().normalized(self) {
+                    Ty::Array(inner, _) => *inner,
+                    Ty::Option(o) => match *o {
+                        Ty::Array(inner, _) => *inner,
+                        _ => return,
+                    },
+                    _ => return,
+                };
+                for item in items {
+                    self.hint_records(item, &inner);
+                }
+            }
+            ExprKind::Grouping(g) => self.hint_records(&g.inner, ty),
+            // the value a block, a branch or an arm hands back fills the same slot
+            ExprKind::Block(b) => {
+                if let Some(y) = &b.yielded_expr {
+                    self.hint_records(y, ty);
+                }
+            }
+            ExprKind::If(i) => {
+                self.hint_records(&i.main_body, ty);
+                if let Some(e) = &i.else_expr {
+                    self.hint_records(e, ty);
+                }
+            }
+            ExprKind::Match(m) => {
+                for case in &m.cases {
+                    self.hint_records(case.body(), ty);
+                }
+            }
+            _ => {}
+        }
+    }
+
     pub(crate) fn note(&mut self, ident: &Ident, ty: Ty, dec: Option<DecId>) {
         if let Some(dec) = dec {
             self.node_decs.insert(ident.id, dec);

@@ -214,6 +214,35 @@ impl Dim {
     }
 }
 
+/// How an echo shows a quantity: in the unit the program wrote for its
+/// dimension (`12lb` echoes `12 lb`, not `5.44 kg`), divided by `scale` (the
+/// unit's size in base units). `list` marks a list of such quantities, which
+/// echoes as `[12, 8, 3] lb`. r[impl mimas.echo.unit]
+#[derive(Debug, Clone, PartialEq)]
+pub struct Shown {
+    pub name: String,
+    pub scale: f64,
+    pub list: bool,
+}
+
+/// A float as an echo writes it beside a unit: at most 12 significant
+/// digits, trailing zeros dropped, so a value converted out of base units
+/// (`12lb` round-trips as `12.000000000000002`) reads `12`.
+pub fn shown_number(v: f64) -> String {
+    if !v.is_finite() || v == 0.0 {
+        return if v == 0.0 { "0".into() } else { format!("{v}") };
+    }
+    let mag = v.abs().log10().floor() as i32;
+    let prec = (11 - mag).clamp(0, 20) as usize;
+    let s = format!("{v:.prec$}");
+    let s = if s.contains('.') {
+        s.trim_end_matches('0').trim_end_matches('.').to_string()
+    } else {
+        s
+    };
+    if s == "-0" { "0".into() } else { s }
+}
+
 /// The word for a dimension, when it has one.
 fn family(dim: Dim) -> &'static str {
     match SI.iter().find(|(_, d)| *d == dim) {

@@ -136,6 +136,18 @@ struct Pass<'a> {
     /// `print`/`dbg`/`warn` call site → the dim of the reported value — surfaces to
     /// `Resolutions::print_dims` so the program can ship it to the natives.
     print_dims: FxIndexMap<Location, Dim>,
+    /// Each top-level echo site's computed dim (a quantity, or a list of them) —
+    /// resolved to [`units::Shown`] once the walk has seen every written unit.
+    echo_ds: FxIndexMap<Location, D>,
+    /// The first unit the program writes for each dimension (`12lb`, a bare `lb`
+    /// constant): an echo shows a quantity of that dimension in it.
+    written: FxIndexMap<Dim, (String, f64)>,
+    /// Unit-constant declarations (`lb` read as `1lb`) by name, so a bare unit in
+    /// an expression counts as writing it.
+    unit_decs: FxHashMap<DecId, String>,
+    /// One slot per enclosing loop: the joined dim of the values its `collect`s
+    /// hand over, so `for i in .. collect qty[i] * price[i]` is a list of usd.
+    collects: Vec<Option<D>>,
     report: bool,
     errors: Vec<miette::Report>,
 }
@@ -170,6 +182,14 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> Result<()> {
             dims: FxIndexMap::default(),
             want_dims: FxIndexMap::default(),
             print_dims: FxIndexMap::default(),
+            echo_ds: FxIndexMap::default(),
+            written: FxIndexMap::default(),
+            unit_decs: solver
+                .unit_consts
+                .iter()
+                .map(|(name, (dec, _))| (*dec, name.clone()))
+                .collect(),
+            collects: Vec::new(),
             report: false,
             errors: Vec::new(),
         };
@@ -196,7 +216,12 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> Result<()> {
         let dims = std::mem::take(&mut pass.dims);
         let want_dims = std::mem::take(&mut pass.want_dims);
         let print_dims = std::mem::take(&mut pass.print_dims);
+        let echo_units: Vec<(Location, units::Shown)> = std::mem::take(&mut pass.echo_ds)
+            .into_iter()
+            .filter_map(|(loc, d)| pass.shown(&d).map(|s| (loc, s)))
+            .collect();
         drop(pass); // ends the `&*solver` borrow
+        solver.echo_units.extend(echo_units);
         solver.node_dims.extend(dims);
         solver.want_dims.extend(want_dims);
         solver.print_dims.extend(print_dims);
@@ -206,6 +231,58 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> Result<()> {
 }
 
 impl<'a> Pass<'a> {
+    /// How an echo of a value in `d` shows its unit: the unit written for the
+    /// dimension, else a ratio or product of two written units (`usd/lb`), else
+    /// the coherent unit. `None` for a value with no known dimension.
+    /// r[impl mimas.echo.unit]
+    fn shown(&self, d: &D) -> Option<units::Shown> {
+        let (dim, list) = match d {
+            D::Q(dim) => (*dim, false),
+            D::Arr(inner) => match &**inner {
+                D::Q(dim) => (*dim, true),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        if dim.is_none() || dim == units::INDEX {
+            return None;
+        }
+        let pick = || -> (String, f64) {
+            if let Some((n, s)) = self.written.get(&dim) {
+                return (n.clone(), *s);
+            }
+            // a dimension with a plain name of its own (`usd`, `W`) reads
+            // better as that than as `lb*usd/lb`
+            let coherent = dim.name();
+            if !coherent.contains(['/', '*', '^']) {
+                return (coherent, 1.0);
+            }
+            // compose only from units written as one word
+            let atoms: Vec<(&Dim, &(String, f64))> = self
+                .written
+                .iter()
+                .filter(|(_, (n, _))| !n.contains(['/', '*', '^']))
+                .collect();
+            for (ad, (an, asc)) in atoms.iter().copied() {
+                for (bd, (bn, bsc)) in atoms.iter().copied() {
+                    if ad.div(*bd) == dim {
+                        return (format!("{an}/{bn}"), asc / bsc);
+                    }
+                }
+            }
+            for (ad, (an, asc)) in atoms.iter().copied() {
+                for (bd, (bn, bsc)) in atoms.iter().copied() {
+                    if ad.mul(*bd) == dim {
+                        return (format!("{an}*{bn}"), asc * bsc);
+                    }
+                }
+            }
+            (dim.name(), 1.0)
+        };
+        let (name, scale) = pick();
+        Some(units::Shown { name, scale, list })
+    }
+
     // ---- indexing
 
     /// Every indexed struct's members that declare a unit, looking through
@@ -366,6 +443,43 @@ impl<'a> Pass<'a> {
         units::lookup(&ident.lexeme).map(|(d, _)| d)
     }
 
+    /// Records the units an annotation spells (`lb`, `[usd/lb]`) as written
+    /// for their dimensions, first one wins — see [`Self::shown`].
+    fn note_written(&mut self, a: &Annotation) {
+        match a {
+            Annotation::Ty(ident) => {
+                if self.unit_of(ident).is_some()
+                    && let Some((dim, scale)) = units::lookup(&ident.lexeme)
+                {
+                    self.written.entry(dim).or_insert((ident.lexeme.clone(), scale));
+                }
+            }
+            Annotation::Quantity(parts) => {
+                let text = parts
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (u, e))| match (i, *e) {
+                        (0, 1) => u.lexeme.clone(),
+                        (0, e) => format!("{}^{e}", u.lexeme),
+                        (_, -1) => format!("/{}", u.lexeme),
+                        (_, 1) => format!("*{}", u.lexeme),
+                        (_, e) if e < 0 => format!("/{}^{}", u.lexeme, -e),
+                        (_, e) => format!("*{}^{e}", u.lexeme),
+                    })
+                    .collect::<String>();
+                if let Some((dim, scale)) = units::parse(&text)
+                    && !dim.is_none()
+                {
+                    self.written.entry(dim).or_insert((text, scale));
+                }
+            }
+            Annotation::Array(inner, _) | Annotation::Option(inner) | Annotation::Result(inner) => {
+                self.note_written(inner)
+            }
+            _ => {}
+        }
+    }
+
     /// Runs `f` with a generic type-param scope pushed (see `ty_params`).
     fn with_ty_params<T>(&mut self, params: Vec<String>, f: impl FnOnce(&mut Self) -> T) -> T {
         self.ty_params.push(params);
@@ -395,6 +509,11 @@ impl<'a> Pass<'a> {
     fn stmt(&mut self, stmt: &'a Stmt) {
         match stmt.kind() {
             StmtKind::Let(l) => {
+                // a declared unit is how the program asks to see its
+                // dimension — it counts as written before the value's own
+                if let Some(a) = &l.annotation {
+                    self.note_written(a);
+                }
                 let got = self.expr(&l.right);
                 if let Some(else_branch) = &l.else_branch {
                     self.expr(else_branch);
@@ -417,6 +536,7 @@ impl<'a> Pass<'a> {
                 if let Some(dim) = d.dim().filter(|x| !x.is_none()) {
                     self.print_dims.insert(stmt.location(), dim);
                 }
+                self.echo_ds.insert(stmt.location(), d.clone());
                 self.bind(&l.left, d);
             }
             StmtKind::Assignment(a) => {
@@ -437,9 +557,11 @@ impl<'a> Pass<'a> {
             StmtKind::Expr(e) => {
                 // a bare expression's echo carries its unit (`25kW * 8h` shows `720000000 J`)
                 // r[impl mimas.echo]
-                if let Some(dim) = self.expr(e).dim().filter(|x| !x.is_none()) {
+                let d = self.expr(e);
+                if let Some(dim) = d.dim().filter(|x| !x.is_none()) {
                     self.print_dims.insert(stmt.location(), dim);
                 }
+                self.echo_ds.insert(stmt.location(), d);
             }
             StmtKind::Item(item) => self.item(item),
             // `unit` decls register into the units table at parse — nothing to check
@@ -585,12 +707,19 @@ impl<'a> Pass<'a> {
         match e.kind() {
             ExprKind::Literal(l) => self.literal(e, l),
             ExprKind::Ident(ident) => match self.dec_of(ident) {
-                Some(dec) => self
+                Some(dec) => {
+                    if let Some(name) = self.unit_decs.get(&dec)
+                        && let Some((dim, scale)) = units::lookup(name)
+                    {
+                        self.written.entry(dim).or_insert((name.clone(), scale));
+                    }
+                    self
                     .env
                     .get(&dec)
                     .or_else(|| self.consts.get(&dec))
                     .cloned()
-                    .unwrap_or(D::Any),
+                    .unwrap_or(D::Any)
+                }
                 None => D::Any,
             },
             ExprKind::Grouping(g) => self.expr(&g.inner),
@@ -710,23 +839,30 @@ impl<'a> Pass<'a> {
                     _ => D::Any,
                 };
                 self.bind(&f.binding, item);
-                self.expr(&f.body);
-                D::Any
+                self.collected(|p| {
+                    p.expr(&f.body);
+                })
             }
             ExprKind::While(w) => {
                 self.expr(&w.header);
                 if let Some(b) = &w.binding {
                     self.bind(b, D::Any);
                 }
-                self.expr(&w.body);
-                D::Any
+                self.collected(|p| {
+                    p.expr(&w.body);
+                })
             }
-            ExprKind::Loop(l) => {
-                self.expr(&l.body);
-                D::Any
-            }
+            ExprKind::Loop(l) => self.collected(|p| {
+                p.expr(&l.body);
+            }),
             ExprKind::Collect(c) => {
-                self.expr(&c.value);
+                let d = self.expr(&c.value);
+                if let Some(slot) = self.collects.last_mut() {
+                    *slot = Some(match slot.take() {
+                        None => d,
+                        Some(prev) => join(prev, &d),
+                    });
+                }
                 D::Any
             }
             ExprKind::Return(r) => {
@@ -791,7 +927,14 @@ impl<'a> Pass<'a> {
         match l {
             Literal::Float(_) | Literal::Int(_) => {
                 // `3index` is the one int literal that carries a dimension
-                self.ast.quantity(e.id()).map_or(PLAIN, D::Q)
+                let d = self.ast.quantity(e.id());
+                if let (Some(dim), Some(text)) = (d, self.ast.quantity_unit(e.id()))
+                    && !dim.is_none()
+                    && let Some((_, scale)) = units::parse(text)
+                {
+                    self.written.entry(dim).or_insert((text.to_string(), scale));
+                }
+                d.map_or(PLAIN, D::Q)
             }
             Literal::Array(items) => {
                 let mut out: Option<D> = None;
@@ -851,6 +994,27 @@ impl<'a> Pass<'a> {
             Literal::Dictionary(fields) => {
                 for (_, v) in fields {
                     self.expr(v);
+                }
+                D::Any
+            }
+            // a bare `{ … }` the solver made a struct checks its fields' units
+            // like `Name { … }` does r[impl mimas.record.context]
+            Literal::Record(fields) => {
+                let decl = self.adt_name(e).and_then(|n| self.structs.get(&n).copied());
+                for (k, value) in fields {
+                    let got = self.expr(value);
+                    let Some(decl) = decl else { continue };
+                    let field = decl
+                        .fields
+                        .iter()
+                        .find(|f| matches!(&f.name, FieldKey::Ident(i) if i.lexeme == k.lexeme));
+                    if let Some(field) = field {
+                        let want = self.with_ty_params(
+                            decl.type_params.iter().map(|i| i.lexeme.clone()).collect(),
+                            |s| s.annotation(&field.annotation),
+                        );
+                        self.expect(&want, &got, value.location(), &format!("field `{}`", k.lexeme));
+                    }
                 }
                 D::Any
             }
@@ -1008,6 +1172,9 @@ impl<'a> Pass<'a> {
             if let Some(f) = user {
                 return self.apply(f, c, &args, false, None);
             }
+            if let Some(d) = self.aggregate(e, c, callee, &args) {
+                return d;
+            }
         } else {
             self.expr(&c.left);
         }
@@ -1152,6 +1319,39 @@ impl<'a> Pass<'a> {
         match first {
             D::Q(d) => D::Iv(*d),
             _ => D::Any,
+        }
+    }
+
+    /// The prelude's free aggregates: `sum`/`avg` of a list of quantities is a
+    /// quantity of their dimension, `count` is a plain number, and the `_by`
+    /// forms keep the same dims per group (a grouped result reads like a list).
+    /// `None` when the callee isn't one of them.
+    /// r[impl mimas.agg.free] r[impl mimas.agg.by]
+    fn aggregate(&mut self, e: &'a Expr, c: &'a parse::Call, callee: &Ident, args: &[D]) -> Option<D> {
+        let dec = self.dec_of(callee)?;
+        self.solver.dec_to_native.get(&dec)?;
+        let item = |d: Option<&D>| match d {
+            Some(D::Arr(inner)) => (**inner).clone(),
+            _ => D::Any,
+        };
+        let _ = (e, c);
+        Some(match self.solver.decs[dec].name.as_str() {
+            "sum" | "avg" => item(args.first()),
+            "count" => PLAIN,
+            "sum_by" | "avg_by" => D::Arr(Box::new(item(args.first()))),
+            "count_by" => D::Arr(Box::new(PLAIN)),
+            _ => return None,
+        })
+    }
+
+    /// Walks a loop body; the loop is worth a list of what its `collect`s hand
+    /// over (unknown when it collects nothing the checker can follow).
+    fn collected(&mut self, body: impl FnOnce(&mut Self)) -> D {
+        self.collects.push(None);
+        body(self);
+        match self.collects.pop().flatten() {
+            Some(d) => D::Arr(Box::new(d)),
+            None => D::Any,
         }
     }
 

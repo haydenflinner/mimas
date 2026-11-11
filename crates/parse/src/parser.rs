@@ -998,6 +998,7 @@ impl<'s> Parser<'s> {
                 TokKind::For => parser.for_in(),
                 TokKind::If => parser.if_expr(),
                 TokKind::Match => parser.match_expr(),
+                TokKind::LeftBrace if parser.record_start() => parser.record_literal(),
                 TokKind::LeftBrace => parser.block(),
                 TokKind::Return => parser.return_expr(),
                 TokKind::Raise => parser.raise_expr(),
@@ -2484,7 +2485,10 @@ impl<'s> Parser<'s> {
             let elements = self.with_juxta(Juxta::Comma, |p| {
                 p.list(TokKind::RightBrace, TokKind::is_ident, |p| {
                     let name = p.require_ident();
-                    p.expect(TokKind::Equal);
+                    // r[impl mimas.record.separator]
+                    if !p.eat(TokKind::Colon) {
+                        p.expect(TokKind::Equal);
+                    }
                     (name, p.struct_literals(true, Self::expr))
                 })
             });
@@ -2558,7 +2562,10 @@ impl<'s> Parser<'s> {
                 let value = if self.at(TokKind::Comma) || self.at(TokKind::RightBrace) {
                     self.new_expr(field.clone(), field.location.span().start())
                 } else {
-                    self.expect(TokKind::Equal);
+                    // r[impl mimas.record.separator] `x: 1` or `x = 1`
+                    if !self.eat(TokKind::Colon) {
+                        self.expect(TokKind::Equal);
+                    }
                     self.expr()
                 };
                 fields.push((FieldKey::Ident(field), value));
@@ -3530,7 +3537,7 @@ impl<'s> Parser<'s> {
     fn parentheticals(&mut self) -> Expr {
         let start = self.next_start();
         if !self.eat(TokKind::LeftParenthesis) {
-            return self.block();
+            return if self.record_start() { self.record_literal() } else { self.block() };
         }
         // `(...)` is a fresh expression boundary: modes disarmed by an
         // enclosing head (`if`, `for .. in`, `table`) re-arm inside
@@ -3553,6 +3560,97 @@ impl<'s> Parser<'s> {
                 p.new_expr(Literal::Tuple(members), start)
             })
         })
+    }
+
+    /// At a `{` in expression position: does a bare-brace literal open here rather
+    /// than a block? `{ name: …` and `{ "key": …` always do (no statement starts
+    /// with a name and one colon), `{ a, b }` does (a comma never follows a block's
+    /// first statement), and `{ name = …, …` does once a comma follows the first
+    /// value on its line — a lone `{ x = 1 }` stays the block that assigns `x`.
+    /// r[impl mimas.record.literal] r[impl mimas.record.separator]
+    fn record_start(&self) -> bool {
+        if self.peek() != TokKind::LeftBrace {
+            return false;
+        }
+        let key = self.nth(1);
+        let named = key.is_ident();
+        if !named && !matches!(key, TokKind::String(_)) {
+            return false;
+        }
+        match self.nth(2) {
+            TokKind::Colon => true,
+            TokKind::Comma => named,
+            TokKind::Equal if named => {
+                // scan the first value at bracket depth 0: a comma on its line
+                // makes it an entry; `;`, `}` or a line break first, a block
+                let src = self.src.inner();
+                let mut depth = 0i32;
+                let mut i = self.next + 3;
+                let mut prev_end = self.tokens[(self.next + 2).min(self.tokens.len() - 1)].span().end();
+                while i < self.tokens.len() {
+                    let tok = &self.tokens[i];
+                    if depth == 0 && src[prev_end..tok.span().start()].contains('\n') {
+                        return false;
+                    }
+                    match tok.kind() {
+                        TokKind::LeftParenthesis | TokKind::LeftSquare | TokKind::LeftBrace | TokKind::TildeLeftBrace => depth += 1,
+                        TokKind::RightParenthesis | TokKind::RightSquare => depth -= 1,
+                        TokKind::RightBrace => {
+                            if depth == 0 {
+                                return false;
+                            }
+                            depth -= 1
+                        }
+                        TokKind::Comma if depth == 0 => return true,
+                        TokKind::SemiColon | TokKind::Eof if depth == 0 => return false,
+                        _ => {}
+                    }
+                    prev_end = tok.span().end();
+                    i += 1;
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
+    /// `{ a: 1, b = 2, c, "d e": 3 }` — entries take `:` or `=`, a bare name is
+    /// shorthand for `name: name`, a quoted key is text. Commas are optional
+    /// between entries. r[impl mimas.record.literal]
+    fn record_literal(&mut self) -> Expr {
+        let start = self.next_start();
+        self.bump(TokKind::LeftBrace);
+        let elements = self.with_juxta(Juxta::Comma, |p| {
+            p.list(
+                TokKind::RightBrace,
+                |k| k.is_ident() || matches!(k, TokKind::String(_)),
+                |p| {
+                    let location = p.next_location();
+                    let key = match p.peek() {
+                        TokKind::String(_) => {
+                            let lit = Literal::try_from(p.peek()).ok();
+                            p.advance();
+                            match lit {
+                                Some(Literal::String(text)) => Ident::new(&text, location),
+                                _ => Ident::new("", location),
+                            }
+                        }
+                        _ => p.require_ident(),
+                    };
+                    if p.at(TokKind::Comma) || p.at(TokKind::RightBrace) {
+                        // shorthand: `{ qty, price }` is `{ qty: qty, price: price }`
+                        let value = p.new_expr(key.clone(), key.location.span().start());
+                        return (key, value);
+                    }
+                    if !p.eat(TokKind::Colon) {
+                        p.expect(TokKind::Equal);
+                    }
+                    (key, p.struct_literals(true, Self::expr))
+                },
+            )
+        });
+        let expr = self.new_expr(Literal::Record(elements), start);
+        self.chain_accesses(expr)
     }
 
     fn block(&mut self) -> Expr {
@@ -3761,17 +3859,20 @@ impl<'s> Parser<'s> {
             }
             annotation
         }
-        if !self.peek().starts_annotation() {
-            // `{str: int}` is Rust's `HashMap<str, int>` habit — the dict
-            // type's real spelling is `~{int}` (keys are always `str`).
-            // `reject` skips the whole brace group, a clean recovery.
+        // `{V}` is the dict type (r[impl mimas.dict.type]); `{str: int}` is
+        // Rust's `HashMap<str, int>` habit — keys are always `str`, so the value
+        // type alone goes in the braces. `reject` skips the whole brace group.
+        // `str` lexes as a type keyword, not a name -- any token then `:` is the habit
+        let key_colon = self.at(TokKind::LeftBrace) && self.nth(2) == TokKind::Colon;
+        let dict_ty = self.at(TokKind::LeftBrace) && !key_colon;
+        if !self.peek().starts_annotation() && !dict_ty {
             if self.at(TokKind::LeftBrace) {
                 self.reject(Misdirection {
                     src: self.src(),
                     at: self.next_location().into(),
-                    msg: "`{str: V}` isn't a type -- a dict type is `~{V}` (keys are always `str`)"
+                    msg: "`{str: V}` isn't a type -- a dict type is `{V}` (keys are always `str`)"
                         .into(),
-                    label: "not a type -- write `~{V}`".into(),
+                    label: "not a type -- write `{V}`".into(),
                 });
             } else {
                 self.expected("type");
@@ -3842,8 +3943,9 @@ impl<'s> Parser<'s> {
                 self.expect(TokKind::RightSquare);
                 Annotation::Array(Box::new(inner), dims)
             }
-            TokKind::TildeLeftBrace => {
-                self.bump(TokKind::TildeLeftBrace);
+            // r[impl mimas.dict.type] `{float}` and `~{float}` are one type
+            TokKind::TildeLeftBrace | TokKind::LeftBrace => {
+                self.advance();
                 let inner = self.annotation();
                 self.expect(TokKind::RightBrace);
                 Annotation::Dictionary(Box::new(inner))

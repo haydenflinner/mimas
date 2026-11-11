@@ -52,6 +52,10 @@ pub struct Program {
     /// rather than a bare `25000`. Keyed by the same call `Location` the `Prints`
     /// fixture attributes; empty in programs a loader didn't solve.
     pub print_dims: HashMap<Location, shared::units::Dim>,
+    /// Top-level echo site -> how the echoed quantity shows: in the unit the
+    /// program wrote for its dimension (`12lb` echoes `12 lb`). Empty in programs
+    /// a loader didn't solve.
+    pub echo_units: HashMap<Location, shared::units::Shown>,
     /// Declared member types, parallel to `field_names` -- copied from
     /// `solve::ResolvedAdt::member_tys`. `Ty::Param`s stand for the adt's
     /// own params (see `member_tys`), so generic fields stay generic until

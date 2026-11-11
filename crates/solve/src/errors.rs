@@ -257,6 +257,18 @@ pub struct NotAllPathsReturn {
 }
 
 #[derive(Error, Debug, Diagnostic)]
+#[error("this `{{ … }}` has nothing to say what it is")]
+#[diagnostic(help(
+    "its values differ, so it can't be a dict -- name the struct (`Pt {{ x: 1, y: 2 }}`) or give its slot a type"
+))]
+pub struct UntypedRecord {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("mixed values with no struct to fill")]
+    pub at: SourceSpan,
+}
+
+#[derive(Error, Debug, Diagnostic)]
 #[error("not a struct")]
 pub struct NotAStruct {
     #[source_code]

@@ -1295,6 +1295,7 @@ impl Solve for Closure {
         // compiles on its own)
         let outer_loops = std::mem::take(&mut solver.loop_stack);
         solver.control_flow.enter();
+        solver.hint_records(&self.body, &expected_ty);
         let body_ty = self.body.query(solver)?;
         solver.loop_stack = outer_loops;
         solver.fn_stack.pop().unwrap();
@@ -1910,6 +1911,7 @@ impl Solve for Function {
             expected_ty: expected_ty.clone(),
         });
         solver.control_flow.enter();
+        solver.hint_records(&self.body, &expected_ty);
         let body_ty = self.body.query(solver)?;
         solver.fn_stack.pop().unwrap();
         let flow = solver.control_flow.exit();
@@ -2456,6 +2458,68 @@ impl Solve for Literal {
                     }
                 };
 
+                let keyed: Vec<(FieldKey, &Expr)> =
+                    fields.iter().map(|(k, v)| (k.clone(), v)).collect();
+                let ty = struct_fields(solver, adt, &variant, layout, &keyed, base.as_ref(), location)?;
+                solver.shadow_expr_ty(name.id(), Ty::adt(layout), name.location())?;
+                ty
+            }
+            // r[impl mimas.record.context]
+            Literal::Record(fields) => {
+                // the struct the slot expects, when it expects one
+                let hint = solver.record_hints.get(&_id).cloned().map(|t| t.normalized(solver));
+                let hint = match hint {
+                    Some(Ty::Option(inner)) => Some(*inner),
+                    other => other,
+                };
+                let target = match hint {
+                    Some(Ty::Adt(adt, _) | Ty::Identity(adt, _))
+                        if !solver.adts[adt].flags.contains(AdtFlags::IS_ENUM)
+                            && !solver.adts[adt].flags.contains(AdtFlags::IS_MODULE) =>
+                    {
+                        solver.adts[adt].try_as_struct().cloned().map(|v| (adt, v))
+                    }
+                    _ => None,
+                };
+                if let Some((adt, variant)) = target {
+                    let keyed: Vec<(FieldKey, &Expr)> = fields
+                        .iter()
+                        .map(|(k, v)| (FieldKey::Ident(k.clone()), v))
+                        .collect();
+                    struct_fields(solver, adt, &variant, adt, &keyed, None, location)?
+                } else {
+                    let values: Vec<&Expr> = fields.iter().map(|(_, v)| v).collect();
+                    match assemble(values, solver) {
+                        Ok(t) => Ty::Dict(Box::new(t)),
+                        Err(_) => Err(UntypedRecord {
+                            src: solver.src(location),
+                            at: location.into(),
+                        })?,
+                    }
+                }
+            }
+            Literal::Tuple(members) => Ty::Tuple(
+                members
+                    .iter()
+                    .map(|v| v.query(solver))
+                    .collect::<Result<_>>()?,
+            ),
+            _ => unreachable!(),
+        })
+    }
+}
+
+/// A struct literal's fields checked against `adt`'s declaration — shared by
+/// `Foo { … }` and a bare `{ … }` whose slot expects `Foo`.
+fn struct_fields(
+    solver: &mut Solver,
+    adt: AdtId,
+    variant: &crate::components::StructVariant,
+    layout: AdtId,
+    fields: &[(FieldKey, &Expr)],
+    base: Option<&Expr>,
+    location: Location,
+) -> Result<Ty> {
                 // like a ctor call, the literal gets a fresh instantiation of the adt's
                 // params; each field's stored `Ty::Param`s are specialized with those args so
                 // what the fields end up as is exactly what the literal's type reports
@@ -2512,18 +2576,7 @@ impl Solve for Literal {
                     })?;
                 }
 
-                solver.shadow_expr_ty(name.id(), Ty::adt(layout), name.location())?;
-                adt_ty.normalized(solver)
-            }
-            Literal::Tuple(members) => Ty::Tuple(
-                members
-                    .iter()
-                    .map(|v| v.query(solver))
-                    .collect::<Result<_>>()?,
-            ),
-            _ => unreachable!(),
-        })
-    }
+                Ok(adt_ty.normalized(solver))
 }
 
 impl Solve for Logical {

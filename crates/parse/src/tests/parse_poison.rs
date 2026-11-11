@@ -1176,6 +1176,6 @@ test_recover!(
     rust_dict_type_habit,
     "fn f(d: {str: int}) -> int { 0 }
      let x = 1;",
-    errors: ["`{str: V}` isn't a type -- a dict type is `~{V}` (keys are always `str`)"],
+    errors: ["`{str: V}` isn't a type -- a dict type is `{V}` (keys are always `str`)"],
     stmts: ["fn f(d: <poison>) -> int {0 }", "let x = 1;"],
 );

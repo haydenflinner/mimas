@@ -847,6 +847,9 @@ impl Compiler {
         let print_dims = std::mem::take(&mut ir.resolutions.print_dims)
             .into_iter()
             .collect();
+        let echo_units = std::mem::take(&mut ir.resolutions.echo_units)
+            .into_iter()
+            .collect();
 
         Program {
             entry: BodyId::ZERO,
@@ -861,6 +864,7 @@ impl Compiler {
             variant_ordinals,
             field_dims,
             print_dims,
+            echo_units,
             field_tys,
             value_adts,
             tests,

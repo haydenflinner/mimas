@@ -732,7 +732,7 @@ impl<'s> Scoped<'s> {
                     self.expr(expr);
                 }
             }
-            Literal::Dictionary(fields) => {
+            Literal::Dictionary(fields) | Literal::Record(fields) => {
                 // Keys are member names; only values resolve.
                 for (_, value) in fields {
                     self.expr(value);

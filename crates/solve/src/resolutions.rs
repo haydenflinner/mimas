@@ -26,6 +26,9 @@ pub struct Resolutions {
     /// `print`/`dbg`/`warn` call site → the dimension of the reported value — codegen ships
     /// it on `Program` so the natives can print `25000 W` rather than `25000`.
     pub print_dims: FxIndexMap<Location, shared::units::Dim>,
+    /// Top-level echo site → the unit its quantity shows in (the unit the program
+    /// wrote for that dimension) — codegen ships it so `12lb` echoes `12 lb`.
+    pub echo_units: FxIndexMap<Location, shared::units::Shown>,
     pub node_decs: FxIndexMap<NodeId, DecId>,
     /// Read/write site counts per declaration -- the `{0,1,ω}` usage grades the
     /// lint suite is built on (`Use::Never` is what "unused" warnings report on).
@@ -460,6 +463,7 @@ impl From<Solver> for Resolutions {
             node_dims: solver.node_dims,
             want_dims: solver.want_dims,
             print_dims: solver.print_dims,
+            echo_units: solver.echo_units,
             node_decs: solver.node_decs,
             dec_uses: solver.dec_uses,
             fn_effects: solver.fn_effects,

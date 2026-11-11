@@ -108,7 +108,7 @@ impl Constant {
             // dicts and structs allocate distinct runtime types; the `const` site can't inline
             // them as a bytecode Constant. callers should use `Self::emit_const_dec` (which
             // routes through `Literal::emit`) instead of trying to fold to a `Constant`.
-            Literal::Dictionary(_) | Literal::Struct(_) => unreachable!(
+            Literal::Dictionary(_) | Literal::Struct(_) | Literal::Record(_) => unreachable!(
                 "Constant::from_literal: dict/struct have no scalar constant form -- use emit_const_dec",
             ),
         }

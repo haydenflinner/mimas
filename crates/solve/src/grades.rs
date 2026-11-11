@@ -1414,7 +1414,7 @@ impl<'a> Pass<'a> {
                     self.expr(e);
                 }
             }
-            Literal::Dictionary(fields) => {
+            Literal::Dictionary(fields) | Literal::Record(fields) => {
                 for (_, e) in fields {
                     self.expr(e);
                 }

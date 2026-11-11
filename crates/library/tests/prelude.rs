@@ -87,8 +87,69 @@ fn echoes_carry_units() {
         .into_iter()
         .map(|(_, t, _)| t)
         .collect();
-    // a `let` inside a block or a loop is not a top-level binding: no echo
-    assert_eq!(texts, ["25000.0 W", "28.0 usd", "5.0 kg", "4", "8"]);
+    // a `let` inside a block or a loop is not a top-level binding: no echo;
+    // a quantity shows in the unit the program wrote for its dimension
+    assert_eq!(texts, ["25 kW", "28 usd", "5 kg", "4", "8"]);
+}
+
+fn echo_texts(src: &str) -> Vec<String> {
+    let mut vm = vm::Vm::compile(src, library::std).expect("compiles");
+    vm.fixture::<vm::fixtures::Echoes>().on.set(true);
+    vm.run().expect("runs");
+    vm.fixture::<vm::fixtures::Echoes>()
+        .take()
+        .into_iter()
+        .map(|(_, t, _)| t)
+        .collect()
+}
+
+// an echo shows a quantity in the unit the program wrote for its dimension,
+// not the coherent unit: pounds stay pounds, a list shows its unit once, a
+// ratio of two written units composes, and base-unit round-off is trimmed
+// r[verify mimas.echo.unit]
+#[test]
+fn echoes_show_units_as_written() {
+    let src = "let qty = [12lb, 8lb, 3lb];
+let t = 12lb + 3lb;
+let price = [1.10usd, 1.40usd] ;
+let per = 3usd / 2lb;
+let m = 2kg;
+let run = 5km + 300m;";
+    assert_eq!(
+        echo_texts(src),
+        ["[12, 8, 3] lb", "15 lb", "[1.1, 1.4] usd", "1.5 usd/lb", "4.4092452437 lb", "5.3 km"]
+    );
+}
+
+// free aggregates over lists keep the unit; `count` counts trues or rows;
+// the `_by` forms group by key text in first-seen order
+// r[verify mimas.agg.free] r[verify mimas.agg.by]
+#[test]
+fn free_aggregates() {
+    let src = "let qty = [12lb, 8lb, 3lb];
+let kind = [\"grain\", \"bean\", \"grain\"];
+sum(qty)
+avg(qty)!
+count(kind)
+count([true, false, true])
+sum([1, 2, 3])
+sum_by(qty, kind)
+count_by(qty, kind)
+avg_by(qty, kind)";
+    let got = echo_texts(src);
+    assert_eq!(
+        &got[2..],
+        [
+            "23 lb",
+            "7.66666666667 lb",
+            "3",
+            "2",
+            "6",
+            "~{grain = 15, bean = 8} lb",
+            "~{grain = 2, bean = 1}",
+            "~{grain = 7.5, bean = 8} lb",
+        ]
+    );
 }
 
 // panic has type `!`, so a panicking match/if arm coerces to the other arm's type
@@ -184,3 +245,26 @@ test_run!(
     "rpn\"3 4 + 2 *\"" => "14",
     "rpn\"1 2 3 + +\" + 1" => "7",
 );
+
+// the shape a table card's question lines lower to: per-row blocks over
+// index lists keep the columns' units, so `sum(qty * price)` reads in usd
+// r[verify mimas.echo.unit]
+#[test]
+fn row_blocks_keep_units() {
+    let src = "let __q = [12lb, 8lb, 3lb];\nlet __p = [1.1usd/lb, 1.4usd/lb, 0.9usd/lb];\nlet v = for __i in [0, 1, 2] collect { let qty = __q[__i]; let price = __p[__i]; qty * price };\nsum(v)\nlet r = [0, 1, 2].filter(|__i: int| { let qty = __q[__i]; qty < 5lb });\nfor __i in r collect __q[__i]";
+    assert_eq!(
+        echo_texts(src),
+        ["[12, 8, 3] lb", "[1.1, 1.4, 0.9] usd/lb", "[13.2, 11.2, 2.7] usd", "27.1 usd", "[2]", "[3] lb"]
+    );
+}
+
+// a declared unit counts as written before the value's own literals: a
+// `[lb]` list holding a `2kg` cell echoes in pounds
+// r[verify mimas.echo.unit]
+#[test]
+fn declared_units_win() {
+    assert_eq!(
+        echo_texts("let w: [lb] = [2kg, 1lb];\nsum(w)\nlet p: [usd/lb] = [2usd/kg];"),
+        ["[4.4092452437, 1] lb", "5.4092452437 lb", "[0.90718474] usd/lb"]
+    );
+}

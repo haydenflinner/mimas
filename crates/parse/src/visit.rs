@@ -262,7 +262,7 @@ pub fn walk_expr(expr: &Expr, visitor: &mut impl Visitor) {
                     walk_expr(expr, visitor);
                 }
             }
-            Literal::Dictionary(fields) => {
+            Literal::Dictionary(fields) | Literal::Record(fields) => {
                 for (key, value) in fields {
                     visitor.ident(key);
                     walk_expr(value, visitor);

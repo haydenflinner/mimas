@@ -311,6 +311,7 @@ impl Vm {
             variant_ordinals,
             field_dims,
             print_dims,
+            echo_units,
             field_tys: _,
             value_adts,
             tests,
@@ -375,6 +376,11 @@ impl Vm {
                 .get::<crate::fixtures::PrintDims>()
                 .dims
                 .borrow_mut() = print_dims;
+            *state
+                .fixtures
+                .get::<crate::fixtures::PrintDims>()
+                .shown
+                .borrow_mut() = echo_units;
             // fresh program = fresh trace: re-size the op counter to the
             // new code length and drop edges that named dead BodyIds
             let trace = state.fixtures.get::<crate::fixtures::Trace>();

@@ -25,6 +25,9 @@ pub enum Literal {
     Dictionary(Vec<DictField>),
     /// A struct literal (Foo { a: 0 })
     Struct(StructLiteral),
+    /// A bare-brace literal (`{ a: 0, b: 1 }`) typed by where it goes: the struct a
+    /// slot expects, else a dict. r[impl mimas.record.literal]
+    Record(Vec<DictField>),
     /// A tuple literal ((0, 1))
     Tuple(Vec<Expr>),
 }
@@ -68,6 +71,17 @@ impl std::fmt::Display for Literal {
                 fields
                     .iter()
                     .map(|(Ident { lexeme, .. }, symbol)| format!("{lexeme} = {symbol}"))
+                    .join(", ")
+            )),
+            Literal::Record(fields) => f.pad(&format!(
+                "{{ {} }}",
+                fields
+                    .iter()
+                    .map(|(Ident { lexeme, .. }, symbol)| if lexeme.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                        format!("{lexeme}: {symbol}")
+                    } else {
+                        format!("{lexeme:?}: {symbol}")
+                    })
                     .join(", ")
             )),
             Literal::Struct(StructLiteral { name, fields, base }) => f.pad(&format!(

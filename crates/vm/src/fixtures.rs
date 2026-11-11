@@ -256,6 +256,8 @@ impl Prints {
 #[derive(Default)]
 pub struct PrintDims {
     pub dims: RefCell<HashMap<Location, shared::units::Dim>>,
+    /// Top-level echo site → the unit the echo shows its quantity in.
+    pub shown: RefCell<HashMap<Location, shared::units::Shown>>,
 }
 
 impl PrintDims {
@@ -263,6 +265,11 @@ impl PrintDims {
     /// `None` for a plain number or a site the checker couldn't follow.
     pub fn at(&self, loc: Location) -> Option<shared::units::Dim> {
         self.dims.borrow().get(&loc).copied()
+    }
+
+    /// How the echo at `loc` shows its quantity, when the dims pass knew it.
+    pub fn shown(&self, loc: Location) -> Option<shared::units::Shown> {
+        self.shown.borrow().get(&loc).cloned()
     }
 }
 

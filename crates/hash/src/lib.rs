@@ -653,7 +653,7 @@ fn literal_refs(lit: &parse::Literal, out: &mut RefSet) {
                 expr_refs(e, out);
             }
         }
-        Literal::Dictionary(fields) => {
+        Literal::Dictionary(fields) | Literal::Record(fields) => {
             for (_, e) in fields {
                 expr_refs(e, out);
             }

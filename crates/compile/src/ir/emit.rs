@@ -1411,6 +1411,34 @@ impl Emit for Literal {
                     Some(array)
                 });
             }
+            // r[impl mimas.record.context] the solver typed a bare `{ … }` as
+            // the struct its slot expects, or left it a dict
+            Literal::Record(fields) => {
+                let struct_ty = match ir.resolutions.node_tys.get(&id) {
+                    Some(Ty::Option(inner)) => Some(&**inner),
+                    other => other,
+                };
+                if let Some(Ty::Adt(adt, _) | Ty::Identity(adt, _)) = struct_ty {
+                    let adt = *adt;
+                    let supplied: Vec<(String, Option<InstId>)> = fields
+                        .iter()
+                        .map(|(key, expr)| (key.lexeme.clone(), expr.lower(ir)))
+                        .collect();
+                    let names: Vec<String> = ir.resolutions.adts[adt].fields.clone();
+                    let values: Option<Vec<InstId>> = names
+                        .iter()
+                        .map(|name| supplied.iter().find(|(k, _)| k == name).and_then(|(_, v)| *v))
+                        .collect();
+                    return Some(ir.current().new_instance(adt, values?));
+                }
+                let dict = ir.current().new_dict();
+                for (key, value) in fields.iter() {
+                    let key = ir.intern_str(&key.lexeme);
+                    let value = value.lower(ir)?;
+                    ir.current().insert(dict, key, value);
+                }
+                return Some(dict);
+            }
             Literal::Dictionary(fields) => {
                 let dict = ir.current().new_dict();
                 for (key, value) in fields.iter() {

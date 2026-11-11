@@ -133,6 +133,8 @@ fn reduce_literal<F: Fn(&Expr) -> Option<Literal>>(
             }
             Ok(Some(lit.clone()))
         }
+        // a bare `{ … }` is typed by its slot, which folding can't see
+        Record(_) => Ok(None),
         Dictionary(fields) => {
             for (_, e) in fields.iter() {
                 if reduce(e, resolve)?.is_none() {

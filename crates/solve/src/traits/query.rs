@@ -17,6 +17,11 @@ pub trait Query: Located {
         // can cycle on commit. `found` normalizes too: a bound vid left raw would hit unify's
         // vid arm and re-unify inside register_sub with the found/expected roles reversed
         // (the cross-module-const inverted-mismatch bug).
+        // a bare-brace literal takes its meaning from the slot it fills
+        // r[impl mimas.record.context]
+        if let Some(expr) = self.contract_expr() {
+            solver.hint_records(expr, &ty);
+        }
         let mut found = self.query(solver)?.normalized(solver);
         let mut ty = ty.normalized(solver);
         Unification::unify(&mut found, &mut ty, solver)
