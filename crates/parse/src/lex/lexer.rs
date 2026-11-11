@@ -788,6 +788,28 @@ impl<'s> Lex<'s, Tok<TokKind<'s>>, TokKind<'s>> for Lexer<'s> {
                 // the word spellings. No assignment forms.
                 '⍲' => TokKind::Nand,
                 '⍱' => TokKind::Nor,
+                // r[impl mimas.op.glyphs]
+                // the named operators (see `TokKind::Wedge`): symbols the
+                // lexer knows and only a method gives meaning to
+                '∧' => TokKind::Wedge,
+                '∨' => TokKind::Vee,
+                '⋅' | '·' => TokKind::DotOp,
+                '×' => TokKind::Cross,
+                '∘' => TokKind::Compose,
+                '⊗' => TokKind::Tensor,
+                '⊙' => TokKind::Odot,
+                '∩' => TokKind::Intersect,
+                '∪' => TokKind::Union,
+                '⊖' => TokKind::Ominus,
+                '⊎' => TokKind::Uplus,
+                // r[impl mimas.op.cmp-glyphs]
+                // the comparison and membership glyphs are the ASCII tokens:
+                // the AST prints `!=`, `<=`, `>=`, `in`, `!in`
+                '≠' => TokKind::BangEqual,
+                '≤' => TokKind::LessEqual,
+                '≥' => TokKind::GreaterEqual,
+                '∈' => TokKind::In,
+                '∉' => TokKind::NotIn,
                 '!' => {
                     // `!in` is the operator only when the `in` ends there: `!inside` is `!`
                     // `inside`

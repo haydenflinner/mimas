@@ -102,10 +102,11 @@ impl Unification {
             }
 
             // a primitive fulfills a pact its library adt implements (`impl Opp for
-            // bool`: a `bool` goes wherever an `Opp` is expected)
-            // (bool only: a pact-typed value dispatches by a runtime kind test, and a
-            // number has none -- `impl Opp for float` serves static calls)
-            (prim @ Ty::Bool, Ty::Pacts(pids)) | (Ty::Pacts(pids), prim @ Ty::Bool) => {
+            // bool`, `impl Num for float`: the value goes wherever the pact is
+            // expected, and the dispatch chain tests its kind through a sentinel
+            // id -- `AdtId::PRIM_FLOAT`) r[impl mimas.pact.primitive]
+            (prim @ (Ty::Bool | Ty::Int | Ty::Float | Ty::Str), Ty::Pacts(pids))
+            | (Ty::Pacts(pids), prim @ (Ty::Bool | Ty::Int | Ty::Float | Ty::Str)) => {
                 let aid = solver.builtin_adt(prim);
                 if aid.is_some_and(|aid| {
                     pids.iter()

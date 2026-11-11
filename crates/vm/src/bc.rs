@@ -1891,7 +1891,7 @@ pub mod jit {
     /// `Op::IsInstance`.
     pub unsafe extern "C" fn is_instance<'gc>(regs: *mut Val<'gc>, d: usize, s: usize, adt: u32) {
         unsafe {
-            let m = matches!(*regs.add(s), Val::Instance(i) if i.0.borrow().struct_id == adt);
+            let m = crate::val_is_instance(&*regs.add(s), adt);
             *regs.add(d) = Val::Bool(m);
         }
     }

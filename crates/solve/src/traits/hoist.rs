@@ -1,4 +1,5 @@
 use crate::FxHashSet;
+use crate::errors::{DuplicatePactFunction, PactOverloadDefault};
 
 use super::Query;
 use crate::{
@@ -105,7 +106,30 @@ impl<'a> HoistCtx<'a> {
                     }
                 };
 
-                if let Some(existing) = self.solver.adts[*adt].impls.get(&ident.lexeme) {
+                let existing = self.solver.adts[*adt].impls.get(&ident.lexeme).cloned();
+                // r[impl mimas.op.overload]
+                // a second `fn mul` is an overload when both are operator-shaped
+                // (`self` + one operand) and the operands' declared types differ
+                // from each other's and from every overload already there;
+                // anything else with the name is the duplicate it always was
+                let overload = match &existing {
+                    Some(first) => {
+                        let siblings = self.solver.adts[*adt]
+                            .overloads
+                            .get(&ident.lexeme)
+                            .cloned()
+                            .unwrap_or_default();
+                        overload_operand(&ty).is_some_and(|mine| {
+                            std::iter::once(first)
+                                .chain(&siblings)
+                                .all(|f| overload_operand(&f.ty).is_some_and(|o| o != mine))
+                        })
+                    }
+                    None => false,
+                };
+                if let Some(existing) = &existing
+                    && !overload
+                {
                     let prev = &self.solver.decs[existing.dec];
                     Err(DuplicateImplDeclaration {
                         src: self.solver.src(ident.location),
@@ -116,10 +140,16 @@ impl<'a> HoistCtx<'a> {
                 }
 
                 let dec = self.solver.dec_id(ident, ty.clone(), kind, self.vis);
-                self.solver.adts[adt].impls.insert(
-                    ident.lexeme.clone(),
-                    Field::new_constant(ty.clone(), self.location, dec),
-                );
+                let field = Field::new_constant(ty.clone(), self.location, dec);
+                if overload {
+                    self.solver.adts[adt]
+                        .overloads
+                        .entry(ident.lexeme.clone())
+                        .or_default()
+                        .push(field);
+                } else {
+                    self.solver.adts[adt].impls.insert(ident.lexeme.clone(), field);
+                }
                 // def-site mapping: lets the item's own body lower via node_dec(expr.id())
                 if let Some(node_id) = self.node_id {
                     self.solver.node_decs.insert(node_id, dec);
@@ -431,11 +461,61 @@ impl Hoist for Pact {
                     let default = body.as_ref().map(|v| Ty::Vid(ctx.solver.node_vid(v.id())));
 
                     let header = hoist_fn_header(ctx.solver, parameters, return_type, is_method)?;
+                    // r[impl mimas.pact.overload]
+                    // A second fn of one name is an overload when both are operator-shaped
+                    // (`self` + one operand with a written type) and the operands differ —
+                    // it lives under the key `name#k`, and `pact_groups` lists the group. An
+                    // overload can't carry a default: the impl pairing is by operand, not name.
+                    let base = name.lexeme.clone();
+                    let key = if ctx.solver.pacts[pact_id].functions.contains_key(&base) {
+                        let group = ctx
+                            .solver
+                            .pact_groups
+                            .get(&(pact_id, base.clone()))
+                            .cloned()
+                            .unwrap_or_else(|| vec![base.clone()]);
+                        let mine = overload_operand(&Ty::Fn(header.clone()));
+                        let distinct = mine.as_ref().is_some_and(|mine| {
+                            group.iter().all(|k| {
+                                let (h, _) = &ctx.solver.pacts[pact_id].functions[k];
+                                overload_operand(&Ty::Fn(h.clone())).is_some_and(|o| o != *mine)
+                            })
+                        });
+                        if !distinct {
+                            let first = ctx.solver.pact_members[&(pact_id, base.clone())];
+                            Err(DuplicatePactFunction {
+                                src: ctx.solver.src(name.location),
+                                at: name.location.into(),
+                                original_at: ctx.solver.decs[first].location.into(),
+                                name: base.clone(),
+                            })?;
+                        }
+                        let key = format!("{base}#{}", group.len());
+                        let mut group = group;
+                        group.push(key.clone());
+                        ctx.solver.pact_groups.insert((pact_id, base.clone()), group);
+                        key
+                    } else {
+                        base.clone()
+                    };
+                    if key != base && body.is_some() {
+                        Err(PactOverloadDefault {
+                            src: ctx.solver.src(name.location),
+                            at: name.location.into(),
+                            name: base.clone(),
+                        })?;
+                    }
                     // Mint a Dec for each method (a defaulted one is what the dispatch table
                     // points at when an impl omits it). Done at hoist so it exists before any body
-                    // solves, regardless of pact/impl source order.
+                    // solves, regardless of pact/impl source order. An overload's dec is named
+                    // by its key, which is how emit finds its slot in each impl's table.
+                    let dec_ident = if key == base {
+                        name.clone()
+                    } else {
+                        Ident::new(key.clone(), name.location)
+                    };
                     let dec = ctx.solver.dec_id(
-                        name,
+                        &dec_ident,
                         Ty::Fn(header.clone()),
                         DecKind::Item {
                             defaults: vec![],
@@ -443,9 +523,7 @@ impl Hoist for Pact {
                         },
                         ctx.vis,
                     );
-                    ctx.solver
-                        .pact_members
-                        .insert((pact_id, name.lexeme.clone()), dec);
+                    ctx.solver.pact_members.insert((pact_id, key.clone()), dec);
                     if let Some(body) = body {
                         // def-site mapping: this is how compile finds the dec to lower the default
                         // body into (emit.rs's Pact arm)
@@ -453,7 +531,7 @@ impl Hoist for Pact {
                     }
                     ctx.solver.pacts[pact_id]
                         .functions
-                        .insert(name.lexeme.clone(), (header, default));
+                        .insert(key, (header, default));
                 }
             }
         }
@@ -491,26 +569,31 @@ impl Hoist for Function {
         ctx.write(&self.name, ty, false)?;
 
         // populate per-parameter defaults onto the just-created Item kind. defaults must be
-        // const-reducible -- anything else is rejected here so the IR never has to deal with
-        // a `None` literal where it expected a value. names live on the callee's `Ty::Fn`,
+        // const-reducible; one that can't reduce yet (it names a `const` the fixpoint
+        // hasn't solved) waits in `pending_defaults` and is rejected by
+        // `resolve_pending_defaults` if it never does, so the IR never has to deal with a
+        // `None` literal where it expected a value. names live on the callee's `Ty::Fn`,
         // not here.
         if let Some(node_id) = node_id
             && let Some(&dec) = ctx.solver.node_decs.get(&node_id)
         {
-            let defaults: Vec<Option<parse::Literal>> = self
-                .parameters
-                .iter()
-                .map(|b| match b.right.as_ref() {
-                    None => Ok(None),
-                    Some(expr) => match ctx.solver.reduce_const_expr(expr)? {
-                        Some(lit) => Ok(Some(lit)),
-                        None => Err(crate::errors::NonConstDefault {
-                            src: ctx.solver.src(expr.location()),
-                            at: expr.location().into(),
-                        })?,
+            let mut defaults: Vec<Option<parse::Literal>> =
+                Vec::with_capacity(self.parameters.len());
+            for (index, b) in self.parameters.iter().enumerate() {
+                defaults.push(match b.right.as_ref() {
+                    None => None,
+                    // r[impl mimas.fn.default-const]
+                    Some(expr) => match ctx.solver.default_literal(expr)? {
+                        Some(lit) => Some(lit),
+                        None => {
+                            ctx.solver
+                                .pending_defaults
+                                .push((dec, index, expr.clone()));
+                            None
+                        }
                     },
-                })
-                .collect::<Result<_>>()?;
+                });
+            }
             if let DecKind::Item {
                 defaults: slot,
                 wheres: where_slot,
@@ -620,5 +703,19 @@ fn field_ident(name: &FieldKey, location: Location) -> Ident {
     match name {
         FieldKey::Ident(ident) => ident.clone(),
         key => Ident::new(key.to_string(), location),
+    }
+}
+
+/// The declared type of a method's one operand, when the method is
+/// operator-shaped: `self` plus exactly one parameter with a written type.
+/// Two such methods may share a name (`mimas.op.overload`); an unannotated
+/// operand can't tell them apart, so it never overloads.
+fn overload_operand(ty: &Ty) -> Option<Ty> {
+    match ty {
+        Ty::Fn(h) if h.is_method && h.parameters.len() == 2 => match &h.parameters[1].ty {
+            Ty::Vid(_) => None,
+            operand => Some(operand.clone()),
+        },
+        _ => None,
     }
 }

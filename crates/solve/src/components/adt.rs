@@ -24,6 +24,11 @@ pub(crate) struct Adt {
     pub variants: FxIndexMap<String, Variant>,
     pub impls: FxHashMap<String, Field>,
     pub native_overloads: FxHashMap<String, Vec<Field>>,
+    /// Source methods that share a name with the one in `impls` and differ in
+    /// their one operand's declared type — `fn mul(self, o: V)` beside
+    /// `fn mul(self, k: float)`. An operator or a call picks among the
+    /// primary and these by what the operand is. r[impl mimas.op.overload]
+    pub overloads: FxHashMap<String, Vec<Field>>,
     pub flags: AdtFlags,
 }
 impl Adt {
@@ -41,6 +46,7 @@ impl Adt {
             .collect(),
             impls: FxHashMap::default(),
             native_overloads: FxHashMap::default(),
+            overloads: FxHashMap::default(),
             flags: AdtFlags::empty(),
         }
     }
@@ -52,6 +58,7 @@ impl Adt {
             variants,
             impls: FxHashMap::default(),
             native_overloads: FxHashMap::default(),
+            overloads: FxHashMap::default(),
             flags: AdtFlags::IS_ENUM,
         }
     }
@@ -72,6 +79,7 @@ impl Adt {
             .collect(),
             impls: FxHashMap::default(),
             native_overloads: FxHashMap::default(),
+            overloads: FxHashMap::default(),
             flags: AdtFlags::empty(),
         }
     }

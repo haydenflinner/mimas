@@ -151,6 +151,19 @@ impl From<EvaluationOp> for BinOp {
             EvaluationOp::Nor => BinOp::Nor,
             EvaluationOp::BitShiftLeft => BinOp::BitShiftLeft,
             EvaluationOp::BitShiftRight => BinOp::BitShiftRight,
+            // a named operator only ever lowers as its method call (`op_decs`):
+            // the solver rejects one with no method before emit sees it
+            EvaluationOp::Wedge
+            | EvaluationOp::Vee
+            | EvaluationOp::Dot
+            | EvaluationOp::Cross
+            | EvaluationOp::Compose
+            | EvaluationOp::Tensor
+            | EvaluationOp::Odot
+            | EvaluationOp::Intersect
+            | EvaluationOp::Union
+            | EvaluationOp::Ominus
+            | EvaluationOp::Uplus => unreachable!("named operator `{value}` has no builtin lowering"),
         }
     }
 }

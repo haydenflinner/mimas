@@ -347,3 +347,35 @@ test_run!(
     "labels([Dot { x = 1 }, Dot { x = 2 }])" => "[\"d1\", \"d2\"]",
     "same([1, 2])" => "[1, 2]",
 );
+
+// A parameter default may name a `const` -- declared before or after the
+// fn -- and is read when the caller leaves the argument out. A default
+// lives in the callee's header as a bytecode constant, so one that would
+// allocate (a struct, a dict) is a compile error, not an internal one.
+test_run!(
+    // r[verify mimas.fn.default-const]
+    default_param_names_a_const,
+    "const K = 5;
+     fn f(a: int = K) -> int { a }
+     fn g(a: int = LATER + 1) -> int { a }
+     const LATER = 10;
+     fn k(s: str = NAME) -> str { s }
+     const NAME = \"#0b1020\";
+     const XS = [1, 2];
+     fn n(xs: [int] = XS) -> int { xs.len() }",
+    "f()" => "5",
+    "f(2)" => "2",
+    "g()" => "11",
+    "k()" => r##""#0b1020""##,
+    "n()" => "2",
+);
+test_fail!(
+    // r[verify mimas.fn.default-const]
+    default_param_cannot_allocate,
+    "struct P { x: float, y: float }
+     fn h(p: P = P { x = 0.0, y = 0.0 }) -> float { p.x }",
+    "struct P { x: float, y: float }
+     const ORIGIN = P { x = 0.0, y = 0.0 };
+     fn h(p: P = ORIGIN) -> float { p.x }",
+    "fn d(m: ~{int} = ~{}) -> int { m.len() }",
+);

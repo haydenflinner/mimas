@@ -28,6 +28,9 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add_method(atan2);
     api.add_method(pow);
     api.add_method(exp);
+    api.add_method(tanh);
+    api.add_method(sinh);
+    api.add_method(cosh);
     api.add_method(ln);
     api.add_method(is_nan);
     api.add_method(is_finite);
@@ -243,6 +246,38 @@ fn atan2(y: f64, x: f64) -> f64 {
 /// ```
 fn pow(n: f64, exponent: f64) -> f64 {
     n.powf(exponent)
+}
+
+#[native]
+/// Returns the hyperbolic tangent of the number — the smooth clamp to `-1.0..1.0` a steering
+/// or throttle controller wants.
+///
+/// ```mimas
+/// let a = 0.0.tanh();     // 0.0
+/// let b = 20.0.tanh();    // 1.0
+/// ```
+fn tanh(n: f64) -> f64 {
+    n.tanh()
+}
+
+#[native]
+/// Returns the hyperbolic sine of the number.
+///
+/// ```mimas
+/// let a = 0.0.sinh(); // 0.0
+/// ```
+fn sinh(n: f64) -> f64 {
+    n.sinh()
+}
+
+#[native]
+/// Returns the hyperbolic cosine of the number.
+///
+/// ```mimas
+/// let a = 0.0.cosh(); // 1.0
+/// ```
+fn cosh(n: f64) -> f64 {
+    n.cosh()
 }
 
 #[native]

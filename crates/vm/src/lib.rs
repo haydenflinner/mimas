@@ -53,3 +53,20 @@ pub use ::inventory;
 pub use ::compile::{
     BinOp, DataflowEdge, DataflowError, DataflowGraph, DataflowNode, NodeKind, Program, UnaryOp,
 };
+
+/// `is_instance`: an instance of the adt, or — for the primitive sentinels
+/// (`AdtId::PRIM_INT` and friends) — a value of that primitive kind, which
+/// is how `impl Num for float` takes its arm in a pact dispatch chain.
+/// r[impl mimas.pact.primitive]
+pub fn val_is_instance(v: &Val<'_>, adt: u32) -> bool {
+    use shared::{AdtId, Id};
+    let id = AdtId::new(adt);
+    match v {
+        _ if id == AdtId::PRIM_INT => matches!(v, Val::Int(_)),
+        _ if id == AdtId::PRIM_FLOAT => matches!(v, Val::Float(_)),
+        _ if id == AdtId::PRIM_STR => matches!(v, Val::Str(_)),
+        _ if id == AdtId::PRIM_BOOL => matches!(v, Val::Bool(_)),
+        Val::Instance(i) => i.0.borrow().struct_id == adt,
+        _ => false,
+    }
+}

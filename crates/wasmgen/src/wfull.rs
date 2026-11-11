@@ -1418,6 +1418,11 @@ impl<'a> WFx<'a> {
                 self.store64(hp, vv, 8 + slot * 8);
             }
             Inst::IsInstance { src, adt } => {
+                // a primitive-kind test (`impl Num for float`'s arm) has no
+                // boxed tag to read in this lane: the VM runs those bodies
+                if adt.is_primitive_sentinel() {
+                    Err("is_instance on a primitive kind".to_string())?;
+                }
                 let sw = self.get(src, K::Word)?;
                 let hp = self.wrap(sw);
                 let isnull = self.emit(WOp::I32Eqz, &[hp], &[WTy::I32]);

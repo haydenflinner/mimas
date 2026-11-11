@@ -39,6 +39,18 @@ op!(
         Nor => Nor,
         DoubleLeftCaret => BitShiftLeft,
         DoubleRightCaret => BitShiftRight,
+        // the named operators: no built-in meaning, a method each (r[impl mimas.op.glyphs])
+        Wedge => Wedge,
+        Vee => Vee,
+        DotOp => Dot,
+        Cross => Cross,
+        Compose => Compose,
+        Tensor => Tensor,
+        Odot => Odot,
+        Intersect => Intersect,
+        Union => Union,
+        Ominus => Ominus,
+        Uplus => Uplus,
     }
 );
 
@@ -69,6 +81,34 @@ impl EvaluationOp {
 
     pub(crate) fn is_additive(&self) -> bool {
         matches!(self, EvaluationOp::Plus | EvaluationOp::Minus)
+    }
+
+    /// The named operators — `∧ ⋅ × ∘ ⊗ ⊙ ∩ ∨ ∪ ⊖ ⊎` — have no built-in
+    /// meaning on any type: each is its method (`wedge`, `dot`, …) or an
+    /// error. r[impl mimas.op.named]
+    pub fn is_named(&self) -> bool {
+        matches!(
+            self,
+            EvaluationOp::Wedge
+                | EvaluationOp::Vee
+                | EvaluationOp::Dot
+                | EvaluationOp::Cross
+                | EvaluationOp::Compose
+                | EvaluationOp::Tensor
+                | EvaluationOp::Odot
+                | EvaluationOp::Intersect
+                | EvaluationOp::Union
+                | EvaluationOp::Ominus
+                | EvaluationOp::Uplus
+        )
+    }
+
+    /// The named operators that bind like `+`: `∨ ∪ ⊖ ⊎` (the rest bind like `*`).
+    pub(crate) fn is_named_additive(&self) -> bool {
+        matches!(
+            self,
+            EvaluationOp::Vee | EvaluationOp::Union | EvaluationOp::Ominus | EvaluationOp::Uplus
+        )
     }
 }
 

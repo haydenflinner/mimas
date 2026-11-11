@@ -235,6 +235,25 @@ pub struct InvalidEvaluation {
     pub op: String,
 }
 
+/// A named operator (`∧`, `⋅`, `×`, …) between two values neither of whose
+/// types has its method. r[impl mimas.op.named]
+#[derive(Error, Debug, Diagnostic)]
+#[error("`{op}` has no meaning here")]
+#[diagnostic(help(
+    "`{op}` is `{method}`: give `{lhs}` a `fn {method}(self, o: {rhs})`, or `{rhs}` a `fn {rmethod}(self, o: {lhs})`"
+))]
+pub struct UnboundOperator {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("no `{method}` on `{lhs}` and no `{rmethod}` on `{rhs}`")]
+    pub at: SourceSpan,
+    pub lhs: String,
+    pub rhs: String,
+    pub op: String,
+    pub method: &'static str,
+    pub rmethod: &'static str,
+}
+
 #[derive(Error, Debug, Diagnostic)]
 #[error("invalid unary operation")]
 pub struct InvalidUnary {
@@ -893,6 +912,16 @@ pub struct NonConstDefault {
 }
 
 #[derive(Error, Debug, Diagnostic)]
+#[error("a struct or dict can't be a parameter default")]
+#[diagnostic(help("a default is a number, string, bool, null, or a list of those -- make the parameter optional and build the value in the body"))]
+pub struct NonScalarDefault {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("this default allocates")]
+    pub at: SourceSpan,
+}
+
+#[derive(Error, Debug, Diagnostic)]
 #[error("unresolved constant `{name}`")]
 #[diagnostic(help("constants can't depend on themselves, directly or through a cycle"))]
 pub struct UnresolvedConst {
@@ -937,6 +966,35 @@ pub struct PactConstNotFound {
     pub at: SourceSpan,
     pub name: String,
     pub pact: String,
+}
+
+/// A pact declared the same function name twice without the two being
+/// operator-shaped overloads with different operand types. r[impl mimas.pact.overload]
+#[derive(Error, Debug, Diagnostic)]
+#[error("pact function declared twice")]
+#[diagnostic(help(
+    "two pact functions may share a name only as overloads: each `self` plus one operand whose written types differ"
+))]
+pub struct DuplicatePactFunction {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("'{name}' is declared again here")]
+    pub at: SourceSpan,
+    #[label("first declared here")]
+    pub original_at: SourceSpan,
+    pub name: String,
+}
+
+/// An overloaded pact function carries a default body, which the impl
+/// pairing can't attribute to one overload. r[impl mimas.pact.overload]
+#[derive(Error, Debug, Diagnostic)]
+#[error("an overloaded pact function cannot have a default body")]
+pub struct PactOverloadDefault {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("'{name}' is overloaded; give each impl its own body")]
+    pub at: SourceSpan,
+    pub name: String,
 }
 
 #[derive(Error, Debug, Diagnostic)]

@@ -99,7 +99,10 @@ pub struct OpDispatch {
 #[derive(Debug, Clone)]
 pub struct PactOp {
     pub pids: Vec<PactId>,
+    /// The member key (`mul`, or an overload's `mul#1`).
     pub method: String,
+    /// The receiver is the *right* operand (`3.0 * x` ⇒ `x.rmul(3.0)`).
+    pub swap: bool,
 }
 
 impl Resolutions {
@@ -281,11 +284,29 @@ impl ResolvedAdt {
             .collect();
         implements.sort_by_key(|p| p.index());
 
+        // a fn that implements a pact member sits under the member's key (an
+        // overload's `mul#1`), which is the name runtime dispatch looks up;
+        // everything else under its own name. r[impl mimas.pact.overload]
+        let slots = |name: &str, dec: DecId| -> Vec<(String, DecId)> {
+            match solver.impl_member.get(&dec) {
+                Some(members) if !members.is_empty() => members
+                    .iter()
+                    .map(|m| (solver.decs[*m].name.clone(), dec))
+                    .collect(),
+                _ => vec![(name.to_string(), dec)],
+            }
+        };
         let methods = adt
             .impls
             .iter()
             .filter(|(_, field)| matches!(solver.decs[field.dec].kind, DecKind::Item { .. }))
-            .map(|(name, field)| (name.clone(), field.dec))
+            .flat_map(|(name, field)| slots(name, field.dec))
+            .chain(
+                adt.overloads
+                    .iter()
+                    .flat_map(|(name, fields)| fields.iter().map(move |f| (name, f.dec)))
+                    .flat_map(|(name, dec)| slots(name, dec)),
+            )
             .collect();
 
         let dispatch_ids = if adt.flags.contains(AdtFlags::IS_ENUM) {
@@ -376,6 +397,17 @@ impl From<Solver> for Resolutions {
                 {
                     implements.insert(field.dec, member);
                 }
+            }
+        }
+        // overload pairings were settled by operand at impl solve
+        for (&dec, members) in solver.impl_member.iter() {
+            if let Some(&member) = members.first() {
+                implements.insert(dec, member);
+            }
+        }
+        for (aid, adt) in solver.adts.iter() {
+            for field in adt.overloads.values().flatten() {
+                owners.insert(field.dec, aid);
             }
         }
 

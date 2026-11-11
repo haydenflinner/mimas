@@ -14,6 +14,12 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add_method(Value::as_array);
     api.add_method(Value::as_str);
     api.add_method(Value::as_float);
+    api.add_method(Value::get);
+    api.add_method(Value::at);
+    api.add_method(Value::str_or);
+    api.add_method(Value::float_or);
+    api.add_method(Value::int_or);
+    api.add_method(Value::bool_or);
 }
 
 #[native]
@@ -120,6 +126,110 @@ impl Value {
     fn as_float(value: Value) -> Option<f64> {
         let Self::Number(f) = value else { return None };
         Some(f)
+    }
+
+    #[native]
+    /// Looks `key` up in an `Object`. A missing key, or any other kind of value, gives `Null`
+    /// rather than raising, so a chain of lookups reads a nested document without a null check
+    /// at every step — pair it with `str_or`/`float_or`/`int_or`/`bool_or` at the leaf.
+    ///
+    /// ```mimas
+    /// use std::parse;
+    ///
+    /// let v = parse::from_json("{\"hero\": {\"name\": \"ada\", \"hp\": 30}}")!;
+    /// let a = v.get("hero").get("name").str_or("?");  // "ada"
+    /// let b = v.get("hero").get("mp").int_or(0);      // 0
+    /// let c = v.get("nope").get("deeper").str_or(""); // ""
+    /// ```
+    fn get(value: Value, key: &str) -> Value {
+        let Self::Object(mut dict) = value else {
+            return Self::Null;
+        };
+        dict.remove(key).unwrap_or(Self::Null)
+    }
+
+    #[native]
+    /// The `i`th element of an `Array`. Out of range, or any other kind of value, gives `Null`.
+    ///
+    /// ```mimas
+    /// use std::parse;
+    ///
+    /// let v = parse::from_json("[[1, 2], [3, 4]]")!;
+    /// let a = v.at(1).at(0).int_or(-1); // 3
+    /// let b = v.at(5).int_or(-1);       // -1
+    /// ```
+    fn at(value: Value, i: i64) -> Value {
+        let Self::Array(mut arr) = value else {
+            return Self::Null;
+        };
+        if i < 0 || i as usize >= arr.len() {
+            return Self::Null;
+        }
+        arr.swap_remove(i as usize)
+    }
+
+    #[native]
+    /// The text of a `String`, or `default` for any other kind of value.
+    ///
+    /// ```mimas
+    /// use std::parse;
+    ///
+    /// let a = parse::from_json("\"hi\"")!.str_or("?"); // "hi"
+    /// let b = parse::from_json("12")!.str_or("?");     // "?"
+    /// ```
+    fn str_or(value: Value, default: &str) -> String {
+        match value {
+            Self::String(s) => s,
+            _ => default.to_string(),
+        }
+    }
+
+    #[native]
+    /// The number in a `Number`, or `default` for any other kind of value.
+    ///
+    /// ```mimas
+    /// use std::parse;
+    ///
+    /// let a = parse::from_json("1.5")!.float_or(0.0);  // 1.5
+    /// let b = parse::from_json("null")!.float_or(0.0); // 0.0
+    /// ```
+    fn float_or(value: Value, default: f64) -> f64 {
+        match value {
+            Self::Number(f) => f,
+            _ => default,
+        }
+    }
+
+    #[native]
+    /// The number in a `Number` truncated to an `int`, or `default` for any other kind of value.
+    ///
+    /// ```mimas
+    /// use std::parse;
+    ///
+    /// let a = parse::from_json("12")!.int_or(0);      // 12
+    /// let b = parse::from_json("\"12\"")!.int_or(0);  // 0
+    /// ```
+    fn int_or(value: Value, default: i64) -> i64 {
+        match value {
+            Self::Number(f) => f as i64,
+            _ => default,
+        }
+    }
+
+    #[native]
+    /// The `Bool`, or `default` for any other kind of value.
+    ///
+    /// ```mimas
+    /// use std::parse;
+    ///
+    /// let a = parse::from_json("true")!.bool_or(false); // true
+    /// let b = parse::from_json("1")!.bool_or(false);    // false
+    /// ```
+    fn bool_or(value: Value, default: bool) -> bool {
+        match value {
+            Self::Bool(b) => b,
+            _ => default,
+        }
     }
 }
 

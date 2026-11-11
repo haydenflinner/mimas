@@ -189,6 +189,29 @@ macro_rules! id {
 
                 /// Sentinel for "no id here" -- safe to read as a discriminator, unsafe to index with.
                 pub const DANGLING: Self = Self(u32::MAX);
+                /// Sentinels an `is_instance` test reads as "is this value a
+                /// primitive of that kind" — how `impl Num for float` takes its
+                /// arm in a pact dispatch chain. Never index with them.
+                /// r[impl mimas.pact.primitive]
+                pub const PRIM_INT: Self = Self(u32::MAX - 1);
+                pub const PRIM_FLOAT: Self = Self(u32::MAX - 2);
+                pub const PRIM_STR: Self = Self(u32::MAX - 3);
+                pub const PRIM_BOOL: Self = Self(u32::MAX - 4);
+
+                /// The primitive sentinel for a library namespace adt's name.
+                pub fn primitive(name: &str) -> Option<Self> {
+                    match name {
+                        "int" => Some(Self::PRIM_INT),
+                        "float" => Some(Self::PRIM_FLOAT),
+                        "str" => Some(Self::PRIM_STR),
+                        "bool" => Some(Self::PRIM_BOOL),
+                        _ => None,
+                    }
+                }
+
+                pub fn is_primitive_sentinel(self) -> bool {
+                    self.0 >= u32::MAX - 4 && self.0 != u32::MAX
+                }
 
                 pub fn index(self) -> usize {
                     self.0 as usize

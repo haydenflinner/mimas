@@ -124,6 +124,18 @@ fn numeric_join(op: EvaluationOp, a: &Option<Ty>, b: &Option<Ty>) -> Option<Ty> 
         EvaluationOp::BitShiftLeft | EvaluationOp::BitShiftRight | EvaluationOp::Xor => {
             Some(Ty::Int)
         }
+        // the named operators have no meaning on a column
+        EvaluationOp::Wedge
+            | EvaluationOp::Vee
+            | EvaluationOp::Dot
+            | EvaluationOp::Cross
+            | EvaluationOp::Compose
+            | EvaluationOp::Tensor
+            | EvaluationOp::Odot
+            | EvaluationOp::Intersect
+            | EvaluationOp::Union
+            | EvaluationOp::Ominus
+            | EvaluationOp::Uplus => None,
     }
 }
 

@@ -63,9 +63,20 @@ pub struct Solver {
     /// The pacts each declared type param is bounded by (`T: Draw`), by the param's id.
     /// Absent means unbounded. Fn and adt params share the map -- ids are global.
     pub(crate) param_bounds: FxHashMap<ParamId, Vec<PactId>>,
+    /// A pact's overload groups: base name → the keys in `Pact::functions` that
+    /// spell it (`mul` → `["mul", "mul#1"]`), first declared first. A name
+    /// declared once has no entry. r[impl mimas.pact.overload]
+    pub(crate) pact_groups: FxHashMap<(PactId, String), Vec<String>>,
+    /// Which pact member an impl's fn implements, for the fns whose pairing
+    /// isn't by name alone (an overload): impl dec → member dec.
+    pub(crate) impl_member: FxHashMap<DecId, Vec<DecId>>,
     /// Bounds named before their pact was hoisted (a struct's `<T: Draw>` is read in
     /// `hoist_types`, ahead of `hoist_pacts`) -- settled by `resolve_pending_bounds`.
     pub(crate) pending_bounds: Vec<(ParamId, Ident)>,
+    /// Parameter defaults that didn't reduce at `hoist_callables` -- a default naming a
+    /// `const` the fixpoint hasn't solved yet -- settled by `resolve_pending_defaults`:
+    /// the fn's dec, the parameter's index, the default's expr.
+    pub(crate) pending_defaults: Vec<(DecId, usize, Expr)>,
     /// Every instantiation of a bounded param: the vid it became, the pact it owes, and the
     /// use that incurred it. Checked once bodies are solved (`check_bounds`).
     pub(crate) bound_obligations: Vec<(Ty, PactId, Location)>,
@@ -263,7 +274,10 @@ impl Solver {
             iter_guards: vec![],
             type_params: vec![],
             param_bounds: FxHashMap::default(),
+            pact_groups: FxHashMap::default(),
+            impl_member: FxHashMap::default(),
             pending_bounds: vec![],
+            pending_defaults: vec![],
             bound_obligations: vec![],
             obligation_at: None,
         };
@@ -489,12 +503,14 @@ impl Solver {
         lap("hoist_types");
         run_phase(self, Self::hoist_pacts, &mut saved_ribs)?;
         lap("hoist_pacts");
+        // constants are declared ahead of the callables so a parameter default can name
+        // one (`fn panel(fill: str = G_DEEP)`); their values come later, in the fixpoint
+        run_phase(self, Self::hoist_constants, &mut saved_ribs)?;
+        lap("hoist_constants");
         run_phase(self, Self::hoist_callables, &mut saved_ribs)?;
         lap("hoist_callables");
         run_phase(self, Self::resolve_pending_bounds, &mut saved_ribs)?;
         lap("resolve_pending_bounds");
-        run_phase(self, Self::hoist_constants, &mut saved_ribs)?;
-        lap("hoist_constants");
 
         // fixpoint: hoist_uses + solve_consts. each round may resolve more consts (e.g. a const
         // that references another module's const reduces only once that other const is bound).
@@ -514,6 +530,11 @@ impl Solver {
             prev = curr;
         }
         self.defer_call_consts = false;
+
+        // the consts are as solved as they get before bodies: the parameter defaults that
+        // waited on one reduce now
+        run_phase(self, Self::resolve_pending_defaults, &mut saved_ribs)?;
+        lap("resolve_pending_defaults");
 
         run_phase(self, Self::solve_types, &mut saved_ribs)?;
         lap("solve_types");
@@ -1447,6 +1468,7 @@ impl Solver {
             variants,
             impls: FxHashMap::default(),
             native_overloads: FxHashMap::default(),
+            overloads: FxHashMap::default(),
             flags: match api_adt.kind {
                 ApiAdtKind::Enum => AdtFlags::IS_ENUM,
                 ApiAdtKind::Struct => AdtFlags::empty(),
@@ -1984,6 +2006,51 @@ impl Solver {
             }
         }
         Ok(())
+    }
+
+    /// A parameter default that named a not-yet-solved `const` at `hoist_callables` is
+    /// reduced now that the const fixpoint has run; one that still has no literal is the
+    /// `NonConstDefault` it would have been at hoist.
+    // r[impl mimas.fn.default-const]
+    fn resolve_pending_defaults(&mut self, _ast: &Ast) -> Result<()> {
+        for (dec, index, expr) in std::mem::take(&mut self.pending_defaults) {
+            let Some(lit) = self.default_literal(&expr)? else {
+                return Err(crate::errors::NonConstDefault {
+                    src: self.src(expr.location()),
+                    at: expr.location().into(),
+                }
+                .into());
+            };
+            if let DecKind::Item { defaults, .. } = &mut self.decs[dec].kind {
+                defaults[index] = Some(lit);
+            }
+        }
+        Ok(())
+    }
+
+    /// A parameter default's literal: `reduce_const_expr`, then the shape check. A
+    /// default lives in the callee's header as a bytecode `Constant`, which has no
+    /// struct or dict form, so a literal that would allocate is refused here with a
+    /// pointer at the body instead of panicking in the IR.
+    pub(crate) fn default_literal(&self, expr: &Expr) -> Result<Option<Literal>> {
+        fn allocates(lit: &Literal) -> bool {
+            match lit {
+                Literal::Struct(_) | Literal::Dictionary(_) => true,
+                Literal::Array(items) | Literal::Tuple(items) => items.iter().any(|e| {
+                    matches!(e.kind(), ExprKind::Literal(l) if allocates(l))
+                }),
+                _ => false,
+            }
+        }
+        let lit = self.reduce_const_expr(expr)?;
+        if lit.as_ref().is_some_and(allocates) {
+            return Err(crate::errors::NonScalarDefault {
+                src: self.src(expr.location()),
+                at: expr.location().into(),
+            }
+            .into());
+        }
+        Ok(lit)
     }
 
     /// The pacts a receiver of `ty` dispatches through: a bound annotation

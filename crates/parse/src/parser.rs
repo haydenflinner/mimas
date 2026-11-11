@@ -4760,10 +4760,11 @@ impl BinaryOp {
             4
         } else if op.is_bit_shift() {
             5
-        } else if op.is_additive() {
+        } else if op.is_additive() || op.is_named_additive() {
             6
         } else {
-            // the multiplicative ops, which bind tightest
+            // the multiplicative ops (and the named ones that bind like
+            // `*`: `∧ ⋅ × ∘ ⊗ ⊙ ∩`), which bind tightest
             7
         };
         Some((Self::Eval(op), power))

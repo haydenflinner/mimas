@@ -287,3 +287,22 @@ test_run!(
     "use std::parse;",
     r#"parse::to_json(parse::from_json("[1]") absolve |_| parse::from_json("null")!)!"# => r#""[1]""#,
 );
+
+// `get`/`at` walk a document without a null check per step; the `_or`
+// leaves read a typed value or the default.
+test_run!(
+    value_get_at_and_or_defaults,
+    "use std::parse;
+     let v = parse::from_json(\"{\\\"hero\\\": {\\\"name\\\": \\\"ada\\\", \\\"hp\\\": 30, \\\"up\\\": true}, \\\"pts\\\": [[1, 2], [3, 4]]}\")!;",
+    "v.get(\"hero\").get(\"name\").str_or(\"?\")" => r#""ada""#,
+    "v.get(\"hero\").get(\"hp\").int_or(0)" => "30",
+    "v.get(\"hero\").get(\"hp\").float_or(0.0)" => "30.0",
+    "v.get(\"hero\").get(\"up\").bool_or(false)" => "true",
+    "v.get(\"hero\").get(\"mp\").int_or(-1)" => "-1",
+    "v.get(\"nope\").get(\"deeper\").str_or(\"\")" => r#""""#,
+    "v.get(\"pts\").at(1).at(0).int_or(-1)" => "3",
+    "v.get(\"pts\").at(5).int_or(-1)" => "-1",
+    "v.get(\"pts\").at(-1).int_or(-1)" => "-1",
+    "v.get(\"hero\").get(\"name\").int_or(7)" => "7",
+    "v.at(0).str_or(\"not an array\")" => r#""not an array""#,
+);

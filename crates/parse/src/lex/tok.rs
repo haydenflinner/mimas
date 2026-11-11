@@ -94,6 +94,35 @@ pub enum TokKind<'s> {
     Nand,
     /// `⍱` — nor; the word `nor` spells the same op.
     Nor,
+    // r[impl mimas.op.glyphs]
+    // The named operators — Julia's idea: a fixed table of mathematical
+    // symbols the lexer knows and the parser ranks, with no built-in meaning.
+    // `a ∧ b` is `a.wedge(b)` (or `b.rwedge(a)`) and nothing else; on a
+    // primitive it is an error that names the method to write. The
+    // multiplicative tier (binds like `*`): `∧` `⋅` `×` `∘` `⊗` `⊙` `∩`. The
+    // additive tier (like `+`): `∨` `∪` `⊖` `⊎`.
+    /// `∧` — wedge (the exterior product).
+    Wedge,
+    /// `∨` — vee (the regressive product, or a lattice join).
+    Vee,
+    /// `⋅` (also `·`) — dot (the inner product).
+    DotOp,
+    /// `×` — cross.
+    Cross,
+    /// `∘` — compose.
+    Compose,
+    /// `⊗` — tensor.
+    Tensor,
+    /// `⊙` — odot (a Hadamard or pointwise product).
+    Odot,
+    /// `∩` — intersect.
+    Intersect,
+    /// `∪` — union.
+    Union,
+    /// `⊖` — ominus.
+    Ominus,
+    /// `⊎` — uplus (a disjoint or multiset union).
+    Uplus,
     Tilde,
     Dollar,
     DoubleLeftCaret,
@@ -206,6 +235,17 @@ impl Display for TokKind<'_> {
             TokKind::CircledPlusEqual => "⊕=",
             TokKind::Nand => "⍲",
             TokKind::Nor => "⍱",
+            TokKind::Wedge => "∧",
+            TokKind::Vee => "∨",
+            TokKind::DotOp => "⋅",
+            TokKind::Cross => "×",
+            TokKind::Compose => "∘",
+            TokKind::Tensor => "⊗",
+            TokKind::Odot => "⊙",
+            TokKind::Intersect => "∩",
+            TokKind::Union => "∪",
+            TokKind::Ominus => "⊖",
+            TokKind::Uplus => "⊎",
             TokKind::Tilde => "~",
             TokKind::Dollar => "$",
             TokKind::DoubleLeftCaret => "<<",

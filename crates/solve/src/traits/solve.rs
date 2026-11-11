@@ -111,6 +111,19 @@ fn op_method_names(op: EvaluationOp) -> (&'static str, &'static str) {
         EvaluationOp::Nor => ("nor", "rnor"),
         EvaluationOp::BitShiftLeft => ("shl", "rshl"),
         EvaluationOp::BitShiftRight => ("shr", "rshr"),
+        // the named operators (r[impl mimas.op.named]): the glyph is the
+        // method, and nothing else gives it meaning
+        EvaluationOp::Wedge => ("wedge", "rwedge"),
+        EvaluationOp::Vee => ("vee", "rvee"),
+        EvaluationOp::Dot => ("dot", "rdot"),
+        EvaluationOp::Cross => ("cross", "rcross"),
+        EvaluationOp::Compose => ("compose", "rcompose"),
+        EvaluationOp::Tensor => ("tensor", "rtensor"),
+        EvaluationOp::Odot => ("odot", "rodot"),
+        EvaluationOp::Intersect => ("intersect", "rintersect"),
+        EvaluationOp::Union => ("union", "runion"),
+        EvaluationOp::Ominus => ("ominus", "rominus"),
+        EvaluationOp::Uplus => ("uplus", "ruplus"),
     }
 }
 
@@ -178,6 +191,7 @@ fn op_method_sig(
     Ok(Some((field.dec, f)))
 }
 
+// r[impl mimas.op.method]
 /// `a <op> b` → `a.<name>(b)` when `a`'s type implements an operator-shaped
 /// `<name>` method, else `b.<rname>(a)` when `b`'s does. "Operator-shaped" is
 /// `self` plus exactly one operand — a same-named method of another arity just
@@ -205,26 +219,42 @@ pub(crate) fn op_dispatch(
                 None => continue,
             },
         };
-        let Some((dec, f)) = op_method_sig(solver, aid, name, recv_ty, &args, location)? else {
-            continue;
-        };
-        // source methods carry `self` in parameters[0]; a native sig bound its
-        // receiver during `instantiate_native`, so its params are all operands
-        let operand = match f.parameters.as_slice() {
-            [_, operand] if f.is_method => operand.ty.clone(),
-            [operand] if !f.is_method => operand.ty.clone(),
-            _ => continue,
-        };
-        let ret = f.return_ty.as_ref().clone();
-        // an arg that doesn't fit this candidate isn't an error — the
-        // search continues (`xs + ys` passes a list to `[T]::add`'s
-        // element slot and still has `union`/`radd` to try). Whatever
-        // nothing claims falls back to `eval`'s own diagnostics.
-        if arg.fulfill_ty(operand, solver).is_err() {
-            continue;
+        // the primary method first, then its operand-typed overloads
+        // (r[impl mimas.op.overload]) — the first whose operand the arg fits wins
+        let mut candidates: Vec<(crate::components::DecId, FnHeader)> = Vec::new();
+        if let Some(primary) = op_method_sig(solver, aid, name, recv_ty, &args, location)? {
+            candidates.push(primary);
         }
-        solver.op_decs.insert(id, OpDispatch { dec, swap });
-        return Ok(Some(ret));
+        for field in solver.adts[aid]
+            .overloads
+            .get(name)
+            .cloned()
+            .unwrap_or_default()
+        {
+            solver.check_vis(field.dec, location)?;
+            if let Ty::Fn(f) = solver.specialize(&field.ty, aid, &args) {
+                candidates.push((field.dec, f));
+            }
+        }
+        for (dec, f) in candidates {
+            // source methods carry `self` in parameters[0]; a native sig bound its
+            // receiver during `instantiate_native`, so its params are all operands
+            let operand = match f.parameters.as_slice() {
+                [_, operand] if f.is_method => operand.ty.clone(),
+                [operand] if !f.is_method => operand.ty.clone(),
+                _ => continue,
+            };
+            let ret = f.return_ty.as_ref().clone();
+            // an arg that doesn't fit this candidate isn't an error — the
+            // search continues (`xs + ys` passes a list to `[T]::add`'s
+            // element slot and still has `union`/`radd` to try). Whatever
+            // nothing claims falls back to `eval`'s own diagnostics.
+            if arg.fulfill_ty(operand, solver).is_err() {
+                continue;
+            }
+            solver.op_decs.insert(id, OpDispatch { dec, swap });
+            return Ok(Some(ret));
+        }
     }
     Ok(None)
 }
@@ -340,6 +370,7 @@ fn pact_unary_dispatch(
         crate::PactOp {
             pids: pids.to_vec(),
             method: name.to_string(),
+            swap: false,
         },
     );
     Some(f.return_ty.as_ref().clone())
@@ -1049,6 +1080,36 @@ impl Solve for Call {
                     })?,
                     (_, other) => other,
                 };
+                // a pact-typed or bounded receiver calling an overloaded member
+                // (`x.mul(3.0)` on `x: T` under `<T: Num>`): the key is chosen by
+                // the one argument, and the noted dec carries it for emit
+                // r[impl mimas.pact.overload]
+                if let Some(pids) = solver.pacts_of(&lhs)
+                    && let [arg] = call.arguments.as_slice()
+                    && arg.name.is_none()
+                    && let Some((pid, keys)) = pids.iter().find_map(|pid| {
+                        solver
+                            .pact_groups
+                            .get(&(*pid, ident.lexeme.clone()))
+                            .map(|keys| (*pid, keys.clone()))
+                    })
+                {
+                    for key in keys {
+                        let (header, _) = solver.pacts[&pid].functions[&key].clone();
+                        let ty = solver.instantiate_pact_fn(&header, &lhs);
+                        let Ty::Fn(f) = &ty else { continue };
+                        let [_, operand] = f.parameters.as_slice() else { continue };
+                        if arg.value.fulfill_ty(operand.ty.clone(), solver).is_err() {
+                            continue;
+                        }
+                        let member = solver.pact_members[&(pid, key.clone())];
+                        solver.check_vis(member, ident.location)?;
+                        solver.node_decs.insert(call.left.id(), member);
+                        solver.note(ident, ty.clone(), Some(member));
+                        return Ok(Some(ty));
+                    }
+                    return Ok(None);
+                }
                 let (aid, recv_args) = match &lhs {
                     Ty::Adt(a, args) | Ty::Identity(a, args) => (*a, args.clone()),
                     l => match solver.builtin_adt(l) {
@@ -1095,6 +1156,12 @@ impl Solve for Call {
                     // receiver's own args (`l.push(5)` on `List<int>` sees `x: int`)
                     solver.specialize(&field.ty, aid, &recv_args)
                 };
+                // `v.mul(2.0)` beside `fn mul(self, o: V)` and `fn mul(self, k: float)`:
+                // the call picks the overload its one argument fits, the same
+                // choice `v * 2.0` makes (r[impl mimas.op.overload])
+                let (dec, ty) =
+                    pick_source_overload(solver, aid, &ident.lexeme, &recv_args, call, dec, ty)?;
+                solver.node_decs.insert(call.left.id(), dec);
                 solver.note(ident, ty.clone(), Some(dec));
                 Ok(Some(ty))
             }
@@ -1639,6 +1706,21 @@ impl Solve for Evaluation {
             location: Location,
             solver: &Solver,
         ) -> Result<Ty> {
+            // a named operator reaching here found no method on either side:
+            // say which methods would have caught it (r[impl mimas.op.named])
+            if op.is_named() {
+                let (method, rmethod) = op_method_names(op);
+                return Err(UnboundOperator {
+                    src: solver.src(location),
+                    at: location.into(),
+                    lhs: lhs.to_string(),
+                    rhs: rhs.to_string(),
+                    op: op.to_string(),
+                    method,
+                    rmethod,
+                }
+                .into());
+            }
             match (lhs, rhs) {
                 (Ty::Str, Ty::Str) if op == EvaluationOp::Plus => Ok(Ty::Str),
                 (Ty::Bool, Ty::Bool) if op.is_binary() => Ok(Ty::Bool),
@@ -1694,8 +1776,40 @@ impl Solve for Evaluation {
         let rhs = self.right.query(solver)?;
         let mut lhs_n = lhs.clone().normalized(solver);
         let mut rhs_n = rhs.clone().normalized(solver);
-        if let Some(ty) = plexpr_overload_ty(&lhs_n, &rhs_n, solver)
-            .or_else(|| tensor_overload_ty(&lhs_n, &rhs_n, solver))
+        // an operand typed by a pact (`x: Num`, or `x: T` under `<T: Num>`):
+        // the operator is the pact's method, dispatched at runtime
+        if let Some(ty) = pact_binary_dispatch(
+            solver,
+            id,
+            op_method_names(self.op),
+            &self.left,
+            &self.right,
+            &lhs_n,
+            &rhs_n,
+            location,
+        )? {
+            return Ok(ty);
+        }
+        // a pact-typed operand whose pacts declare neither method: nothing
+        // could run this at runtime, so say so now r[impl mimas.pact.binary]
+        if solver.pacts_of(&lhs_n).is_some() || solver.pacts_of(&rhs_n).is_some() {
+            let (method, rmethod) = op_method_names(self.op);
+            return Err(UnboundOperator {
+                src: solver.src(location),
+                at: location.into(),
+                lhs: lhs_n.to_string(),
+                rhs: rhs_n.to_string(),
+                op: self.op.to_string(),
+                method,
+                rmethod,
+            }
+            .into());
+        }
+        // the VM-level overloads of `PlExpr`/`Tensor` cover the arithmetic
+        // operators only; a named operator on them is its method or nothing
+        if !self.op.is_named()
+            && let Some(ty) = plexpr_overload_ty(&lhs_n, &rhs_n, solver)
+                .or_else(|| tensor_overload_ty(&lhs_n, &rhs_n, solver))
         {
             return Ok(ty);
         }
@@ -2199,14 +2313,68 @@ impl Solve for Impl {
             // inherent methods are concrete fields; refresh the stored type with the solved one.
             // pact methods aren't fields (they dispatch via `pact_impls`), so this is a no-op
             // there.
-            if let Some(field) = solver.adts[aid].impls.get_mut(&function.name.lexeme) {
+            // an overload refreshes its own slot, never the primary's: match by dec
+            let dec = solver.node_decs.get(&item.id()).copied();
+            let name = &function.name.lexeme;
+            if let Some(field) = solver.adts[aid]
+                .impls
+                .get_mut(name)
+                .filter(|f| dec.is_none_or(|d| f.dec == d))
+            {
+                field.ty = ty.clone();
+            } else if let Some(field) = solver.adts[aid]
+                .overloads
+                .get_mut(name)
+                .and_then(|fs| fs.iter_mut().find(|f| Some(f.dec) == dec))
+            {
                 field.ty = ty.clone();
             }
 
-            if let Some((pact, _)) = &mut pact {
-                let (pact_header, _default) = pact
+            if let Some((pact, pid)) = &mut pact {
+                // r[impl mimas.pact.overload]
+                // the member this fn implements: by name when the name is declared once;
+                // among an overload group, the key whose operand is this fn's operand
+                let keys: Vec<String> = pact
                     .functions
-                    .swap_remove(&function.name.lexeme)
+                    .keys()
+                    .filter(|k| crate::pact_key_base(k) == function.name.lexeme)
+                    .cloned()
+                    .collect();
+                // every overload whose operand instantiates to this fn's operand:
+                // for `impl Num for float`, `mul(self, o: Self)` and `mul(self, k:
+                // float)` both read `float`, and one fn implements both
+                // r[impl mimas.pact.primitive]
+                let chosen: Vec<String> = match keys.as_slice() {
+                    [one] => vec![one.clone()],
+                    [] => vec![],
+                    many => {
+                        let target = solver.impl_target_ty().unwrap();
+                        let mine = overload_operand_of(&ty).map(|o| o.normalized(solver));
+                        many.iter()
+                            .filter(|k| {
+                                let (h, _) = &pact.functions[*k];
+                                let inst = solver.instantiate_pact_fn(h, &target);
+                                overload_operand_of(&inst)
+                                    .map(|o| o.normalized(solver))
+                                    .is_some_and(|o| mine.as_ref().is_some_and(|m| same_operand(&o, m)))
+                            })
+                            .cloned()
+                            .collect()
+                    }
+                };
+                let mut found = None;
+                for k in &chosen {
+                    if let Some(f) = pact.functions.swap_remove(k) {
+                        if let (Some(dec), Some(&member)) = (
+                            solver.node_decs.get(&item.id()).copied(),
+                            solver.pact_members.get(&(*pid, k.clone())),
+                        ) {
+                            solver.impl_member.entry(dec).or_default().push(member);
+                        }
+                        found.get_or_insert(f);
+                    }
+                }
+                let (pact_header, _default) = found
                     .ok_or_else(|| {
                         miette::Error::from(PactFunctionNotFound {
                             src: solver.src(function.name.location),
@@ -2245,7 +2413,12 @@ impl Solve for Impl {
                 .functions
                 .iter()
                 .filter(|(_, (_, default))| default.is_none())
-                .map(|(name, _)| name.clone())
+                .map(|(key, (h, _))| match overload_operand_of(&Ty::Fn(h.clone())) {
+                    Some(o) if key.contains('#') || pact.functions.keys().any(|k| k != key && crate::pact_key_base(k) == crate::pact_key_base(key)) => {
+                        format!("{}(self, _: {})", crate::pact_key_base(key), o)
+                    }
+                    _ => key.clone(),
+                })
                 .chain(pact.constants.keys().cloned())
                 .collect();
             if !missing.is_empty() {
@@ -3082,5 +3255,120 @@ fn check_member_defaultable(
             solver,
             format!("`{member}: {other}` has no default value"),
         ))?,
+    }
+}
+
+/// Among `name`'s primary (`dec`, typed `ty`) and its operand-typed overloads
+/// on `aid`, the one whose operand `call`'s single positional argument fits.
+/// The primary stands when there are no overloads, the call isn't
+/// single-argument, or nothing fits (the call's own checking then reports
+/// the mismatch against the primary). r[impl mimas.op.overload]
+fn pick_source_overload(
+    solver: &mut Solver,
+    aid: AdtId,
+    name: &str,
+    recv_args: &[Ty],
+    call: &Call,
+    dec: crate::components::DecId,
+    ty: Ty,
+) -> Result<(crate::components::DecId, Ty)> {
+    let overloads = solver.adts[aid].overloads.get(name).cloned().unwrap_or_default();
+    let [arg] = call.arguments.as_slice() else {
+        return Ok((dec, ty));
+    };
+    if overloads.is_empty() || arg.name.is_some() {
+        return Ok((dec, ty));
+    }
+    let mut candidates = vec![(dec, ty.clone())];
+    for field in overloads {
+        solver.check_vis(field.dec, call.left.location())?;
+        let sig = solver.specialize(&field.ty, aid, recv_args);
+        candidates.push((field.dec, sig));
+    }
+    for (dec, sig) in &candidates {
+        let Ty::Fn(f) = sig else { continue };
+        let [_, operand] = f.parameters.as_slice() else { continue };
+        if arg.value.fulfill_ty(operand.ty.clone(), solver).is_ok() {
+            return Ok((*dec, sig.clone()));
+        }
+    }
+    Ok((dec, ty))
+}
+
+/// The declared type of an operator-shaped method's one operand (`self` plus
+/// one written parameter), or `None`. The pact overload pairing's key.
+fn overload_operand_of(ty: &Ty) -> Option<Ty> {
+    match ty {
+        Ty::Fn(h) if h.is_method && h.parameters.len() == 2 => Some(h.parameters[1].ty.clone()),
+        _ => None,
+    }
+}
+
+/// `a <op> b` with `a` (or `b`) pact-typed or a bounded type param: the pact
+/// that declares the operator's method (`mul`, or `rmul` on the right) owns
+/// the operator, and the call dispatches at runtime over the bound's
+/// implementers. Among an overload group the first member whose operand the
+/// other side fits wins. `Self` in the signature reads as the operand's own
+/// type, so `x * x` on `x: T` stays `T`. Recorded in `pact_ops`.
+/// r[impl mimas.pact.binary] r[impl mimas.pact.overload]
+#[allow(clippy::too_many_arguments)]
+fn pact_binary_dispatch(
+    solver: &mut Solver,
+    id: NodeId,
+    names: (&'static str, &'static str),
+    left: &Expr,
+    right: &Expr,
+    lhs: &Ty,
+    rhs: &Ty,
+    location: Location,
+) -> Result<Option<Ty>> {
+    for (recv_ty, name, arg, swap) in [(lhs, names.0, right, false), (rhs, names.1, left, true)] {
+        let Some(pids) = solver.pacts_of(recv_ty) else { continue };
+        // the pact that declares the name, and its overload group
+        let Some((pid, keys)) = pids.iter().find_map(|pid| {
+            let pact = &solver.pacts[pid];
+            if !pact.functions.contains_key(name) {
+                return None;
+            }
+            let keys = solver
+                .pact_groups
+                .get(&(*pid, name.to_string()))
+                .cloned()
+                .unwrap_or_else(|| vec![name.to_string()]);
+            Some((*pid, keys))
+        }) else {
+            continue;
+        };
+        for key in keys {
+            let (header, _) = solver.pacts[&pid].functions[&key].clone();
+            let Ty::Fn(f) = solver.instantiate_pact_fn(&header, recv_ty) else { continue };
+            let [_, operand] = f.parameters.as_slice() else { continue };
+            if arg.fulfill_ty(operand.ty.clone(), solver).is_err() {
+                continue;
+            }
+            solver.check_vis(solver.pact_members[&(pid, key.clone())], location)?;
+            solver.pact_ops.insert(
+                id,
+                crate::PactOp {
+                    pids: pids.clone(),
+                    method: key,
+                    swap,
+                },
+            );
+            return Ok(Some(f.return_ty.as_ref().clone()));
+        }
+    }
+    Ok(None)
+}
+
+/// Two operand types that name the same thing: the impl target written as
+/// itself (`o: R` inside `impl Num for R` is `Identity(R)`) matches the pact's
+/// `Self` instantiated to the target (`Adt(R)`).
+fn same_operand(a: &Ty, b: &Ty) -> bool {
+    match (a, b) {
+        (Ty::Adt(x, xa) | Ty::Identity(x, xa), Ty::Adt(y, ya) | Ty::Identity(y, ya)) => {
+            x == y && xa == ya
+        }
+        _ => a == b,
     }
 }

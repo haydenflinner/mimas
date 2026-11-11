@@ -2339,10 +2339,7 @@ pub fn cold_dispatch<'gc>(
             let dst = Reg::decode(code);
             let src = Reg::decode(code);
             let adt = code.u32();
-            let matches = matches!(
-                rd!(regs, src),
-                Val::Instance(i) if i.0.borrow().struct_id == adt,
-            );
+            let matches = crate::val_is_instance(&rd!(regs, src), adt);
             wr!(regs, dst, Val::Bool(matches));
         }
         OpCode::NewClosure => {

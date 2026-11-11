@@ -883,11 +883,15 @@ impl Emit for Call {
                     other => other.as_pacts(),
                 });
             if let Some(pids) = pact_pids {
-                let method = right
-                    .as_ident()
-                    .expect("method name is an ident")
-                    .lexeme
-                    .clone();
+                let ident = right.as_ident().expect("method name is an ident");
+                // the solver noted the member it chose — an overload's key
+                // (`mul#1`) differs from the name written r[impl mimas.pact.overload]
+                let method = ir
+                    .resolutions
+                    .node_decs
+                    .get(&ident.id)
+                    .map(|d| ir.resolutions.decs[*d].name.clone())
+                    .unwrap_or_else(|| ident.lexeme.clone());
                 return emit_pact_dispatch(ir, &fn_ty, left, &self.arguments, &pids, &method);
             }
 
@@ -2014,11 +2018,14 @@ fn dispatch_pact_method(
         .iter()
         .filter(|(_, adt)| pids.iter().all(|p| adt.implements.contains(p)))
         .map(|(_, adt)| {
-            (
-                adt.methods[method],
-                adt.dispatch_ids.clone(),
-                adt.name == "bool",
-            )
+            // a primitive implementer (`impl Num for float`) has no instance id:
+            // its arm tests the value's kind through a sentinel id
+            // r[impl mimas.pact.primitive]
+            let ids = match AdtId::primitive(&adt.name) {
+                Some(p) if adt.name != "bool" => vec![p],
+                _ => adt.dispatch_ids.clone(),
+            };
+            (adt.methods[method], ids, adt.name == "bool")
         })
         .collect();
     let candidates: Vec<_> = candidates
@@ -2099,6 +2106,14 @@ fn emit_bin_op(
         let right = right.lower(ir)?;
         let (recv, arg) = if d.swap { (right, left) } else { (left, right) };
         return emit_op_call(ir, d, vec![recv, arg]);
+    }
+    // an operator on a pact-typed operand: the pact's method, dispatched over
+    // the bound's implementers at runtime r[impl mimas.pact.binary]
+    if let Some(p) = ir.resolutions.pact_ops.get(&id).cloned() {
+        let left = left.lower(ir)?;
+        let right = right.lower(ir)?;
+        let (recv, arg) = if p.swap { (right, left) } else { (left, right) };
+        return dispatch_pact_method(ir, recv, vec![recv, arg], &p.pids, &p.method);
     }
     let kind = num_kind(ir, id, left, right);
     let left = left.lower(ir)?;
