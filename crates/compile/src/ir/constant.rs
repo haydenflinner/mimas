@@ -158,7 +158,7 @@ impl Constant {
     /// fresh, the way a struct const already does.
     pub(crate) fn needs_alloc(ir: &Ir, lit: &Literal) -> bool {
         match lit {
-            Literal::Dictionary(_) | Literal::Struct(_) => true,
+            Literal::Dictionary(_) | Literal::Struct(_) | Literal::Record(_) => true,
             Literal::Array(es) | Literal::Tuple(es) => {
                 es.iter().any(|e| Self::expr_needs_alloc(ir, e))
             }

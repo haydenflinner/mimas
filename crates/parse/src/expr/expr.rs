@@ -78,6 +78,17 @@ impl Expr {
         }
     }
 
+    /// An expression that stands in for the node `id`: a folded `const`
+    /// value keeps the id of the expression it replaced, so what the checker
+    /// learned about that node (a record's struct type) still applies.
+    pub fn with_id(kind: ExprKind, id: NodeId, location: Location) -> Self {
+        Self {
+            kind: Box::new(kind),
+            id,
+            location,
+        }
+    }
+
     /// Get a reference to the inner ExprKind.
     pub fn kind(&self) -> &ExprKind {
         self.kind.as_ref()

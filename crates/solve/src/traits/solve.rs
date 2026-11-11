@@ -2718,6 +2718,19 @@ fn struct_fields(
                     if let FieldKey::Ident(key) = field_name {
                         solver.note(key, target.ty.clone(), Some(target.dec));
                     }
+                    // a `const`'s literal can be solved before `solve_types` gave the
+                    // struct its field types: read this field's from its annotation
+                    // now, so a record in it knows its slot (r[impl mimas.record.const])
+                    if let Ty::Vid(_) = target.ty.clone().normalized(solver)
+                        && let Some(ann) = solver.field_annotations.get(&target.dec).cloned()
+                        && let Ok(mut declared) = Ty::from_annotation(ann, solver)
+                    {
+                        target
+                            .ty
+                            .clone()
+                            .fulfill_ty(&mut declared, solver)
+                            .map_err(|e| e.into_type_mismatch(solver, value.location()))?;
+                    }
                     value.fulfill_ty(target.ty, solver)?;
                 }
 

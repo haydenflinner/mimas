@@ -147,6 +147,10 @@ pub struct Solver {
     /// hint makes it that struct, anything else leaves it a dict.
     /// r[impl mimas.record.context]
     pub(crate) record_hints: FxHashMap<NodeId, Ty>,
+    /// The annotation of each field of a non-generic struct, by the field's dec:
+    /// a literal solved before `solve_types` (a `const`'s) reads its field types
+    /// from here (r[impl mimas.record.const]).
+    pub(crate) field_annotations: FxHashMap<DecId, parse::components::Annotation>,
     /// Dimensions of api-adt fields (`Input.dt` is `s`): `(adt name, field name)`.
     /// Populated by `install_user_adt` from `ApiVariantFields::Named` dims; the dims pass
     /// consults it when a `.field` read isn't on a source-declared struct.
@@ -259,6 +263,7 @@ impl Solver {
             print_dims: FxIndexMap::default(),
             echo_units: FxIndexMap::default(),
             record_hints: FxHashMap::default(),
+            field_annotations: FxHashMap::default(),
             field_dims: FxHashMap::default(),
             member_units: FxHashMap::default(),
             len_checks: FxIndexMap::default(),
@@ -3153,7 +3158,13 @@ impl Solver {
         env: &ConstEnv,
     ) -> crate::utils::ReduceResult<Option<Literal>> {
         let reify = |e: &Expr| -> crate::utils::ReduceResult<Option<Expr>> {
-            Ok(self.reduce_const_in(e, env)?.map(|l| l.into_expr()))
+            Ok(self.reduce_const_in(e, env)?.map(|l| match l {
+                // a record is typed by its slot: keep the node the checker
+                // typed, or the emitter can't tell the struct from a dict
+                // (r[impl mimas.record.const])
+                l @ Literal::Record(_) => Expr::with_id(l.into(), e.id(), e.location()),
+                l => l.into_expr(),
+            }))
         };
         let reify_elems = |elems: Vec<Expr>| -> crate::utils::ReduceResult<Option<Vec<Expr>>> {
             let mut out = Vec::with_capacity(elems.len());
@@ -3192,6 +3203,16 @@ impl Solver {
                     out.push((key.clone(), lit));
                 }
                 Ok(Some(Literal::Dictionary(out)))
+            }
+            Literal::Record(fields) => {
+                let mut out = Vec::with_capacity(fields.len());
+                for (key, value) in &fields {
+                    let Some(lit) = reify(value)? else {
+                        return Ok(None);
+                    };
+                    out.push((key.clone(), lit));
+                }
+                Ok(Some(Literal::Record(out)))
             }
             _ => Ok(Some(lit)),
         }

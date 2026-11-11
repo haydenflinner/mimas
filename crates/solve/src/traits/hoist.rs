@@ -282,11 +282,13 @@ impl Hoist for Struct {
         } else {
             let mut adt = Adt::new_struct(self.name.to_string());
 
+            let generic = !self.type_params.is_empty();
             self.fields.iter().for_each(
                 |StructField {
                      name,
                      location,
                      public,
+                     annotation,
                      ..
                  }| {
                     let ty = Ty::Vid(ctx.solver.vid());
@@ -297,6 +299,9 @@ impl Hoist for Struct {
                         DecKind::Local,
                         if *public { Vis::Public } else { Vis::Private },
                     );
+                    if !generic {
+                        ctx.solver.field_annotations.insert(dec, annotation.clone());
+                    }
                     adt.as_struct_mut()
                         .insert(name.to_string(), Field::new(ty, *location, dec));
                 },

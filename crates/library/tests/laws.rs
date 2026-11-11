@@ -106,3 +106,22 @@ fn a_law_is_a_closure() {
         .expect("a law that isn't a closure is an error");
     assert!(format!("{err:?}").contains("law over the pact's values"), "{err:?}");
 }
+
+// r[verify mimas.pact.law.impl]
+#[test]
+fn law_checks_keep_the_programs_own_units() {
+    // the generated checks parse after the program; a page's `unit` decls
+    // must survive that parse, or every annotation using them goes undefined
+    let r = results(
+        "unit elixir;
+        fn cost(c: elixir) -> elixir { c }
+        pact Twice {
+            fn flip(self) -> Self;
+            check |x| x.flip().flip() == x
+        }
+        enum Side { L, R }
+        impl Twice for Side { fn flip(self) -> Side { match self { Side::L => Side::R, Side::R => Side::L } } }",
+    );
+    assert_eq!(r.len(), 1, "{r:?}");
+    assert!(r[0].1.is_none(), "{r:?}");
+}

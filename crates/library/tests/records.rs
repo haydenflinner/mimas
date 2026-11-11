@@ -91,3 +91,23 @@ test_fail!(
     // the declared unit is checked through the record
     "struct Item { qty: lb } let i: Item = { qty: 2usd };",
 );
+
+// r[verify mimas.record.const]
+test_run!(
+    records_fold_in_consts,
+    "struct V { x: float, y: float }
+     struct W { v: V }
+     struct Piece { cells: [V] }
+     const B: V = { x: 1.0, y: 2.0 };
+     const D = W { v: { x: 0.0, y: 5.0 } }
+     const P = Piece { cells: [{ x: 0.0, y: -1.0 }, { x: 1.0, y: 1.0 }] }
+     const TAGS = { a: 1, b: 2 }",
+    // annotated: the record is the struct the annotation names
+    "B.y" => "2.0",
+    // in a struct field, before the struct's own types are solved
+    "D.v.y" => "5.0",
+    // in a list in a struct field
+    "P.cells[1].x" => "1.0",
+    // nothing names a struct: a dict
+    "TAGS[\"b\"]!" => "2",
+);

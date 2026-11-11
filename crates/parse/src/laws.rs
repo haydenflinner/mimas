@@ -160,7 +160,7 @@ pub fn expand_laws(user: &mut [Ast], shipped: &[Ast]) -> LawExpansion {
         let id = next_id;
         next_id += 1;
         let name = format!("{} (laws)", ast.name());
-        let (mut generated, errors) = Parser::new(Lexer::new(&text, id, name.clone())).into_ast();
+        let (mut generated, errors) = Parser::new_extending(Lexer::new(&text, id, name.clone())).into_ast();
         out.errors.extend(errors);
         // the checks take the law's own name, in impl order
         let mut names = names.into_iter();

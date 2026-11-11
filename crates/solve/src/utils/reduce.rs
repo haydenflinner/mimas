@@ -133,8 +133,17 @@ fn reduce_literal<F: Fn(&Expr) -> Option<Literal>>(
             }
             Ok(Some(lit.clone()))
         }
-        // a bare `{ … }` is typed by its slot, which folding can't see
-        Record(_) => Ok(None),
+        // a bare `{ … }` folds like a dict: the literal is kept whole, and the
+        // emitter makes it the struct its slot expects or a dict from the type
+        // the checker gave it (r[impl mimas.record.const])
+        Record(fields) => {
+            for (_, e) in fields.iter() {
+                if reduce(e, resolve)?.is_none() {
+                    return Ok(None);
+                }
+            }
+            Ok(Some(lit.clone()))
+        }
         Dictionary(fields) => {
             for (_, e) in fields.iter() {
                 if reduce(e, resolve)?.is_none() {
