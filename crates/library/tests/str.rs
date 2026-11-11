@@ -270,7 +270,6 @@ test_run!(
     find_computed_regex_raises,
     r#"let re = "(";"#,
     r#""abc".find(re) absolve |_| null"# => "null",
-    r#""abc".find(re)?"# => "null",
 );
 
 // find_all: every match; each element is the captures of one match

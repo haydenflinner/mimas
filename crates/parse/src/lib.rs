@@ -44,7 +44,7 @@ pub mod expr {
         mod coalescence;
         mod collect;
         mod r#continue;
-        mod demote;
+        mod propagate;
         mod equality;
         mod evaluation;
         mod r#for;
@@ -72,7 +72,7 @@ pub mod expr {
         pub use coalescence::*;
         pub use collect::*;
         pub use r#continue::*;
-        pub use demote::*;
+        pub use propagate::*;
         pub use equality::*;
         pub use evaluation::*;
         pub use r#for::*;
@@ -139,6 +139,8 @@ pub mod item {
 
 mod ast;
 pub mod errors;
+mod laws;
+pub use laws::{LAW_FILE_BASE, LawExpansion, expand_laws, law_sources};
 mod parser;
 pub mod visit;
 pub use ast::*;

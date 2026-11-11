@@ -60,6 +60,10 @@ impl Stmt {
         self.kind.as_ref()
     }
 
+    pub(crate) fn kind_mut(&mut self) -> &mut StmtKind {
+        self.kind.as_mut()
+    }
+
     /// Get the stmt's id.
     #[allow(unused)]
     pub fn id(&self) -> NodeId {

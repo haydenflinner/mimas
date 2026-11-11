@@ -68,20 +68,16 @@ test_run!(
     "f() absolve |_| ()" => "null"
 );
 
-// expr? demotes T! to T? — a raise reads back as null instead of propagating
+// `expr?` in a `T?` function: a raise or a null hands back null early
+// (the full table is in tests/propagate.rs)
 test_run!(
-    demote_result_to_option,
+    propagate_in_option_fn,
     "fn raises() -> int! { raise \"e\" }
      fn gives() -> int! { return 5 }
-     let x: int? = raises()?;
-     let y: int? = null;",
-    "raises()?" => "null",
-    "gives()?" => "5",
-    // `let x: int? = raises()?` in the preamble proves the demote types as int?
-    "x" => "null",
-    // identity on T? and passthrough on plain T (trailing ? was a legal no-op)
-    "y?" => "null",
-    "5?" => "5"
+     fn via_raise() -> int? { raises()? + 1 }
+     fn via_give() -> int? { gives()? + 1 }",
+    "via_raise()" => "null",
+    "via_give()" => "6"
 );
 
 // match panic terminator (trailing `!`) reached

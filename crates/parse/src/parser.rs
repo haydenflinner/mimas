@@ -649,6 +649,17 @@ impl<'s> Parser<'s> {
         }
     }
 
+    /// Inside a pact, `check` opens a law when an expression follows on the
+    /// same line -- a closure (`check |x| …`), or anything else, which
+    /// `pact_law` then explains.
+    fn law_intro(&self) -> bool {
+        let last = self.tokens.len() - 1;
+        let kw_end = self.tokens[self.next.min(last)].span().end();
+        let after = self.tokens[(self.next + 1).min(last)].span().start();
+        !self.src.inner()[kw_end..after].contains('\n')
+            && (matches!(self.nth(1), TokKind::Pipe | TokKind::DoublePipe) || self.check_intro())
+    }
+
     /// One-token lookahead for the contextual `unit` keyword: `unit` opens
     /// a declaration when a plain name follows on the same line — `unit(x)`,
     /// `unit = 4`, `unit.foo`, and `unit` alone stay ordinary expressions.
@@ -1109,6 +1120,7 @@ impl<'s> Parser<'s> {
         self.bump(TokKind::Pact);
         let pact_name = self.require_ident();
         let mut items = vec![];
+        let mut laws = vec![];
         if !self.expect(TokKind::LeftBrace) {
             return Pact::new(pact_name, items);
         }
@@ -1157,6 +1169,14 @@ impl<'s> Parser<'s> {
                         location: self.location(start),
                     });
                 }
+                // r[impl mimas.pact.law]
+                TokKind::Ident("check") if self.law_intro() => {
+                    self.advance();
+                    if let Some(law) = self.pact_law(&pact_name, laws.len(), start) {
+                        laws.push(law);
+                    }
+                    self.eat(TokKind::SemiColon);
+                }
                 TokKind::Eof => {
                     self.expect(TokKind::RightBrace);
                     break;
@@ -1167,7 +1187,86 @@ impl<'s> Parser<'s> {
                 }),
             }
         }
-        Pact::new(pact_name, items)
+        let mut pact = Pact::new(pact_name, items);
+        pact.laws = laws;
+        pact
+    }
+
+    /// A pact's `check |x, y| body` law, after the `check`: lowered to the
+    /// top-level `fn __law_<Pact>_<i><__Law: Pact>(x: __Law, y: __Law) -> bool
+    /// { body }` (queued in `pending`), so the body is checked once, against
+    /// the pact, and runs on any one implementer's values.
+    fn pact_law(&mut self, pact: &Ident, index: usize, start: usize) -> Option<Law> {
+        let expr = self.expr();
+        let text = self.source_of(&expr);
+        let ExprKind::Closure(closure) = expr.kind() else {
+            self.error(Misdirection {
+                src: self.src(),
+                at: expr.location().into(),
+                msg: "a pact's `check` is a law over the pact's values".into(),
+                label: "write it as a closure, one parameter per value: `check |x| x.turned(↻).turned(↺) == x`"
+                    .into(),
+            });
+            return None;
+        };
+        let closure = closure.clone();
+        let at = self.location(start);
+        let mut params = vec![];
+        let mut bindings = vec![];
+        for b in closure.parameters {
+            let PatKind::Ident(name) = b.left.kind() else {
+                self.error(Misdirection {
+                    src: self.src(),
+                    at: b.left.location().into(),
+                    msg: "a law's parameters are plain names".into(),
+                    label: "each one stands for a value of the implementing type".into(),
+                });
+                return None;
+            };
+            if b.annotation.is_some() {
+                self.error(Misdirection {
+                    src: self.src(),
+                    at: b.left.location().into(),
+                    msg: "a law's parameters take no type".into(),
+                    label: format!("each one is a `{}` -- a value of the implementing type", pact.lexeme),
+                });
+            }
+            params.push(name.lexeme.clone());
+            let mut binding = Binding::new(name.clone());
+            binding.annotation = Some(Annotation::Ty(Ident::new("__Law", at)));
+            bindings.push(binding);
+        }
+        if params.is_empty() {
+            self.error(Misdirection {
+                src: self.src(),
+                at: expr.location().into(),
+                msg: "a law needs at least one value to talk about".into(),
+                label: "name it: `check |x| …`".into(),
+            });
+            return None;
+        }
+        let fn_name = format!("__law_{}_{index}", pact.lexeme);
+        // generic over one implementer, so a law may pass one value to
+        // another's method (`a.merge(b)` takes a `Self`)
+        let func = Function {
+            name: Ident::new(fn_name.clone(), at),
+            type_params: vec![TypeParam::new(
+                Ident::new("__Law", at),
+                vec![Ident::new(pact.lexeme.clone(), at)],
+            )],
+            parameters: bindings,
+            wheres: vec![],
+            return_type: Some(Annotation::Kw(lex::TyKw::Bool)),
+            body: closure.body,
+        };
+        self.pending
+            .push(self.new_stmt(Item::new(func.into(), at, false), start));
+        Some(Law {
+            text,
+            params,
+            fn_name,
+            location: expr.location(),
+        })
     }
 
     fn enum_decl(&mut self, start: usize) -> Enum {
@@ -3092,10 +3191,10 @@ impl<'s> Parser<'s> {
                     self.assert_or_unwrap(expr)
                 }
                 TokKind::Bang if self.cursor() == self.next_start() => self.unwrap(expr),
-                // `?` hugs like `!`: `x?` demotes, a spaced `?` starts
+                // `?` hugs like `!`: `x?` propagates, a spaced `?` starts
                 // nothing (`?` opens no expression), so `f ?x` errors
                 // rather than silently reading `(f?)(x)`.
-                TokKind::Hook if self.cursor() == self.next_start() => self.demote(expr),
+                TokKind::Hook if self.cursor() == self.next_start() => self.propagate(expr),
                 // `x%` hugs its operand and spells percent -- `50%` is `50 * 0.01`, the
                 // `pct` unit by another name. A spaced `%` is neither postfix nor modulo
                 // (`a mod b`); `binary` reports it. While a `±` tolerance parses the
@@ -3161,11 +3260,12 @@ impl<'s> Parser<'s> {
         self.new_expr(Unwrap { expr: left }, start)
     }
 
-    /// `expr?` demotes a `T!` to `T?` — a raise reads back as null.
-    fn demote(&mut self, left: Expr) -> Expr {
+    /// `expr?` — `expr`'s value, or the enclosing function hands back its
+    /// null or its raise (`mimas.propagate`).
+    fn propagate(&mut self, left: Expr) -> Expr {
         let start = left.span().start();
         self.bump(TokKind::Hook);
-        self.new_expr(Demote { expr: left }, start)
+        self.new_expr(Propagate { expr: left }, start)
     }
 
     /// `assert!(expr)` rewrites to an `if`/`panic` block. Bare `assert!` (no following `(`) is

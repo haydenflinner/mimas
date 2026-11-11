@@ -3919,6 +3919,13 @@ impl Vm {
             );
         }
 
+        // a pact's laws become checks on each impl, over the impl type's samples
+        let laws = parse::expand_laws(&mut asts, &[]);
+        sources.extend(parse::law_sources(&laws));
+        if let Some(e) = laws.errors.into_iter().next() {
+            return Err(FunctionDataflowError::from(e));
+        }
+
         let mut vm = Self::new();
         let library = vm.install_library(install_lib);
 

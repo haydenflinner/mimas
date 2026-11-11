@@ -879,7 +879,7 @@ impl<'s> Scoped<'s> {
             }
             ExprKind::Unary(u) => self.expr(&u.right),
             ExprKind::Unwrap(u) => self.expr(&u.expr),
-            ExprKind::Demote(d) => self.expr(&d.expr),
+            ExprKind::Propagate(d) => self.expr(&d.expr),
             ExprKind::Grouping(g) => self.expr(&g.inner),
             ExprKind::Loop(l) => self.expr(&l.body),
             ExprKind::Collect(c) => self.expr(&c.value),

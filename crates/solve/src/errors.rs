@@ -205,6 +205,28 @@ pub struct ReturnOutOfFunction {
 }
 
 #[derive(Error, Debug, Diagnostic)]
+#[error("`?` has nowhere to send a null or a raise")]
+pub struct PropagateOutsideFallible {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("{why}")]
+    pub at: SourceSpan,
+    pub why: String,
+    #[help]
+    pub help: String,
+}
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("`?` on a value that can't be null")]
+pub struct PropagateOnPlain {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("this is `{ty}`, never null and never raised -- `?` passes on a `T?`'s null or a `T!`'s raise")]
+    pub at: SourceSpan,
+    pub ty: String,
+}
+
+#[derive(Error, Debug, Diagnostic)]
 #[error("raise outside result-returning function")]
 pub struct RaiseOutsideResult {
     #[source_code]

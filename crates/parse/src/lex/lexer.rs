@@ -883,6 +883,8 @@ pub fn is_symbol_ident(c: char) -> bool {
             | 0x2380..=0x23FF  // misc technical, above it
             | 0x25A0..=0x25FF  // geometric shapes: ● ◆ ▲
             | 0x2600..=0x27BF  // misc symbols + dingbats: ☀ ☾ ★ ➕ ➖
+            | 0x27F0..=0x27FF  // supplemental arrows-A: ⟲ ⟳
+            | 0x2900..=0x297F  // supplemental arrows-B: ⤡ ⤢ (the moves' transpose)
             | 0x2B00..=0x2BFF  // misc symbols and arrows: ⬤ ⬆ ⬇
             | 0x1F000..=0x1FAFF // emoji: 🌞 🌙 😀
             | 0xFE0F           // variation selector-16

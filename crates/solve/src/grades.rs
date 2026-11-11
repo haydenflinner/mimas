@@ -1096,7 +1096,7 @@ impl<'a> Pass<'a> {
                 self.expr(&c.right);
             }
             ExprKind::Unwrap(u) => self.expr(&u.expr),
-            ExprKind::Demote(d) => self.expr(&d.expr),
+            ExprKind::Propagate(d) => self.expr(&d.expr),
             ExprKind::Absolve(a) => {
                 self.expr(&a.left);
                 let pre = self.flow.clone();

@@ -60,9 +60,9 @@ test_fail!(
      xs !true",
 );
 
-// `?` demotes with the same hugging rule — `f ?x` was `(f?)(x)`.
+// `?` propagates with the same hugging rule — `f ?x` was `(f?)(x)`.
 test_run!(
-    spaced_hook_is_not_demote,
+    spaced_hook_is_not_propagate,
     "fn r() -> int! { 2 } fn boom() -> int! { raise(\"b\") }
      fn d() -> int? { r()? } fn e() -> int? { boom()? }",
     "d()" => "2",

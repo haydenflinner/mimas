@@ -263,7 +263,7 @@ impl Solver {
         match e.kind() {
             ExprKind::Grouping(g) => self.frame_schema_of(&g.inner),
             ExprKind::Unwrap(u) => self.frame_schema_of(&u.expr),
-            ExprKind::Demote(d) => self.frame_schema_of(&d.expr),
+            ExprKind::Propagate(d) => self.frame_schema_of(&d.expr),
             ExprKind::Absolve(a) => self.frame_schema_of(&a.left),
             ExprKind::Ident(ident) => self
                 .node_decs
@@ -280,7 +280,7 @@ impl Solver {
         match e.kind() {
             ExprKind::Grouping(g) => self.group_schema_of(&g.inner),
             ExprKind::Unwrap(u) => self.group_schema_of(&u.expr),
-            ExprKind::Demote(d) => self.group_schema_of(&d.expr),
+            ExprKind::Propagate(d) => self.group_schema_of(&d.expr),
             ExprKind::Absolve(a) => self.group_schema_of(&a.left),
             ExprKind::Ident(ident) => self
                 .node_decs
@@ -462,7 +462,7 @@ impl Solver {
         match e.kind() {
             ExprKind::Grouping(g) => self.col_expr(&g.inner, input),
             ExprKind::Unwrap(u) => self.col_expr(&u.expr, input),
-            ExprKind::Demote(d) => self.col_expr(&d.expr, input),
+            ExprKind::Propagate(d) => self.col_expr(&d.expr, input),
             ExprKind::Absolve(a) => self.col_expr(&a.left, input),
             ExprKind::Literal(Literal::Int(_)) => Ok((FrameCol::known(Ty::Int), CDim::Plain)),
             ExprKind::Literal(Literal::Float(_)) => {

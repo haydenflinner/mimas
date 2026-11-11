@@ -87,6 +87,10 @@ impl Item {
         self.kind.as_ref()
     }
 
+    pub(crate) fn kind_mut(&mut self) -> &mut ItemKind {
+        self.kind.as_mut()
+    }
+
     /// Get the item's id.
     pub fn id(&self) -> NodeId {
         self.id

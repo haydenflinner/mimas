@@ -788,7 +788,7 @@ fn expr_refs(expr: &parse::Expr, out: &mut RefSet) {
         }
         ExprKind::Unary(u) => expr_refs(&u.right, out),
         ExprKind::Unwrap(u) => expr_refs(&u.expr, out),
-        ExprKind::Demote(d) => expr_refs(&d.expr, out),
+        ExprKind::Propagate(d) => expr_refs(&d.expr, out),
         ExprKind::While(w) => {
             if let Some(p) = &w.binding {
                 pat_refs(p, out);

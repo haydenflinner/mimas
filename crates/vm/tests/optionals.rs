@@ -205,17 +205,19 @@ test_vm!(
     "die_dict()" => Raised(Box::new(dict! { ~{x = Int(9)} })),
 );
 
-// `?` demotes a structured raise to null without touching the payload;
-// `absolve`'s handler binds the payload itself (`e: any`) — format it
-// explicitly for the old str note.
+// `?` in a `T?` function turns a structured raise into its null without
+// touching the payload; `absolve`'s handler binds the payload itself
+// (`e: any`) — format it explicitly for the old str note.
 test_vm!(
     raise_any_value_boundaries,
     "fn die() -> str! { raise 42 }
-     fn die_list() -> str! { raise [1, 2] }",
+     fn die_list() -> str! { raise [1, 2] }
+     fn quiet() -> str? { die()? }
+     fn quiet_list() -> str? { die_list()? }",
     "die() absolve |e| f\"saw: {e}\"" => str!("saw: 42"),
     "die_list() absolve |e| f\"{e}\"" => str!("[1, 2]"),
-    "die()?" => Null,
-    "die_list()?" => Null,
+    "quiet()" => Null,
+    "quiet_list()" => Null,
 );
 
 test_vm!(

@@ -2973,16 +2973,54 @@ impl Solve for Unwrap {
     }
 }
 
-impl Solve for parse::Demote {
-    fn solve(&self, _id: NodeId, _location: Location, solver: &mut Solver) -> Result<Ty> {
-        // `expr?` demotes a `T!` to `T?` — a raise reads back as null. On `T?`
-        // it's identity, and on anything else it's a passthrough (trailing `?`
-        // was a legal no-op before it had semantics, so `5?` stays `int`).
+// r[impl mimas.propagate] r[impl mimas.propagate.where]
+impl Solve for parse::Propagate {
+    fn solve(&self, id: NodeId, location: Location, solver: &mut Solver) -> Result<Ty> {
+        // `expr?` is `expr`'s value, or an early exit from the enclosing
+        // function: `return null` from a `U?` function, the same raise (or a
+        // raise saying what was null) from a `U!` one.
         let ty = self.expr.query(solver)?;
-        Ok(match ty.normalized(solver) {
-            Ty::Result(inner) => Ty::Option(inner),
-            ty => ty,
-        })
+        let (inner, raised) = match ty.normalized(solver) {
+            Ty::Option(inner) => (*inner, false),
+            Ty::Result(inner) => (*inner, true),
+            ty => Err(PropagateOnPlain {
+                src: solver.src(self.expr.location()),
+                at: self.expr.location().into(),
+                ty: ty.to_string(),
+            })?,
+        };
+        let Some(ret) = solver.fn_stack.last().map(|run| run.expected_ty.clone()) else {
+            Err(PropagateOutsideFallible {
+                src: solver.src(location),
+                at: location.into(),
+                why: "there's no function here to return from".into(),
+                help: "at the top level, `x!` stops with an error and `x ?? fallback` picks a value".into(),
+            })?
+        };
+        let mut ret = ret.normalized(solver);
+        // a closure with no return annotation: `?` makes it return an option
+        if let Ty::Vid(v) = ret {
+            let opt = Ty::Option(Box::new(Ty::Vid(solver.vid())));
+            solver
+                .register_sub(v, opt.clone())
+                .map_err(|e| e.into_type_mismatch(solver, location))?;
+            ret = opt;
+        }
+        let how = match ret {
+            Ty::Option(_) => crate::Propagation::ReturnNull,
+            Ty::Result(_) if raised => crate::Propagation::Reraise,
+            Ty::Result(_) => crate::Propagation::RaiseNull(format!("`{}` was null", self.expr)),
+            ret => Err(PropagateOutsideFallible {
+                src: solver.src(location),
+                at: location.into(),
+                why: format!("this function returns `{ret}`, which can't carry a null or a raise"),
+                help: format!(
+                    "return `{ret}?` to pass the null on, or `{ret}!` to pass the raise on"
+                ),
+            })?,
+        };
+        solver.propagates.insert(id, how);
+        Ok(inner)
     }
 }
 

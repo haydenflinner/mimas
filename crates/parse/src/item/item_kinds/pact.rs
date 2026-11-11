@@ -12,11 +12,29 @@ use shared::{Located, Location};
 pub struct Pact {
     pub name: Ident,
     pub items: Vec<PactItem>,
+    /// The pact's laws, its `check |x| …` lines (`mimas.pact.law`). Each was
+    /// lowered to a top-level `fn` whose parameters are the pact's values;
+    /// every impl runs it over its type's samples (`expand_laws`).
+    pub laws: Vec<Law>,
 }
 impl Pact {
     pub(crate) fn new(name: Ident, items: Vec<PactItem>) -> Self {
-        Self { name, items }
+        Self {
+            name,
+            items,
+            laws: vec![],
+        }
     }
+}
+
+/// One `check |x, y| …` line in a pact: the law as written, the parameter
+/// names, and the synthesized function that evaluates it for given values.
+#[derive(Debug, PartialEq, Clone)]
+pub struct Law {
+    pub text: String,
+    pub params: Vec<String>,
+    pub fn_name: String,
+    pub location: Location,
 }
 
 impl From<Pact> for ItemKind {

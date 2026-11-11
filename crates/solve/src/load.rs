@@ -165,6 +165,12 @@ impl Prepared {
             errors.extend(parse_errors);
             asts.push(ast);
         }
+        // a pact's laws become checks on each impl, over the impl type's samples
+        if errors.is_empty() {
+            let laws = parse::expand_laws(&mut asts, &self.shipped_asts);
+            sources.extend(parse::law_sources(&laws));
+            errors.extend(laws.errors);
+        }
         lap("parse");
         let mut solver = self.solver.clone();
         lap("clone solver");

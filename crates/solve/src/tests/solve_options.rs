@@ -62,18 +62,19 @@ test_ty!(
 );
 test_ty!(unwrap, "let a: int? = 0;", "a!" => Int);
 
-// A trailing `?` postfix after a call or square access is accepted by the parser as a no-op.
-// It's the syntactic form `expr?` (vs the option-chaining `?.field` / `?[key]` infix tokens),
-// reserved for future option-aware chaining; for now it's just a parse-accepted nullable hint.
+// A trailing `?` after a call or square access is `mimas.propagate`: inside a
+// `T?` function it is the option's value, and the function returns null early.
 test_ty!(
     postfix_hook_after_square,
-    "let a: [int?] = [1, null, 3];",
-    "a[1]?" => option!(Int),
+    "let a: [int?] = [1, null, 3];
+     fn second() -> int? { let v = a[1]?; v }",
+    "second()" => option!(Int),
 );
 test_ty!(
     postfix_hook_after_call,
-    "fn maybe() -> int? { 5 }",
-    "maybe()?" => option!(Int),
+    "fn maybe() -> int? { 5 }
+     fn plus() -> int? { maybe()? + 1 }",
+    "plus()" => option!(Int),
 );
 test_ty!(
     unwrap_through_dot,

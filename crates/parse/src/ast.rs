@@ -86,6 +86,19 @@ impl Ast {
         &self.name
     }
 
+    pub(crate) fn src(&self) -> NamedSource<Arc<str>> {
+        self.src.clone()
+    }
+
+    /// Appends `other`'s statements, and the unit literals they carry, to
+    /// this file: generated code (`expand_laws`) that should resolve names as
+    /// this file does while its locations point at its own source.
+    pub(crate) fn absorb(&mut self, other: Ast) {
+        self.stmts.extend(other.stmts);
+        self.quantities.extend(other.quantities);
+        self.quantity_units.extend(other.quantity_units);
+    }
+
     /// The innermost node whose span covers `offset` (a byte offset into the source), with that
     /// span. Idents count as nodes, so a name wins over the expr or pat it sits in.
     pub fn node_at(&self, offset: usize) -> Option<(NodeId, Span)> {

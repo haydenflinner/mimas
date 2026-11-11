@@ -59,6 +59,7 @@ pub struct Solver {
     pub(crate) node_to_vid: FxIndexMap<NodeId, Vid>,
     pub(crate) node_decs: FxIndexMap<NodeId, DecId>,
     pub(crate) op_decs: FxIndexMap<NodeId, crate::OpDispatch>,
+    pub(crate) propagates: FxIndexMap<NodeId, crate::Propagation>,
     pub(crate) pact_ops: FxIndexMap<NodeId, crate::PactOp>,
     /// The pacts each declared type param is bounded by (`T: Draw`), by the param's id.
     /// Absent means unbounded. Fn and adt params share the map -- ids are global.
@@ -229,6 +230,7 @@ impl Solver {
             node_to_vid: FxIndexMap::default(),
             node_decs: FxIndexMap::default(),
             op_decs: FxIndexMap::default(),
+            propagates: FxIndexMap::default(),
             pact_ops: FxIndexMap::default(),
             closure_captures: FxIndexMap::default(),
             expected_closures: FxIndexMap::default(),
@@ -4006,7 +4008,7 @@ pub(crate) fn root_and_path(expr: &Expr) -> Option<(&Ident, Vec<GuardSeg>)> {
             }
             ExprKind::Grouping(g) => cur = &g.inner,
             ExprKind::Unwrap(u) => cur = &u.expr,
-            ExprKind::Demote(d) => cur = &d.expr,
+            ExprKind::Propagate(d) => cur = &d.expr,
             ExprKind::Absolve(a) => cur = &a.left,
             _ => return None,
         }

@@ -50,7 +50,7 @@ declare_expr_kinds!(
         Loop,
         Match,
         Coalescence,
-        Demote,
+        Propagate,
         Raise,
         Range,
         Return,

@@ -74,6 +74,9 @@ pub struct Resolutions {
     /// for `s - v`). Emit lowers them as ordinary method calls rather than
     /// `Bin`/`Unary` ops.
     pub op_decs: FxIndexMap<NodeId, OpDispatch>,
+    /// `expr?` nodes → what a null or a raise does to the enclosing function
+    /// (`mimas.propagate`); the operand's own type says which test to run.
+    pub propagates: FxIndexMap<NodeId, Propagation>,
     /// `<op> a` nodes whose operand is pact-typed (`!x` with `x: Dichotomy`):
     /// no single impl, so emit dispatches at runtime over the bound's
     /// implementers, exactly like a method call through the pact.
@@ -88,6 +91,17 @@ pub struct Resolutions {
 /// A solved `a <op> b` → method call: `dec` is the `fn` inside the operand's
 /// `impl`; `swap` marks an `r`-prefixed method whose receiver is the *right*
 /// operand (`s - v` ⇒ `v.rsub(s)` — `self` always owns the impl).
+/// What `expr?` does when `expr` is null or raised: the enclosing function
+/// returns `null` (it returns `U?`), raises the same payload again (it returns
+/// `U!` and `expr` raised), or raises `msg` (it returns `U!` and `expr` was a
+/// null option).
+#[derive(Debug, Clone)]
+pub enum Propagation {
+    ReturnNull,
+    Reraise,
+    RaiseNull(String),
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct OpDispatch {
     pub dec: DecId,
@@ -513,6 +527,7 @@ impl From<Solver> for Resolutions {
             echo_native,
             panic_native,
             op_decs: solver.op_decs,
+            propagates: solver.propagates,
             pact_ops: solver.pact_ops,
             param_bounds: solver
                 .param_bounds

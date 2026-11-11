@@ -39,8 +39,7 @@ test_run!(
     "let u = \"W\";
      let bad = \"watt?\";",
     "25kW.to(\"W\")" => "25000.0",
-    "25kW.to(u)?" => "25000.0",
-    "5.0.to(bad)?" => "null",
+    "25kW.to(u)!" => "25000.0",
     "25kW.to(bad) absolve |_| -1.0" => "-1.0",
 );
 
@@ -55,7 +54,7 @@ test_run!(
     "(1turn / 1s).to(1deg/s)" => "360.0",
     "(0.14usd/kWh * 100kWh).to(1usd)" => "14.0",
     "(3km / 2h).to(1m/s) < 0.42" => "true",
-    "(1turn / 1s).to(deg_s)?" => "360.0",
+    "(1turn / 1s).to(deg_s)!" => "360.0",
 );
 
 // r[verify mimas.unit.constant]
@@ -77,7 +76,7 @@ test_run!(
     "(kWh == 1kWh)" => "true",
     "pct == 0.01" => "true",
     "RATE.to(deg/s)" => "720.0",
-    "{ let u = kWh; (25kW * 4h).to(u)? }" => "100.0",
+    "{ let u = kWh; (25kW * 4h).to(u)! }" => "100.0",
     "(m * m).to(m*m)" => "1.0",
 );
 
