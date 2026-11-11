@@ -49,6 +49,16 @@ test_run!(
     "fn total(d: {int}) -> int { d[\"a\"]! + d[\"b\"]! }",
     "total({ a: 1, b: 2 })" => "3",
     "{ let e: {int} = ~{}; e.len() }" => "0",
+    // inside a tuple type and an enum payload too
+    "{ let t: (int, {int}) = (1, { a: 2 }); t.1[\"a\"]! }" => "2",
+);
+
+// r[verify mimas.dict.type]
+test_run!(
+    an_enum_payload_takes_the_dict_type,
+    "enum Box { Bag({int}), Empty }
+     fn size(b: Box) -> int { match b { Box::Bag(d) => d.len(), Box::Empty => 0 } }",
+    "size(Box::Bag({ a: 1, b: 2 }))" => "2",
 );
 
 // r[verify mimas.record.separator]

@@ -337,6 +337,7 @@ impl TokKind<'_> {
 
     /// Returns if this can start a type annotation.
     pub(crate) fn starts_annotation(self) -> bool {
+        // `{float}` is the dict type too (r[impl mimas.dict.type])
         matches!(
             self,
             TokKind::Ident(_)
@@ -344,6 +345,7 @@ impl TokKind<'_> {
                 | TokKind::LeftParenthesis
                 | TokKind::LeftSquare
                 | TokKind::TildeLeftBrace
+                | TokKind::LeftBrace
         )
     }
 

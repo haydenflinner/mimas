@@ -3864,9 +3864,8 @@ impl<'s> Parser<'s> {
         // type alone goes in the braces. `reject` skips the whole brace group.
         // `str` lexes as a type keyword, not a name -- any token then `:` is the habit
         let key_colon = self.at(TokKind::LeftBrace) && self.nth(2) == TokKind::Colon;
-        let dict_ty = self.at(TokKind::LeftBrace) && !key_colon;
-        if !self.peek().starts_annotation() && !dict_ty {
-            if self.at(TokKind::LeftBrace) {
+        if key_colon || !self.peek().starts_annotation() {
+            if key_colon {
                 self.reject(Misdirection {
                     src: self.src(),
                     at: self.next_location().into(),
