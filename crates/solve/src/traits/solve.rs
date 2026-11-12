@@ -1077,7 +1077,10 @@ impl Solve for Call {
                     for (i, arg) in self.arguments.iter().enumerate() {
                         let key = match &arg.name {
                             Some(name) => name.clone(),
-                            None => Ident::new(names[i].clone(), arg.value.location()),
+                            None => {
+                                solver.field_hints.push((arg.value.location(), names[i].clone()));
+                                Ident::new(names[i].clone(), arg.value.location())
+                            }
                         };
                         order.push(key.lexeme.clone());
                         keyed.push((FieldKey::Ident(key), &arg.value));
@@ -2754,6 +2757,9 @@ impl Solve for Literal {
                                     ctor: Some(format!("`{}`", solver.adts[adt].name)),
                                 })
                             })?
+                        }
+                        for (v, n) in members.iter().zip(&names) {
+                            solver.field_hints.push((v.location(), n.clone()));
                         }
                         let keyed: Vec<(FieldKey, &Expr)> = members
                             .iter()

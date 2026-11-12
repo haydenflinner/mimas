@@ -160,6 +160,10 @@ pub struct Solver {
     /// The same calls' field names, by argument: folding builds the struct
     /// literal from them (r[impl mimas.struct.positional]).
     pub(crate) ctor_names: FxHashMap<NodeId, Vec<String>>,
+    /// Each value that fills a struct field without naming it (`V(0, -1)`,
+    /// a tuple in a struct's slot) and the field it fills: an editor shows
+    /// the long form, `V(x = 0, y = -1)` (r[impl app.field-names]).
+    pub(crate) field_hints: Vec<(Location, String)>,
     /// `const`s whose value calls a Mimas fn that folding can't run (a loop, a
     /// list push, a native): computed once, before the program runs, by the
     /// real VM. Each is the const item's node, its dec, and its value
@@ -281,6 +285,7 @@ impl Solver {
             int_as_float: FxHashSet::default(),
             ctor_slots: FxHashMap::default(),
             ctor_names: FxHashMap::default(),
+            field_hints: Vec::new(),
             computed_consts: Vec::new(),
             field_dims: FxHashMap::default(),
             member_units: FxHashMap::default(),

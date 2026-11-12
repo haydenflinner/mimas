@@ -196,6 +196,8 @@ struct BuiltProgram {
     script_fx: Vec<(String, shared::Fx)>,
     /// `(file, site, inferred Fx)` per top-level statement.
     script_segments: Vec<(String, shared::Location, shared::Fx)>,
+    /// Values filling a struct field without naming it, with the field.
+    field_hints: Vec<(shared::Location, String)>,
 }
 
 pub struct Vm {
@@ -247,6 +249,9 @@ pub struct Vm {
     /// `(file, site, inferred Fx)` per top-level statement from the same
     /// load — a `check` line or `use`-spliced stmt's own footprint.
     pub(crate) script_segments: Vec<(String, shared::Location, shared::Fx)>,
+    /// Each value that fills a struct field without naming it (`V(0, -1)`),
+    /// with the field it fills: a host editor shows the long form.
+    pub(crate) field_hints: Vec<(shared::Location, String)>,
     /// The program's `unit` declarations, installed into the live units
     /// table at every dispatch entry — another program's compile between
     /// this Vm's load and run must not make `.to("tile")` stop resolving.
@@ -284,6 +289,7 @@ impl Vm {
             warnings: Vec::new(),
             script_fx: Vec::new(),
             script_segments: Vec::new(),
+            field_hints: Vec::new(),
             units: Default::default(),
         }
     }
@@ -3706,6 +3712,7 @@ impl Vm {
         vm.warnings = built.warnings;
         vm.script_fx = built.script_fx;
         vm.script_segments = built.script_segments;
+        vm.field_hints = built.field_hints;
         vm.load_program(built.program);
         vm.set_sources(built.sources);
         vm.registry = library.into_registry();
@@ -3721,6 +3728,14 @@ impl Vm {
 
     /// `(file, inferred top-level Fx)` from this program's load — the
     /// footprint a host badges a page with.
+    /// Values that fill a struct field without naming it, each with the
+    /// field it fills (`V(0, -1)`, a tuple in a struct's slot). A host
+    /// editor shows the long form, `V(x = 0, y = -1)`.
+    // r[impl app.field-names]
+    pub fn field_hints(&self) -> &[(shared::Location, String)] {
+        &self.field_hints
+    }
+
     pub fn script_fx(&self) -> &[(String, shared::Fx)] {
         &self.script_fx
     }
@@ -3833,6 +3848,7 @@ impl Vm {
             .map(|(f, fx)| (f.clone(), *fx))
             .collect();
         let script_segments = resolutions.script_segments.clone();
+        let field_hints = resolutions.field_hints.clone();
         // The gate sits between solve and codegen: a file whose inferred
         // effects escape `allowed` is refused before a single op is built.
         if let Some(allowed) = allowed {
@@ -3883,6 +3899,7 @@ impl Vm {
             warnings,
             script_fx,
             script_segments,
+            field_hints,
         })
     }
 

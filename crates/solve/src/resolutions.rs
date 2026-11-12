@@ -87,6 +87,9 @@ pub struct Resolutions {
     /// `const` items computed before the program runs (`mimas.const.computed`),
     /// in source order: the emitter lowers each value at the top of the entry.
     pub computed_consts: rustc_hash::FxHashSet<NodeId>,
+    /// Values filling a struct field without naming it, with that field
+    /// (`app.field-names`): a host editor shows `V(x = 0, y = -1)`.
+    pub field_hints: Vec<(shared::Location, String)>,
     /// `<op> a` nodes whose operand is pact-typed (`!x` with `x: Dichotomy`):
     /// no single impl, so emit dispatches at runtime over the bound's
     /// implementers, exactly like a method call through the pact.
@@ -540,6 +543,7 @@ impl From<Solver> for Resolutions {
             propagates: solver.propagates,
             int_as_float: solver.int_as_float,
             computed_consts: solver.computed_consts.iter().map(|(id, _, _)| *id).collect(),
+            field_hints: solver.field_hints,
             ctor_slots: solver.ctor_slots,
             pact_ops: solver.pact_ops,
             param_bounds: solver
