@@ -25,6 +25,9 @@ pub struct Ast {
     /// The unit text as written for each literal in `quantities` (`5ft` -> `"ft"`), kept so
     /// diagnostics can name the unit the user typed rather than its coherent form.
     quantity_units: HashMap<NodeId, String>,
+    /// Number literals written with `#` (`#1.10`): exact decimals, a `dec`
+    /// wherever they stand (r[impl mimas.dec.exact-literal]).
+    exact_literals: std::collections::HashSet<NodeId>,
 }
 impl Ast {
     /// Creates a new Ast with the given statements.
@@ -35,6 +38,7 @@ impl Ast {
         docs: HashMap<usize, String>,
         quantities: HashMap<NodeId, Dim>,
         quantity_units: HashMap<NodeId, String>,
+        exact_literals: std::collections::HashSet<NodeId>,
     ) -> Self {
         Self {
             name,
@@ -43,7 +47,13 @@ impl Ast {
             docs,
             quantities,
             quantity_units,
+            exact_literals,
         }
+    }
+
+    /// The number literals written with `#` (`#1.10`), which are `dec`.
+    pub fn exact_literals(&self) -> impl Iterator<Item = NodeId> + '_ {
+        self.exact_literals.iter().copied()
     }
 
     /// The dimension of the unit-suffixed literal `id`, when it is one.

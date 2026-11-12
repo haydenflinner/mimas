@@ -339,6 +339,8 @@ impl TokKind<'_> {
                     | TokKind::LeftBrace
                     | TokKind::TildeLeftBrace
                     | TokKind::Dollar
+                    // `#1.10`, an exact literal; the parser checks a number follows
+                    | TokKind::Hash
                     | TokKind::Pipe
                     | TokKind::DoublePipe
                     | TokKind::Loop

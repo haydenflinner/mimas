@@ -40,7 +40,7 @@ pub enum DecError {
 impl fmt::Display for DecError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            DecError::Overflow => "the exact result needs more than 16 digits",
+            DecError::Overflow => "the number is too large for a dec (past 10^127)",
             DecError::DivByZero => "division by zero",
             DecError::Parse => "not a decimal number",
         })
@@ -118,6 +118,54 @@ impl Dec {
         Dec::new(c as i64, e as i8)
     }
 
+    /// From a wide coefficient and exponent, exact when it fits, else
+    /// rounded to 16 significant digits, half to even, the way division
+    /// rounds and decimal64 rounds every operation. Money keeps few digits
+    /// and stays exact; a damping loop (`v * 0.9` each frame) or a small
+    /// step added to a large position rounds where it used to fail.
+    /// Only a magnitude past about 10^127 is still an error.
+    // r[impl mimas.dec.rounding]
+    fn from_wide_rounded(c: i128, e: i32) -> Result<Dec, DecError> {
+        if let Ok(d) = Dec::from_wide_exact(c, e) {
+            return Ok(d);
+        }
+        let digits = |x: i128| x.unsigned_abs().to_string().len() as i32;
+        let negative = c < 0;
+        let mut q = c.abs();
+        let mut e = e;
+        // drop digits down to DIV_DIGITS + 1, remembering whether anything
+        // nonzero went (the sticky bit), then round the guard digit away
+        let mut sticky = false;
+        let keep = DIV_DIGITS as i32 + 1;
+        while digits(q) > keep || e < i8::MIN as i32 {
+            sticky |= q % 10 != 0;
+            q /= 10;
+            e += 1;
+            if q == 0 {
+                break;
+            }
+        }
+        if digits(q) == keep {
+            let last = q % 10;
+            q /= 10;
+            e += 1;
+            if last > 5 || (last == 5 && (sticky || q % 2 != 0)) {
+                q += 1;
+            }
+            if digits(q) > DIV_DIGITS as i32 {
+                // 9999999999999999.5 rounded up to 10000000000000000
+                q /= 10;
+                e += 1;
+            }
+        }
+        // the trailing zeros rounding leaves say nothing about the scale
+        while q != 0 && q % 10 == 0 && e < 0 {
+            q /= 10;
+            e += 1;
+        }
+        Dec::from_wide_exact(if negative { -q } else { q }, e)
+    }
+
     /// Both values with one exponent, the smaller, as wide coefficients.
     fn aligned(self, o: Dec) -> Option<(i128, i128, i32)> {
         let (ea, eb) = (self.exponent() as i32, o.exponent() as i32);
@@ -134,8 +182,12 @@ impl Dec {
         if o.coefficient() == 0 {
             return Ok(self.with_min_scale(o));
         }
-        let (a, b, e) = self.aligned(o).ok_or(DecError::Overflow)?;
-        Dec::from_wide_exact(a + b, e)
+        match self.aligned(o) {
+            Some((a, b, e)) => Dec::from_wide_rounded(a + b, e),
+            // scales so far apart that the smaller one is far below the
+            // 16th digit of the larger: the sum, rounded, is the larger
+            None => Ok(if (self.exponent() as i32) > (o.exponent() as i32) { self } else { o }),
+        }
     }
 
     pub fn sub(self, o: Dec) -> Result<Dec, DecError> {
@@ -161,7 +213,7 @@ impl Dec {
     pub fn mul(self, o: Dec) -> Result<Dec, DecError> {
         let c = (self.coefficient() as i128) * (o.coefficient() as i128);
         let e = self.exponent() as i32 + o.exponent() as i32;
-        Dec::from_wide_exact(c, e)
+        Dec::from_wide_rounded(c, e)
     }
 
     /// The quotient to 16 significant digits, half to even, without the
@@ -419,12 +471,29 @@ mod tests {
         assert_eq!(set.len(), 1);
     }
 
+    // r[verify mimas.dec.rounding]
     #[test]
-    fn overflow_is_an_error_not_a_lost_digit() {
+    fn a_result_past_sixteen_digits_rounds_half_even() {
         let big = d("36028797018963967");
-        assert_eq!(big.add(d("1")), Err(DecError::Overflow));
+        assert_eq!(big.add(d("1")).unwrap(), d("3602879701896397e1"));
         assert_eq!(big.mul(d("10")).unwrap().to_string(), "360287970189639670");
-        assert_eq!(d("0.1234567890123456").mul(d("0.1234567890123456")), Err(DecError::Overflow));
+        assert_eq!(d("0.1234567890123456").mul(d("0.1234567890123456")).unwrap(), d("0.01524157875323882"));
+        // a damping loop keeps going instead of failing at the 16th step
+        let mut v = d("1.5");
+        for _ in 0..200 {
+            v = v.mul(d("0.9")).unwrap();
+        }
+        assert!(v > Dec::ZERO && v < d("0.000000002"));
+        // a small step on a large position, and scales too far apart to align
+        assert_eq!(d("1000000000000000").add(d("0.001")).unwrap(), d("1000000000000000"));
+        assert_eq!(d("1e100").add(d("1e-100")).unwrap(), d("1e100"));
+        // half to even on an exact tie
+        assert_eq!(d("1000000000000000.5").add(d("0")).unwrap(), d("1000000000000000.5"));
+        assert_eq!(d("10000000000000005").mul(d("10")).unwrap(), d("100000000000000050"));
+        assert_eq!(d("1234567890123456.5").add(d("1")).unwrap(), d("1234567890123457.5")); // fits: exact
+        assert_eq!(d("3602879701896396.5").add(d("1")).unwrap(), d("3602879701896398")); // a tie past 16 digits: to even
+        // money stays exact
+        assert_eq!(d("1.10").mul(d("12")).unwrap().to_string(), "13.20");
     }
 
     #[test]

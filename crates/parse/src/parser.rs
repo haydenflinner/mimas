@@ -74,6 +74,8 @@ pub struct Parser<'s> {
     depth: usize,
     /// The dimension of each unit-suffixed literal (`25kW`), by the literal's node.
     quantities: HashMap<NodeId, shared::units::Dim>,
+    /// `#1.10`: number literals marked exact, read as `dec`.
+    exact_literals: std::collections::HashSet<NodeId>,
     /// The unit text as written for each literal in `quantities` (`5ft` -> `"ft"`).
     quantity_units: HashMap<NodeId, String>,
     /// The source's per-page shadow table (`Lexer::shadow_table`) — an
@@ -169,6 +171,7 @@ impl<'s> Parser<'s> {
             assert_id: 0,
             depth: 0,
             quantities: HashMap::new(),
+            exact_literals: Default::default(),
             quantity_units: HashMap::new(),
         }
     }
@@ -213,6 +216,7 @@ impl<'s> Parser<'s> {
                 docs,
                 self.quantities,
                 self.quantity_units,
+                self.exact_literals,
             ),
             self.errors,
         )
@@ -393,7 +397,7 @@ impl<'s> Parser<'s> {
             TokKind::Ident("space") if self.opp_intro() => {
                 BlockElement::Stmt(self.space_stmt(start))
             }
-            kind if kind.starts_item() => {
+            kind if kind.starts_item() && !self.at_exact_literal() => {
                 let item = self.item();
                 self.end_item(&item);
                 BlockElement::Stmt(self.new_stmt(item, start))
@@ -3098,6 +3102,16 @@ impl<'s> Parser<'s> {
             }
             return self.new_expr(Ident::new(ty.to_string(), self.location(start)), start);
         }
+        // `#1.10`: an exact decimal, a `dec` wherever it stands. The `#`
+        // hugs the number, as Scheme's `#e0.3` does (r[impl mimas.dec.exact-literal])
+        if self.at_exact_literal() {
+            self.advance();
+            let lit = self.literal();
+            if matches!(lit.kind(), ExprKind::Literal(Literal::Int(_) | Literal::Float(_))) {
+                self.exact_literals.insert(lit.id());
+            }
+            return lit;
+        }
         self.parentheticals()
     }
 
@@ -4556,6 +4570,17 @@ impl<'s> Parser<'s> {
     /// Whether the next token is the first on its line.
     fn at_line_start(&self) -> bool {
         self.src.inner()[self.cursor()..self.next_start()].contains('\n')
+    }
+
+    /// `#1.10`: a `#` glued to a number opens an exact literal, not an
+    /// attribute (r[impl mimas.dec.exact-literal]).
+    fn at_exact_literal(&self) -> bool {
+        self.peek() == TokKind::Hash
+            && matches!(self.nth(1), TokKind::Int(_) | TokKind::Float(_) | TokKind::Quantity(..))
+            && self
+                .tokens
+                .get(self.next + 1)
+                .is_some_and(|t| t.span().start() == self.tokens[self.next].span().end())
     }
 
     /// In a comma-optional sequence, a `-` glued to a numeric literal

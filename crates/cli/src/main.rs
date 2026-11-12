@@ -318,10 +318,13 @@ fn build(
         resolved_args.extend(script_args);
         vm.fixture::<library::ScriptArgs>().set(resolved_args);
 
+        // the program, then its `check` lines on the world it left: a
+        // failing check fails the run (exit 1), as it goes red on a page
+        // (r[impl check.run.fails])
         let result = ice::catch("execution", move || {
             vm.load_program(program);
             vm.set_sources(sources);
-            vm.run()
+            vm.run().map(|()| vm.run_tests())
         });
         match result {
             Err(report) => {
@@ -332,7 +335,15 @@ fn build(
                 emit_runtime_error(&report, color);
                 return 1;
             }
-            Ok(Ok(())) => {
+            Ok(Ok(checks)) => {
+                let failed: Vec<_> = checks.iter().filter(|c| !c.passed()).collect();
+                for c in &failed {
+                    eprintln!("{} {}: {}", "✕".red(), c.name, c.error.as_deref().unwrap_or("failed"));
+                }
+                if !failed.is_empty() {
+                    eprintln!("{} of {} checks failed", failed.len(), checks.len());
+                    return 1;
+                }
                 if time {
                     eprintln!(
                         "{}",

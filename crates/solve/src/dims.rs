@@ -650,6 +650,14 @@ impl<'a> Pass<'a> {
                     }
                 });
             }
+            // `check` lines: their bodies get the same dimension check as
+            // any code, and a failing one names its values in the page's
+            // units (r[impl check.report.units])
+            ItemKind::Tests(tests) => {
+                for case in &tests.cases {
+                    self.expr(&case.expr);
+                }
+            }
             _ => {}
         }
     }
@@ -1003,6 +1011,24 @@ impl<'a> Pass<'a> {
     fn literal(&mut self, e: &'a Expr, l: &'a Literal) -> D {
         match l {
             Literal::Float(_) | Literal::Int(_) => {
+                // a `dec` literal holds its number exactly or is an error,
+                // never a silent 0 or a rounded float (r[impl mimas.dec.literal])
+                if self.solver.dec_literals.contains(&e.id())
+                    && let Some(text) = self.solver.dec_texts.get(&e.id())
+                {
+                    let clean = text.replace(['_', ','], "");
+                    let end = clean
+                        .find(|c: char| !(c.is_ascii_digit() || matches!(c, '.' | '-' | '+')))
+                        .unwrap_or(clean.len());
+                    if clean[..end].parse::<shared::dec::Dec>().is_err() {
+                        self.fail(
+                            e.location(),
+                            format!("`{text}` doesn't fit in a `dec` exactly"),
+                            "more digits than a `dec` holds".to_string(),
+                            "a `dec` holds about 16 significant digits; use a `float` for a wider number",
+                        );
+                    }
+                }
                 // `3index` is the one int literal that carries a dimension
                 let d = self.ast.quantity(e.id());
                 if let (Some(dim), Some(text)) = (d, self.ast.quantity_unit(e.id()))

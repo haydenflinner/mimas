@@ -214,6 +214,9 @@ pub struct Vm {
     pub(crate) items: HashMap<String, BodyId>,
     /// Functions marked `#[test]`, in source order. Each name is a key in `items`.
     pub(crate) tests: Vec<String>,
+    /// The top level ran to its end since the last reset, so its `let`s
+    /// hold values a check can read. [`Vm::run_tests`] runs it first when not.
+    pub(crate) top_level_ran: bool,
     /// `items` inverted, for labeling a frame with its source-level function name -- see
     /// [`Vm::chunk_name`]. Rebuilt whenever `items` is (`load_program`).
     pub(crate) chunk_names: HashMap<BodyId, String>,
@@ -265,6 +268,7 @@ impl Vm {
         #[allow(clippy::redundant_closure)]
         let arena = Arena::new(|mc| State::new(mc));
         Self {
+            top_level_ran: false,
             entry: BodyId::ZERO,
             code: Decoder {
                 bytes: Vec::new(),
@@ -400,6 +404,7 @@ impl Vm {
     /// program root. Used after an injected call (`call_fn`, `run_tests`) that would otherwise
     /// leave register 0 / extra frames dirty.
     fn reset_to_entry(&mut self) {
+        self.top_level_ran = false;
         let entry_chunk = &self.chunks[self.entry];
         let regs_count = entry_chunk.regs as usize;
         let entry_offset = entry_chunk.offset;
@@ -589,6 +594,7 @@ impl Vm {
             if done {
                 #[cfg(feature = "op-count")]
                 op_count::report();
+                self.top_level_ran = true;
                 return Ok(());
             }
             self.collect_boundary();
@@ -2519,8 +2525,8 @@ impl Vm {
 
     /// [`Vm::call_fn`], but surfaces a runtime fault instead of swallowing it. A fault unwinds the
     /// call's frames, so the thread (and every global the program holds) is usable for the next
-    /// call -- [`Vm::run_tests`] still resets afterwards so a debug session starts at program
-    /// entry.
+    /// call -- [`Vm::run_tests`] resets once after its last check so a debug session starts at
+    /// program entry.
     pub fn call_fn_result(&mut self, name: &str) -> Result<Captured, Error> {
         shared::units::install(&self.units);
         self.mem_boundary();
@@ -2844,7 +2850,7 @@ impl Vm {
     /// `DataFrame` reads as `Inspect::Other`; a host typesetting it needs the
     /// cells, e.g. [`table_data`]). A faulting call rewinds the thread to the
     /// entry frame first, so the next injected call doesn't read stale
-    /// registers — the same reset `run_tests` performs between cases.
+    /// registers — the same reset `run_tests` performs after its last case.
     pub fn call_fn_read<T>(
         &mut self,
         name: &str,
@@ -2885,23 +2891,27 @@ impl Vm {
         out
     }
 
-    /// Runs every `#[test]` function and every `#[tests]` expression to completion (not through
-    /// `debug_step`). A panic or other runtime fault is a failure; a `false` bool is a failure
-    /// (for `#[tests]` checks); any other return is a pass. Resets the thread afterwards so a
-    /// debug session still starts at program entry.
+    /// Runs every `#[test]` function and every `#[tests]` expression (each
+    /// `check` line) to completion, not through `debug_step`. A panic or
+    /// other runtime fault is a failure, a `false` bool is a failure, and
+    /// `true` or unit is a pass.
     ///
-    /// Cold-globals caveat: each body is injected via `call_fn_result` and the
-    /// thread is rewound with `reset_to_entry` after every test, so top-level
-    /// `let`s never execute — a test that reads one sees `Null`. The host's
-    /// check runner (literate-eval `run_top_level_for_checks`) inits the entry
-    /// chunk once up front instead; if `mimas test` needs the same, the fix is
-    /// a checkpoint reset — run the entry chunk once, snapshot
-    /// `regs.len()`/`frames`, and between tests truncate back to that instead
-    /// of `reset_to_entry` (heap mutations by tests still persist either way —
-    /// `Val` slots are shallow). Only faulted calls actually need the recovery;
-    /// successful ones already leave `frames == [entry]`.
+    /// The checks see the program's top level, as the page's check runner
+    /// does: it runs once first (unless [`Vm::run`] already ran it), and
+    /// then the checks run in source order on that one world. A check that
+    /// faults is unwound by the call itself, so the globals stay for the
+    /// next one. The thread resets to the entry frame after the last check,
+    /// so a debug session starts at program entry.
     pub fn run_tests(&mut self) -> Vec<TestResult> {
+        // r[impl check.world]
         let names = self.tests.clone();
+        if !self.top_level_ran
+            && let Err(e) = self.run()
+        {
+            let why = format!("not run: the top level failed: {e}");
+            self.reset_to_entry();
+            return names.into_iter().map(|name| TestResult { name, error: Some(why.clone()) }).collect();
+        }
         let mut results = Vec::with_capacity(names.len());
         for name in names {
             let error = match self.call_fn_result(&name) {
@@ -2912,9 +2922,9 @@ impl Vm {
                 // anything else is a broken check, not a pass
                 Ok(other) => Some(format!("check produced {other:?}, expected a bool")),
             };
-            self.reset_to_entry();
             results.push(TestResult { name, error });
         }
+        self.reset_to_entry();
         results
     }
 

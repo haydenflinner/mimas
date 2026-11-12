@@ -432,9 +432,17 @@ fn dbg<'gc>(ctx: Ctx<'gc>, val: anon::T<'gc>) -> Result<anon::T<'gc>, RtErr> {
 #[native]
 #[effects()]
 /// A quantity as a failing check names it: `value` (in base units) shown
-/// in a unit `scale` base units large and called `name`, as an echo shows
-/// it. Not for user code; the compiler calls it (r[impl check.report.units]).
+/// in a unit `scale` base units large and called `name`, written as a
+/// literal (`20px`), so both sides of `20px == 30px` read the same way
+/// as the code. Not for user code; the compiler calls it
+/// (r[impl check.report.units]).
 fn __in_unit<'gc>(ctx: Ctx<'gc>, val: anon::T<'gc>, scale: f64, name: &str) -> Result<String, RtErr> {
+    if let Some(x) = val.0.as_float() {
+        return Ok(format!("{}{name}", shared::units::shown_number(x / scale)));
+    }
+    if let Val::Dec(d) = val.0 {
+        return Ok(format!("{d}{name}"));
+    }
     let shown = shared::units::Shown { name: name.to_string(), scale, list: false };
     shown_text(ctx, val.0, &shown)
 }

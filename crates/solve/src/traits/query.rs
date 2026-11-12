@@ -91,6 +91,10 @@ impl Query for Expr {
             }
         }
 
+        // `#1.10` is a `dec` wherever it stands (r[impl mimas.dec.exact-literal])
+        if solver.exact_literals.contains(&self.id()) && !solver.dec_literals.contains(&self.id()) {
+            solver.dec_literal(self);
+        }
         match self.kind() {
             ExprKind::Literal(Literal::True) | ExprKind::Literal(Literal::False) => Ok(Ty::Bool),
             ExprKind::Literal(Literal::Null) => Ok(Ty::Null),

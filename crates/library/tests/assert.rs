@@ -169,3 +169,29 @@ test_run!(
     r#"{ assert!(!(any_of([], pos))); 0 }"# => "0",
     r#"{ assert!([1, 2].contains(1 + 1)); 0 }"# => "0",
 );
+
+// Checks read the top level's `let`s, every one of them and not only the
+// first: `run_tests` runs the top level once, then the checks in order on
+// that one world, with no reset between them that would blank the globals.
+// r[verify check.world]
+#[test]
+fn every_check_reads_the_top_level() {
+    const SOURCE: &str = "let w = 20\nlet xs = [1, 2, 3]\ncheck w == 20\ncheck xs.len() == 3\ncheck xs[0] == 1\ncheck w + xs[2] == 23\n";
+    let mut vm = vm::Vm::compile(SOURCE, library::std).unwrap();
+    let results = vm.run_tests();
+    assert_eq!(results.len(), 4, "{results:?}");
+    assert!(results.iter().all(|r| r.passed()), "{results:?}");
+    // a second run sees the same world
+    assert!(vm.run_tests().iter().all(|r| r.passed()));
+}
+
+// A check that faults doesn't blank the globals for the checks after it.
+#[test]
+fn a_faulting_check_leaves_the_world_for_the_next() {
+    const SOURCE: &str = "let xs = [1, 2, 3]\ncheck xs[9] == 1\ncheck xs.len() == 3\n";
+    let mut vm = vm::Vm::compile(SOURCE, library::std).unwrap();
+    let results = vm.run_tests();
+    assert!(!results[0].passed(), "{results:?}");
+    assert!(results[1].passed(), "{results:?}");
+}
+

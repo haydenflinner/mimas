@@ -115,6 +115,8 @@ pub struct Solver {
     /// Unit dims of `25kW`-style literals, merged from every solved ast (`NodeId`s are
     /// globally unique, so one map is collision-free).
     pub(crate) ast_quantities: FxHashMap<NodeId, shared::units::Dim>,
+    /// `#1.10` literals from every file: `dec` wherever they stand.
+    pub(crate) exact_literals: rustc_hash::FxHashSet<NodeId>,
     /// The unit text as written for each literal in `ast_quantities`, so diagnostics can
     /// name `ft` rather than collapsing it to `length (m)`.
     pub(crate) ast_quantity_units: FxHashMap<NodeId, String>,
@@ -285,6 +287,7 @@ impl Solver {
             group_schemas: FxHashMap::default(),
             group_decs: FxHashMap::default(),
             ast_quantities: FxHashMap::default(),
+            exact_literals: Default::default(),
             ast_quantity_units: FxHashMap::default(),
             unit_consts: FxHashMap::default(),
             const_dims: Vec::new(),
@@ -494,6 +497,7 @@ impl Solver {
         };
         for ast in &asts {
             self.ast_quantities.extend(ast.quantities());
+            self.exact_literals.extend(ast.exact_literals());
             self.ast_quantity_units.extend(
                 ast.quantity_units()
                     .map(|(id, unit)| (id, unit.to_string())),
@@ -3165,7 +3169,12 @@ impl Solver {
     // r[impl mimas.dec.literal]
     pub(crate) fn dec_literal_beside(&mut self, left: &Expr, right: &Expr) -> crate::Result<()> {
         for (lit, other) in [(right, left), (left, right)] {
-            if is_num_literal(lit) && !is_num_literal(other) {
+            // `#0.1 + 0.2`: an exact literal counts as a `dec` beside it
+            let exact = |e: &Expr| match e.kind() {
+                ExprKind::Grouping(g) => self.exact_literals.contains(&g.inner.id()),
+                _ => self.exact_literals.contains(&e.id()),
+            };
+            if is_num_literal(lit) && !exact(lit) && (!is_num_literal(other) || exact(other)) {
                 let ty = other.query(self)?;
                 if self.is_dec(&ty) {
                     self.dec_literal(lit);
