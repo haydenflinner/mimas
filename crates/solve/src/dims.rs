@@ -139,6 +139,12 @@ struct Pass<'a> {
     /// Each top-level echo site's computed dim (a quantity, or a list of them) —
     /// resolved to [`units::Shown`] once the walk has seen every written unit.
     echo_ds: FxIndexMap<Location, D>,
+    /// Each value a failing check's message interpolates, with its
+    /// dimension, so the message can say the unit (r[impl check.report.units]).
+    check_ds: FxIndexMap<parse::NodeId, D>,
+    /// A number written with its unit in a check (`47lb`), as written, so
+    /// the message doesn't show it after a round trip through base units.
+    check_texts: FxIndexMap<parse::NodeId, String>,
     /// The first unit the program writes for each dimension (`12lb`, a bare `lb`
     /// constant): an echo shows a quantity of that dimension in it.
     written: FxIndexMap<Dim, (String, f64)>,
@@ -183,6 +189,8 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> Result<()> {
             want_dims: FxIndexMap::default(),
             print_dims: FxIndexMap::default(),
             echo_ds: FxIndexMap::default(),
+            check_ds: FxIndexMap::default(),
+            check_texts: FxIndexMap::default(),
             written: FxIndexMap::default(),
             unit_decs: solver
                 .unit_consts
@@ -220,8 +228,15 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> Result<()> {
             .into_iter()
             .filter_map(|(loc, d)| pass.shown(&d).map(|s| (loc, s)))
             .collect();
+        let check_texts = std::mem::take(&mut pass.check_texts);
+        let check_units: Vec<(parse::NodeId, units::Shown)> = std::mem::take(&mut pass.check_ds)
+            .into_iter()
+            .filter_map(|(id, d)| pass.shown(&d).filter(|s| !s.list).map(|s| (id, s)))
+            .collect();
         drop(pass); // ends the `&*solver` borrow
         solver.echo_units.extend(echo_units);
+        solver.check_units.extend(check_units);
+        solver.check_texts.extend(check_texts);
         solver.node_dims.extend(dims);
         solver.want_dims.extend(want_dims);
         solver.print_dims.extend(print_dims);
@@ -897,9 +912,34 @@ impl<'a> Pass<'a> {
                 D::Any
             }
             ExprKind::FString(f) => {
+                // the message `check a == b` fails with names both values
+                let check_message = matches!(
+                    f.parts.first(),
+                    Some(FStringPart::Literal(l)) if l.starts_with("assertion failed: ")
+                );
                 for part in &f.parts {
                     if let FStringPart::Expr(x) = part {
-                        self.expr(x);
+                        let d = self.expr(x);
+                        if check_message {
+                            let loc = x.location();
+                            let text = self.solver.sources.get(&loc.file_id).and_then(|s| {
+                                let a = loc.span.start();
+                                s.inner().get(a..a + loc.span.len()).map(str::to_string)
+                            });
+                            // a written number with a unit shows as written: `47lb`
+                            match text {
+                                Some(t)
+                                    if matches!(d, D::Q(q) if !q.is_none())
+                                        && t.trim_start_matches('-').starts_with(|c: char| c.is_ascii_digit())
+                                        && t.ends_with(|c: char| c.is_alphabetic()) =>
+                                {
+                                    self.check_texts.insert(x.id(), t);
+                                }
+                                _ => {
+                                    self.check_ds.insert(x.id(), d);
+                                }
+                            }
+                        }
                     }
                 }
                 D::Any

@@ -7,6 +7,9 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add_method(insert);
     api.add_method(remove);
     api.add_method(pairs);
+    // r[impl mimas.dict.keys]
+    api.add_method(keys);
+    api.add_method(values);
 }
 
 #[native]
@@ -84,4 +87,21 @@ fn remove(d: &mut DictMap<'gc, anon::T<'gc>>, key: Str<'gc>) -> Option<anon::T<'
 /// ```
 fn pairs(d: &DictMap<'gc, anon::T<'gc>>) -> Vec<(Str<'gc>, anon::T<'gc>)> {
     d.iter().map(|(&k, &v)| (k, v)).collect()
+}
+
+#[native]
+/// The keys, in the order they were added.
+///
+/// ```mimas
+/// let ages = { ann: 31, bo: 7 };
+/// let names = ages.keys(); // ["ann", "bo"]
+/// ```
+fn keys(d: &DictMap<'gc, anon::T<'gc>>) -> Vec<Str<'gc>> {
+    d.iter().map(|(&k, _)| k).collect()
+}
+
+#[native]
+/// The values, in the order their keys were added.
+fn values(d: &DictMap<'gc, anon::T<'gc>>) -> Vec<anon::T<'gc>> {
+    d.iter().map(|(_, &v)| v).collect()
 }

@@ -29,6 +29,10 @@ pub struct Resolutions {
     /// Top-level echo site → the unit its quantity shows in (the unit the program
     /// wrote for that dimension) — codegen ships it so `12lb` echoes `12 lb`.
     pub echo_units: FxIndexMap<Location, shared::units::Shown>,
+    /// Values a failing check's message names, with the unit to name them in.
+    pub check_units: rustc_hash::FxHashMap<NodeId, shared::units::Shown>,
+    /// Numbers with units written in a check, as written (`47lb`).
+    pub check_texts: rustc_hash::FxHashMap<NodeId, String>,
     pub node_decs: FxIndexMap<NodeId, DecId>,
     /// Read/write site counts per declaration -- the `{0,1,ω}` usage grades the
     /// lint suite is built on (`Use::Never` is what "unused" warnings report on).
@@ -527,6 +531,8 @@ impl From<Solver> for Resolutions {
             want_dims: solver.want_dims,
             print_dims: solver.print_dims,
             echo_units: solver.echo_units,
+            check_units: solver.check_units,
+            check_texts: solver.check_texts,
             node_decs: solver.node_decs,
             dec_uses: solver.dec_uses,
             fn_effects: solver.fn_effects,

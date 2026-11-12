@@ -1438,7 +1438,10 @@ fn split_struct_phis(
     // other uses.
     let leaf_adt = |v: InstId, body: &Body| -> Option<AdtId> {
         let id = adt_of_ty(&ty_of(res, entry_locals, body, v, 0)?)?;
-        values.contains(&id).then_some(id)
+        // a struct, one layout: an enum's value could be any variant, and
+        // splitting it into its (zero) direct fields rebuilt a bare enum
+        let one_layout = res.adts[id].dispatch_ids.as_slice() == [id];
+        (values.contains(&id) && one_layout).then_some(id)
     };
     let mut done_any = false;
     let phis: Vec<InstId> = body

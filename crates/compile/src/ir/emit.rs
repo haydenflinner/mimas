@@ -1288,9 +1288,28 @@ impl Emit for FString {
                     let literal = ir.intern_str(literal);
                     parts.push(FormatPart::Literal(literal));
                 }
+                FStringPart::Expr(expr) if ir.resolutions.check_texts.contains_key(&expr.id()) => {
+                    let text = ir.resolutions.check_texts[&expr.id()].clone();
+                    parts.push(FormatPart::Literal(ir.intern_str(&text)));
+                }
                 FStringPart::Expr(expr) => {
                     let value = expr.lower(ir)?;
-                    parts.push(FormatPart::Value(value));
+                    // a failing check names a quantity in the unit the page wrote
+                    // (r[impl check.report.units])
+                    match ir.resolutions.check_units.get(&expr.id()).cloned() {
+                        Some(shown) => {
+                            let v = if shown.scale != 1.0 {
+                                let k = ir.current().constant(Constant::Float(shown.scale));
+                                ir.current().bin(BinOp::Div, value, k, OperandKind::Float)
+                            } else {
+                                value
+                            };
+                            parts.push(FormatPart::Value(v));
+                            let unit = ir.intern_str(&format!(" {}", shown.name));
+                            parts.push(FormatPart::Literal(unit));
+                        }
+                        None => parts.push(FormatPart::Value(value)),
+                    }
                 }
             }
         }

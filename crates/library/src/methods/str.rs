@@ -3,6 +3,9 @@ use macros::native;
 use vm::{Ctx, RtErr, api::Api, conversion::Raisable};
 
 pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
+    // r[impl mimas.slice]
+    api.add_method_named("slice", str_slice);
+    api.add_method_named("slice_from", str_slice_from);
     let nid = api.add_method(len);
     api.mark_intrinsic(nid, api::Intrinsic::Len);
     let nid = api.add_method(contains);
@@ -318,4 +321,24 @@ fn repeat<'gc>(ctx: Ctx<'gc>, s: &str, count: i64) -> Result<String, RtErr> {
     // before allocating: a size from a script integer must fit one value's share of the budget
     ctx.check_alloc_n(s.len(), count)?;
     Ok(s.repeat(count))
+}
+
+#[native]
+/// The characters from position `a` up to, not including, `b`. `s[a..b]`
+/// is this, with bounds clamped as for a list.
+///
+/// ```mimas
+/// let word = "nina family"[0..4]; // "nina"
+/// ```
+fn str_slice(s: &str, a: i64, b: i64) -> String {
+    let n = s.chars().count() as i64;
+    let (a, b) = (a.clamp(0, n), b.clamp(0, n));
+    if a >= b { String::new() } else { s.chars().skip(a as usize).take((b - a) as usize).collect() }
+}
+
+#[native]
+/// The characters from position `a` to the end. `s[a..]` is this.
+fn str_slice_from(s: &str, a: i64) -> String {
+    let n = s.chars().count() as i64;
+    s.chars().skip(a.clamp(0, n) as usize).collect()
 }

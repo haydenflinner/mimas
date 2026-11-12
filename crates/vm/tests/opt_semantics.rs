@@ -152,3 +152,30 @@ test_vm!(
     // the closure captures `a` as it was, not as the call rebinds it
     "h(0, |x| x, 2)" => Int(3),
 );
+
+// A self tail call whose argument is an `if` choosing between two values of
+// an enum: the struct-phi split once took the enum for a struct with no
+// fields and rebuilt it as a bare `T {}`, so the call saw no variant and the
+// function returned null.
+const TAIL_ENUM: &str = "enum T { Leaf { v: int }, Node { kids: [T] } }
+fn d(t: T, b: bool) -> int {
+    match t {
+        T::Node { kids } => { return d(if b { kids[0] } else { kids[1] }, b); }
+        T::Leaf { v } => v,
+    }
+}
+fn a(t: T, b: bool) -> int {
+    match t {
+        T::Node { kids } => a(if b { kids[0] } else { kids[1] }, b),
+        T::Leaf { v } => v,
+    }
+}
+fn tree() -> T { T::Node { kids = [T::Leaf { v = 1 }, T::Leaf { v = 2 }] } }";
+
+test_vm!(
+    tail_call_with_an_enum_chosen_by_if,
+    TAIL_ENUM,
+    "d(tree(), true)" => Int(1),
+    "d(tree(), false)" => Int(2),
+    "a(tree(), false)" => Int(2),
+);

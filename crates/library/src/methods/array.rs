@@ -39,6 +39,13 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add_method_named("argsort", argsort_int);
     api.add_method_named("argsort", argsort_float);
     api.add_method(reorder);
+    // r[impl mimas.slice]
+    api.add_method(slice);
+    api.add_method(slice_from);
+    // r[impl mimas.sorted]
+    api.add_method_named("sorted", sorted_int);
+    api.add_method_named("sorted", sorted_float);
+    api.add_method_named("sorted", sorted_str);
     api.add_method(zip);
     // higher-order: signatures only -- each lowers to a generated loop that calls the
     // closure itself (a `#[native]` can't call back into the VM). see emit_intrinsic.
@@ -591,4 +598,62 @@ fn reorder<'gc>(ctx: Ctx<'gc>, arr: &mut Vec<Val<'gc>>, perm: Vec<i64>) -> Resul
         .collect::<Result<Vec<_>, _>>()?;
     *arr = out;
     Ok(())
+}
+
+/// `n` clamped into `0..=len`, as Python clamps a slice's bounds.
+fn clamp_index(n: i64, len: usize) -> usize {
+    n.clamp(0, len as i64) as usize
+}
+
+#[native]
+/// The elements from position `a` up to, not including, `b`. `xs[a..b]`
+/// is this. Bounds past either end are clamped, so `[1, 2, 3].slice(1, 99)`
+/// is `[2, 3]`, and a slice that runs backward is empty.
+///
+/// ```mimas
+/// let xs = [10, 20, 30, 40];
+/// let mid = xs[1..3]; // [20, 30]
+/// ```
+fn slice(arr: Vec<anon::T<'gc>>, a: i64, b: i64) -> Vec<anon::T<'gc>> {
+    let (a, b) = (clamp_index(a, arr.len()), clamp_index(b, arr.len()));
+    if a >= b { Vec::new() } else { arr[a..b].to_vec() }
+}
+
+#[native]
+/// The elements from position `a` to the end. `xs[a..]` is this.
+///
+/// ```mimas
+/// let rest = [10, 20, 30][1..]; // [20, 30]
+/// ```
+fn slice_from(arr: Vec<anon::T<'gc>>, a: i64) -> Vec<anon::T<'gc>> {
+    let a = clamp_index(a, arr.len());
+    arr[a..].to_vec()
+}
+
+#[native]
+/// A sorted copy of the list, smallest first. The list itself is unchanged.
+///
+/// ```mimas
+/// let xs = [3, 1, 2].sorted(); // [1, 2, 3]
+/// ```
+fn sorted_int(arr: &[i64]) -> Vec<i64> {
+    let mut out = arr.to_vec();
+    out.sort();
+    out
+}
+
+#[native]
+/// A sorted copy of the list, smallest first, `NaN` last.
+fn sorted_float(arr: &[f64]) -> Vec<f64> {
+    let mut out = arr.to_vec();
+    out.sort_by(|a, b| a.total_cmp(b));
+    out
+}
+
+#[native]
+/// A sorted copy of the list, in dictionary order.
+fn sorted_str(arr: &[&str]) -> Vec<String> {
+    let mut out: Vec<String> = arr.iter().map(|s| s.to_string()).collect();
+    out.sort();
+    out
 }

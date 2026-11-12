@@ -142,6 +142,10 @@ pub struct Solver {
     /// Top-level echo site → how its quantity shows (the unit as written).
     /// Surfaces on [`Resolutions::echo_units`](crate::Resolutions).
     pub(crate) echo_units: FxIndexMap<shared::Location, shared::units::Shown>,
+    /// Values a failing check's message names, with the unit to name them in.
+    pub(crate) check_units: FxHashMap<NodeId, shared::units::Shown>,
+    /// Numbers with units written in a check, as written.
+    pub(crate) check_texts: FxHashMap<NodeId, String>,
     /// The type each bare-brace literal's slot expects (`{ x: 1 }` passed where a
     /// `Pt` goes), noted by `fulfill_ty` before the literal is solved — a struct
     /// hint makes it that struct, anything else leaves it a dict.
@@ -286,6 +290,8 @@ impl Solver {
             want_dims: FxIndexMap::default(),
             print_dims: FxIndexMap::default(),
             echo_units: FxIndexMap::default(),
+            check_units: FxHashMap::default(),
+            check_texts: FxHashMap::default(),
             record_hints: FxHashMap::default(),
             field_annotations: FxHashMap::default(),
             int_as_float: FxHashSet::default(),

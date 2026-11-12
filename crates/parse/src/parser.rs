@@ -3598,9 +3598,56 @@ impl<'s> Parser<'s> {
     fn square_access(&mut self, left: Expr) -> Expr {
         let start = left.span().start();
         let kind = AccessKind::try_from(self.advance().kind()).expect("dispatched on a square");
+        // `xs[..b]`: a slice from the start (r[impl mimas.slice])
+        if kind == AccessKind::Direct && (self.at(TokKind::DoubleDot) || self.at(TokKind::DoubleDotEqual)) {
+            let inclusive = self.at(TokKind::DoubleDotEqual);
+            self.advance();
+            let end = self.struct_literals(true, Self::expr);
+            self.expect(TokKind::RightSquare);
+            let zero = self.new_expr(Literal::Int(0), start);
+            return self.slice_call(left, zero, Some(end), inclusive, start);
+        }
         let key = self.struct_literals(true, Self::expr);
+        // `xs[a..b]`, `xs[a..=b]`, `xs[a..]`
+        if kind == AccessKind::Direct && (self.at(TokKind::DoubleDot) || self.at(TokKind::DoubleDotEqual)) {
+            let inclusive = self.at(TokKind::DoubleDotEqual);
+            self.advance();
+            let end = if self.at(TokKind::RightSquare) {
+                None
+            } else {
+                Some(self.struct_literals(true, Self::expr))
+            };
+            self.expect(TokKind::RightSquare);
+            return self.slice_call(left, key, end, inclusive, start);
+        }
         self.expect(TokKind::RightSquare);
         self.new_expr(Access::Square { left, key, kind }, start)
+    }
+
+    /// A slice as the method it means: `xs[a..b]` is `xs.slice(a, b)`,
+    /// `xs[a..=b]` is `xs.slice(a, b + 1)`, and `xs[a..]` is
+    /// `xs.slice_from(a)`. `xs` is evaluated once. r[impl mimas.slice]
+    fn slice_call(&self, left: Expr, from: Expr, end: Option<Expr>, inclusive: bool, start: usize) -> Expr {
+        let at = self.location(start);
+        let method = |name: &str| Ident::new(name, at);
+        let arg = |value: Expr| Argument { name: None, value };
+        let (name, args) = match end {
+            None => ("slice_from", vec![arg(from)]),
+            Some(end) => {
+                let end = if inclusive {
+                    let one = self.new_expr(Literal::Int(1), start);
+                    self.new_expr(Evaluation::new(end, EvaluationOp::Plus, one), start)
+                } else {
+                    end
+                };
+                ("slice", vec![arg(from), arg(end)])
+            }
+        };
+        let callee = self.new_expr(
+            Access::Dot { left, right: self.new_expr(method(name), start), kind: AccessKind::Direct },
+            start,
+        );
+        self.new_expr(Call::new(callee, args), start)
     }
 
     fn parentheticals(&mut self) -> Expr {

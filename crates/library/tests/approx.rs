@@ -33,3 +33,15 @@ test_run!(
     "sum([1e16, 1.0, -1e16])" => "1.0",
     "avg([0.1, 0.2, 0.3])! ≈ 0.2" => "true",
 );
+
+// A failing check names quantities in the page's units, and a written
+// number as written. r[verify check.report.units]
+#[test]
+fn a_failing_check_says_its_units() {
+    let err = test_runner::try_execute("fn wide(w: px) -> px { w * 2 }\nassert!(wide(10px) == 30px);").unwrap_err().to_string();
+    assert!(err.contains("assertion failed: 20.0 px == 30px"), "{err}");
+    let err = test_runner::try_execute("assert!(12lb + 36lb == 47lb);").unwrap_err().to_string();
+    assert!(err.contains("48.0 lb == 47lb"), "{err}");
+    let err = test_runner::try_execute("assert!(2 + 2 == 5);").unwrap_err().to_string();
+    assert!(err.contains("assertion failed: 4 == 5"), "{err}");
+}
