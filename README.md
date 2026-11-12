@@ -91,7 +91,7 @@ This tree is a permanently separate fork of upstream [mimas](https://github.com/
 | `hash` crate | Unison-style content-addressed code: scoped alpha-renamed hashing, SCC groups, link-by-hash loader, cross-page `use "…"` edges (`crates/hash/`) | no such crate |
 | Stdlib surface | Adds `std::polars` (dataframes), `std::interval`, `std::iso`, `std::darkly`, `std::debug`, parquet/xlsx I/O (`library/src/std_lib/`) | `std::{fs, math, parse, process, sys}` |
 | Deps | `polars` pinned to a git fork (`haydenflinner/polars` rev `c90a33e`); `dataframe`/`darkly`/`xlsx`/`parquet` features are default-on (`library/Cargo.toml`) | no polars dep |
-| Check-time literals | Literal args validated at compile time — `5kg.to("parsecs")`, bad regex in `str.find` fail the check (`solve/src/errors.rs` `BadLiteralArg`) | runtime errors |
+| Check-time literals | Literal args validated at compile time: `5kg.to("parsecs")`, bad regex in `str.find` fail the check (`solve/src/errors.rs` `BadLiteralArg`) | runtime errors |
 | RNG | One seeded `Rng` stream behind every random native (`library/src/methods/rng.rs`) | unseeded per-call |
 | Diagnostics | Dim mismatches name the written unit: `2px + 5ft` says `length (ft)`, not `length (m)` (`shared/src/units.rs` `describe_unit`) | n/a (no dims) |
 
@@ -159,7 +159,7 @@ Runnable projects live in [`examples/`](examples):
 
 - [`extension`](examples/extension) -- sharing Rust structs, enums, methods, and fallible functions with a script via `#[mimas]`.
 - [`game-loop`](examples/game-loop) -- driving a script from a host game loop, using fixtures and `FreezeCell` to safely hand mimas a `&mut` to host state.
-- [`bevy`](examples/bevy) — a breakout game on the `bevy` feature, which runs `.mim` scripts as hot-reloaded Bevy assets with typed access to reflected components, resources, and messages. See the [Bevy guide](https://mim.as/extension/bevy.html), and run it with `cargo run --manifest-path examples/bevy/Cargo.toml`.
+- [`bevy`](examples/bevy), a breakout game on the `bevy` feature, which runs `.mim` scripts as hot-reloaded Bevy assets with typed access to reflected components, resources, and messages. See the [Bevy guide](https://mim.as/extension/bevy.html), and run it with `cargo run --manifest-path examples/bevy/Cargo.toml`.
 
 ## Editor support
 

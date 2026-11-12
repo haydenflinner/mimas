@@ -1,6 +1,6 @@
 # Features
 
-Memorable additions to mimas beyond what the changelog tracks — newest first.
+Memorable additions to mimas beyond what the changelog tracks. Newest first.
 
 ## IR optimizer: inlining and scalar replacement (`compile/src/codegen/opt.rs`)
 
@@ -204,8 +204,8 @@ now.
 
 ## Tagged literals, spanned literal faults, prelude-first solving, `SeqSide`/`SortOrder`
 
-- **Tagged literals.** A name glued to a string — `pat"bd sd"`,
-  `keys"right@5"` — lexes as `TokKind::Tagged` and lowers to a call of
+- **Tagged literals.** A name glued to a string: `pat"bd sd"`,
+  `keys"right@5"`. Lexes as `TokKind::Tagged` and lowers to a call of
   the prelude native `__lit_<tag>("…")`, so a host registers one native
   per tag and the literal is typed by that native's return and checked
   by its validator at compile time. A tag no native backs errors by the
@@ -213,14 +213,14 @@ now.
 - **`api::LitFault`.** A literal validator reports which argument and
   which char span inside it the fault is about; the solver places the
   error there (`frames::fault_span`). Module-qualified calls
-  (`music::pat("…")`) now run validators — only plain and method callees
+  (`music::pat("…")`) now run validators, only plain and method callees
   did (`mimas.lit.validate`).
 - **Prelude first.** `load_files` solves the built-in source and the
   library's own sources to completion before any user file, so a user
   type that takes a prelude name shadows it for user code (with a
   `shadowed_builtin` warning, `ShadowedBuiltinType`) instead of breaking
   the prelude's own impls mid-hoist (`mimas.prelude.shadow`).
-- **Struct update.** `S { f = v, ..base }` — the listed fields change,
+- **Struct update.** `S { f = v, ..base }`, the listed fields change,
   the rest are read from `base` (same struct type, evaluated once);
   an enum variant literal refuses a base (`UpdateNeedsStruct`), since
   it might be another variant. `mimas.struct.update`.
@@ -251,17 +251,17 @@ now.
   the one opp is `RelativeSize { Bigger, Smaller }` with `Greater`/`Less`
   consts. `Fill`/`Flow` had no users beyond their involution checks. The
   prelude: `Sign`, `Shade`, `Daytime`, `SortOrder`, `RelativeSize`,
-  `SeqSide` — every name a qualifier and a noun.
+  `SeqSide`, every name a qualifier and a noun.
 - **Descriptive built-in opps.** `Side { Start, End }` is `SeqSide` and
   `Order { Asc, Desc }` is `SortOrder` (`SortOrder::Increasing`/
   `Decreasing` stay as consts), so the everyday `Side` and `Order` are
-  free for user types — and `LrSide`/`TbSide` have room beside `SeqSide`.
+  free for user types, and `LrSide`/`TbSide` have room beside `SeqSide`.
   `SortOrder::Desc.rank`, `.sort`, `.argsort`, `.arrange`;
   `SeqSide::End.pad`, `SeqSide::Start.justify`.
 
 ## `raise` carries any value
 
-`raise` used to take only `str` — `Val::Raised` stored the note directly,
+`raise` used to take only `str`: `Val::Raised` stored the note directly,
 and the solver rejected `raise 42`. Now the payload is any `Val`, boxed
 as `Raised(Gc<Val>)` so a `Val` never holds a `Val` inline: `raise 42`,
 `raise [1, 2]`, `raise ~{code = 7}` all work, and a raised value can even
@@ -272,38 +272,38 @@ through `Flow::Return`, `is_raised`, `?` demotion, binding, and the
 snapshot/inspect/capture surfaces, and only stringifies at the cold
 boundaries that need a `str`:
 
-- `x!` and `()`-unwraps still fault `UnwrappedRaised(String)` — the
+- `x!` and `()`-unwraps still fault `UnwrappedRaised(String)`, the
   display render happens on the fault path, where it's already cold.
 - `absolve`'s handler is `(any) -> T`: `e` binds the payload itself, not
-  a stringified note — `f"{e}"` formats on use, and `match` narrows it
+  a stringified note: `f"{e}"` formats on use, and `match` narrows it
   with runtime probes.
-- `Raisable<T>` keeps its `String` variant — native authors see no API
+- `Raisable<T>` keeps its `String` variant. Native authors see no API
   change; a raised payload crossing `from_value` renders (or reads
   `<unprintable raise payload>`), and `into_value` wraps the message
   `Str` in the structured payload.
 - `Captured::Raised`/`Inspect::Raised`/`SnapVal::Raised` all hold the
   payload recursively (`Box<…>`), so the web host's `inspect_json` hands
-  JS a nested `{"$raised": …}` document — richer raise/resume context
+  JS a nested `{"$raised": …}` document. Richer raise/resume context
   without a flattening pass.
 
 Cycle protection rides along: the payload `Gc` joins the render path's
 pointer guard, capture/inspect `seen` sets, and snapshot node walk, so
 `raise` on a cyclic structure errors deep instead of recursing forever.
 
-The wasm backend needed nothing — `Val::Raised` there is already
+The wasm backend needed nothing: `Val::Raised` there is already
 `tag|word` with the payload as a raw word. The JIT/bcgen helpers grew a
 `Ctx` arg only where cold-stringify lives (`unwrap`, `unwrap_unit`,
 `raise`); `unwrap_raised` still just moves the payload.
 
-Tests: `optionals.rs` — structured payloads (`int`/`[int]`/`dict`),
+Tests: `optionals.rs`. Structured payloads (`int`/`[int]`/`dict`),
 `absolve`/`?`/`!` boundaries, nested raise, snapshot roundtrip;
-`solve_results.rs` — `raise` on non-`str` solves to `T!`.
+`solve_results.rs`: `raise` on non-`str` solves to `T!`.
 
-## `absolve`'s `e` is `any` — `match` narrows the payload
+## `absolve`'s `e` is `any`: `match` narrows the payload
 
 `raise` carries any value, so `absolve`'s handler parameter is the
 dynamic type `any` rather than a pre-stringified `str`. `T` fulfills
-`any`; `any` fulfills only `any` — it stays quarantined until narrowed,
+`any`; `any` fulfills only `any`, it stays quarantined until narrowed,
 which is what `match` is for:
 
 ```mimas
@@ -321,26 +321,26 @@ retry() absolve |e| {
 
 - **Variant/struct/tuple-variant arms are runtime probes**: the pattern
   resolves the variant as usual and emits `is_instance`, but skips the
-  scrutinee unify — the probe proves the variant, never claims `e` is
+  scrutinee unify, the probe proves the variant, never claims `e` is
   one. Struct-variant fields bind with the variant's *declared* member
   types (`Err::Fatal { code }` gives `code: int`); a generic variant's
-  params stay `any` (`Wrap::Full(x)` gives `x: any` — the probe proves
+  params stay `any` (`Wrap::Full(x)` gives `x: any`, the probe proves
   `Full`, not `T`).
 - **Literal arms are structural-eq probes** (`42`, `"x"`, `null`); `x?`
   is a non-null probe binding `x: any`. A `match` over `any` requires a
-  `_` arm — the payload could be anything — and `match … !` still
+  `_` arm (the payload could be anything), and `match … !` still
   panics on a miss.
 - **Quarantine**: `e + 1`, `e.field`, `|e| e` into a concrete return
-  type, and `let n: int = e` all fail — format (`f"{e}"`), match, or
+  type, and `let n: int = e` all fail. Format (`f"{e}"`), match, or
   pass it somewhere expecting `any`.
 - `==`/`!=` on `any` is allowed (structural eq is total at runtime), so
   `e == Order::Desc` works without a `match`.
 - Any-scrutinee matches always take the linear probe chain, never the
-  `switch` jump table — `switch` indexes `Val::Int` payloads and
+  `switch` jump table: `switch` indexes `Val::Int` payloads and
   instance struct ids into the same table, and on `any` the two tag
   spaces can collide.
 - The emit is the cold-path design carried through: `absolve` no longer
-  emits a `Format` — the handler gets the raw payload and picks what to
+  emits a `Format`, the handler gets the raw payload and picks what to
   do with it. Handler closures are single-use call-site literals, so
   inlining one is a syntactic fact, not an analysis problem.
 
@@ -349,8 +349,8 @@ retry() absolve |e| {
 `xs + x` appends one `x`, `xs - x` drops the first `==` match, `xs + ys`
 unions (concat), `xs - ys` removes each `y` in turn, and `xs += x` /
 `xs -= x` / `xs += ys` / `xs -= ys` come with them. This is the
-weight-±1 surface of the algebra `Change` already carries weighted —
-`xs + add(3)` and `xs + 3` now agree — and it replaces nothing anyone
+weight-±1 surface of the algebra `Change` already carries weighted:
+`xs + add(3)` and `xs + 3` now agree, and it replaces nothing anyone
 could write: `[T] ± T`/`[T] ± [T]` were type errors before (the VM's
 sequence broadcast arms were unreachable from solved code; `*`/`/`
 keep theirs).
@@ -360,52 +360,52 @@ Two pieces worth knowing:
 - The point/extent choice is *type-directed*, resolved the same way an
   `impl` would: `add`/`sub` are element-shaped natives, `union`/`minus`
   are list-shaped ones, and `xs + ys` falls through `add`'s element
-  slot to `union` — so `[[1]] + [2]` appends `[2]` (it *is* a valid
+  slot to `union`, so `[[1]] + [2]` appends `[2]` (it *is* a valid
   element), while `[[1]] + [[2]]` concats. `op_dispatch` now treats an
   arg that doesn't fit a candidate as "keep looking" instead of an
   error, which is also what lets `xs + c` still reach `c.radd(xs)`.
-- `xs - x` is a quiet no-op when `x` isn't there — arrays can't hold
+- `xs - x` is a quiet no-op when `x` isn't there. Arrays can't hold
   the negative multiplicities a `~{int}` Z-set can (`xs - xs` empties).
   `[T; n]` places refuse `±=` like `push` does.
 
 Postfix `!` now hugs its operand like `x%`: `x!` unwraps, but a *spaced*
-`!` starts the next thing — `[!a !b]` is `[!a, !b]` (the parse everyone
+`!` starts the next thing: `[!a !b]` is `[!a, !b]` (the parse everyone
 meant), and `f !x` errors at the statement boundary rather than
 silently meaning `(f!)(x)`. Same rule Zig calls partial precedence:
 adjacency with two readings gets neither. `?` demote follows the same
-rule — `x?` needs the hug too, so `f ?x` errors rather than reading
+rule: `x?` needs the hug too, so `f ?x` errors rather than reading
 `(f?)(x)` (a spaced `?` opens nothing, so there's no second element
 to win; the win is purely that the silent misread is gone).
 
-Tests: `zset.rs` — arithmetic, `±=` forms, element/list-type rejection,
+Tests: `zset.rs`. Arithmetic, `±=` forms, element/list-type rejection,
 the `[T; n]` guard, and the spaced-`!`/`?` parses both ways.
 
-## `nand`/`nor` — the gate operators, word or glyph
+## `nand`/`nor`: the gate operators, word or glyph
 
 `a nand b` and `a ⍲ b` spell the same op; `a nor b`/`a ⍱ b` likewise
-(the APL glyphs are canonical — the AST prints `⍲`/`⍱` as it does `⊕`).
+(the APL glyphs are canonical, the AST prints `⍲`/`⍱` as it does `⊕`).
 They sit with `&`/`|`/`⊕` in the bit/gate family: on bools they're the
-*eager* forms — `!(a && b)`/`!(a || b)` with both operands always
+*eager* forms: `!(a && b)`/`!(a || b)` with both operands always
 evaluated, the parallel read where `&&`/`||` are the serial walk that
-may skip the tail — and on ints they run per bit-lane, `~(a & b)`/
+may skip the tail, and on ints they run per bit-lane, `~(a & b)`/
 `~(a | b)`, a 64-wide gate array just as `&` is a 64-wide read.
 
 What makes them load-bearing rather than trivia: `nand`/`nor` are each
-functionally complete bases, and the choice between them is real —
-`nand` is the existential gate (`¬∀`, any low input settles it — the
+functionally complete bases, and the choice between them is real:
+`nand` is the existential gate (`¬∀`, any low input settles it, the
 parallel-deciding shape, and in silicon literally a *parallel* pull-up
-pair), `nor` the universal (`¬∃`, every input must report — the serial
+pair), `nor` the universal (`¬∃`, every input must report, the serial
 one). `host/web/games/logic-kit.mimas` writes the whole story as `check`
 lines: the lazy/eager witness (a `log` counting operand reads),
 `nand = ¬all`/`nor = ¬any` over `[bool]`, `dual(f) = λ¬f(¬a,¬b)` as a
 higher-order fn (`dual(nand) = nor`, `dual(xor) = xnor`), sheffer
 completeness built from both bases, a Kleene three-valued `Tri`
 overloading the whole family, and the `span`/`points` fencepost split
-(half-open `a..b` holds `span(a,b)` points — Dijkstra's rule, the +1
+(half-open `a..b` holds `span(a,b)` points, dijkstra's rule, the +1
 only appears when the extent is closed).
 
 Dispatch: `nand`/`nor` are the first operator words that also name
-methods — `mod`/`xor`/`and`/`or`/`not` are keywords or reserved infix
+methods: `mod`/`xor`/`and`/`or`/`not` are keywords or reserved infix
 spellings, but `fn nand` stays an ordinary declaration (contextual like
 `xor`), so `a.nand(b)` and `a nand b` are the same call. Overload names
 are `nand`/`rnand` and `nor`/`rnor`.
@@ -414,16 +414,16 @@ Tests: `operators.rs` `nand_nor_builtin_gates` /
 `nand_nor_dispatch_to_impl_methods`; the kit's 13 `check` lines run in
 `logic_kit::logic_kit_check_lines_all_pass`.
 
-## Operator overloading — operators resolve to ordinary methods
+## Operator overloading: operators resolve to ordinary methods
 
 `a + b` is a method call: the left operand's type is asked for `add`, and
-if it doesn't provide one the right operand's is asked for `radd` — so
+if it doesn't provide one the right operand's is asked for `radd`, so
 `s * v` finds `v.rmul(s)` with `self` always the operand that owns the
-implementation. The same naming covers the whole infix surface —
+implementation. The same naming covers the whole infix surface:
 `add sub mul div idiv rem band bor bxor shl shr` for `+ - * / ~/ mod &
 | ⊕ << >>`, `lt le gt ge` for the comparisons, `neg pos bnot inv` for
-prefix `- + ~ !` — plus `r`-prefixed reverse forms for every binary
-name. Names dodge the keywords (`rem` not `mod`, `bxor` not `xor`) —
+prefix `- + ~ !`. Plus `r`-prefixed reverse forms for every binary
+name. Names dodge the keywords (`rem` not `mod`, `bxor` not `xor`),
 and `!`'s is `inv`, an ordinary name, so overloading it never shadows
 the `not` operator word; types without `inv` keep `!` bool-only, and
 `not x` spells the same `x.inv()` call. `==`/`!=` stay structural and
@@ -431,18 +431,18 @@ the `not` operator word; types without `inv` keep `!` bool-only, and
 
 Resolution is static and recorded: the solver writes an `OpDispatch`
 (`dec` + `swap`) into `Resolutions::op_decs` keyed by the operator node,
-and codegen lowers to an ordinary direct/native call — receiver first,
-operand second — rather than a generic `Bin`. An operator-shaped method
+and codegen lowers to an ordinary direct/native call. Receiver first,
+operand second. Rather than a generic `Bin`. An operator-shaped method
 must take exactly one operand (zero for unary); a `fn add(self, o, k)`
 is just a method and `a + b` keeps its plain invalid-op error. Compound
 assignments ride the same dispatch: `x += y` calls `x.add(y)` and stores
-the result — `??=` keeps its option semantics.
+the result: `??=` keeps its option semantics.
 
 Two consequences fell out of making it ordinary methods:
 
 - **Vectors, tensors and deltas speak infix.** `std::math`'s `Vec2`/`Vec3`
   ship `mul`/`rmul`/`div`/`neg`, so `v * 2.0`, `2.0 * v`, `v / 2.0` and
-  `-v` all work (`add`/`sub` were already methods — `v + w` arrived
+  `-v` all work (`add`/`sub` were already methods: `v + w` arrived
   free). In game-kit, `Change<T>` gets `radd`/`rsub`, so `xs += add 3`
   applies a delta and `xs -= remove 2` applies its undo.
 - **CUE-style unification is a library.** `host/web/games/cue-kit.mimas`
@@ -456,13 +456,13 @@ Two consequences fell out of making it ordinary methods:
 reverse dispatch, non-bool comparisons, compound assign, structural
 equality untouched, and arity/type rejections.
 
-## `and`/`or`/`not` — the logical operators in word form
+## `and`/`or`/`not`: the logical operators in word form
 
 C++-style alternative tokens: `and` and `or` lex straight to
 `DoubleAmpersand`/`DoublePipe`, and `not` lexes to a new `NotWord` token
-that parses as prefix `!` (never a postfix unwrap — `x!` stays `Bang`
+that parses as prefix `!` (never a postfix unwrap: `x!` stays `Bang`
 territory). Same precedence, same short-circuit; `t or f and f` is
-`(t || f) && f`. Source canonically spells `&&`/`||`/`!` — the words
+`(t || f) && f`. Source canonically spells `&&`/`||`/`!`, the words
 exist so the editor can show and accept them as a per-person reading
 option, and so `not x` stops being a foreign-spelling teaching error.
 
@@ -472,12 +472,12 @@ lexer's pre-scan (`lex::shadowed_words`) sees the declaration and lexes
 the word as an `Ident` in that page, so `not(a)`, `map1(a, not)` and
 `not a` all call the fn, and the operator is spelled with its symbol.
 The reach is directional: a declaration covers its own page and the
-pages that `use` it, never the pages it uses (`lex::shadow_sets`) — so
+pages that `use` it, never the pages it uses (`lex::shadow_sets`), so
 n2t-lib's `fn not(a: int)` reaches n2t-gates but not game-kit's
 `not UP`. Per file in `load_files`; in one spliced source the host's
 splice writes a `//# page: name` line (`lex::PAGE_MARK`) at each page's
 start and `lex::shadow_table` bounds pages there. The
-grades pass warns at the declaration — `shadowed_builtin`, a stable
+grades pass warns at the declaration: `shadowed_builtin`, a stable
 miette code a host can filter on (Nina hides it per page with the
 `allow` page property). nand2tetris's gate lib is the motivating page.
 Tests: `parse_validity::a_declared_fn_takes_back_an_operator_word`,
@@ -486,23 +486,23 @@ Tests: `parse_validity::a_declared_fn_takes_back_an_operator_word`,
 `a_kits_shadowing_reaches_the_page_that_uses_it`),
 `parse_validity::a_spliced_source_shadows_per_page`.
 
-## `space` — axes taken together
+## `space`: axes taken together
 
 `space Politics { econ: Hand, power: Grip }` declares a struct whose
 fields are all axes, plus a synthesized `impl Opp` that flips every field
-(`Politics { econ = self.econ.inv(), … }`) — so `!p` is the opposite
+(`Politics { econ = self.econ.inv(), … }`), so `!p` is the opposite
 point, a space is an axis itself, and spaces nest. An axis is any type
 implementing `Opp`: an `opp`, `bool`, a number (`impl Opp for int` /
 `float` in the built-in source: the flip is negation, so `px` and other
 quantities count), a `Dial`, another space. A field without a flip gets a
 targeted error at the field ("`name: str` isn't an axis, so it can't be
-part of `space S`"). Numbers serve static flips only — a space calls its
-fields' `inv` directly — and don't travel as `Opp`-typed values, since a
+part of `space S`"). Numbers serve static flips only, a space calls its
+fields' `inv` directly, and don't travel as `Opp`-typed values, since a
 pact-typed call tests the value's kind at runtime and a number has no
 test (`involutive(3.0)` is a type error). Tests:
 `space_flips_every_axis`, `space_fields_must_be_axes`.
 
-## `datalog { … }` — Ascent's language, run in mimas
+## `datalog { … }`: Ascent's language, run in mimas
 
 A `datalog` block declares relations, facts and rules, evaluates them to a
 fixpoint, and yields the relations in declaration order (a tuple of arrays
@@ -521,7 +521,7 @@ The language follows Ascent (the Rust Datalog crate) but runs in mimas,
 so rules can call the page's own functions and it works in the browser.
 A body holds atoms, conditions (`if cond` or bare), `let x = e`, `for x in
 e`, negation `!rel(args)` / `not rel(args)` (every variable bound to its
-left), and aggregates `agg x = f(e) in rel(args)` — `count()`, `sum`,
+left), and aggregates `agg x = f(e) in rel(args)`: `count()`, `sum`,
 `min`, `max`, `mean` (over no tuples only `count` derives). Rules are
 stratified the way Ascent's are: a head sits at least as high as every
 relation it reads and strictly higher than one it negates or aggregates,
@@ -536,32 +536,32 @@ runtime. Not yet: lattices, `if let`, several heads per rule. Tests:
 `library/tests/datalog.rs` (closure, seeds, filters, the carp-kit and
 learned lessons, Ascent spelling, negation, aggregates, errors).
 
-## `opp` — a dichotomy, as basic as an enum
+## `opp`: a dichotomy, as basic as an enum
 
 `opp Sky { Sun, Moon }` declares a type with exactly two ends, each the
 other's opposite: the enum of its two ends plus a synthesized `impl Opp
 for Sky` (built by the parser, every node located at the declaration)
 whose `inv` swaps them. So `!Sky::Sun == Sky::Moon`, `not` spells the
 same flip, and `fn involutive(x: Opp) -> bool { !(!x) == x }` takes any
-opp — `!` dispatches through the pact at runtime. Anything but two plain
+opp: `!` dispatches through the pact at runtime. Anything but two plain
 names is an error ("an `opp` has exactly two ends"); `opp` stays an
 ordinary name wherever a type name and `{` don't follow it.
 
 Every program has a small built-in source (`solve::BUILTIN_SRC`,
 appended last by `load_files` so user files keep their ids): the `Opp`
-pact itself and the pairs pages kept spelling as bools or ±1 —
+pact itself and the pairs pages kept spelling as bools or ±1:
 `Sign { Pos, Neg }`, `Size { Big, Small }`, `Shade { Light, Dark }`,
 `Daytime { Day, Night }`, `Flow { Push, Pull }`, `Fill { Full, Empty }`, `Order { Asc, Desc }` (a
-sort's direction — std and pages take it instead of an `asc: bool`),
+sort's direction. Std and pages take it instead of an `asc: bool`),
 `Compare { Less, Greater }`, `Side { Start, End }`. Alternative spellings
-are associated consts — `Order::Increasing`/`Decreasing`,
-`Compare::Smaller`/`Bigger` — so `!Order::Increasing ==
+are associated consts: `Order::Increasing`/`Decreasing`,
+`Compare::Smaller`/`Bigger`, so `!Order::Increasing ==
 Order::Decreasing`. The core source (`solve/src/builtin.mim`) is
 declarations only; std's operations on the opps ship with std as mimas
 source (`library/src/opp.mim`, via the new `Library::add_source`), on
 the opps themselves so they add no global names: `Order::Desc.rank(keys)`
-(indices, Desc the exact reverse of a stable Asc — `xs.reorder(...)`
-sorts by key), `Side::End.pad(xs, n, fill)` (extend any list — the
+(indices, Desc the exact reverse of a stable Asc: `xs.reorder(...)`
+sorts by key), `Side::End.pad(xs, n, fill)` (extend any list, the
 zero-extend case) and `Side::Start.justify(s, width)` (align text). A host asking a variant's value for a
 method (the debugger's `draw`, Nina's switch calling `inv`) finds the
 enum's impl: the host-facing method table registers an enum's methods
@@ -582,13 +582,13 @@ A unit variant now prints as its bare name (`Sky::Moon`, not
 `unary_operator_through_a_pact`).
 
 **`bool` is an opp.** The built-in source has `impl Opp for bool` (`inv` is
-`!self`), so a bool goes wherever an `Opp` is expected — `involutive(true)`
-— through the same runtime dispatch as an enum (a bool arm tests the value
+`!self`), so a bool goes wherever an `Opp` is expected: `involutive(true)`.
+Through the same runtime dispatch as an enum (a bool arm tests the value
 with `x == true || x == false`; there's no instance id to test). A pact
 may now be implemented for a primitive (`impl P for bool`; `bool` only for
 now), `Self` inside is the primitive, and a primitive satisfies a pact its
-library adt implements. A primitive's operators stay built in — `!b` is
-never dispatched to `inv` (which is `!self`, so it couldn't recurse) —
+library adt implements. A primitive's operators stay built in: `!b` is
+never dispatched to `inv` (which is `!self`, so it couldn't recurse),
 and the same holds for every operator on `int`/`float`/`str`/`bool`
 (`bool_is_an_opp`).
 
@@ -605,24 +605,24 @@ touching the word stay a call and an index
 `const DIRS4 = [RIGHT DOWN LEFT UP]` over struct consts used to be
 "non-constant" (and `[P { x = 1 }]` an ICE): only scalar arrays have a
 bytecode `Constant` form. A const array/tuple that holds a struct or
-dict — directly, nested, or through a const ref — now allocates at each
+dict (directly, nested, or through a const ref), now allocates at each
 use site, the way a struct const already did (`Constant::needs_alloc`
 in `emit_const_dec` and the module-constant export), so a write into
 one use never reaches the next. Tests:
 `solve_variables::{const_struct_in_array, const_array_of_struct_consts}`,
 `library/tests/structs.rs::const_array_of_struct_consts`.
 
-## Typed arrays — `IntArray`/`FloatArray` backing stores — branch `typed-arrays`
+## Typed arrays: `IntArray`/`FloatArray` backing stores: branch `typed-arrays`
 
 Homogeneous `[int]`/`[float]` sequences stop paying `Vec<Val>`'s 16-byte
 tagged cells (and a GC trace per element): they get a structure-of-arrays
-backing instead — `Gc<RefLock<ArrayStore>>` where `ArrayStore` is
+backing instead: `Gc<RefLock<ArrayStore>>` where `ArrayStore` is
 `Empty | Ints(Vec<i64>) | Floats(Vec<f64>) | Vals(Array)` (`val.rs`).
 
 **Distinct `Val` tags on purpose.** `Val::IntArray`/`Val::FloatArray` are
-separate discriminants, so every existing `Val::Array` pattern — including
+separate discriminants, so every existing `Val::Array` pattern. Including
 the bcgen-generated and JIT-inlined fast paths that borrow the `Vec<Val>`
-directly — *misses* typed arrays and falls through to the helpers that box
+directly. *misses* typed arrays and falls through to the helpers that box
 elements back out. That's the safety property; no inline path can misread a
 `Vec<i64>` as `Vec<Val>`. The JIT needed zero changes: `GetIndex`/`SetIndex`/
 `GetField`/`SetField` tag-compare against `t_array` before touching the vec
@@ -632,8 +632,8 @@ layout, and `Push`/`NewArray`/`Len` were already helper-backed (`bc.rs`'s
 **Promotion/demotion policy.** `[]` (`Ctx::new_seq`) starts `Empty`; the
 first `Push` of an int/float picks `Ints`/`Floats`. `Ctx::array_val` maps an
 all-`Int`/`Float` `Vec<Val>` to the typed tags (constants, `collect`
-results, native `Vec<T>` returns — tuples like `(1,2,3)` included).
-Promotion happens *only* at construction — an existing `Val::Array` never
+results, native `Vec<T>` returns. Tuples like `(1,2,3)` included).
+Promotion happens *only* at construction, an existing `Val::Array` never
 upgrades. Any write that doesn't fit demotes in place: `set`/`push` box the
 store into `Vals`, which holds a real `Array` handle so a native that took
 `as_untyped_array` keeps mutating the very contents the typed `Val` still
@@ -644,21 +644,21 @@ observes. The tag is a birth hint; the store is the truth (an
 `==`, `display`, `capture`/`inspect`, iteration, `in`, `len`, broadcast
 `bin`/`unary`, deep-clone, snapshots (`SnapNode::IntArray/FloatArray` ride
 unboxed) and rebind all go through `ArrayStore`'s boxed accessors, so
-semantics — including cross-representation equality between a typed array
-and a `Vec<Val>` array — are identical. `crates/vm/tests/typed_arrays.rs`
+semantics. Including cross-representation equality between a typed array
+and a `Vec<Val>` array. Are identical. `crates/vm/tests/typed_arrays.rs`
 pins both halves of that contract.
 
-## `|>` — why the pipe operator is worth keeping
+## `|>`: why the pipe operator is worth keeping
 
 The TODO asked the honest question: nobody who doesn't write pipelines uses it, so what
 does `|>` offer over `.`? Here is what it actually does, where it earns its keep, and
 where `.` is the right tool instead.
 
-**What it lowers to.** `|>` is pure sugar at parse time — there is no `ExprKind` for it.
+**What it lowers to.** `|>` is pure sugar at parse time, there is no `ExprKind` for it.
 `x |> f(a, b)` becomes the plain call `f(x, a, b)`; `x |> f` becomes `f(x)`. The piped
 value is inserted as the *first argument of a free call*, which is the entire semantics.
 It is also the loosest operator in the grammar (`a + b |> f` is `f(a + b)`), and it is
-the one infix exempt from the newline cutoff, because a line can't start with `|>` —
+the one infix exempt from the newline cutoff, because a line can't start with `|>`,
 that is what makes the vertical, one-verb-per-line style parse:
 
 ```mimas
@@ -672,36 +672,36 @@ samples
 
 Two subtleties worth knowing: `x |> f(1)!.g(2)` puts `x` into the *first* call of the
 postfix chain (`f(x, 1)!.g(2)`, not `(f(1)!.g)(x, 2)`), so `!` unwraps per-step inside a
-pipeline. And `x |> n.f(1)` pipes into `n.f(x, 1)` — the callee can be any expression
+pipeline. And `x |> n.f(1)` pipes into `n.f(x, 1)`, the callee can be any expression
 that calls, not just a bare ident.
 
 **What it buys over `.`.** `.` is member access: `x.f(a)` only resolves when `f` is a
-method on `x`'s type (or a field). `|>` doesn't dispatch at all — `x |> f(a)` calls the
+method on `x`'s type (or a field). `|>` doesn't dispatch at all: `x |> f(a)` calls the
 *free function* `f(x, a)`. So `|>` is the only way to put a value through functions that
 aren't, and can't be, methods:
 
-- functions on types you don't own — you can't `impl` methods onto builtin `[T]`, `str`,
+- functions on types you don't own, you can't `impl` methods onto builtin `[T]`, `str`,
   or a `DataFrame` type declared by a library;
-- ordinary `fn`s written without thinking about receivers — `x |> clean(2)` for any
+- ordinary `fn`s written without thinking about receivers: `x |> clean(2)` for any
   `fn clean(x, k)`;
 - the `std::polars` verbs, which are deliberately registered *both* as methods and as
   module functions (see `dataframe.rs::install`) precisely so `df |> filter(..)!` and
-  `df.filter(..)!` both resolve — the pipeline style for data transforms was the original
+  `df.filter(..)!` both resolve, the pipeline style for data transforms was the original
   motivation (tidy/PRQL, commit `8767a67`).
 
 The secondary benefit is visual: a pipeline lines its steps up vertically and reads as a
-recipe, and `|>` being loosest means `expr |> f` grabs the whole expression to its left —
-usually what you want.
+recipe, and `|>` being loosest means `expr |> f` grabs the whole expression to its left.
+Usually what you want.
 
 **When `.` is better.** Almost everywhere else. `.` is how you read fields, index, and
-call *methods* — including the mutating ones: `xs.push(0)` takes `&mut self`, and
+call *methods*. Including the mutating ones: `xs.push(0)` takes `&mut self`, and
 `xs |> push(0)` desugars to a *call* `push(xs, 0)`, which doesn't resolve because `push`
 isn't a free function. `|>` passes the value by first-argument position; it cannot reach
-`&mut self` receivers. If a name is only a method, it won't resolve under `|>` — that is
+`&mut self` receivers. If a name is only a method, it won't resolve under `|>`, that is
 the main footgun, and the reason polars verbs are dual-registered.
 
-**Verdict: keep.** The `.` operator covers methods; `|>` covers the one thing `.` can't —
-threading a value through free functions in reading order — and it costs almost nothing:
+**Verdict: keep.** The `.` operator covers methods; `|>` covers the one thing `.` can't.
+Threading a value through free functions in reading order, and it costs almost nothing:
 a desugar in `Parser::binary`/`pipe` (~50 lines), no new AST, no runtime, no type-system
 surface. Nothing about it is mandatory; code that never pipelines never sees it. The cost
 it does impose is a second spelling for call chains (`x.f()` vs `x |> f()` when `f` is
@@ -709,36 +709,36 @@ dual-registered), and the resolution surprise when a method-only name doesn't ex
 free function. Both are documented above; the upside is that the tidy surface reads like
 tidy, which was the point.
 
-## Units across the native boundary — `param_dims` / `return_dim` on native signatures
+## Units across the native boundary: `param_dims` / `return_dim` on native signatures
 
 Natives used to be `Any` at the boundary: `music::play_for(t, n, amp, 0.5s, 1200Hz)`
 in the wrong order compiled fine because no argument dimension ever reached the
-checker. Now a native parameter declared as a unit-carrying Rust type —
+checker. Now a native parameter declared as a unit-carrying Rust type:
 `Secs`, `Hz`, `Beats`, `St`, `Tempo`, `Bits` (thin `f64` newtypes in
-`mimas::vm::units`) — lands its `Dim` on `ApiFunction`/`ApiMethod`
+`mimas::vm::units`). Lands its `Dim` on `ApiFunction`/`ApiMethod`
 (`param_dims`, `return_dim`), parallel to the `Vec<Option<Ty>>` slots that
 `MimasType::mimas_ty` already produced. `MimasType` gains `mimas_dim`,
 `IntoNativeResult` gains `return_dim`; `Option<T>`/`Raisable<T>` forward the
 inner dim.
 
 - The dims pass resolves the call's `DecId` through `node_decs` (all three
-  call shapes — ident, `x.m()`, `mod::f()` — record it) into `dec_to_native`,
+  call shapes. Ident, `x.m()`, `mod::f()`. Record it) into `dec_to_native`,
   then checks each arg positionally against `param_dims` and returns
   `D::Q(return_dim)`. Undeclared slots stay `None` = unchecked, and a native
   declaring *no* dims falls through to `builtin`'s special cases (`pull`,
   `to`, `pow`, …) untouched.
-- The check rejects *known* mismatches — a plain `0.4` or `1200Hz` into a
-  `secs` slot errors — while `Any` (other natives' returns, dynamic values)
+- The check rejects *known* mismatches, a plain `0.4` or `1200Hz` into a
+  `secs` slot errors, while `Any` (other natives' returns, dynamic values)
   still flows. So adopting a unit on one slot never breaks callers that
   produce the value dynamically.
 - `music::synth`/`adsr` take `Secs`/`Hz`, `play_for`/`play_with` take
   `Hz`/`Secs`, `transpose`/`rate` take `St`, `hz` returns `Hz`. zzfx tables
-  stay plain by contract — feed a measured value into a slot list with
+  stay plain by contract. Feed a measured value into a slot list with
   `.to("Hz")`, which is exactly the conversion the checker asks for.
 - `Dim`'s arithmetic (`mul`/`div`/`powi`/`sqrt`) is `const` now, so a wrapper
   can spell its dimension as a `const` (`Tempo::DIM = BEAT.div(TIME)`).
 
-## `warn` — a non-fatal, source-located diagnostic channel
+## `warn`: a non-fatal, source-located diagnostic channel
 
 `Ctx::warn(msg)` records a line on `Prints` like `print` does, but kinded
 `Warn` and carrying the call site's `Location` via `DebugInfo::top_loc()`; a
@@ -752,14 +752,14 @@ start/stop/replay.
   and plays silence; the run continues. Music natives (`midi`, `pattern`,
   `pat`, `mask`, …) warn through it; genuinely unrecoverable failures still
   raise.
-- `Prints` entries are `(Location, PrintKind, String)` — every consumer of
+- `Prints` entries are `(Location, PrintKind, String)`, every consumer of
   `take()` handles the kind.
 
-## DataFrame rows as records — `df.row(i)` / `df.rows()`
+## DataFrame rows as records: `df.row(i)` / `df.rows()`
 
 `df.row(i)!` hands back one row as an instance of the declared struct whose
 fields are exactly the frame's columns, filled by name; `df.rows()!` gives them
-all in order. The point is `cleared_1k(shuttle().row(2)!)` — a real table row
+all in order. The point is `cleared_1k(shuttle().row(2)!)`, a real table row
 going straight into a function typed on the record.
 
 - The struct resolves by field-name *shape*, not by name: zero matching structs
@@ -767,21 +767,21 @@ going straight into a function typed on the record.
   […]`, `… match more than one declared struct (…)`). Out-of-bounds raises.
   Missing cells materialize as `null`.
 - Two paths to the record type: the declared return is `anon` (`Anon`/`ArrayOf`
-  slot 0) and unifies wherever the row is used — that's the only path for an
+  slot 0) and unifies wherever the row is used, that's the only path for an
   opaque frame (`from_csv`). For a closed-schema frame (`table {}` literal,
   `.schema("…")`, or a schema-propagating op) the solver's `frame_method_call`
   finds the adt up front via `record_adt_for`, so `df.row(0)!.riders` type-checks
   directly without annotation.
 - `to_dataframe` is the exact inverse: array-of-structs in, struct-rows out.
 - Both are free fns and `DataFrame` methods in `std::polars`; `row` is also how
-  `query`-derived frames read back — any frame whose columns match a declared
+  `query`-derived frames read back, any frame whose columns match a declared
   struct's fields decomposes, so `derive`d extra columns need a wider struct or
   a `select` first.
 
-## xlsx spreadsheet I/O — `std::polars`
+## xlsx spreadsheet I/O: `std::polars`
 
 `from_xlsx(path, sheet?)` reads a worksheet into a `DataFrame` via calamine;
-`df.to_xlsx(path, sheet?)` exports one via rust_xlsxwriter (new files only —
+`df.to_xlsx(path, sheet?)` exports one via rust_xlsxwriter (new files only,
 no editing existing workbooks). Behind the default-on `xlsx` feature on
 `library`/`mimas`, same opt-out story as `dataframe`/`darkly`.
 
@@ -789,36 +789,36 @@ no editing existing workbooks). Behind the default-on `xlsx` feature on
   bools `bool`, Excel datetimes `datetime[μs]`, mixed columns fall back to
   per-cell `str`, Excel errors preserved as text, empty cells null. Formulas
   read cached values, never evaluated.
-- `rust_xlsxwriter`'s `polars` feature stays off — it would resolve a second,
+- `rust_xlsxwriter`'s `polars` feature stays off, it would resolve a second,
   crates.io `polars` that doesn't unify with the workspace's path-dep clone.
 - Deferred: in-place workbook editing → `umya-spreadsheet` if the need ever
   shows up. SheetJS and the C `xlsxwriter` bindings were ruled out.
 
-## Cranelift JIT tier — `mimas-jit`
+## Cranelift JIT tier: `mimas-jit`
 
 Restored in-tree (2026-10-31) alongside `mimas-bcgen`/`mimas-bcgen-test`, and
 ported to the `*const BodyEnv` `BodyFn` ABI: emitted bodies take the single
 env pointer and load `thread`/`code`/`mutation`/`state`/`strs`/`fuel`/`op_ip`/
 `out` fields via `offset_of!` at entry; `call_body`/`call_dyn` and inline
 `CallDirect` calls forward `env` verbatim instead of ten flat params.
-(`mimas-llvm`'s `llvm-jit` MCJIT lane is intentionally not merged — LLVM's
+(`mimas-llvm`'s `llvm-jit` MCJIT lane is intentionally not merged, LLVM's
 compile latency made it the wrong tier; pure-Rust lanes only.)
 
 Second Futamura projection: `jit::compile(&program)` emits one native function
 per bytecode chunk with Cranelift (`FunctionBuilder`, dense op dispatch through
 `br_table` on a byte-offset→op-index map) and returns a `Vec<Option<BodyFn>>`
-for `Vm::install_bc` — the same slot bcgen bodies use, so interpreter/JIT
+for `Vm::install_bc`, the same slot bcgen bodies use, so interpreter/JIT
 bodies interleave freely.
 
 - Scalar int/float registers live in SSA vars ("shadows" with ok-flags) inside
   a body; they flush to the register window before any call that observes it.
   Unsupported ops delegate to `bc::jit::step_at` (= the interpreter's own
-  `step_one`), so semantics can't drift — only speed can.
+  `step_one`), so semantics can't drift, only speed can.
 - `vm::bc::jit` is the `extern "C"` helper layer bound via `JITBuilder::symbol`
   (`mj_*` names in `crates/jit/src/lib.rs::SPECS`, `H` indexes it 1:1).
   **ABI gotcha:** `Ctx` is a repr(C) 2-pointer struct; under AAPCS64 a composite
   that doesn't fully fit in remaining arg registers goes *wholly* to the stack,
-  while a flat Cranelift signature would split it — so `call_native` (ctx at
+  while a flat Cranelift signature would split it, so `call_native` (ctx at
   arg slot 7) takes `mc`/`st` as two pointers and rebuilds via
   `Ctx::from_parts`. Any new helper with `Ctx` past arg 6 must do the same.
 - Calls: `CallDirect`/dynamic `Call` run inline below `INLINE_CALL_DEPTH` via
@@ -826,26 +826,26 @@ bodies interleave freely.
   (fn-ptr table in JIT module data), `pop_return` on `Flow::Return`; deeper
   frames return `Flow::Call` to the driver as before.
 - Parity: `mimas-jit-test` runs each fixture under both lanes and diffs
-  `TEST_VALUE` + `keep` log + error — including op-budget *counts*, fuel
+  `TEST_VALUE` + `keep` log + error. Including op-budget *counts*, fuel
   windows, pause/resume (`run_frame`), snapshot/restore, and GC pressure.
 - Bench (bc-bench `jit` lane, M-series arm64): fib_iter jit 172ms vs bc 254ms,
-  mandelbrot 519 vs 710 — beats pre-tuning bcgen on scalar loops; fib_rec
+  mandelbrot 519 vs 710. Beats pre-tuning bcgen on scalar loops; fib_rec
   2313 vs 1089 and physics 2897 vs 704 lose (call-shim + flush overhead is the
   known gap vs the batched-quota/loop-form bcgen on `bcgen-tuning`).
 
-## bcgen second specialization pass — branch `bcgen-perf`
+## bcgen second specialization pass: branch `bcgen-perf`
 
 On top of `bcgen-tuning`'s scalar shadows and batched quota gates:
 
 - **Sparse multi-block loop wrapping** (`emit_body` + `grow_region` in
   `crates/bcgen/src/lib.rs`): a bounded DFS grows a loop region over
-  continuation edges — jump targets first, then conditional fallthrough —
-  backtracking on dead ends. Regions stay ascending and validate iff every
+  continuation edges: jump targets first, then conditional fallthrough.
+  Backtracking on dead ends. Regions stay ascending and validate iff every
   interior edge lands on the head (`continue`), the next emitted op, or
   outside the region (`code.ip` + `break`). Handles `while A && B`
   short-circuit re-entry (mandelbrot's inner loop) and physics' 13-block
   loop; `Switch` regions are rejected outright.
-- **Bool shadows**: `W::Bool` joins int/float in `analyze` — comparisons,
+- **Bool shadows**: `W::Bool` joins int/float in `analyze`. Comparisons,
   `JumpIf` conditions and `Constant::Bool` keep a native `bool` + ok flag
   instead of boxing `Val::Bool` per write. `Unary::Not` emits a direct
   `Val::Bool(b) => !b` arm, generic `unary` otherwise.
@@ -859,9 +859,9 @@ Measured (`bc-bench` bc lane vs the pre-pass tree, best-of ≥20): mandelbrot
 prime_numbers 245→196–210ms (typed indexing ≈ −10%), physics ~unchanged,
 fib_iter/fib_rec unchanged. Rejected along the way: contiguous gap-fill of
 sparse regions (regressed hot inner loops) and `_vN` write-forwarding locals
-(the extra copies cost more than the `rd` slot loads they saved — +6–7%).
+(the extra copies cost more than the `rd` slot loads they saved. +6–7%).
 
-## JIT round-2 perf — branch `jit-perf` (PR haydenflinner/mimas#7)
+## JIT round-2 perf: branch `jit-perf` (PR haydenflinner/mimas#7)
 
 Four layered optimizations over the tier above, all semantics-preserving
 (helpers/`estep` still provide the ground truth):
@@ -871,32 +871,32 @@ Four layered optimizations over the tier above, all semantics-preserving
   fuel-out and ops_left exhaustion escape through cold gate trampolines;
   `settle` runs at every observable boundary (calls, helper ops, exits).
 - **Bulk shadow flush (M2):** one `mj_flush` FFI call drains a packed
-  `FlushEnt` list — replaces per-register `wr_i`/`wr_f` calls.
+  `FlushEnt` list. Replaces per-register `wr_i`/`wr_f` calls.
 - **Megacalls (M3):** `mj_call_body`/`mj_call_dyn` fold callee resolution,
   `enter_call_regs` frame push, callee `BodyFn` invocation, and the
   `Flow::Return` pop/truncate/dst writeback into one FFI hop, returning the
   rebuilt caller-window pointer for re-pinning.
-- **Direct `Val` access (M4):** `bc::jit::layout()` probes the live layout —
-  discriminant position/width, `Int`/`Float`/`Bool`/`Fn` payload offsets,
-  `ThreadState`/`Frame`/`Decoder` fields, `Vec` header order — by semantic
+- **Direct `Val` access (M4):** `bc::jit::layout()` probes the live layout.
+  Discriminant position/width, `Int`/`Float`/`Bool`/`Fn` payload offsets,
+  `ThreadState`/`Frame`/`Decoder` fields, `Vec` header order, by semantic
   round-trip (mutate bytes of a known `Val`, `ptr::read` it back and compare
   `discriminant()`; invalid patterns decode as "other", never abort).
-  Emitted code then does tag compares + payload loads/stores inline —
+  Emitted code then does tag compares + payload loads/stores inline:
   `ri`/`rf`/`rval`/`wr_*` FFI calls vanish from hot paths.
   **Gotcha:** `size_of::<Discriminant<Val>>` (8) is the *token* width, not
-  the field width — rustc leaves stale bytes in discriminant padding, so
+  the field width. Rustc leaves stale bytes in discriminant padding, so
   the probe tries widths smallest-first and emits 1-byte tag compares.
 - Result (release): mandelbrot jit 117ms vs bc 199ms (**jit wins x1.7**);
   fib_iter 89 vs 60; prime_numbers 334 vs 255; fib_rec 1006 vs 723 and
-  physics 1065 vs 273 — call-heavy still trails; next lever is inlining /
+  physics 1065 vs 273. Call-heavy still trails; next lever is inlining /
   direct body dispatch to skip the megacall FFI hop.
 
-## bcgen generated call path — branch `bcgen-calls2`
+## bcgen generated call path: branch `bcgen-calls2`
 
 Recursive `CallDirect` was ~330x rustgen on `fib_rec`. Profiling the
 generated call path found the costs in order: (1) `Val`'s derived
 `PartialEq` never inlines, so `rd(regs, r) == Val::Bool(x)` on `JumpIf`
-conditions without a bool shadow compiled to a *call* per branch — two per
+conditions without a bool shadow compiled to a *call* per branch, two per
 mandelbrot inner iteration and one per `fib` call frame; (2) full
 `Vec::resize(..., Val::Null)` + `enter_call_regs` bookkeeping on every
 generated-to-generated call; (3) `RtResult<Flow>` construction on every
@@ -910,14 +910,14 @@ return and quota settle/re-arm at each boundary.
   (frame pop, `regs.truncate`, IP restore, dst writeback) and yield 0;
   tag 1 means `io.out` holds the callee's `RtResult<Flow>` verbatim.
 - **`GenIo` boundary bundle**: `out`/`fuel`/`op_ip`/quota-pair/`inl` move
-  into one struct — the inner ABI drops from 11 params to 7 (no AArch64
+  into one struct, the inner ABI drops from 11 params to 7 (no AArch64
   stack spill) and `[bcn0, bcn]` rides the same `io` across inline calls,
   so quota settles once per propagating exit instead of once per call.
 - **`gbail` cold exit**: all tag-1 exits funnel the `io.out` write through
-  a `#[cold]` helper — keeps big call-free bodies small enough that LLVM
+  a `#[cold]` helper. Keeps big call-free bodies small enough that LLVM
   stops spilling loop-carried shadows.
 - **`matches!` discriminant checks**: `JumpIf` and `GetField` option-null
-  checks emit `matches!(v, Val::Bool(..)/Val::Null)` — same predicate,
+  checks emit `matches!(v, Val::Bool(..)/Val::Null)`, same predicate,
   no `Val::eq` call.
 - Debug `INLINE_CALL_DEPTH` is 48 (release 256): generated debug frames
   are ~7.7KB, so ~96 nested inline calls overflowed the parity thread's
@@ -926,11 +926,11 @@ return and quota settle/re-arm at each boundary.
 Measured (`bc-bench` bc lane, min-of-5, vs `e5b6214` binary): fib_rec
 714→534ms (−25%), mandelbrot 90→54ms (−40%), prime_numbers ~202ms flat,
 fib_iter ~56ms flat, physics ~268→280ms (+4.5%, regalloc noise). rustgen
-`fib_rec` is ~2.2ms — still ~245x ahead.
+`fib_rec` is ~2.2ms, still ~245x ahead.
 
-## JIT round-4 runtime specialization — branch `jit-spec`
+## JIT round-4 runtime specialization: branch `jit-spec`
 
-Observe the live VM, recompile with what was seen, reinstall — no VM
+Observe the live VM, recompile with what was seen, reinstall, no VM
 surgery: `jit::JitSession::observe(&mut vm, &program)` installs one
 profiling `BodyFn` shim per body through the ordinary `install_bc` table
 (each dispatch runs the interpreter's own `step_at`, so observation costs
@@ -941,24 +941,24 @@ the bodies in mid-run.
 - **`Facts`/`BodyFacts`** (`crates/jit/src/lib.rs`): per-body `entry[r]`
   merged `Obs` (tag + stable GC payload ptr), `calls` (call-site resume ip
   → the one callee `BodyId` ever seen), and `sites[ip]` (the merged
-  *receiver operand* of each `GetIndex`/`GetField` — sees mid-body values
+  *receiver operand* of each `GetIndex`/`GetField`. Sees mid-body values
   `entry` can't, e.g. a global `LoadEntry`'d config dict). `Obs` merges
   decay to `Mixed`/`ptr=0` on disagreement, so polymorphism degrades
   gracefully.
 - **Forced entry shadows**: an `entry` tag of `Int`/`Float` puts the reg
   in the scalar-shadow set unconditionally; the entry probe's ok-flag is
   the runtime guard and every write site refreshes or clears the shadow,
-  so a wrong observation only ever deopts through `estep` — never
+  so a wrong observation only ever deopts through `estep`. Never
   miscomputes (`spec.rs::wrong_entry_facts_deopt_not_break` feeds a lying
   `Float` claim at an `Int` param and still gets 42).
 - **Monomorphic call ICs** (`emit_call_ic`): `Op::Call` sites with a single
-  observed callee emit two guard arms — `Val::Fn` tag + body-id compare,
-  `Val::Closure` tag + guarded `cl_func` deref + `captures.len` match —
+  observed callee emit two guard arms: `Val::Fn` tag + body-id compare,
+  `Val::Closure` tag + guarded `cl_func` deref + `captures.len` match,
   each routing through `call_gates`/`inline_enter_run` (the refactored
   `emit_call_direct_inline` core). Any miss runs `mj_call_dyn`, which
   reproduces `not_callable`/`WrongArity`/`Flow::Call` verbatim.
 - **Frozen-constant baking**: `Facts::frozen` maps a `Gc::as_ptr` payload
-  address to `{kind, unguarded}` — a host promise of immutability for the
+  address to `{kind, unguarded}`, a host promise of immutability for the
   bodies' install lifetime (break it and you get stale reads, not
   crashes). `Dict` bakes entries into a key-pointer compare chain (cap 32,
   `Str` equality is pointer equality); `Array`/`Seq`/`Instance` fold to a
@@ -966,16 +966,16 @@ the bodies in mid-run.
   immediate `Val` when it's a scalar/primitive. Every site still
   tag+pointer-guards `regs[r]` unless `unguarded` (honored only for regs
   never re-seated in the body).
-- Bench (`jit-test --example specbench`, release, M-series arm64 —
+- Bench (`jit-test --example specbench`, release, M-series arm64:
   `run(500_000)` where `tick` reads `CFG["rate"]`/`["scale"]`/`["bias"]`
   per call): interp 127.5ms → jit generic 95.7ms (1.33x) → jit + facts
-  **32.9ms (2.91x vs generic, 3.87x vs interp)** — frozen-dict reads turn
+  **32.9ms (2.91x vs generic, 3.87x vs interp)**: frozen-dict reads turn
   ~50% of the loop body's runtime constant traffic into immediates.
-- Tests: `jit-test/tests/spec.rs` — IC hit/reseat-miss, polymorphic site
+- Tests: `jit-test/tests/spec.rs`. IC hit/reseat-miss, polymorphic site
   staying generic, frozen config bake from a `LoadEntry`'d global, wrong
   facts deopting, `specialize_now` parity.
 
 Host-facing quirk to know: `Vm::call` uses entry reg 0 as its return
 scratch and restores it afterwards, so a callee's `StoreEntry` to global
-slot 0 inside an injected call is silently restored away — keep mutable
+slot 0 inside an injected call is silently restored away. Keep mutable
 globals out of slot 0 (see `call_ic_hit_and_miss`'s `pad`).
