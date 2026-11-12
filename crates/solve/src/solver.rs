@@ -151,6 +151,20 @@ pub struct Solver {
     /// a literal solved before `solve_types` (a `const`'s) reads its field types
     /// from here (r[impl mimas.record.const]).
     pub(crate) field_annotations: FxHashMap<DecId, parse::components::Annotation>,
+    /// Int literals (and their `-`/`+`/`(…)` wrappers) that fill a `float`
+    /// slot: each types, folds and runs as a float (r[impl mimas.num.literal]).
+    pub(crate) int_as_float: FxHashSet<NodeId>,
+    /// `Name(args…)` on a named-field struct: the field each argument fills,
+    /// by the call's node (r[impl mimas.struct.positional]).
+    pub(crate) ctor_slots: FxHashMap<NodeId, Vec<usize>>,
+    /// The same calls' field names, by argument: folding builds the struct
+    /// literal from them (r[impl mimas.struct.positional]).
+    pub(crate) ctor_names: FxHashMap<NodeId, Vec<String>>,
+    /// `const`s whose value calls a Mimas fn that folding can't run (a loop, a
+    /// list push, a native): computed once, before the program runs, by the
+    /// real VM. Each is the const item's node, its dec, and its value
+    /// (r[impl mimas.const.computed]).
+    pub(crate) computed_consts: Vec<(NodeId, DecId, Expr)>,
     /// Dimensions of api-adt fields (`Input.dt` is `s`): `(adt name, field name)`.
     /// Populated by `install_user_adt` from `ApiVariantFields::Named` dims; the dims pass
     /// consults it when a `.field` read isn't on a source-declared struct.
@@ -264,6 +278,10 @@ impl Solver {
             echo_units: FxIndexMap::default(),
             record_hints: FxHashMap::default(),
             field_annotations: FxHashMap::default(),
+            int_as_float: FxHashSet::default(),
+            ctor_slots: FxHashMap::default(),
+            ctor_names: FxHashMap::default(),
+            computed_consts: Vec::new(),
             field_dims: FxHashMap::default(),
             member_units: FxHashMap::default(),
             len_checks: FxIndexMap::default(),
@@ -583,6 +601,8 @@ impl Solver {
         // and, with decs resolved everywhere the walk reaches: the usage/effect grades
         crate::grades::check(self, &asts)?;
         lap("grades");
+        // a const computed before the program runs must be pure
+        self.check_computed_consts()?;
         Ok(())
     }
 
@@ -816,6 +836,26 @@ impl Solver {
             // callee — defer to the retry pass instead of erroring early
             // (r[mimas.const.eval])
             if self.defer_call_consts && self.calls_unsolved_fn(right) {
+                return Ok(ty);
+            }
+            // r[impl mimas.const.computed]
+            // a call into Mimas code that folding can't run (a loop, a push,
+            // a native, a notation's reader): the const is computed once,
+            // before the program runs, and must be pure (`check_computed_consts`)
+            if !self.defer_call_consts
+                && left.as_ident().is_some()
+                && (self.calls_unsolved_fn(right) || self.refers_to_computed(right))
+                && let Some(dec) = self.node_decs.get(&id).copied()
+            {
+                if !self.computed_consts.iter().any(|(_, d, _)| *d == dec) {
+                    self.decs[dec].kind = DecKind::Global;
+                    // the emitter binds the name like a `let`'s pattern
+                    self.node_decs.insert(left.id(), dec);
+                    if let PatKind::Ident(ident) = left.kind() {
+                        self.node_decs.insert(ident.id, dec);
+                    }
+                    self.computed_consts.push((id, dec, right.clone()));
+                }
                 return Ok(ty);
             }
             Err(NonConstantValue {
@@ -3020,9 +3060,63 @@ impl Solver {
     /// `if` branch or a `match` arm yields, so `let ps: [Pt] =
     /// [{ x: 1 }, { x: 2 }]` fills two `Pt`s. The first hint a literal gets wins.
     /// r[impl mimas.record.context]
-    pub(crate) fn hint_records(&mut self, expr: &Expr, ty: &Ty) {
+    /// A struct field's type, read from its annotation when the literal or
+    /// constructor call that needs it comes before `solve_types` (a `const`'s
+    /// value): a no-op once the field is solved, or for a generic struct.
+    // r[impl mimas.record.const]
+    pub(crate) fn settle_field_ty(
+        &mut self,
+        field_ty: &Ty,
+        dec: DecId,
+    ) -> std::result::Result<(), crate::UnificationError> {
+        if let Ty::Vid(_) = field_ty.clone().normalized(self)
+            && let Some(ann) = self.field_annotations.get(&dec).cloned()
+            && let Ok(mut declared) = Ty::from_annotation(ann, self)
+        {
+            field_ty.clone().fulfill_ty(&mut declared, self)?;
+        }
+        Ok(())
+    }
+
+    /// `3`, `-1` or `(2)` filling a `float` slot is that float: mark the
+    /// literal and its wrappers. An `int` variable is never widened.
+    // r[impl mimas.num.literal]
+    pub(crate) fn float_literal(&mut self, expr: &Expr) {
         match expr.kind() {
-            ExprKind::Literal(Literal::Record(_)) => {
+            ExprKind::Literal(Literal::Int(_)) => {
+                self.int_as_float.insert(expr.id());
+            }
+            ExprKind::Unary(u)
+                if matches!(u.op, parse::UnaryOp::Negative | parse::UnaryOp::Positive)
+                    && is_int_literal(&u.right) =>
+            {
+                self.int_as_float.insert(expr.id());
+                self.float_literal(&u.right);
+            }
+            ExprKind::Grouping(g) if is_int_literal(&g.inner) => {
+                self.int_as_float.insert(expr.id());
+                self.float_literal(&g.inner);
+            }
+            _ => {}
+        }
+    }
+
+    pub(crate) fn hint_records(&mut self, expr: &Expr, ty: &Ty) {
+        // a whole-number literal in a `float` slot is that float
+        // r[impl mimas.num.literal]
+        if is_int_literal(expr) {
+            let float_slot = match ty.clone().normalized(self) {
+                Ty::Float => true,
+                Ty::Option(inner) => matches!(*inner, Ty::Float),
+                _ => false,
+            };
+            if float_slot {
+                self.float_literal(expr);
+            }
+            return;
+        }
+        match expr.kind() {
+            ExprKind::Literal(Literal::Record(_) | Literal::Tuple(_)) => {
                 self.record_hints.entry(expr.id()).or_insert_with(|| ty.clone());
             }
             ExprKind::Literal(Literal::Array(items)) => {
@@ -3121,6 +3215,7 @@ impl Solver {
             match e.kind() {
                 ExprKind::Call(_) => self
                     .const_ctor_literal(e, env)
+                    .or_else(|| self.const_struct_call(e, env))
                     .or_else(|| self.fold_mimas_call(e, env)),
                 // the stock walker has no Block/If/Access arm — they decline to
                 // resolve and land here, where the env-aware walk folds them
@@ -3143,6 +3238,10 @@ impl Solver {
             return Err(err);
         }
         match out {
+            // r[impl mimas.num.literal]
+            Some(Literal::Int(n)) if self.int_as_float.contains(&expr.id()) => {
+                Ok(Some(Literal::Float(n as f64)))
+            }
             Some(lit) => self.reify_literal(lit, env),
             None => Ok(None),
         }
@@ -3162,7 +3261,9 @@ impl Solver {
                 // a record is typed by its slot: keep the node the checker
                 // typed, or the emitter can't tell the struct from a dict
                 // (r[impl mimas.record.const])
-                l @ Literal::Record(_) => Expr::with_id(l.into(), e.id(), e.location()),
+                l @ (Literal::Record(_) | Literal::Tuple(_)) => {
+                    Expr::with_id(l.into(), e.id(), e.location())
+                }
                 l => l.into_expr(),
             }))
         };
@@ -3523,6 +3624,108 @@ impl Solver {
     /// fixpoint to tell "fails because a callee's body isn't recorded yet"
     /// (deferrable — `solve_bodies` may make it fold) from "fails on its own
     /// terms" (error now).
+    /// Whether `expr` reads a computed const (`mimas.const.computed`): a const
+    /// built from one is computed too, after it.
+    fn refers_to_computed(&self, expr: &Expr) -> bool {
+        struct Probe<'s> {
+            solver: &'s Solver,
+            hit: bool,
+        }
+        impl parse::visit::Visitor for Probe<'_> {
+            fn expr(&mut self, expr: &Expr) {
+                if let ExprKind::Ident(i) = expr.kind()
+                    && let Some(dec) = self.solver.node_decs.get(&i.id).or(self.solver.node_decs.get(&expr.id()))
+                    && self.solver.computed_consts.iter().any(|(_, d, _)| d == dec)
+                {
+                    self.hit = true;
+                }
+            }
+        }
+        let mut probe = Probe { solver: self, hit: false };
+        parse::visit::walk_expr(expr, &mut probe);
+        probe.hit
+    }
+
+    /// A computed const runs before the page does, so it may not touch the
+    /// world. Its value's calls are followed into every Mimas fn they reach:
+    /// a native contributes its declared effects; an unannotated method on a
+    /// built-in value (`str`, a list, a dict, a number, a `bool`) is pure,
+    /// since the std methods with effects declare them (`chance`, `shuffle`);
+    /// any other unannotated native, or a call through a value, fails closed.
+    // r[impl mimas.const.computed]
+    pub(crate) fn check_computed_consts(&self) -> Result<()> {
+        for (_, _, value) in &self.computed_consts {
+            let mut seen = FxHashSet::default();
+            let fx = self.computed_effects(value, &mut seen);
+            if !(fx & shared::Fx::ANY).is_empty() {
+                Err(crate::errors::ImpureConst {
+                    src: self.src(value.location()),
+                    at: value.location().into(),
+                    effects: format!("{:?}", fx & shared::Fx::ANY),
+                    help: "compute it in a `let` instead: a `let` runs with the page and may use effects".into(),
+                })?
+            }
+        }
+        Ok(())
+    }
+
+    fn computed_effects(&self, expr: &Expr, seen: &mut FxHashSet<DecId>) -> shared::Fx {
+        struct Walk<'s, 'h> {
+            solver: &'s Solver,
+            seen: &'h mut FxHashSet<DecId>,
+            fx: shared::Fx,
+        }
+        impl parse::visit::Visitor for Walk<'_, '_> {
+            fn expr(&mut self, call_expr: &Expr) {
+                let ExprKind::Call(call) = call_expr.kind() else { return };
+                let solver = self.solver;
+                if solver.ctor_names.contains_key(&call_expr.id()) {
+                    return; // a struct built from values does no work
+                }
+                let callee = match call.left.kind() {
+                    ExprKind::Access(parse::Access::Dot { right, .. }) => right.as_ident().map(|i| i.id),
+                    ExprKind::Access(parse::Access::DoubleColon { right, .. }) => Some(right.id),
+                    _ => Some(call.left.id()),
+                };
+                let Some(dec) = callee.and_then(|id| solver.node_decs.get(&id).copied()) else {
+                    self.fx |= shared::Fx::unknown();
+                    return;
+                };
+                if let Some(binding) = solver.dec_to_native.get(&dec) {
+                    let value_method = binding.sig.recv.as_ref().is_some_and(|r| {
+                        matches!(
+                            r.clone().normalized(solver),
+                            Ty::Str | Ty::Int | Ty::Float | Ty::Bool | Ty::Array(..) | Ty::Dict(_) | Ty::Option(_)
+                        )
+                    });
+                    self.fx |= binding
+                        .sig
+                        .effects
+                        .unwrap_or(if value_method { shared::Fx::pure() } else { shared::Fx::unknown() });
+                    return;
+                }
+                match solver.decs[dec].kind {
+                    DecKind::Adt(_) | DecKind::Variant { .. } | DecKind::Constant(_) => {}
+                    // a Mimas fn: follow it once; a fn with no body here is a
+                    // host fn the checker can't see into, so it fails closed
+                    DecKind::Item { .. } => match solver.const_items.get(&dec) {
+                        Some(item) => {
+                            if self.seen.insert(dec) {
+                                let fx = solver.computed_effects(&item.body, self.seen);
+                                self.fx |= fx;
+                            }
+                        }
+                        None => self.fx |= shared::Fx::unknown(),
+                    },
+                    _ => self.fx |= shared::Fx::unknown(),
+                }
+            }
+        }
+        let mut walk = Walk { solver: self, seen, fx: shared::Fx::pure() };
+        parse::visit::walk_expr(expr, &mut walk);
+        walk.fx
+    }
+
     fn calls_unsolved_fn(&self, expr: &Expr) -> bool {
         struct Probe<'s> {
             solver: &'s Solver,
@@ -3609,6 +3812,34 @@ impl Solver {
         }))
     }
 
+    /// `Name(args…)` on a named-field struct, every argument const: the struct
+    /// literal it builds. The call node types as the struct, so it stands as
+    /// the literal's name, as a field constructor's does.
+    // r[impl mimas.struct.positional]
+    fn const_struct_call(&self, expr: &Expr, env: &ConstEnv) -> Option<Literal> {
+        let ExprKind::Call(call) = expr.kind() else {
+            return None;
+        };
+        let names = self.ctor_names.get(&expr.id())?;
+        let mut fields = Vec::with_capacity(names.len());
+        for (arg, name) in call.arguments.iter().zip(names) {
+            let lit = self.reduce_const_in(&arg.value, env).ok()??;
+            let value = match lit {
+                // typed by its slot: keep the node the checker typed
+                l @ (Literal::Record(_) | Literal::Tuple(_)) => {
+                    Expr::with_id(l.into(), arg.value.id(), arg.value.location())
+                }
+                l => l.into_expr(),
+            };
+            fields.push((parse::FieldKey::Ident(Ident::synthetic(name)), value));
+        }
+        Some(Literal::Struct(parse::StructLiteral {
+            name: expr.clone(),
+            fields,
+            base: None,
+        }))
+    }
+
     /// `E::V` naming a field-less enum variant (`opp Team { Blue, Red }`'s
     /// `Team::Blue`): a value with nothing to compute, so a `const` may be one.
     pub(crate) fn is_unit_variant(&self, expr: &Expr) -> bool {
@@ -3662,8 +3893,11 @@ impl Solver {
                         .arguments
                         .iter()
                         .all(|a| a.name.is_none() && self.is_const_expr_in(&a.value, scope));
+                // `Vec2(0, -1)` on a named-field struct (r[mimas.struct.positional])
+                let struct_call = self.ctor_names.contains_key(&expr.id())
+                    && call.arguments.iter().all(|a| self.is_const_expr_in(&a.value, scope));
                 // `f(const…)` where `f`'s body is itself a const expression
-                ctor || self.is_const_mimas_call(call, scope)
+                ctor || struct_call || self.is_const_mimas_call(call, scope)
             }
             ExprKind::Block(block) => self.is_const_block(block, scope),
             ExprKind::If(if_expr) => {
@@ -4106,4 +4340,16 @@ struct ConstEnv {
 enum FieldName<'e> {
     Ident(&'e str),
     Index(usize),
+}
+
+/// An int literal, possibly signed or parenthesized: `3`, `-1`, `(2)`.
+fn is_int_literal(expr: &Expr) -> bool {
+    match expr.kind() {
+        ExprKind::Literal(Literal::Int(_)) => true,
+        ExprKind::Unary(u) => {
+            matches!(u.op, parse::UnaryOp::Negative | parse::UnaryOp::Positive) && is_int_literal(&u.right)
+        }
+        ExprKind::Grouping(g) => is_int_literal(&g.inner),
+        _ => false,
+    }
 }

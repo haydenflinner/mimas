@@ -260,7 +260,8 @@ test_fail!(
     method_arity_and_type_mismatches,
     "let x = (3).min();",
     "let x = (3).clamp(1);",
-    "let x = (3.5).max(2);",
+    // an int value, not a literal (a literal would fill the float slot)
+    "let n = 2; let x = (3.5).max(n);",
     "let x = (3).min(2.0);",
     "let x = (3.5).format(2.0);"
 );

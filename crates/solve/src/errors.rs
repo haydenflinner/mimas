@@ -730,6 +730,18 @@ pub struct IteratingHere {
 }
 
 #[derive(Error, Debug, Diagnostic)]
+#[error("a const is computed before the program runs, so it can't have effects")]
+pub struct ImpureConst {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("this calls something with effects: {effects}")]
+    pub at: SourceSpan,
+    pub effects: String,
+    #[help]
+    pub help: String,
+}
+
+#[derive(Error, Debug, Diagnostic)]
 #[error("non-constant value")]
 pub struct NonConstantValue {
     #[source_code]

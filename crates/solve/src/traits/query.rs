@@ -96,6 +96,9 @@ impl Query for Expr {
             ExprKind::Literal(Literal::Null) => Ok(Ty::Null),
             ExprKind::Literal(Literal::Unit) => Ok(Ty::Unit),
             ExprKind::Literal(Literal::String(_)) => Ok(Ty::Str),
+            ExprKind::Literal(Literal::Int(_)) if solver.int_as_float.contains(&self.id()) => {
+                Ok(Ty::Float)
+            }
             ExprKind::Literal(Literal::Int(_)) => Ok(Ty::Int),
             ExprKind::Literal(Literal::Hex(h)) => {
                 if i64::from_str_radix(h, 16).is_err() {

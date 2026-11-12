@@ -62,6 +62,22 @@ impl Ir {
     }
 
     pub fn lower(&mut self, stmts: &[parse::Stmt]) {
+        use super::Lower;
+        use shared::Located;
+        // r[impl mimas.const.computed]
+        // a const the checker couldn't fold is computed first, in source order,
+        // into the global its name reads: it is ready before any code uses it
+        for stmt in stmts {
+            if let parse::StmtKind::Item(item) = stmt.kind()
+                && let parse::ItemKind::Const(con) = item.kind()
+                && self.resolutions.computed_consts.contains(&item.id())
+            {
+                let value = self.with_loc(con.right.location(), |ir| con.right.lower(ir));
+                if let Some(value) = value {
+                    self.pattern(&con.left, Some(value));
+                }
+            }
+        }
         for stmt in stmts {
             self.stmt(stmt);
         }

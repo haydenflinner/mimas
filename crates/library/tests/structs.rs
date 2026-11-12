@@ -124,14 +124,26 @@ test_run!(
 // A call stays a runtime call — and a compile error in a `const` — when the
 // body doesn't fold: a non-const callee, a `let` over a runtime value, an
 // assignment or `return`, a non-const arg, or recursion.
+// a native nobody annotated with its effects fails closed: the const can't
+// be computed before the program runs (`mimas.const.computed`)
 test_fail!(
     non_folding_calls_stay_non_const,
     "use std::math::Vec2; fn f(x: int) -> int { x + 1 } const A = f(Vec2::from_angle(0.5rad).x.to_int());",
     "use std::math::Vec2; fn f(x: float) -> float { let y = Vec2::from_angle(0.5rad).x; x + y } const A = f(1);",
-    "fn f(x: int) -> int { x = x + 1; x } const A = f(1);",
-    "fn f(x: int) -> int { return x } const A = f(1);",
-    "fn f(x: int) -> int { if x > 0 { f(x - 1) } else { 0 } } const A = f(3);",
     "use std::math::Vec2; fn f(x: float) -> float { Vec2::from_angle(0.5rad).x + x } const A = f(1.0);",
+);
+
+// a pure body that folding can't run (an assignment, a `return`, recursion)
+// is computed once before the program runs instead
+// r[verify mimas.const.computed]
+test_run!(
+    pure_non_folding_calls_are_computed,
+    "fn f(x: int) -> int { x = x + 1; x } const A = f(1);
+     fn g(x: int) -> int { return x } const B = g(1);
+     fn h(x: int) -> int { if x > 0 { h(x - 1) } else { 0 } } const C = h(3);",
+    "A" => "2",
+    "B" => "1",
+    "C" => "0",
 );
 
 // An operator through a pact: the built-in `pact Opp { fn inv(self)

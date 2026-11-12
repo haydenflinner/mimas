@@ -421,7 +421,8 @@ test_run!(
 
 test_fail!(
     sort_by_float_rejects_int_keys,
-    "let a = [1, 2, 3]; a.sort_by_float([1, 2, 3]);"
+    // an int list: literals would fill the float slot (`mimas.num.literal`)
+    "let a = [1, 2, 3]; let ks = [1, 2, 3]; a.sort_by_float(ks);"
 );
 
 // argsort dispatches on the receiver key array

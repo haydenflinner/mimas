@@ -1053,6 +1053,46 @@ impl Solve for Call {
                     solver.shadow_expr_ty(self.left.id(), Ty::adt(layout), self.left.location())?;
                     Ok(adt_ty.normalized(solver))
                 }
+                // r[impl mimas.struct.positional]
+                // `Vec2(0, -1)`: the arguments fill the fields in declaration
+                // order; a named one (`Vec2(y = -1, x = 0)`) fills its field by name
+                Variant::Struct(variant) if !solver.adts[adt].flags.contains(AdtFlags::IS_ENUM) => {
+                    let names: Vec<String> = variant
+                        .fields
+                        .0
+                        .iter()
+                        .filter(|(_, f)| !f.constant)
+                        .map(|(n, _)| n.clone())
+                        .collect();
+                    let positional = self.arguments.iter().filter(|a| a.name.is_none()).count();
+                    if positional > names.len() {
+                        Err(ExtraTupleMembers {
+                            src: solver.src(location),
+                            at: location.into(),
+                            ctor: Some(format!("`{ctor_spelling}`")),
+                        })?
+                    }
+                    let mut keyed: Vec<(FieldKey, &Expr)> = vec![];
+                    let mut order: Vec<String> = vec![];
+                    for (i, arg) in self.arguments.iter().enumerate() {
+                        let key = match &arg.name {
+                            Some(name) => name.clone(),
+                            None => Ident::new(names[i].clone(), arg.value.location()),
+                        };
+                        order.push(key.lexeme.clone());
+                        keyed.push((FieldKey::Ident(key), &arg.value));
+                    }
+                    let ty = struct_fields(solver, adt, &variant, layout, &keyed, None, location)?;
+                    // the field each argument fills, for the emitter
+                    let slots = order
+                        .iter()
+                        .map(|n| names.iter().position(|m| m == n).unwrap_or(usize::MAX))
+                        .collect();
+                    solver.ctor_slots.insert(id, slots);
+                    solver.ctor_names.insert(id, order);
+                    solver.shadow_expr_ty(self.left.id(), Ty::adt(layout), self.left.location())?;
+                    Ok(ty)
+                }
                 v @ Variant::Struct(_) => Err(ExpectedTupleStruct {
                     src: solver.src(location),
                     at: location.into(),
@@ -2671,12 +2711,65 @@ impl Solve for Literal {
                     }
                 }
             }
-            Literal::Tuple(members) => Ty::Tuple(
-                members
-                    .iter()
-                    .map(|v| v.query(solver))
-                    .collect::<Result<_>>()?,
-            ),
+            Literal::Tuple(members) => {
+                // r[impl mimas.struct.positional]
+                // a tuple where a named-field struct is expected fills its
+                // fields in declaration order: `cells: [(0, -1), (0, 0)]`
+                let hint = solver.record_hints.get(&_id).cloned().map(|t| t.normalized(solver));
+                let hint = match hint {
+                    Some(Ty::Option(inner)) => Some(*inner),
+                    other => other,
+                };
+                let target = match hint {
+                    Some(Ty::Adt(adt, _) | Ty::Identity(adt, _))
+                        if !solver.adts[adt]
+                            .flags
+                            .intersects(AdtFlags::IS_ENUM | AdtFlags::IS_MODULE)
+                            && !solver.adts[adt].is_tuple_struct() =>
+                    {
+                        solver.adts[adt].try_as_struct().cloned().map(|v| (adt, v))
+                    }
+                    _ => None,
+                };
+                match target {
+                    Some((adt, variant)) => {
+                        let names: Vec<String> = variant
+                            .fields
+                            .0
+                            .iter()
+                            .filter(|(_, f)| !f.constant)
+                            .map(|(n, _)| n.clone())
+                            .collect();
+                        if members.len() != names.len() {
+                            Err(if members.len() > names.len() {
+                                Error::from(ExtraTupleMembers {
+                                    src: solver.src(location),
+                                    at: location.into(),
+                                    ctor: Some(format!("`{}`", solver.adts[adt].name)),
+                                })
+                            } else {
+                                Error::from(MissingTupleMembers {
+                                    src: solver.src(location),
+                                    at: location.into(),
+                                    ctor: Some(format!("`{}`", solver.adts[adt].name)),
+                                })
+                            })?
+                        }
+                        let keyed: Vec<(FieldKey, &Expr)> = members
+                            .iter()
+                            .zip(&names)
+                            .map(|(v, n)| (FieldKey::Ident(Ident::new(n.clone(), v.location())), v))
+                            .collect();
+                        struct_fields(solver, adt, &variant, adt, &keyed, None, location)?
+                    }
+                    None => Ty::Tuple(
+                        members
+                            .iter()
+                            .map(|v| v.query(solver))
+                            .collect::<Result<_>>()?,
+                    ),
+                }
+            }
             _ => unreachable!(),
         })
     }
@@ -2718,19 +2811,9 @@ fn struct_fields(
                     if let FieldKey::Ident(key) = field_name {
                         solver.note(key, target.ty.clone(), Some(target.dec));
                     }
-                    // a `const`'s literal can be solved before `solve_types` gave the
-                    // struct its field types: read this field's from its annotation
-                    // now, so a record in it knows its slot (r[impl mimas.record.const])
-                    if let Ty::Vid(_) = target.ty.clone().normalized(solver)
-                        && let Some(ann) = solver.field_annotations.get(&target.dec).cloned()
-                        && let Ok(mut declared) = Ty::from_annotation(ann, solver)
-                    {
-                        target
-                            .ty
-                            .clone()
-                            .fulfill_ty(&mut declared, solver)
-                            .map_err(|e| e.into_type_mismatch(solver, value.location()))?;
-                    }
+                    solver
+                        .settle_field_ty(&target.ty, target.dec)
+                        .map_err(|e| e.into_type_mismatch(solver, value.location()))?;
                     value.fulfill_ty(target.ty, solver)?;
                 }
 
@@ -2847,11 +2930,6 @@ impl Solve for Match {
 
 impl Solve for Return {
     fn solve(&self, _id: NodeId, location: Location, solver: &mut Solver) -> Result<Ty> {
-        let mut this_ty = self
-            .value
-            .as_ref()
-            .map_or(Ok(Ty::Unit), |e| e.query(solver))?;
-
         let mut expected_ty = solver
             .fn_stack
             .last()
@@ -2861,6 +2939,14 @@ impl Solve for Return {
             })?
             .expected_ty
             .clone();
+        // the returned value fills the function's return slot
+        if let Some(value) = &self.value {
+            solver.hint_records(value, &expected_ty);
+        }
+        let mut this_ty = self
+            .value
+            .as_ref()
+            .map_or(Ok(Ty::Unit), |e| e.query(solver))?;
 
         this_ty
             .fulfill_ty(&mut expected_ty, solver)

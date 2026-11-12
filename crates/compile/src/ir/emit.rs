@@ -833,8 +833,16 @@ impl Emit for Call {
             let adt = *adt;
             let mut args = Vec::with_capacity(self.arguments.len());
             for arg in &self.arguments {
-                debug_assert!(arg.name.is_none(), "solver rejects named args on adt ctor");
                 args.push(arg.value.lower(ir)?);
+            }
+            // a named-field struct: the arguments ran in source order, the
+            // instance takes them in field order (r[impl mimas.struct.positional])
+            if let Some(slots) = ir.resolutions.ctor_slots.get(&id).cloned() {
+                let mut fields = vec![None; slots.len()];
+                for (arg, slot) in args.into_iter().zip(slots) {
+                    fields[slot] = Some(arg);
+                }
+                args = fields.into_iter().collect::<Option<Vec<_>>>()?;
             }
             return Some(ir.current().new_instance(adt, args));
         }
@@ -1402,9 +1410,33 @@ impl Emit for Literal {
             Literal::Null => Constant::Null,
             Literal::Unit => Constant::Null,
             Literal::String(s) => Constant::Str(ir.intern_str(s)),
+            // r[impl mimas.num.literal]
+            Literal::Int(i) if ir.resolutions.int_as_float.contains(&id) => Constant::Float(*i as f64),
             Literal::Int(i) => Constant::Int(*i),
             Literal::Float(f) => Constant::Float(*f),
             Literal::Hex(h) => Constant::Int(i64::from_str_radix(h, 16).unwrap()),
+            // a tuple filling a named-field struct's slot: the struct, fields
+            // in declaration order (r[impl mimas.struct.positional])
+            Literal::Tuple(a)
+                if matches!(
+                    ir.resolutions.node_tys.get(&id).map(|t| match t {
+                        Ty::Option(inner) => inner.as_ref(),
+                        t => t,
+                    }),
+                    Some(Ty::Adt(..) | Ty::Identity(..))
+                ) =>
+            {
+                let adt = match ir.resolutions.node_tys.get(&id) {
+                    Some(Ty::Option(inner)) => match inner.as_ref() {
+                        Ty::Adt(adt, _) | Ty::Identity(adt, _) => *adt,
+                        _ => unreachable!(),
+                    },
+                    Some(Ty::Adt(adt, _) | Ty::Identity(adt, _)) => *adt,
+                    _ => unreachable!(),
+                };
+                let values: Option<Vec<InstId>> = a.iter().map(|e| e.lower(ir)).collect();
+                return Some(ir.current().new_instance(adt, values?));
+            }
             Literal::Array(a) | Literal::Tuple(a) => {
                 return ir.in_current(|block| {
                     let array = block.new_array();

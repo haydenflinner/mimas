@@ -77,6 +77,16 @@ pub struct Resolutions {
     /// `expr?` nodes → what a null or a raise does to the enclosing function
     /// (`mimas.propagate`); the operand's own type says which test to run.
     pub propagates: FxIndexMap<NodeId, Propagation>,
+    /// Int literals that fill a `float` slot (`mimas.num.literal`): emit and
+    /// fold them as floats.
+    pub int_as_float: rustc_hash::FxHashSet<NodeId>,
+    /// `Name(args…)` on a named-field struct (`mimas.struct.positional`): the
+    /// field each argument fills, so the emitter builds the instance in field
+    /// order after evaluating the arguments in source order.
+    pub ctor_slots: FxHashMap<NodeId, Vec<usize>>,
+    /// `const` items computed before the program runs (`mimas.const.computed`),
+    /// in source order: the emitter lowers each value at the top of the entry.
+    pub computed_consts: rustc_hash::FxHashSet<NodeId>,
     /// `<op> a` nodes whose operand is pact-typed (`!x` with `x: Dichotomy`):
     /// no single impl, so emit dispatches at runtime over the bound's
     /// implementers, exactly like a method call through the pact.
@@ -528,6 +538,9 @@ impl From<Solver> for Resolutions {
             panic_native,
             op_decs: solver.op_decs,
             propagates: solver.propagates,
+            int_as_float: solver.int_as_float,
+            computed_consts: solver.computed_consts.iter().map(|(id, _, _)| *id).collect(),
+            ctor_slots: solver.ctor_slots,
             pact_ops: solver.pact_ops,
             param_bounds: solver
                 .param_bounds

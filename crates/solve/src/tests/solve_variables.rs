@@ -230,10 +230,9 @@ test_fail!(non_const_array, "const A = [foo()];");
 test_fail!(
     // r[verify mimas.const.compile-time]
     const_non_literal,
-    // a call is still a compile error when the callee's body can't fold --
-    // a `match` isn't const
-    "fn foo() -> int { match 1 { 1 => 0, _ => 1 } }
-     const BUZZ = foo();"
+    // a runtime value is still not a const (a pure fn call is: `mimas.const.computed`)
+    "let y = 3;
+     const BUZZ = y + 1;"
 );
 test_fail!(
     const_reassignment,

@@ -143,7 +143,10 @@ impl Constant {
             use super::Lower;
             return s.name.lower(ir);
         }
-        if Self::needs_alloc(ir, &lit) {
+        // a tuple that is a struct (`const O: V = (0, 0)`) allocates the struct
+        let struct_tuple = matches!(lit, Literal::Tuple(_))
+            && matches!(ir.resolutions.node_tys.get(&id), Some(solve::components::Ty::Adt(..) | solve::components::Ty::Identity(..)));
+        if struct_tuple || Self::needs_alloc(ir, &lit) {
             use super::Emit;
             lit.emit(id, ir)
         } else {
@@ -199,6 +202,11 @@ impl Constant {
             ExprKind::Literal(Literal::Array(inner)) => {
                 Self::Array(inner.iter().map(|e| Self::from_expr(ir, e)).collect())
             }
+            // a whole-number literal in a `float` slot (`mimas.num.literal`)
+            _ if ir.resolutions.int_as_float.contains(&expr.id()) => match reduce_simple(expr) {
+                Ok(Some(parse::Literal::Int(n))) => Self::Float(n as f64),
+                _ => Self::from_literal(ir, reduce_simple(expr).ok().flatten().unwrap()),
+            },
             _ => Self::from_literal(
                 ir,
                 // solve already vetted every element; reduce_simple is source-free and

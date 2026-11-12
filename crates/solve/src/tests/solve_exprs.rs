@@ -476,7 +476,8 @@ test_fail!(
     let_annotation_mismatch,
     "let a: int = \"str\";",
     "let a: bool = 0;",
-    "let a: float = 0;",
+    // an int value: a literal `0` would be a float here (`mimas.num.literal`)
+    "let n = 0; let a: float = n;",
 );
 test_fail!(nested_array_element_mismatch, "let a: [[int]] = [[\"x\"]];");
 test_fail!(dict_value_mismatch, "let a: ~{int} = ~{ k = \"x\" };");
