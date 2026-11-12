@@ -1809,7 +1809,7 @@ fn ty_of(
             crate::Constant::Bool(_) => Ty::Bool,
             crate::Constant::Str(_) => Ty::Str,
             crate::Constant::Null => Ty::Null,
-            crate::Constant::Array(_) => return None,
+            crate::Constant::Array(_) | crate::Constant::Dec(_) => return None,
         }),
         Inst::BinOp { .. }
         | Inst::UnaryOp { .. }

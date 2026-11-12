@@ -163,7 +163,8 @@ impl From<EvaluationOp> for BinOp {
             | EvaluationOp::Intersect
             | EvaluationOp::Union
             | EvaluationOp::Ominus
-            | EvaluationOp::Uplus => unreachable!("named operator `{value}` has no builtin lowering"),
+            | EvaluationOp::Uplus
+            | EvaluationOp::Approx => unreachable!("named operator `{value}` has no builtin lowering"),
         }
     }
 }

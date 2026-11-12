@@ -746,72 +746,12 @@ impl<'s> Parser<'s> {
 
     /// A `check` is one line: `check <expr>` — `check f(2) == 3` — becoming one
     /// [TestCase] in a [Tests] item, so `Vm::run_tests` sees it exactly like a
-    /// `#[tests]` entry. `,`/`;` chain more checks on the same line. The retired
-    /// `check:` / `check { }` list forms still parse — once, under a pointed error —
-    /// so old text degrades to diagnostics instead of junk.
+    /// `#[tests]` entry. `,`/`;` chain more checks on the same line. The
+    /// expression may be a block: `check { let a = 2; a * 3 } == 6`.
     fn check_block(&mut self) -> Tests {
         self.advance();
         let mut names = std::collections::HashSet::new();
-        let mut cases = vec![];
-        if self.at(TokKind::Colon) && !self.at_line_start() {
-            self.error_here(Misdirection {
-                src: self.src(),
-                at: self.next_location().into(),
-                msg: "`check:` lists are retired — put `check` on each line: `check f(2) == 3`"
-                    .into(),
-                label: "the check is just the line's expression".into(),
-            });
-            self.bump(TokKind::Colon);
-            if self.peek().starts_expr() {
-                cases.push(self.check_case(&mut names));
-            }
-        } else if self.at(TokKind::LeftBrace) && !self.at_line_start() {
-            self.error_here(Misdirection {
-                src: self.src(),
-                at: self.next_location().into(),
-                msg: "`check { }` lists are retired — put `check` on each line: `check f(2) == 3`"
-                    .into(),
-                label: "the check is just the line's expression".into(),
-            });
-            self.bump(TokKind::LeftBrace);
-            loop {
-                if self.eat(TokKind::RightBrace) {
-                    break;
-                }
-                // A token that can't open a check where a check or `}` should be means the
-                // brace never closed. Flag the missing `}` and leave the token for
-                // whatever's further out -- parsing it as a check would go nowhere, and
-                // looping here spins until the fuel guard panics.
-                if !self.peek().starts_expr() {
-                    self.expect(TokKind::RightBrace);
-                    break;
-                }
-                cases.push(self.check_case(&mut names));
-                if self.eat(TokKind::Comma) || self.at_line_start() || self.at(TokKind::RightBrace)
-                {
-                    continue;
-                }
-                self.error_here(Misdirection {
-                    src: self.src(),
-                    at: self.next_location().into(),
-                    msg: "checks need `,` or a newline between them".into(),
-                    label: "expected `,` or `}` here".into(),
-                });
-                // Skip the junk up to the next line / `}` so the next check starts somewhere
-                // new -- retrying at the same token would spin until the fuel guard panics.
-                if self.at(TokKind::Eof) {
-                    break;
-                }
-                while !self.at(TokKind::Eof)
-                    && !self.at(TokKind::RightBrace)
-                    && !self.at_line_start()
-                {
-                    self.advance();
-                }
-            }
-        } else {
-            cases.push(self.check_case(&mut names));
-        }
+        let mut cases = vec![self.check_case(&mut names)];
         // `,`/`;` chain more checks on the same line.
         while self.eat(TokKind::Comma) || self.eat(TokKind::SemiColon) {
             if !self.check_chains() {
@@ -824,7 +764,10 @@ impl<'s> Parser<'s> {
 
     /// One check: the `expr`, wrapped in `assert`'s operand-reporting rewrite.
     fn check_case(&mut self, names: &mut std::collections::HashSet<String>) -> TestCase {
-        let expr = self.expr();
+        // a check is always an expression: a block that opens it can take
+        // an operator after it (`check { let a = 2; a * 3 } == 6`), where a
+        // statement-start block ends the expression
+        let expr = if self.at(TokKind::LeftBrace) { self.null_coalecence() } else { self.expr() };
         let name = unique_test_name(names, self.source_of(&expr));
         let location = expr.location();
         // `check` gets `assert`'s operand rewrite: a failed `check x == 40`
@@ -1210,6 +1153,7 @@ impl<'s> Parser<'s> {
             return None;
         };
         let closure = closure.clone();
+        let body = self.source_of(&closure.body);
         let at = self.location(start);
         let mut params = vec![];
         let mut bindings = vec![];
@@ -1263,6 +1207,7 @@ impl<'s> Parser<'s> {
             .push(self.new_stmt(Item::new(func.into(), at, false), start));
         Some(Law {
             text,
+            body,
             params,
             fn_name,
             location: expr.location(),
@@ -3308,6 +3253,10 @@ impl<'s> Parser<'s> {
                 let op_text = if inn.condition { "in" } else { "!in" };
                 self.rewrite_assert_in(start, inn.left, inn.right, !inn.condition, op_text)
             }
+            // `check a ≈ b` reports both sides, as `==` does (r[impl mimas.op.approx])
+            ExprKind::Evaluation(ev) if ev.op == EvaluationOp::Approx => {
+                self.rewrite_assert_approx(start, ev.left, ev.right)
+            }
             // r[impl check.report.call]
             ExprKind::Call(call) => self.rewrite_assert_call(start, call, false),
             ExprKind::Unary(u) if u.op == UnaryOp::Not => {
@@ -3395,6 +3344,26 @@ impl<'s> Parser<'s> {
             start,
         );
         let message = self.assert_pair_message(left_expr, right_expr, &op_text, start);
+        self.assert_lets_if(
+            start,
+            [left_let, right_let].into_iter().flatten().collect(),
+            condition,
+            message,
+        )
+    }
+
+    /// `check a ≈ b`: each side evaluated once, and a failure says both
+    /// values, `assertion failed: 21.77 ≈ 30.0`.
+    fn rewrite_assert_approx(&mut self, start: usize, left: Expr, right: Expr) -> Expr {
+        let (left_ident, right_ident) = self.next_assert_temps(start);
+        let (left_expr, left_let) = self.assert_operand(left, left_ident, start);
+        let (right_expr, right_let) = self.assert_operand(right, right_ident, start);
+        let close = self.new_expr(
+            Evaluation::new(left_expr.clone(), EvaluationOp::Approx, right_expr.clone()),
+            start,
+        );
+        let condition = self.new_expr(Unary::new(UnaryOp::Not, close), start);
+        let message = self.assert_pair_message(left_expr, right_expr, "≈", start);
         self.assert_lets_if(
             start,
             [left_let, right_let].into_iter().flatten().collect(),
@@ -4856,6 +4825,10 @@ impl BinaryOp {
             return Some((Self::Eval(op), 4));
         }
         let op = EvaluationOp::try_from(kind).ok()?;
+        // `a ≈ b` compares, so it binds like `==` (r[impl mimas.op.approx])
+        if op == EvaluationOp::Approx {
+            return Some((Self::Eval(op), 2));
+        }
         let power = if op.is_binary() {
             4
         } else if op.is_bit_shift() {

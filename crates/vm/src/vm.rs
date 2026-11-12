@@ -2406,6 +2406,7 @@ pub fn constant_to_val<'gc>(c: Constant, ctx: Ctx<'gc>, c_cstrs: &StrInterner) -
         Constant::Bool(b) => Val::Bool(b),
         Constant::Int(i) => Val::Int(i),
         Constant::Float(f) => Val::Float(f),
+        Constant::Dec(b) => Val::Dec(shared::dec::Dec::from_bits(b)),
         Constant::Str(id) => Val::Str(ctx.intern(c_cstrs.get(id))),
         Constant::Array(items) => {
             let out: Vec<Val<'gc>> = items

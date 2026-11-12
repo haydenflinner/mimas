@@ -1,3 +1,4 @@
+pub mod dec;
 mod fx;
 mod id;
 mod interner;

@@ -412,7 +412,7 @@ fn sum_int(arr: &[i64]) -> i64 {
 /// let float_sum = b.sum(); // 3.0
 /// ```
 fn sum_float(arr: &[f64]) -> f64 {
-    arr.iter().sum()
+    crate::fsum(arr.iter().copied())
 }
 
 #[native]

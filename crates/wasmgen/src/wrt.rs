@@ -487,7 +487,7 @@ pub(crate) fn analyze_body(body: &IrBody, ret: &[Option<K>]) -> Result<AnaI, Bai
                         Constant::Float(_) => K_FLOAT | K_WORD,
                         Constant::Bool(_) => K_BOOL | K_WORD,
                         Constant::Str(_) | Constant::Null => K_WORD,
-                        Constant::Array(_) => 0,
+                        Constant::Array(_) | Constant::Dec(_) => 0,
                     },
                     Inst::GetLocal(l) => snap_lmask[l.index()],
                     Inst::BinOp { op, kind, .. } => {

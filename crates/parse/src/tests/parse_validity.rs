@@ -205,17 +205,18 @@ test_ok!(
     "check f(2) == 3",
     "check x",
     "check x == 1, y == 2",
-    "check !done"
+    "check !done",
+    // a check's expression may be a block
+    "check { let a = 2; a * 3 } == 6",
+    "check {\n    xs.len() == 2\n}"
 );
 test_fail!(
     // r[verify check.retired]
     // r[verify check.contextual]
     checks_rejected,
-    // the retired list forms -- `:`/`{` error but still recover
+    // `check:` was a retired list form; `:` can't start an expression
     "check:",
     "check: x == 1",
-    "check { }",
-    "check { x == 1 }",
     "check: { x == 1 }",
     // `is` is gone -- plain `==` is the check spelling now
     "check x is 1",
@@ -223,8 +224,7 @@ test_fail!(
     // alone is an expression closing the input, so a stray `}` follows it)
     "where: x == 1",
     "example { x } }",
-    // junk after a check used to spin the parser until its fuel guard panicked
-    "check {\n    xs[1..] == [2]\n}",
+    // an unclosed block after `check` is an error, and doesn't spin the parser
     "check { a[1..] == b",
     // an unclosed `check {` followed by an item -- deleting the `}` used to
     // loop forever on `fn` (it can't open a check) until the fuel guard

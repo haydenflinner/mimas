@@ -175,7 +175,8 @@ impl Dim {
         for (an, ad, _) in NAMED.iter() {
             for (bn, bd, _) in NAMED.iter() {
                 if ad.mul(*bd) == *self && an <= bn {
-                    return format!("{an}*{bn}");
+                    // a unit times itself is its square: `px²`, not `px*px`
+                    return if an == bn { format!("{an}²") } else { format!("{an}*{bn}") };
                 }
             }
         }
@@ -695,6 +696,11 @@ mod tests {
         assert_eq!(lookup("logit"), Some((Dim::NONE, 1.0)));
         assert_eq!(lookup("bp"), Some((Dim::NONE, 1e-4)));
         assert!(lookup("bogus").is_none());
+    }
+
+    #[test]
+    fn a_unit_times_itself_reads_as_its_square() {
+        assert_eq!(PIXELS.mul(PIXELS).describe(), "px²");
     }
 
     // r[verify mimas.unit.angle]

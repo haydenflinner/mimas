@@ -10,6 +10,7 @@
 mod methods {
     pub(crate) mod array;
     pub(crate) mod bool;
+    pub(crate) mod dec;
     pub(crate) mod dict;
     pub(crate) mod float;
     pub(crate) mod int;
@@ -41,6 +42,25 @@ mod std_lib {
 
 mod prelude;
 
+/// The sum of `xs`, compensated as Python's `sum` is (Neumaier): each
+/// step keeps the low bits that rounding dropped and adds them back at the
+/// end, so ten `0.1`s make `1.0` and `1e16 + 1 - 1e16` makes `1.0`. It
+/// costs about a third of a nanosecond per number over a plain sum.
+/// r[impl mimas.agg.compensated]
+pub fn fsum(xs: impl IntoIterator<Item = f64>) -> f64 {
+    let (mut s, mut c) = (0.0f64, 0.0f64);
+    for x in xs {
+        let t = s + x;
+        if s.abs() >= x.abs() {
+            c += (s - t) + x;
+        } else {
+            c += (x - t) + s;
+        }
+        s = t;
+    }
+    s + c
+}
+
 pub use std_lib::sys::ScriptArgs;
 
 use vm::api::Api;
@@ -50,9 +70,14 @@ use vm::api::Api;
 /// Std's operations on the built-in opps, written in mimas (`opp.mim`) and
 /// shipped with std through `Library::add_source`.
 pub const OPP_SRC: &str = include_str!("opp.mim");
+/// Approximate equality, the `Approx` pact behind `a ≈ b`, written in mimas
+/// (`approx.mim`) and shipped with std.
+pub const APPROX_SRC: &str = include_str!("approx.mim");
 
 pub fn std<'gc>(api: &mut Api<'_, 'gc>) {
     api.library.add_source("<std::opp>", OPP_SRC);
+    api.library.add_source("<std::approx>", APPROX_SRC);
+    methods::dec::install(api);
     prelude::install(api);
     methods::array::install(api);
     methods::dict::install(api);

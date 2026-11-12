@@ -1,0 +1,33 @@
+// Approximate equality (library::APPROX_SRC, shipped with std). `a ≈ b`
+// (typed `~=`) calls `a.approx(b)`. `==` stays exact; `≈` allows for the
+// rounding of floating point, so `0.1 + 0.2 ≈ 0.3` holds, and so does a
+// sum of pounds against its total, though pounds are stored as kilograms.
+// r[impl mimas.op.approx]
+
+/// Values you can compare allowing for rounding.
+pact Approx {
+    /// Whether this value equals `o`, allowing for rounding.
+    fn approx(self, o: Self) -> bool;
+    check |x| x ≈ x
+    check |a, b| (a ≈ b) == (b ≈ a)
+}
+
+impl Approx for float {
+    /// Equal to about 12 significant digits: the two differ by at most a
+    /// trillionth of the larger, or by at most 1e-15 near zero.
+    fn approx(self, o: float) -> bool {
+        let d = (self - o).abs();
+        self == o || d <= 1e-15 || d <= 1e-12 * self.abs().max(o.abs())
+    }
+}
+
+impl Approx for int {
+    /// Whole numbers have no rounding: the same as `==`.
+    fn approx(self, o: int) -> bool { self == o }
+}
+
+impl Approx for dec {
+    /// A decimal has no binary rounding to forgive, so std makes it `==`.
+    /// The spec lets a library choose a looser rule (`mimas.op.approx`).
+    fn approx(self, o: dec) -> bool { self == o }
+}

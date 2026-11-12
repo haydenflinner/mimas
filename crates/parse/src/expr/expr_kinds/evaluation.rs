@@ -51,6 +51,8 @@ op!(
         Union => Union,
         Ominus => Ominus,
         Uplus => Uplus,
+        // `≈`: binds like `==`, and only its method gives it meaning (r[impl mimas.op.approx])
+        Approx => Approx,
     }
 );
 
@@ -100,6 +102,7 @@ impl EvaluationOp {
                 | EvaluationOp::Union
                 | EvaluationOp::Ominus
                 | EvaluationOp::Uplus
+                | EvaluationOp::Approx
         )
     }
 

@@ -128,6 +128,10 @@ impl Compiler {
         ) -> Module {
             let mut out = Module::default();
             for (name, dec) in module.items {
+                // a law's generic function has no body (see `is_generic_law`)
+                if crate::ir::is_generic_law(&name) {
+                    continue;
+                }
                 match ir.resolutions.decs[dec].kind.clone() {
                     ResolvedDeclKind::Item { .. } => {
                         let f = exported_fn(ir, signatures, dec)
@@ -1055,7 +1059,7 @@ fn fixed_kind(body: &Body, iid: InstId, locals: &IdVec<Local, OperandKind>) -> O
             Constant::Int(_) => K::Int,
             Constant::Float(_) => K::Float,
             Constant::Str(_) => K::Str,
-            Constant::Array(_) | Constant::Null => K::Generic,
+            Constant::Array(_) | Constant::Null | Constant::Dec(_) => K::Generic,
         }),
         Inst::BinOp { op, kind, .. } => match op {
             Identity | NotEqual | LessThan | LessEqual | GreaterThan | GreaterEqual => {

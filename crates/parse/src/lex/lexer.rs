@@ -539,6 +539,24 @@ impl<'s> Lex<'s, Tok<TokKind<'s>>, TokKind<'s>> for Lexer<'s> {
                     TokKind::Hex("")
                 }
             }
+        } else if let Some((len, text, is_float)) = grouped_number(rest) {
+            // `1,000,000`, `1,234.50`: commas group thousands (r[impl mimas.num.groups])
+            for _ in 0..len {
+                self.char_stream.match_chomp_with(|_| true);
+            }
+            if is_float {
+                let float = text.parse::<f64>().unwrap_or(f64::NAN);
+                self.with_unit(TokKind::Float(float), float)
+            } else {
+                match text.parse::<i64>() {
+                    Ok(int) => self.with_unit(TokKind::Int(int), int as f64),
+                    Err(_) => {
+                        let location = self.location(start, self.char_stream.position());
+                        self.errors.push((IntegerOutOfRange(location).into(), location));
+                        TokKind::Int(0)
+                    }
+                }
+            }
         } else if let Some(mantissa) = self.construct_float(true, false) {
             let float = self.with_exponent(start, mantissa).unwrap_or(mantissa);
             self.with_unit(TokKind::Float(float), float)
@@ -741,6 +759,9 @@ impl<'s> Lex<'s, Tok<TokKind<'s>>, TokKind<'s>> for Lexer<'s> {
                         }
                     } else if self.match_chomp('{') {
                         TokKind::TildeLeftBrace
+                    } else if self.match_chomp('=') {
+                        // `~=`, the typed spelling of `≈`
+                        TokKind::Approx
                     } else {
                         TokKind::Tilde
                     }
@@ -802,6 +823,8 @@ impl<'s> Lex<'s, Tok<TokKind<'s>>, TokKind<'s>> for Lexer<'s> {
                 '∪' => TokKind::Union,
                 '⊖' => TokKind::Ominus,
                 '⊎' => TokKind::Uplus,
+                // r[impl mimas.op.approx]
+                '≈' => TokKind::Approx,
                 // r[impl mimas.op.cmp-glyphs]
                 // the comparison and membership glyphs are the ASCII tokens:
                 // the AST prints `!=`, `<=`, `>=`, `in`, `!in`
@@ -946,4 +969,54 @@ pub(crate) fn interp_end(text: &str) -> Option<usize> {
             _ => {}
         }
     }
+}
+
+/// A number with thousands grouped by commas at the start of `rest`:
+/// digits, then one or more `,ddd` (a comma and exactly three digits, not
+/// followed by another digit), then an optional fraction and exponent. The
+/// answer is its length in bytes, its text without the commas, and whether
+/// it is a float. `None` when there is no comma group, so `[1, 2]` and
+/// `f(a,b)` lex as before; `f(1,234)` is the one number 1234.
+// r[impl mimas.num.groups]
+fn grouped_number(rest: &str) -> Option<(usize, String, bool)> {
+    let b = rest.as_bytes();
+    let digit = |i: usize| i < b.len() && b[i].is_ascii_digit();
+    let mut i = 0;
+    while digit(i) || (i > 0 && i < b.len() && b[i] == b'_') {
+        i += 1;
+    }
+    if i == 0 {
+        return None;
+    }
+    let mut groups = 0;
+    while i < b.len() && b[i] == b',' && digit(i + 1) && digit(i + 2) && digit(i + 3) && !digit(i + 4) {
+        i += 4;
+        groups += 1;
+    }
+    if groups == 0 {
+        return None;
+    }
+    let mut is_float = false;
+    if i < b.len() && b[i] == b'.' && digit(i + 1) {
+        is_float = true;
+        i += 1;
+        while digit(i) || (i < b.len() && b[i] == b'_') {
+            i += 1;
+        }
+    }
+    if i < b.len() && (b[i] == b'e' || b[i] == b'E') {
+        let mut j = i + 1;
+        if j < b.len() && (b[j] == b'+' || b[j] == b'-') {
+            j += 1;
+        }
+        if digit(j) {
+            while digit(j) {
+                j += 1;
+            }
+            is_float = true;
+            i = j;
+        }
+    }
+    let text: String = rest[..i].chars().filter(|c| *c != ',' && *c != '_').collect();
+    Some((i, text, is_float))
 }

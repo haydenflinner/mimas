@@ -448,7 +448,7 @@ impl BlockWriter<'_> {
                     Constant::Int(_) => OperandKind::Int,
                     Constant::Float(_) => OperandKind::Float,
                     Constant::Str(_) => OperandKind::Str,
-                    Constant::Array(_) | Constant::Null => OperandKind::Generic,
+                    Constant::Array(_) | Constant::Null | Constant::Dec(_) => OperandKind::Generic,
                 };
                 let this = self.constant(con);
                 let eq = self.bin(BinOp::Identity, scrut_val, this, op_kind);

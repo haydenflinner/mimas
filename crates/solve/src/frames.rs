@@ -135,7 +135,8 @@ fn numeric_join(op: EvaluationOp, a: &Option<Ty>, b: &Option<Ty>) -> Option<Ty> 
             | EvaluationOp::Intersect
             | EvaluationOp::Union
             | EvaluationOp::Ominus
-            | EvaluationOp::Uplus => None,
+            | EvaluationOp::Uplus
+            | EvaluationOp::Approx => None,
     }
 }
 

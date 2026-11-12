@@ -1396,6 +1396,7 @@ fn konst(c: &Constant) -> String {
         Constant::Bool(b) => format!("Constant::Bool({b})"),
         Constant::Int(i) => format!("Constant::Int({i}i64)"),
         Constant::Float(f) => format!("Constant::Float(f64::from_bits({}u64))", f.to_bits()),
+        Constant::Dec(b) => format!("Constant::Dec({b}i64)"),
         Constant::Str(id) => format!("Constant::Str(StrId::from({}u32))", id.index()),
         Constant::Array(items) => {
             let items = items.iter().map(konst).collect::<Vec<_>>().join(", ");

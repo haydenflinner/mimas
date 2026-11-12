@@ -235,7 +235,7 @@ fn evaluate(
             ))),
             // a named operator has no built-in meaning on numbers: nothing to fold
             Wedge | Vee | Dot | Cross | Compose | Tensor | Odot | Intersect | Union | Ominus
-            | Uplus => None,
+            | Uplus | Approx => None,
         },
 
         (Float(float_a), Float(float_b)) => math_floats(float_a, op, float_b, location)?.map(Float),

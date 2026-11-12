@@ -327,6 +327,44 @@ impl<'gc> MimasType<'gc> for crate::val::GroupBy<'gc> {
     }
 }
 
+// ----- dec ---------------------------------------------------------------------------------
+//
+// An exact decimal (`shared::dec`, docs/decimal.md). The payload is the unboxed `Val::Dec`;
+// this marker is `add_adt`'d so `dec` works in annotations, beside `int` and `float`.
+// r[impl mimas.dec]
+pub struct DecTy;
+impl crate::adt::MimasAdt for DecTy {
+    fn descriptor(_reg: &Registry) -> crate::adt::ApiAdtDescriptor {
+        crate::adt::ApiAdtDescriptor {
+            name: "dec",
+            module: &[],
+            kind: api::ApiAdtKind::Struct,
+            doc: "An exact decimal number: about 16 digits, kept as written (`3.50`).",
+            variants: vec![crate::adt::ApiVariantShape {
+                name: "dec".into(),
+                doc: "",
+                fields: api::ApiVariantFields::Unit,
+            }],
+        }
+    }
+}
+
+impl<'gc> MimasType<'gc> for shared::dec::Dec {
+    fn mimas_ty(reg: &Registry) -> Option<Ty> {
+        Some(Ty::adt(reg.get::<DecTy>()?.adt_id))
+    }
+    fn from_value(_ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError> {
+        match v {
+            Val::Dec(d) => Ok(d),
+            Val::Int(n) => shared::dec::Dec::from_int(n).map_err(|_| ty_error("dec", v)),
+            _ => Err(ty_error("dec", v)),
+        }
+    }
+    fn into_value(self, _ctx: Ctx<'gc>) -> Val<'gc> {
+        Val::Dec(self)
+    }
+}
+
 // ----- Tensor ------------------------------------------------------------------------------
 //
 // Same shape as `DataFrameTy`: the payload lives in a real `Val` variant (`val::Tensor`), and

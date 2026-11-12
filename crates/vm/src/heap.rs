@@ -586,6 +586,9 @@ impl<'gc> Ctx<'gc> {
             // -- alloc
             Val::Int(i) => out.push_str(itoa::Buffer::new().format(i)),
             Val::Float(f) => shared::write_float(out, f),
+            Val::Dec(d) => {
+                let _ = write!(out, "{d}");
+            }
             Val::Str(s) => {
                 if quote {
                     let _ = write!(out, "{:?}", s.as_str());

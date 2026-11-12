@@ -32,6 +32,9 @@ impl Pact {
 #[derive(Debug, PartialEq, Clone)]
 pub struct Law {
     pub text: String,
+    /// The closure's body as written: each impl's law check runs a copy of
+    /// it typed for that impl, so the law's calls resolve statically.
+    pub body: String,
     pub params: Vec<String>,
     pub fn_name: String,
     pub location: Location,

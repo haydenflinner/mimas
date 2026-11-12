@@ -15,6 +15,8 @@ pub enum Constant {
     Str(StrId) = 3,
     Array(Vec<Constant>) = 4,
     Null = 5,
+    /// An exact decimal, as its 64 bits (`shared::dec::Dec::to_bits`).
+    Dec(i64) = 6,
 }
 
 #[repr(u8)]
@@ -26,6 +28,7 @@ pub enum ConstantCode {
     Str = 3,
     Array = 4,
     Null = 5,
+    Dec = 6,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -35,6 +38,7 @@ pub enum CachedConstant {
     Float(u64),
     Str(StrId),
     Null,
+    Dec(i64),
 }
 
 impl CachedConstant {
@@ -46,6 +50,7 @@ impl CachedConstant {
             CachedConstant::Float(bits) => Constant::Float(f64::from_bits(*bits)),
             CachedConstant::Str(s) => Constant::Str(*s),
             CachedConstant::Null => Constant::Null,
+            CachedConstant::Dec(b) => Constant::Dec(*b),
         }
     }
 }
@@ -59,7 +64,7 @@ impl Constant {
     pub fn byte_len(&self) -> usize {
         match self {
             Constant::Bool(_) => 1,
-            Constant::Int(_) | Constant::Float(_) => 8,
+            Constant::Int(_) | Constant::Float(_) | Constant::Dec(_) => 8,
             Constant::Str(_) => 4,
             Constant::Array(a) => 4 + a.iter().map(|v| 1 + v.byte_len()).sum::<usize>(),
             Constant::Null => 0,
@@ -71,6 +76,7 @@ impl Constant {
             Constant::Bool(b) => e.u8(*b as u8),
             Constant::Int(i) => e.i64(*i),
             Constant::Float(f) => e.f64(*f),
+            Constant::Dec(b) => e.i64(*b),
             Constant::Str(str_id) => e.u32(*str_id),
             Constant::Array(a) => {
                 e.u32(a.len() as u32);
@@ -227,6 +233,7 @@ impl Constant {
             Constant::Str(str_id) => Some(CachedConstant::Str(*str_id)),
             Constant::Null => Some(CachedConstant::Null),
             Constant::Float(f) => Some(CachedConstant::Float(f.to_bits())),
+            Constant::Dec(b) => Some(CachedConstant::Dec(*b)),
             Constant::Array(_) => None,
         }
     }
@@ -239,6 +246,7 @@ impl IrDisplay for Constant {
             Constant::Bool(b) => format!("{b:?}"),
             Constant::Int(i) => i.to_string(),
             Constant::Float(float) => float.to_string(),
+            Constant::Dec(b) => format!("{}dec", shared::dec::Dec::from_bits(*b)),
             Constant::Str(str_id) => format!("\"{}\"", ir.str(*str_id)),
             Constant::Array(_) => self.to_string(),
             Constant::Null => "null".into(),
@@ -253,6 +261,7 @@ impl std::fmt::Display for Constant {
             Constant::Bool(b) => f.pad(&format!("{b}")),
             Constant::Int(i) => f.pad(&format!("{i}")),
             Constant::Float(v) => f.pad(&format!("{v}")),
+            Constant::Dec(b) => f.pad(&format!("{}dec", shared::dec::Dec::from_bits(*b))),
             Constant::Str(str_id) => f.pad(&format!("str {}", str_id.index())),
             Constant::Array(a) => {
                 f.pad(&format!("[{}]", a.iter().map(|v| v.to_string()).join(", ")))

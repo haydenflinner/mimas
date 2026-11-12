@@ -437,7 +437,7 @@ impl Decode for Constant {
     fn decode(decoder: &mut Decoder) -> Self {
         let b = decoder.u8();
         debug_assert!(
-            (b as usize) <= ConstantCode::Null as usize,
+            (b as usize) <= ConstantCode::Dec as usize,
             "invalid ConstantCode byte {b}: bytecode desync"
         );
         let code = unsafe { std::mem::transmute::<u8, ConstantCode>(b) };
@@ -455,6 +455,7 @@ impl Decode for Constant {
                 Constant::Array(items)
             }
             ConstantCode::Null => Constant::Null,
+            ConstantCode::Dec => Constant::Dec(decoder.i64()),
         }
     }
 }

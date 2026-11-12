@@ -123,6 +123,9 @@ pub enum TokKind<'s> {
     Ominus,
     /// `⊎` — uplus (a disjoint or multiset union).
     Uplus,
+    /// `≈` (also typed `~=`) — approximately equal. A named operator that
+    /// binds like `==`: `a ≈ b` is `a.approx(b)` (r[impl mimas.op.approx]).
+    Approx,
     Tilde,
     Dollar,
     DoubleLeftCaret,
@@ -236,6 +239,7 @@ impl Display for TokKind<'_> {
             TokKind::Nand => "⍲",
             TokKind::Nor => "⍱",
             TokKind::Wedge => "∧",
+            TokKind::Approx => "≈",
             TokKind::Vee => "∨",
             TokKind::DotOp => "⋅",
             TokKind::Cross => "×",

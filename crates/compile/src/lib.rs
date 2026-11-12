@@ -4,6 +4,7 @@ mod ir {
     pub use ir::*;
     mod emit;
     use emit::*;
+    pub(crate) use emit::is_generic_law;
     mod place;
     use place::*;
     mod body;

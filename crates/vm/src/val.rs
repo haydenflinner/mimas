@@ -24,6 +24,8 @@ pub enum Val<'gc> {
     Bool(bool),
     Int(i64),
     Float(f64),
+    /// An exact decimal, 64 bits unboxed (`shared::dec`, docs/decimal.md).
+    Dec(#[collect(require_static)] shared::dec::Dec),
     Fn(#[collect(require_static)] BodyId),
     Str(Str<'gc>),
     Array(Array<'gc>),
@@ -80,6 +82,11 @@ impl<'gc> PartialEq for Val<'gc> {
             (Val::Bool(a), Val::Bool(b)) => a == b,
             (Val::Int(a), Val::Int(b)) => a == b,
             (Val::Float(a), Val::Float(b)) => a == b,
+            // numeric: `1.0 == 1.00`, and a whole `dec` equals its `int`
+            (Val::Dec(a), Val::Dec(b)) => a == b,
+            (Val::Dec(a), Val::Int(b)) | (Val::Int(b), Val::Dec(a)) => {
+                shared::dec::Dec::from_int(*b).is_ok_and(|b| *a == b)
+            }
             (Val::Fn(a), Val::Fn(b)) => a == b,
             (Val::Str(a), Val::Str(b)) => a == b,
             (Val::Array(a), Val::Array(b)) => {
@@ -1071,6 +1078,8 @@ impl<'gc> Val<'gc> {
             Val::Bool(b) => Captured::Bool(b),
             Val::Int(i) => Captured::Int(i),
             Val::Float(f) => Captured::Float(f),
+            // a check compares; the host's boundary reads a decimal as its nearest double
+            Val::Dec(d) => Captured::Float(d.to_f64()),
             Val::Str(s) => Captured::Str(s.as_str().to_string()),
             Val::Array(a) => guarded(Gc::as_ptr(a.0) as *const (), path, |path| {
                 Captured::Array(a.0.borrow().iter().map(|v| v.capture_at(path)).collect())
@@ -1132,6 +1141,8 @@ pub enum Inspect {
     Bool(bool),
     Int(i64),
     Float(f64),
+    /// An exact decimal, as its digits (`3.50`).
+    Dec(String),
     Str(String),
     Array(Vec<Inspect>),
     Dict(Vec<(String, Inspect)>),
@@ -1202,6 +1213,7 @@ impl<'gc> Val<'gc> {
             Val::Bool(b) => Inspect::Bool(b),
             Val::Int(i) => Inspect::Int(i),
             Val::Float(f) => Inspect::Float(f),
+            Val::Dec(d) => Inspect::Dec(d.to_string()),
             Val::Str(s) => Inspect::Str(s.as_str().to_string()),
             Val::Array(a) => guarded(Gc::as_ptr(a.0) as *const (), seen, |seen| {
                 Inspect::Array(
@@ -1327,6 +1339,7 @@ impl<'gc> Val<'gc> {
                 Val::Bool(b) => Inspect::Bool(b),
                 Val::Int(i) => Inspect::Int(i),
                 Val::Float(f) => Inspect::Float(f),
+                Val::Dec(d) => Inspect::Dec(d.to_string()),
                 Val::Str(s) => Inspect::Str(s.as_str().to_string()),
                 Val::Array(a) => guarded(
                     Gc::as_ptr(a.0) as *const (),
@@ -1554,6 +1567,38 @@ pub fn bin<'gc>(this: Val<'gc>, ctx: Ctx<'gc>, other: Val<'gc>, op: BinOp) -> Rt
             .map_err(|_| RtErr::invalid_bin(Val::Float(a), op, Val::Float(b)))
     }
 
+    /// `dec` arithmetic: exact for `+ - *`, 16 digits for `/`, and an
+    /// error, never a dropped digit, when the exact answer doesn't fit.
+    // r[impl mimas.dec]
+    fn dec_bin<'gc>(op: BinOp, a: shared::dec::Dec, b: shared::dec::Dec) -> RtResult<Val<'gc>> {
+        use shared::dec::DecError;
+        let fault = |e: DecError| match e {
+            DecError::DivByZero => RtErr::DivByZero,
+            e => RtErr::Custom(format!("dec: {a} {} {b}: {e}", op_text(op))),
+        };
+        Ok(match op {
+            BinOp::Add => Val::Dec(a.add(b).map_err(fault)?),
+            BinOp::Sub => Val::Dec(a.sub(b).map_err(fault)?),
+            BinOp::Mult => Val::Dec(a.mul(b).map_err(fault)?),
+            BinOp::Div => Val::Dec(a.div(b).map_err(fault)?),
+            BinOp::LessThan => Val::Bool(a < b),
+            BinOp::LessEqual => Val::Bool(a <= b),
+            BinOp::GreaterThan => Val::Bool(a > b),
+            BinOp::GreaterEqual => Val::Bool(a >= b),
+            _ => Err(RtErr::invalid_bin(Val::Dec(a), op, Val::Dec(b)))?,
+        })
+    }
+
+    fn op_text(op: BinOp) -> &'static str {
+        match op {
+            BinOp::Add => "+",
+            BinOp::Sub => "-",
+            BinOp::Mult => "*",
+            BinOp::Div => "/",
+            _ => "?",
+        }
+    }
+
     fn int_bin<'gc>(op: BinOp, a: i64, b: i64) -> RtResult<Val<'gc>> {
         op.eval_int(a, b)
             .map(scalar_val)
@@ -1661,6 +1706,12 @@ pub fn bin<'gc>(this: Val<'gc>, ctx: Ctx<'gc>, other: Val<'gc>, op: BinOp) -> Rt
         (op, Val::Float(a), Val::Int(b)) => float_bin(op, a, b as f64)?,
         (op, Val::Int(a), Val::Float(b)) => float_bin(op, a as f64, b)?,
         (op, Val::Int(a), Val::Int(b)) => int_bin(op, a, b)?,
+        // `dec` stays exact with `dec` and `int`; with a `float` the answer is a `float`
+        (op, Val::Dec(a), Val::Dec(b)) => dec_bin(op, a, b)?,
+        (op, Val::Dec(a), Val::Int(b)) => dec_bin(op, a, dec_of_int(b)?)?,
+        (op, Val::Int(a), Val::Dec(b)) => dec_bin(op, dec_of_int(a)?, b)?,
+        (op, Val::Dec(a), Val::Float(b)) => float_bin(op, a.to_f64(), b)?,
+        (op, Val::Float(a), Val::Dec(b)) => float_bin(op, a, b.to_f64())?,
         // elementwise over any sequence pair — `IntArray`/`FloatArray` read
         // their elements boxed back into `Val`s, so a typed array broadcasts
         // exactly like the `Vec<Val>` it replaces.
@@ -1674,7 +1725,7 @@ pub fn bin<'gc>(this: Val<'gc>, ctx: Ctx<'gc>, other: Val<'gc>, op: BinOp) -> Rt
             }
             ctx.array_val(out)
         }
-        (op, a, s @ (Val::Int(_) | Val::Float(_))) if a.is_seq() => {
+        (op, a, s @ (Val::Int(_) | Val::Float(_) | Val::Dec(_))) if a.is_seq() => {
             let n = a.seq_len().unwrap();
             let mut out = Vec::with_capacity(n);
             for i in 0..n {
@@ -1683,7 +1734,7 @@ pub fn bin<'gc>(this: Val<'gc>, ctx: Ctx<'gc>, other: Val<'gc>, op: BinOp) -> Rt
             }
             ctx.array_val(out)
         }
-        (op, s @ (Val::Int(_) | Val::Float(_)), b) if b.is_seq() => {
+        (op, s @ (Val::Int(_) | Val::Float(_) | Val::Dec(_)), b) if b.is_seq() => {
             let n = b.seq_len().unwrap();
             let mut out = Vec::with_capacity(n);
             for i in 0..n {
@@ -1721,6 +1772,8 @@ pub fn unary<'gc>(this: Val<'gc>, ctx: Ctx<'gc>, op: UnaryOp) -> RtResult<Val<'g
         (UnaryOp::Not, Val::Bool(value)) => Val::Bool(!value),
         (op, Val::Float(value)) => float_unary(op, value)?,
         (op, Val::Int(value)) => int_unary(op, value)?,
+        (UnaryOp::Negative, Val::Dec(d)) => Val::Dec(d.neg().map_err(|e| RtErr::Custom(format!("dec: -{d}: {e}")))?),
+        (UnaryOp::Positive, Val::Dec(d)) => Val::Dec(d),
         (op, a) if a.is_seq() => {
             let n = a.seq_len().unwrap();
             let mut out = Vec::with_capacity(n);
@@ -1747,4 +1800,9 @@ pub fn unary<'gc>(this: Val<'gc>, ctx: Ctx<'gc>, op: UnaryOp) -> RtResult<Val<'g
             _ => Err(RtErr::InvalidUnaryOperand)?,
         },
     })
+}
+
+/// A whole number as a `dec`, for arithmetic that mixes the two.
+fn dec_of_int(n: i64) -> RtResult<shared::dec::Dec> {
+    shared::dec::Dec::from_int(n).map_err(|e| RtErr::Custom(format!("dec: {n}: {e}")))
 }

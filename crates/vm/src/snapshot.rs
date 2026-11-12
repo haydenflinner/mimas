@@ -45,6 +45,8 @@ pub enum SnapVal {
     Bool(bool),
     Int(i64),
     Float(f64),
+    /// `Val::Dec`, as its 64 bits.
+    Dec(i64),
     /// `Val::Fn` — a program-level body, stable for the snapshot's lifetime.
     Fn(u32),
     /// Strings travel by content and re-intern on restore — `Str` equality is content-wise,
@@ -164,6 +166,7 @@ impl<'gc> Snapper<'gc> {
             Val::Bool(b) => SnapVal::Bool(b),
             Val::Int(i) => SnapVal::Int(i),
             Val::Float(f) => SnapVal::Float(f),
+            Val::Dec(d) => SnapVal::Dec(d.to_bits()),
             Val::Fn(b) => SnapVal::Fn(b.into()),
             Val::Str(s) => SnapVal::Str(Gc::as_ref(s.0).clone()),
             Val::Raised(s) => SnapVal::Raised(Box::new(self.val(*s)?)),
@@ -287,6 +290,7 @@ impl<'gc> Thaw<'gc, '_> {
             SnapVal::Bool(b) => Val::Bool(*b),
             SnapVal::Int(i) => Val::Int(*i),
             SnapVal::Float(f) => Val::Float(*f),
+            SnapVal::Dec(b) => Val::Dec(shared::dec::Dec::from_bits(*b)),
             SnapVal::Fn(b) => Val::Fn(BodyId::from(*b)),
             SnapVal::Str(s) => Val::Str(self.ctx.intern(s)),
             SnapVal::Raised(s) => Val::Raised(Gc::new(self.ctx.mutation(), self.thaw(s)?)),

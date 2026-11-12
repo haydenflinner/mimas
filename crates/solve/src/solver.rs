@@ -154,6 +154,12 @@ pub struct Solver {
     /// Int literals (and their `-`/`+`/`(…)` wrappers) that fill a `float`
     /// slot: each types, folds and runs as a float (r[impl mimas.num.literal]).
     pub(crate) int_as_float: FxHashSet<NodeId>,
+    /// Numeric literals that are `dec`, exact: in a `dec` slot, or beside a
+    /// `dec` in arithmetic or a comparison (r[impl mimas.dec.literal]).
+    pub(crate) dec_literals: FxHashSet<NodeId>,
+    /// Each `dec` literal as written (`3.50`), so it keeps its scale: an
+    /// `f64` would have dropped the trailing zero.
+    pub(crate) dec_texts: FxHashMap<NodeId, String>,
     /// `Name(args…)` on a named-field struct: the field each argument fills,
     /// by the call's node (r[impl mimas.struct.positional]).
     pub(crate) ctor_slots: FxHashMap<NodeId, Vec<usize>>,
@@ -283,6 +289,8 @@ impl Solver {
             record_hints: FxHashMap::default(),
             field_annotations: FxHashMap::default(),
             int_as_float: FxHashSet::default(),
+            dec_literals: FxHashSet::default(),
+            dec_texts: FxHashMap::default(),
             ctor_slots: FxHashMap::default(),
             ctor_names: FxHashMap::default(),
             field_hints: Vec::new(),
@@ -3106,7 +3114,71 @@ impl Solver {
         }
     }
 
+    /// Whether `ty` is the `dec` type.
+    pub(crate) fn is_dec(&self, ty: &Ty) -> bool {
+        matches!(ty.clone().normalized(self), Ty::Adt(id, _) if self.adts[id].name == "dec")
+    }
+
+    /// The `dec` type, once the library has registered it.
+    pub(crate) fn dec_ty(&self) -> Option<Ty> {
+        self.adts.iter().find(|(_, a)| a.name == "dec").map(|(id, _)| Ty::adt(id))
+    }
+
+    /// Mark a numeric literal (through `-` and parentheses) as a `dec`.
+    // r[impl mimas.dec.literal]
+    pub(crate) fn dec_literal(&mut self, expr: &Expr) {
+        match expr.kind() {
+            ExprKind::Literal(Literal::Int(_) | Literal::Float(_)) => {
+                self.dec_literals.insert(expr.id());
+                let loc = expr.location();
+                if let Some(src) = self.sources.get(&loc.file_id) {
+                    let (a, n) = (loc.span.start(), loc.span.len());
+                    if let Some(text) = src.inner().get(a..a + n) {
+                        self.dec_texts.insert(expr.id(), text.to_string());
+                    }
+                }
+            }
+            ExprKind::Unary(u) if matches!(u.op, parse::UnaryOp::Negative | parse::UnaryOp::Positive) => {
+                self.dec_literal(&u.right)
+            }
+            ExprKind::Grouping(g) => self.dec_literal(&g.inner),
+            // `2.99 + 4.50 + 0.75` in a `dec` slot: every number in it is a `dec`
+            ExprKind::Evaluation(ev) if is_num_tree(expr) => {
+                self.dec_literal(&ev.left);
+                self.dec_literal(&ev.right);
+            }
+            _ => {}
+        }
+    }
+
+    /// `price + 0.25`, `price == 0.30`: a numeric literal beside a `dec`
+    /// is a `dec` too, so the arithmetic stays exact.
+    // r[impl mimas.dec.literal]
+    pub(crate) fn dec_literal_beside(&mut self, left: &Expr, right: &Expr) -> crate::Result<()> {
+        for (lit, other) in [(right, left), (left, right)] {
+            if is_num_literal(lit) && !is_num_literal(other) {
+                let ty = other.query(self)?;
+                if self.is_dec(&ty) {
+                    self.dec_literal(lit);
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn hint_records(&mut self, expr: &Expr, ty: &Ty) {
+        // a numeric literal in a `dec` slot is that decimal, exactly
+        // r[impl mimas.dec.literal]
+        if is_num_tree(expr) {
+            let dec_slot = match ty.clone().normalized(self) {
+                Ty::Option(inner) => self.is_dec(&inner),
+                t => self.is_dec(&t),
+            };
+            if dec_slot {
+                self.dec_literal(expr);
+                return;
+            }
+        }
         // a whole-number literal in a `float` slot is that float
         // r[impl mimas.num.literal]
         if is_int_literal(expr) {
@@ -4348,6 +4420,39 @@ enum FieldName<'e> {
 }
 
 /// An int literal, possibly signed or parenthesized: `3`, `-1`, `(2)`.
+/// Arithmetic made only of numbers written out: `2.99 + 4.50 * 2`.
+fn is_num_tree(expr: &Expr) -> bool {
+    match expr.kind() {
+        ExprKind::Evaluation(ev) => {
+            matches!(
+                ev.op,
+                parse::EvaluationOp::Plus
+                    | parse::EvaluationOp::Minus
+                    | parse::EvaluationOp::Multiply
+                    | parse::EvaluationOp::Divide
+            ) && is_num_tree(&ev.left)
+                && is_num_tree(&ev.right)
+        }
+        ExprKind::Grouping(g) => is_num_tree(&g.inner),
+        ExprKind::Unary(u) => {
+            matches!(u.op, parse::UnaryOp::Negative | parse::UnaryOp::Positive) && is_num_tree(&u.right)
+        }
+        _ => is_num_literal(expr),
+    }
+}
+
+/// A number written out: `3`, `0.25`, `-1.5`, `(2)`.
+fn is_num_literal(expr: &Expr) -> bool {
+    match expr.kind() {
+        ExprKind::Literal(Literal::Int(_) | Literal::Float(_)) => true,
+        ExprKind::Unary(u) => {
+            matches!(u.op, parse::UnaryOp::Negative | parse::UnaryOp::Positive) && is_num_literal(&u.right)
+        }
+        ExprKind::Grouping(g) => is_num_literal(&g.inner),
+        _ => false,
+    }
+}
+
 fn is_int_literal(expr: &Expr) -> bool {
     match expr.kind() {
         ExprKind::Literal(Literal::Int(_)) => true,

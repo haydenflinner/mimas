@@ -219,7 +219,7 @@ fn sum_vals<'gc>(xs: &[anon::T<'gc>], what: &str) -> Result<Val<'gc>, RtErr> {
     Ok(if ints && !ns.is_empty() {
         Val::Int(ns.iter().map(|n| *n as i64).sum())
     } else {
-        Val::Float(ns.iter().sum())
+        Val::Float(crate::fsum(ns.iter().copied()))
     })
 }
 
@@ -238,7 +238,7 @@ fn avg<'gc>(xs: Vec<anon::T<'gc>>) -> Result<Raisable<f64>, RtErr> {
     if ns.is_empty() {
         return Ok(Raisable::Raised("avg of no values".into()));
     }
-    Ok(Raisable::Ok(ns.iter().sum::<f64>() / ns.len() as f64))
+    Ok(Raisable::Ok(crate::fsum(ns.iter().copied()) / ns.len() as f64))
 }
 
 #[native]
@@ -357,7 +357,7 @@ fn avg_by<'gc>(
     let mut rows = Vec::new();
     for (k, xs) in groups(ctx, &vals, &keys, "avg_by")? {
         let (ns, _) = numbers(&xs, "avg_by")?;
-        rows.push((k, Val::Float(ns.iter().sum::<f64>() / ns.len() as f64)));
+        rows.push((k, Val::Float(crate::fsum(ns.iter().copied()) / ns.len() as f64)));
     }
     Ok(Grouped(group_map(ctx, rows)))
 }

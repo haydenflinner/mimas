@@ -273,7 +273,9 @@ impl<'a> Pass<'a> {
             for (ad, (an, asc)) in atoms.iter().copied() {
                 for (bd, (bn, bsc)) in atoms.iter().copied() {
                     if ad.mul(*bd) == dim {
-                        return (format!("{an}*{bn}"), asc * bsc);
+                        // a unit times itself is its square: `12 px²`, not `12 px*px`
+                        let name = if an == bn { format!("{an}²") } else { format!("{an}*{bn}") };
+                        return (name, asc * bsc);
                     }
                 }
             }

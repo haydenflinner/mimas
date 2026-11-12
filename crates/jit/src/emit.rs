@@ -1519,7 +1519,7 @@ impl Em<'_> {
                         &[regs, d, id, self.env.ctx0, self.env.ctx1, self.env.strs],
                     );
                 }
-                Constant::Array(_) => self.estep(),
+                Constant::Array(_) | Constant::Dec(_) => self.estep(),
             },
             Op::LoadBody { dst, body } => {
                 let regs = self.regs();

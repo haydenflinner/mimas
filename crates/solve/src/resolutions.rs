@@ -80,6 +80,10 @@ pub struct Resolutions {
     /// Int literals that fill a `float` slot (`mimas.num.literal`): emit and
     /// fold them as floats.
     pub int_as_float: rustc_hash::FxHashSet<NodeId>,
+    /// Numeric literals that are `dec` (`mimas.dec.literal`).
+    pub dec_literals: rustc_hash::FxHashSet<NodeId>,
+    /// Each `dec` literal as written, so `3.50` keeps its scale.
+    pub dec_texts: rustc_hash::FxHashMap<NodeId, String>,
     /// `Name(args…)` on a named-field struct (`mimas.struct.positional`): the
     /// field each argument fills, so the emitter builds the instance in field
     /// order after evaluating the arguments in source order.
@@ -542,6 +546,8 @@ impl From<Solver> for Resolutions {
             op_decs: solver.op_decs,
             propagates: solver.propagates,
             int_as_float: solver.int_as_float,
+            dec_literals: solver.dec_literals,
+            dec_texts: solver.dec_texts,
             computed_consts: solver.computed_consts.iter().map(|(id, _, _)| *id).collect(),
             field_hints: solver.field_hints,
             ctor_slots: solver.ctor_slots,

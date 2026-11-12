@@ -362,6 +362,7 @@ fn constant_label(ir: &Ir, c: &crate::Constant) -> String {
         crate::Constant::Bool(b) => b.to_string(),
         crate::Constant::Int(i) => i.to_string(),
         crate::Constant::Float(f) => f.to_string(),
+        crate::Constant::Dec(b) => shared::dec::Dec::from_bits(*b).to_string(),
         crate::Constant::Str(s) => format!("{:?}", ir.str(*s)),
         crate::Constant::Null => "null".to_string(),
         crate::Constant::Array(items) => {

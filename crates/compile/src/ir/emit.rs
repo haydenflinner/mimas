@@ -80,6 +80,11 @@ impl Ir {
                 match item.kind() {
                     parse::ItemKind::Poison(poison) => poison.escaped(),
                     // function bodies need to be lowered into their own Body
+                    // a pact law's generic function (`__law_<Pact>_<i>`) is
+                    // there so the solver checks the law against the pact;
+                    // each impl's check runs its own typed copy
+                    // (`__law_impl_…`), so nothing calls it and it needs no body
+                    parse::ItemKind::Function(f) if is_generic_law(&f.name.lexeme) => {}
                     parse::ItemKind::Function(f) => {
                         if item.is_test() {
                             ir.tests.push(f.name.lexeme.clone());
@@ -1411,6 +1416,17 @@ impl Emit for Literal {
             Literal::Unit => Constant::Null,
             Literal::String(s) => Constant::Str(ir.intern_str(s)),
             // r[impl mimas.num.literal]
+            // r[impl mimas.dec.literal]
+            Literal::Int(i) if ir.resolutions.dec_literals.contains(&id) => {
+                Constant::Dec(shared::dec::Dec::from_int(*i).map(|d| d.to_bits()).unwrap_or(0))
+            }
+            // from the text as written, so `3.50` keeps its scale
+            Literal::Float(f) if ir.resolutions.dec_literals.contains(&id) => {
+                let written = ir.resolutions.dec_texts.get(&id).map(|t| t.replace(',', ""));
+                let d = written.and_then(|t| t.parse::<shared::dec::Dec>().ok());
+                let d = d.or_else(|| shared::dec::Dec::from_f64(*f).ok());
+                Constant::Dec(d.map(|d| d.to_bits()).unwrap_or(0))
+            }
             Literal::Int(i) if ir.resolutions.int_as_float.contains(&id) => Constant::Float(*i as f64),
             Literal::Int(i) => Constant::Int(*i),
             Literal::Float(f) => Constant::Float(*f),
@@ -2473,4 +2489,11 @@ fn default_inst(ir: &mut Ir, ty: &Ty) -> Option<InstId> {
         Ty::Adt(inner, iargs) | Ty::Identity(inner, iargs) => default_adt(ir, *inner, iargs)?,
         _ => return None,
     })
+}
+
+/// Whether `name` is a pact law's generic function (`__law_Flip_0`), not
+/// one of the per-impl checks the law pass writes (`__law_impl_…`,
+/// `__law_check_…`).
+pub(crate) fn is_generic_law(name: &str) -> bool {
+    name.starts_with("__law_") && !name.starts_with("__law_impl_") && !name.starts_with("__law_check_")
 }

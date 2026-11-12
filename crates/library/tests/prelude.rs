@@ -258,6 +258,13 @@ fn row_blocks_keep_units() {
     );
 }
 
+// a unit times itself echoes as its square
+// r[verify mimas.echo.unit]
+#[test]
+fn a_unit_times_itself_echoes_as_its_square() {
+    assert_eq!(echo_texts("3px * 4px\n2m * 5m"), ["12 px²", "10 m²"]);
+}
+
 // a declared unit counts as written before the value's own literals: a
 // `[lb]` list holding a `2kg` cell echoes in pounds
 // r[verify mimas.echo.unit]

@@ -138,9 +138,18 @@ pub fn expand_laws(user: &mut [Ast], shipped: &[Ast]) -> LawExpansion {
                 }
                 let shown: Vec<String> = law.params.iter().map(|p| format!("{p} = {{{p}}}")).collect();
                 let quoted = law.text.replace('\\', "\\\\").replace('"', "\\\"").replace('{', "{{").replace('}', "}}");
+                // the law's body typed for this impl: `x ≈ x` on a `float`
+                // is `float`'s `approx`, chosen now, not by a runtime test of
+                // each implementer (which wasmgen can't make on a primitive)
+                let typed: Vec<String> = law.params.iter().map(|p| format!("{p}: {ty}")).collect();
+                let here = next_id - LAW_FILE_BASE;
+                text.push_str(&format!(
+                    "fn __law_impl_{k}_{here}({}) -> bool {{ {} }}\n",
+                    typed.join(", "),
+                    law.body
+                ));
                 body.push_str(&format!(
-                    "if !{}({}) {{ panic(f\"the law `{quoted}` fails for {}\"); }} ",
-                    law.fn_name,
+                    "if !__law_impl_{k}_{here}({}) {{ panic(f\"the law `{quoted}` fails for {}\"); }} ",
                     law.params.join(", "),
                     shown.join(", ")
                 ));
@@ -148,9 +157,7 @@ pub fn expand_laws(user: &mut [Ast], shipped: &[Ast]) -> LawExpansion {
                     body.push_str("} ");
                 }
                 text.push_str(&format!(
-                    "fn __law_check_{k}_{}() -> bool {{ {body}true }}\ncheck __law_check_{k}_{}()\n",
-                    next_id - LAW_FILE_BASE,
-                    next_id - LAW_FILE_BASE,
+                    "fn __law_check_{k}_{here}() -> bool {{ {body}true }}\ncheck __law_check_{k}_{here}()\n",
                 ));
             }
         }

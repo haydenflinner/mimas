@@ -124,6 +124,7 @@ fn op_method_names(op: EvaluationOp) -> (&'static str, &'static str) {
         EvaluationOp::Union => ("union", "runion"),
         EvaluationOp::Ominus => ("ominus", "rominus"),
         EvaluationOp::Uplus => ("uplus", "ruplus"),
+        EvaluationOp::Approx => ("approx", "rapprox"),
     }
 }
 
@@ -209,7 +210,10 @@ pub(crate) fn op_dispatch(
     location: Location,
 ) -> Result<Option<Ty>> {
     for (recv_ty, name, arg, swap) in [(lhs, names.0, right, false), (rhs, names.1, left, true)] {
-        if is_primitive(recv_ty) {
+        // a primitive's `+` is built in; a named operator has no built-in
+        // meaning, so on a primitive it is the method an impl gives it
+        // (`impl Approx for float` is what makes `0.1 + 0.2 ≈ 0.3` work)
+        if is_primitive(recv_ty) && !is_named_method(names.0) {
             continue;
         }
         let (aid, args) = match recv_ty {
@@ -299,6 +303,15 @@ pub(crate) fn seq_op_dispatch(
 
 /// `int`/`float`/`str`/`bool`: their operators are built in, never dispatched
 /// to a method, even when a pact impl gives them one of those names.
+/// Whether `name` is the method of a named operator (`∧ ⋅ × … ≈`).
+fn is_named_method(name: &str) -> bool {
+    matches!(
+        name,
+        "wedge" | "vee" | "dot" | "cross" | "compose" | "tensor" | "odot" | "intersect" | "union"
+            | "ominus" | "uplus" | "approx"
+    )
+}
+
 fn is_primitive(ty: &Ty) -> bool {
     matches!(ty, Ty::Int | Ty::Float | Ty::Str | Ty::Bool)
 }
@@ -1593,6 +1606,19 @@ fn plexpr_overload_ty(lhs: &Ty, rhs: &Ty, solver: &Solver) -> Option<Ty> {
 /// it back to bool). The other side still has to be broadcastable -- numeric, tensor, or
 /// still-unresolved (`Vid`/`Param`) -- so `t == "x"` keeps its real error rather than typing
 /// a mask that can never run.
+/// `dec` arithmetic: with a `dec` or an `int` the answer is a `dec`, exact;
+/// with a `float` it is a `float` (docs/decimal.md). r[impl mimas.dec]
+pub(crate) fn dec_overload_ty(lhs: &Ty, rhs: &Ty, solver: &Solver) -> Option<Ty> {
+    let is_dec = |ty: &Ty| matches!(ty, Ty::Adt(id, _) if solver.adts[*id].name == "dec");
+    match (is_dec(lhs), is_dec(rhs)) {
+        (true, true) => Some(lhs.clone()),
+        (true, false) if matches!(rhs, Ty::Int) => Some(lhs.clone()),
+        (false, true) if matches!(lhs, Ty::Int) => Some(rhs.clone()),
+        (true, false) | (false, true) if matches!(lhs, Ty::Float) || matches!(rhs, Ty::Float) => Some(Ty::Float),
+        _ => None,
+    }
+}
+
 fn tensor_overload_ty(lhs: &Ty, rhs: &Ty, solver: &Solver) -> Option<Ty> {
     let is_tensor = |ty: &Ty| matches!(ty, Ty::Adt(id, _) if solver.adts[*id].name == "Tensor");
     let broadcastable =
@@ -1608,6 +1634,7 @@ fn tensor_overload_ty(lhs: &Ty, rhs: &Ty, solver: &Solver) -> Option<Ty> {
 
 impl Solve for Equality {
     fn solve(&self, id: NodeId, location: Location, solver: &mut Solver) -> Result<Ty> {
+        solver.dec_literal_beside(&self.left, &self.right)?;
         let lhs = self.left.query(solver)?;
         let rhs = self.right.query(solver)?;
         let lhs_n = lhs.clone().normalized(solver);
@@ -1616,6 +1643,10 @@ impl Solve for Equality {
             .or_else(|| tensor_overload_ty(&lhs_n, &rhs_n, solver))
         {
             return Ok(ty);
+        }
+        // a `dec` compares with a `dec`, an `int` or a `float` by value (r[impl mimas.dec])
+        if dec_overload_ty(&lhs_n, &rhs_n, solver).is_some() {
+            return Ok(Ty::Bool);
         }
         // `<` `<=` `>` `>=` on an adt with registered operator impls (`Api::add_bin_op`)
         // dispatch at runtime and answer a bool -- `==`/`!=` stay structural
@@ -1742,6 +1773,7 @@ impl Solve for Equality {
 
 impl Solve for Evaluation {
     fn solve(&self, id: NodeId, location: Location, solver: &mut Solver) -> Result<Ty> {
+        solver.dec_literal_beside(&self.left, &self.right)?;
         fn eval(
             op: EvaluationOp,
             lhs: &Ty,
@@ -1853,6 +1885,7 @@ impl Solve for Evaluation {
         if !self.op.is_named()
             && let Some(ty) = plexpr_overload_ty(&lhs_n, &rhs_n, solver)
                 .or_else(|| tensor_overload_ty(&lhs_n, &rhs_n, solver))
+                .or_else(|| dec_overload_ty(&lhs_n, &rhs_n, solver))
         {
             return Ok(ty);
         }
@@ -3024,6 +3057,10 @@ impl Solve for Unary {
                 (UnaryOp::BitwiseNot, Ty::Int) => Ok(Ty::Int),
                 (UnaryOp::Negative | UnaryOp::Positive, Ty::Int) => Ok(Ty::Int),
                 (UnaryOp::Negative | UnaryOp::Positive, Ty::Float) => Ok(Ty::Float),
+                // `-price` on a `dec` stays exact (r[impl mimas.dec])
+                (UnaryOp::Negative | UnaryOp::Positive, Ty::Adt(id, _)) if solver.adts[*id].name == "dec" => {
+                    Ok(ty.clone())
+                }
                 (op, Ty::Tuple(elems)) => elems
                     .iter()
                     .map(|e| unary(op, e, location, solver))

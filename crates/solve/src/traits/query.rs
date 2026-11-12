@@ -96,6 +96,12 @@ impl Query for Expr {
             ExprKind::Literal(Literal::Null) => Ok(Ty::Null),
             ExprKind::Literal(Literal::Unit) => Ok(Ty::Unit),
             ExprKind::Literal(Literal::String(_)) => Ok(Ty::Str),
+            // r[impl mimas.dec.literal]
+            ExprKind::Literal(Literal::Int(_) | Literal::Float(_))
+                if solver.dec_literals.contains(&self.id()) && solver.dec_ty().is_some() =>
+            {
+                Ok(solver.dec_ty().unwrap())
+            }
             ExprKind::Literal(Literal::Int(_)) if solver.int_as_float.contains(&self.id()) => {
                 Ok(Ty::Float)
             }

@@ -98,6 +98,8 @@ fn const_word(ctx: &Statics, c: &Constant) -> Result<i64, Bail> {
             .get(&(s.index() as u32))
             .ok_or("str in const array not laid out")? as i64,
         Constant::Array(es) => bake_const_array_obj(ctx, es)? as i64,
+        // a `dec` has no tagged word in this lane: the VM runs its body
+        Constant::Dec(_) => Err("dec has no wasm form")?,
     })
 }
 
@@ -1052,6 +1054,7 @@ impl<'a> WFx<'a> {
                     let a = bake_const_array_obj(self.ctx, es)?;
                     self.k64(a as i64)
                 }
+                Constant::Dec(_) => Err("dec has no wasm form")?,
             },
             (Constant::Int(v), K::Int) => self.k64(*v),
             (Constant::Int(v), K::Float) => self.kf(*v as f64),

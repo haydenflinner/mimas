@@ -19,3 +19,6 @@ mutants.workspace = true
 miette.workspace = true
 chompy.workspace = true
 indexmap.workspace = true
+
+[dev-dependencies]
+rust_decimal = "1.43"
