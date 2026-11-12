@@ -25,6 +25,7 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add(todo);
     api.add(dbg);
     api.add(echo);
+    api.add(__in_unit);
     api.add(__contract_fail);
     api.add(sum);
     api.add(avg);
@@ -48,7 +49,12 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
 /// ```
 fn print<'gc>(ctx: Ctx<'gc>, msg: Val<'gc>) -> Result<(), RtErr> {
     let loc = ctx.fixture::<DebugInfo>().top_loc();
-    let suffix = unit_suffix(ctx, loc);
+    // a `dec` quantity is held in the page's unit, so it prints with that
+    // unit's name, not the coherent one (r[impl mimas.dec.units])
+    let suffix = match (msg, loc.and_then(|l| ctx.fixture::<PrintDims>().shown(l))) {
+        (Val::Dec(_), Some(shown)) => format!(" {}", shown.name),
+        _ => unit_suffix(ctx, loc),
+    };
     let line = ctx.to_string(msg)?;
     ctx.fixture::<Out>().write(&format!("{line}{suffix}"));
     // `display` (quoted strings, structured values) is the richer read
@@ -159,6 +165,10 @@ fn shown_text<'gc>(ctx: Ctx<'gc>, v: Val<'gc>, shown: &shared::units::Shown) -> 
     if !shown.list {
         if let Some(x) = v.as_float() {
             return Ok(format!("{} {unit}", num(x)));
+        }
+        // a `dec` quantity is already in the page's unit (r[impl mimas.dec.units])
+        if let Val::Dec(d) = v {
+            return Ok(format!("{d} {unit}"));
         }
     } else if let Some(d) = v.as_dict() {
         let pairs: Vec<(String, Val<'gc>)> =
@@ -417,4 +427,14 @@ fn dbg<'gc>(ctx: Ctx<'gc>, val: anon::T<'gc>) -> Result<anon::T<'gc>, RtErr> {
         ctx.fixture::<Prints>().push(loc, text);
     }
     Ok(val)
+}
+
+#[native]
+#[effects()]
+/// A quantity as a failing check names it: `value` (in base units) shown
+/// in a unit `scale` base units large and called `name`, as an echo shows
+/// it. Not for user code; the compiler calls it (r[impl check.report.units]).
+fn __in_unit<'gc>(ctx: Ctx<'gc>, val: anon::T<'gc>, scale: f64, name: &str) -> Result<String, RtErr> {
+    let shown = shared::units::Shown { name: name.to_string(), scale, list: false };
+    shown_text(ctx, val.0, &shown)
 }

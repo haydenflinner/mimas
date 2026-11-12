@@ -145,6 +145,8 @@ struct Pass<'a> {
     /// A number written with its unit in a check (`47lb`), as written, so
     /// the message doesn't show it after a round trip through base units.
     check_texts: FxIndexMap<parse::NodeId, String>,
+    /// `dec` quantities, scaled when the pass ends (r[impl mimas.dec.units]).
+    dec_notes: FxIndexMap<parse::NodeId, DecNote>,
     /// The first unit the program writes for each dimension (`12lb`, a bare `lb`
     /// constant): an echo shows a quantity of that dimension in it.
     written: FxIndexMap<Dim, (String, f64)>,
@@ -191,6 +193,7 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> Result<()> {
             echo_ds: FxIndexMap::default(),
             check_ds: FxIndexMap::default(),
             check_texts: FxIndexMap::default(),
+            dec_notes: FxIndexMap::default(),
             written: FxIndexMap::default(),
             unit_decs: solver
                 .unit_consts
@@ -224,19 +227,45 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> Result<()> {
         let dims = std::mem::take(&mut pass.dims);
         let want_dims = std::mem::take(&mut pass.want_dims);
         let print_dims = std::mem::take(&mut pass.print_dims);
+        // a print site's unit as the page writes it, for a `dec` quantity,
+        // which is held in that unit (r[impl mimas.dec.units])
+        let print_shown: Vec<(Location, units::Shown)> = print_dims
+            .iter()
+            .filter_map(|(loc, d)| pass.shown(&D::Q(*d)).map(|s| (*loc, s)))
+            .collect();
         let echo_units: Vec<(Location, units::Shown)> = std::mem::take(&mut pass.echo_ds)
             .into_iter()
             .filter_map(|(loc, d)| pass.shown(&d).map(|s| (loc, s)))
             .collect();
         let check_texts = std::mem::take(&mut pass.check_texts);
+        let scale_of = |pass: &Pass, d: Dim| if d.is_none() { 1.0 } else { pass.shown(&D::Q(d)).map_or(1.0, |s| s.scale) };
+        let dec_scales: Vec<(parse::NodeId, f64)> = std::mem::take(&mut pass.dec_notes)
+            .into_iter()
+            .map(|(id, note)| {
+                let k = match note {
+                    // the written number in the page's unit for its dimension
+                    DecNote::Lit { dim, scale } => scale / scale_of(&pass, dim),
+                    // a product or quotient of two page units, in the page's unit
+                    // for the result (1 when the page's units agree)
+                    DecNote::Fix { mul: true, l, r, out } => scale_of(&pass, l) * scale_of(&pass, r) / scale_of(&pass, out),
+                    DecNote::Fix { mul: false, l, r, out } => scale_of(&pass, l) / scale_of(&pass, r) / scale_of(&pass, out),
+                };
+                (id, k)
+            })
+            .filter(|(_, k)| (k - 1.0).abs() > 1e-12)
+            .collect();
         let check_units: Vec<(parse::NodeId, units::Shown)> = std::mem::take(&mut pass.check_ds)
             .into_iter()
             .filter_map(|(id, d)| pass.shown(&d).filter(|s| !s.list).map(|s| (id, s)))
             .collect();
         drop(pass); // ends the `&*solver` borrow
+        for (loc, shown) in print_shown {
+            solver.echo_units.entry(loc).or_insert(shown);
+        }
         solver.echo_units.extend(echo_units);
         solver.check_units.extend(check_units);
         solver.check_texts.extend(check_texts);
+        solver.dec_scales.extend(dec_scales);
         solver.node_dims.extend(dims);
         solver.want_dims.extend(want_dims);
         solver.print_dims.extend(print_dims);
@@ -443,6 +472,10 @@ impl<'a> Pass<'a> {
                     _ => D::Any,
                 }
             }
+            // `dec<usd>`: an exact decimal that carries a unit (r[impl mimas.dec.units])
+            Annotation::Applied(ty, args) if ty.len() == 1 && ty[0].lexeme == "dec" && args.len() == 1 => {
+                self.annotation(&args[0])
+            }
             Annotation::Option(inner) | Annotation::Result(inner) => self.annotation(inner),
             Annotation::Array(inner, _) => D::Arr(Box::new(self.annotation(inner))),
             _ => D::Any,
@@ -493,6 +526,8 @@ impl<'a> Pass<'a> {
             Annotation::Array(inner, _) | Annotation::Option(inner) | Annotation::Result(inner) => {
                 self.note_written(inner)
             }
+            // `dec<usd>`, `Interval<kW>`: the unit inside
+            Annotation::Applied(_, args) if args.len() == 1 => self.note_written(&args[0]),
             _ => {}
         }
     }
@@ -975,6 +1010,9 @@ impl<'a> Pass<'a> {
                     && let Some((_, scale)) = units::parse(text)
                 {
                     self.written.entry(dim).or_insert((text.to_string(), scale));
+                    if self.solver.dec_literals.contains(&e.id()) {
+                        self.dec_notes.insert(e.id(), DecNote::Lit { dim, scale });
+                    }
                 }
                 d.map_or(PLAIN, D::Q)
             }
@@ -1069,6 +1107,21 @@ impl<'a> Pass<'a> {
     }
 
     fn evaluation(&mut self, e: &Expr, op: EvaluationOp, l: D, r: D) -> D {
+        // a `dec` quantity is held in the page's unit and a float one in SI,
+        // so the two can't meet (r[impl mimas.dec.units])
+        if let ExprKind::Evaluation(ev) = e.kind() {
+            let q = |d: &D| d.dim().is_some_and(|x| !x.is_none());
+            let (ld, rd) = (self.is_dec(&ev.left), self.is_dec(&ev.right));
+            let (lf, rf) = (self.is_float(&ev.left), self.is_float(&ev.right));
+            if ((ld && rf) || (lf && rd)) && (q(&l) || q(&r)) {
+                self.fail(
+                    e.location(),
+                    "a `dec` quantity meets a `float` one".to_string(),
+                    "`dec` with `float`".to_string(),
+                    "write both as `dec` (a number written beside a `dec` is one), or convert the `dec` with `.to_float()`",
+                );
+            }
+        }
         let name = |op| match op {
             EvaluationOp::Plus => "add",
             EvaluationOp::Minus => "subtract",
@@ -1105,6 +1158,10 @@ impl<'a> Pass<'a> {
                         } else {
                             a.div(b)
                         };
+                        if self.is_dec(e) && !(a.is_none() && b.is_none()) {
+                            let mul = op == EvaluationOp::Multiply;
+                            self.dec_notes.insert(e.id(), DecNote::Fix { mul, l: a, r: b, out: d });
+                        }
                         if interval { D::Iv(d) } else { D::Q(d) }
                     }
                     _ => D::Any,
@@ -1115,6 +1172,19 @@ impl<'a> Pass<'a> {
     }
 
     // ---- access and calls
+
+    /// Whether the solver typed `e` as a `dec`.
+    fn is_dec(&self, e: &Expr) -> bool {
+        self.solver.node_to_vid.get(&e.id()).is_some_and(|v| self.solver.is_dec(&Ty::Vid(*v)))
+    }
+
+    /// Whether the solver typed `e` as a `float`.
+    fn is_float(&self, e: &Expr) -> bool {
+        self.solver
+            .node_to_vid
+            .get(&e.id())
+            .is_some_and(|v| matches!(Ty::Vid(*v).normalized(self.solver), Ty::Float))
+    }
 
     fn adt_name(&self, e: &Expr) -> Option<String> {
         let vid = self.solver.node_to_vid.get(&e.id())?;
@@ -1640,3 +1710,11 @@ fn tail_location(body: &Expr) -> Location {
 
 #[allow(dead_code)]
 fn _unused(_: NamedSource<std::sync::Arc<str>>) {}
+
+/// A `dec` quantity the pass scales once the page's units are known: a
+/// written literal (`12lb`), or a product or quotient whose operands' page
+/// units don't compose to the result's.
+enum DecNote {
+    Lit { dim: Dim, scale: f64 },
+    Fix { mul: bool, l: Dim, r: Dim, out: Dim },
+}

@@ -1119,7 +1119,16 @@ impl Emit for Equality {
 
 impl Emit for Evaluation {
     fn emit(&self, id: NodeId, ir: &mut Ir) -> Option<InstId> {
-        emit_bin_op(ir, id, &self.left, self.op, &self.right)
+        let out = emit_bin_op(ir, id, &self.left, self.op, &self.right)?;
+        // a `dec` product of page units that don't compose to the result's:
+        // the correction, as a `dec` (r[impl mimas.dec.units])
+        match ir.resolutions.dec_scales.get(&id).and_then(|k| shared::dec::Dec::from_f64(*k).ok()) {
+            Some(k) => {
+                let k = ir.current().constant(Constant::Dec(k.to_bits()));
+                Some(ir.current().bin(BinOp::Mult, out, k, OperandKind::Generic))
+            }
+            None => Some(out),
+        }
     }
 }
 
@@ -1296,19 +1305,17 @@ impl Emit for FString {
                     let value = expr.lower(ir)?;
                     // a failing check names a quantity in the unit the page wrote
                     // (r[impl check.report.units])
-                    match ir.resolutions.check_units.get(&expr.id()).cloned() {
-                        Some(shown) => {
-                            let v = if shown.scale != 1.0 {
-                                let k = ir.current().constant(Constant::Float(shown.scale));
-                                ir.current().bin(BinOp::Div, value, k, OperandKind::Float)
-                            } else {
-                                value
-                            };
-                            parts.push(FormatPart::Value(v));
-                            let unit = ir.intern_str(&format!(" {}", shown.name));
-                            parts.push(FormatPart::Literal(unit));
+                    // through `__in_unit`, so a `dec` converts exactly and a float
+                    // reads as its echo does (`20 px`)
+                    match (ir.resolutions.check_units.get(&expr.id()).cloned(), ir.resolutions.in_unit_native) {
+                        (Some(shown), Some(nid)) => {
+                            let k = ir.current().constant(Constant::Float(shown.scale));
+                            let name = ir.intern_str(&shown.name);
+                            let name = ir.current().constant(Constant::Str(name));
+                            let text = ir.current().call_native(nid, vec![value, k, name]);
+                            parts.push(FormatPart::Value(text));
                         }
-                        None => parts.push(FormatPart::Value(value)),
+                        _ => parts.push(FormatPart::Value(value)),
                     }
                 }
             }
@@ -1441,8 +1448,8 @@ impl Emit for Literal {
             }
             // from the text as written, so `3.50` keeps its scale
             Literal::Float(f) if ir.resolutions.dec_literals.contains(&id) => {
-                let written = ir.resolutions.dec_texts.get(&id).map(|t| t.replace(',', ""));
-                let d = written.and_then(|t| t.parse::<shared::dec::Dec>().ok());
+                let written = ir.resolutions.dec_texts.get(&id).map(|t| t.replace(['_', ','], ""));
+                let d = written.and_then(|t| dec_of_written(&t, ir.resolutions.dec_scales.get(&id).copied()));
                 let d = d.or_else(|| shared::dec::Dec::from_f64(*f).ok());
                 Constant::Dec(d.map(|d| d.to_bits()).unwrap_or(0))
             }
@@ -2515,4 +2522,23 @@ fn default_inst(ir: &mut Ir, ty: &Ty) -> Option<InstId> {
 /// `__law_check_…`).
 pub(crate) fn is_generic_law(name: &str) -> bool {
     name.starts_with("__law_") && !name.starts_with("__law_impl_") && !name.starts_with("__law_check_")
+}
+
+/// A `dec` literal from its text: `3.50` keeps its scale, and a quantity
+/// (`12lb`, `3.50usd/lb`) is its number in the page's unit for its
+/// dimension, `factor` times the number written, exact when the units
+/// agree (r[impl mimas.dec.units]).
+fn dec_of_written(text: &str, factor: Option<f64>) -> Option<shared::dec::Dec> {
+    use shared::dec::Dec;
+    let split = text
+        .find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-' || c == '+'))
+        .unwrap_or(text.len());
+    let n: Dec = text[..split].parse().ok()?;
+    match factor {
+        None => Some(n),
+        Some(k) => n
+            .mul(Dec::from_f64(k).ok()?)
+            .or_else(|_| Dec::from_f64(n.to_f64() * k))
+            .ok(),
+    }
 }

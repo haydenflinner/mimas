@@ -146,6 +146,8 @@ pub struct Solver {
     pub(crate) check_units: FxHashMap<NodeId, shared::units::Shown>,
     /// Numbers with units written in a check, as written.
     pub(crate) check_texts: FxHashMap<NodeId, String>,
+    /// `dec` literals and products to scale into the page's units.
+    pub(crate) dec_scales: FxHashMap<NodeId, f64>,
     /// The type each bare-brace literal's slot expects (`{ x: 1 }` passed where a
     /// `Pt` goes), noted by `fulfill_ty` before the literal is solved — a struct
     /// hint makes it that struct, anything else leaves it a dict.
@@ -292,6 +294,7 @@ impl Solver {
             echo_units: FxIndexMap::default(),
             check_units: FxHashMap::default(),
             check_texts: FxHashMap::default(),
+            dec_scales: FxHashMap::default(),
             record_hints: FxHashMap::default(),
             field_annotations: FxHashMap::default(),
             int_as_float: FxHashSet::default(),

@@ -33,6 +33,10 @@ pub struct Resolutions {
     pub check_units: rustc_hash::FxHashMap<NodeId, shared::units::Shown>,
     /// Numbers with units written in a check, as written (`47lb`).
     pub check_texts: rustc_hash::FxHashMap<NodeId, String>,
+    /// A `dec` held in the page's unit for its dimension: a literal's
+    /// factor from its written unit, or a product's correction
+    /// (r[impl mimas.dec.units]).
+    pub dec_scales: rustc_hash::FxHashMap<NodeId, f64>,
     pub node_decs: FxIndexMap<NodeId, DecId>,
     /// Read/write site counts per declaration -- the `{0,1,ω}` usage grades the
     /// lint suite is built on (`Use::Never` is what "unused" warnings report on).
@@ -70,6 +74,8 @@ pub struct Resolutions {
     /// statement's value to it, so a host can show the value at its line.
     /// `None` without the stdlib — then nothing is emitted.
     pub echo_native: Option<NativeId>,
+    /// `__in_unit`: a quantity in a named unit, for failing checks.
+    pub in_unit_native: Option<NativeId>,
     /// The `panic` native's id -- emit's contract-failure fallback when the
     /// prettier `__contract_fail` channel isn't installed.
     pub panic_native: Option<NativeId>,
@@ -461,6 +467,12 @@ impl From<Solver> for Resolutions {
             .filter(|(id, _)| solver.dec_to_native.contains_key(id))
             .find(|(_, dec)| dec.name == "echo")
             .map(|(id, _)| solver.dec_to_native[&id].id);
+        let in_unit_native = solver
+            .decs
+            .iter()
+            .filter(|(id, _)| solver.dec_to_native.contains_key(id))
+            .find(|(_, dec)| dec.name == "__in_unit")
+            .map(|(id, _)| solver.dec_to_native[&id].id);
         let panic_native = solver
             .decs
             .iter()
@@ -533,6 +545,7 @@ impl From<Solver> for Resolutions {
             echo_units: solver.echo_units,
             check_units: solver.check_units,
             check_texts: solver.check_texts,
+            dec_scales: solver.dec_scales,
             node_decs: solver.node_decs,
             dec_uses: solver.dec_uses,
             fn_effects: solver.fn_effects,
@@ -548,6 +561,7 @@ impl From<Solver> for Resolutions {
             default_ctors: solver.default_ctors,
             contract_native,
             echo_native,
+            in_unit_native,
             panic_native,
             op_decs: solver.op_decs,
             propagates: solver.propagates,
