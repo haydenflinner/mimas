@@ -81,6 +81,8 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add_method(nonzero);
     api.add_method(all);
     api.add_method(any);
+    api.add_method(inf);
+    api.add_method(sup);
     // scan / order / tiling
     api.add_method(cumsum);
     api.add_method(cumprod);
@@ -345,7 +347,14 @@ fn matmul<'gc>(ctx: Ctx<'gc>, a: vm::Tensor<'gc>, b: vm::Tensor<'gc>) -> Raisabl
 /// `a.dot(b)` -- 1-D inner product -> scalar tensor.
 #[native]
 fn dot<'gc>(ctx: Ctx<'gc>, a: vm::Tensor<'gc>, b: vm::Tensor<'gc>) -> Raisable<vm::Tensor<'gc>> {
-    wrap(ctx, bt::dot(a.inner(), b.inner()))
+    // `a ⋅ b` is contraction: the inner product on vectors, matmul on anything
+    // higher -- one spelling for APL's `+.×`
+    let (a, b) = (a.inner(), b.inner());
+    if bt::dims(&a).len() == 1 && bt::dims(&b).len() == 1 {
+        wrap(ctx, bt::dot(a, b))
+    } else {
+        wrap(ctx, bt::matmul(a, b))
+    }
 }
 
 // -- reductions ----------------------------------------------------------------------
@@ -606,6 +615,18 @@ fn all(t: vm::Tensor) -> Raisable<bool> {
 
 #[native]
 fn any(t: vm::Tensor) -> Raisable<bool> {
+    bt::any(&t.inner()).into()
+}
+
+/// `⨅ t` / `⨆ t` -- the meet and join of a mask: `all` and `any` under their
+/// reduction names, so `⨆⨅ (m == 3)` reads the same on a tensor as on a list.
+#[native]
+fn inf(t: vm::Tensor) -> Raisable<bool> {
+    bt::all(&t.inner()).into()
+}
+
+#[native]
+fn sup(t: vm::Tensor) -> Raisable<bool> {
     bt::any(&t.inner()).into()
 }
 

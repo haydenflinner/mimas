@@ -34,6 +34,28 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add_method_named("min", min_float);
     api.add_method_named("sum", sum_int);
     api.add_method_named("sum", sum_float);
+    // the reductions behind `∑ ∏ ⨅ ⨆`: `product`, and meet/join -- `inf` is
+    // all-of for bools and min for numbers, `sup` any-of and max
+    api.add_method_named("product", product_int);
+    api.add_method_named("product", product_float);
+    api.add_method_named("inf", inf_bool);
+    api.add_method_named("inf", inf_int);
+    api.add_method_named("inf", inf_float);
+    api.add_method_named("sup", sup_bool);
+    api.add_method_named("sup", sup_int);
+    api.add_method_named("sup", sup_float);
+    // on a list of lists each reduction eats the innermost axis -- one answer per
+    // row -- so `⨆⨅ (b[LINES] == p)` meets each line, then joins the lines
+    api.add_method_named("sum", sum_int_rows);
+    api.add_method_named("sum", sum_float_rows);
+    api.add_method_named("product", product_int_rows);
+    api.add_method_named("product", product_float_rows);
+    api.add_method_named("inf", inf_bool_rows);
+    api.add_method_named("inf", inf_int_rows);
+    api.add_method_named("inf", inf_float_rows);
+    api.add_method_named("sup", sup_bool_rows);
+    api.add_method_named("sup", sup_int_rows);
+    api.add_method_named("sup", sup_float_rows);
     api.add_method(sort_by_int);
     api.add_method(sort_by_float);
     api.add_method_named("argsort", argsort_int);
@@ -656,4 +678,120 @@ fn sorted_str(arr: &[&str]) -> Vec<String> {
     let mut out: Vec<String> = arr.iter().map(|s| s.to_string()).collect();
     out.sort();
     out
+}
+
+#[native]
+/// The product of every value in the array (`∏ xs`); `1` for an empty one.
+fn product_int(arr: &[i64]) -> Result<i64, RtErr> {
+    arr.iter()
+        .try_fold(1i64, |acc, &x| acc.checked_mul(x))
+        .ok_or_else(|| RtErr::Custom("integer product overflowed".into()))
+}
+
+#[native]
+/// The product of every value in the array (`∏ xs`); `1.0` for an empty one.
+fn product_float(arr: &[f64]) -> f64 {
+    arr.iter().product()
+}
+
+#[native]
+/// `⨅ xs` on bools -- the meet: every value is `true` (`true` for an empty list).
+fn inf_bool(arr: &[bool]) -> bool {
+    arr.iter().all(|&b| b)
+}
+
+#[native]
+/// `⨅ xs` on ints -- the meet: the minimum, `null` for an empty list.
+fn inf_int(arr: &[i64]) -> Option<i64> {
+    arr.iter().min().copied()
+}
+
+#[native]
+/// `⨅ xs` on floats -- the meet: the minimum, `null` for an empty list.
+fn inf_float(arr: &[f64]) -> Option<f64> {
+    arr.iter().copied().reduce(f64::min)
+}
+
+#[native]
+/// `⨆ xs` on bools -- the join: some value is `true` (`false` for an empty list).
+fn sup_bool(arr: &[bool]) -> bool {
+    arr.iter().any(|&b| b)
+}
+
+#[native]
+/// `⨆ xs` on ints -- the join: the maximum, `null` for an empty list.
+fn sup_int(arr: &[i64]) -> Option<i64> {
+    arr.iter().max().copied()
+}
+
+#[native]
+/// `⨆ xs` on floats -- the join: the maximum, `null` for an empty list.
+fn sup_float(arr: &[f64]) -> Option<f64> {
+    arr.iter().copied().reduce(f64::max)
+}
+
+#[native]
+/// `∑ xss` on a list of lists -- each row's sum.
+fn sum_int_rows(arr: Vec<Vec<i64>>) -> Vec<i64> {
+    arr.iter().map(|r| r.iter().sum()).collect()
+}
+
+#[native]
+/// `∑ xss` on a list of float lists -- each row's sum.
+fn sum_float_rows(arr: Vec<Vec<f64>>) -> Vec<f64> {
+    arr.iter().map(|r| r.iter().sum()).collect()
+}
+
+#[native]
+/// `∏ xss` on a list of lists -- each row's product.
+fn product_int_rows(arr: Vec<Vec<i64>>) -> Result<Vec<i64>, RtErr> {
+    arr.iter()
+        .map(|r| {
+            r.iter()
+                .try_fold(1i64, |acc, &x| acc.checked_mul(x))
+                .ok_or_else(|| RtErr::Custom("integer product overflowed".into()))
+        })
+        .collect()
+}
+
+#[native]
+/// `∏ xss` on a list of float lists -- each row's product.
+fn product_float_rows(arr: Vec<Vec<f64>>) -> Vec<f64> {
+    arr.iter().map(|r| r.iter().product()).collect()
+}
+
+#[native]
+/// `⨅ xss` on bool rows -- each row's meet (all).
+fn inf_bool_rows(arr: Vec<Vec<bool>>) -> Vec<bool> {
+    arr.iter().map(|r| r.iter().all(|&b| b)).collect()
+}
+
+#[native]
+/// `⨅ xss` on int rows -- each row's minimum (`null` for an empty row).
+fn inf_int_rows(arr: Vec<Vec<i64>>) -> Vec<Option<i64>> {
+    arr.iter().map(|r| r.iter().min().copied()).collect()
+}
+
+#[native]
+/// `⨅ xss` on float rows -- each row's minimum (`null` for an empty row).
+fn inf_float_rows(arr: Vec<Vec<f64>>) -> Vec<Option<f64>> {
+    arr.iter().map(|r| r.iter().copied().reduce(f64::min)).collect()
+}
+
+#[native]
+/// `⨆ xss` on bool rows -- each row's join (any).
+fn sup_bool_rows(arr: Vec<Vec<bool>>) -> Vec<bool> {
+    arr.iter().map(|r| r.iter().any(|&b| b)).collect()
+}
+
+#[native]
+/// `⨆ xss` on int rows -- each row's maximum (`null` for an empty row).
+fn sup_int_rows(arr: Vec<Vec<i64>>) -> Vec<Option<i64>> {
+    arr.iter().map(|r| r.iter().max().copied()).collect()
+}
+
+#[native]
+/// `⨆ xss` on float rows -- each row's maximum (`null` for an empty row).
+fn sup_float_rows(arr: Vec<Vec<f64>>) -> Vec<Option<f64>> {
+    arr.iter().map(|r| r.iter().copied().reduce(f64::max)).collect()
 }

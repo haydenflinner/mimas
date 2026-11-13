@@ -2053,6 +2053,15 @@ pub fn get_index<'gc>(
             Val::Str(ctx.intern(ch.encode_utf8(&mut [0; 4])))
         }
         (Val::Int(_), Val::Int(_)) => index,
+        // `xs[idxs]` gathers: one read per index, nested lists nesting the result
+        (set, idx) if set.is_seq() && idx.is_seq() => {
+            let n = idx.seq_len().unwrap();
+            let mut out = Vec::with_capacity(n);
+            for i in 0..n {
+                out.push(get_index(ctx, set, idx.seq_get(i).unwrap(), kind)?);
+            }
+            ctx.array_val(out)
+        }
         _ => return Err(RtErr::invalid_index(set, index)),
     })
 }

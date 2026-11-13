@@ -809,7 +809,9 @@ impl<'s> Lex<'s, Tok<TokKind<'s>>, TokKind<'s>> for Lexer<'s> {
                 '⍱' => TokKind::Nor,
                 // r[impl mimas.op.glyphs]
                 // the named operators (see `TokKind::Wedge`): symbols the
-                // lexer knows and only a method gives meaning to
+                // lexer knows and only a method gives meaning to —
+                // `∧`/`∨` stay wedge/vee (they are not `&&`/`||` spellings;
+                // bool logic keeps `and`/`or`/`&&`/`||`)
                 '∧' => TokKind::Wedge,
                 '∨' => TokKind::Vee,
                 '⋅' | '·' => TokKind::DotOp,
@@ -831,6 +833,18 @@ impl<'s> Lex<'s, Tok<TokKind<'s>>, TokKind<'s>> for Lexer<'s> {
                 '≥' => TokKind::GreaterEqual,
                 '∈' => TokKind::In,
                 '∉' => TokKind::NotIn,
+                '¬' => TokKind::NotWord,
+                // the big operators: prefix reductions (see `Parser::unary`)
+                '∑' => TokKind::Sum,
+                '∏' => TokKind::Prod,
+                '⨅' => TokKind::Inf,
+                '⨆' => TokKind::Sup,
+                '→' => TokKind::RightArrow,
+                '←' => TokKind::LeftArrow,
+                '↑' => TokKind::UpArrow,
+                '↓' => TokKind::DownArrow,
+                '↔' => TokKind::LeftRightArrow,
+                '↕' => TokKind::UpDownArrow,
                 '!' => {
                     // `!in` is the operator only when the `in` ends there: `!inside` is `!`
                     // `inside`

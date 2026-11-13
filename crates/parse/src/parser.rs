@@ -735,6 +735,8 @@ impl<'s> Parser<'s> {
             | TokKind::Tagged(..)
             | TokKind::Bang
             | TokKind::NotWord => true,
+            // `check ∑ xs == 6` -- a prefix reduction opens one like a name does
+            TokKind::Sum | TokKind::Prod | TokKind::Inf | TokKind::Sup => true,
             // `check (a * b).same(c)`, `check [1 2] == xs`, `check -x < 0`:
             // a gap after the word opens a check, as it does before a name;
             // `check(x)` and `check[i]` touching the word stay a call and
@@ -2652,6 +2654,55 @@ impl<'s> Parser<'s> {
 
     fn unary(&mut self) -> Expr {
         let start = self.next_start();
+        // `∑ xs` -- a reduction is the big form of its operator, and desugars to
+        // the method it names on the operand: `∑` `.sum()`, `∏` `.product()`,
+        // `⨅` `.inf()` (meet: all/min), `⨆` `.sup()` (join: any/max). It binds
+        // like a unary minus, so `∑ xs.map(f)` reduces the mapped list and
+        // `⨆⨅ (m == p)` nests. A direction after the glyph reduces a tensor
+        // along it: `∑→ m` is `m.sum_dim(1)` (each row to one number), `∑↓ m`
+        // is `m.sum_dim(0)`.
+        if let Some(method) = reduce_method(self.peek()) {
+            self.advance();
+            let along = match self.peek() {
+                TokKind::RightArrow => Some(1),
+                TokKind::DownArrow => Some(0),
+                _ => None,
+            };
+            if along.is_some() {
+                self.advance();
+            }
+            // `⨆ for ln in LINES { … collect … }`: a keyword expression is the whole
+            // operand; anything else binds like a unary minus does
+            let operand = if matches!(
+                self.peek(),
+                TokKind::For | TokKind::If | TokKind::Match | TokKind::Loop | TokKind::While | TokKind::LeftBrace
+            ) {
+                self.expr()
+            } else {
+                self.nested(Self::unary)
+                    .unwrap_or_else(|| self.poison_expr(self.cursor()))
+            };
+            let at = self.location(start);
+            let (name, args) = match along {
+                Some(dim) => (
+                    format!("{method}_dim"),
+                    vec![Argument {
+                        name: None,
+                        value: self.new_expr(ExprKind::Literal(Literal::Int(dim)), start),
+                    }],
+                ),
+                None => (method.to_string(), vec![]),
+            };
+            let callee = self.new_expr(
+                Access::Dot {
+                    left: operand,
+                    right: self.new_expr(Ident::new(&name, at), start),
+                    kind: AccessKind::Direct,
+                },
+                start,
+            );
+            return self.new_expr(Call::new(callee, args), start);
+        }
         let operator = if self.at(TokKind::NotWord) {
             UnaryOp::Not
         } else if let Ok(op) = self.peek().try_into() {
@@ -5342,6 +5393,17 @@ impl BinaryOp {
         };
         Some((Self::Eval(op), power))
     }
+}
+
+/// The method a prefix reduction glyph names, if `kind` is one.
+fn reduce_method(kind: TokKind<'_>) -> Option<&'static str> {
+    Some(match kind {
+        TokKind::Sum => "sum",
+        TokKind::Prod => "product",
+        TokKind::Inf => "inf",
+        TokKind::Sup => "sup",
+        _ => return None,
+    })
 }
 
 /// Makes a test name unique within its list by appending ` #n`.

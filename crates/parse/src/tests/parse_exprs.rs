@@ -2260,3 +2260,26 @@ fn with_stays_a_name_elsewhere() {
     // and a newline after `with` keeps it a name too
     crate::tests::utils::assert_parses("fn f() { let _x = with\nrng = 7; }");
 }
+
+// `∑ xs` is the big form of `+`: a prefix reduction, desugared to `xs.sum()`.
+expr_test!(
+    sum_reduction,
+    "∑ xs",
+    Call::new(
+        Access::Dot {
+            left: ident_expr!("xs"),
+            right: ident_expr!("sum"),
+            kind: AccessKind::Direct,
+        }
+        .into_expr(),
+        vec![],
+    )
+);
+
+// `a ⋅ b` is `a.dot(b)` through the named operators: `⋅` is DotOp, which
+// parses to EvaluationOp::Dot and lowers to the `dot` method.
+expr_test!(
+    cdot_is_named_dot,
+    "a ⋅ b",
+    Evaluation::new(ident_expr!("a"), EvaluationOp::Dot, ident_expr!("b"))
+);

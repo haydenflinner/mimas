@@ -532,6 +532,26 @@ impl Solve for Access {
                     return Ok(if optional { option!(Ty::Str) } else { Ty::Str });
                 }
 
+                // `xs[idxs]` -- a list of ints gathers: `b[[0, 4, 8]]` is `[b[0], b[4], b[8]]`,
+                // and a nested index list gathers a nested result (`b[LINES]` is `[[T]]`)
+                let mut depth = 0;
+                let mut key_inner = k.clone().normalized(solver);
+                while let Ty::Array(inner, _) = key_inner {
+                    depth += 1;
+                    key_inner = inner.as_ref().clone().normalized(solver);
+                }
+                if depth > 0 && key_inner == Ty::Int && receiver != Ty::Str {
+                    let value = solver.vid();
+                    let optional = *kind == AccessKind::Option || rides(solver, left);
+                    let seq = Ty::array(Ty::from(value));
+                    left.fulfill_ty(if optional { option!(seq) } else { seq }, solver)?;
+                    let mut out = Ty::from(value).normalized(solver);
+                    for _ in 0..depth {
+                        out = Ty::array(out);
+                    }
+                    return Ok(if optional { option!(out) } else { out });
+                }
+
                 let shape = |inner: Ty| -> Result<Ty> {
                     match &k {
                         Ty::Int => Ok(Ty::array(inner)),
@@ -1632,6 +1652,37 @@ fn tensor_overload_ty(lhs: &Ty, rhs: &Ty, solver: &Solver) -> Option<Ty> {
     }
 }
 
+/// `xs == 3`, `b[ln] == p`, `xs < 0` -- a list against a scalar compares pervasively and
+/// answers a list of bools, as deep as the list nests (`[[T]] == T` is `[[bool]]`), the way
+/// a tensor does. Two lists still compare structurally, a list against `null` is still the
+/// option check, and an unresolved scalar keeps its inference (no mask is claimed for it).
+fn seq_cmp_overload_ty(lhs: &Ty, rhs: &Ty, solver: &mut Solver) -> Option<Ty> {
+    fn mask(seq: &Ty, scalar: &Ty, solver: &mut Solver) -> Option<Ty> {
+        let Ty::Array(inner, _) = seq else {
+            return None;
+        };
+        let inner = inner.as_ref().clone().normalized(solver);
+        if matches!(inner, Ty::Array(..)) {
+            return mask(&inner, scalar, solver).map(Ty::array);
+        }
+        if matches!(
+            scalar,
+            Ty::Array(..) | Ty::Null | Ty::Option(_) | Ty::Vid(_) | Ty::Dict(_) | Ty::Tuple(_)
+        ) {
+            return None;
+        }
+        // a `null` element is simply unequal to the scalar: compare the inner type
+        let mut a = match inner {
+            Ty::Option(inner) => inner.as_ref().clone(),
+            inner => inner,
+        };
+        let mut b = scalar.clone();
+        a.fulfill_ty(&mut b, solver).ok()?;
+        Some(Ty::array(Ty::Bool))
+    }
+    mask(lhs, rhs, solver).or_else(|| mask(rhs, lhs, solver))
+}
+
 impl Solve for Equality {
     fn solve(&self, id: NodeId, location: Location, solver: &mut Solver) -> Result<Ty> {
         solver.dec_literal_beside(&self.left, &self.right)?;
@@ -1641,6 +1692,7 @@ impl Solve for Equality {
         let rhs_n = rhs.clone().normalized(solver);
         if let Some(ty) = plexpr_overload_ty(&lhs_n, &rhs_n, solver)
             .or_else(|| tensor_overload_ty(&lhs_n, &rhs_n, solver))
+            .or_else(|| seq_cmp_overload_ty(&lhs_n, &rhs_n, solver))
         {
             return Ok(ty);
         }

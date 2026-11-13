@@ -243,3 +243,7 @@ tok_test!(named_operator_hugs_names: "a∧b" => Ident("a"), Wedge, Ident("b"));
 // the comparison and membership glyphs are the ASCII tokens
 tok_test!(comparison_glyphs: "a ≠ b ≤ c ≥ d" => Ident("a"), BangEqual, Ident("b"), LessEqual, Ident("c"), GreaterEqual, Ident("d"));
 tok_test!(membership_glyphs: "x ∈ xs ∉ ys" => Ident("x"), In, Ident("xs"), NotIn, Ident("ys"));
+// `¬` spells `not`; `∧`/`∨` stay named operators, not `&&`/`||` spellings
+tok_test!(not_glyph: "¬ x" => NotWord, Ident("x"));
+tok_test!(reductions: "∑ ∏ ⨅ ⨆" => Sum, Prod, Inf, Sup);
+tok_test!(direction_glyphs: "→ ← ↑ ↓ ↔ ↕" => RightArrow, LeftArrow, UpArrow, DownArrow, LeftRightArrow, UpDownArrow);

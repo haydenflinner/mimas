@@ -125,6 +125,19 @@ pub enum TokKind<'s> {
     /// `≈` (also typed `~=`) — approximately equal. A named operator that
     /// binds like `==`: `a ≈ b` is `a.approx(b)` (r[impl mimas.op.approx]).
     Approx,
+    /// `∑` `∏` `⨅` `⨆` -- a reduction is the big form of its operator; prefix, desugars to
+    /// `.sum()` `.product()` `.inf()` `.sup()` (`⨅`/`⨆` are meet and join: all/min, any/max).
+    Sum,
+    Prod,
+    Inf,
+    Sup,
+    /// Direction and axis glyphs: `→ ← ↑ ↓` are directions, `↔ ↕` the axes they lie on.
+    RightArrow,
+    LeftArrow,
+    UpArrow,
+    DownArrow,
+    LeftRightArrow,
+    UpDownArrow,
     Tilde,
     Dollar,
     DoubleLeftCaret,
@@ -248,6 +261,16 @@ impl Display for TokKind<'_> {
             TokKind::Union => "∪",
             TokKind::Ominus => "⊖",
             TokKind::Uplus => "⊎",
+            TokKind::Sum => "∑",
+            TokKind::Prod => "∏",
+            TokKind::Inf => "⨅",
+            TokKind::Sup => "⨆",
+            TokKind::RightArrow => "→",
+            TokKind::LeftArrow => "←",
+            TokKind::UpArrow => "↑",
+            TokKind::DownArrow => "↓",
+            TokKind::LeftRightArrow => "↔",
+            TokKind::UpDownArrow => "↕",
             TokKind::Tilde => "~",
             TokKind::Dollar => "$",
             TokKind::DoubleLeftCaret => "<<",
@@ -328,6 +351,10 @@ impl TokKind<'_> {
                 self,
                 TokKind::Ident(_)
                     | TokKind::NotWord
+                    | TokKind::Sum
+                    | TokKind::Prod
+                    | TokKind::Inf
+                    | TokKind::Sup
                     | TokKind::SelfKeyword
                     | TokKind::TyKw(_)
                     | TokKind::FString(_)

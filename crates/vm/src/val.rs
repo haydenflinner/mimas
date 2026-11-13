@@ -1698,8 +1698,31 @@ pub fn bin<'gc>(this: Val<'gc>, ctx: Ctx<'gc>, other: Val<'gc>, op: BinOp) -> Rt
         (op, Val::Int(s), Val::Tensor(b)) => Val::Tensor(ctx.new_tensor(
             crate::tensor::scalar_bin(s as f64, op, b.inner()).map_err(RtErr::Custom)?,
         )),
-        // `==` is structural on every non-tensor type, arrays included (element-wise `==` returned
-        // a list where the checker promised a `bool`). Ordering and arithmetic still broadcast.
+        // a list against a scalar compares pervasively (`b[ln] == p` is a mask), nested lists
+        // nesting the mask -- the checker types exactly these as `[bool]`. list-vs-list and
+        // anything-vs-null stay structural below.
+        (op @ (BinOp::Identity | BinOp::NotEqual), a, s)
+            if a.is_seq() && !s.is_seq() && s != Val::Null =>
+        {
+            let n = a.seq_len().unwrap();
+            let mut out = Vec::with_capacity(n);
+            for i in 0..n {
+                out.push(bin(a.seq_get(i).unwrap(), ctx, s, op)?);
+            }
+            ctx.array_val(out)
+        }
+        (op @ (BinOp::Identity | BinOp::NotEqual), s, a)
+            if a.is_seq() && !s.is_seq() && s != Val::Null =>
+        {
+            let n = a.seq_len().unwrap();
+            let mut out = Vec::with_capacity(n);
+            for i in 0..n {
+                out.push(bin(s, ctx, a.seq_get(i).unwrap(), op)?);
+            }
+            ctx.array_val(out)
+        }
+        // `==` is structural on every other non-tensor type, lists against lists included.
+        // Ordering and arithmetic still broadcast.
         (BinOp::Identity, left, right) => Val::Bool(left == right),
         (BinOp::NotEqual, left, right) => Val::Bool(left != right),
         (op, Val::Bool(a), Val::Bool(b)) => bool_bin(op, a, b)?,
