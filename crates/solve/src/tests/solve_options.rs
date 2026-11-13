@@ -15,7 +15,7 @@ test_ty!(
 );
 test_ty!(
     option_dict,
-    "let a: ~{int}? = null;",
+    "let a: {int}? = null;",
     "a" => option!(dictionary!(Int)),
 );
 test_ty!(
@@ -25,7 +25,7 @@ test_ty!(
 );
 test_ty!(
     dict_of_optional,
-    "let a: ~{int?} = ~{ x = 0, y = null };",
+    "let a: {int?} = { x : 0, y : null };",
     "a" => dictionary!(option!(Int)),
 );
 test_ty!(

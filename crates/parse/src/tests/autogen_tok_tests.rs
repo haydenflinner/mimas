@@ -25,7 +25,6 @@ tok_test!(lex_right_square: "]" => RightSquare);
 tok_test!(lex_enum: "enum" => Enum);
 tok_test!(lex_left_brace: "{" => LeftBrace);
 tok_test!(lex_right_brace: "}" => RightBrace);
-tok_test!(lex_tilde_left_brace: "~{" => TildeLeftBrace);
 tok_test!(lex_left_parenthesis: "(" => LeftParenthesis);
 tok_test!(lex_right_parenthesis: ")" => RightParenthesis);
 tok_test!(lex_comma: "," => Comma);

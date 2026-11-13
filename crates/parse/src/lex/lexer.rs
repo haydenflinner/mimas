@@ -757,8 +757,6 @@ impl<'s> Lex<'s, Tok<TokKind<'s>>, TokKind<'s>> for Lexer<'s> {
                         } else {
                             TokKind::TildeSlash
                         }
-                    } else if self.match_chomp('{') {
-                        TokKind::TildeLeftBrace
                     } else if self.match_chomp('=') {
                         // `~=`, the typed spelling of `≈`
                         TokKind::Approx

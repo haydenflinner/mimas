@@ -21,8 +21,6 @@ pub enum Literal {
     Hex(String),
     /// An array literal ([0, 1, 2])
     Array(Vec<Expr>),
-    /// A dictionary literal (~{a = 0, b = 0})
-    Dictionary(Vec<DictField>),
     /// A struct literal (Foo { a: 0 })
     Struct(StructLiteral),
     /// A bare-brace literal (`{ a: 0, b: 1 }`) typed by where it goes: the struct a
@@ -65,13 +63,6 @@ impl std::fmt::Display for Literal {
             Literal::Array(members) => f.pad(&format!(
                 "[{}]",
                 members.iter().map(|member| member.to_string()).join(", ")
-            )),
-            Literal::Dictionary(fields) => f.pad(&format!(
-                "~{{ {} }}",
-                fields
-                    .iter()
-                    .map(|(Ident { lexeme, .. }, symbol)| format!("{lexeme} = {symbol}"))
-                    .join(", ")
             )),
             Literal::Record(fields) => f.pad(&format!(
                 "{{ {} }}",

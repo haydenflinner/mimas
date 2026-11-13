@@ -624,12 +624,12 @@ impl<'gc> Ctx<'gc> {
                 out.push(']');
             }
             Val::Dict(d) => {
-                out.push_str("~{");
+                out.push_str("{");
                 for (i, (k, v)) in d.0.borrow().iter().enumerate() {
                     if i > 0 {
                         out.push_str(", ");
                     }
-                    let _ = write!(out, "{} = ", k.as_str());
+                    let _ = write!(out, "{}: ", k.as_str());
                     self.render_into(out, *v, true, depth + 1, path)?;
                 }
                 out.push('}');

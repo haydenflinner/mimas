@@ -339,11 +339,11 @@ impl<'a> Lower<'a> {
                 )
             }
             CTy::Dict(_) => {
-                // `{{k, v}, ...}` pairs -> `~{ k = v }`? dict literal keys are
-                // identifiers-as-strings; emit `~{}` + inserts via expr map.
+                // `{{k, v}, ...}` pairs -> `{ k: v }`? dict literal keys are
+                // identifiers-as-strings; emit `dict::new()` + inserts via expr map.
                 let _ = items;
-                self.diag(DiagKind::Approximate, init, "map brace-init -> `~{}`");
-                "~{}".into()
+                self.diag(DiagKind::Approximate, init, "map brace-init -> `dict::new()`");
+                "dict::new()".into()
             }
             CTy::Struct(name) => {
                 // positional aggregate init `X{a, b}` -> `X { f1 = a, f2 = b }`

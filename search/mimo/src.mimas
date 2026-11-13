@@ -486,7 +486,7 @@ cov::hit(604); cov::pass(605, game_loop(cov::pass(606, init()), tick, draw));
 //
 // `stroke = ""` means none. `Group`'s `at` translates its children
 // (and is the only `at`-carrying node). The enum is the typed path,
-// not the only one — a `~{kind = "…", …}` dict or your own
+// not the only one — a `{kind : "…", …}` dict or your own
 // identically-named struct walks the same way.
 //
 // Every geometric field is `px` — the renderer works in pixel space,

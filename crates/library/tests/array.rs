@@ -900,7 +900,7 @@ test_run!(
 
 test_run!(
     comprehension_iterates_strings_and_dicts,
-    "let d = ~{a = 1, b = 2};",
+    "let d = {a : 1, b : 2};",
     "[c for c in \"ab\"]" => r#"["a", "b"]"#,
     "[kv for kv in d]" => r#"[["a", 1], ["b", 2]]"#,
 );

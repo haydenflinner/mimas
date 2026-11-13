@@ -2481,21 +2481,29 @@ impl Solve for Impl {
         }
         solver.ribs.pop();
 
-        if let Some((pact, _)) = pact {
+        if let Some((pact, pid)) = pact {
             // anything left in the cloned pact is unimplemented, except functions carrying a
             // default body, which the impl may legally omit (the dispatch table was filled at
-            // hoist).
+            // hoist) -- or a member a `via` impl forwards by name
+            // r[impl mimas.impl.via]
             let missing: Vec<String> = pact
                 .functions
                 .iter()
-                .filter(|(_, (_, default))| default.is_none())
+                .filter(|(key, (_, default))| {
+                    default.is_none() && !solver.via_covered.contains(&(aid, pid, (*key).clone()))
+                })
                 .map(|(key, (h, _))| match overload_operand_of(&Ty::Fn(h.clone())) {
                     Some(o) if key.contains('#') || pact.functions.keys().any(|k| k != key && crate::pact_key_base(k) == crate::pact_key_base(key)) => {
                         format!("{}(self, _: {})", crate::pact_key_base(key), o)
                     }
                     _ => key.clone(),
                 })
-                .chain(pact.constants.keys().cloned())
+                .chain(
+                    pact.constants
+                        .keys()
+                        .filter(|k| !solver.via_covered.contains(&(aid, pid, (*k).clone())))
+                        .cloned(),
+                )
                 .collect();
             if !missing.is_empty() {
                 Err(PactImplIncomplete {
@@ -2572,10 +2580,6 @@ impl Solve for Literal {
             // literals stay growable `[T]` in the type; their exact length is a
             // `lens` fact consulted where a sized slot wants it
             Literal::Array(exprs) => Ty::array(assemble(exprs.iter().collect(), solver)?),
-            Literal::Dictionary(fields) => Ty::Dict(Box::new(assemble(
-                fields.iter().map(|(_, v)| v).collect(),
-                solver,
-            )?)),
             Literal::Struct(StructLiteral { name, fields, base }) => {
                 let (adt, variant, layout) = match name.kind() {
                     ExprKind::Access(Access::DoubleColon { left, right }) => {
@@ -3383,7 +3387,7 @@ fn check_defaultable(
     Ok(())
 }
 
-/// One member's defaultability. Containers always default (`[]`, `~{}`,
+/// One member's defaultability. Containers always default (`[]`, `dict::new()`,
 /// `null`) without ever materializing an element, so their inners aren't
 /// visited; a nested struct member recurses; anything opaque reports.
 fn check_member_defaultable(

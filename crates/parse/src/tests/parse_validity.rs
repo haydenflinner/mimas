@@ -71,7 +71,7 @@ test_fail!(unexpected_end_let, "let", "let a", "let a =", "let a = 1 +");
 test_fail!(unexpected_end_block, "fn f() {", "if true", "match x {");
 
 // unmatched brackets
-test_fail!(unmatched_brackets, "{", "[", "(", "~{", "fn foo() {");
+test_fail!(unmatched_brackets, "{", "[", "(", "{a:", "fn foo() {");
 
 // impl items
 test_ok!(
@@ -86,6 +86,27 @@ test_fail!(
     "impl Foo { let x = 1; }",
     "impl Foo { struct S; }",
     "impl Foo for Bar { x = 1; }"
+);
+// `impl X for T via Y` -- braceless, with a block, or partial
+// r[verify mimas.impl.via]
+test_ok!(
+    impl_via_forms,
+    "impl Drawable for Foo via Defaults",
+    "impl Drawable for Foo via Defaults {}",
+    "impl Drawable for Foo via Defaults { fn draw() {} }"
+);
+// r[verify mimas.impl.via]
+test_fail!(
+    impl_via_rejected_on_inherent,
+    "impl Foo via Defaults",
+    "impl Foo via Defaults {}"
+);
+// `pact A: B` -- one bound or a `+`-list
+// r[verify mimas.pact.requires]
+test_ok!(
+    pact_requires_forms,
+    "pact A: B {}",
+    "pact A: B + C { fn f() -> (); }"
 );
 
 // pact items
@@ -390,6 +411,29 @@ test_ok!(
 );
 test_fail!(glob_all_modules_rejected, "use a::*::*;");
 
+// r[verify mimas.fx.needs]
+// `needs` writes the `granting` vocabulary; an unknown name errors at parse
+test_ok!(
+    needs_decl_forms,
+    "needs {};",
+    "needs { net, time };",
+    "needs { any };",
+    "needs { unaudited };",
+    "needs { doc, net, rng, yield, io, time };"
+);
+test_fail!(
+    needs_unknown_effect_rejected,
+    "needs { bogus };",
+    "needs { net, bogus };",
+    "needs { any, docc };"
+);
+// (`needs net;` is legal -- `needs` stays a name and juxtaposes like any fn)
+test_fail!(
+    needs_body_is_names_only,
+    "needs { 1 };",
+    "needs { net() };"
+);
+
 // type annotations
 test_ok!(tuple_type_one_element_ok, "let i: (int,) = z;");
 test_fail!(
@@ -463,7 +507,7 @@ test_ok!(
     "a = 0.0.a;",
     r#"a = "foo".a;"#,
     "a = [].a;",
-    "a = ~{}.a;",
+    "a = {x: 1}.a;",
     "a = 0();",
     "a = 0[0];",
     r#"a = 0["foo"];"#,
@@ -471,8 +515,8 @@ test_ok!(
     r#"a = 0.0["foo"];"#,
     "a = [][0];",
     r#"a = []["foo"];"#,
-    "a = ~{}[0];",
-    r#"a = ~{}["foo"];"#,
+    "a = {x: 1}[0];",
+    r#"a = {x: 1}["foo"];"#,
     "a = true();",
     "a = true[0];",
     r#"a = true["foo"];"#,
@@ -489,7 +533,7 @@ test_ok!(
     "0();",
     "0.0();",
     "\"foo\"();",
-    "~{}();",
+    "{x: 1}();",
     "[]();"
 );
 test_ok!(
@@ -782,4 +826,14 @@ fn opp_is_an_enum_and_its_flip() {
         let lexer = crate::lex::Lexer::new(src, 0, "test".into());
         assert!(crate::Parser::new(lexer).try_into_ast().is_err(), "{src}");
     }
+}
+
+#[test]
+fn a_granting_use_still_feeds_shadow_sets() {
+    // `uses()` reads the quoted name regardless of the granting tail
+    let pages = [
+        ("kit", "fn not(a: int) -> int { 1 - a }"),
+        ("own", "use \"kit\" granting { rng };"),
+    ];
+    assert_eq!(crate::lex::shadow_sets(&pages)[1], [false, false, true]);
 }

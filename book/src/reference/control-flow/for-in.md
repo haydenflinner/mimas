@@ -14,12 +14,12 @@ for x in xs {
 | Iterable | Each binding is |
 | :--- | :--- |
 | `[T]` (array) | an element, `T` |
-| `~{V}` (dict) | a `(str, V)` pair of key and value |
+| `{V}` (dict) | a `(str, V)` pair of key and value |
 | `str` | each character, as a one-character `str` |
 | `int` | the numbers `0` up to (but not including) the value |
 
 ```mimas
-for pair in ~{ x = 1, y = 2 } {
+for pair in { x : 1, y : 2 } {
     print(pair); // [x, 1], then [y, 2]
 }
 

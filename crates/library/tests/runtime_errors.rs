@@ -43,7 +43,7 @@ test_fail!(
 test_fail!(
     unwrap_null_faults,
     "let x: int? = null; print(x!);",
-    r#"let d = ~{ a = 1 }; print(d["missing"]!);"#
+    r#"let d = { a : 1 }; print(d["missing"]!);"#
 );
 
 // unwrapping a raised result with !

@@ -47,9 +47,9 @@ fn from_json(v: &str) -> Raisable<Value> {
 /// use std::parse;
 /// use std::parse::Value;
 ///
-/// let player = Value::Object(~{
-///     name = Value::String("ada"),
-///     level = Value::Number(3.0),
+/// let player = Value::Object({
+///     name : Value::String("ada"),
+///     level : Value::Number(3.0),
 /// });
 /// let text = parse::to_json(player)!; // "{\"level\":3,\"name\":\"ada\"}"
 /// ```

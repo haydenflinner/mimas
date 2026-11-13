@@ -46,7 +46,7 @@ impl std::fmt::Display for Annotation {
             )),
             Annotation::Array(e, dims) if dims.is_empty() => f.pad(&format!("[{e}]")),
             Annotation::Array(e, dims) => f.pad(&format!("[{e}; {}]", dims.iter().join(", "))),
-            Annotation::Dictionary(e) => f.pad(&format!("~{{{e}}}")),
+            Annotation::Dictionary(e) => f.pad(&format!("{{{e}}}")),
             Annotation::Function(params, ret) => f.pad(&format!(
                 "({}) -> {ret}",
                 params.iter().map(|p| p.to_string()).join(", "),

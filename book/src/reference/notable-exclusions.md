@@ -10,9 +10,9 @@ There are no pointers or references. They're a sharp tool that invites whole cat
 
 Arbitrary unions (`A | B`) undercut type inference and blur the line between static and dynamic typing in ways that get unpleasant fast. Where you'd reach for a union to write code generic over several types, mimas points you at a [pact](./pacts.md) instead. The only built-in "this or that" types are [options](./options.md) and [results](./error-handling.md), which are deliberate, well-behaved special cases.
 
-## Generics
+## The rest of generics
 
-mimas has no user-facing generics. Abstracting over types is the job of [pacts](./pacts.md), which cover the common cases without the inference cost and complexity that a full generic system brings to an embeddable language.
+mimas does have type parameters -- `fn id<T>(x: T) -> T`, `struct Pair<A, B>`, `enum Opt<T>` -- and [pact](./pacts.md) bounds on them (`fn f<T: Draw + Vary>(x: T)`). What it leaves out is Rust's heavier end: associated types, blanket impls, and the coherence machinery they drag in. Dispatch through a bound happens at run time, not by monomorphization, which is what keeps the checker small enough to stay embeddable.
 
 ## A borrow checker
 

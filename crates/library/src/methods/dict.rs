@@ -1,7 +1,12 @@
+use std::collections::HashMap;
+
 use macros::native;
+use shared::Ty;
 use vm::{Ctx, DictMap, Str, anon, api::Api};
 
 pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
+    // r[impl mimas.dict.type] `dict::new()` is the empty dict
+    api.add_assoc(Ty::Dict(Box::new(Ty::Anon(0))), new);
     api.add_method(len);
     api.add_method(contains_key);
     api.add_method(insert);
@@ -13,10 +18,22 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
 }
 
 #[native]
+/// Creates an empty dictionary. It needs a type annotation if nothing else
+/// tells the compiler what it will hold.
+///
+/// ```mimas
+/// let ids: {int} = dict::new();
+/// ids["a"] = 1; // ids is now {"a": 1}
+/// ```
+fn new<'gc>() -> HashMap<String, anon::T<'gc>> {
+    HashMap::new()
+}
+
+#[native]
 /// Returns the number of entries.
 ///
 /// ```mimas
-/// let n = ~{ a = 1, b = 2 }.len(); // 2
+/// let n = { a: 1, b: 2 }.len(); // 2
 /// ```
 fn len(d: &DictMap<'gc>) -> usize {
     d.len()
@@ -27,7 +44,8 @@ fn len(d: &DictMap<'gc>) -> usize {
 /// key apart from one whose value is `null`.
 ///
 /// ```mimas
-/// let slots: ~{int?} = ~{ a = null };
+/// let slots: {int?} = dict::new();
+/// slots["a"] = null;
 /// let a = slots.contains_key("a"); // true, though slots["a"] is null
 /// let b = slots.contains_key("b"); // false
 /// ```
@@ -45,7 +63,7 @@ fn contains_key<'gc>(ctx: Ctx<'gc>, d: &DictMap<'gc>, key: String) -> bool {
 /// Assigning with `dict[key] = value` does the same without returning anything.
 ///
 /// ```mimas
-/// let stock = ~{ apples = 3 };
+/// let stock = { apples: 3 };
 /// let old = stock.insert("apples", 5); // 3
 /// let new = stock.insert("pears", 2);  // null
 /// ```
@@ -62,8 +80,8 @@ fn insert(
 /// entry. The remaining entries keep their order.
 ///
 /// ```mimas
-/// let stock = ~{ apples = 3, pears = 2 };
-/// let a = stock.remove("apples"); // 3, and stock is now ~{ pears = 2 }
+/// let stock = { apples: 3, pears: 2 };
+/// let a = stock.remove("apples"); // 3, and stock is now { pears: 2 }
 /// let b = stock.remove("plums");  // null
 /// ```
 fn remove(d: &mut DictMap<'gc, anon::T<'gc>>, key: Str<'gc>) -> Option<anon::T<'gc>> {
@@ -74,7 +92,7 @@ fn remove(d: &mut DictMap<'gc, anon::T<'gc>>, key: Str<'gc>) -> Option<anon::T<'
 /// Returns every entry as a `(key, value)` tuple, in the order the keys were first inserted.
 ///
 /// ```mimas
-/// let scores = ~{ ada = 3, bob = 5 };
+/// let scores = { ada: 3, bob: 5 };
 /// let entries = scores.pairs(); // [("ada", 3), ("bob", 5)]
 /// ```
 ///

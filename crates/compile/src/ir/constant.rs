@@ -114,7 +114,7 @@ impl Constant {
             // dicts and structs allocate distinct runtime types; the `const` site can't inline
             // them as a bytecode Constant. callers should use `Self::emit_const_dec` (which
             // routes through `Literal::emit`) instead of trying to fold to a `Constant`.
-            Literal::Dictionary(_) | Literal::Struct(_) | Literal::Record(_) => unreachable!(
+            Literal::Struct(_) | Literal::Record(_) => unreachable!(
                 "Constant::from_literal: dict/struct have no scalar constant form -- use emit_const_dec",
             ),
         }
@@ -167,7 +167,7 @@ impl Constant {
     /// fresh, the way a struct const already does.
     pub(crate) fn needs_alloc(ir: &Ir, lit: &Literal) -> bool {
         match lit {
-            Literal::Dictionary(_) | Literal::Struct(_) | Literal::Record(_) => true,
+            Literal::Struct(_) | Literal::Record(_) => true,
             Literal::Array(es) | Literal::Tuple(es) => {
                 es.iter().any(|e| Self::expr_needs_alloc(ir, e))
             }

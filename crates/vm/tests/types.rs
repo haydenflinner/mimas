@@ -89,10 +89,10 @@ test_fail!(
 test_vm!(
     // r[verify mimas.struct.default]
     default_ctor_all_member_kinds,
-    "struct Foo { a: int, f: float, s: str, ok: bool, xs: [int], m: ~{int}, t: (int, str), maybe: int? }",
+    "struct Foo { a: int, f: float, s: str, ok: bool, xs: [int], m: {int}, t: (int, str), maybe: int? }",
     "Foo::default()" => instance!(Foo {
         a = Int(0), f = Float(0.0), s = str!(""), ok = Bool(false),
-        xs = array!(), m = dict!(~{}), t = array!(Int(0), str!("")), maybe = Null,
+        xs = array!(), m = dict!({}), t = array!(Int(0), str!("")), maybe = Null,
     }),
 );
 

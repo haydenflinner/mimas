@@ -309,7 +309,7 @@ fn node_label(ir: &Ir, inst: &Inst, body_names: &HashMap<BodyId, &str>) -> Strin
         Inst::BinOp { op, .. } => op.to_string(),
         Inst::UnaryOp { op, .. } => op.to_string(),
         Inst::NewArray => "[ ]".to_string(),
-        Inst::NewDict => "~{ }".to_string(),
+        Inst::NewDict => "{ }".to_string(),
         Inst::SetIndex { .. } => "[i] =".to_string(),
         Inst::GetIndex { .. } => "[i]".to_string(),
         Inst::GetField { slot, .. } => format!(".{slot}"),

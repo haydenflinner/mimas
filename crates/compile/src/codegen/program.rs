@@ -152,6 +152,10 @@ pub struct Type {
     pub fields: Vec<String>,
     /// Sorted by name, since the solver doesn't keep impls in declaration order.
     pub methods: IndexMap<String, Function>,
+    /// Names of the pacts this type implements (`impl Game for W` → `"Game"`),
+    /// sorted by declaration — how a host asks "which pacts does this page's
+    /// type opt into" rather than guessing at method names.
+    pub implements: Vec<String>,
 }
 
 #[derive(Debug, Clone)]

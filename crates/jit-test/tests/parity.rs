@@ -237,7 +237,7 @@ let total = 0;
 let i = 0;
 while i < 500 {
     let a = [i, i * 2];
-    let d = ~{ k = a[1] };
+    let d = { k : a[1] };
     total += a[0] + d["k"]!;
     i += 1;
 }

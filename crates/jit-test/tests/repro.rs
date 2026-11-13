@@ -60,7 +60,7 @@ fn repro_in() {
            if 99 in arr { h += 100; }
            let TEST_VALUE = f"{h}";"#,
         // + dict membership
-        r#"let arr = [10, 20, 30]; arr[0] = 5; let d = ~{ k = 9 }; d["j"] = 4;
+        r#"let arr = [10, 20, 30]; arr[0] = 5; let d = { k : 9 }; d["j"] = 4;
            let h = 0;
            if 20 in arr { h += 1; }
            if 99 in arr { h += 100; }

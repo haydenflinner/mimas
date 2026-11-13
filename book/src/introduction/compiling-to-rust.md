@@ -11,7 +11,7 @@ runtime shim instead of the VM:
 
 - **`mrt.rs`** — mimas's collection and stdlib surface re-implemented over
   persistent structures: `imbl::Vector` for `[T]` arrays,
-  `indexmap::IndexMap` for `~{T}` dicts (insertion-ordered, exactly like
+  `indexmap::IndexMap` for `{T}` dicts (insertion-ordered, exactly like
   the VM's `DictMap`), plus JSON and scalar helpers.
 - **`pl.rs`** — `std::polars`'s `__q_*` surface over real polars, so
   `query { }` blocks work natively too.

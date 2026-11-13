@@ -23,7 +23,7 @@ impl MdBook {
     /// Returns a copy with every chapter's mimas code blocks rendered to highlighted html.
     pub fn render(self) -> Self! {
         let sources = self.sources()!;
-        let cache = ~{};
+        let cache = dict::new();
         for (i, shiki) in Shiki::from_many(sources)!.enumerate() {
             cache[sources[i]] = shiki.to_html();
         }
@@ -42,8 +42,7 @@ impl MdBook {
 
     /// Serializes back into a Value ready for `parse::to_json`.
     pub fn serialize(self) -> parse::Value {
-        parse::Value::Object(~{
-            sections = parse::Value::Array(for item in self.sections collect item.serialize()),
+        parse::Value::Object({ sections: parse::Value::Array(for item in self.sections collect item.serialize()),
             __non_exhaustive = parse::Value::Null,
         })
     }
@@ -72,7 +71,7 @@ impl BookItem {
         }
     }
 
-    fn render(self, cache: ~{ str }) -> Self! {
+    fn render(self, cache: { str }) -> Self! {
         match self {
             BookItem::Chapter(chapter) => BookItem::Chapter(chapter.render(cache)!),
             other => other,
@@ -88,9 +87,9 @@ impl BookItem {
 
     fn serialize(self) -> parse::Value {
         match self {
-            BookItem::Chapter(chapter) => parse::Value::Object(~{ Chapter = chapter.serialize() }),
+            BookItem::Chapter(chapter) => parse::Value::Object({ Chapter: chapter.serialize() }),
             BookItem::Separator => parse::Value::String("Separator"),
-            BookItem::PartTitle(title) => parse::Value::Object(~{ PartTitle = parse::Value::String(title) }),
+            BookItem::PartTitle(title) => parse::Value::Object({ PartTitle: parse::Value::String(title) }),
         }
     }
 }
@@ -124,7 +123,7 @@ impl Chapter {
         }
     }
 
-    fn render(self, cache: ~{ str }) -> Self! {
+    fn render(self, cache: { str }) -> Self! {
         Self {
             name = self.name,
             content = self.render_blocks(cache)!,
@@ -145,7 +144,7 @@ impl Chapter {
     }
 
     /// Replaces every ```mimas fence in a markdown string with a Shiki HTML block.
-    fn render_blocks(self, cache: ~{ str }) -> str! {
+    fn render_blocks(self, cache: { str }) -> str! {
         let out = self.content;
         for found in self.content.find_all(BLOCK_PATTERN)! {
             let original = f"```mimas\n{found[1]}\n```";
@@ -156,18 +155,17 @@ impl Chapter {
 
 
     fn serialize(self) -> parse::Value {
-        parse::Value::Object(~{
-            name = parse::Value::String(self.name),
-            content = parse::Value::String(self.content),
-            number = if let n? = self.number {
+        parse::Value::Object({ name: parse::Value::String(self.name),
+            content: parse::Value::String(self.content),
+            number: if let n? = self.number {
                 parse::Value::Array(for x in n collect parse::Value::Number(x))
             } else {
                 parse::Value::Null
             },
-            path = if let p? = self.path { parse::Value::String(p) } else { parse::Value::Null },
-            source_path = if let p? = self.source_path { parse::Value::String(p) } else { parse::Value::Null },
-            parent_names = parse::Value::Array(for n in self.parent_names collect parse::Value::String(n)),
-            sub_items = parse::Value::Array(for s in self.sub_items collect s.serialize()),
+            path: if let p? = self.path { parse::Value::String(p) } else { parse::Value::Null },
+            source_path: if let p? = self.source_path { parse::Value::String(p) } else { parse::Value::Null },
+            parent_names: parse::Value::Array(for n in self.parent_names collect parse::Value::String(n)),
+            sub_items: parse::Value::Array(for s in self.sub_items collect s.serialize()),
         })
     }
 }

@@ -44,12 +44,12 @@ test_ty!(
 );
 test_ty!(
     let_infer_empty_dictionary,
-    "let a = ~{};",
+    "let a = dict::new();",
     "a" => dictionary!(unknown!()),
 );
 test_ty!(
     let_infer_dictionary,
-    "let a = ~{ a = 0 };",
+    "let a = { a : 0 };",
     "a" => dictionary!(Int)
 );
 test_ty!(
@@ -101,7 +101,7 @@ test_ty!(
 );
 test_ty!(
     let_explicate_dictionary,
-    "let a: ~{int} = ~{ a = 0 };",
+    "let a: {int} = { a : 0 };",
     "a" => dictionary!(Int)
 );
 test_ty!(
@@ -111,7 +111,7 @@ test_ty!(
 );
 test_ty!(
     empty_dict_unifies_with_typed_dict,
-    "let a: ~{int} = ~{};",
+    "let a: {int} = dict::new();",
     "a" => dictionary!(Int)
 );
 
@@ -364,7 +364,7 @@ test_fail!(
 );
 test_fail!(
     index_write_to_iterated_dict,
-    "let d = ~{};
+    "let d = dict::new();
      for (k, v) in d { d[\"a\"] = 1; }",
 );
 test_fail!(

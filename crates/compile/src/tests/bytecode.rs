@@ -950,7 +950,7 @@ test_lowering!(
 );
 test_lowering!(
     dict_index_yields_get_index,
-    "let d: ~{int} = ~{ k = 1 };\nlet x: int? = d[\"k\"];",
+    "let d: {int} = { k : 1 };\nlet x: int? = d[\"k\"];",
     Op::GetIndex { .. }
 );
 test_lowering!(
@@ -1045,7 +1045,7 @@ fn array_literal_lowers_to_newarray_and_push() {
 
 #[test]
 fn dict_literal_lowers_to_newdict_and_insert() {
-    let ops = compile_ops("let x: ~{int} = ~{ a = 1, b = 2 };");
+    let ops = compile_ops("let x: {int} = { a : 1, b : 2 };");
     assert!(
         ops.iter().any(|o| matches!(o, Op::NewDict { .. })),
         "expected NewDict:\n{ops:#?}"

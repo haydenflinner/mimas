@@ -466,6 +466,13 @@ impl<'a, 'gc> Api<'a, 'gc> {
         module: Option<Vec<String>>,
         describe: impl FnOnce(&Registry) -> ApiAdtDescriptor,
     ) -> AdtBinding {
+        // The same Rust type registered twice keeps the first binding —
+        // a second `adt_id` would split name resolution from the methods
+        // bound to the first (world re-registers game's `Vec3`, and a
+        // page's `v.norm()` then found no methods).
+        if let Some(binding) = self.library.registry().get_id(type_id).cloned() {
+            return binding;
+        }
         let adt_id = self.library.registry_mut().alloc();
         // pre-bind so the type can be self-referential
         self.library.registry_mut().bind_id(

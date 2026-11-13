@@ -4,9 +4,9 @@ use crate::components::Ty::*;
 test_ty!(array, "[0]" => array!(Int));
 test_ty!(tuple, "(0,)" => tuple!(Int));
 test_ty!(triple_tuple, "(0, 0, 0)" => tuple!(Int, Int, Int));
-test_ty!(dictionary, "~{ a = 0 }" => dictionary!(Int));
+test_ty!(dictionary, "{ a : 0 }" => dictionary!(Int));
 test_ty!(coerced_array, "[0, null]" => array!(option!(Int)));
-test_ty!(coerced_dictionary, "~{ a = 0, b = null }" => dictionary!(option!(Int)));
+test_ty!(coerced_dictionary, "{ a : 0, b : null }" => dictionary!(option!(Int)));
 test_ty!(coerced_tuple_with_null, "(0, null)" => tuple!(Int, Null));
 test_ty!(
     array_access,
@@ -30,28 +30,28 @@ test_ty!(
 );
 test_ty!(
     dictionary_access,
-    "let a = ~{ foo = [0] };",
+    "let a = { foo : [0] };",
     "a[\"foo\"]" => option!(array!(Int)),
 );
 test_ty!(
     optional_dictionary_access,
-    "let a: ~{int}? = null;",
+    "let a: {int}? = null;",
     "a?[\"foo\"]" => option!(Int),
 );
 test_ty!(
     chained_sets,
-    "let a = [ ~{ foo = [ [0] ] } ];",
+    "let a = [ { foo : [ [0] ] } ];",
     "a[0][\"foo\"]?[0][0]" => option!(Int),
 );
 test_ty!(
     chained_optional_set_accesses,
-    "let a: [[~{int}?]?]? = null;",
+    "let a: [[{int}?]?]? = null;",
     "a?[0]?[0]?[\"foo\"]" => option!(Int),
 );
-test_ty!(dict_index_is_option, "let d = ~{ a = 0 };", "d[\"a\"]" => option!(Int));
+test_ty!(dict_index_is_option, "let d = { a : 0 };", "d[\"a\"]" => option!(Int));
 test_fail!(
     plain_index_after_dict,
-    "let d = ~{ a = ~{ b = 0 } }; let y = d[\"a\"][\"b\"];"
+    "let d = { a : { b : 0 } }; let y = d[\"a\"][\"b\"];"
 );
 test_fail!(
     plain_dot_on_option,
@@ -73,23 +73,23 @@ test_ty!(
 );
 test_fail!(
     taint_stops_at_grouping,
-    "let a = [ ~{ foo = [[0]] } ]; let y = (a[0][\"foo\"]?[0])[0];"
+    "let a = [ { foo : [[0]] } ]; let y = (a[0][\"foo\"]?[0])[0];"
 );
 // one `?` per dict you reach through. dict<dict<array>>: the `["y"]` miss needs its own `?`, so a
 // single `?` then plain `[0]` is rejected; `?[0]` is required.
 test_fail!(
     dict_dict_array_one_question,
-    "let f: ~{~{[int]}} = ~{}; let y = f[\"x\"]?[\"y\"][0];"
+    "let f: {{[int]}} = dict::new(); let y = f[\"x\"]?[\"y\"][0];"
 );
 test_ty!(
     dict_dict_array_two_questions,
-    "let f: ~{~{[int]}} = ~{};",
+    "let f: {{[int]}} = dict::new();",
     "f[\"x\"]?[\"y\"]?[0]" => option!(Int),
 );
 // a terminal dict option is fine -- you only need a `?` to reach *through* one.
 test_ty!(
     dict_dict_terminal_option,
-    "let f: ~{~{int}} = ~{};",
+    "let f: {{int}} = dict::new();",
     "f[\"x\"]?[\"y\"]" => option!(Int),
 );
 
@@ -126,7 +126,7 @@ test_ty!(for_in_int, "for x in 5 { collect x }" => array!(Int));
 test_ty!(for_in_break, "for x in [] { break; }" => Unit);
 test_ty!(for_in_break_unit, "for x in [] { break (); }" => Unit);
 test_ty!(for_in_break_value, "for x in [] { break 0; }" => option!(Int));
-test_ty!(for_in_dict, "for (x, y) in ~{ foo = 10 } { break y; }" => option!(Int));
+test_ty!(for_in_dict, "for (x, y) in { foo : 10 } { break y; }" => option!(Int));
 test_ty!(
     for_in_break_option,
     "for x in [] {
@@ -180,7 +180,7 @@ test_fail!(
 );
 test_ty!(
     for_over_dict,
-    r#"let d = ~{ a = 1, b = 2 };
+    r#"let d = { a : 1, b : 2 };
     let keys = for (k, v) in d collect k;"#,
     "keys" => array!(Str)
 );
@@ -218,7 +218,7 @@ test_fail!(
 );
 test_fail!(bool_ordering, "let a = true > false;");
 test_fail!(array_ordering, "let a = [] > [];");
-test_fail!(dict_ordering, "let a = ~{} > ~{};");
+test_fail!(dict_ordering, "let a = dict::new() > dict::new();");
 test_fail!(null_ordering, "let a = null > null;");
 
 // Evaluations
@@ -434,14 +434,14 @@ test_ty!(
 
 test_ty!(
     in_dict,
-    r#"let a = ~{ foo = 0 };"#,
+    r#"let a = { foo : 0 };"#,
     r#""foo" in a"# => Bool,
     r#""foo" !in a"# => Bool,
 );
 
 test_fail!(
     in_does_not_search_values,
-    "let a = ~{ foo = 0}; let b = 0 in a;"
+    "let a = { foo : 0}; let b = 0 in a;"
 );
 
 // ice prevention
@@ -469,7 +469,7 @@ test_success!(
     "struct S { x: int }
      const S0: S = S { x = 5 };"
 );
-test_success!(const_dict, "const D: ~{int} = ~{ a = 1, b = 2 };");
+test_success!(const_dict, "const D: {int} = { a : 1, b : 2 };");
 
 // TypeMismatch shapes
 test_fail!(
@@ -480,7 +480,7 @@ test_fail!(
     "let n = 0; let a: float = n;",
 );
 test_fail!(nested_array_element_mismatch, "let a: [[int]] = [[\"x\"]];");
-test_fail!(dict_value_mismatch, "let a: ~{int} = ~{ k = \"x\" };");
+test_fail!(dict_value_mismatch, "let a: {int} = { k: \"x\" };");
 test_fail!(tuple_element_mismatch, "let a: (int, str) = (0, 0);");
 test_fail!(
     tuple_arity_mismatch,
@@ -517,7 +517,7 @@ test_fail!(
 test_fail!(eval_str_div, "let x = \"a\" / \"b\";");
 test_fail!(eval_bool_plus, "let x = true + false;");
 test_fail!(eval_array_plus, "let x = [0] + [1];");
-test_fail!(eval_dict_plus, "let x = ~{a=0} + ~{b=1};");
+test_fail!(eval_dict_plus, "let a = {a:0}; let b = {b:1}; let x = a + b;");
 test_fail!(eval_float_bitor, "let x = 1.0 | 1.0;");
 test_fail!(eval_shift_by_float, "let x = 1 << 1.0;");
 

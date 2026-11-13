@@ -344,6 +344,39 @@ impl Hoist for Impl {
                 pact: ctx.solver.pacts[pid].name.clone(),
             })?;
         }
+        if let Some(pid) = pid {
+            // the impl's required pacts (`pact X: Y`) check out once every impl
+            // is registered -- `resolve_pending_impls`
+            ctx.solver
+                .pending_required
+                .push((adt, pid, self.target.location()));
+            // `impl X for T via Y`: member coverage waits for the same phase.
+            // the default graft below doesn't run for it -- `via` covers by
+            // name, so a member the block omits lands from `Y` or reports
+            if let Some(via) = self.via.as_ref() {
+                let provided: FxHashSet<String> = self
+                    .items
+                    .iter()
+                    .filter_map(|i| match i.kind() {
+                        ItemKind::Function(f) => Some(f.name.lexeme.clone()),
+                        ItemKind::Const(c) => {
+                            Some(c.left.as_ident().map(|i| i.lexeme.clone()).unwrap_or_else(
+                                || c.left.to_string(),
+                            ))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                ctx.solver.pending_vias.push(PendingVia {
+                    adt,
+                    pact: pid,
+                    via: via.clone(),
+                    provided,
+                    target: self.target.clone(),
+                    location: self.target.location(),
+                });
+            }
+        }
 
         ctx.solver.ribs.push_impl(adt);
         // the impl target's own params are in scope for member signatures (`impl List` can
@@ -375,8 +408,11 @@ impl Hoist for Impl {
 
             // graft methods the impl omitted but the pact defaults, so they become real callable
             // methods on the adt (and collide like everything else if another pact already provides
-            // the name). freshen the header so each impl's `self` slot is independent.
-            if let Some(pid) = pid {
+            // the name). freshen the header so each impl's `self` slot is independent. a `via`
+            // impl skips this -- its omitted members land from the via pact instead
+            if let Some(pid) = pid
+                && self.via.is_none()
+            {
                 let provided: FxHashSet<String> = self
                     .items
                     .iter()
@@ -429,10 +465,18 @@ impl Hoist for Pact {
         // and the pact's own name resolve to it within its own method types (see `resolve_name`)
         let pact_id = ctx.solver.pacts.push(shared::Pact {
             name: self.name.lexeme.clone(),
+            // `pact A: B` bounds -- a later pact's name may not resolve yet, so
+            // the idents wait for `resolve_pending_impls` to fill this
+            requires: vec![],
             // `shared::Pact` keeps indexmap's own hasher: it is shared's type
             functions: indexmap::IndexMap::default(),
             constants: indexmap::IndexMap::default(),
         });
+        for req in self.requires.iter() {
+            ctx.solver
+                .pending_pact_requires
+                .push((pact_id, req.clone()));
+        }
         shared::name_pact(pact_id.index(), &self.name.lexeme);
         let prev_self = ctx.solver.pact_self.replace(pact_id);
 

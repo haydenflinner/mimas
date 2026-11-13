@@ -1,6 +1,6 @@
 fn area(r: float) -> float { 3.14159 * r * r }
 
-let d = ~{ a = 1, b = 2 };
+let d = { a : 1, b : 2 };
 let hits = 0;
 if d["a"]! + d["b"]! == 3 { hits += 1; }
 let i = 0;

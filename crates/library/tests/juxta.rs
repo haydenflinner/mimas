@@ -102,7 +102,7 @@ fn shadowing_an_operator_word_warns_with_a_code() {
     );
 }
 
-// Inside a sequence (`[…]`, `f(…)`, `~{…}`) commas are optional --
+// Inside a sequence (`[…]`, `f(…)`, `{…}`) commas are optional --
 // adjacency ends the element instead. Applying inside one needs
 // parens, so `[f x]` is `[f, x]` while `[f(x)]` applies.
 
@@ -120,7 +120,7 @@ test_run!(
     "add3(1, 2 3)" => "6",
     "add3(1 b = 2 c = 3)" => "6",
     // dicts: `name =` markers delimit the fields
-    "~{a = 1 b = 2}[\"a\"]! + ~{a = 1 b = 2}[\"b\"]!" => "3",
+    "({a : 1 b : 2})[\"a\"]! + ({a : 1 b : 2})[\"b\"]!" => "3",
     // a glued `-N` opens a new element -- direction vectors spell
     // `[0 -1 1 0]`, exactly as the eye reads them
     "[0 -1 1 0]" => "[0, -1, 1, 0]",

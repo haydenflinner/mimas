@@ -56,7 +56,7 @@ test_ty!(
     raise_any_value,
     "fn bad() -> int! { raise 0 }
      fn worse() -> int! { raise [1, 2] }
-     fn worst() -> int! { raise ~{code = 7} }",
+     fn worst() -> int! { raise {code : 7} }",
     "bad()" => result!(Int),
     "worse()" => result!(Int),
     "worst()" => result!(Int),

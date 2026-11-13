@@ -160,12 +160,18 @@ impl Compiler {
                                 Some((name, exported_fn(ir, signatures, dec)?))
                             })
                             .collect();
+                        let implements = resolved
+                            .implements
+                            .iter()
+                            .map(|p| ir.resolutions.pact_names[*p].clone())
+                            .collect();
                         out.types.insert(
                             name,
                             crate::Type {
                                 vis: ir.resolutions.decs[dec].vis,
                                 fields,
                                 methods,
+                                implements,
                             },
                         );
                     }

@@ -83,10 +83,10 @@ stmt_test!(
 );
 stmt_test!(
     let_explicate_dictionary,
-    "let a: ~{int} = ~{ a = 0 };",
+    "let a: {int} = {a: 0};",
     Let::new(
         ident!("a").into(),
-        Literal::Dictionary(vec![(ident!("a"), int!(0))]).into_expr(),
+        Literal::Record(vec![(ident!("a"), int!(0))]).into_expr(),
         Some(Annotation::Dictionary(Box::new(Annotation::Kw(TyKw::Int)))),
     )
 );
@@ -344,7 +344,7 @@ stmt_test!(
 
 stmt_test!(
     let_dictionary,
-    "let i: ~{str} = 0;",
+    "let i: {str} = 0;",
     Let::new(
         ident!("i").into(),
         int!(0),
@@ -405,7 +405,7 @@ stmt_test!(
 
 stmt_test!(
     let_absurd_type,
-    "let i: [ ~{ (int?, str, int) -> [ [ [int] ] ]? } ] = 0;",
+    "let i: [ { (int?, str, int) -> [ [ [int] ] ]? } ] = 0;",
     Let::new(
         ident!("i").into(),
         int!(0),
@@ -493,6 +493,31 @@ stmt_test!(
     "module @;",
     StmtKind::Module(Module::new(ident!("test")))
 );
+
+// r[verify mimas.fx.needs]
+stmt_test!(
+    needs_decl,
+    "needs { net, time };",
+    Needs::new(vec![ident!("net"), ident!("time")])
+);
+
+// r[verify mimas.fx.needs]
+stmt_test!(needs_empty, "needs {};", Needs::new(vec![]));
+
+// `needs` stays an ordinary name everywhere the decl grammar doesn't fit:
+// bound like any ident, applied like any fn value, and inside a block
+// `needs {x}` is a juxtaposition call, never a declaration.
+// r[verify mimas.fx.needs]
+#[test]
+fn needs_is_contextual() {
+    use crate::tests::utils::assert_parses;
+    assert_parses("let needs = 1;");
+    assert_parses("needs(1);");
+    assert_parses("fn f() { needs { x } }");
+    // a newline between `needs` and `{` closes the statement like anywhere else
+    let (_, errors) = crate::tests::utils::parse_to_strings("needs\n{ x };");
+    assert!(errors.is_empty(), "{errors:?}");
+}
 
 stmt_test!(
     assign,
@@ -673,7 +698,7 @@ stmt_test!(
 stmt_test!(
     optional_semicolon_impl,
     "impl Foo {}",
-    Impl::new(ident!("Foo"), None, vec![]).into_item()
+    Impl::new(ident!("Foo"), None, None, vec![]).into_item()
 );
 
 stmt_test!(
@@ -681,6 +706,7 @@ stmt_test!(
     "impl Foo { fn foo() {} }",
     Impl::new(
         ident!("Foo"),
+        None,
         None,
         vec![Function::new(ident!("foo"), vec![], None, block!()).into_item()],
     )
@@ -690,7 +716,7 @@ stmt_test!(
 stmt_test!(
     impl_pact_for_target,
     "impl Drawable for Foo {}",
-    Impl::new(ident!("Foo"), Some(ident!("Drawable")), vec![]).into_item()
+    Impl::new(ident!("Foo"), Some(ident!("Drawable")), None, vec![]).into_item()
 );
 
 stmt_test!(
@@ -699,6 +725,7 @@ stmt_test!(
     Impl::new(
         ident!("Foo"),
         Some(ident!("Drawable")),
+        None,
         vec![Function::new(ident!("draw"), vec![], None, block!()).into_item()],
     )
     .into_item()
@@ -707,7 +734,7 @@ stmt_test!(
 stmt_test!(
     empty_pact,
     "pact Foo {}",
-    Pact::new(ident!("Foo"), vec![]).into_item()
+    Pact::new(ident!("Foo"), vec![], vec![]).into_item()
 );
 
 stmt_test!(
@@ -715,6 +742,7 @@ stmt_test!(
     "pact Foo { fn foo(); }",
     Pact::new(
         ident!("Foo"),
+        vec![],
         vec![PactItem::Fn {
             name: ident!("foo"),
             parameters: vec![],
@@ -731,6 +759,7 @@ stmt_test!(
     "pact Foo { fn foo() -> (); }",
     Pact::new(
         ident!("Foo"),
+        vec![],
         vec![PactItem::Fn {
             name: ident!("foo"),
             parameters: vec![],
@@ -747,6 +776,7 @@ stmt_test!(
     "pact Foo { fn foo() { 0 } }",
     Pact::new(
         ident!("Foo"),
+        vec![],
         vec![PactItem::Fn {
             name: ident!("foo"),
             parameters: vec![],
@@ -763,6 +793,7 @@ stmt_test!(
     "pact Foo { const FOO: int; }",
     Pact::new(
         ident!("Foo"),
+        vec![],
         vec![PactItem::Const {
             name: ident!("FOO"),
             annotation: Annotation::Kw(TyKw::Int),
@@ -777,6 +808,7 @@ stmt_test!(
     "pact Foo { const ID: int; fn name() -> str; fn cost() -> int; }",
     Pact::new(
         ident!("Foo"),
+        vec![],
         vec![
             PactItem::Const {
                 name: ident!("ID"),
@@ -1287,4 +1319,96 @@ fn if_body_starting_with_an_assignment_is_fine() {
             .try_into_ast()
             .unwrap_or_else(|e| panic!("{src}: {e:?}"));
     }
+}
+
+// `use "page@H";` / `use "page@latest";` / `use "page" granting {…};` --
+// the version tail rides inside the quoted name, the grant outside it.
+// r[verify mimas.use.page.target]
+#[test]
+fn use_a_pinned_page() {
+    let h = "a".repeat(64);
+    let (ast, errors) = crate::tests::utils::parse(&format!("use \"kit@{h}\";"));
+    assert!(errors.is_empty(), "{errors:?}");
+    let StmtKind::Item(item) = ast.stmts()[0].kind() else {
+        panic!("expected an item")
+    };
+    let ItemKind::Use(Use::Host(host)) = item.kind() else {
+        panic!("expected a host use")
+    };
+    assert_eq!(host.name, format!("kit@{h}"));
+    assert_eq!(
+        host.target(),
+        crate::UseTarget::Pinned {
+            page: "kit",
+            hash: h.as_str()
+        }
+    );
+    assert!(host.grants.is_none());
+}
+
+// r[verify mimas.use.page.target]
+#[test]
+fn use_a_following_page() {
+    let (ast, errors) = crate::tests::utils::parse("use \"kit@latest\";");
+    assert!(errors.is_empty(), "{errors:?}");
+    let StmtKind::Item(item) = ast.stmts()[0].kind() else {
+        panic!("expected an item")
+    };
+    let ItemKind::Use(Use::Host(host)) = item.kind() else {
+        panic!("expected a host use")
+    };
+    assert_eq!(host.target(), crate::UseTarget::Follow("kit"));
+}
+
+// r[verify mimas.use.page.granting]
+#[test]
+fn use_page_granting() {
+    let (ast, errors) = crate::tests::utils::parse("use \"kit\" granting { net, rng };");
+    assert!(errors.is_empty(), "{errors:?}");
+    let StmtKind::Item(item) = ast.stmts()[0].kind() else {
+        panic!("expected an item")
+    };
+    let ItemKind::Use(Use::Host(host)) = item.kind() else {
+        panic!("expected a host use")
+    };
+    assert_eq!(host.grants_fx(), Some(shared::Fx::NET | shared::Fx::RNG));
+    assert_eq!(
+        format!("{}", Use::Host(host.clone())),
+        "use \"kit\" granting { net, rng };"
+    );
+}
+
+// r[verify mimas.use.page.granting]
+#[test]
+fn use_page_granting_empty_is_a_purity_assertion() {
+    let (ast, errors) = crate::tests::utils::parse("use \"kit\" granting {};");
+    assert!(errors.is_empty(), "{errors:?}");
+    let StmtKind::Item(item) = ast.stmts()[0].kind() else {
+        panic!("expected an item")
+    };
+    let ItemKind::Use(Use::Host(host)) = item.kind() else {
+        panic!("expected a host use")
+    };
+    assert_eq!(host.grants_fx(), Some(shared::Fx::empty()));
+}
+
+// r[verify mimas.use.page.granting]
+#[test]
+fn use_page_granting_unknown_effect_errors() {
+    let (_, errors) = crate::tests::utils::parse("use \"kit\" granting { magic };");
+    assert!(!errors.is_empty());
+}
+
+#[test]
+fn use_page_granting_must_share_the_line() {
+    // `granting` on the next line is no clause -- include lines are one
+    // line each, so the use ends at the newline.
+    let (ast, _) = crate::tests::utils::parse("use \"kit\"\ngranting { net };");
+    let StmtKind::Item(item) = ast.stmts()[0].kind() else {
+        panic!("expected an item")
+    };
+    let ItemKind::Use(Use::Host(host)) = item.kind() else {
+        panic!("expected a host use")
+    };
+    assert!(host.grants.is_none());
 }

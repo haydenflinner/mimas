@@ -14,7 +14,7 @@ for i in N {
 }
 
 // histogram it into a dict<str, int>
-let hist: ~{int} = ~{};
+let hist: {int} = dict::new();
 for x in data {
     let key = keys[x];
     if key in hist {

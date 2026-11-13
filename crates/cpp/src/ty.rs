@@ -41,7 +41,7 @@ pub enum CTy {
     Char,
     /// A sequence container; `kind` refines member-call lowering.
     Arr(Box<CTy>, SeqKind),
-    /// `std::map`/`std::unordered_map`/`std::set` over `str` keys — mimas `~{V}`.
+    /// `std::map`/`std::unordered_map`/`std::set` over `str` keys — mimas `{V}`.
     Dict(Box<CTy>),
     /// `std::set`/`std::unordered_set` (non-str keys emulated by a `[T]` +
     /// dedup; sorted-order iteration is approximated and warned about).
@@ -68,7 +68,7 @@ impl CTy {
             CTy::Float => "float".into(),
             CTy::Str | CTy::Char => "str".into(),
             CTy::Arr(t, _) => format!("[{}]", t.annot()?),
-            CTy::Dict(v) => format!("~{{{}}}", v.annot()?),
+            CTy::Dict(v) => format!("{{{}}}", v.annot()?),
             CTy::Set(t) => format!("[{}]", t.annot()?),
             CTy::Tuple(ts) => format!(
                 "({})",
@@ -93,7 +93,7 @@ impl CTy {
             CTy::Float => "0.0".into(),
             CTy::Str | CTy::Char => "\"\"".into(),
             CTy::Arr(..) | CTy::Set(_) => "array::new()".into(),
-            CTy::Dict(_) => "~{}".into(),
+            CTy::Dict(_) => "dict::new()".into(),
             CTy::Tuple(ts) => format!(
                 "({})",
                 ts.iter()
@@ -133,7 +133,7 @@ impl CTy {
         match self {
             CTy::Arr(..) | CTy::Set(_) => format!("(for __e in {e} collect __e)"),
             CTy::Dict(_) => {
-                format!("{{ let __d = ~{{}}; for (__k, __v) in {e} {{ __d[__k] = __v; }} __d }}")
+                format!("{{ let __d = dict::new(); for (__k, __v) in {e} {{ __d[__k] = __v; }} __d }}")
             }
             CTy::Struct(n) => match structs.get(n) {
                 Some(fields) => {

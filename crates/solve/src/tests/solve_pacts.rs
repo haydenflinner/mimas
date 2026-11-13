@@ -598,3 +598,164 @@ test_fail!(
     "pact P { fn g(self) -> int; fn f(x: int) -> Self { self } }",
     "struct W { n: int } impl W { fn f(x: int) -> int { self.n } }",
 );
+
+// r[verify mimas.pact.requires] r[verify mimas.pact.requires.reach]
+// `pact A: B`: an `A` bound reaches `B`'s members, and an `impl A for T`
+// owes an `impl B for T`.
+test_ty!(
+    pact_requires_member_reach,
+    "pact Base { fn v(self) -> int; }
+     pact Up: Base {
+         fn w(self) -> int { self.v() + 1 }
+     }
+     struct S { n: int }
+     impl Base for S { fn v(self) -> int { self.n } }
+     impl Up for S {}",
+    "S { n = 1 }.w()" => Int,
+);
+
+// r[verify mimas.pact.requires] r[verify mimas.pact.requires.reach]
+// requires chain: `C: B`, `B: A` -- a `C` bound sees `A`
+test_ty!(
+    pact_requires_transitive,
+    "pact A { fn a(self) -> int; }
+     pact B: A {}
+     pact C: B {}
+     struct S { n: int }
+     impl A for S { fn a(self) -> int { self.n } }
+     impl B for S {}
+     impl C for S {}
+     fn go<T: C>(x: T) -> int { x.a() }",
+    "go(S { n = 4 })" => Int,
+);
+
+// r[verify mimas.pact.requires] r[verify mimas.pact.requires.reach]
+// a generic bound through the required pact checks the impl, not the chain
+test_ty!(
+    pact_requires_bound_satisfied_by_impl,
+    "pact A { fn a(self) -> int; }
+     pact B: A {}
+     struct S { n: int }
+     impl A for S { fn a(self) -> int { self.n } }
+     impl B for S {}
+     fn go<T: A>(x: T) -> int { x.a() }",
+    "go(S { n = 4 })" => Int,
+);
+
+// r[verify mimas.pact.requires]
+test_fail!(
+    pact_requires_impl_owes_required,
+    "pact B { fn b(self) -> int; }
+     pact A: B {}
+     struct T { x: int }
+     impl A for T {}",
+);
+
+// r[verify mimas.pact.requires]
+test_fail!(
+    pact_requires_non_pact_bound,
+    "struct T { x: int }
+     pact A: T {}",
+);
+
+// r[verify mimas.impl.via] r[verify mimas.impl.via.synth]
+// `impl X for T via Y` synthesizes `impl Y for T` (all `Y` members
+// defaulted) and forwards `X`'s members by name.
+test_ty!(
+    via_forwards_defaulted_pact,
+    "pact Y {
+         fn m(self) -> int { 1 }
+     }
+     pact X { fn m(self) -> int; }
+     struct T { n: int }
+     impl X for T via Y",
+    "T { n = 2 }.m()" => Int,
+);
+
+// r[verify mimas.impl.via] r[verify mimas.impl.via.provided]
+// a provided fn in the via block wins; the rest forward
+test_ty!(
+    via_block_members_stay,
+    "pact Y {
+         fn m(self) -> int { 1 }
+         fn n(self) -> int { 2 }
+     }
+     pact X {
+         fn m(self) -> int;
+         fn n(self) -> int;
+         fn own(self) -> int;
+     }
+     struct T { x: int }
+     impl X for T via Y {
+         fn own(self) -> int { self.x }
+     }",
+    "T { x = 3 }.own()" => Int,
+);
+
+// r[verify mimas.impl.via]
+// the via pact's own explicit impl forwards its provided members, not its
+// defaults
+test_ty!(
+    via_forwards_custom_impl,
+    "pact Y {
+         fn m(self) -> int { 1 }
+     }
+     pact X { fn m(self) -> int; }
+     struct T { n: int }
+     impl Y for T { fn m(self) -> int { self.n } }
+     impl X for T via Y",
+    "T { n = 9 }.m()" => Int,
+);
+
+// r[verify mimas.impl.via] r[verify mimas.impl.via.provided]
+// `X`'s own default covers what `Y` doesn't name
+test_ty!(
+    via_falls_back_to_own_default,
+    "pact Y {
+         fn m(self) -> int { 1 }
+     }
+     pact X {
+         fn m(self) -> int;
+         fn extra(self) -> int { 42 }
+     }
+     struct T { n: int }
+     impl X for T via Y",
+    "T { n = 0 }.extra()" => Int,
+);
+
+// r[verify mimas.impl.via] r[verify mimas.impl.via.synth]
+test_fail!(
+    via_requires_real_impl_when_members_lack_defaults,
+    "pact Y {
+         fn needed(self) -> int;
+         fn defaulted(self) -> int { 1 }
+     }
+     pact X { fn needed(self) -> int; }
+     struct T { n: int }
+     impl X for T via Y",
+);
+
+// r[verify mimas.impl.via] r[verify mimas.impl.via.match]
+test_fail!(
+    via_signature_mismatch_rejected,
+    "pact Y { fn m(self) -> int { 1 } }
+     pact X { fn m(self) -> str; }
+     struct T { n: int }
+     impl X for T via Y",
+);
+
+// r[verify mimas.impl.via] r[verify mimas.impl.via.provided]
+test_fail!(
+    via_uncovered_member_still_missing,
+    "pact Y { fn m(self) -> int { 1 } }
+     pact X {
+         fn m(self) -> int;
+         fn absent(self) -> int;
+     }
+     struct T { n: int }
+     impl X for T via Y",
+);
+
+// r[verify mimas.impl.via]
+// `via` on an inherent impl is a parse error -- parse_validity.rs's
+// `impl_via_rejected_on_inherent` owns it

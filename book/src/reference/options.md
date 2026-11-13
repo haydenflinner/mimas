@@ -48,7 +48,7 @@ Any type coerces *into* its option form when it meets a `null`. So an array lite
 
 ```mimas
 let a = [0, null, 1];               // a is [int?]
-let b = ~{ x = null, y = 0 };       // b is ~{int?}
+let b = { x : null, y : 0 };       // b is {int?}
 let c = if ready { 0 } else { null }; // c is int?
 ```
 
@@ -107,10 +107,10 @@ let grid: [[int]]? = null;
 let cell: int? = grid?[0][1]; // null if `grid` is null
 ```
 
-A dict index is different: the key might miss, so each dict you reach *through* spends its own `?`. With a `~{~{[int]}}`, both dict hops are options:
+A dict index is different: the key might miss, so each dict you reach *through* spends its own `?`. With a `{{[int]}}`, both dict hops are options:
 
 ```mimas
-let f: ~{~{[int]}} = ~{ a = ~{ b = [0] } };
+let f: {{[int]}} = { a : { b : [0] } };
 
 let x: int? = f["a"]?["b"]?[0]; // two dicts -> two `?`, then the array drill rides
 // f["a"]?["b"][0]  // compile error: the `["b"]` miss isn't handled before `[0]`
@@ -119,7 +119,7 @@ let x: int? = f["a"]?["b"]?[0]; // two dicts -> two `?`, then the array drill ri
 The rule is one `?` for each option you reach *through*. A trailing option is fine -- you spend a `?` to index past one, not to produce one:
 
 ```mimas
-let users: ~{~{int}} = ~{ alice = ~{ score = 10 } };
+let users: {{int}} = { alice : { score : 10 } };
 let score: int? = users["alice"]?["score"]; // `?` reaches through ["alice"]; the result is the option
 ```
 

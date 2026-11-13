@@ -332,7 +332,7 @@ test_recover!(
     stmts: ["let a = 1;", "foo()", "let b = 2;"],
 );
 
-// `~{ a = 1 b = 2 }` and `[1 2]` used to be the broken lists here; commas
+// `{ a = 1 b = 2 }` and `[1 2]` used to be the broken lists here; commas
 // are optional inside sequences now (`Juxta::Comma`), so they parse.
 test_single_error!(
     broken_list_does_not_truncate_its_block,
@@ -884,10 +884,10 @@ test_recover!(
 
 test_recover!(
     unclosed_dictionary_annotation,
-    "let a: ~{int = 1;
+    "let a: {int = 1;
      let b = 2;",
     errors: ["expected token"],
-    stmts: ["let a: ~{int} = 1;", "let b = 2;"],
+    stmts: ["let a: {int} = 1;", "let b = 2;"],
 );
 
 test_single_error!(
@@ -934,7 +934,7 @@ test_single_error!(
     "{",
     "[",
     "(",
-    "~{",
+    "{a:",
 );
 
 test_single_error!(
@@ -1125,7 +1125,7 @@ fn sum(values: [int], start: int = 0) -> int? {
 }
 
 let p = Point { x = 1, y = -2 };
-let names = ~{ a = "x", b = f"{p.x}!" };
+let names = { a: "x", b: f"{p.x}!" };
 let f = |a: int, b| a + b;
 let pair = (sum([1, 2, 3], start = 4), names["a"]?);
 while let (a, b) = pair {

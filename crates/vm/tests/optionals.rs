@@ -80,8 +80,8 @@ test_vm!(
 // the plain `[0]` and comes out null rather than faulting
 test_vm!(
     taint_ride_null_short_circuits,
-    "let a: [~{[[int]]}] = [~{ foo = [[7]] }];
-     let b: [~{[[int]]}] = [~{}];",
+    "let a: [{[[int]]}] = [{ foo : [[7]] }];
+     let b: [{[[int]]}] = [dict::new()];",
     "a[0][\"foo\"]?[0][0]" => Int(7),
     "b[0][\"foo\"]?[0][0]" => Null,
 );
@@ -199,10 +199,10 @@ test_vm!(
     raise_any_value_keeps_payload,
     "fn die() -> int! { raise 42 }
      fn die_list() -> int! { raise [1, 2] }
-     fn die_dict() -> int! { raise ~{x = 9} }",
+     fn die_dict() -> int! { raise {x : 9} }",
     "die()" => Raised(Box::new(Int(42))),
     "die_list()" => Raised(Box::new(array!(Int(1), Int(2)))),
-    "die_dict()" => Raised(Box::new(dict! { ~{x = Int(9)} })),
+    "die_dict()" => Raised(Box::new(dict! { {x: Int(9)} })),
 );
 
 // `?` in a `T?` function turns a structured raise into its null without

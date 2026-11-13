@@ -83,7 +83,13 @@ impl Unification {
             // fulfills `Self`, as the value could be any implementer, not necessarily the
             // receiver's type. Direction actually matters here, unlike the adt/pact
             // rule below.
-            (Ty::Skolem(pid), Ty::Pacts(pids)) if pids.iter().all(|p| *p == *pid) => {
+            // `Self` fulfills its own pact's bound -- including the pacts it
+            // requires (`pact A: B` makes `Self: A` a `B` too)
+            (Ty::Skolem(pid), Ty::Pacts(pids))
+                if pids
+                    .iter()
+                    .all(|p| solver.pact_closure(*pid).contains(p)) =>
+            {
                 Ok(Substitution::None)
             }
 

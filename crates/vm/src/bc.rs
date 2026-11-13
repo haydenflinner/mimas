@@ -1904,7 +1904,7 @@ pub mod jit {
         }
     }
 
-    /// `Op::NewDict` — `regs[d] = ~{}`.
+    /// `Op::NewDict` — `regs[d] = dict::new()`.
     pub unsafe extern "C" fn new_dict<'gc>(regs: *mut Val<'gc>, d: usize, ctx: Ctx<'gc>) {
         unsafe {
             *regs.add(d) = Val::Dict(ctx.new_dict(DictMap::new()));

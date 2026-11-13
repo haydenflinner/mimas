@@ -80,10 +80,10 @@ macro_rules! array {
     }};
 }
 
-// mirrors mimas's `~{}` dict literal so the expected reads like the source
+// mirrors mimas's `{k: v}` dict literal so the expected reads like the source
 #[macro_export]
 macro_rules! dict {
-    ( ~{ $($key:ident = $val:expr),* $(,)? } ) => {{
+    ( { $($key:ident : $val:expr),* $(,)? } ) => {{
         $crate::vm_test_utils::Captured::Dict(::std::vec![
             $( (stringify!($key).to_string(), $val) ),*
         ])

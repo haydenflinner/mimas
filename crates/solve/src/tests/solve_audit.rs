@@ -105,10 +105,10 @@ test_fail!(
 
 // ---- covariant containers, take 2: dict + generic adt -------------------------------
 test_fail!(
-    #[ignore = "known unsound: ~{int} widens to ~{int?} -- dict value is invariant, unify recurses covariantly"]
+    #[ignore = "known unsound: {int} widens to {int?} -- dict value is invariant, unify recurses covariantly"]
     covariant_dict,
-    "let d: ~{int} = ~{ x = 1 };
-     fn poison(m: ~{int?}) { m[\"k\"] = null; }
+    "let d: {int} = { x : 1 };
+     fn poison(m: {int?}) { m[\"k\"] = null; }
      poison(d);"
 );
 test_fail!(

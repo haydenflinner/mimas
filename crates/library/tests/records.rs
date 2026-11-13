@@ -48,7 +48,7 @@ test_run!(
     the_dict_type_needs_no_tilde,
     "fn total(d: {int}) -> int { d[\"a\"]! + d[\"b\"]! }",
     "total({ a: 1, b: 2 })" => "3",
-    "{ let e: {int} = ~{}; e.len() }" => "0",
+    "{ let e: {int} = dict::new(); e.len() }" => "0",
     // inside a tuple type and an enum payload too
     "{ let t: (int, {int}) = (1, { a: 2 }); t.1[\"a\"]! }" => "2",
 );
@@ -76,7 +76,7 @@ test_run!(
     PT,
     "Pt { x: 1.0, y: 2.0 }.y" => "2.0",
     "Pt { x = 1.0, y: 2.0 }.x" => "1.0",
-    "~{ a: 1, b = 2 }[\"a\"]!" => "1",
+    "{ a: 1, b : 2 }[\"a\"]!" => "1",
 );
 
 // r[verify mimas.record.context]

@@ -786,9 +786,11 @@ fn inspect_lines(name: &str, value: &Inspect, depth: usize, out: &mut Vec<String
             }
             out.push(format!("{indent}]"));
         }
-        Inspect::Dict(entries) if entries.is_empty() => out.push(format!("{indent}{name} = ~{{}}")),
+        Inspect::Dict(entries) if entries.is_empty() => {
+            out.push(format!("{indent}{name} = dict::new()"))
+        }
         Inspect::Dict(entries) => {
-            out.push(format!("{indent}{name} = ~{{"));
+            out.push(format!("{indent}{name} = {{"));
             for (k, v) in entries {
                 inspect_lines(k, v, depth + 1, out);
             }

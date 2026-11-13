@@ -1295,7 +1295,7 @@ impl<'a> Lower<'a> {
                 }
                 "erase" => {
                     return format!(
-                        "{{ let __d = ~{{}}; for (__k, __v) in {recv} {{ if __k != {} {{ __d[__k] = __v; }} }} {recv} = __d; () }}",
+                        "{{ let __d = dict::new(); for (__k, __v) in {recv} {{ if __k != {} {{ __d[__k] = __v; }} }} {recv} = __d; () }}",
                         arg0()
                     );
                 }

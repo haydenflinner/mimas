@@ -389,5 +389,5 @@ test_fail!(
     "struct P { x: float, y: float }
      const ORIGIN = P { x = 0.0, y = 0.0 };
      fn h(p: P = ORIGIN) -> float { p.x }",
-    "fn d(m: ~{int} = ~{}) -> int { m.len() }",
+    "fn d(m: {int} = dict::new()) -> int { m.len() }",
 );

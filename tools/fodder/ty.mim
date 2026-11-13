@@ -114,10 +114,10 @@ impl Ty {
     }
 }
 
-pub struct AdtFields(~{ Ty })
+pub struct AdtFields({ Ty })
 impl AdtFields {
     pub fn new(len: int) -> Self {
-        let d = ~{};
+        let d = dict::new();
         for _ in len {
             d[words::numbered_noun()] = Ty::random();
         }

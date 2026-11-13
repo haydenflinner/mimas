@@ -389,7 +389,7 @@ impl<'s> Parser<'s> {
             // goes without one
             if rel.seed.is_some() || clauses.iter().any(|c| c.head.lexeme == rel.name.lexeme) {
                 let index = format!("__dl_x_{}", rel.name.lexeme);
-                stmts.push(b.let_(&index, None, b.e(Literal::Dictionary(vec![]))));
+                stmts.push(b.let_(&index, None, b.e(Literal::Record(vec![]))));
             }
             if let Some(seed) = rel.seed {
                 seeds.push((name, seed));

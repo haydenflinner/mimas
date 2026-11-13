@@ -114,7 +114,7 @@ pub enum Ty {
     /// See more in the [book](https://mim.as/reference/collections/arrays.html).
     Array(Box<Ty>, Len),
     /// A hash map from string keys to values of one type, like a `HashMap<String, T>` in Rust.
-    /// Written `~{T}`. Any key might be absent, so indexing one yields `T?`.
+    /// Written `{T}`. Any key might be absent, so indexing one yields `T?`.
     ///
     /// See more in the [book](https://mim.as/reference/collections/dictionaries.html).
     Dict(Box<Ty>),
@@ -336,6 +336,10 @@ impl Ty {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Pact {
     pub name: String,
+    /// Pacts this one requires (`pact A: B`): every implementer of `A` must
+    /// also implement each entry, and their members are reachable through an
+    /// `A` bound. Filled by `resolve_pending_impls`, so empty until then.
+    pub requires: Vec<PactId>,
     pub functions: IndexMap<String, (FnHeader, Option<Ty>)>,
     pub constants: IndexMap<String, Ty>,
 }
@@ -514,7 +518,7 @@ impl Ty {
                 }
                 format!("[{}; {}]", elem.display(names), dims.iter().join(", "))
             }
-            Ty::Dict(ty) => format!("~{{{}}}", ty.display(names)),
+            Ty::Dict(ty) => format!("{{{}}}", ty.display(names)),
             Ty::Tuple(members) => {
                 format!("({})", members.iter().map(|v| v.display(names)).join(", "))
             }

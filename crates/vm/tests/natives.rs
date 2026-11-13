@@ -257,8 +257,8 @@ native_tests! { install_all;
 
     native_returns_dict: "let TEST_VALUE = make_map();"
         => Captured::Dict(vec![("k".into(), Captured::Int(9))]);
-    native_takes_dict: r#"let TEST_VALUE = lookup(~{ a = 1, b = 2 }, "b");"# => Captured::Int(2);
-    native_takes_dict_missing_key: r#"let TEST_VALUE = lookup(~{ a = 1 }, "z");"# => Captured::Int(-1);
+    native_takes_dict: r#"let TEST_VALUE = lookup({ a : 1, b : 2 }, "b");"# => Captured::Int(2);
+    native_takes_dict_missing_key: r#"let TEST_VALUE = lookup({ a : 1 }, "z");"# => Captured::Int(-1);
 
     native_raisable_ok_unwrap: "let TEST_VALUE = checked_div(10, 2)!;" => Captured::Int(5);
     native_raisable_raised_absolve: "let TEST_VALUE = checked_div(1, 0) absolve |e| -99;" => Captured::Int(-99);

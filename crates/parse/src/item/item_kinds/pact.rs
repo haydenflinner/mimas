@@ -11,6 +11,10 @@ use shared::{Located, Location};
 #[derive(Debug, PartialEq, Clone)]
 pub struct Pact {
     pub name: Ident,
+    /// The pacts this one requires: `pact Drag: Slots` declares that every
+    /// implementer of `Drag` also implements `Slots`, and that `Slots`'
+    /// members are reachable through a `Drag` bound (`mimas.pact.requires`).
+    pub requires: Vec<Ident>,
     pub items: Vec<PactItem>,
     /// The pact's laws, its `check |x| …` lines (`mimas.pact.law`). Each was
     /// lowered to a top-level `fn` whose parameters are the pact's values;
@@ -18,9 +22,10 @@ pub struct Pact {
     pub laws: Vec<Law>,
 }
 impl Pact {
-    pub(crate) fn new(name: Ident, items: Vec<PactItem>) -> Self {
+    pub(crate) fn new(name: Ident, requires: Vec<Ident>, items: Vec<PactItem>) -> Self {
         Self {
             name,
+            requires,
             items,
             laws: vec![],
         }
@@ -50,11 +55,16 @@ impl IntoItem for Pact {}
 #[mutants::skip]
 impl std::fmt::Display for Pact {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let requires = if self.requires.is_empty() {
+            String::new()
+        } else {
+            format!(": {}", self.requires.iter().join(" + "))
+        };
         if self.items.is_empty() {
-            f.pad(&format!("pact {} {{}}", self.name))
+            f.pad(&format!("pact {}{requires} {{}}", self.name))
         } else {
             f.pad(&format!(
-                "pact {} {{ {} }}",
+                "pact {}{requires} {{ {} }}",
                 self.name,
                 self.items.iter().join(" ")
             ))

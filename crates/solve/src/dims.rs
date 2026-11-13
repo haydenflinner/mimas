@@ -617,7 +617,7 @@ impl<'a> Pass<'a> {
             }
             StmtKind::Item(item) => self.item(item),
             // `unit` decls register into the units table at parse — nothing to check
-            StmtKind::Module(_) | StmtKind::Unit(_) => {}
+            StmtKind::Module(_) | StmtKind::Unit(_) | StmtKind::Needs(_) => {}
         }
     }
 
@@ -1094,12 +1094,6 @@ impl<'a> Pass<'a> {
                             &format!("field `{}`", k.lexeme),
                         );
                     }
-                }
-                D::Any
-            }
-            Literal::Dictionary(fields) => {
-                for (_, v) in fields {
-                    self.expr(v);
                 }
                 D::Any
             }

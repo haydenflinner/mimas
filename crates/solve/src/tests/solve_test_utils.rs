@@ -6,15 +6,46 @@ use crate::{components::*, *};
 use parse::{Ident, Parser, lex::Lexer};
 use pretty_assertions::assert_eq;
 
+/// The test solver runs without a real library, so std associated fns
+/// (`dict::new()`) wouldn't resolve. Install a stub `Library<()>` carrying
+/// just the method entries the tests name — the `call` payload stays `()`
+/// because solving never invokes it.
+fn test_solver() -> Solver {
+    let mut solver = Solver::new();
+    let mut lib = api::Library::new();
+    lib.method(api::ApiMethod {
+        recv_ty: Ty::Dict(Box::new(Ty::Anon(0))),
+        name: "new".into(),
+        parameters: vec![],
+        param_dims: vec![],
+        param_names: vec![],
+        return_ty: Some(Ty::Dict(Box::new(Ty::Anon(0)))),
+        return_dim: None,
+        takes_self: false,
+        mutates_recv: false,
+        effects: Some(shared::Fx::empty()),
+        consumes: vec![],
+        consumes_recv: false,
+        must_use: false,
+        ctor: None,
+        doc: String::new(),
+        validate: None,
+        src: None,
+        call: (),
+    });
+    solver.install_library(&lib);
+    solver
+}
+
 thread_local! {
     pub static TEST_SESSION: RefCell<TestSession> =
-        RefCell::new(TestSession(Solver::new()));
+        RefCell::new(TestSession(test_solver()));
 }
 
 pub(crate) struct TestSession(pub Solver);
 impl TestSession {
     pub(crate) fn reset(&mut self) {
-        self.0 = Solver::new();
+        self.0 = test_solver();
     }
 
     pub(crate) fn run(&mut self, source: &str, file_name: impl Into<String>) -> Result<()> {

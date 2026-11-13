@@ -29,7 +29,6 @@ pub enum TokKind<'s> {
     Enum,
     LeftBrace,
     RightBrace,
-    TildeLeftBrace,
     LeftParenthesis,
     RightParenthesis,
     Comma,
@@ -181,7 +180,6 @@ impl Display for TokKind<'_> {
             TokKind::Enum => "enum",
             TokKind::LeftBrace => "{",
             TokKind::RightBrace => "}",
-            TokKind::TildeLeftBrace => "~{",
             TokKind::LeftParenthesis => "(",
             TokKind::RightParenthesis => ")",
             TokKind::Comma => ",",
@@ -337,7 +335,6 @@ impl TokKind<'_> {
                     | TokKind::LeftParenthesis
                     | TokKind::LeftSquare
                     | TokKind::LeftBrace
-                    | TokKind::TildeLeftBrace
                     | TokKind::Dollar
                     // `#1.10`, an exact literal; the parser checks a number follows
                     | TokKind::Hash
@@ -390,7 +387,6 @@ impl TokKind<'_> {
                 | TokKind::TyKw(_)
                 | TokKind::LeftParenthesis
                 | TokKind::LeftSquare
-                | TokKind::TildeLeftBrace
                 | TokKind::LeftBrace
         )
     }

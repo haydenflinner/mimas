@@ -144,14 +144,6 @@ fn reduce_literal<F: Fn(&Expr) -> Option<Literal>>(
             }
             Ok(Some(lit.clone()))
         }
-        Dictionary(fields) => {
-            for (_, e) in fields.iter() {
-                if reduce(e, resolve)?.is_none() {
-                    return Ok(None);
-                }
-            }
-            Ok(Some(lit.clone()))
-        }
         Struct(s) => {
             for (_, e) in s.fields.iter() {
                 if reduce(e, resolve)?.is_none() {

@@ -97,8 +97,8 @@ let xs: [int] = [3, 1, 2];
 xs.push(4);
 let first = xs[0]; // 0-based, reading past the end faults at runtime
 
-// Dictionary -- hash map of str keys to one value type: ~{V}
-let scores: ~{int} = ~{ alice = 10, bob = 7 }; // keys are bare idents
+// Dictionary -- hash map of str keys to one value type: {V}
+let scores: {int} = { alice : 10, bob : 7 }; // keys are bare idents
 let a: int? = scores["alice"]; // indexing yields V? (missing key -> null)
 scores.insert("cy", 3);
 

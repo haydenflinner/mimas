@@ -32,14 +32,14 @@ test_vm!(
 
 test_vm!(
     dict_index_present_and_missing,
-    "let d = ~{ a = 1, b = 2 };",
+    "let d = { a : 1, b : 2 };",
     "d[\"a\"]" => Int(1),
     "d[\"z\"]" => Null,
 );
 
 test_vm!(
     dict_taint_propagates,
-    "let a = [ ~{ foo = [[7]] } ];",
+    "let a = [ { foo : [[7]] } ];",
     "a[0][\"foo\"]?[0][0]" => Int(7),
 );
 
@@ -47,8 +47,8 @@ test_vm!(
 // when `["b"]` misses, so the chain comes out null instead of faulting.
 test_vm!(
     dict_two_questions,
-    "let nested: ~{~{~{int}}} = ~{ a = ~{ b = ~{ c = 9 } } };
-     let hole: ~{~{~{int}}} = ~{ a = ~{} };",
+    "let nested: {{{int}}} = { a : { b : { c : 9 } } };
+     let hole: {{{int}}} = { a : dict::new() };",
     "nested[\"a\"]?[\"b\"]?[\"c\"]" => Int(9),
     "hole[\"a\"]?[\"b\"]?[\"c\"]" => Null,
 );
@@ -69,7 +69,7 @@ test_vm!(
 
 test_vm!(
     in_dict,
-    r#"let d = ~{ foo = 0 };"#,
+    r#"let d = { foo : 0 };"#,
     r#""foo" in d"# => Bool(true),
     r#""bar" in d"# => Bool(false),
 );
@@ -82,7 +82,7 @@ test_vm!(
 
 test_vm!(
     array_of_dict_access,
-    r#"let a = [~{ x = 1 }, ~{ x = 2 }];"#,
+    r#"let a = [{ x : 1 }, { x : 2 }];"#,
     r#"a[0]["x"]"# => Int(1),
     r#"a[1]["x"]"# => Int(2),
 );

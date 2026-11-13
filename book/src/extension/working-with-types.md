@@ -20,7 +20,7 @@ You don't need to hand-write the lifetime on your function headers -- the macro 
 | `Option<T>` | `T?` | `None` and `null` convert to one another. Trailing `Option` parameters may be omitted at the call site |
 | `Raisable<T>` | `T!` | See [Runtime Errors](./runtime-errors.md) |
 | `Vec<T>` | `[T]` | Copied in and out (see [below](working-with-types.md#collections-copies-and-borrows)) |
-| `HashMap<String, T>` | `~{T}` | Copied in and out |
+| `HashMap<String, T>` | `{T}` | Copied in and out |
 | Tuples, up to 8 elements | `(A, B, ...)` | Runtime shape is an array |
 | A `#[mimas]` struct or enum | That type | |
 | `anon::T` (and `U`, `V`, `W`) | A type linked per call site | See [below](./working-with-types.md#anonymous-types) |

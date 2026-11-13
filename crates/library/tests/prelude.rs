@@ -145,9 +145,9 @@ avg_by(qty, kind)";
             "3",
             "2",
             "6",
-            "~{grain = 15, bean = 8} lb",
-            "~{grain = 2, bean = 1}",
-            "~{grain = 7.5, bean = 8} lb",
+            "{grain : 15, bean : 8} lb",
+            "{grain : 2, bean : 1}",
+            "{grain : 7.5, bean : 8} lb",
         ]
     );
 }

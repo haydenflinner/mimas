@@ -13,8 +13,8 @@ test_vm!(
     "\"foo\"" => str!("foo"),
     "[0]" => array!(Int(0)),
     "(0,)" => array!(Int(0)),
-    "~{ foo = 0 }" => dict!(~{
-        foo = Int(0)
+    "{ foo: 0 }" => dict!({
+        foo: Int(0)
     }),
 );
 
@@ -355,7 +355,7 @@ test_vm!(
 );
 test_vm!(
     dict_membership,
-    "let a = ~{ foo = 0 };",
+    "let a = { foo: 0 };",
     "\"foo\" in a" => Bool(true),
     "\"foo\" !in a" => Bool(false),
 );
@@ -389,18 +389,18 @@ test_vm!(
 
 test_vm!(
     dict_structural_eq,
-    "~{ a = 1, b = 2 } == ~{ a = 1, b = 2 }" => Bool(true),
+    "{ a: 1, b: 2 } == { a: 1, b: 2 }" => Bool(true),
 );
 
 // order-independent
 test_vm!(
     dict_structural_eq_reordered,
-    "~{ a = 1, b = 2 } == ~{ b = 2, a = 1 }" => Bool(true),
+    "{ a: 1, b: 2 } == { b: 2, a: 1 }" => Bool(true),
 );
 
 test_vm!(
     dict_structural_neq,
-    "~{ a = 1 } == ~{ a = 2 }" => Bool(false),
+    "{ a: 1 } == { a: 2 }" => Bool(false),
 );
 
 test_vm!(

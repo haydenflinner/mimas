@@ -209,7 +209,7 @@ fn union<'gc>(
 
 #[native]
 /// `xs - x` — the Z-set's -1: drops the first element `== x` (a quiet
-/// no-op when `x` isn't there; `~{int}` Z-sets can go negative, arrays
+/// no-op when `x` isn't there; `{int}` Z-sets can go negative, arrays
 /// can't). `xs - ys` below removes each `y` in turn.
 ///
 /// ```mimas

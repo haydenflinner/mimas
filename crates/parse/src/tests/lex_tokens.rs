@@ -205,7 +205,7 @@ tok_test!(block_comment_ignored_in_string: "\"/* not */\"" => String("/* not */"
 tok_test!(division_not_a_comment: "6 / 2" => Int(6), Slash, Int(2));
 
 tok_test!(double_colon_path: "a::b" => Ident("a"), DoubleColon, Ident("b"));
-tok_test!(tilde_dict: "~{}" => TildeLeftBrace, RightBrace);
+tok_test!(tilde: "~{}" => Tilde, LeftBrace, RightBrace);
 tok_test!(tilde_slash: "a ~/ b" => Ident("a"), TildeSlash, Ident("b"));
 tok_test!(hook_dot: "a?.b" => Ident("a"), HookDot, Ident("b"));
 tok_test!(hook_left_square: "a?[0]" => Ident("a"), HookLeftSquare, Int(0), RightSquare);

@@ -20,7 +20,7 @@ fn alias_probe() -> int {
     let b = Bag { items = xs };
     b.items[1] = 7;
     let zs = keep(xs);
-    let d = ~{k = xs};
+    let d = {k: xs};
     let row = d["k"]!;
     row[0] = 9;
     zs[0] + ys[1]

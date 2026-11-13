@@ -373,7 +373,6 @@ fn opens(kind: TokKind<'_>) -> bool {
             | TokKind::LeftSquare
             | TokKind::HookLeftSquare
             | TokKind::LeftBrace
-            | TokKind::TildeLeftBrace
     )
 }
 
@@ -450,7 +449,7 @@ fn needs_parens(tokens: &[(Tok<TokKind<'_>>, TokMeta)]) -> bool {
     for (tok, meta) in tokens {
         let kind = tok.kind;
         // a struct literal needs them where a `{` would open a body
-        if depth == 0 && matches!(kind, TokKind::LeftBrace | TokKind::TildeLeftBrace) {
+        if depth == 0 && matches!(kind, TokKind::LeftBrace) {
             return true;
         }
         if opens(kind) {

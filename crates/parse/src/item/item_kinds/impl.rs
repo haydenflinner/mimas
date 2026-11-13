@@ -12,14 +12,24 @@ pub struct Impl {
     pub target: Ident,
     /// The pact being implemented, if any.
     pub pact: Option<Ident>,
+    /// A pact this impl forwards members from: `impl Drag for Pow via
+    /// SlotDrag` covers each `Drag` member the block omits with `Pow`'s
+    /// `SlotDrag` member of the same name (`mimas.impl.via`).
+    pub via: Option<Ident>,
     /// The items this impl declares.
     pub items: Vec<Item>,
 }
 impl Impl {
-    pub(crate) fn new(target: Ident, pact: Option<Ident>, items: Vec<Item>) -> Self {
+    pub(crate) fn new(
+        target: Ident,
+        pact: Option<Ident>,
+        via: Option<Ident>,
+        items: Vec<Item>,
+    ) -> Self {
         Self {
             target,
             pact,
+            via,
             items,
         }
     }
@@ -37,6 +47,10 @@ impl std::fmt::Display for Impl {
         let head = match &self.pact {
             Some(pact) => format!("impl {} for {}", pact, self.target),
             None => format!("impl {}", self.target),
+        };
+        let head = match &self.via {
+            Some(via) => format!("{head} via {via}"),
+            None => head,
         };
         if self.items.is_empty() {
             f.pad(&format!("{head} {{}}"))
