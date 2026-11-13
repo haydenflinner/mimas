@@ -32,6 +32,11 @@ pub struct Ir {
     /// How many statements deep the lowering is: 1 for a statement written directly in a
     /// file's top level, more inside a block, loop or fn body. A `let` echoes only at 1.
     pub(crate) stmt_depth: u32,
+    /// Bodies holding a test case (`check` lines, `#[tests]` exprs, `#[test]` fns): their
+    /// statements echo at any depth, so a host that re-runs a failing check with `Echoes`
+    /// on gets the tape of what it computed. The calls cost one no-op native entry while
+    /// recording stays off. r[impl check.tape]
+    pub(crate) test_bodies: std::collections::HashSet<BodyId>,
 }
 
 impl Ir {
@@ -51,6 +56,7 @@ impl Ir {
             closure_bodies: HashMap::new(),
             current_loc: Location::SYNTHETIC,
             stmt_depth: 0,
+            test_bodies: std::collections::HashSet::new(),
         }
     }
 

@@ -46,10 +46,13 @@ impl Ir {
                         ir.pattern(&s.left, Some(value))?;
                         // A top-level `let NAME = …` hands its bound value to `echo` too, at
                         // the let's line: a host shows a number beside the `let` that made
-                        // it, the way a bare expression shows its value.
+                        // it, the way a bare expression shows its value. A `let` in a test
+                        // body echoes at any depth instead — the rerun of a failed check
+                        // tapes every statement it ran.
                         // r[impl mimas.echo.let]
-                        if ir.current_body == crate::ir::BodyId::ZERO
-                            && ir.stmt_depth == 1
+                        // r[impl check.tape]
+                        if (ir.current_body == crate::ir::BodyId::ZERO && ir.stmt_depth == 1
+                            || ir.test_bodies.contains(&ir.current_body))
                             && !ir.is_terminated()
                             && matches!(s.left.kind(), PatKind::Ident(_))
                             && let Some(nid) = ir.resolutions.echo_native
@@ -88,6 +91,8 @@ impl Ir {
                     parse::ItemKind::Function(f) => {
                         if item.is_test() {
                             ir.tests.push(f.name.lexeme.clone());
+                            let bid = ir.item_body_for(ir.node_dec(item.id()));
+                            ir.test_bodies.insert(bid);
                         }
                         let _ = f.emit(item.id(), ir);
                     }
@@ -96,6 +101,7 @@ impl Ir {
                             ir.tests.push(case.name.lexeme.clone());
                             let dec = ir.node_dec(case.id);
                             let bid = ir.item_body_for(dec);
+                            ir.test_bodies.insert(bid);
                             ir.in_body(bid, |ir| ir.lower_fn_body(&[], &[], &case.expr));
                         }
                     }
@@ -160,7 +166,9 @@ impl Ir {
                 // stdlib native that records it for a host (off unless the host asks):
                 // a notebook's cell shows its last expression. r[impl mimas.echo]
                 let value = expr.lower(ir);
-                if ir.current_body == crate::ir::BodyId::ZERO
+                // r[impl check.tape]
+                if (ir.current_body == crate::ir::BodyId::ZERO
+                    || ir.test_bodies.contains(&ir.current_body))
                     && !ir.is_terminated()
                     && let (Some(value), Some(nid)) = (value, ir.resolutions.echo_native)
                 {

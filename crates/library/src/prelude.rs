@@ -135,10 +135,12 @@ fn todo<'gc>(ctx: Ctx<'gc>, msg: Option<anon::T<'gc>>) -> Result<NeverReturn, Rt
 /// The value of a bare expression at a file's top level: the compiler hands
 /// every top-level expression statement's value here, and while a host has
 /// turned `Echoes` on this records the value's display text and structure at
-/// the statement's line — what a notebook cell shows under itself. Off (the
-/// default) it does nothing, so a plain run formats nothing. Unit is skipped,
-/// so a call made for its effect stays silent, and nothing reaches the out
-/// sink.
+/// the statement's line — what a notebook cell shows under itself. Statements
+/// inside test bodies (`check`, `#[test]`) call it too, at any depth, so a
+/// host that re-runs a failing check with recording on gets its tape. Off
+/// (the default) it does nothing, so a plain run formats nothing. Unit is
+/// skipped, so a call made for its effect stays silent, and nothing reaches
+/// the out sink.
 /// r[impl mimas.echo]
 fn echo<'gc>(ctx: Ctx<'gc>, val: anon::T<'gc>) -> Result<(), RtErr> {
     let echoes = ctx.fixture::<Echoes>();
