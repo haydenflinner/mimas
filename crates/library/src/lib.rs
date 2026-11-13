@@ -62,6 +62,10 @@ pub fn fsum(xs: impl IntoIterator<Item = f64>) -> f64 {
 }
 
 pub use std_lib::sys::ScriptArgs;
+/// `std::parse`'s `Value` adt, re-exported so host natives (e.g. `use
+/// cad`'s mesh/STEP emitters) can hand a `model-gen` card the same
+/// `Object`/`String` shapes a page builds in source.
+pub use std_lib::parse::Value as JsonValue;
 
 use vm::api::Api;
 

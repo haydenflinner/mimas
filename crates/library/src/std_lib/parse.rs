@@ -58,7 +58,7 @@ fn to_json(v: Value) -> Raisable<String> {
 }
 
 #[derive(MimasEnum)]
-enum Value {
+pub enum Value {
     Null,
     Bool(bool),
     Number(f64),

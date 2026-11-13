@@ -95,6 +95,13 @@ unit_ty!(
     /// checker refuses plain numbers at the call site.
     Rad, "rad", units::ANGLE
 );
+// r[impl mimas.unit.length]
+unit_ty!(
+    /// Meters -- `mm`/`cm`/`inch`/`ft` are the same dimension, scaled.
+    /// The `use cad` kernel's lengths: `cad::box(40mm, 30mm, 6mm)` type-checks,
+    /// a bare `40` does not.
+    Len, "m", units::LENGTH
+);
 unit_ty!(
     /// Pixels per second -- screen-space velocities.
     PxS, "px/s", units::PIXELS.div(units::TIME)
