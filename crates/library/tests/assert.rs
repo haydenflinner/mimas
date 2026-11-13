@@ -195,3 +195,107 @@ fn a_faulting_check_leaves_the_world_for_the_next() {
     assert!(results[1].passed(), "{results:?}");
 }
 
+// The failing check's operands come back on the `TestResult` as
+// `Inspect` trees — the example a debugger opens, left then right,
+// not just the text inside the message. r[verify check.line]
+#[test]
+fn a_failed_check_carries_its_operands() {
+    const SOURCE: &str = "check 39 == 40\n";
+    let mut vm = vm::Vm::compile(SOURCE, library::std).unwrap();
+    let results = vm.run_tests();
+    assert_eq!(results.len(), 1, "{results:?}");
+    assert!(!results[0].passed(), "{results:?}");
+    assert_eq!(
+        results[0].operands,
+        [vm::Inspect::Int(39), vm::Inspect::Int(40)],
+    );
+}
+
+// Each side is evaluated once into the desugar's temp, so a computed
+// operand lands as its whole `Inspect` shape — the dealt hand itself,
+// not its source text. r[verify check.line]
+#[test]
+fn a_computed_operand_keeps_its_shape() {
+    const SOURCE: &str = "check [1, 2, 3].len() == 4\ncheck [1, 2] == [9]\n";
+    let mut vm = vm::Vm::compile(SOURCE, library::std).unwrap();
+    let results = vm.run_tests();
+    assert_eq!(results.len(), 2, "{results:?}");
+    assert_eq!(
+        results[0].operands,
+        [vm::Inspect::Int(3), vm::Inspect::Int(4)],
+        "{results:?}"
+    );
+    assert_eq!(
+        results[1].operands,
+        [
+            vm::Inspect::Array(vec![vm::Inspect::Int(1), vm::Inspect::Int(2)]),
+            vm::Inspect::Array(vec![vm::Inspect::Int(9)]),
+        ],
+        "{results:?}"
+    );
+}
+
+// A bare `check x` records the checked value itself; a predicate check
+// records its arguments in order — the same values the message names.
+// r[verify check.report.call]
+#[test]
+fn unary_and_call_checks_carry_their_values() {
+    const SOURCE: &str = "fn is_one(n: int) -> bool { n == 1 }\n\
+                          let flag = false\n\
+                          check flag\n\
+                          check is_one(2)\n";
+    let mut vm = vm::Vm::compile(SOURCE, library::std).unwrap();
+    let results = vm.run_tests();
+    assert_eq!(results.len(), 2, "{results:?}");
+    assert_eq!(results[0].operands, [vm::Inspect::Bool(false)], "{results:?}");
+    assert_eq!(results[1].operands, [vm::Inspect::Int(2)], "{results:?}");
+}
+
+// Each operand is its own `__check_operand` call, so a predicate's
+// mixed-type arguments each keep their type — a `[…]` argument list
+// would force them to share one and not compile.
+// r[verify check.report.call]
+#[test]
+fn mixed_type_arguments_each_record() {
+    const SOURCE: &str = "fn fits(n: int, s: str) -> bool { n == s.len() }\n\
+                          check fits(2, \"abc\")\n";
+    let mut vm = vm::Vm::compile(SOURCE, library::std).unwrap();
+    let results = vm.run_tests();
+    assert_eq!(results.len(), 1, "{results:?}");
+    assert!(!results[0].passed(), "{results:?}");
+    assert_eq!(
+        results[0].operands,
+        [
+            vm::Inspect::Int(2),
+            vm::Inspect::Str("abc".into()),
+        ],
+    );
+}
+
+// A pass records nothing, and a check that faults *before* its operands
+// are compared records nothing — the record is drained after each case
+// so a stale one can't attribute to the next check.
+// r[verify check.world]
+#[test]
+fn operands_stay_with_the_check_that_failed() {
+    const SOURCE: &str = "let xs = [1, 2, 3]\n\
+                          check 1 == 1\n\
+                          check 39 == 40\n\
+                          check xs[9] == 1\n";
+    let mut vm = vm::Vm::compile(SOURCE, library::std).unwrap();
+    let results = vm.run_tests();
+    assert_eq!(results.len(), 3, "{results:?}");
+    assert!(results[0].passed(), "{results:?}");
+    assert!(results[0].operands.is_empty(), "{results:?}");
+    assert!(!results[1].passed(), "{results:?}");
+    assert_eq!(
+        results[1].operands,
+        [vm::Inspect::Int(39), vm::Inspect::Int(40)],
+    );
+    // `xs[9]` faults while its operand let evaluates — before the
+    // witness call runs — so it owns no operands, and the previous
+    // check's didn't leak onto it
+    assert!(!results[2].passed(), "{results:?}");
+    assert!(results[2].operands.is_empty(), "{results:?}");
+}
+

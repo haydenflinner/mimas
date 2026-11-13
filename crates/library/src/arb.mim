@@ -1,0 +1,97 @@
+// Arbitrary values for a pact's laws (library::ARB_SRC, shipped with std
+// through `Library::add_source`). A type that implements `Arbitrary` feeds
+// a pact's `check` lines without a hand-written `samples()`: the law
+// expansion draws `T::gen(size)` values off the one seeded stream behind
+// `int::random`/`bool::random`/`random::seed`, and a witness that breaks a
+// law walks `shrink` to the smallest candidate that still breaks it before
+// the failure is named.
+// r[impl mimas.pact.samples]
+
+/// Values a pact's laws can draw on their own. `gen` takes a `size` --
+/// bigger numbers, wilder values -- and reads the program's random stream,
+/// so `random::seed` replays a failing law check witness-for-witness.
+/// `shrink` lists simpler candidates, simplest first; the default shrinks
+/// nowhere, so an impl may name only `gen`.
+pact Arbitrary {
+    /// A value of `Self` drawn at `size`: `int::gen(10)` lands in ±10.
+    fn gen(size: int) -> Self;
+    /// Simpler values to try when `self` breaks a law, simplest first.
+    fn shrink(self) -> [Self] { [] }
+}
+
+impl Arbitrary for int {
+    /// Uniform over `-size ..= size`.
+    fn gen(size: int) -> int { int::random(2 * size + 1) - size }
+    /// `0`, then closes on `self` by halves -- `7` tries `0, 4, 6`, so a
+    /// failing law meets the smallest magnitude that still breaks it.
+    fn shrink(self) -> [int] {
+        let out: [int] = [];
+        if self != 0 { out.push(0); }
+        let half = (self / 2).to_int();
+        while half != 0 {
+            out.push(self - half);
+            half = (half / 2).to_int();
+        }
+        out
+    }
+}
+
+impl Arbitrary for float {
+    /// Uniform over `-size .. size`.
+    fn gen(size: int) -> float {
+        let n = size.to_float();
+        float::random(2.0 * n) - n
+    }
+    /// `0.0`, then halves toward `self`, the way `int`'s does.
+    fn shrink(self) -> [float] {
+        let out: [float] = [];
+        if self != 0.0 { out.push(0.0); }
+        let half = self / 2.0;
+        // ~20 steps reaches 1e-6 of any size; NaN and ∞ stall at `half ==
+        // self` rather than dwindling, so the count also caps the walk.
+        while half != 0.0 && half != self && out.len() < 20 {
+            out.push(self - half);
+            half = half / 2.0;
+        }
+        out
+    }
+}
+
+impl Arbitrary for bool {
+    /// A coin flip.
+    fn gen(_size: int) -> bool { bool::random() }
+    /// `true` falls to `false`; `false` is already as small as it gets.
+    fn shrink(self) -> [bool] { if self { [false] } else { [] } }
+}
+
+impl Arbitrary for str {
+    /// `size` or fewer characters of a small ASCII pool.
+    fn gen(size: int) -> str {
+        let pool = "abcd efgh ijkl mnop 0123";
+        let s = "";
+        for _i in int::random(size + 1) {
+            let j = int::random(pool.len());
+            s = s + pool[j .. j + 1];
+        }
+        s
+    }
+    /// `""`, then shorter prefixes by halves -- `"hello"` tries `""`,
+    /// `"he"`, `"h"`. Whole prefixes only; per-character shrinking would
+    /// drown the report in near-identical strings.
+    fn shrink(self) -> [str] {
+        let out: [str] = [];
+        if self.len() != 0 { out.push(""); }
+        let half = (self.len() / 2).to_int();
+        while half != 0 {
+            out.push(self[0 .. half]);
+            half = (half / 2).to_int();
+        }
+        out
+    }
+}
+
+impl Arbitrary for dec {
+    /// A whole dec in `±size` (fractional draws buy little against the
+    /// extra draw they cost).
+    fn gen(size: int) -> dec { int::gen(size).to_dec() }
+}

@@ -1220,3 +1220,134 @@ fn a_dataframe_survives_snapshot_and_restore() {
     assert_eq!(vm.resolve_name_to_string("same").unwrap().unwrap(), before);
     assert!(vm.resolve_name_to_string("q").unwrap().is_ok());
 }
+
+// ---- `data "…"` -- external sources with a check-time schema -----------
+// `data "name"` is the type-provider form: the host's resolver (the ambient
+// hook `solve::set_data_resolver`, which every compile path reads) answers
+// the name with a column schema, and `pull`/`query` code checks columns by
+// name. The runtime half is the host's own `__data` binding: a page-level
+// `fn __data` shadows the prelude fallback, which is how the web host's
+// generated source wires a fetched payload in.
+
+/// Install `f` as the ambient data resolver for the test's duration; the
+/// previous resolver goes back on drop (tests share the thread).
+struct ResolverGuard(Option<solve::DataResolver>);
+
+impl ResolverGuard {
+    fn install(f: impl Fn(&str) -> Option<solve::DataSchema> + 'static) -> Self {
+        Self(solve::set_data_resolver(Some(std::rc::Rc::new(f))))
+    }
+}
+
+impl Drop for ResolverGuard {
+    fn drop(&mut self) {
+        solve::set_data_resolver(self.0.take());
+    }
+}
+
+fn data_resolver(name: &str) -> Option<solve::DataSchema> {
+    (name == "trips").then(|| solve::DataSchema::Spec("zone:int fare:float".to_string()))
+}
+
+/// The host's runtime half, as its generated source would write it: a
+/// page-level `fn __data` shadows the prelude fallback and answers the
+/// name with a real frame.
+const TRIPS_DATA: &str = "use std::polars::*;
+    fn __data(name: str) -> DataFrame {
+        from_csv(\"zone,fare\\n1,12.5\\n2,9.0\")!
+    }";
+
+fn compile_err(src: &str) -> String {
+    match vm::Vm::compile(src, library::std) {
+        Ok(_) => panic!("expected a compile error:\n{src}"),
+        Err(e) => format!("{e}"),
+    }
+}
+
+#[test]
+fn data_source_schema_types_pull_and_query() {
+    let _g = ResolverGuard::install(data_resolver);
+    // `.format(2)` on a pulled element compiles only because `pull` knows `fare: float`
+    let got = test_runner::render(
+        TRIPS_DATA,
+        r#"query { data "trips" filter fare > 10 }.pull("fare")![0].format(2)"#,
+    );
+    assert_eq!(got, r#""12.50""#);
+}
+
+#[test]
+fn data_source_schema_propagates_through_a_let() {
+    let _g = ResolverGuard::install(data_resolver);
+    let got = test_runner::render(
+        "use std::polars::*;
+         fn __data(name: str) -> DataFrame { from_csv(\"zone,fare\\n1,12.5\")! }
+         let trips = data \"trips\";",
+        r#"trips.pull("zone")![0] + 10"#,
+    );
+    assert_eq!(got, "11");
+}
+
+#[test]
+fn data_source_join_merges_resolved_schemas() {
+    let _g = ResolverGuard::install(|name| match name {
+        "trips" => Some(solve::DataSchema::Spec("zone:int fare:float".into())),
+        "zones" => Some(solve::DataSchema::Spec("zone:int label:str".into())),
+        _ => None,
+    });
+    let got = test_runner::render(
+        "use std::polars::*;
+         fn __data(name: str) -> DataFrame {
+             if name == \"zones\" { from_csv(\"zone,label\\n1,a\\n2,b\")! }
+             else { from_csv(\"zone,fare\\n1,12.5\\n2,9.0\")! }
+         }",
+        r#"query { data "trips" join data "zones" zone
+           select zone fare label }
+           .pull("label")![0]"#,
+    );
+    assert_eq!(got, r#""a""#);
+}
+
+#[test]
+fn data_source_typo_column_is_a_check_error() {
+    let _g = ResolverGuard::install(data_resolver);
+    let err = compile_err(r#"let df = query { data "trips" filter frae > 5 };"#);
+    assert!(err.contains("no column `frae`"), "{err}");
+    assert!(err.contains("zone, fare"), "{err}");
+}
+
+#[test]
+fn data_source_unknown_name_is_a_check_error() {
+    let _g = ResolverGuard::install(data_resolver);
+    let err = compile_err(r#"let df = data "trpis";"#);
+    assert!(err.contains("no data source `trpis`"), "{err}");
+}
+
+#[test]
+fn data_source_opaque_answer_stays_permissive() {
+    let _g = ResolverGuard::install(|name| (name == "trips").then_some(solve::DataSchema::Opaque));
+    let src = "use std::polars::*;
+        fn __data(name: str) -> DataFrame { from_csv(\"zone,fare\\n1,12.5\")! }
+        let df = data \"trips\";
+        df.pull(\"frae\")!;";
+    // compiles (no schema to check against), fails at runtime like a
+    // `from_csv` frame
+    assert!(vm::Vm::compile(src, library::std).is_ok());
+    assert!(test_runner::try_execute(src).is_err());
+}
+
+#[test]
+fn data_source_unbound_faults_at_runtime() {
+    let _g = ResolverGuard::install(data_resolver); // schema resolves, but no `fn __data` binds it
+    let err = match vm::Vm::execute(r#"let df = data "trips";"#, library::std) {
+        Ok(_) => panic!("expected the unbound `data` source to fault"),
+        Err(e) => format!("{e}"),
+    };
+    assert!(err.contains("no source named `trips`"), "{err}");
+}
+
+#[test]
+fn data_source_without_resolver_compiles_opaque() {
+    // no resolver installed: `data "…"` is an ordinary opaque DataFrame --
+    // a bare `mimas check` on a page never fails for want of a host.
+    assert!(vm::Vm::compile(r#"let df = data "trips";"#, library::std).is_ok());
+}

@@ -308,6 +308,15 @@ struct Pass<'a> {
     /// pact member decs -- a call resolved to one dispatches to an impl this file can't see,
     /// so it's `unknown`, not an edge.
     pact_members: FxHashSet<DecId>,
+
+    /// `needs {…}` decls walked: `(site, declared set)`. After the fixpoint
+    /// each page's inferred set must fit the union its `needs` wrote.
+    needs: Vec<(Location, Fx)>,
+    /// `use "…" granting {…}` sites walked: `(site, spelled name, granted
+    /// set)`. Each must fit the granting page's own authority (its `needs`,
+    /// or ambient `Fx::ANY` when it declares none) -- and the spliced-in
+    /// page's inferred set must fit the grant.
+    grants: Vec<(Location, String, Fx)>,
 }
 
 /// Fill `solver.dec_uses`, `solver.fn_effects`, `solver.script_effects`, `solver.warnings`.
@@ -322,6 +331,9 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> crate::errors::Result
     // per file: (name, [(stmt site, own fx, callee edges)]) -- folded into
     // `script_effects`/`script_segments` after the fixpoint
     let mut script_fx: Vec<(String, Vec<(Location, Fx, FxHashSet<DecId>)>)> = Vec::new();
+    // per file, in `asts` order: its `needs` decls and `granting` sites --
+    // checked per page once the fixpoint has every caller's set
+    let mut decl_fx: Vec<(Vec<(Location, Fx)>, Vec<(Location, String, Fx)>)> = Vec::new();
 
     for ast in asts {
         let mut dec_by_site = FxHashMap::default();
@@ -357,6 +369,8 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> crate::errors::Result
             edges: FxHashMap::default(),
             dec_by_site,
             pact_members: solver.pact_members.values().copied().collect(),
+            needs: Vec::new(),
+            grants: Vec::new(),
         };
         pass.push_scope();
         pass.run_top(ast.stmts());
@@ -376,6 +390,10 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> crate::errors::Result
             segments.push((site, own, calls));
         }
         script_fx.push((ast.name().to_string(), segments));
+        decl_fx.push((
+            std::mem::take(&mut pass.needs),
+            std::mem::take(&mut pass.grants),
+        ));
         for (caller, fx) in pass.own_fx {
             if let Caller::Fn(d) = caller {
                 *fn_fx.entry(d).or_insert(Fx::empty()) |= fx;
@@ -410,6 +428,7 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> crate::errors::Result
 
     // fixpoint: fn_effects[f] |= union fn_fx[callee] until stable. Each round only adds bits,
     // so this terminates in at most (edge count) rounds; recursive cycles settle on their own.
+    // r[impl mimas.fx.infer]
     loop {
         let mut grown = Vec::new();
         for (caller, callees) in &edges {
@@ -431,23 +450,122 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> crate::errors::Result
     for (caller, fx) in fn_fx {
         solver.fn_effects.insert(caller, fx);
     }
-    for (name, segments) in script_fx {
+    for (i, (name, segments)) in script_fx.into_iter().enumerate() {
         let mut file_fx = Fx::empty();
+        let mut page_fx: FxHashMap<&str, Fx> = FxHashMap::default();
+        let marks = asts[i].page_marks();
+        // the page a byte offset splices from: the last `//# page:` mark at
+        // or before it (`""` is the file's own text, marked or implicit)
+        let page_of = |byte: usize| -> &str {
+            marks
+                .iter()
+                .rev()
+                .find(|(start, _)| *start <= byte)
+                .map_or("", |(_, name)| *name)
+        };
         for (site, own, calls) in segments {
             let fx = own
                 | calls.iter().fold(Fx::empty(), |acc, d| {
                     acc | solver.fn_effects.get(d).copied().unwrap_or(Fx::empty())
                 });
             file_fx |= fx;
+            *page_fx
+                .entry(page_of(site.span.start))
+                .or_insert(Fx::empty()) |= fx;
             solver.script_segments.push((name.clone(), site, fx));
         }
-        solver.script_effects.insert(name, file_fx);
+        solver.script_effects.insert(name.clone(), file_fx);
+
+        // Effect-authority checks (`mimas.fx.needs`,
+        // `mimas.use.page.grant-narrow`, `mimas.use.page.grant-check`). A
+        // `needs` decl bounds its page's inferred set and is the page's
+        // authority for `granting` clauses; absent one the ambient
+        // authority is `Fx::ANY` (the host decides what a page may ask
+        // for) -- still narrower than `unknown()`, which also carries
+        // UNAUDITED.
+        let (needs, grants) = &decl_fx[i];
+        let mut authority: FxHashMap<&str, (Location, Fx)> = FxHashMap::default();
+        for (site, declared) in needs {
+            let page = page_of(site.span.start);
+            let entry = authority.entry(page).or_insert((*site, Fx::empty()));
+            entry.1 |= *declared;
+        }
+        for (page, (site, declared)) in &authority {
+            let inferred = page_fx.get(page).copied().unwrap_or(Fx::empty());
+            solver
+                .page_needs
+                .push((page_name(name.as_str(), page), *site, *declared));
+            // r[impl mimas.fx.needs]
+            if !inferred.fits(*declared) {
+                errors.push(
+                    crate::errors::NeedsExceeded {
+                        src: solver.src(*site),
+                        at: (*site).into(),
+                        declared: declared.to_string(),
+                        missing: inferred.difference(*declared).to_string(),
+                    }
+                    .into(),
+                );
+            }
+        }
+        for (site, spelled, granted) in grants {
+            let page = page_of(site.span.start);
+            let held = authority.get(page).map_or(Fx::ANY, |(_, fx)| *fx);
+            // r[impl mimas.use.page.grant-narrow]
+            if !granted.fits(held) {
+                errors.push(
+                    crate::errors::GrantExceeded {
+                        src: solver.src(*site),
+                        at: (*site).into(),
+                        name: spelled.clone(),
+                        granted: granted.to_string(),
+                        authority: held.to_string(),
+                    }
+                    .into(),
+                );
+            }
+            // r[impl mimas.use.page.grant-check] -- the spliced-in page's own
+            // top-level set must fit what its `use` granted. Lookup by the
+            // spelled name first (`kit@latest` marks land verbatim), then the
+            // version tail's page part; an unspliced name is the host's
+            // `include.missing`, not the grant check's, business.
+            let page_part = match parse::use_target(spelled) {
+                parse::UseTarget::Live(page) | parse::UseTarget::Follow(page) => page,
+                parse::UseTarget::Pinned { page, .. } => page,
+            };
+            let required = [spelled.as_str(), page_part].into_iter().find_map(|want| {
+                page_fx
+                    .iter()
+                    .find(|(name, _)| name.eq_ignore_ascii_case(want))
+                    .map(|(_, fx)| *fx)
+            });
+            if let Some(required) = required
+                && !required.fits(*granted)
+            {
+                errors.push(
+                    crate::errors::IncludeGrantDenied {
+                        src: solver.src(*site),
+                        at: (*site).into(),
+                        name: spelled.clone(),
+                        missing: required.difference(*granted).to_string(),
+                        granted: granted.to_string(),
+                    }
+                    .into(),
+                );
+            }
+        }
     }
     // consume violations ride every other phase's convention: first error out
     if let Some(err) = errors.into_iter().next() {
         return Err(err);
     }
     Ok(())
+}
+
+/// What a `needs` decl's page is called on `page_needs`: the mark's own
+/// name, or the file's when the decl sits in unmarked (own) text.
+fn page_name(file: &str, page: &str) -> String {
+    if page.is_empty() { file } else { page }.to_string()
 }
 
 impl<'a> Pass<'a> {
@@ -929,6 +1047,11 @@ impl<'a> Pass<'a> {
                     }
                 }
             }
+            StmtKind::Needs(needs) => {
+                // the page's declared authority -- checked against its inferred
+                // set after the fixpoint (`mimas.fx.needs`)
+                self.needs.push((stmt.location(), needs.needs_fx()));
+            }
             StmtKind::Expr(e) => {
                 // a `#[must_use]` native's result dropped on the floor warns
                 // (`let _x = f()` still counts as a use -- Rust agrees)
@@ -955,6 +1078,13 @@ impl<'a> Pass<'a> {
 
     fn item(&mut self, item: &'a Item) {
         match item.kind() {
+            ItemKind::Use(parse::Use::Host(host)) => {
+                // a `granting {…}` clause: the page hands the set down to the
+                // include -- checked after the fixpoint (`mimas.use.page.grant-check`)
+                if let Some(fx) = host.grants_fx() {
+                    self.grants.push((item.location(), host.name.clone(), fx));
+                }
+            }
             ItemKind::Function(f) => self.function(f),
             ItemKind::Const(c) => self.expr(&c.right),
             ItemKind::Impl(imp) => {
@@ -1414,7 +1544,7 @@ impl<'a> Pass<'a> {
                     self.expr(e);
                 }
             }
-            Literal::Dictionary(fields) | Literal::Record(fields) => {
+            Literal::Record(fields) => {
                 for (_, e) in fields {
                     self.expr(e);
                 }

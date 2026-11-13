@@ -155,6 +155,26 @@ impl Ast {
         self.docs.get(&position).map(String::as_str)
     }
 
+    /// The `//# page: name` boundaries of a spliced source
+    /// (`lex::PAGE_MARK`), as `(byte start, page name)` in source order.
+    /// The own page's marks carry an empty name; a source without marks
+    /// yields the one implicit `(0, "")` entry covering the whole file —
+    /// every statement has a page either way. The same line scan
+    /// `lex::shadow_table` makes, so the regions agree with per-page
+    /// lexing.
+    pub fn page_marks(&self) -> Vec<(usize, &str)> {
+        let src: &str = self.src.inner();
+        let mut marks = vec![(0, "")];
+        let mut at = 0;
+        for line in src.split_inclusive('\n') {
+            if let Some(name) = line.strip_prefix(crate::lex::PAGE_MARK) {
+                marks.push((at, name.trim_end()));
+            }
+            at += line.len();
+        }
+        marks
+    }
+
     pub fn module_name(&self) -> Result<Option<String>> {
         let module_name = self.stmts.first().and_then(|stmt| match stmt.kind() {
             StmtKind::Module(module) => Some(if module.name.lexeme == "@" {

@@ -1055,6 +1055,45 @@ pub struct PactImplIncomplete {
     pub missing: String,
 }
 
+#[derive(Error, Debug, Diagnostic)]
+#[error("`{target}` implements `{pact}` but not `{requires}`, which `{pact}` requires")]
+#[diagnostic(help("`pact {pact}: {requires}` -- add an `impl {requires} for {target}`"))]
+pub struct PactRequires {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("this impl owes `{requires}`")]
+    pub at: SourceSpan,
+    pub target: String,
+    pub pact: String,
+    pub requires: String,
+}
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("`{via}` has members without defaults, so `via` can't synthesize its impl for `{target}`")]
+#[diagnostic(help("write `impl {via} for {target}` yourself -- `via` can only build an impl whose members all carry defaults"))]
+pub struct ViaRequiresImpl {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("missing: {missing}")]
+    pub at: SourceSpan,
+    pub target: String,
+    pub via: String,
+    pub missing: String,
+}
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("`{member}` has a different signature on `{pact}` than on `{via}`, so it can't be forwarded")]
+#[diagnostic(help("a `via` impl forwards by name -- write `{member}` in the impl block to keep a different shape"))]
+pub struct ViaSignatureMismatch {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("forwarded from `{via}` here")]
+    pub at: SourceSpan,
+    pub member: String,
+    pub pact: String,
+    pub via: String,
+}
+
 /// stop a giant type/value string from flooding a diagnostic label
 pub(crate) fn elide(s: String) -> String {
     const MAX: usize = 100;
@@ -1106,6 +1145,23 @@ pub struct NoSuchColumn {
     pub at: SourceSpan,
     pub name: String,
     pub columns: String,
+}
+
+/// `data "name"` where the host's schema resolver has no such source -- a
+/// mistyped card name, or a URL whose schema was never fetched. With no
+/// resolver installed the name isn't checked at all (the `use "…"` kind
+/// of inert).
+#[derive(Error, Debug, Diagnostic)]
+#[error("no data source `{name}`")]
+#[diagnostic(help(
+    "the host supplies schemas for `data \"…\"` -- check the name, or fetch the source first"
+))]
+pub struct UnknownDataSource {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("no schema resolves to `{name}`")]
+    pub at: SourceSpan,
+    pub name: String,
 }
 
 /// A native's literal validator rejected the call -- e.g. `s.find("(")` where the regex
@@ -1359,6 +1415,58 @@ pub struct FxGate {
     pub file: String,
     pub have: String,
     pub allowed: String,
+}
+
+// ---- ambient-capability refusals (`needs`/`granting` in `grades.rs`) -- a
+// page opted into the discipline by declaring it, so a breach fails the
+// solve like any other checked contract.
+
+/// The page's inferred effect set escapes the `needs` it declared.
+#[derive(Error, Debug, Diagnostic)]
+#[error("the page's code needs {missing} beyond its declared `needs {declared}`")]
+#[diagnostic(help(
+    "extend `needs` to cover what the code does, or take the effectful calls out"
+))]
+pub struct NeedsExceeded {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("the page declares {declared} here")]
+    pub at: SourceSpan,
+    pub declared: String,
+    pub missing: String,
+}
+
+/// A `granting` clause asks for more than the page that wrote it holds.
+#[derive(Error, Debug, Diagnostic)]
+#[error("`use \"{name}\" granting {granted}` exceeds this page's own authority {authority}")]
+#[diagnostic(help(
+    "grants narrow, never widen -- the page can only pass on effects its `needs` \
+     declared (ambient authority is every audited effect when it declares none)"
+))]
+pub struct GrantExceeded {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("grants {granted} here")]
+    pub at: SourceSpan,
+    pub name: String,
+    pub granted: String,
+    pub authority: String,
+}
+
+/// The spliced-in page's inferred set escapes the grant its `use` declared.
+#[derive(Error, Debug, Diagnostic)]
+#[error("`{name}` needs {missing} beyond the granted {granted}")]
+#[diagnostic(help(
+    "widen the `granting` set, or the include must lose the calls producing {missing}"
+))]
+pub struct IncludeGrantDenied {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("the grant is declared here")]
+    pub at: SourceSpan,
+    pub name: String,
+    pub missing: String,
+    pub granted: String,
 }
 
 /// A bounded type param (`fn f<T: Draw>`) was filled by a type that doesn't implement the

@@ -30,11 +30,16 @@
 
 pub mod link;
 mod scoped;
+mod uses;
 
 pub use link::{LinkError, Linked, LinkedItem};
 pub use scoped::{
     Globals, Manifest, Reloc, canonical_scoped, dep_table, deps, hash_scoped, manifest,
     manifest_with, scoped_hashes, scoped_hashes_with,
+};
+pub use uses::{
+    GrantDenial, UseRecord, UseSite, UseTarget, Version, check_grant, check_grants, use_sites,
+    use_target,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -611,7 +616,7 @@ fn stmt_refs(stmt: &parse::Stmt, out: &mut RefSet) {
                 expr_refs(&f.body, out);
             }
         }
-        StmtKind::Module(_) | StmtKind::Unit(_) => {}
+        StmtKind::Module(_) | StmtKind::Unit(_) | StmtKind::Needs(_) => {}
     }
 }
 
@@ -653,7 +658,7 @@ fn literal_refs(lit: &parse::Literal, out: &mut RefSet) {
                 expr_refs(e, out);
             }
         }
-        Literal::Dictionary(fields) | Literal::Record(fields) => {
+        Literal::Record(fields) => {
             for (_, e) in fields {
                 expr_refs(e, out);
             }

@@ -44,6 +44,46 @@ pub const BUILTIN_NAME: &str = "<builtin>";
 /// files; the id only keys `sources` and locates diagnostics.
 pub const SHIPPED_FILE_BASE: FileId = 1 << 20;
 
+/// A host's answer to `data "name"`: what the checker should believe about
+/// that source's columns (see [`DataSchema`]), or `None` for a name it
+/// doesn't know -- which the solve reports as an error at the `data` site.
+/// The resolver does no I/O itself: the host pre-resolves (card schemas
+/// derived from fetched payloads, url heads already pulled through its
+/// proxy) and closes over that map.
+pub type DataResolver = std::rc::Rc<dyn Fn(&str) -> Option<DataSchema>>;
+
+/// What a [`DataResolver`] knows about one `data "…"` source.
+#[derive(Debug, Clone)]
+pub enum DataSchema {
+    /// A `df.schema("…")`-style spec (`"zone:int fare:float kwh:kWh"`) --
+    /// the frame's columns become a closed schema, checked by name.
+    Spec(String),
+    /// The source exists but its columns aren't known (a card whose
+    /// payload hasn't been fetched yet) -- the frame stays permissive
+    /// like a `from_csv` one, no error.
+    Opaque,
+}
+
+thread_local! {
+    /// The ambient resolver `Prepared::solve` installs on each program's
+    /// solver -- the type-provider hook a host sets before compiling, like
+    /// the unit table `units::install` sets. `None` (the default) leaves
+    /// `data "…"` frames opaque rather than erroring.
+    static DATA_RESOLVER: std::cell::RefCell<Option<DataResolver>> =
+        std::cell::RefCell::new(None);
+}
+
+/// Install the ambient [`DataResolver`] for this thread's solves,
+/// returning the previous one so a host can save and restore it.
+pub fn set_data_resolver(resolver: Option<DataResolver>) -> Option<DataResolver> {
+    DATA_RESOLVER.with(|r| r.replace(resolver))
+}
+
+/// The ambient resolver, if the host installed one.
+pub(crate) fn ambient_data_resolver() -> Option<DataResolver> {
+    DATA_RESOLVER.with(|r| r.borrow().clone())
+}
+
 /// A solver with a library and the shipped sources already taken in —
 /// everything a program's solve needs before reading its first file, and
 /// the fixed cost of every solve (hoisting a few hundred natives, solving
@@ -177,6 +217,9 @@ impl Prepared {
         lap("parse");
         let mut solver = self.solver.clone();
         lap("clone solver");
+        // the host's `data "…"` resolver rides on the program's solver --
+        // per-program input, like the sources below
+        solver.data_resolver = ambient_data_resolver();
         solver.set_sources(sources.clone());
         lap("set_sources");
         if errors.is_empty() {

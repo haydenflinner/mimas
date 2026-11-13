@@ -78,9 +78,14 @@ pub const OPP_SRC: &str = include_str!("opp.mim");
 /// (`approx.mim`) and shipped with std.
 pub const APPROX_SRC: &str = include_str!("approx.mim");
 
+/// `Arbitrary`, the pact a law's expansion uses to draw and shrink sample
+/// values (`arb.mim`), shipped with std.
+pub const ARB_SRC: &str = include_str!("arb.mim");
+
 pub fn std<'gc>(api: &mut Api<'_, 'gc>) {
     api.library.add_source("<std::opp>", OPP_SRC);
     api.library.add_source("<std::approx>", APPROX_SRC);
+    api.library.add_source("<std::arb>", ARB_SRC);
     methods::dec::install(api);
     prelude::install(api);
     methods::array::install(api);

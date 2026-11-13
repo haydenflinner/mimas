@@ -84,10 +84,12 @@ fn a_law_over_two_values_takes_every_pair() {
 // r[verify mimas.pact.samples]
 #[test]
 fn a_type_without_samples_is_told_what_to_add() {
+    // a field the derived generator can't draw (a function) keeps the
+    // no-samples error — it names `samples()` and `Arbitrary`
     let err = Vm::compile(
         &format!(
             "{TURNABLE}
-            struct Lone {{ v: int }}
+            struct Lone {{ f: (int) -> int }}
             impl Turnable for Lone {{ fn turned(self, m: Move) -> Lone {{ self }} }}"
         ),
         |api| library::std(api),
@@ -125,3 +127,117 @@ fn law_checks_keep_the_programs_own_units() {
     assert_eq!(r.len(), 1, "{r:?}");
     assert!(r[0].1.is_none(), "{r:?}");
 }
+
+// r[verify mimas.pact.samples] r[verify mimas.pact.samples.arb]
+#[test]
+fn a_structs_fields_generate_its_samples() {
+    // `Cell` has no `samples()`, but its `int` fields are generatable —
+    // the law checks run off derived draws instead of failing to compile
+    let src = format!(
+        "{TURNABLE}
+        struct Cell2 {{ x: int, y: int }}
+        impl Turnable for Cell2 {{
+            fn turned(self, m: Move) -> Cell2 {{
+                if m == ↻ {{ Cell2 {{ x = -self.y, y = self.x }} }} else {{ Cell2 {{ x = -self.x, y = self.y }} }}
+            }}
+        }}"
+    );
+    let r = results(&src);
+    let laws: Vec<_> = r.iter().filter(|(n, _)| n.starts_with("law ")).collect();
+    assert_eq!(laws.len(), 2, "{r:?}");
+    assert!(laws.iter().all(|(_, e)| e.is_none()), "{r:?}");
+}
+
+// r[verify mimas.pact.samples] r[verify mimas.pact.samples.arb]
+#[test]
+fn an_enums_payloads_generate_too() {
+    let src = format!(
+        "{TURNABLE}
+        enum D {{ N, V(int) }}
+        impl Turnable for D {{
+            fn turned(self, m: Move) -> D {{ self }}
+        }}"
+    );
+    let r = results(&src);
+    assert_eq!(r.len(), 2, "{r:?}");
+    assert!(r.iter().all(|(_, e)| e.is_none()), "{r:?}");
+}
+
+// r[verify mimas.pact.samples] r[verify mimas.pact.samples.arb]
+#[test]
+fn a_failing_law_names_the_minimal_witness() {
+    // `v > 3` breaks the law; the int field's shrink walks any witness
+    // down to `v = 4`, the smallest value that still fails
+    let src = "pact Small {
+        fn v(self) -> int;
+        check |x| x.v() <= 3
+    }
+    struct S { v: int }
+    impl Small for S { fn v(self) -> int { self.v } }";
+    let r = results(src);
+    assert_eq!(r.len(), 1, "{r:?}");
+    let err = r[0].1.as_ref().expect("the law fails for v > 3");
+    assert!(err.contains("fails for x = S { 4 }"), "{err}");
+}
+
+// r[verify mimas.pact.samples] r[verify mimas.pact.samples.arb]
+#[test]
+fn generated_samples_replay_on_the_same_seed() {
+    let src = "pact Small {
+        fn v(self) -> int;
+        check |x| x.v() <= 3
+    }
+    struct S { v: int }
+    impl Small for S { fn v(self) -> int { self.v } }";
+    assert_eq!(results(src), results(src));
+}
+
+// r[verify mimas.pact.samples] r[verify mimas.pact.samples.arb]
+#[test]
+fn an_arbitrary_impl_drives_draws_and_shrink() {
+    // a declared `impl Arbitrary` overrides the derivation: gen always
+    // yields v = 9 (law fails), shrink hands back v = 4
+    let src = "pact Small {
+        fn v(self) -> int;
+        check |x| x.v() <= 3
+    }
+    struct N { v: int }
+    impl Arbitrary for N {
+        fn gen(size: int) -> N { N { v = 9 } }
+        fn shrink(self) -> [N] { [N { v = 4 }] }
+    }
+    impl Small for N { fn v(self) -> int { self.v } }";
+    let r = results(src);
+    let err = r[0].1.as_ref().expect("the law fails for v = 9");
+    assert!(err.contains("fails for x = N { 4 }"), "{err}");
+}
+
+// r[verify mimas.pact.law.impl]
+#[test]
+fn a_broken_law_on_a_primitive_shrinks_to_zero() {
+    // even over the fixed primitive samples, a failing law reports the
+    // minimal pair — subtraction here is never commutative
+    let r = results(
+        "pact Merge {
+            fn merge(self, o: Self) -> Self;
+            check |a, b| a.merge(b) == b.merge(a)
+        }
+        impl Merge for int { fn merge(self, o: int) -> int { self - o } }",
+    );
+    let err = r[0].1.as_ref().expect("the law fails");
+    assert!(err.contains("a = 0, b = 1"), "{err}");
+}
+
+// r[verify mimas.pact.samples] r[verify mimas.pact.samples.arb]
+#[test]
+fn a_recursive_type_generates_through_its_option() {
+    // `next: Node?` is a carried self-edge — bounded by `size`, it
+    // terminates instead of recursing forever
+    let src = "pact Id { fn id(self) -> Self; check |x| x.id() == x }
+    struct Node { next: Node? }
+    impl Id for Node { fn id(self) -> Node { self } }";
+    let r = results(src);
+    assert_eq!(r.len(), 1, "{r:?}");
+    assert!(r[0].1.is_none(), "{r:?}");
+}
+

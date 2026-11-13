@@ -33,7 +33,8 @@ declare_stmt_kinds!(
         Assignment,
         Expr,
         Item,
-        Unit
+        Unit,
+        Needs
     }
 );
 

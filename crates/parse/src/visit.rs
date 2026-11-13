@@ -40,6 +40,11 @@ pub fn walk_stmt(stmt: &Stmt, visitor: &mut impl Visitor) {
         StmtKind::Item(item) => walk_item(item, visitor),
         // a `unit` decl's spec is written text, not an expr — only the name visits
         StmtKind::Unit(unit) => visitor.ident(&unit.name),
+        StmtKind::Needs(needs) => {
+            for name in &needs.names {
+                visitor.ident(name);
+            }
+        }
     }
 }
 
@@ -144,7 +149,7 @@ pub fn walk_item(item: &Item, visitor: &mut impl Visitor) {
                 Use::Singular(path, item) => (path, std::slice::from_ref(item)),
                 Use::Multi(path, items) => (path, items),
                 Use::All(path) => (path, &[]),
-                Use::Host(_) => (&[], &[]),
+                Use::Host(h) => (&[], h.grants.as_deref().unwrap_or(&[])),
             };
             for ident in path.iter().chain(items) {
                 visitor.ident(ident);
@@ -262,7 +267,7 @@ pub fn walk_expr(expr: &Expr, visitor: &mut impl Visitor) {
                     walk_expr(expr, visitor);
                 }
             }
-            Literal::Dictionary(fields) | Literal::Record(fields) => {
+            Literal::Record(fields) => {
                 for (key, value) in fields {
                     visitor.ident(key);
                     walk_expr(value, visitor);

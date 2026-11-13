@@ -1015,12 +1015,12 @@ impl std::fmt::Display for Captured {
                 f.write_str("]")
             }
             Captured::Dict(entries) => {
-                f.write_str("~{")?;
+                f.write_str("{")?;
                 for (i, (k, v)) in entries.iter().enumerate() {
                     if i > 0 {
                         f.write_str(", ")?;
                     }
-                    write!(f, "{k} = {v}")?;
+                    write!(f, "{k}: {v}")?;
                 }
                 f.write_str("}")
             }
@@ -1134,8 +1134,9 @@ impl<'gc> Val<'gc> {
 /// tables -- so a debugger's structural inspector can show `Node { val: 391, next: .. }` instead
 /// of `{ 391, .. }`. Kept separate from `Captured` rather than adding names to it directly:
 /// `Captured` is compared for equality by the test suite, which should stay indifferent to what
-/// a struct's fields happen to be named.
-#[derive(Debug, Clone)]
+/// a struct's fields happen to be named. `PartialEq`, like `Captured` and for the same reason
+/// (a `Float` can't be `Eq`): check results that carry `Inspect` trees compare them in tests.
+#[derive(Debug, Clone, PartialEq)]
 pub enum Inspect {
     Null,
     Bool(bool),

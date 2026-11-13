@@ -58,6 +58,7 @@ impl AscDesc {
     api.add(__q_distinct);
     api.add(__q_join);
     api.add(__q_splice);
+    api.add(__data);
     {
         let mut m = api.module("std::polars");
         m.add(col);
@@ -1827,6 +1828,18 @@ fn __q_splice<'gc>(_ctx: Ctx<'gc>, _value: Val<'gc>) -> Result<Val<'gc>, vm::RtE
     Err(q_err(
         "`$` names an outside value only inside `query { … }`",
     ))
+}
+
+/// `data "name"` -- an external data source's frame. This prelude binding
+/// is the fallback: the host that answers `data "…"` names (the web host
+/// generates a `fn __data` per page, over its fetched card payloads) is
+/// the real provider, so reaching here means the name isn't bound -- a
+/// fault like a `use "…"` whose page the host didn't splice.
+#[native]
+fn __data<'gc>(_ctx: Ctx<'gc>, name: &str) -> Result<vm::DataFrame<'gc>, vm::RtErr> {
+    Err(q_err(format!(
+        "data: no source named `{name}` is bound -- the host provides `data \"…\"` frames"
+    )))
 }
 
 /// `if c { a } else { b }` inside a query

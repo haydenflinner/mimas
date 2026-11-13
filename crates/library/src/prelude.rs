@@ -5,7 +5,7 @@ use vm::{
     anon::{self},
     api::Api,
     conversion::NeverReturn,
-    fixtures::{DebugInfo, Echoes, Out, PrintDims, Prints},
+    fixtures::{DebugInfo, Echoes, Out, PrintDims, Prints, Witnesses},
 };
 
 /// The ` {unit}` a `print`/`dbg`/`warn` appends when the dims pass proved the value's
@@ -27,6 +27,7 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add(echo);
     api.add(__in_unit);
     api.add(__contract_fail);
+    api.add(__check_operand);
     api.add(sum);
     api.add(avg);
     api.add(count);
@@ -91,7 +92,7 @@ fn warn<'gc>(ctx: Ctx<'gc>, msg: Val<'gc>) -> Result<(), RtErr> {
 /// a value of any type:
 ///
 /// ```mimas
-/// let config = ~{ port = 8080 };
+/// let config = { port : 8080 };
 /// let port = config["port"] ?? panic("no port configured");
 /// ```
 ///
@@ -114,7 +115,7 @@ fn panic<'gc>(ctx: Ctx<'gc>, msg: Option<anon::T<'gc>>) -> Result<NeverReturn, R
 /// yet:
 ///
 /// ```mimas
-/// fn load_save(path: str) -> ~{int} {
+/// fn load_save(path: str) -> {int} {
 ///     todo("read the save format")
 /// }
 /// ```
@@ -156,7 +157,7 @@ fn echo<'gc>(ctx: Ctx<'gc>, val: anon::T<'gc>) -> Result<(), RtErr> {
 }
 
 /// An echo of a quantity in the unit the program wrote for it: `12 lb`, a list
-/// as `[12, 8, 3] lb`, a grouped result (`sum_by`) as `~{grain = 15, veg = 3} lb`.
+/// as `[12, 8, 3] lb`, a grouped result (`sum_by`) as `{grain : 15, veg : 3} lb`.
 /// Anything else falls back to the plain display with the unit appended.
 fn shown_text<'gc>(ctx: Ctx<'gc>, v: Val<'gc>, shown: &shared::units::Shown) -> Result<String, RtErr> {
     use shared::units::shown_number;
@@ -176,11 +177,11 @@ fn shown_text<'gc>(ctx: Ctx<'gc>, v: Val<'gc>, shown: &shared::units::Shown) -> 
         let mut parts = Vec::with_capacity(pairs.len());
         for (k, x) in pairs {
             match x.as_float() {
-                Some(f) => parts.push(format!("{k} = {}", num(f))),
-                None => parts.push(format!("{k} = {}", ctx.display(x)?)),
+                Some(f) => parts.push(format!("{k}: {}", num(f))),
+                None => parts.push(format!("{k}: {}", ctx.display(x)?)),
             }
         }
-        return Ok(format!("~{{{}}} {unit}", parts.join(", ")));
+        return Ok(format!("{{{}}} {unit}", parts.join(", ")));
     } else if let Ok(xs) = <Vec<f64> as vm::conversion::MimasType>::from_value(ctx, v) {
         let parts: Vec<String> = xs.into_iter().map(num).collect();
         return Ok(format!("[{}] {unit}", parts.join(", ")));
@@ -313,7 +314,7 @@ fn group_dict<'gc>(ctx: Ctx<'gc>, rows: Vec<(String, Val<'gc>)>) -> anon::DictOf
 }
 
 /// A grouped result whose values are all of one primitive type (`count_by` is
-/// `~{int}`, `avg_by` is `~{float}`), kept in key order — a `HashMap` would lose it.
+/// `{int}`, `avg_by` is `{float}`), kept in key order — a `HashMap` would lose it.
 struct Grouped<'gc, const FLOAT: bool>(vm::Dict<'gc>);
 
 impl<'gc, const FLOAT: bool> vm::conversion::MimasType<'gc> for Grouped<'gc, FLOAT> {
@@ -339,7 +340,7 @@ impl<'gc, const FLOAT: bool> vm::conversion::MimasType<'gc> for Grouped<'gc, FLO
 /// ```mimas
 /// let qty = [12lb, 8lb, 3lb];
 /// let kind = ["grain", "bean", "grain"];
-/// let by_kind = sum_by(qty, kind); // ~{grain = 15, bean = 8} lb
+/// let by_kind = sum_by(qty, kind); // {grain : 15, bean : 8} lb
 /// ```
 /// r[impl mimas.agg.by]
 fn sum_by<'gc>(
@@ -427,6 +428,24 @@ fn dbg<'gc>(ctx: Ctx<'gc>, val: anon::T<'gc>) -> Result<anon::T<'gc>, RtErr> {
         ctx.fixture::<Prints>().push(loc, text);
     }
     Ok(val)
+}
+
+#[native]
+#[effects()]
+/// One operand of a failing `check`/`assert!`, recorded for the host:
+/// the assert desugar emits this call inside the failure branch — once
+/// per operand, just before `panic` unwinds — so a check runner shows
+/// the values the message names, an inspectable example object rather
+/// than text alone. One call per operand, not one `[…]` argument list:
+/// each call keeps the operand's own type where a list would force them
+/// to share one. The value lands as its `Inspect` tree plus a live
+/// handle a host can draw through (see `Witnesses`). Not for user code;
+/// the `__` marks it internal.
+fn __check_operand<'gc>(ctx: Ctx<'gc>, val: anon::T<'gc>) -> Result<(), RtErr> {
+    let loc = ctx.fixture::<DebugInfo>().top_loc();
+    ctx.fixture::<Witnesses>()
+        .push(loc, ctx.inspect(val.0), ctx.stash(val.0));
+    Ok(())
 }
 
 #[native]

@@ -5,7 +5,8 @@ use crate::{
         AssignToConst, AssignToLoopVar, AssignToStringIndex, BareNullBinding, BoundNotSatisfied,
         CheckIsNotCallable, ExtraTupleMembers, FieldNotFound, InvalidAssignTarget, InvalidPattern,
         InvalidUseTarget, IteratingHere, MissingTupleMembers, MultipleConstDeclarations,
-        MutateWhileIterating, NonConstantValue, NotAPact, NotFound, SelfOutOfContext,
+        MutateWhileIterating, NonConstantValue, NotAPact, NotFound, PactRequires,
+        SelfOutOfContext, ViaRequiresImpl, ViaSignatureMismatch,
     },
     traits::*,
 };
@@ -81,6 +82,18 @@ pub struct Solver {
     /// Every instantiation of a bounded param: the vid it became, the pact it owes, and the
     /// use that incurred it. Checked once bodies are solved (`check_bounds`).
     pub(crate) bound_obligations: Vec<(Ty, PactId, Location)>,
+    /// `pact A: B` bounds, recorded at `hoist_pacts` when `B` may not be
+    /// declared yet -- settled by `resolve_pending_impls` (mimas.pact.requires).
+    pub(crate) pending_pact_requires: Vec<(PactId, Ident)>,
+    /// `impl X for T via Y` decls, recorded at `hoist_callables` -- settled
+    /// once every impl is registered, by `resolve_pending_impls` (mimas.impl.via).
+    pub(crate) pending_vias: Vec<PendingVia>,
+    /// Every pact impl as (adt, pact, decl-site): the required-pact check
+    /// runs over these once all impls are registered (mimas.pact.requires).
+    pub(crate) pending_required: Vec<(AdtId, PactId, Location)>,
+    /// Members a `via` impl forwards: (target adt, impl'd pact, member key).
+    /// `Impl::solve` counts them as covered (mimas.impl.via).
+    pub(crate) via_covered: FxHashSet<(AdtId, PactId, String)>,
     /// Where the instantiation under way is written, so `substitute_params` can record an
     /// obligation against it. `None` when the caller has no use site to blame.
     pub(crate) obligation_at: Option<Location>,
@@ -112,6 +125,10 @@ pub struct Solver {
     /// `__q_group`/`group_by` results: `(input schema, key columns)` by expr/binding.
     pub(crate) group_schemas: FxHashMap<NodeId, crate::frames::GroupInfo>,
     pub(crate) group_decs: FxHashMap<DecId, crate::frames::GroupInfo>,
+    /// `data "…"` sources the host can answer -- name -> column schema
+    /// (see `load::set_data_resolver` and `frames::data_source_call`).
+    /// `None` leaves `data` frames opaque rather than erroring.
+    pub(crate) data_resolver: Option<crate::DataResolver>,
     /// Unit dims of `25kW`-style literals, merged from every solved ast (`NodeId`s are
     /// globally unique, so one map is collision-free).
     pub(crate) ast_quantities: FxHashMap<NodeId, shared::units::Dim>,
@@ -214,6 +231,12 @@ pub struct Solver {
     /// that splices `use`-includes into one file maps each site back onto its include's
     /// byte range -- how a peer page's contribution is attributed (and gated) separately.
     pub(crate) script_segments: Vec<(String, shared::Location, shared::Fx)>,
+    /// Each page's declared `needs {…}` authority: `(page, decl site, set)`.
+    /// `page` is the `//# page:` mark name for a spliced include, or the
+    /// file name for a standalone file's own text. Empty for a page that
+    /// declares none -- ambient authority (`Fx::ANY`) applies there.
+    /// `Resolutions::page_needs`.
+    pub(crate) page_needs: Vec<(String, shared::Location, shared::Fx)>,
     /// Non-fatal diagnostics (the lint suite). Solve succeeds; hosts decide how to show them.
     /// Surfaces on `Loaded::warnings` and `Resolutions::warnings`.
     /// Lints from the grades pass, behind `Rc` so a prepared solver (see
@@ -286,6 +309,7 @@ impl Solver {
             frame_decs: FxHashMap::default(),
             group_schemas: FxHashMap::default(),
             group_decs: FxHashMap::default(),
+            data_resolver: None,
             ast_quantities: FxHashMap::default(),
             exact_literals: Default::default(),
             ast_quantity_units: FxHashMap::default(),
@@ -315,6 +339,7 @@ impl Solver {
             fn_effects: FxIndexMap::default(),
             script_effects: FxIndexMap::default(),
             script_segments: Vec::new(),
+            page_needs: Vec::new(),
             warnings: Vec::new(),
             bare_module_uses: FxHashMap::default(),
             resolved_uses: FxHashMap::default(),
@@ -329,6 +354,10 @@ impl Solver {
             pending_bounds: vec![],
             pending_defaults: vec![],
             bound_obligations: vec![],
+            pending_pact_requires: vec![],
+            pending_vias: vec![],
+            pending_required: vec![],
+            via_covered: FxHashSet::default(),
             obligation_at: None,
         };
         // root frame: [Import, Module, Script] -- see `Ribs::default` for why
@@ -351,6 +380,14 @@ impl Solver {
         sources: impl IntoIterator<Item = (FileId, NamedSource<Arc<str>>)>,
     ) {
         self.sources = sources.into_iter().collect();
+    }
+
+    /// The `data "…"` resolver for this solve -- the type-provider hook.
+    /// `load::Prepared::solve` installs the ambient one
+    /// (`load::set_data_resolver`); a host driving a bare `Solver` can set
+    /// its own here.
+    pub fn set_data_resolver(&mut self, resolver: Option<crate::DataResolver>) {
+        self.data_resolver = resolver;
     }
 
     /// Look up the `NamedSource` for a `Location`'s file. Falls back to an empty `<unknown>` source
@@ -562,6 +599,10 @@ impl Solver {
         lap("hoist_callables");
         run_phase(self, Self::resolve_pending_bounds, &mut saved_ribs)?;
         lap("resolve_pending_bounds");
+        // `pact A: B` bounds and `impl X for T via Y` forwards -- every pact is
+        // declared, every impl registered
+        run_phase(self, Self::resolve_pending_impls, &mut saved_ribs)?;
+        lap("resolve_pending_impls");
 
         // fixpoint: hoist_uses + solve_consts. each round may resolve more consts (e.g. a const
         // that references another module's const reduces only once that other const is bound).
@@ -2108,7 +2149,7 @@ impl Solver {
     pub(crate) fn default_literal(&self, expr: &Expr) -> Result<Option<Literal>> {
         fn allocates(lit: &Literal) -> bool {
             match lit {
-                Literal::Struct(_) | Literal::Dictionary(_) => true,
+                Literal::Struct(_) => true,
                 Literal::Array(items) | Literal::Tuple(items) => items.iter().any(|e| {
                     matches!(e.kind(), ExprKind::Literal(l) if allocates(l))
                 }),
@@ -2126,19 +2167,270 @@ impl Solver {
         Ok(lit)
     }
 
+    /// `pid` plus every pact it transitively requires (`pact A: B`): the set an
+    /// `A` bound grants member access to, and an `impl A for T` owes impls for.
+    /// Cycle-safe -- `A: B, B: A` just yields both.
+    // r[impl mimas.pact.requires]
+    pub(crate) fn pact_closure(&self, pid: PactId) -> Vec<PactId> {
+        let mut seen = FxHashSet::default();
+        let mut out = vec![];
+        let mut stack = vec![pid];
+        while let Some(p) = stack.pop() {
+            if !seen.insert(p) {
+                continue;
+            }
+            out.push(p);
+            stack.extend(self.pacts[p].requires.iter().copied());
+        }
+        out
+    }
+
+    /// `pact A: B` bounds and `impl X for T via Y` forwards, settled once every
+    /// pact is declared and every impl is registered -- a phase after
+    /// `resolve_pending_bounds`.
+    fn resolve_pending_impls(&mut self, _ast: &Ast) -> Result<()> {
+        if self.pending_pact_requires.is_empty()
+            && self.pending_vias.is_empty()
+            && self.pending_required.is_empty()
+        {
+            return Ok(());
+        }
+        for (pid, ident) in std::mem::take(&mut self.pending_pact_requires) {
+            let ty = self.resolve_name(&ident, ident.location)?;
+            let Some(req) = ty.as_single_pact() else {
+                return Err(NotAPact {
+                    src: self.src(ident.location),
+                    at: ident.location.into(),
+                    ty: ty.to_string(),
+                }
+                .into());
+            };
+            self.pacts[pid].requires.push(req);
+        }
+        // forwards next: an auto-registered via pact owes its own required
+        // pacts, and the impl check below runs once they're all in
+        for via in std::mem::take(&mut self.pending_vias) {
+            self.settle_via(&via)?;
+        }
+        for (adt, pid, at) in std::mem::take(&mut self.pending_required) {
+            for req in self.pact_closure(pid) {
+                if req != pid && !self.pact_impls.contains(&(req, adt)) {
+                    return Err(PactRequires {
+                        src: self.src(at),
+                        at: at.into(),
+                        target: self.adts[adt].name.clone(),
+                        pact: self.pacts[pid].name.clone(),
+                        requires: self.pacts[req].name.clone(),
+                    }
+                    .into());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// `impl X for T via Y`: register `T`'s `Y` impl (synthesized when the
+    /// block didn't write one and every `Y` member carries a default), then
+    /// cover each `X` member the block omits with the `Y` member of the same
+    /// name -- matching signature, `T`'s member slot filled if empty.
+    // r[impl mimas.impl.via]
+    fn settle_via(&mut self, via: &PendingVia) -> Result<()> {
+        let ty = self.resolve_name(&via.via, via.via.location)?;
+        let Some(yid) = ty.as_single_pact() else {
+            return Err(NotAPact {
+                src: self.src(via.via.location),
+                at: via.via.location.into(),
+                ty: ty.to_string(),
+            }
+            .into());
+        };
+        let adt = via.adt;
+
+        // the impl needs a real `Y` impl to forward through. a missing one is
+        // synthesized exactly like `impl Y for T {}` -- legal only while every
+        // `Y` member has a default to graft.
+        // r[impl mimas.impl.via.synth]
+        if !self.pact_impls.contains(&(yid, adt)) {
+            let missing: Vec<String> = self.pacts[yid]
+                .functions
+                .iter()
+                .filter(|(_, (_, default))| default.is_none())
+                .map(|(k, _)| crate::pact_key_base(k).to_string())
+                .chain(self.pacts[yid].constants.keys().cloned())
+                .collect();
+            if !missing.is_empty() {
+                return Err(ViaRequiresImpl {
+                    src: self.src(via.via.location),
+                    at: via.via.location.into(),
+                    target: via.target.lexeme.clone(),
+                    via: self.pacts[yid].name.clone(),
+                    missing: missing.join(", "),
+                }
+                .into());
+            }
+            self.pact_impls.insert((yid, adt));
+            self.pending_required.push((adt, yid, via.location));
+            self.graft_pact_defaults(adt, yid, via.target.location)?;
+        }
+
+        self.ribs.push_impl(adt);
+        let generic = self.adts[adt].is_generic();
+        if generic {
+            self.push_adt_params(adt);
+        }
+        let result = self.settle_via_members(via, yid);
+        if generic {
+            self.pop_type_params();
+        }
+        self.ribs.pop();
+        result
+    }
+
+    /// The coverage half of `settle_via`, run under the impl rib so
+    /// `impl_target_ty` answers.
+    fn settle_via_members(&mut self, via: &PendingVia, yid: PactId) -> Result<()> {
+        let adt = via.adt;
+        let xid = via.pact;
+        let target_ty = self
+            .impl_target_ty()
+            .expect("settle_via pushes the impl rib first");
+
+        // every `X` member the block omits (overload keys excluded -- `via`
+        // matches by name, and `mul#1` isn't a name) must name a `Y` member of
+        // the same signature; what it can't cover stays for `Impl::solve`'s
+        // missing-member report
+        let omitted: Vec<String> = self.pacts[xid]
+            .functions
+            .keys()
+            .chain(self.pacts[xid].constants.keys())
+            .filter(|k| !k.contains('#') && !via.provided.contains(crate::pact_key_base(k)))
+            .cloned()
+            .collect();
+        for key in omitted {
+            // `X`'s declared shape for the member, `Self` := the impl target
+            let x_ty = if let Some((header, _)) = self.pacts[xid].functions.get(&key) {
+                let header = header.clone();
+                self.instantiate_pact_fn(&header, &target_ty)
+            } else {
+                let ty = self.pacts[xid].constants[&key].clone();
+                let mut memo = FxHashMap::default();
+                self.fresh_vids(&ty, &target_ty, &mut memo)
+            };
+            // `Y`'s namesake, or -- for a member `X` itself defaulted -- `X`'s
+            // own default, grafted the way an ordinary impl would have.
+            // neither leaves it for the missing-member report
+            // r[impl mimas.impl.via.provided]
+            let (y_ty, member): (Ty, Option<DecId>) =
+                if let Some((header, _)) = self.pacts[yid].functions.get(&key) {
+                    let header = header.clone();
+                    (
+                        self.instantiate_pact_fn(&header, &target_ty),
+                        self.pact_members.get(&(yid, key.clone())).copied(),
+                    )
+                } else if let Some(ty) = self.pacts[yid].constants.get(&key) {
+                    let ty = ty.clone();
+                    let mut memo = FxHashMap::default();
+                    (self.fresh_vids(&ty, &target_ty, &mut memo), None)
+                } else if self.pacts[xid]
+                    .functions
+                    .get(&key)
+                    .is_some_and(|(_, default)| default.is_some())
+                {
+                    (x_ty.clone(), self.pact_members.get(&(xid, key.clone())).copied())
+                } else {
+                    continue;
+                };
+            // r[impl mimas.impl.via.match]
+            let mut want = x_ty;
+            if y_ty.clone().fulfill_ty(&mut want, self).is_err() {
+                return Err(ViaSignatureMismatch {
+                    src: self.src(via.via.location),
+                    at: via.via.location.into(),
+                    member: key.clone(),
+                    pact: self.pacts[xid].name.clone(),
+                    via: self.pacts[yid].name.clone(),
+                }
+                .into());
+            }
+            // constants have no runtime dispatch: cover only when `T`'s surface
+            // already holds the `Y` impl's value (a `via`-synthesized impl
+            // never has consts). a `fn` slot gets the `Y` member's dec, which
+            // resolves to `T`'s impl or the `Y` default
+            let is_const = self.pacts[yid].constants.contains_key(&key);
+            if is_const {
+                if self.adts[adt].impls.contains_key(&key) {
+                    self.via_covered.insert((adt, xid, key));
+                }
+            } else {
+                if !self.adts[adt].impls.contains_key(&key)
+                    && let Some(dec) = member
+                {
+                    self.adts[adt]
+                        .impls
+                        .insert(key.clone(), Field::new_constant(y_ty, via.location, dec));
+                }
+                self.via_covered.insert((adt, xid, key));
+            }
+        }
+        Ok(())
+    }
+
+    /// Fill `adt`'s omitted members from the pact's defaulted members, the way
+    /// `Impl::hoist`'s graft does -- for a `via`-synthesized impl, which has no
+    /// impl block of its own to hang the graft on.
+    // r[impl mimas.impl.via]
+    fn graft_pact_defaults(&mut self, adt: AdtId, pid: PactId, at: Location) -> Result<()> {
+        self.ribs.push_impl(adt);
+        let generic = self.adts[adt].is_generic();
+        if generic {
+            self.push_adt_params(adt);
+        }
+        let result = (|| {
+            let target_ty = self.impl_target_ty().unwrap();
+            for name in self.pacts[pid].functions.keys().cloned().collect::<Vec<_>>() {
+                if self.adts[adt].impls.contains_key(&name) {
+                    continue;
+                }
+                let header = self.pacts[pid].functions[&name].0.clone();
+                let ty = self.instantiate_pact_fn(&header, &target_ty);
+                let dec = self.pact_members[&(pid, name.clone())];
+                self.adts[adt]
+                    .impls
+                    .insert(name, Field::new_constant(ty, at, dec));
+            }
+            Ok(())
+        })();
+        if generic {
+            self.pop_type_params();
+        }
+        self.ribs.pop();
+        result
+    }
+
     /// The pacts a receiver of `ty` dispatches through: a bound annotation
     /// (`d: Draw + Named`), `Self` in a default body, or a declared param's bounds
     /// (`x: T` under `<T: Draw>`). `None` for a concrete type -- or an unbounded param,
-    /// which has nothing to dispatch through.
+    /// which has nothing to dispatch through. Each bound contributes its whole
+    /// required-pact closure, so `x: A` sees `B`'s members when `pact A: B`.
+    // r[impl mimas.pact.requires.reach]
     pub(crate) fn pacts_of(&self, ty: &Ty) -> Option<Vec<PactId>> {
-        match ty {
+        let bounds = match ty {
             Ty::Param(pid) => self
                 .param_bounds
                 .get(pid)
                 .filter(|b| !b.is_empty())
                 .cloned(),
             other => other.as_pacts(),
+        }?;
+        let mut out: Vec<PactId> = vec![];
+        for pid in bounds {
+            for p in self.pact_closure(pid) {
+                if !out.contains(&p) {
+                    out.push(p);
+                }
+            }
         }
+        Some(out)
     }
 
     /// A fresh vid standing in for the bounded param `pid` at the use `obligation_at`
@@ -2162,9 +2454,13 @@ impl Solver {
             let ok = match &ty {
                 Ty::Vid(_) | Ty::Never => true,
                 Ty::Adt(aid, _) | Ty::Identity(aid, _) => self.pact_impls.contains(&(pact, *aid)),
-                Ty::Pacts(pids) => pids.contains(&pact),
-                Ty::Skolem(p) => *p == pact,
-                Ty::Param(p) => self.param_bounds.get(p).is_some_and(|b| b.contains(&pact)),
+                Ty::Pacts(pids) => pids
+                    .iter()
+                    .any(|p| self.pact_closure(*p).contains(&pact)),
+                Ty::Skolem(p) => self.pact_closure(*p).contains(&pact),
+                Ty::Param(p) => self.param_bounds.get(p).is_some_and(|b| {
+                    b.iter().any(|bound| self.pact_closure(*bound).contains(&pact))
+                }),
                 other => self
                     .builtin_adt(other)
                     .is_some_and(|aid| self.pact_impls.contains(&(pact, aid))),
@@ -2838,6 +3134,9 @@ impl Solver {
             StmtKind::Unit(_) => {
                 // `unit` decls register into the units table at parse.
             }
+            StmtKind::Needs(_) => {
+                // `needs` decls are the grades pass's business — see `grades::check`.
+            }
             StmtKind::Item(item) => match item.kind() {
                 // block-scoped consts get solved here, top-level consts are handled by the
                 // hoist_constants/solve_consts fixpoint
@@ -3390,16 +3689,6 @@ impl Solver {
             }
             Literal::Array(elems) => Ok(reify_elems(elems)?.map(Literal::Array)),
             Literal::Tuple(elems) => Ok(reify_elems(elems)?.map(Literal::Tuple)),
-            Literal::Dictionary(fields) => {
-                let mut out = Vec::with_capacity(fields.len());
-                for (key, value) in &fields {
-                    let Some(lit) = reify(value)? else {
-                        return Ok(None);
-                    };
-                    out.push((key.clone(), lit));
-                }
-                Ok(Some(Literal::Dictionary(out)))
-            }
             Literal::Record(fields) => {
                 let mut out = Vec::with_capacity(fields.len());
                 for (key, value) in &fields {
@@ -4408,6 +4697,20 @@ pub(crate) struct ConstItem {
     pub body: Expr,
     /// The first parameter is `self` — a dot-call supplies the receiver.
     pub method: bool,
+}
+
+/// An `impl X for T via Y` decl recorded at hoist: the target and pact it
+/// implements, the via pact it forwards from, the member names its block
+/// writes itself (all other `X` members must name a `Y` member of the same
+/// signature, mimas.impl.via), and the decl site for errors.
+#[derive(Debug, Clone)]
+pub(crate) struct PendingVia {
+    pub adt: AdtId,
+    pub pact: PactId,
+    pub via: Ident,
+    pub provided: FxHashSet<String>,
+    pub target: Ident,
+    pub location: Location,
 }
 
 /// Scope state for the `is_const_expr` walk: decs that count as constant (a

@@ -405,3 +405,65 @@ impl Echoes {
         std::mem::take(&mut *self.lines.borrow_mut())
     }
 }
+
+/// What one failing `check`/`assert!` compared: the operand values its
+/// failure message names, kept so a host shows the example, not just its
+/// text. The `__check_operand` stdlib native (which the assert desugar
+/// emits inside the failure branch, one call per operand, just before
+/// `panic` unwinds) builds one of these; a check runner drains it after
+/// each case. A pass never reaches the calls, so a record only ever
+/// exists on the failing path.
+pub struct CheckWitness {
+    /// The first `__check_operand` call's source site, when debug info
+    /// had one — all of them share the check's `start`.
+    pub loc: Option<Location>,
+    /// Each operand's [`Inspect`](crate::Inspect) tree, in the desugar's
+    /// order: `left, right` for `==`/`!=`/`<`/`in`/`≈`, the call's
+    /// arguments for a predicate check, the checked value alone for a
+    /// bare `check x`.
+    pub operands: Vec<crate::Inspect>,
+    /// The same operands as live handles, for a host that wants more than
+    /// the trees — drawing one through its own `draw` method
+    /// ([`Vm::call_method_on_stashed`](crate::Vm::call_method_on_stashed))
+    /// needs the real `Val`, not the snapshot. They root their values
+    /// until this record drops.
+    pub vals: Vec<crate::Stashed>,
+}
+
+/// The [`CheckWitness`] being recorded. One slot, not a history: a
+/// recorded failure unwinds its check at once, and the runner takes the
+/// record after each case, so nothing accrues and a stale one can't ride
+/// onto a later check's report.
+#[derive(Default)]
+pub struct Witnesses {
+    last: RefCell<Option<CheckWitness>>,
+}
+
+impl Witnesses {
+    /// The next operand of the failure being recorded. The desugar emits
+    /// one `__check_operand` call per operand — separate calls keep each
+    /// operand's own static type; a single `[…]` argument list would
+    /// force heterogeneous operands (a predicate's mixed arguments) to
+    /// share one element type and not compile.
+    pub fn push(
+        &self,
+        loc: Option<Location>,
+        operand: crate::Inspect,
+        val: crate::Stashed,
+    ) {
+        let mut last = self.last.borrow_mut();
+        let w = last.get_or_insert_with(|| CheckWitness {
+            loc,
+            operands: Vec::new(),
+            vals: Vec::new(),
+        });
+        w.operands.push(operand);
+        w.vals.push(val);
+    }
+
+    /// The recorded failure's operands, taken — callers drain after each
+    /// check case so attribution stays exact.
+    pub fn take(&self) -> Option<CheckWitness> {
+        self.last.borrow_mut().take()
+    }
+}

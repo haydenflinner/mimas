@@ -73,6 +73,23 @@ impl Fx {
     pub const fn declared(&self) -> Fx {
         self.intersection(Fx::ANY)
     }
+
+    /// The name a `granting {…}` clause writes: the six effects, the
+    /// umbrella `any` (the six together), and `unaudited` — permission
+    /// for ungraded calls, not an effect itself.
+    pub fn named(name: &str) -> Option<Fx> {
+        Some(match name {
+            "doc" => Fx::DOC,
+            "net" => Fx::NET,
+            "rng" => Fx::RNG,
+            "yield" => Fx::YIELD,
+            "io" => Fx::IO,
+            "time" => Fx::TIME,
+            "any" => Fx::ANY,
+            "unaudited" => Fx::UNAUDITED,
+            _ => return None,
+        })
+    }
 }
 
 /// `{doc, rng}` for a declared set; a trailing `…` marks `UNAUDITED` ("and possibly more").

@@ -52,6 +52,11 @@ pub struct Resolutions {
     /// Spliced `use`-includes share one file name -- the site's byte span is what
     /// attributes each statement back to the include that wrote it.
     pub script_segments: Vec<(String, shared::Location, shared::Fx)>,
+    /// Each page's declared `needs {…}` authority: `(page, decl site, set)`,
+    /// `page` named by its `//# page:` mark or by the file for own text. A
+    /// page absent here declared no `needs` -- it holds ambient authority
+    /// (`Fx::ANY`) by default.
+    pub page_needs: Vec<(String, shared::Location, shared::Fx)>,
     /// Non-fatal diagnostics from the grades pass's lint suite. The solve succeeded;
     /// these are severity-warning reports for the host to render.
     pub warnings: Vec<miette::Report>,
@@ -551,6 +556,7 @@ impl From<Solver> for Resolutions {
             fn_effects: solver.fn_effects,
             script_effects: solver.script_effects,
             script_segments: solver.script_segments,
+            page_needs: solver.page_needs,
             warnings: crate::load::unwrap_warnings(solver.warnings),
             decs: resolved_decs,
             adts: resolved_adts,

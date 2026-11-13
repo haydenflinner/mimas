@@ -109,6 +109,11 @@ pub struct Globals {
     items: Vec<Item>,
     /// How many of `items` came from the page's own source.
     own: usize,
+    /// `(owner, site)` rows for every `use "…"` seen while assembling —
+    /// the own page's `None`-owned sites first, then each resolved
+    /// include's in BFS order. The version/grant ledger of the whole
+    /// closure.
+    use_records: Vec<crate::UseRecord>,
     /// Whole-page scoped analysis (dep graph → SCCs → final addresses),
     /// computed once on demand.
     analysis: OnceCell<Rc<Analysis>>,
@@ -132,6 +137,11 @@ impl Globals {
             globals.item(item);
         }
         globals.own = globals.items.len();
+        for site in crate::use_sites(source) {
+            globals
+                .use_records
+                .push(crate::UseRecord { owner: None, site });
+        }
         let mut queue = VecDeque::new();
         let mut seen = HashSet::new();
         globals.use_items(source, &mut queue, &mut seen);
@@ -146,6 +156,12 @@ impl Globals {
                 globals.item(item);
             }
             globals.use_items(&inc, &mut queue, &mut seen);
+            for site in crate::use_sites(&inc) {
+                globals.use_records.push(crate::UseRecord {
+                    owner: Some(name.clone()),
+                    site,
+                });
+            }
             globals.includes.push(name);
             base += inc.len() + 2;
         }
@@ -162,6 +178,14 @@ impl Globals {
     /// link-by-hash loader fetches alongside this one.
     pub fn includes(&self) -> &[String] {
         &self.includes
+    }
+
+    /// The `use "…"` ledger of the assembled closure: each site with
+    /// the page that declared it — `None` for the own page, `Some(name)`
+    /// for a resolved include. A publish records these as the version
+    /// and grant records downstream readers pin and check against.
+    pub fn use_records(&self) -> &[crate::UseRecord] {
+        &self.use_records
     }
 
     /// Every top-level `fn` of the assembled program — own source first,
@@ -293,9 +317,9 @@ impl Globals {
                     }
                 }
                 Use::All(_) => {}
-                Use::Host(name) => {
-                    if seen.insert(name.to_lowercase()) {
-                        queue.push_back(name.clone());
+                Use::Host(h) => {
+                    if seen.insert(h.name.to_lowercase()) {
+                        queue.push_back(h.name.clone());
                     }
                 }
             }
@@ -619,8 +643,8 @@ impl<'s> Scoped<'s> {
             StmtKind::Expr(e) => self.expr(e),
             StmtKind::Item(item) => self.nested_item(item),
             // `module name;` is a file header, not a binding.
-            // `unit name;` declares a unit, not a binding either.
-            StmtKind::Module(_) | StmtKind::Unit(_) => {}
+            // `unit name;` declares a unit, `needs {…}` an authority — not bindings.
+            StmtKind::Module(_) | StmtKind::Unit(_) | StmtKind::Needs(_) => {}
         }
     }
 
@@ -732,7 +756,7 @@ impl<'s> Scoped<'s> {
                     self.expr(expr);
                 }
             }
-            Literal::Dictionary(fields) | Literal::Record(fields) => {
+            Literal::Record(fields) => {
                 // Keys are member names; only values resolve.
                 for (_, value) in fields {
                     self.expr(value);
@@ -1594,9 +1618,9 @@ mod tests {
         assert!(canon.contains("@dep:"), "{canon}");
         assert!(canon.contains("( n = @v0 )"), "{canon}");
         // Dict keys stay literal.
-        let src2 = "fn g() -> int { let x = 0; ~{ x = 1 } }\n";
+        let src2 = "fn g() -> int { let x = 0; { x : 1 } }\n";
         let canon2 = canon_of(src2, "g");
-        assert!(canon2.contains("~{ x = 1 }"), "{canon2}");
+        assert!(canon2.contains("{ x : 1 }"), "{canon2}");
     }
 
     /// Bindings in for/match/if-let/while-let/closures all alpha-rename.

@@ -22,7 +22,7 @@ use shared::{Located, Ty, units::Dim};
 use crate::{
     Error, Result, Solver,
     components::{AdtId, TyExt},
-    errors::{BadLiteralArg, BadSchemaSpec, DimensionMismatch, NoSuchColumn},
+    errors::{BadLiteralArg, BadSchemaSpec, DimensionMismatch, NoSuchColumn, UnknownDataSource},
     traits::Query,
 };
 
@@ -952,6 +952,7 @@ impl Solver {
                         self.frame_schemas.insert(id, Rc::new(FrameSchema::empty()));
                     }
                     "__table_col" => self.table_col(id, call)?,
+                    "__data" => self.data_source_call(id, call)?,
                     "__q_filter" => {
                         if let Some(schema) = arg(0).and_then(|a| self.frame_schema_of(a)) {
                             if let Some(cond) = arg(1) {
@@ -1267,6 +1268,36 @@ impl Solver {
         out.cols.insert(name.to_string(), FrameCol { ty, dim });
         self.frame_schemas.insert(id, Rc::new(out));
         Ok(())
+    }
+
+    /// `data "name"` (`__data`) -- an external data source. The host's
+    /// resolver answers the name with a `df.schema("…")`-style spec and
+    /// the frame becomes closed-schema, so `pull`/query verbs check its
+    /// columns by name and `derive`/`join` propagate its types. A
+    /// resolver-installed miss is a check error on the name; no resolver
+    /// (a bare `mimas check`, or the source answered `Opaque`) leaves the
+    /// frame permissive, like `use "…"` with no splice.
+    fn data_source_call(&mut self, id: NodeId, call: &Call) -> Result<()> {
+        let (Some(resolver), Some(name)) =
+            (self.data_resolver.clone(), Self::str_arg(call, 0))
+        else {
+            return Ok(());
+        };
+        let at = &call.arguments[0].value;
+        match resolver(name) {
+            Some(crate::DataSchema::Opaque) => Ok(()),
+            Some(crate::DataSchema::Spec(spec)) => {
+                let schema = self.schema_from_spec(&spec, at)?;
+                self.frame_schemas.insert(id, Rc::new(schema));
+                Ok(())
+            }
+            None => Err(UnknownDataSource {
+                src: self.src(at.location()),
+                at: at.location().into(),
+                name: name.to_string(),
+            }
+            .into()),
+        }
     }
 
     /// `__q_select(t, ["a","b"])` -- project in the listed order.

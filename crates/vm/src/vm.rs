@@ -169,10 +169,19 @@ pub enum DebugEvent {
 }
 
 /// Outcome of running one `#[test]` function via [`Vm::run_tests`]. `error` is `None` on pass.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// `PartialEq` but not `Eq` — `operands` holds `Inspect` trees, which carry floats.
+#[derive(Debug, Clone, PartialEq)]
 pub struct TestResult {
     pub name: String,
     pub error: Option<String>,
+    /// The operand values a failing `check`/`assert!` compared, as
+    /// [`Inspect`] trees — an example a debugger can open, not just the
+    /// text inside `error`. `left, right` for a comparison or `in`,
+    /// the predicate's arguments for a call check, the checked value
+    /// alone for a bare `check x`. Empty on a pass, on a `#[tests]`
+    /// expression that returned `false` (no assert rewrite records
+    /// operands), and on faults outside an assert's operand list.
+    pub operands: Vec<Inspect>,
 }
 
 impl TestResult {
@@ -1686,7 +1695,7 @@ fn top_level_receiver<'gc>(
 
 /// Build the one argument [`Vm::resolve_for_call`] passes. The callee's declared parameter
 /// type drives the shape: an adt becomes an `Instance` whose declared fields fill by name
-/// (names the bag didn't supply land as `Null`), anything else a `~{…}` dict of the entries.
+/// (names the bag didn't supply land as `Null`), anything else a `{…}` dict of the entries.
 fn arg_val<'gc>(
     ctx: Ctx<'gc>,
     field_names: &[Vec<String>],
@@ -2910,11 +2919,29 @@ impl Vm {
         {
             let why = format!("not run: the top level failed: {e}");
             self.reset_to_entry();
-            return names.into_iter().map(|name| TestResult { name, error: Some(why.clone()) }).collect();
+            return names
+                .into_iter()
+                .map(|name| TestResult {
+                    name,
+                    error: Some(why.clone()),
+                    operands: Vec::new(),
+                })
+                .collect();
         }
+        // a top-level `assert!` may have recorded its operands before the
+        // run faulted — drop them so they can't ride onto the first check
+        let _ = self.fixture::<crate::fixtures::Witnesses>().take();
         let mut results = Vec::with_capacity(names.len());
         for name in names {
-            let error = match self.call_fn_result(&name) {
+            let ran = self.call_fn_result(&name);
+            // the desugared assert records its operands just before the
+            // panic unwinds; take whatever this call left, pass or fail
+            let operands = self
+                .fixture::<crate::fixtures::Witnesses>()
+                .take()
+                .map(|w| w.operands)
+                .unwrap_or_default();
+            let error = match ran {
                 Err(e) => Some(format!("{e}")),
                 Ok(Captured::Bool(false)) => Some("assertion failed".into()),
                 // `true` for a check case, unit for a `#[test]` fn (which asserts or panics)
@@ -2922,7 +2949,7 @@ impl Vm {
                 // anything else is a broken check, not a pass
                 Ok(other) => Some(format!("check produced {other:?}, expected a bool")),
             };
-            results.push(TestResult { name, error });
+            results.push(TestResult { name, error, operands });
         }
         self.reset_to_entry();
         results
@@ -3149,6 +3176,78 @@ impl Vm {
         })
     }
 
+    /// [`Vm::resolve_for_scene`] on a value the script handed the host through
+    /// [`Ctx::stash`] — the operand of a failed check, rooted in the
+    /// [`Witnesses`](crate::fixtures::Witnesses) record — rather than a named
+    /// top-level local. `None` when the handle isn't live in this program, the
+    /// value isn't an instance, its type has no one-argument `draw_method`,
+    /// or the call faults. Draws an operand the way a hover draws a `let`.
+    pub fn call_method_on_stashed(
+        &mut self,
+        stashed: &Stashed,
+        draw_method: &str,
+    ) -> Option<SceneResult> {
+        shared::units::install(&self.units);
+        let Vm {
+            code,
+            chunks,
+            signatures,
+            c_strs: strs,
+            arena,
+            sources,
+            methods,
+            field_names,
+            variant_ordinals,
+            bc,
+            ..
+        } = self;
+        arena.mutate(|mc, state| {
+            let ctx = state.ctx(mc);
+            // a handle from a superseded program names nothing here — treat
+            // it as "no draw" rather than `fetch`'s panic
+            if !ctx.holds(stashed) {
+                return None;
+            }
+            let receiver = ctx.fetch(stashed);
+            let body = if let Val::Instance(inst) = receiver {
+                let sid = inst.0.borrow().struct_id as usize;
+                methods.get(sid).and_then(|m| m.get(draw_method)).copied()
+            } else {
+                None
+            };
+            if let Some(body) = body {
+                // `draw(self)` takes the receiver only — a fatter signature
+                // can't be injected (same `enter_call` arity refusal as
+                // `resolve_for_scene`, just checked ahead of the call)
+                if chunks[body].args as usize != 1 {
+                    return None;
+                }
+                if let Ok(result) = inject_call(
+                    ctx,
+                    code,
+                    chunks,
+                    signatures,
+                    strs,
+                    sources,
+                    bc.as_deref(),
+                    body,
+                    &[receiver],
+                    &[],
+                ) {
+                    let struct_names = state.struct_names.borrow();
+                    let mut seen = std::collections::HashSet::new();
+                    return Some(SceneResult::Drawn(result.inspect(
+                        &struct_names,
+                        field_names,
+                        variant_ordinals,
+                        &mut seen,
+                    )));
+                }
+            }
+            ctx.to_string(receiver).ok().map(SceneResult::Fallback)
+        })
+    }
+
     /// [`Vm::resolve_for_scene`] over the elements of a top-level array
     /// binding: `(index, scene)` for each element that is an instance whose
     /// type has a one-argument `draw_method`, called and inspected in turn —
@@ -3281,7 +3380,7 @@ impl Vm {
     /// returns the result as an [`Inspect`]. For a livelit `respond(self, ev)` the host
     /// synthesizes `ev` — the method's declared parameter type drives the shape: an adt becomes
     /// an `Instance` whose declared fields fill by name (absent names land as `Null`), anything
-    /// else becomes a `~{…}` dict of the given entries. `None` when `name` isn't a live
+    /// else becomes a `{…}` dict of the given entries. `None` when `name` isn't a live
     /// instance-typed local, has no `method`, or `method` doesn't take exactly one parameter.
     /// Faults unwind like any other [`inject_call`] — no injected frame is left behind.
     pub fn resolve_for_call(

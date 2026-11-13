@@ -28,7 +28,7 @@ enum Juxta {
     /// Adjacency never applies -- the next token is the *next thing*:
     /// `if`/`while`/`for` heads, `table` cells, `query` verbs.
     Off,
-    /// Inside a sequence (`[…]`, `f(…)`, `~{…}`): adjacency ends the
+    /// Inside a sequence (`[…]`, `f(…)`, `{…}`): adjacency ends the
     /// element, so commas are optional. Application needs `(…)` --
     /// `[f x]` is `[f, x]`; `[f(x)]` applies.
     Comma,
@@ -465,6 +465,11 @@ impl<'s> Parser<'s> {
             TokKind::Ident("unit") if self.unit_intro() => {
                 BlockElement::Stmt(self.unit_stmt(start))
             }
+            // `needs { doc, net }` declares the page's effect authority.
+            // Top-level only: inside a block `needs {x}` stays an apply.
+            TokKind::Ident("needs") if self.needs_intro() => {
+                BlockElement::Stmt(self.needs_stmt(start))
+            }
             // `opp Sky { Sun, Moon }` declares a dichotomy. Contextual: `opp`
             // is a name anywhere a type name and `{` don't follow it.
             TokKind::Ident("opp") if self.opp_intro() => BlockElement::Stmt(self.opp_stmt(start)),
@@ -732,7 +737,6 @@ impl<'s> Parser<'s> {
             // an index
             TokKind::LeftParenthesis
             | TokKind::LeftSquare
-            | TokKind::TildeLeftBrace
             | TokKind::Minus => !after.glued,
             kind => Literal::try_from(kind).is_ok(),
         }
@@ -744,6 +748,38 @@ impl<'s> Parser<'s> {
     fn law_intro(&self) -> bool {
         !self.meta_at(1).newline
             && (matches!(self.nth(1), TokKind::Pipe | TokKind::DoublePipe) || self.check_intro())
+    }
+
+    /// One-token lookahead for the contextual `needs` keyword: `needs {`
+    /// at top level opens the page's effect-authority declaration. Inside
+    /// a block `needs` stays an ordinary name — `needs {x}` applies it.
+    fn needs_intro(&self) -> bool {
+        self.depth == 0
+            && matches!(self.nth(1), TokKind::LeftBrace)
+            && !self.meta_at(1).newline
+    }
+
+    /// `needs { doc, net, … };` — the page's declared effect authority, the
+    /// same names `granting {…}` writes (`Fx::named` validates). `needs {}`
+    /// declares the page pure. The grades pass checks the page's inferred
+    /// `Fx` against this set at solve and bounds `granting` clauses by it.
+    // r[impl mimas.fx.needs]
+    fn needs_stmt(&mut self, start: usize) -> Stmt {
+        self.advance(); // `needs`
+        self.bump(TokKind::LeftBrace);
+        let names = self.list(TokKind::RightBrace, TokKind::is_ident, Self::require_ident);
+        for name in &names {
+            if shared::Fx::named(&name.lexeme).is_none() {
+                self.error(Expected {
+                    src: self.src(),
+                    at: name.location.into(),
+                    what: "an effect name (`doc`, `net`, `rng`, `yield`, `io`, `time`, `any`, `unaudited`)",
+                });
+            }
+        }
+        let stmt = self.new_stmt(Needs::new(names), start);
+        self.end_stmt(stmt.location());
+        stmt
     }
 
     /// One-token lookahead for the contextual `unit` keyword: `unit` opens
@@ -911,7 +947,10 @@ impl<'s> Parser<'s> {
         if let TokKind::String(lit) = self.peek() {
             self.advance();
             // r[impl mimas.use.page]
-            return Some(Use::Host(lit.trim_matches('"').to_string()));
+            let name = lit.trim_matches('"').to_string();
+            // r[impl mimas.use.page.granting]
+            let grants = self.granting_clause();
+            return Some(Use::Host(HostUse { name, grants }));
         }
 
         let mut path = vec![self.require_ident()];
@@ -937,6 +976,40 @@ impl<'s> Parser<'s> {
         // the path ran out, so its last segment is the import
         let item = path.pop()?;
         Some(Use::Singular(path, item))
+    }
+
+    /// The `granting { doc, net, … }` clause a host `use` may carry on
+    /// the same line — `None` when no spaced `granting` word follows the
+    /// quoted name. `granting {}` grants nothing: it asserts the
+    /// include is pure.
+    // r[impl mimas.use.page.granting]
+    fn granting_clause(&mut self) -> Option<Vec<Ident>> {
+        if self.at_line_start() || self.glued() {
+            return None;
+        }
+        let TokKind::Ident(word) = self.peek() else {
+            return None;
+        };
+        if word != "granting" {
+            return None;
+        }
+        self.advance();
+        if !self.at(TokKind::LeftBrace) {
+            self.expected("a `{ … }` grant set");
+            return Some(vec![]);
+        }
+        self.bump(TokKind::LeftBrace);
+        let grants = self.list(TokKind::RightBrace, TokKind::is_ident, Self::require_ident);
+        for grant in &grants {
+            if shared::Fx::named(&grant.lexeme).is_none() {
+                self.error(Expected {
+                    src: self.src(),
+                    at: grant.location.into(),
+                    what: "an effect name (`doc`, `net`, `rng`, `yield`, `io`, `time`, `any`, `unaudited`)",
+                });
+            }
+        }
+        Some(grants)
     }
 
     fn module_stmt(&mut self) -> Stmt {
@@ -1143,10 +1216,21 @@ impl<'s> Parser<'s> {
     fn pact_decl(&mut self) -> Pact {
         self.bump(TokKind::Pact);
         let pact_name = self.require_ident();
+        // `pact A: B + C` -- A requires B and C: every implementer of A must
+        // also implement them, and their members are reachable through an
+        // `A` bound. Same `+` spelling as a param bound.
+        // r[impl mimas.pact.requires]
+        let mut requires = vec![];
+        if self.eat(TokKind::Colon) {
+            requires.push(self.require_ident());
+            while self.eat(TokKind::Plus) {
+                requires.push(self.require_ident());
+            }
+        }
         let mut items = vec![];
         let mut laws = vec![];
         if !self.expect(TokKind::LeftBrace) {
-            return Pact::new(pact_name, items);
+            return Pact::new(pact_name, requires, items);
         }
         while !self.eat(TokKind::RightBrace) {
             let start = self.next_start();
@@ -1211,7 +1295,7 @@ impl<'s> Parser<'s> {
                 }),
             }
         }
-        let mut pact = Pact::new(pact_name, items);
+        let mut pact = Pact::new(pact_name, requires, items);
         pact.laws = laws;
         pact
     }
@@ -1330,7 +1414,7 @@ impl<'s> Parser<'s> {
                     .collect();
                 let at = self.location(start);
                 let item = self.glyph_fn(&head, &arms, start);
-                let imp = Impl::new(Ident::new(head.lexeme.clone(), at), None, vec![item]);
+                let imp = Impl::new(Ident::new(head.lexeme.clone(), at), None, None, vec![item]);
                 self.pending
                     .push(self.new_stmt(Item::new(imp.into(), at, false), start));
             }
@@ -1555,7 +1639,7 @@ impl<'s> Parser<'s> {
         if let Some((ga, gb)) = glyphs {
             items.push(self.glyph_fn(head, &[(a.clone(), ga), (b.clone(), gb)], start));
         }
-        let imp = Impl::new(id(&head.lexeme), Some(id("Opp")), items);
+        let imp = Impl::new(id(&head.lexeme), Some(id("Opp")), None, items);
         self.new_stmt(Item::new(imp.into(), at, false), start)
     }
 
@@ -1666,6 +1750,7 @@ impl<'s> Parser<'s> {
         let imp = Impl::new(
             id(&name.lexeme),
             Some(id("Opp")),
+            None,
             vec![Item::new(inv.into(), at, false)],
         );
         self.new_stmt(Item::new(imp.into(), at, false), start)
@@ -1708,9 +1793,24 @@ impl<'s> Parser<'s> {
         } else {
             (None, first)
         };
+        // `impl X for T via Y` -- the impl forwards members it doesn't write
+        // to `T`'s `Y` impl of the same name. `via` is
+        // contextual: an impl target could itself be named `via`, so it's
+        // only read when it sits right after the target of a pact impl.
+        // r[impl mimas.impl.via]
+        let via = if pact.is_some() && self.at(TokKind::Ident("via")) {
+            self.advance();
+            Some(self.require_ident())
+        } else {
+            None
+        };
         let mut items = vec![];
+        // a via impl may carry no braces at all
+        if via.is_some() && !self.at(TokKind::LeftBrace) {
+            return Impl::new(target, pact, via, items);
+        }
         if !self.expect(TokKind::LeftBrace) {
-            return Impl::new(target, pact, items);
+            return Impl::new(target, pact, via, items);
         }
         while !self.eat(TokKind::RightBrace) {
             let kind = if self.at(TokKind::Pub) {
@@ -1734,7 +1834,7 @@ impl<'s> Parser<'s> {
                 }),
             }
         }
-        Impl::new(target, pact, items)
+        Impl::new(target, pact, via, items)
     }
 
     /// A function up to its body. A pact's signatures don't get `defaults`. Returns the
@@ -2625,19 +2725,6 @@ impl<'s> Parser<'s> {
                 self.new_expr(Literal::Array(elements), start)
             };
             self.chain_accesses(expr)
-        } else if self.eat(TokKind::TildeLeftBrace) {
-            let elements = self.with_juxta(Juxta::Comma, |p| {
-                p.list(TokKind::RightBrace, TokKind::is_ident, |p| {
-                    let name = p.require_ident();
-                    // r[impl mimas.record.separator]
-                    if !p.eat(TokKind::Colon) {
-                        p.expect(TokKind::Equal);
-                    }
-                    (name, p.struct_literals(true, Self::expr))
-                })
-            });
-            let expr = self.new_expr(Literal::Dictionary(elements), start);
-            self.chain_accesses(expr)
         } else if self.struct_literals
             && self.peek() == TokKind::Ident("table")
             && self.nth(1) == TokKind::LeftBrace
@@ -2655,6 +2742,14 @@ impl<'s> Parser<'s> {
             && self.nth(1) == TokKind::LeftBrace
         {
             let expr = self.datalog_literal();
+            self.chain_accesses(expr)
+        } else if self.struct_literals
+            && self.peek() == TokKind::Ident("data")
+            && matches!(self.nth(1), TokKind::String(_))
+            && !self.meta_at(1).newline
+        {
+            // `data "name-or-url"` — an external data source (see data_source)
+            let expr = self.data_source();
             self.chain_accesses(expr)
         } else if self.at(TokKind::Dollar) {
             // `$expr` — a `query { }` splice: `expr` is a value from the
@@ -2722,6 +2817,36 @@ impl<'s> Parser<'s> {
             let expr = self.new_expr(Literal::Struct(StructLiteral { name, fields, base }), start);
             self.chain_accesses(expr)
         }
+    }
+
+    /// `data "name-or-url"` -- an external data source: a page's `data`
+    /// card by name, or a URL the host fetches. Lowers to `__data("…")`;
+    /// the host binds the name at runtime and hands the checker its column
+    /// schema, so `pull`/`query` code over the result checks by name (see
+    /// docs/type-providers.md). `data("name")`, the host's untyped
+    /// accessor, is unaffected -- the form needs a bare string.
+    fn data_source(&mut self) -> Expr {
+        let start = self.next_start();
+        self.advance(); // `data`
+        let str_start = self.next_start();
+        let TokKind::String(raw) = self.peek() else {
+            self.expected("a data source name or url (a quoted string)");
+            return self.poison_expr(start);
+        };
+        let name = chompy::utils::unescape(raw, &['\\'], &['"']);
+        self.advance();
+        let value = self.new_expr(Literal::String(name), str_start);
+        let callee = self.new_expr(Ident::new("__data", self.location(start)), start);
+        self.new_expr(
+            Call::new(
+                callee,
+                vec![Argument {
+                    name: None,
+                    value,
+                }],
+            ),
+            start,
+        )
     }
 
     /// `table { name age \n "Denmark" 25 \n … }` -- a table literal. The first line names the
@@ -3423,6 +3548,16 @@ impl<'s> Parser<'s> {
         parts.push(FStringPart::Literal(
             if negated { ") is true" } else { ") is false" }.into(),
         ));
+        // the values the call saw, in argument order — what the host
+        // opens when this check fails. A closure sits out: its parameter
+        // types come from the call itself, so a bare `__check_operand`
+        // can't type it, and an opaque `fn` tree adds nothing over the
+        // source text the message already shows.
+        let witnesses = args
+            .iter()
+            .filter(|arg| !matches!(arg.value.kind(), ExprKind::Closure(_)))
+            .map(|arg| arg.value.clone())
+            .collect();
         let rebuilt = self.new_expr(Call::new(call.left, args), start);
         let condition = if negated {
             rebuilt
@@ -3430,7 +3565,7 @@ impl<'s> Parser<'s> {
             self.new_expr(Unary::new(UnaryOp::Not, rebuilt), start)
         };
         let message = self.new_expr(FString::new(parts), start);
-        self.assert_lets_if(start, lets, condition, message)
+        self.assert_lets_if(start, lets, condition, message, witnesses)
     }
 
     fn skip_groups(mut expr: &Expr) -> &Expr {
@@ -3455,12 +3590,14 @@ impl<'s> Parser<'s> {
             Equality::new(left_expr.clone(), inverted, right_expr.clone()),
             start,
         );
-        let message = self.assert_pair_message(left_expr, right_expr, &op_text, start);
+        let message =
+            self.assert_pair_message(left_expr.clone(), right_expr.clone(), &op_text, start);
         self.assert_lets_if(
             start,
             [left_let, right_let].into_iter().flatten().collect(),
             condition,
             message,
+            vec![left_expr, right_expr],
         )
     }
 
@@ -3475,12 +3612,13 @@ impl<'s> Parser<'s> {
             start,
         );
         let condition = self.new_expr(Unary::new(UnaryOp::Not, close), start);
-        let message = self.assert_pair_message(left_expr, right_expr, "≈", start);
+        let message = self.assert_pair_message(left_expr.clone(), right_expr.clone(), "≈", start);
         self.assert_lets_if(
             start,
             [left_let, right_let].into_iter().flatten().collect(),
             condition,
             message,
+            vec![left_expr, right_expr],
         )
     }
 
@@ -3512,23 +3650,43 @@ impl<'s> Parser<'s> {
             In::new(left_expr.clone(), right_expr.clone(), fail_when),
             start,
         );
-        let message = self.assert_pair_message(left_expr, right_expr, op_text, start);
+        let message = self.assert_pair_message(left_expr.clone(), right_expr.clone(), op_text, start);
         self.assert_lets_if(
             start,
             [left_let, right_let].into_iter().flatten().collect(),
             condition,
             message,
+            vec![left_expr, right_expr],
         )
     }
 
+    /// The fallback `check <expr>`: the checked value itself is what a
+    /// failure should open, so it goes through `assert_operand` like a
+    /// comparison side — evaluated once into a temp, then both the
+    /// condition and the witness read the temp. An ident or literal
+    /// needs no temp: reading it again costs nothing.
     fn rewrite_assert_bool(&mut self, start: usize, inner: Expr) -> Expr {
         let snippet = self.source_of(&inner);
-        let condition = self.new_expr(Unary::new(UnaryOp::Not, inner), start);
+        let (value, value_let) = match inner.kind() {
+            ExprKind::Literal(_) | ExprKind::Ident(_) => (inner, None),
+            _ => {
+                self.assert_id += 1;
+                let ident = self.ident_at(format!("__assert_arg_{}", self.assert_id), start);
+                self.assert_operand(inner, ident, start)
+            }
+        };
+        let condition = self.new_expr(Unary::new(UnaryOp::Not, value.clone()), start);
         let message = self.new_expr(
             Literal::String(format!("assertion failed: {snippet}")),
             start,
         );
-        self.assert_lets_if(start, vec![], condition, message)
+        self.assert_lets_if(
+            start,
+            value_let.into_iter().collect(),
+            condition,
+            message,
+            vec![value],
+        )
     }
 
     fn next_assert_temps(&mut self, start: usize) -> (Ident, Ident) {
@@ -3568,13 +3726,37 @@ impl<'s> Parser<'s> {
         )
     }
 
+    /// The assert desugar's tail: `body` (the operand lets), then
+    /// `if (condition) { __check_operand(w0); __check_operand(w1); …;
+    /// panic(message) }`. `witnesses` are the operand values the message
+    /// names — the use-site exprs, temps or inlined literals, so nothing
+    /// with an effect runs twice. One call each, not one `[…]` list:
+    /// each keeps its operand's own type where a list would force them
+    /// to share one. `__check_operand` hands them to the host before
+    /// `panic` unwinds: a failed check keeps its operands as inspectable
+    /// trees, not just inside the message's text.
     fn assert_lets_if(
         &self,
         start: usize,
         mut body: Vec<Stmt>,
         condition: Expr,
         message: Expr,
+        witnesses: Vec<Expr>,
     ) -> Expr {
+        let mut then = Vec::with_capacity(witnesses.len() + 1);
+        for witness in witnesses {
+            let record = self.new_expr(
+                Call::new(
+                    self.new_expr(self.ident_at("__check_operand", start), start),
+                    vec![Argument {
+                        name: None,
+                        value: witness,
+                    }],
+                ),
+                start,
+            );
+            then.push(self.new_stmt(StmtKind::Expr(record), start));
+        }
         let panic_call = self.new_expr(
             Call::new(
                 self.new_expr(self.ident_at("panic", start), start),
@@ -3585,9 +3767,10 @@ impl<'s> Parser<'s> {
             ),
             start,
         );
+        then.push(self.new_stmt(StmtKind::Expr(panic_call), start));
         let then_body = self.new_expr(
             Block {
-                body: vec![self.new_stmt(StmtKind::Expr(panic_call), start)],
+                body: then,
                 yielded_expr: None,
             },
             start,
@@ -3820,7 +4003,7 @@ impl<'s> Parser<'s> {
                         return false;
                     }
                     match tok.kind() {
-                        TokKind::LeftParenthesis | TokKind::LeftSquare | TokKind::LeftBrace | TokKind::TildeLeftBrace => depth += 1,
+                        TokKind::LeftParenthesis | TokKind::LeftSquare | TokKind::LeftBrace => depth += 1,
                         TokKind::RightParenthesis | TokKind::RightSquare => depth -= 1,
                         TokKind::RightBrace => {
                             if depth == 0 {
@@ -4170,8 +4353,8 @@ impl<'s> Parser<'s> {
                 self.expect(TokKind::RightSquare);
                 Annotation::Array(Box::new(inner), dims)
             }
-            // r[impl mimas.dict.type] `{float}` and `~{float}` are one type
-            TokKind::TildeLeftBrace | TokKind::LeftBrace => {
+            // r[impl mimas.dict.type] `{float}` is the dict type
+            TokKind::LeftBrace => {
                 self.advance();
                 let inner = self.annotation();
                 self.expect(TokKind::RightBrace);
@@ -4383,7 +4566,7 @@ impl<'s> Parser<'s> {
             match kind {
                 TokKind::LeftParenthesis => open.push(TokKind::RightParenthesis),
                 TokKind::LeftSquare | TokKind::HookLeftSquare => open.push(TokKind::RightSquare),
-                TokKind::LeftBrace | TokKind::TildeLeftBrace => open.push(TokKind::RightBrace),
+                TokKind::LeftBrace => open.push(TokKind::RightBrace),
                 kind if kind.is_closer() => {
                     open.pop();
                 }
@@ -4789,7 +4972,6 @@ fn declare_units(source: &str, tokens: &[Tok<TokKind<'_>>]) -> bool {
     while i + 1 < toks.len() {
         match toks[i].kind() {
             TokKind::LeftBrace
-            | TokKind::TildeLeftBrace
             | TokKind::LeftParenthesis
             | TokKind::LeftSquare
             | TokKind::HookLeftSquare => depth += 1,

@@ -58,7 +58,7 @@ This tree is a permanently separate fork of upstream [mimas](https://github.com/
 | `|>` | Pipeline infix, loosest precedence: `x |> f(a)` ≡ `f(x, a)` (`parse/src/lex/tok.rs` `PipeGreater`) | not present |
 | `xor` / names | xor spells `⊕`/`⊻`/`xor`; `^` and `-` join identifiers, so `x^2` and `foo-bar` are single names (`parse/src/lex/lexer.rs`) | `^` is an operator; `-` is always minus |
 | `table {}` / `query {}` | Literal dataframes and PRQL-style query blocks with `$expr` splices (`parse/src/parser.rs`, `solve/src/traits/query.rs`); the checker tracks column→type schemas (`solve/src/frames.rs`) | not present |
-| `use` | `use "page-name";` is a host-resolved include (`Use::Host`, `parse/src/item/item_kinds/use.rs`) | `use` takes `a::b::{…}` paths only |
+| `use` | `use "page-name";` is a host-resolved include (`Use::Host`, `parse/src/item/item_kinds/use.rs`); `name@<64-hex>` pins, `name@latest` follows, `granting {…}` caps effects | `use` takes `a::b::{…}` paths only |
 | `name_(…)` patterns | `FIELD_(X, Y)` binds `FIELD_X`, `FIELD_Y` in every pattern position (`parse/src/parser.rs`) | not present |
 | `const` | Takes irrefutable patterns: `const (A, B) = (1, 2)` (`parse/src/item/item_kinds/const.rs`) | `const` binds a single name |
 | Generics | `fn map<T, U>(…)`, `struct Pair<A, B>`, generic enums/impls; `Ty::Param` (`shared/src/ty.rs`) | monomorphic declarations |

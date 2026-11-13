@@ -75,7 +75,7 @@ impl Ir {
                 }
                 Some(())
             }
-            StmtKind::Module(_) | StmtKind::Unit(_) => Some(()),
+            StmtKind::Module(_) | StmtKind::Unit(_) | StmtKind::Needs(_) => Some(()),
             StmtKind::Item(item) => {
                 match item.kind() {
                     parse::ItemKind::Poison(poison) => poison.escaped(),
@@ -1517,15 +1517,6 @@ impl Emit for Literal {
                 }
                 return Some(dict);
             }
-            Literal::Dictionary(fields) => {
-                let dict = ir.current().new_dict();
-                for (key, value) in fields.iter() {
-                    let key = ir.intern_str(&key.lexeme);
-                    let value = value.lower(ir)?;
-                    ir.current().insert(dict, key, value);
-                }
-                return Some(dict);
-            }
             Literal::Struct(s) => {
                 // a const-folded unit variant arrives as an empty struct
                 // literal naming the `E::V` access — lower the access, not a
@@ -2490,7 +2481,7 @@ fn subst_params(ty: &Ty, params: &[ParamId], args: &[Ty]) -> Ty {
     }
 }
 
-/// One member's default value: `0`, `""`, `[]`, `~{}`, `null`, or a
+/// One member's default value: `0`, `""`, `[]`, `dict::new()`, `null`, or a
 /// nested default instance.
 fn default_inst(ir: &mut Ir, ty: &Ty) -> Option<InstId> {
     Some(match ty {
