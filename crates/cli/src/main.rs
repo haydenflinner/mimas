@@ -4,6 +4,7 @@ use num_format::{Locale, ToFormattedString};
 use std::{path::PathBuf, time::Duration};
 
 mod build;
+mod fmt;
 mod ice;
 mod input;
 mod render;
@@ -30,6 +31,7 @@ fn main() {
             input.dump_ir,
             input.time,
         ),
+        Some(Commands::Fmt { check, paths }) => fmt::run(&paths, check),
         Some(Commands::Hash { path, scoped, deps }) => hash(path, scoped || deps, deps),
         Some(Commands::Link { addr, blobs }) => link(&addr, blobs),
         Some(Commands::Cpp { path }) => cpp_dump(&path),
@@ -378,7 +380,9 @@ fn build(
 // bare `mimas foo.mim` means `mimas run foo.mim`; inject `run` when the first
 // positional isn't already a subcommand. `mimas` alone still falls through to help.
 fn massage_args(mut args: Vec<String>) -> Vec<String> {
-    const SUBCOMMANDS: [&str; 7] = ["check", "build", "hash", "run", "link", "cpp", "help"];
+    const SUBCOMMANDS: [&str; 8] = [
+        "check", "build", "hash", "run", "link", "cpp", "fmt", "help",
+    ];
     if let Some(idx) = args.iter().skip(1).position(|a| !a.starts_with('-')) {
         let idx = idx + 1;
         if !SUBCOMMANDS.contains(&args[idx].as_str()) {

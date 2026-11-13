@@ -79,6 +79,20 @@ pub enum Commands {
         #[clap(parse(from_os_str))]
         path: PathBuf,
     },
+    /// Canonicalizes mimas source formatting: indentation, spacing,
+    /// comments preserved. Rewrites each `.mim`/`.mimas` file in place;
+    /// reads stdin and writes stdout when given no paths (or `-`).
+    Fmt {
+        /// List files that would change without writing them; exit 1
+        /// when any do (for CI).
+        #[clap(long)]
+        check: bool,
+
+        /// Files or directories to format. Directories walk recursively
+        /// for `.mim`/`.mimas`. No paths (or `-`) reads stdin.
+        #[clap(parse(from_os_str))]
+        paths: Vec<PathBuf>,
+    },
     /// Assemble a fn by scoped content address from a blob dir: fetch the
     /// blob, follow its `@dep:` edges, rename markers, print the linked
     /// module source. The read half of `host::publish`'s blob store.

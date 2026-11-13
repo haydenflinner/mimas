@@ -2,6 +2,36 @@
 
 Memorable additions to mimas beyond what the changelog tracks. Newest first.
 
+## Canonical formatter `mimas fmt` (`cli/src/fmt.rs`, spec `mimas.fmt`)
+
+A token-stream respacer, not an AST reprint: comments are tokens, so every
+comment survives verbatim and each literal keeps its written form (`1e-6`,
+`#1.10`, `1_000`, `25kW`). Newlines are semantic under semicolon insertion,
+so the formatter only rewrites whitespace — gaps, indentation, blank runs,
+trailing whitespace — plus canonical operator spellings (`and`→`&&`,
+`≠`→`!=`, `~=`→`≈`). The semantic adjacencies stay: `x!`/`x?`/`x%` postfix
+glue, `check (` vs `check(`, `[0 -1]` vs `[0 - 1]`, glued generics, `px/s`
+unit types.
+
+- `mimas fmt <paths>` rewrites `.mim`/`.mimas` in place (dirs walk
+  recursively), `--check` lists without writing (exit 1 on diffs, 2 on
+  operational errors), no paths or `-` reads stdin to stdout.
+- `// fmt: off` … `// fmt: on` emits a region verbatim; `// fmt: skip`
+  exempts the next statement or item, `{…}` body included.
+- Columnar alignment: consecutive same-shape, same-indent lines pad a
+  shared pivot — `=` of `let`/`const`/assignments and `=` record fields,
+  values after `:` field colons, `=>` match arms, `->` signature lines,
+  comma-separated row cells. Groups break at blank lines, comment-only
+  lines, items, and shape changes; a group drops whole if its column
+  passes 80 or a member needs more than 32 spaces. Emission is two
+  passes — measure columns under canonical single-space gaps, then write
+  pads — so `fmt(fmt(x)) == fmt(x)` holds by construction.
+- Guard: the output must relex to the same non-comment token stream, or
+  the file is left alone. `table {}` rows align to columns with a
+  4-space gutter; `query {}` keeps written adjacency; `unit` specs glue
+  `m/s` operands; `macro` decls glue `$x:expr` fragments and `),*`
+  repeats.
+
 ## IR optimizer: inlining and scalar replacement (`compile/src/codegen/opt.rs`)
 
 Two passes run on the IR before `clean`, for every lane (interpreter,
@@ -264,7 +294,7 @@ now.
 `raise` used to take only `str`: `Val::Raised` stored the note directly,
 and the solver rejected `raise 42`. Now the payload is any `Val`, boxed
 as `Raised(Gc<Val>)` so a `Val` never holds a `Val` inline: `raise 42`,
-`raise [1, 2]`, `raise ~{code = 7}` all work, and a raised value can even
+`raise [1, 2]`, `raise {code = 7}` all work, and a raised value can even
 carry another raised value (`raise inner()` nests to `<raised 7>`).
 
 The point is *when* the text appears: the payload stays structured
@@ -365,7 +395,7 @@ Two pieces worth knowing:
   arg that doesn't fit a candidate as "keep looking" instead of an
   error, which is also what lets `xs + c` still reach `c.radd(xs)`.
 - `xs - x` is a quiet no-op when `x` isn't there. Arrays can't hold
-  the negative multiplicities a `~{int}` Z-set can (`xs - xs` empties).
+  the negative multiplicities a `{int}` Z-set can (`xs - xs` empties).
   `[T; n]` places refuse `±=` like `push` does.
 
 Postfix `!` now hugs its operand like `x%`: `x!` unwraps, but a *spaced*
@@ -448,7 +478,7 @@ Two consequences fell out of making it ordinary methods:
 - **CUE-style unification is a library.** `host/web/games/cue-kit.mimas`
   defines a `CVal` ADT (top/bottom/atoms/lists/structs/disjunctions/
   bounds/defaults) and implements `band`/`bor` as `meet`/`join`, so a
-  config schema reads `~{port = ge(1024) & le(65535)}` and `schema &
+  config schema reads `{port = ge(1024) & le(65535)}` and `schema &
   record` unifies fieldwise with `⊥` propagating. The lattice laws are
   `check` lines run by `cue_kit::cue_kit_check_lines_all_pass`.
 
@@ -595,7 +625,7 @@ and the same holds for every operator on `int`/`float`/`str`/`bool`
 ## `check (expr)` opens a check
 
 Juxtaposition made `check (a * b).same(c)` the call `check(a * b)…`. A
-gap after the word now opens a check before `(`, `[`, `~{` and `-`, as
+gap after the word now opens a check before `(`, `[`, `{` and `-`, as
 it always did before a name or literal; `check(x)` and `check[i]`
 touching the word stay a call and an index
 (`parse_validity::check_opens_before_a_spaced_paren_bracket_or_minus`).
