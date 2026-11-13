@@ -110,3 +110,20 @@ let result = samples
 ```
 
 The callee is a *call*, not a method lookup on the piped value: `x |> f(a)` resolves `f` as a free function, and `x |> obj.f(a)` is `obj.f(x, a)`. Method-only names (`xs.push(0)` mutates through `&mut self`) can't be reached this way — that's what `.` is for. The `std::polars` verbs are registered as both methods and module functions so `df |> filter(..)!` and `df.filter(..)!` both work.
+
+## Math spellings
+
+Every comparison and logic operator has its glyph, lexed to the same token as the keyboard form: `≠ ≤ ≥ ¬ ∧ ∨`, and `∈`/`∉` for `in`/`!in`.
+
+```mimas
+if 1 ≤ x ∧ ¬ done { … }
+if c ∈ ln { … }
+```
+
+### Reductions
+
+The big operators reduce a list, in front of it: `∑ xs` is `xs.sum()`, `∏ xs` is `xs.product()`, and `⨅ xs` / `⨆ xs` are the meet and join -- all/min and any/max -- `xs.inf()` / `xs.sup()`. They bind like a unary minus, so `∑ xs.map(f)` reduces the mapped list, `⨆⨅ m` nests, and `(⨅ xs)!` is how to unwrap a numeric meet (a bare `⨅ xs!` unwraps `xs` first). On a list of lists each reduction eats the innermost axis, one answer per row: `⨅ [[true, false], [true, true]]` is `[false, true]`. On a tensor, `∑→ m` sums each row to one number and `∑↓ m` each column (`.sum_dim(1)` / `.sum_dim(0)`).
+
+### Contraction
+
+`a ⋅ b` is `a.dot(b)`: the dot product of two vectors, matmul of anything higher -- APL's `+.×`, one glyph.

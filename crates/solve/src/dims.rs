@@ -82,7 +82,10 @@ fn angle_plain(x: Dim, y: Dim) -> bool {
 fn clash(a: &D, b: &D) -> Option<(Dim, Dim)> {
     match (a, b) {
         (D::Q(x) | D::Iv(x), D::Q(y) | D::Iv(y))
-            if x != y && !index_plain(*x, *y) && !angle_plain(*x, *y) =>
+            if !Dim::agree(*x, *y)
+                && !index_plain(x.bare(), y.bare())
+                && !angle_plain(x.bare(), y.bare())
+            =>
         {
             Some((*x, *y))
         }
@@ -94,13 +97,17 @@ fn clash(a: &D, b: &D) -> Option<(Dim, Dim)> {
 /// The dimension two agreeing values share (unknown wins, so a doubt propagates as a doubt).
 fn join(a: D, b: &D) -> D {
     match (&a, b) {
-        (D::Q(x), D::Q(y)) | (D::Iv(x), D::Iv(y)) if x == y => a,
+        // an untagged side adopts the other's axis: `b.x + BALL` stays along x
+        (D::Q(x), D::Q(y)) if Dim::agree(*x, *y) => D::Q(Dim::absorb(*x, *y)),
+        (D::Iv(x), D::Iv(y)) if Dim::agree(*x, *y) => D::Iv(Dim::absorb(*x, *y)),
         // `index` absorbs a plain operand, so `if .. { i } else { 0 }` stays an index
-        (D::Q(x), D::Q(y)) if index_plain(*x, *y) => D::Q(if x.is_none() { *y } else { *x }),
+        (D::Q(x), D::Q(y)) if index_plain(x.bare(), y.bare()) => {
+            D::Q(if x.bare().is_none() { *y } else { *x })
+        }
         // `rad` dissolves into a plain operand instead -- a mixed sum is a
         // plain radian count, so `theta = theta + atan2(..)` doesn't turn a
         // plain accumulator into a quantity the next `theta * v` rejects.
-        (D::Q(x), D::Q(y)) if angle_plain(*x, *y) => PLAIN,
+        (D::Q(x), D::Q(y)) if angle_plain(x.bare(), y.bare()) => PLAIN,
         (D::Arr(x), D::Arr(y)) => D::Arr(Box::new(join((**x).clone(), y))),
         _ => D::Any,
     }
@@ -786,7 +793,13 @@ impl<'a> Pass<'a> {
             ExprKind::Unary(u) => {
                 let d = self.expr(&u.right);
                 match u.op {
-                    UnaryOp::Negative | UnaryOp::Positive => d,
+                    // a direction word's wrapper puts its axis on a known quantity;
+                    // an unknown one stays unknown rather than becoming a bare tag
+                    UnaryOp::Negative | UnaryOp::Positive => match (d, self.ast.direction(e.id())) {
+                        (D::Q(q), Some(axis)) => D::Q(q.mul(axis)),
+                        (D::Iv(q), Some(axis)) => D::Iv(q.mul(axis)),
+                        (d, _) => d,
+                    },
                     _ => D::Any,
                 }
             }
@@ -1670,7 +1683,7 @@ impl<'a> Pass<'a> {
                     c.arguments.first().map(|a| a.value.kind())
                 {
                     match units::parse(u) {
-                        Some((ud, _)) if ud != *d => self.fail(
+                        Some((ud, _)) if !Dim::agree(ud, *d) => self.fail(
                             c.arguments[0].value.location(),
                             format!("cannot express {} in {u}", Self::describe(d)),
                             format!("{u} is {}", Self::describe(&ud)),

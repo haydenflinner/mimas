@@ -28,6 +28,9 @@ pub struct Ast {
     /// Number literals written with `#` (`#1.10`): exact decimals, a `dec`
     /// wherever they stand (r[impl mimas.dec.exact-literal]).
     exact_literals: std::collections::HashSet<NodeId>,
+    /// The axis a direction word put on an expression (`up 50.0px`), by the node the
+    /// parser wrapped the operand in. The sign is already in the wrapper.
+    directions: HashMap<NodeId, Dim>,
 }
 impl Ast {
     /// Creates a new Ast with the given statements.
@@ -39,6 +42,7 @@ impl Ast {
         quantities: HashMap<NodeId, Dim>,
         quantity_units: HashMap<NodeId, String>,
         exact_literals: std::collections::HashSet<NodeId>,
+        directions: HashMap<NodeId, Dim>,
     ) -> Self {
         Self {
             name,
@@ -48,12 +52,18 @@ impl Ast {
             quantities,
             quantity_units,
             exact_literals,
+            directions,
         }
     }
 
     /// The number literals written with `#` (`#1.10`), which are `dec`.
     pub fn exact_literals(&self) -> impl Iterator<Item = NodeId> + '_ {
         self.exact_literals.iter().copied()
+    }
+
+    /// The axis a direction word tagged the expression `id` with, if one did.
+    pub fn direction(&self, id: NodeId) -> Option<Dim> {
+        self.directions.get(&id).copied()
     }
 
     /// The dimension of the unit-suffixed literal `id`, when it is one.

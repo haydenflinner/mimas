@@ -1,7 +1,7 @@
 //! The math spellings: `≠ ≤ ≥ ¬ ∈ ∉`, the prefix reductions `∑ ∏ ⨅ ⨆`,
-//! pervasive list-vs-scalar comparison and list-indexed gather. See
-//! `docs/symbols.md`. (`∧` `∨` `⋅` are named operators — `wedge`, `vee`,
-//! `dot` methods — not spellings of `and` `or` `*`.)
+//! pervasive list-vs-scalar comparison and list-indexed gather. See the
+//! book's Operators and Arrays pages. (`∧` `∨` `⋅` are named operators —
+//! `wedge`, `vee`, `dot` methods — not spellings of `and` `or` `*`.)
 
 #[macro_use]
 mod test_runner;
@@ -52,10 +52,10 @@ test_run!(
 );
 
 // tic-tac-toe's win check, the whole thing: gather the lines, compare, meet
-// each line, join the lines
+// each line, join the lines. The players are an `opp`, so `!p` is the other one.
 test_run!(
     tic_tac_toe,
-    "enum Player { X, O }
+    "opp Player { X, O }
      const LINES = [[0, 1, 2], [3, 4, 5], [6, 7, 8], [0, 3, 6], [1, 4, 7], [2, 5, 8], [0, 4, 8], [2, 4, 6]];
      fn won(b: [Player?], p: Player) -> bool { ⨆⨅ (b[LINES] == p) }
      fn won_at(b: [Player?], p: Player, c: int) -> bool {
@@ -68,4 +68,5 @@ test_run!(
     "won([o, x, x, null, o, x, null, null, o], o)" => "true",
     "won_at([x, x, x, null, o, o, null, null, null], x, 1)" => "true",
     "won_at([x, x, x, null, o, o, null, null, null], o, 4)" => "false",
+    "won([o, x, x, null, o, x, null, null, o], !x)" => "true",
 );

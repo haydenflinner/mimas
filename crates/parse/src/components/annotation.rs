@@ -59,6 +59,10 @@ impl std::fmt::Display for Annotation {
                     .iter()
                     .enumerate()
                     .map(|(i, (unit, exp))| match (i, exp) {
+                        // an axis part prints as its suffix: `px↕`, `usd@wealth`
+                        (_, 1) if unit.lexeme.starts_with('@') || unit.lexeme == "↔" || unit.lexeme == "↕" => {
+                            unit.to_string()
+                        }
                         (0, 1) => unit.to_string(),
                         (0, e) => format!("{unit}^{e}"),
                         (_, 1) => format!("*{unit}"),

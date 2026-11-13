@@ -12,8 +12,19 @@
 //! carries a dimension and a scale to the base unit, which is how `25kW`, `25000W` and `25000`
 //! all mean the same watts.
 
-/// Number of base dimensions: the builtins, plus slots for `unit` decls.
-pub const N: usize = FIRST_CUSTOM + MAX_CUSTOM;
+/// Number of slots in a [`Dim`]: the base dimensions (builtins, then `unit`
+/// decls), then the axis parity slots.
+pub const N: usize = AXIS0 + MAX_AXES;
+
+/// Where the axis slots start. An axis slot is a parity, not an exponent: a
+/// quantity *along x* flips sign when x is mirrored, and a product of two
+/// such quantities doesn't -- so `*`/`/` xor the axis slots where they add
+/// the exponent slots. See [`Dim::axes`].
+pub const AXIS0: usize = FIRST_CUSTOM + MAX_CUSTOM;
+
+/// Axis slots: the four builtin axes (`x` `y` `z` `t`) and four for `axis` decls.
+pub const MAX_AXES: usize = 8;
+const BUILTIN_AXES: usize = 4;
 
 /// Where a `unit tile;` declaration's base dimension sits in the [`Dim`]
 /// array -- the builtins occupy the slots before it.
@@ -29,6 +40,7 @@ pub const MAX_CUSTOM: usize = 8;
 /// a `Dim` that outlives its compilation.
 pub const BASES: [&str; N] = [
     "m", "kg", "s", "A", "K", "mol", "cd", "usd", "px", "frame", "beat", "st", "b", "index", "rad",
+    "", "", "", "", "", "", "", "",
     "", "", "", "", "", "", "", "",
 ];
 
@@ -46,8 +58,13 @@ impl Dim {
     pub const fn mul(self, other: Dim) -> Dim {
         let mut out = self.0;
         let mut i = 0;
-        while i < N {
+        while i < AXIS0 {
             out[i] += other.0[i];
+            i += 1;
+        }
+        // axis slots are parities: along x times along x is no longer along x
+        while i < N {
+            out[i] = (out[i] + other.0[i]) & 1;
             i += 1;
         }
         Dim(out)
@@ -56,8 +73,12 @@ impl Dim {
     pub const fn div(self, other: Dim) -> Dim {
         let mut out = self.0;
         let mut i = 0;
-        while i < N {
+        while i < AXIS0 {
             out[i] -= other.0[i];
+            i += 1;
+        }
+        while i < N {
+            out[i] = (out[i] + other.0[i]) & 1;
             i += 1;
         }
         Dim(out)
@@ -67,14 +88,18 @@ impl Dim {
     pub const fn powi(self, n: i8) -> Dim {
         let mut out = self.0;
         let mut i = 0;
-        while i < N {
+        while i < AXIS0 {
             out[i] *= n;
+            i += 1;
+        }
+        while i < N {
+            out[i] = (out[i] * n) & 1;
             i += 1;
         }
         Dim(out)
     }
 
-    /// The square root, when every exponent is even.
+    /// The square root, when every exponent is even (and nothing is along an axis).
     pub const fn sqrt(self) -> Option<Dim> {
         let mut out = self.0;
         let mut i = 0;
@@ -86,6 +111,70 @@ impl Dim {
             i += 1;
         }
         Some(Dim(out))
+    }
+
+    /// The axis slots as a bitmask: which axes this quantity is along (odd parity).
+    pub const fn axes(&self) -> u8 {
+        let mut bits = 0u8;
+        let mut i = 0;
+        while i < MAX_AXES {
+            if self.0[AXIS0 + i] != 0 {
+                bits |= 1 << i;
+            }
+            i += 1;
+        }
+        bits
+    }
+
+    /// This dimension with no axis: the exponents alone.
+    pub const fn bare(&self) -> Dim {
+        let mut out = self.0;
+        let mut i = AXIS0;
+        while i < N {
+            out[i] = 0;
+            i += 1;
+        }
+        Dim(out)
+    }
+
+    /// A dimensionless quantity along one axis slot -- what a direction word tags.
+    pub const fn axis(slot: usize) -> Dim {
+        let mut e = [0i8; N];
+        e[AXIS0 + slot] = 1;
+        Dim(e)
+    }
+
+    /// Whether two dimensions can meet in `+`, `-`, a comparison or a slot: the
+    /// exponents must match, and the axes must match unless one side has none --
+    /// an untagged quantity adopts the other's axis (`b.x + BALL`), the way a
+    /// plain number meets an `index`.
+    pub fn agree(a: Dim, b: Dim) -> bool {
+        a.bare() == b.bare() && (a.axes() == 0 || b.axes() == 0 || a.axes() == b.axes())
+    }
+
+    /// The dimension two agreeing values share: the tagged one's.
+    pub fn absorb(a: Dim, b: Dim) -> Dim {
+        if a.axes() == 0 { b } else { a }
+    }
+
+    /// `x`, `y`, `x·y` -- the axes this is along, by name.
+    pub fn along(&self) -> String {
+        (0..MAX_AXES)
+            .filter(|i| self.0[AXIS0 + i] != 0)
+            .map(axis_name)
+            .collect::<Vec<_>>()
+            .join("·")
+    }
+
+    /// The suffix a type annotation writes for the axes: `↔`, `↕`, or `@name`.
+    fn axis_suffix(&self) -> String {
+        (0..MAX_AXES)
+            .filter(|i| self.0[AXIS0 + i] != 0)
+            .map(|i| match axis_glyph(i) {
+                Some(g) => g.to_string(),
+                None => format!("@{}", axis_name(i)),
+            })
+            .collect()
     }
 
     /// The base dimension a `unit name;` declaration claims -- slot
@@ -100,7 +189,7 @@ impl Dim {
     /// `None` for builtin dims and composites.
     fn custom_slot(&self) -> Option<usize> {
         let mut slot = None;
-        for (i, e) in self.0.iter().enumerate() {
+        for (i, e) in self.0.iter().enumerate().take(AXIS0) {
             match (*e, i >= FIRST_CUSTOM) {
                 (0, _) => {}
                 (1, true) if slot.is_none() => slot = Some(i - FIRST_CUSTOM),
@@ -119,6 +208,9 @@ impl Dim {
     /// The unit name for a type annotation — `px`, `px/s`, `kg*m^2/s^3` —
     /// unlike `describe`, which answers in prose (`pixels (px)`).
     pub fn name(&self) -> String {
+        if self.axes() != 0 {
+            return format!("{}{}", self.bare().name(), self.axis_suffix());
+        }
         if self.is_none() {
             return "float".into();
         }
@@ -151,6 +243,9 @@ impl Dim {
     /// A reader-friendly name: a familiar unit when one fits (`kW`-ish things say `power (W)`),
     /// else the base composition (`kg*m^2/s^3`).
     pub fn describe(&self) -> String {
+        if self.axes() != 0 {
+            return format!("{} along {}", self.bare().describe(), self.along());
+        }
         if self.is_none() {
             return "a plain number".into();
         }
@@ -204,6 +299,9 @@ impl Dim {
     /// Like [`Self::describe`], but names the unit the way it was written (`length (ft)`
     /// for `5ft`) instead of the dimension's coherent unit (`length (m)`).
     pub fn describe_unit(&self, unit: &str) -> String {
+        if self.axes() != 0 {
+            return format!("{} along {}", self.bare().describe_unit(unit), self.along());
+        }
         if self.is_none() {
             return "a plain number".into();
         }
@@ -374,6 +472,12 @@ pub struct CustomUnits {
     /// Declared base dims, in declaration order — entry `i` names the
     /// `Dim` slot `FIRST_CUSTOM + i`.
     bases: Vec<String>,
+    /// `axis wealth (poorer, richer);` decls: the axis name and its direction
+    /// words, negative first. Slot `BUILTIN_AXES + i`.
+    axes: Vec<(String, String, String)>,
+    /// A builtin axis redeclared with other words (`axis y (south, north);`):
+    /// slot -> (negative, positive). The old words stop being words.
+    renamed: std::collections::HashMap<usize, (String, String)>,
 }
 
 thread_local! {
@@ -386,6 +490,8 @@ impl CustomUnits {
         Self {
             names: std::collections::HashMap::new(),
             bases: Vec::new(),
+            axes: Vec::new(),
+            renamed: std::collections::HashMap::new(),
         }
     }
 }
@@ -454,6 +560,129 @@ pub fn declare(name: &str, spec: Option<(Dim, f64)>) -> Result<(Dim, f64), Strin
     })
 }
 
+/// The builtin axes: name, negative direction word, positive direction word,
+/// and the glyphs for the axis and its two directions. `y` is down-positive
+/// because the screen is; `z` is into the screen; `t` is time.
+const BUILTIN_AXIS: [(&str, &str, &str, Option<&str>, &str, &str); BUILTIN_AXES] = [
+    ("x", "left", "right", Some("↔"), "←", "→"),
+    ("y", "up", "down", Some("↕"), "↑", "↓"),
+    ("z", "outward", "inward", None, "⊙", ""),
+    ("t", "earlier", "later", None, "⏪", "⏩"),
+];
+
+/// `axis NAME (NEG, POS);` -- a new axis with its two direction words, or a
+/// builtin axis renamed (`axis y (south, north);`). Redeclaring the same way
+/// is a no-op; a name that is a unit, or a fifth custom axis, is an error.
+pub fn declare_axis(name: &str, neg: &str, pos: &str) -> Result<Dim, String> {
+    if lookup_builtin(name).is_some() {
+        return Err(format!("`{name}` is a unit, not an axis"));
+    }
+    if let Some(slot) = BUILTIN_AXIS.iter().position(|a| a.0 == name) {
+        CUSTOM.with(|c| {
+            let mut binding = c.borrow_mut();
+            let c = std::rc::Rc::make_mut(&mut binding);
+            c.renamed.insert(slot, (neg.to_string(), pos.to_string()));
+        });
+        return Ok(Dim::axis(slot));
+    }
+    CUSTOM.with(|c| {
+        let mut binding = c.borrow_mut();
+        let c = std::rc::Rc::make_mut(&mut binding);
+        if let Some(i) = c.axes.iter().position(|a| a.0 == name) {
+            return if c.axes[i].1 == neg && c.axes[i].2 == pos {
+                Ok(Dim::axis(BUILTIN_AXES + i))
+            } else {
+                Err(format!("`{name}` is already an axis with other directions"))
+            };
+        }
+        if c.axes.len() >= MAX_AXES - BUILTIN_AXES {
+            return Err(format!(
+                "a program gets at most {} `axis` declarations",
+                MAX_AXES - BUILTIN_AXES
+            ));
+        }
+        c.axes.push((name.to_string(), neg.to_string(), pos.to_string()));
+        Ok(Dim::axis(BUILTIN_AXES + c.axes.len() - 1))
+    })
+}
+
+/// The axis a name denotes (`x`, or a declared one), as a dimension.
+pub fn axis_lookup(name: &str) -> Option<Dim> {
+    if let Some(slot) = BUILTIN_AXIS.iter().position(|a| a.0 == name) {
+        return Some(Dim::axis(slot));
+    }
+    CUSTOM.with(|c| {
+        c.borrow()
+            .axes
+            .iter()
+            .position(|a| a.0 == name)
+            .map(|i| Dim::axis(BUILTIN_AXES + i))
+    })
+}
+
+/// The axis an axis glyph denotes: `↔` is x, `↕` is y.
+pub fn axis_of_glyph(c: char) -> Option<Dim> {
+    BUILTIN_AXIS
+        .iter()
+        .position(|a| a.3 == Some(c.encode_utf8(&mut [0; 4]) as &str))
+        .map(Dim::axis)
+}
+
+/// A direction word or glyph: the axis it lies on and whether it is the
+/// negative end (`up` and `←` are; `down` and `→` are not).
+pub fn direction(word: &str) -> Option<(Dim, bool)> {
+    for (slot, a) in BUILTIN_AXIS.iter().enumerate() {
+        if word == a.4 && !word.is_empty() {
+            return Some((Dim::axis(slot), true));
+        }
+        if word == a.5 && !word.is_empty() {
+            return Some((Dim::axis(slot), false));
+        }
+    }
+    CUSTOM.with(|c| {
+        let c = c.borrow();
+        for (i, (_, neg, pos)) in c.axes.iter().enumerate() {
+            if word == neg {
+                return Some((Dim::axis(BUILTIN_AXES + i), true));
+            }
+            if word == pos {
+                return Some((Dim::axis(BUILTIN_AXES + i), false));
+            }
+        }
+        for (slot, a) in BUILTIN_AXIS.iter().enumerate() {
+            let (neg, pos) = match c.renamed.get(&slot) {
+                Some((n, p)) => (n.as_str(), p.as_str()),
+                None => (a.1, a.2),
+            };
+            if word == neg {
+                return Some((Dim::axis(slot), true));
+            }
+            if word == pos {
+                return Some((Dim::axis(slot), false));
+            }
+        }
+        None
+    })
+}
+
+/// The name of an axis slot: `x`, or the declared name.
+pub fn axis_name(slot: usize) -> String {
+    if slot < BUILTIN_AXES {
+        return BUILTIN_AXIS[slot].0.to_string();
+    }
+    CUSTOM.with(|c| {
+        c.borrow()
+            .axes
+            .get(slot - BUILTIN_AXES)
+            .map_or_else(|| "?".to_string(), |a| a.0.clone())
+    })
+}
+
+/// The glyph an axis writes in a type, if it has one.
+fn axis_glyph(slot: usize) -> Option<&'static str> {
+    BUILTIN_AXIS.get(slot).and_then(|a| a.3)
+}
+
 /// The declared name behind a custom base-dimension slot.
 fn custom_name(slot: usize) -> Option<String> {
     CUSTOM.with(|c| c.borrow().bases.get(slot).cloned())
@@ -464,6 +693,16 @@ fn custom_name(slot: usize) -> Option<String> {
 // r[impl mimas.unit.literal]
 // r[impl mimas.unit.editor-list]
 pub fn lookup(name: &str) -> Option<(Dim, f64)> {
+    // an axis in unit position: the glyph (`px↕`) or `@name` (`usd@wealth`)
+    if let Some(rest) = name.strip_prefix('@') {
+        return axis_lookup(rest).map(|d| (d, 1.0));
+    }
+    let mut chars = name.chars();
+    if let (Some(c), None) = (chars.next(), chars.next())
+        && let Some(d) = axis_of_glyph(c)
+    {
+        return Some((d, 1.0));
+    }
     lookup_builtin(name).or_else(|| CUSTOM.with(|c| c.borrow().names.get(name).copied()))
 }
 
@@ -642,6 +881,14 @@ pub fn parse(expr: &str) -> Option<(Dim, f64)> {
                 op = c;
                 rest = &tail[1..];
             }
+            // a trailing axis: `px↕`, `px/s↔`, `usd@wealth` -- ends the expression
+            Some(c) if axis_of_glyph(c).is_some() => {
+                let after = &tail[c.len_utf8()..];
+                return after
+                    .is_empty()
+                    .then(|| (dim.mul(axis_of_glyph(c).unwrap()), scale));
+            }
+            Some('@') => return axis_lookup(&tail[1..]).map(|a| (dim.mul(a), scale)),
             Some(_) => return None,
         }
     }
@@ -677,6 +924,17 @@ pub fn scan_suffix(rest: &str) -> Option<usize> {
         }
         end += 1 + n;
         end += exponent(&rest[end..]);
+    }
+    // a trailing axis rides the suffix: `40.0px↕`, `3col@wealth`
+    if let Some(c) = rest[end..].chars().next()
+        && axis_of_glyph(c).is_some()
+    {
+        end += c.len_utf8();
+    } else if let Some(after) = rest[end..].strip_prefix('@') {
+        let n = ident(after);
+        if n > 0 && axis_lookup(&after[..n]).is_some() {
+            end += 1 + n;
+        }
     }
     Some(end)
 }

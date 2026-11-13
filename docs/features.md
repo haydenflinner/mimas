@@ -289,6 +289,56 @@ now.
   `SortOrder::Desc.rank`, `.sort`, `.argsort`, `.arrange`;
   `SeqSide::End.pad`, `SeqSide::Start.justify`.
 
+## Axes and directions — which way a quantity points
+
+A quantity can be *along* an axis, and a direction word in front of it says
+which way: `up 50.0px` is `−50 px` along y, `← x` and `right 3.0px` are along
+x, `richer 5usd` is along an axis the program declared. The builtin axes are
+`x y z t` with `left/right`, `up/down` (down is positive: the screen's way),
+`outward/inward`, `earlier/later` and the glyphs `← → ↑ ↓ ⊙ ⏪ ⏩`; `axis
+wealth (poorer, richer);` declares one (negative end first, four per
+program) and `axis y (south, north);` renames a builtin's words. A word is a
+direction only when declared and when an operand follows it on the line —
+`up + 1` keeps `up` a name, `up(x)` with no gap is a call — so no existing
+program changes meaning. In a type the axis follows the unit: `px↕`,
+`px/s↔`, `usd@wealth` (`@name` for any axis); a literal takes the same
+suffix, `40.0px↕`; `#[mimas_dim("px↕")]` carries it across a native field.
+
+The algebra is parity, not exponents. `Dim` grew eight axis slots after the
+unit slots (`units::AXIS0`); `*` and `/` xor them where they add the
+exponents, so along-x times along-x is along neither (a square, a ratio),
+along-x times along-y is along `x·y` (an area, a slope) and `slope * dx`
+lands back on y — a quantity along x is one that flips sign when x is
+mirrored, and that is the whole invariant. `+ - < ==` and slots need
+*agreeing* axes (`Dim::agree`): equal, or one side untagged, which then
+adopts the other's (`Dim::absorb`) the way a plain number meets an `index` —
+`b.x + BALL` stays along x without tagging every size twice. Diagnostics
+name both: `cannot add pixels (px) along y and pixels (px) along x`. The
+direction word is parsed as a signed unary whose node the parser records in
+`Ast::directions`, so at run time `up 50.0px` is the float `-50.0` and
+nothing else moves. A direction is `Sign` on an axis, the opp made
+spatial; `space` fields that are quantities flip the same way.
+Tests: `library/tests/axes.rs`. Book: Units › Axes and directions.
+
+## Math spellings, the big reductions, `⋅`, masks and gather
+
+`≠ ≤ ≥ ¬ ∧ ∨ ∈ ∉` lex to the tokens their keyboard forms do, so the AST and
+every diagnostic still print ASCII. `∑ ∏ ⨅ ⨆` are prefix reductions — the
+big form of an operator is its fold — desugaring in `Parser::unary` to
+`.sum()` `.product()` `.inf()` `.sup()`: meet and join, all-of/min and
+any-of/max, the lattice glyphs rather than `⋀ ⋁` so they don't read as
+boolean logic. They bind like a unary minus (`∑ xs.map(f)`, `⨆⨅ m`,
+`(⨅ xs)!`), a list of lists reduces its innermost axis (one answer per
+row), and `∑→ m` / `∑↓ m` sum a tensor along a direction (`sum_dim(1)` /
+`sum_dim(0)`). `a ⋅ b` is `a.dot(b)` — contraction, APL's `+.×` — and tensor
+`dot` falls through to matmul above rank 1. A list against a scalar
+compares pervasively to a mask, nested as deep as the list, the way a tensor
+does (`seq_cmp_overload_ty`; list-vs-list and anything-vs-null stay
+structural), and `xs[idxs]` gathers. Tic-tac-toe's win check is
+`⨆⨅ (b[LINES] == p)`, gather–compare–meet–join, and a test.
+Tests: `library/tests/symbols.rs`. Book: Operators › Math spellings, Arrays ›
+Gather and pervasive comparison.
+
 ## `raise` carries any value
 
 `raise` used to take only `str`: `Val::Raised` stored the note directly,

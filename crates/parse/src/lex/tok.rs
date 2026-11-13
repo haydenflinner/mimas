@@ -112,8 +112,6 @@ pub enum TokKind<'s> {
     Compose,
     /// `⊗` — tensor.
     Tensor,
-    /// `⊙` — odot (a Hadamard or pointwise product).
-    Odot,
     /// `∩` — intersect.
     Intersect,
     /// `∪` — union.
@@ -138,6 +136,10 @@ pub enum TokKind<'s> {
     DownArrow,
     LeftRightArrow,
     UpDownArrow,
+    /// `⊙` (out of the page), `⏪` `⏩` (backward, forward in time): directions.
+    CircledDot,
+    Rewind,
+    FastForward,
     Tilde,
     Dollar,
     DoubleLeftCaret,
@@ -256,7 +258,6 @@ impl Display for TokKind<'_> {
             TokKind::Cross => "×",
             TokKind::Compose => "∘",
             TokKind::Tensor => "⊗",
-            TokKind::Odot => "⊙",
             TokKind::Intersect => "∩",
             TokKind::Union => "∪",
             TokKind::Ominus => "⊖",
@@ -271,6 +272,9 @@ impl Display for TokKind<'_> {
             TokKind::DownArrow => "↓",
             TokKind::LeftRightArrow => "↔",
             TokKind::UpDownArrow => "↕",
+            TokKind::CircledDot => "⊙",
+            TokKind::Rewind => "⏪",
+            TokKind::FastForward => "⏩",
             TokKind::Tilde => "~",
             TokKind::Dollar => "$",
             TokKind::DoubleLeftCaret => "<<",
@@ -355,6 +359,13 @@ impl TokKind<'_> {
                     | TokKind::Prod
                     | TokKind::Inf
                     | TokKind::Sup
+                    | TokKind::RightArrow
+                    | TokKind::LeftArrow
+                    | TokKind::UpArrow
+                    | TokKind::DownArrow
+                    | TokKind::CircledDot
+                    | TokKind::Rewind
+                    | TokKind::FastForward
                     | TokKind::SelfKeyword
                     | TokKind::TyKw(_)
                     | TokKind::FString(_)

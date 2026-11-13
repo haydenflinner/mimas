@@ -345,7 +345,7 @@ fn is_continuation(k: TokKind) -> bool {
             | TokKind::Cross
             | TokKind::Compose
             | TokKind::Tensor
-            | TokKind::Odot
+            | TokKind::CircledDot
             | TokKind::Intersect
             | TokKind::Union
             | TokKind::Ominus
@@ -460,7 +460,7 @@ fn spaced(k: TokKind) -> bool {
             | TokKind::Cross
             | TokKind::Compose
             | TokKind::Tensor
-            | TokKind::Odot
+            | TokKind::CircledDot
             | TokKind::Intersect
             | TokKind::Union
             | TokKind::Ominus

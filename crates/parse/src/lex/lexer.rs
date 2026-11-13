@@ -818,7 +818,6 @@ impl<'s> Lex<'s, Tok<TokKind<'s>>, TokKind<'s>> for Lexer<'s> {
                 '×' => TokKind::Cross,
                 '∘' => TokKind::Compose,
                 '⊗' => TokKind::Tensor,
-                '⊙' => TokKind::Odot,
                 '∩' => TokKind::Intersect,
                 '∪' => TokKind::Union,
                 '⊖' => TokKind::Ominus,
@@ -845,6 +844,9 @@ impl<'s> Lex<'s, Tok<TokKind<'s>>, TokKind<'s>> for Lexer<'s> {
                 '↓' => TokKind::DownArrow,
                 '↔' => TokKind::LeftRightArrow,
                 '↕' => TokKind::UpDownArrow,
+                '⊙' => TokKind::CircledDot,
+                '⏪' => TokKind::Rewind,
+                '⏩' => TokKind::FastForward,
                 '!' => {
                     // `!in` is the operator only when the `in` ends there: `!inside` is `!`
                     // `inside`
@@ -911,6 +913,13 @@ impl<'s> Lex<'s, Tok<TokKind<'s>>, TokKind<'s>> for Lexer<'s> {
 /// Operators) and `⍲`/`⍱` (the APL slice of Miscellaneous Technical,
 /// cut out of that block below) are not in any of these ranges.
 pub fn is_symbol_ident(c: char) -> bool {
+    // the direction and axis glyphs are operators, not name parts —
+    // `px↕` is `px` then `↕`, and a name must not swallow a direction
+    // (`x→` is `x` then `→`). Every other arrow stays a name char:
+    // `↻` `⇄` `⤡` are the moves' names.
+    if matches!(c, '→' | '←' | '↑' | '↓' | '↔' | '↕' | '⏪' | '⏩') {
+        return false;
+    }
     matches!(
         c as u32,
         0x2190..=0x21FF        // arrows: ↑ ↗ ⇤ ⇥

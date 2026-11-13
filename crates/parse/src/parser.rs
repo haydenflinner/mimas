@@ -84,6 +84,9 @@ pub struct Parser<'s> {
     exact_literals: std::collections::HashSet<NodeId>,
     /// The unit text as written for each literal in `quantities` (`5ft` -> `"ft"`).
     quantity_units: HashMap<NodeId, String>,
+    /// The axis a direction word tagged an expression with (`up 50.0px`), by the
+    /// wrapper node -- see `direction_intro`.
+    directions: HashMap<NodeId, shared::units::Dim>,
     /// The source's per-page shadow table (`Lexer::shadow_table`) — an
     /// f-string interpolation sublexer takes its page's set.
     shadow: Vec<(usize, [bool; 3])>,
@@ -248,6 +251,7 @@ impl<'s> Parser<'s> {
             depth: 0,
             quantities: HashMap::new(),
             exact_literals: Default::default(),
+            directions: HashMap::new(),
             quantity_units: HashMap::new(),
             meta,
             hygiene: macros::Hygiene::default(),
@@ -295,6 +299,7 @@ impl<'s> Parser<'s> {
                 self.quantities,
                 self.quantity_units,
                 self.exact_literals,
+                self.directions,
             ),
             self.errors,
         )
@@ -463,6 +468,9 @@ impl<'s> Parser<'s> {
                 let item = Item::new(self.check_block().into(), self.location(start), false);
                 BlockElement::Stmt(self.new_stmt(item, start))
             }
+            // `axis wealth (poorer, richer);` names an axis and its two direction
+            // words. Contextual like `unit`.
+            TokKind::Ident("axis") if self.unit_intro() => BlockElement::Stmt(self.axis_stmt(start)),
             // `unit tile` declares a base dimension; `unit league = 3mi`
             // a scale of known units. Contextual like `check`: `unit(x)`,
             // `unit = 4`, `unit.foo` stay expressions.
@@ -737,6 +745,8 @@ impl<'s> Parser<'s> {
             | TokKind::NotWord => true,
             // `check ∑ xs == 6` -- a prefix reduction opens one like a name does
             TokKind::Sum | TokKind::Prod | TokKind::Inf | TokKind::Sup => true,
+            TokKind::RightArrow | TokKind::LeftArrow | TokKind::UpArrow | TokKind::DownArrow
+            | TokKind::CircledDot | TokKind::Rewind | TokKind::FastForward => true,
             // `check (a * b).same(c)`, `check [1 2] == xs`, `check -x < 0`:
             // a gap after the word opens a check, as it does before a name;
             // `check(x)` and `check[i]` touching the word stay a call and
@@ -982,6 +992,88 @@ impl<'s> Parser<'s> {
         let stmt = self.new_stmt(Unit::new(name, spec_text), start);
         self.end_stmt(stmt.location());
         stmt
+    }
+
+    /// `axis NAME (NEG, POS);` -- an axis and its direction words, negative end
+    /// first. The pre-parse scan already registered it so `richer 5usd` parses
+    /// anywhere in the file; this reports a bad declaration for real.
+    fn axis_stmt(&mut self, start: usize) -> Stmt {
+        let kw = self.advance(); // `axis`
+        if self.depth > 0 {
+            self.error(Misdirection {
+                src: self.src(),
+                at: Location::from(kw.location()).into(),
+                msg: "`axis` decls are top-level only".into(),
+                label: "declare axes at the top of the file".into(),
+            });
+        }
+        let name = self.require_ident();
+        let name_loc: Location = name.location;
+        let mut words = None;
+        if self.eat(TokKind::LeftParenthesis) {
+            let neg = self.require_ident();
+            self.expect(TokKind::Comma);
+            let pos = self.require_ident();
+            self.expect(TokKind::RightParenthesis);
+            words = Some((neg, pos));
+        } else {
+            self.error_here(Misdirection {
+                src: self.src(),
+                at: self.next_location().into(),
+                msg: format!("`axis {}` needs its two directions", name.lexeme),
+                label: "write `(negative, positive)` here, as in `axis y (up, down)`".into(),
+            });
+        }
+        let spec = words.as_ref().map(|(n, p)| format!("({}, {})", n.lexeme, p.lexeme));
+        if let Some((neg, pos)) = &words
+            && let Err(msg) = shared::units::declare_axis(&name.lexeme, &neg.lexeme, &pos.lexeme)
+        {
+            self.error(Misdirection {
+                src: self.src(),
+                at: name_loc.into(),
+                msg,
+                label: name.lexeme.clone(),
+            });
+        }
+        let stmt = self.new_stmt(Unit::new(name, spec), start);
+        self.end_stmt(stmt.location());
+        stmt
+    }
+
+    /// A direction word or glyph in front of an operand: `up 50.0px`, `← x`,
+    /// `richer 5usd`. The axis it lies on and whether it is the negative end.
+    /// A word is only a direction when the program declared it (or `use`d the
+    /// builtin pair) and an operand follows on the same line; `(`/`[` need a
+    /// gap after the word, since a touching one is a call or an index on the
+    /// name, and an operator can't open the operand (`up + 1` keeps `up` a name).
+    fn direction_intro(&self) -> Option<(shared::units::Dim, bool)> {
+        let dir = match self.peek() {
+            TokKind::RightArrow => "→",
+            TokKind::LeftArrow => "←",
+            TokKind::UpArrow => "↑",
+            TokKind::DownArrow => "↓",
+            TokKind::CircledDot => "⊙",
+            TokKind::Rewind => "⏪",
+            TokKind::FastForward => "⏩",
+            TokKind::Ident(w) => w,
+            _ => return None,
+        };
+        let found = shared::units::direction(dir)?;
+        let last = self.tokens.len() - 1;
+        let kw_end = self.tokens[self.next.min(last)].span().end();
+        let after = self.tokens[(self.next + 1).min(last)].span().start();
+        if self.src.inner()[kw_end..after].contains('\n') {
+            return None;
+        }
+        let next = self.nth(1);
+        let opens = match next {
+            TokKind::Ident(_) | TokKind::SelfKeyword | TokKind::NotWord => true,
+            TokKind::RightArrow | TokKind::LeftArrow | TokKind::UpArrow | TokKind::DownArrow
+            | TokKind::CircledDot | TokKind::Rewind | TokKind::FastForward => true,
+            TokKind::LeftParenthesis | TokKind::LeftSquare => kw_end < after,
+            kind => Literal::try_from(kind).is_ok(),
+        };
+        opens.then_some(found)
     }
 
     /// A `check` is one line: `check <expr>` — `check f(2) == 3` — becoming one
@@ -2703,6 +2795,19 @@ impl<'s> Parser<'s> {
             );
             return self.new_expr(Call::new(callee, args), start);
         }
+        // `up 50.0px` -- a direction in front of a quantity puts it along the
+        // direction's axis with the direction's sign: the operand is wrapped in
+        // a `+`/`-` and the wrapper remembers the axis for the dimension checker.
+        if let Some((axis, negative)) = self.direction_intro() {
+            self.advance();
+            let operand = self
+                .nested(Self::unary)
+                .unwrap_or_else(|| self.poison_expr(self.cursor()));
+            let op = if negative { UnaryOp::Negative } else { UnaryOp::Positive };
+            let wrapped = self.new_expr(Unary::new(op, operand), start);
+            self.directions.insert(wrapped.id(), axis);
+            return wrapped;
+        }
         let operator = if self.at(TokKind::NotWord) {
             UnaryOp::Not
         } else if let Ok(op) = self.peek().try_into() {
@@ -2746,6 +2851,7 @@ impl<'s> Parser<'s> {
             // units written inside the interpolation belong to the whole file's ast
             outer.quantities.extend(parser.quantities);
             outer.quantity_units.extend(parser.quantity_units);
+            outer.directions.extend(parser.directions);
             expr
         }
         // `{` and `}` join the quote-chars so chompy's unescape resolves `\{` -> `{` and
@@ -4498,6 +4604,14 @@ impl<'s> Parser<'s> {
                         });
                         Annotation::Applied(segments, args)
                     }
+                    // `px↕`, `usd@wealth`: a lone unit followed by its axis
+                    1 if matches!(
+                        self.peek(),
+                        TokKind::LeftRightArrow | TokKind::UpDownArrow | TokKind::At
+                    ) =>
+                    {
+                        self.quantity_annotation(segments.remove(0))
+                    }
                     1 => Annotation::Ty(segments.remove(0)),
                     _ => Annotation::Path(segments),
                 }
@@ -4561,6 +4675,21 @@ impl<'s> Parser<'s> {
             let unit = self.require_ident();
             let (unit, exp) = self.unit_name_exp(unit);
             parts.push((unit, sign * exp));
+        }
+        // a trailing axis: `px/s↕`, `index@wealth` -- an axis glyph is a unit
+        // name to `units::lookup`, and `@name` the same for a declared axis
+        match self.peek() {
+            TokKind::LeftRightArrow | TokKind::UpDownArrow => {
+                let tok = self.advance();
+                let glyph = if tok.kind() == TokKind::LeftRightArrow { "↔" } else { "↕" };
+                parts.push((Ident::new(glyph, Location::from(tok.location())), 1));
+            }
+            TokKind::At => {
+                let at = self.advance();
+                let name = self.require_ident();
+                parts.push((Ident::new(format!("@{}", name.lexeme), Location::from(at.location())), 1));
+            }
+            _ => {}
         }
         Annotation::Quantity(parts)
     }
@@ -5147,6 +5276,7 @@ fn declare_units(source: &str, tokens: &[Tok<TokKind<'_>>]) -> bool {
     // (name, spec tokens) at each top-level `unit` decl site; `None` for a
     // bare `unit name;`.
     let mut sites: Vec<(&str, Option<Vec<TokKind>>)> = vec![];
+    let mut fresh_axes = false;
     let mut i = 0;
     let mut depth = 0usize;
     while i + 1 < toks.len() {
@@ -5163,6 +5293,32 @@ fn declare_units(source: &str, tokens: &[Tok<TokKind<'_>>]) -> bool {
         let stmt_pos = i == 0
             || matches!(toks[i - 1].kind(), TokKind::SemiColon)
             || source[toks[i - 1].span().end()..toks[i].span().start()].contains('\n');
+        // `axis NAME (NEG, POS)` registers its words here too, so a direction
+        // written above its declaration still parses as one
+        if depth == 0
+            && stmt_pos
+            && matches!(toks[i].kind(), TokKind::Ident("axis"))
+            && i + 6 < toks.len()
+            && let (
+                TokKind::Ident(name),
+                TokKind::LeftParenthesis,
+                TokKind::Ident(neg),
+                TokKind::Comma,
+                TokKind::Ident(pos),
+                TokKind::RightParenthesis,
+            ) = (
+                toks[i + 1].kind(),
+                toks[i + 2].kind(),
+                toks[i + 3].kind(),
+                toks[i + 4].kind(),
+                toks[i + 5].kind(),
+                toks[i + 6].kind(),
+            )
+            && !source[toks[i].span().end()..toks[i + 1].span().start()].contains('\n')
+        {
+            fresh_axes |= shared::units::axis_lookup(name).is_none();
+            let _ = shared::units::declare_axis(name, neg, pos);
+        }
         let is_decl = depth == 0
             && stmt_pos
             && matches!(toks[i].kind(), TokKind::Ident("unit"))
@@ -5227,7 +5383,7 @@ fn declare_units(source: &str, tokens: &[Tok<TokKind<'_>>]) -> bool {
             break;
         }
     }
-    fresh
+    fresh || fresh_axes
 }
 
 /// One factor of a unit spec: a unit name (bare ident or a quantity

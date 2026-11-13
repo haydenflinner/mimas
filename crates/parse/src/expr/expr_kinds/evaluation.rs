@@ -46,7 +46,9 @@ op!(
         Cross => Cross,
         Compose => Compose,
         Tensor => Tensor,
-        Odot => Odot,
+        // `⊙` lexes as CircledDot (outward's direction glyph); infix it is
+        // the named `odot` op, prefix it opens a direction — position decides.
+        CircledDot => Odot,
         Intersect => Intersect,
         Union => Union,
         Ominus => Ominus,

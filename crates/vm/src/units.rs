@@ -16,8 +16,10 @@ use crate::{
 
 /// Resolve a unit name to its dimension — backs `#[mimas_dim("s")]` on `MimasStruct`/
 /// `MimasEnum` fields, so a plain `f64` field can declare its unit for the checker.
+/// `#[mimas_dim("px")]`, `#[mimas_dim("px/s")]`, `#[mimas_dim("px↕")]` -- any unit
+/// expression, axis included, so a host field can say which way it points.
 pub fn dim_of(name: &str) -> Option<Dim> {
-    units::lookup(name).map(|(d, _)| d)
+    units::parse(name).map(|(d, _)| d)
 }
 
 macro_rules! unit_ty {

@@ -95,3 +95,41 @@ print(e.to("kW"));    // compile error: cannot express energy (J) in kW
 ```
 
 Printing a quantity shows its base-unit value with its unit (`25kW` prints `25000 W`, `9ft / 24px` prints `0.1143 m/px`). Convert with `to` first when you want a different unit — `print(e.to("kWh"))` prints `100`.
+
+## Axes and directions
+
+A quantity can also say *which way it points*. A direction word in front of a number puts it along that direction's axis and folds the sign in:
+
+```mimas
+const PADDLE_SPEED = 460.0px/s;
+let p: px↕ = 330.0px;
+p += up PADDLE_SPEED * dt;      // −460 px/s along y, times dt: along y
+p += down PADDLE_SPEED * dt;
+let v = right 3.0px;            // 3 px along x
+let w = ← 3.0px;                // the glyph form; −3 px along x
+```
+
+The builtin axes are `x` (`left`, `right`; `← →`), `y` (`up`, `down`; `↑ ↓` -- down is positive, the screen's way), `z` (`outward`, `inward`; `⊙`) and `t` (`earlier`, `later`; `⏪ ⏩`). A program declares its own with the negative end first:
+
+```mimas
+axis wealth (poorer, richer);
+let bal = richer 10usd + poorer 4usd;   // 6 usd along wealth
+axis y (south, north);                  // renames the builtin words for y
+```
+
+A direction word is only a word when it is declared (the builtin ones always are) and an operand follows it on the line; `up + 1` keeps `up` a plain name, and `up(x)` with no gap is a call.
+
+In a type, the axis goes after the unit: `px↕`, `px/s↔`, `usd@wealth` (`@name` for any axis, glyph or not). A literal takes the same suffix: `40.0px↕`.
+
+```mimas
+fn paddle(top: px↕) -> px↕ { top + down 110.0px }
+fn pay(bal: usd@wealth, amt: usd@wealth) -> usd@wealth { bal + amt }
+```
+
+What the checker enforces, on top of the dimension rules above:
+
+- `+`, `-`, comparisons and slots need agreeing axes. An untagged quantity adopts the other side's axis (`b.x + BALL` is along x; a size has no direction of its own), the way a plain number meets an `index`. Two different axes are an error that names both: `cannot add pixels (px) along y and pixels (px) along x`.
+- `*` and `/` xor the axes: along x times along x is along neither (a square, a ratio), along x times along y is along `x·y` (an area, a slope), and `slope * dx` lands back on y. The rule is parity: a quantity along x is one that flips sign when x is mirrored, and that is all the checker tracks.
+- `.to("px")` reads any axis back as a plain number.
+
+Nothing changes at run time: `up 50.0px` is the float `-50.0`.
