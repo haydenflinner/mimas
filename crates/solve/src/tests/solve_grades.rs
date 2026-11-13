@@ -265,8 +265,9 @@ fn site_counts_are_recorded() {
     assert_eq!(dec_reads("z"), crate::Use::Once);
 }
 
-// ---- effect inference
+// ---- effect inference (`mimas.fx.infer`)
 
+// r[verify mimas.fx.infer]
 #[test]
 fn pure_fn_has_no_effects() {
     let _t = TestResetter;
@@ -274,6 +275,7 @@ fn pure_fn_has_no_effects() {
     assert_eq!(fn_fx("f"), Fx::empty());
 }
 
+// r[verify mimas.fx.infer]
 #[test]
 fn native_declared_effects_reach_caller() {
     let _t = TestResetter;
@@ -282,6 +284,7 @@ fn native_declared_effects_reach_caller() {
     assert_eq!(fn_fx("f"), Fx::NET);
 }
 
+// r[verify mimas.fx.infer]
 #[test]
 fn effects_flow_through_user_calls() {
     let _t = TestResetter;
@@ -291,6 +294,7 @@ fn effects_flow_through_user_calls() {
     assert_eq!(fn_fx("f"), Fx::NET | Fx::IO);
 }
 
+// r[verify mimas.fx.infer]
 #[test]
 fn unannotated_native_is_unaudited() {
     let _t = TestResetter;
@@ -300,6 +304,7 @@ fn unannotated_native_is_unaudited() {
     assert!(fn_fx("f").contains(Fx::ANY));
 }
 
+// r[verify mimas.fx.infer]
 #[test]
 fn explicit_pure_annotation_stays_pure() {
     let _t = TestResetter;
@@ -308,6 +313,7 @@ fn explicit_pure_annotation_stays_pure() {
     assert_eq!(fn_fx("f"), Fx::empty());
 }
 
+// r[verify mimas.fx.infer]
 #[test]
 fn recursion_settles() {
     let _t = TestResetter;
@@ -316,6 +322,7 @@ fn recursion_settles() {
     assert_eq!(fn_fx("f"), Fx::NET);
 }
 
+// r[verify mimas.fx.infer]
 #[test]
 fn script_level_effects_are_recorded() {
     let _t = TestResetter;
@@ -324,6 +331,7 @@ fn script_level_effects_are_recorded() {
     assert_eq!(script_fx(), Fx::NET);
 }
 
+// r[verify mimas.fx.infer]
 #[test]
 fn script_picks_up_fn_effects() {
     let _t = TestResetter;
@@ -332,6 +340,7 @@ fn script_picks_up_fn_effects() {
     assert_eq!(script_fx(), Fx::NET);
 }
 
+// r[verify mimas.fx.infer]
 #[test]
 fn closure_call_site_is_unknown() {
     let _t = TestResetter;
@@ -803,4 +812,173 @@ fn break_path_write_inside_loop_is_live() {
         }",
     );
     assert!(w.is_empty(), "{w:?}");
+}
+
+// ---- page authority: `needs` bounds the page's inferred set and is its
+// authority for `granting`; a use-site grant must cover its include's own
+// set (`mimas.fx.needs`, `mimas.use.page.grant-narrow`,
+// `mimas.use.page.grant-check`)
+
+// r[verify mimas.fx.needs]
+#[test]
+fn needs_covering_inferred_passes() {
+    let _t = TestResetter;
+    native("net_get", Some(Fx::NET));
+    run("needs { net, time }; net_get();");
+}
+
+// r[verify mimas.fx.needs]
+#[test]
+fn inferred_beyond_needs_refuses() {
+    let _t = TestResetter;
+    native("clock", Some(Fx::TIME));
+    let e = err("needs { net }; clock();").unwrap();
+    assert!(e.contains("beyond its declared `needs"), "{e}");
+}
+
+// r[verify mimas.fx.needs]
+#[test]
+fn empty_needs_declares_the_page_pure() {
+    let _t = TestResetter;
+    native("net_get", Some(Fx::NET));
+    run("needs {}; let _x = 1;");
+    let e = err("needs {}; net_get();").unwrap();
+    assert!(e.contains("needs"), "{e}");
+}
+
+// r[verify mimas.fx.needs]
+#[test]
+fn absent_needs_stays_permissive() {
+    let _t = TestResetter;
+    native("net_get", Some(Fx::NET));
+    // no declaration, no check -- the page holds ambient authority
+    run("net_get();");
+}
+
+// r[verify mimas.fx.needs]
+#[test]
+fn needs_bounds_what_the_page_runs() {
+    let _t = TestResetter;
+    native("net_get", Some(Fx::NET));
+    // f's NET is inferred but the page never calls it -- the declaration
+    // bounds the page's own top-level footprint, not an export it never runs
+    run("needs {}; fn f() { net_get() }");
+    // fresh session for the second solve -- `Solver::solve` re-run on one
+    // solver aliases `fn` decs by site, so `f` wouldn't earn its own
+    // `fn_effects` entry (a solver-reuse wart, not this check's semantics)
+    TEST_SESSION.with(|s| s.borrow_mut().reset());
+    native("net_get", Some(Fx::NET));
+    let e = err("needs {}; fn f() { net_get() } f();").unwrap();
+    assert!(e.contains("needs"), "{e}");
+}
+
+// r[verify mimas.fx.with]
+#[test]
+fn with_region_keeps_its_fx_requirement() {
+    let _t = TestResetter;
+    native("net_get", Some(Fx::NET));
+    // stand-ins for `library::std`'s desugar targets — `#[effects(rng)]` on
+    // both, as the real `__fx_rng_push`/`__fx_rng_pop` declare
+    native_opts("__fx_rng_push", 1, &[], false, Some(Fx::RNG));
+    native("__fx_rng_pop", Some(Fx::RNG));
+    // covered: `needs` declares the region's rng and the body's net
+    run("needs { rng, net }; let _x = with rng = 7 { net_get() };");
+    // a `with` channels the effect, it doesn't launder it — the region
+    // itself still needs `rng` authority
+    let e = err("needs {}; let _x = with rng = 7 { 1 };").unwrap();
+    assert!(e.contains("needs"), "{e}");
+    // and a body's effects aren't hidden inside the region either
+    let e = err("needs { rng }; let _x = with rng = 7 { net_get() };").unwrap();
+    assert!(e.contains("needs"), "{e}");
+}
+
+// r[verify mimas.fx.needs]
+#[test]
+fn page_needs_records_the_declaration() {
+    let _t = TestResetter;
+    run("needs { net, time }; let _x = 1;");
+    TEST_SESSION.with(|s| {
+        let needs = &s.borrow().0.page_needs;
+        assert_eq!(needs.len(), 1, "{needs:?}");
+        assert_eq!(needs[0].0, "test");
+        assert_eq!(needs[0].2, Fx::NET | Fx::TIME);
+    });
+}
+
+// r[verify mimas.fx.needs]
+#[test]
+fn spliced_pages_needs_bound_their_own_regions() {
+    let _t = TestResetter;
+    native("net_get", Some(Fx::NET));
+    native("clock", Some(Fx::TIME));
+    // each page's `needs` bounds that page's region alone: kit is pure by
+    // its own declaration, own text asks the ambient grant
+    run("//# page: kit\nneeds {}; let _x = 1;\n//# page: \nnet_get();\n");
+    let e = err("//# page: kit\nneeds {}; net_get();\n//# page: \nlet _x = 1;\n").unwrap();
+    assert!(e.contains("needs"), "{e}");
+}
+
+// r[verify mimas.use.page.grant-narrow]
+#[test]
+fn grant_within_ambient_authority_passes() {
+    let _t = TestResetter;
+    // no `needs`: the page holds the audited six, so any audited grant fits
+    run("use \"kit\" granting { net, rng };");
+    run("needs { net, rng }; use \"kit\" granting { net };");
+}
+
+// r[verify mimas.use.page.grant-narrow]
+#[test]
+fn grant_beyond_ambient_authority_refuses() {
+    let _t = TestResetter;
+    // ambient authority is `any` -- `unaudited` must be declared to hand down
+    let e = err("use \"kit\" granting { unaudited };").unwrap();
+    assert!(e.contains("authority"), "{e}");
+    run("needs { unaudited }; use \"kit\" granting { unaudited };");
+}
+
+// r[verify mimas.use.page.grant-narrow]
+#[test]
+fn grant_beyond_declared_needs_refuses() {
+    let _t = TestResetter;
+    let e = err("needs { rng }; use \"kit\" granting { net, rng };").unwrap();
+    assert!(e.contains("exceeds this page's own authority"), "{e}");
+}
+
+// r[verify mimas.use.page.grant-narrow]
+#[test]
+fn a_spliced_pages_grants_narrow_by_its_needs() {
+    let _t = TestResetter;
+    // kit writes a `needs { rng }`, so its `use "deep" granting { net }`
+    // exceeds kit's own authority even though own text could grant it
+    let e = err(
+        "//# page: kit\nneeds { rng }; use \"deep\" granting { net };\n//# page: \nlet _x = 1;\n",
+    )
+    .unwrap();
+    assert!(e.contains("exceeds this page's own authority"), "{e}");
+}
+
+// r[verify mimas.use.page.grant-check]
+#[test]
+fn spliced_include_effects_fit_the_grant() {
+    let _t = TestResetter;
+    native("net_get", Some(Fx::NET));
+    // the shape `splice_marked` emits: the include under its mark, own text
+    // (carrying the `use` line) last
+    run("//# page: kit\nnet_get();\n//# page: \nuse \"kit\" granting { net };\n");
+    // `granting {}` is a purity assertion -- a pure include fits it
+    run("//# page: kit\nlet _x = 1;\n//# page: \nuse \"kit\" granting {};\n");
+}
+
+// r[verify mimas.use.page.grant-check]
+#[test]
+fn spliced_include_beyond_its_grant_refuses() {
+    let _t = TestResetter;
+    native("net_get", Some(Fx::NET));
+    let e =
+        err("//# page: kit\nnet_get();\n//# page: \nuse \"kit\" granting {};\n").unwrap();
+    assert!(e.contains("`kit` needs"), "{e}");
+    let e =
+        err("//# page: kit\nnet_get();\n//# page: \nuse \"kit\" granting { io };\n").unwrap();
+    assert!(e.contains("`kit` needs"), "{e}");
 }

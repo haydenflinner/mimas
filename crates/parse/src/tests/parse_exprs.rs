@@ -622,11 +622,11 @@ expr_test!(
 );
 
 expr_test!(
-    dictionary_block_mix,
-    "{~{foo = {}}}",
+    record_block_mix,
+    "{{foo: {}}}",
     Block::new_with_yield(
         vec![],
-        Literal::Dictionary(vec![(ident!("foo"), block!())]).into_expr()
+        Literal::Record(vec![(ident!("foo"), block!())]).into_expr()
     )
 );
 
@@ -1251,24 +1251,18 @@ expr_test!(
 );
 
 expr_test!(
-    empty_dictionary,
-    "~{}",
-    ExprKind::Literal(Literal::Dictionary(vec![]))
-);
-
-expr_test!(
-    filled_dictionary,
-    "~{ foo = bar, fizz = buzz }",
-    ExprKind::Literal(Literal::Dictionary(vec![
+    dict_record,
+    "{ foo: bar, fizz: buzz }",
+    ExprKind::Literal(Literal::Record(vec![
         (ident!("foo"), ident_expr!("bar")),
         (ident!("fizz"), ident_expr!("buzz")),
     ]))
 );
 
 expr_test!(
-    dictionary_comma_trail,
-    "~{ foo = bar, fizz = buzz, }",
-    ExprKind::Literal(Literal::Dictionary(vec![
+    dict_record_comma_trail,
+    "{ foo: bar, fizz: buzz, }",
+    ExprKind::Literal(Literal::Record(vec![
         (ident!("foo"), ident_expr!("bar")),
         (ident!("fizz"), ident_expr!("buzz")),
     ]))
@@ -2121,3 +2115,148 @@ expr_test!(
         base: Some(ident_expr!("base")),
     })
 );
+
+// ---- `with` — a scoped effect region. Parses to ordinary calls on the
+// internal `__fx_<fx>_push`/`__fx_<fx>_pop` pair around a `__with_N` temp,
+// so nothing downstream learns a new node; `with` stays a plain name in
+// every other shape.
+
+// r[verify mimas.fx.with]
+expr_test!(
+    with_desugars_to_push_pop,
+    "with rng = 7 { 42 }",
+    Block {
+        body: vec![
+            Call::new(
+                ident_expr!("__fx_rng_push"),
+                vec![Argument::new(int!(7))]
+            )
+            .into_expr()
+            .into_stmt(),
+            Let::new(
+                ident!("__with_1").into(),
+                Block::new_with_yield(vec![], int!(42)).into_expr(),
+                None,
+            )
+            .into_stmt(),
+            Call::new(ident_expr!("__fx_rng_pop"), vec![])
+                .into_expr()
+                .into_stmt(),
+        ],
+        yielded_expr: Some(ident_expr!("__with_1")),
+    }
+);
+
+// r[verify mimas.fx.with]
+expr_test!(
+    with_yields_its_body,
+    "with rng = seed { 1 + 2 }",
+    Block {
+        body: vec![
+            Call::new(
+                ident_expr!("__fx_rng_push"),
+                vec![Argument::new(ident_expr!("seed"))]
+            )
+            .into_expr()
+            .into_stmt(),
+            Let::new(
+                ident!("__with_1").into(),
+                Block::new_with_yield(
+                    vec![],
+                    Evaluation::new(int!(1), EvaluationOp::Plus, int!(2)).into_expr(),
+                )
+                .into_expr(),
+                None,
+            )
+            .into_stmt(),
+            Call::new(ident_expr!("__fx_rng_pop"), vec![])
+                .into_expr()
+                .into_stmt(),
+        ],
+        yielded_expr: Some(ident_expr!("__with_1")),
+    }
+);
+
+/// `parse`'s errors as message strings — what a rejected `with` teaches.
+fn with_errors(source: &str) -> Vec<String> {
+    let (_, errors) = crate::tests::utils::parse(source);
+    errors.iter().map(ToString::to_string).collect()
+}
+
+// r[verify mimas.fx.with]
+#[test]
+fn with_unknown_effect_named() {
+    let errs = with_errors("let _x = with speed = 7 { 1 };");
+    assert!(
+        errs.iter().any(|e| e.contains("`speed` isn't an effect")),
+        "{errs:?}"
+    );
+}
+
+// r[verify mimas.fx.with]
+#[test]
+fn with_only_rng_scopes_yet() {
+    let errs = with_errors("let _x = with net = m { fetch() };");
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("can't install `net` yet")),
+        "{errs:?}"
+    );
+}
+
+// r[verify mimas.fx.with]
+#[test]
+fn with_wants_a_block_body() {
+    let errs = with_errors("let _x = with rng = 7;");
+    assert!(
+        errs.iter().any(|e| e.contains("wants a `{` body")),
+        "{errs:?}"
+    );
+}
+
+// r[verify mimas.fx.with.exits]
+#[test]
+fn with_refuses_boundary_exits() {
+    // a structured exit skips the desugared restore — refused at parse
+    for (src, exit) in [
+        ("fn f() { with rng = 1 { return 0 } }", "`return`"),
+        ("fn f() { with rng = 1 { raise 0 } }", "`raise`"),
+        ("fn f() { with rng = 1 { g()? } }", "`?`"),
+        ("fn f() { with rng = 1 { break } }", "`break`"),
+        ("fn f() { with rng = 1 { continue } }", "`continue`"),
+    ] {
+        let errs = with_errors(src);
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("can't leave a `with` region") && e.contains(exit)),
+            "`{src}`: {errs:?}"
+        );
+    }
+}
+
+// r[verify mimas.fx.with.exits]
+#[test]
+fn with_allows_bound_exits() {
+    // a loop inside the region binds its own `break`/`continue`; a closure
+    // binds its own `return`/`?` — none escape the region
+    let (_, errors) = crate::tests::utils::parse(
+        "fn f() { with rng = 1 {
+            for x in [1] { break }
+            for x in [1] { continue }
+            let _g = || { return 0 };
+            let _h = || { g()? };
+        } }",
+    );
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
+// r[verify mimas.fx.with]
+#[test]
+fn with_stays_a_name_elsewhere() {
+    // `with` is contextual: a call, a binding, an `==` (not `=`) — all plain
+    crate::tests::utils::assert_parses("with(1);");
+    crate::tests::utils::assert_parses("let with = 3;");
+    crate::tests::utils::assert_parses("let _x = with rng == 7;");
+    // and a newline after `with` keeps it a name too
+    crate::tests::utils::assert_parses("fn f() { let _x = with\nrng = 7; }");
+}

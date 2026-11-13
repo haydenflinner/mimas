@@ -294,6 +294,20 @@ pub struct Rng {
     state: Cell<Option<u64>>,
     /// Exact `[0,1)` values queued for the next draws.
     script: RefCell<VecDeque<f64>>,
+    /// `with rng` scopes, LIFO: each entry saved the state+script in force
+    /// before its push installed new ones, keyed by the frame depth it was
+    /// pushed at (`DebugInfo::stack`'s len — the pushing frame included). A
+    /// scope's `pop` runs at the same depth its `push` did; an entry that
+    /// outlives the live stack was orphaned by an unwind — a hard fault
+    /// skipping the desugar's pop — and [`Rng::reconcile`] restores it.
+    with: RefCell<Vec<WithScope>>,
+}
+
+/// One installed `with rng` scope (see [`Rng::with`]).
+struct WithScope {
+    depth: usize,
+    state: Option<u64>,
+    script: VecDeque<f64>,
 }
 
 impl Rng {
@@ -344,6 +358,57 @@ impl Rng {
         }
         stream
     }
+
+    /// `with rng`'s install half (`__fx_rng_push`): save the current
+    /// state+script on the scope stack, keyed by `depth`, and install the
+    /// scope's own. `depth` is the live frame count the pushing native saw.
+    // r[impl mimas.fx.with]
+    pub fn push_with(&self, depth: usize, state: Option<u64>, script: VecDeque<f64>) {
+        let saved = WithScope {
+            depth,
+            state: self.state.replace(state),
+            script: std::mem::replace(&mut *self.script.borrow_mut(), script),
+        };
+        self.with.borrow_mut().push(saved);
+    }
+
+    /// `with rng`'s restore half (`__fx_rng_pop`): pop the top scope and put
+    /// its saved state+script back. An empty stack can't come from the
+    /// desugar (push and pop pair lexically), so this is a no-op then.
+    pub fn pop_with(&self) {
+        if let Some(scope) = self.with.borrow_mut().pop() {
+            self.state.set(scope.state);
+            *self.script.borrow_mut() = scope.script;
+        }
+    }
+
+    /// Drop every scope orphaned by an unwind. `depth` is the live frame
+    /// count *now*; an entry recorded deeper was pushed by a frame that's
+    /// gone (a fault truncated it — the structured exits `return`/`raise`/
+    /// `break`/`continue`/`?` can't skip a `with` because the parser refuses
+    /// them inside one). Popping deepest-first leaves the *shallowest*
+    /// orphan's saved state in `saved` — the state the oldest dead scope was
+    /// keeping for its outside, which is what the survivors should see.
+    // r[impl mimas.fx.with.restore]
+    pub fn reconcile(&self, depth: usize) {
+        let saved = {
+            let mut with = self.with.borrow_mut();
+            let mut saved = None;
+            while with.last().is_some_and(|s| s.depth > depth) {
+                saved = with.pop();
+            }
+            saved
+        };
+        if let Some(scope) = saved {
+            self.state.set(scope.state);
+            *self.script.borrow_mut() = scope.script;
+        }
+    }
+
+    /// Live `with` scopes — a test asserts a program left none behind.
+    pub fn with_scopes(&self) -> usize {
+        self.with.borrow().len()
+    }
 }
 
 /// Per-Vm type-keyed storage for host-shared state. Lazily creates entries on first access via
@@ -379,9 +444,11 @@ impl Fixtures {
 /// notebook cell shows under itself. `echo` (the stdlib native every
 /// top-level expression statement is compiled to call) records here only
 /// while `on` — a host sets it for the pass it reads, so a plain run
-/// formats nothing. Each entry is the call site, the value's display text
-/// (quoted strings, `Name { .. }`), and its [`Inspect`] tree for a richer
-/// view. Capped like [`Prints`].
+/// formats nothing. Test-body statements call `echo` the same way at any
+/// depth, which is how a failed check's rerun tapes itself (check.tape).
+/// Each entry is the call site, the value's display text (quoted strings,
+/// `Name { .. }`), and its [`Inspect`] tree for a richer view. Capped like
+/// [`Prints`].
 #[derive(Default)]
 pub struct Echoes {
     pub on: Cell<bool>,

@@ -432,6 +432,10 @@ impl Vm {
                 return_reg: 0,
                 base: 0,
             });
+            // the frames every `with rng` scope hung on are gone — restore
+            // the state the outermost one saved
+            // r[impl mimas.fx.with.restore]
+            ctx.fixture::<crate::fixtures::Rng>().reconcile(0);
         });
     }
 
@@ -594,7 +598,13 @@ impl Vm {
                     bc.as_deref(),
                     FUEL,
                     1,
-                )?;
+                );
+                if done.is_err() {
+                    // a fault ends the program — restore every `with rng`
+                    // scope its dying frames left installed
+                    ctx.fixture::<crate::fixtures::Rng>().reconcile(0);
+                }
+                let done = done?;
                 // No frame host to hand control to — a pause native (a
                 // `use game` program run to completion) is a no-op here.
                 state.paused.set(false);
@@ -647,7 +657,13 @@ impl Vm {
                     bc.as_deref(),
                     FUEL,
                     1,
-                )?;
+                );
+                if done.is_err() {
+                    // a fault ends the program — restore every `with rng`
+                    // scope its dying frames left installed
+                    ctx.fixture::<crate::fixtures::Rng>().reconcile(0);
+                }
+                let done = done?;
                 Ok::<(bool, bool), Error>((done, state.paused.get()))
             })?;
             if done || paused {
@@ -1948,6 +1964,8 @@ fn inject_call_inner<'gc>(
         thread.frames.truncate(depth);
         thread.regs.truncate(regs);
         code.ip = ip;
+        // `with rng` scopes the unwound frames left behind restore here
+        ctx.fixture::<crate::fixtures::Rng>().reconcile(depth);
     }
     let value = std::mem::replace(&mut thread.regs[base], r0);
     drop(thread);
@@ -2639,6 +2657,11 @@ impl Vm {
                 let mut thread = state.thread.borrow_mut(mc);
                 thread.frames.truncate(stop_depth - 1);
                 thread.regs.truncate(regs_len);
+                // `with rng` scopes the unwound frames left behind restore here
+                state
+                    .ctx(mc)
+                    .fixture::<crate::fixtures::Rng>()
+                    .reconcile(stop_depth - 1);
             });
         }
         Ok((slot, ran))

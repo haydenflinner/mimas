@@ -74,6 +74,9 @@ pub struct Parser<'s> {
     /// Monotonic counter for `__assert_left_N` / `__assert_right_N` names minted by `assert!`
     /// rewriting, so nested asserts don't collide.
     assert_id: u32,
+    /// Monotonic counter for `__with_N` names minted by the `with` desugar,
+    /// so nested regions don't collide.
+    with_id: u32,
     depth: usize,
     /// The dimension of each unit-suffixed literal (`25kW`), by the literal's node.
     quantities: HashMap<NodeId, shared::units::Dim>,
@@ -241,6 +244,7 @@ impl<'s> Parser<'s> {
             group_depth: 0,
             pct_marker: false,
             assert_id: 0,
+            with_id: 0,
             depth: 0,
             quantities: HashMap::new(),
             exact_literals: Default::default(),
@@ -780,6 +784,118 @@ impl<'s> Parser<'s> {
         let stmt = self.new_stmt(Needs::new(names), start);
         self.end_stmt(stmt.location());
         stmt
+    }
+
+    /// One-token lookahead for the contextual `with` keyword: `with <name> =`
+    /// on one line opens a scoped effect region (`with rng = 7 { … }`); a
+    /// newline or any other shape (`with(x)`, `with = 4`, `with` alone) keeps
+    /// `with` an ordinary expression.
+    // r[impl mimas.fx.with]
+    fn with_intro(&self) -> bool {
+        !self.meta_at(1).newline
+            && self.nth(1).is_ident()
+            && self.nth(2) == TokKind::Equal
+            && !self.meta_at(2).newline
+    }
+
+    /// `with rng = <spec> { … }` — installs the spec's state on the `rng`
+    /// fixture for the body's dynamic extent and restores the enclosing one
+    /// after. Desugars at parse to ordinary calls, so no new syntax node
+    /// reaches solve or codegen:
+    ///
+    /// ```mimas
+    /// { __fx_rng_push(<spec>); let __with_N = { … }; __fx_rng_pop(); __with_N }
+    /// ```
+    ///
+    /// The `#[effects(rng)]` push/pop keep `rng` in the caller's inferred set —
+    /// a handler channels the authority, it doesn't launder it. The fixture's
+    /// scope stack restores across a hard fault, but an exit that skips the
+    /// pop *without* unwinding a frame — `return`, `raise`, `?`, `break`,
+    /// `continue` — is refused here: a scoped region a jump can escape
+    /// silently isn't scoped.
+    // r[impl mimas.fx.with]
+    fn with_expr(&mut self, start: usize) -> Expr {
+        self.advance(); // `with`
+        let name = self.require_ident();
+        self.expect(TokKind::Equal);
+        // like a loop head: `{` after the spec opens the body, never a literal
+        let spec = self.with_juxta(Juxta::Off, |p| p.struct_literals(false, Self::expr));
+        if !self.at(TokKind::LeftBrace) {
+            self.error_here(Misdirection {
+                src: self.src(),
+                at: self.next_location().into(),
+                msg: format!("`with {} = <spec>` wants a `{{` body", name.lexeme),
+                label: "the scoped region goes here".into(),
+            });
+            return self.poison_expr(start);
+        }
+        let body = self.block();
+        match shared::Fx::named(&name.lexeme) {
+            Some(fx) if fx == shared::Fx::RNG => {}
+            Some(_) => self.error(Misdirection {
+                src: self.src(),
+                at: name.location.into(),
+                msg: format!(
+                    "`with` can't install `{}` yet — only `rng` has a scoped state",
+                    name.lexeme
+                ),
+                label: "`with rng = …` is the working spelling".into(),
+            }),
+            None => self.error(Misdirection {
+                src: self.src(),
+                at: name.location.into(),
+                msg: format!(
+                    "`{}` isn't an effect — `needs`/`granting` write `doc`, `net`, `rng`, `yield`, `io`, `time`",
+                    name.lexeme
+                ),
+                label: "the effect the `with` installs".into(),
+            }),
+        }
+        if let Some((at, exit)) = with_region_escape(&body) {
+            self.error(Misdirection {
+                src: self.src(),
+                at: at.into(),
+                msg: format!(
+                    "`{exit}` can't leave a `with` region — the handler's restore would be skipped"
+                ),
+                label: format!("handle it inside, or restructure so the `{exit}` sits outside"),
+            });
+        }
+        self.with_desugar(&name.lexeme, spec, body, start)
+    }
+
+    /// `{ __fx_<fx>_push(spec); let __with_N = body; __fx_<fx>_pop(); __with_N }`
+    /// — see [`Self::with_expr`].
+    fn with_desugar(&mut self, fx: &str, spec: Expr, body: Expr, start: usize) -> Expr {
+        self.with_id += 1;
+        let temp = self.ident_at(format!("__with_{}", self.with_id), start);
+        let call = |p: &Self, name: &str, args: Vec<Expr>| {
+            p.new_expr(
+                Call::new(
+                    p.new_expr(p.ident_at(name.to_string(), start), start),
+                    args.into_iter()
+                        .map(|value| Argument { name: None, value })
+                        .collect(),
+                ),
+                start,
+            )
+        };
+        let push = self.new_stmt(
+            StmtKind::Expr(call(self, &format!("__fx_{fx}_push"), vec![spec])),
+            start,
+        );
+        let bind = self.synthetic_let(temp.clone(), body, start);
+        let pop = self.new_stmt(
+            StmtKind::Expr(call(self, &format!("__fx_{fx}_pop"), vec![])),
+            start,
+        );
+        self.new_expr(
+            Block {
+                body: vec![push, bind, pop],
+                yielded_expr: Some(self.new_expr(temp, start)),
+            },
+            start,
+        )
     }
 
     /// One-token lookahead for the contextual `unit` keyword: `unit` opens
@@ -2751,6 +2867,12 @@ impl<'s> Parser<'s> {
             // `data "name-or-url"` — an external data source (see data_source)
             let expr = self.data_source();
             self.chain_accesses(expr)
+        } else if self.peek() == TokKind::Ident("with") && self.with_intro() {
+            // `with rng = <spec> { … }` — a scoped effect state for the
+            // body's extent; `with` stays a name everywhere else
+            // r[impl mimas.fx.with]
+            let expr = self.with_expr(start);
+            self.chain_accesses(expr)
         } else if self.at(TokKind::Dollar) {
             // `$expr` — a `query { }` splice: `expr` is a value from the
             // surrounding scope, not a column. Emitted as `__q_splice(expr)`;
@@ -3702,15 +3824,22 @@ impl<'s> Parser<'s> {
         Ident::new(name, self.location(start))
     }
 
+    /// `let __assert_* = value` gets the operand's own span, not the whole
+    /// check's: a failed check's tape (r[impl check.tape] in emit) records
+    /// each operand let at the statement's location, so the strip names the
+    /// subexpression that produced the value.
     fn synthetic_let(&self, name: Ident, value: Expr, start: usize) -> Stmt {
-        self.new_stmt(
+        let loc = value.location();
+        Stmt::new(
             Let {
                 left: Pat::new(PatKind::Ident(name), self.location(start)),
                 annotation: None,
                 right: value,
                 else_branch: None,
-            },
-            start,
+            }
+            .into(),
+            NodeId::new(),
+            loc,
         )
     }
 
@@ -5345,4 +5474,160 @@ fn desugar_prefix_pat(pat: &Pat, prefix: &str) -> Pat {
         _ => return pat.clone(),
     };
     Pat::new(kind, pat.location())
+}
+
+/// The first `return`/`raise`/`?`/`break`/`continue` in a `with` region's
+/// body that would leave the region without running the desugared restore.
+/// These are structured exits — the frame returns early or the loop jumps;
+/// neither unwinds the Vm, so the `__fx_*_pop` at the region's tail never
+/// runs and the installed state leaks to the caller. Loops and closures
+/// inside the body bind their own exits, so only exits aimed *past* the
+/// `with` count. (A hard fault is different: it unwinds, and the fixture's
+/// `reconcile` heals the scope at the truncation boundary.)
+// r[impl mimas.fx.with.exits]
+fn with_region_escape(body: &Expr) -> Option<(Location, &'static str)> {
+    let ExprKind::Block(block) = body.kind() else {
+        return None;
+    };
+    block
+        .body
+        .iter()
+        .find_map(|stmt| with_stmt_escape(stmt, false, false))
+        .or_else(|| {
+            block
+                .yielded_expr
+                .as_ref()
+                .and_then(|expr| with_expr_escape(expr, false, false))
+        })
+}
+
+fn with_stmt_escape(stmt: &Stmt, in_loop: bool, in_fn: bool) -> Option<(Location, &'static str)> {
+    match stmt.kind() {
+        StmtKind::Let(l) => with_pat_escape(&l.left, in_loop, in_fn)
+            .or_else(|| with_expr_escape(&l.right, in_loop, in_fn))
+            .or_else(|| {
+                l.else_branch
+                    .as_ref()
+                    .and_then(|e| with_expr_escape(e, in_loop, in_fn))
+            }),
+        StmtKind::Assignment(a) => with_expr_escape(&a.left, in_loop, in_fn)
+            .or_else(|| with_expr_escape(&a.right, in_loop, in_fn)),
+        StmtKind::Expr(e) => with_expr_escape(e, in_loop, in_fn),
+        // a nested item (`fn`, `check`, `const`, …) binds its own exits
+        StmtKind::Item(_) | StmtKind::Module(_) | StmtKind::Unit(_) | StmtKind::Needs(_) => None,
+    }
+}
+
+fn with_expr_escape(expr: &Expr, in_loop: bool, in_fn: bool) -> Option<(Location, &'static str)> {
+    let scan = |e: &Expr| with_expr_escape(e, in_loop, in_fn);
+    let scan_opt = |e: &Option<Expr>| e.as_ref().and_then(|e| scan(e));
+    match expr.kind() {
+        // exits aimed past the region — the desugared pop never runs
+        ExprKind::Return(_) if !in_fn => Some((expr.location(), "return")),
+        ExprKind::Raise(_) if !in_fn => Some((expr.location(), "raise")),
+        ExprKind::Propagate(_) if !in_fn => Some((expr.location(), "`?`")),
+        ExprKind::Break(_) if !(in_loop || in_fn) => Some((expr.location(), "break")),
+        ExprKind::Continue(_) if !(in_loop || in_fn) => Some((expr.location(), "continue")),
+        // exits that stay inside — bound, but their payloads still get scanned
+        ExprKind::Return(r) => scan_opt(&r.value),
+        ExprKind::Raise(r) => scan(&r.value),
+        ExprKind::Propagate(p) => scan(&p.expr),
+        ExprKind::Break(b) => scan_opt(&b.value),
+        ExprKind::Continue(_) | ExprKind::Ident(_) | ExprKind::Poison(_) => None,
+        // a closure binds its own exits — a `return`/`?` inside one leaves
+        // the closure, not this region; parameter defaults likewise
+        ExprKind::Closure(c) => c
+            .parameters
+            .iter()
+            .filter_map(|b| b.right.as_ref())
+            .find_map(|e| with_expr_escape(e, false, true))
+            .or_else(|| with_expr_escape(&c.body, false, true)),
+        ExprKind::For(f) => with_pat_escape(&f.binding, in_loop, in_fn)
+            .or_else(|| scan(&f.iterator))
+            .or_else(|| with_expr_escape(&f.body, true, in_fn)),
+        ExprKind::While(w) => w
+            .binding
+            .as_ref()
+            .and_then(|b| with_pat_escape(b, in_loop, in_fn))
+            .or_else(|| scan(&w.header))
+            .or_else(|| with_expr_escape(&w.body, true, in_fn)),
+        ExprKind::Loop(l) => with_expr_escape(&l.body, true, in_fn),
+        ExprKind::Collect(c) => scan(&c.value),
+        ExprKind::Block(b) => b
+            .body
+            .iter()
+            .find_map(|s| with_stmt_escape(s, in_loop, in_fn))
+            .or_else(|| scan_opt(&b.yielded_expr)),
+        ExprKind::If(i) => i
+            .binding
+            .as_ref()
+            .and_then(|b| with_pat_escape(b, in_loop, in_fn))
+            .or_else(|| scan(&i.condition))
+            .or_else(|| scan(&i.main_body))
+            .or_else(|| scan_opt(&i.else_expr)),
+        ExprKind::Match(m) => scan(&m.identity).or_else(|| {
+            m.cases.iter().find_map(|case| {
+                with_pat_escape(case.pat(), in_loop, in_fn)
+                    .or_else(|| case.guard().and_then(|g| scan(g)))
+                    .or_else(|| scan(case.body()))
+            })
+        }),
+        ExprKind::Absolve(a) => scan(&a.left).or_else(|| scan(&a.handler)),
+        ExprKind::Call(c) => scan(&c.left).or_else(|| {
+            c.arguments.iter().find_map(|a| scan(&a.value))
+        }),
+        ExprKind::Access(a) => match a {
+            Access::Dot { left, right, .. } => scan(left).or_else(|| scan(right)),
+            Access::DoubleColon { left, .. } => scan(left),
+            Access::Square { left, key, .. } => scan(left).or_else(|| scan(key)),
+            Access::Identity { .. } => None,
+        },
+        ExprKind::Equality(e) => scan(&e.left).or_else(|| scan(&e.right)),
+        ExprKind::Evaluation(e) => scan(&e.left).or_else(|| scan(&e.right)),
+        ExprKind::Logical(e) => scan(&e.left).or_else(|| scan(&e.right)),
+        ExprKind::Coalescence(e) => scan(&e.left).or_else(|| scan(&e.right)),
+        ExprKind::In(e) => scan(&e.left).or_else(|| scan(&e.right)),
+        ExprKind::FString(f) => f.parts.iter().find_map(|p| match p {
+            FStringPart::Expr(e) => scan(e),
+            _ => None,
+        }),
+        ExprKind::Grouping(g) => scan(&g.inner),
+        ExprKind::Literal(l) => match l {
+            Literal::Array(exprs) | Literal::Tuple(exprs) => {
+                exprs.iter().find_map(|e| scan(e))
+            }
+            Literal::Record(fields) => fields.iter().find_map(|(_, v)| scan(v)),
+            Literal::Struct(s) => scan(&s.name)
+                .or_else(|| s.fields.iter().find_map(|(_, v)| scan(v)))
+                .or_else(|| scan_opt(&s.base)),
+            _ => None,
+        },
+        ExprKind::Range(r) => scan(&r.start).or_else(|| scan(&r.end)),
+        ExprKind::Unary(u) => scan(&u.right),
+        ExprKind::Unwrap(u) => scan(&u.expr),
+    }
+}
+
+fn with_pat_escape(pat: &Pat, in_loop: bool, in_fn: bool) -> Option<(Location, &'static str)> {
+    match pat.kind() {
+        PatKind::Tuple(pats) | PatKind::Or(pats) => pats
+            .iter()
+            .find_map(|p| with_pat_escape(p, in_loop, in_fn)),
+        PatKind::Struct(head, fields) => {
+            with_expr_escape(head, in_loop, in_fn).or_else(|| {
+                fields
+                    .values()
+                    .find_map(|p| with_pat_escape(p, in_loop, in_fn))
+            })
+        }
+        PatKind::TupleVariant(head, pats) => {
+            with_expr_escape(head, in_loop, in_fn).or_else(|| {
+                pats.iter()
+                    .find_map(|p| with_pat_escape(p, in_loop, in_fn))
+            })
+        }
+        PatKind::Variant(head) => with_expr_escape(head, in_loop, in_fn),
+        PatKind::NullBind(inner) => with_pat_escape(inner, in_loop, in_fn),
+        PatKind::Ident(_) | PatKind::Literal(_) | PatKind::Poison(_) => None,
+    }
 }
