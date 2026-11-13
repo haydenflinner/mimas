@@ -66,6 +66,7 @@ This tree is a permanently separate fork of upstream [mimas](https://github.com/
 | Tests | `#[test]` / `tests`/`check` items are syntax (`#[attr]` tokens, `parse/src/item/item_kinds/tests.rs`) | not present |
 | Globals | Top-level `let`s are globals any `fn` can read/write via the entry frame (`LoadEntry`/`StoreEntry`) | top-level `let` is invisible inside `fn`s |
 | Docstrings | `"""…"""` in statement position is captured for tooling (`parse/src/lex/lexer.rs`) | not present |
+| Macros | `macro twice($e:expr) { $e * 2 }` then `twice!(21)`: `macro_rules!`-style patterns with `$( … ),*` repeats, expanded by the parser before checking, hygienic for template locals (`parse/src/parser/macros.rs`) | not present |
 | Invertible fns | `iso`/`lens`/`un`/`under`/`at` (Uiua-style `un`/`under`); `under`/`at` lower in codegen (`library/src/std_lib/iso.rs`, `api/src/lib.rs` `Intrinsic`) | not present |
 
 ### Host integration & embedding

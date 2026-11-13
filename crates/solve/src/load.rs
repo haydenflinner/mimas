@@ -71,6 +71,7 @@ impl Prepared {
     /// sources' own parse or solve errors — a broken prelude has no program.
     pub fn new(library: &Library<()>) -> std::result::Result<Self, Vec<Error>> {
         shared::units::clear();
+        parse::clear_macros();
         let shipped: Vec<(String, String)> = std::iter::once((BUILTIN_NAME, BUILTIN_SRC))
             .chain(library.sources().iter().copied())
             .map(|(n, t)| (n.to_string(), t.to_string()))
@@ -144,6 +145,8 @@ impl Prepared {
             }
         };
         shared::units::install(&self.units);
+        // a program sees only the macros its own files declare
+        parse::clear_macros();
         let user: Vec<(&str, &str)> = files.into_iter().collect();
         // shadowed operator words: a kit's `fn not` makes `not` a name in the
         // kit and in the files that `use` it, never upstream — computed over

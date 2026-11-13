@@ -3933,6 +3933,7 @@ impl Vm {
         let mut asts = Vec::with_capacity(files.len());
         let mut sources = Sources::with_capacity(files.len());
         shared::units::clear();
+        parse::clear_macros();
         let inherited = parse::lex::inherited_shadow(files);
         for (file_id, (name, source)) in files.iter().enumerate() {
             let lexer =

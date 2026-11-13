@@ -10,6 +10,9 @@ use shared::{FileId, Located, Location, Span, units::Dim};
 use std::{cell::Cell, sync::Arc};
 
 mod datalog;
+pub(crate) mod macros;
+/// Forgets every declared macro: a new program starts with none.
+pub use macros::clear as clear_macros;
 
 /// Recursively descends mimas source, incrementally returning various
 /// statements and expressions.
@@ -84,6 +87,56 @@ pub struct Parser<'s> {
     /// Top-level statements a declaration synthesized alongside itself
     /// (`opp`'s `impl Opp`), emitted right after it.
     pending: Vec<Stmt>,
+    /// One entry per token in `tokens`: how the token sits against the one
+    /// before it, and which macro expansion wrote it. The parser asks this,
+    /// not the spans, whether two tokens touch or a line breaks between
+    /// them. A spliced macro expansion has spans from the call site.
+    meta: Vec<TokMeta>,
+    /// Macro hygiene and expansion state (`parser/macros.rs`).
+    hygiene: macros::Hygiene,
+}
+
+/// How a token sits in the stream (see [`Parser::meta`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct TokMeta {
+    /// It starts exactly where the token before it ends.
+    pub(crate) glued: bool,
+    /// A line break comes between it and the token before it.
+    pub(crate) newline: bool,
+    /// The macro expansion whose template wrote it. 0 is source text,
+    /// including a fragment the call site passed in.
+    pub(crate) mark: u32,
+}
+
+/// The [`TokMeta`] of each token, read from the text between neighbours.
+/// `offset` is where `source` starts in the spans (an f-string
+/// interpolation lexes a slice).
+fn token_meta(source: &str, offset: usize, tokens: &[Tok<TokKind<'_>>]) -> Vec<TokMeta> {
+    let mut meta = Vec::with_capacity(tokens.len());
+    let mut prev_end: Option<usize> = None;
+    for tok in tokens {
+        let start = tok.span().start();
+        let entry = match prev_end {
+            None => TokMeta {
+                glued: true,
+                newline: false,
+                mark: 0,
+            },
+            Some(end) => {
+                let gap = source
+                    .get(end.saturating_sub(offset)..start.saturating_sub(offset))
+                    .unwrap_or_default();
+                TokMeta {
+                    glued: end == start,
+                    newline: gap.contains('\n'),
+                    mark: 0,
+                }
+            }
+        };
+        meta.push(entry);
+        prev_end = Some(tok.span().end());
+    }
+    meta
 }
 
 // Basic features
@@ -94,6 +147,8 @@ impl<'s> Parser<'s> {
         // A fresh source is a fresh unit scope — `unit` decls never leak
         // between standalone parses.
         shared::units::clear();
+        // and so is its macro table
+        macros::clear();
         Self::with_src(lexer, src)
     }
 
@@ -107,7 +162,18 @@ impl<'s> Parser<'s> {
 
     /// Creates a parser whose diagnostics render against `src` rather than the lexer's own
     /// source (the lexer is on a slice of it).
-    fn with_src(mut lexer: Lexer<'s>, src: NamedSource<Arc<str>>) -> Self {
+    fn with_src(lexer: Lexer<'s>, src: NamedSource<Arc<str>>) -> Self {
+        Self::with_src_at(lexer, src, None)
+    }
+
+    /// Like [`Self::with_src`]. With `relocate`, every token and lexer error
+    /// takes that location instead of its own: a macro template's f-string
+    /// has no place in the file, so its interpolation reports at the call.
+    fn with_src_at(
+        mut lexer: Lexer<'s>,
+        src: NamedSource<Arc<str>>,
+        relocate: Option<Location>,
+    ) -> Self {
         let mut tokens: Vec<_> = lexer.by_ref().collect();
         // `unit` decls teach the lexer new suffixes — `18.0tile` only reads
         // as a quantity once `tile` is registered — so the token list gets
@@ -138,6 +204,12 @@ impl<'s> Parser<'s> {
             })
             .collect();
         tokens.retain(|tok| !tok.kind().is_comment());
+        let meta = token_meta(lexer.source(), lexer.offset(), &tokens);
+        if let Some(at) = relocate {
+            for tok in &mut tokens {
+                tok.location = at.into();
+            }
+        }
 
         let errors = lexer
             .take_errors()
@@ -146,7 +218,7 @@ impl<'s> Parser<'s> {
                 let err = LexError {
                     src: src.clone(),
                     diag,
-                    at: Location::from(location).into(),
+                    at: relocate.unwrap_or_else(|| Location::from(location)).into(),
                 };
                 err.into()
             })
@@ -173,6 +245,8 @@ impl<'s> Parser<'s> {
             quantities: HashMap::new(),
             exact_literals: Default::default(),
             quantity_units: HashMap::new(),
+            meta,
+            hygiene: macros::Hygiene::default(),
         }
     }
 
@@ -360,6 +434,19 @@ impl<'s> Parser<'s> {
     /// statement) the caller decides. Assignments finish here as `Stmt`; only true bare exprs
     /// surface as `MaybeYield`.
     fn node(&mut self) -> BlockElement {
+        // a macro declaration holds no statement: read past it to the next one
+        if self.macro_intro() {
+            let start = self.next_start();
+            while self.macro_intro() {
+                self.macro_decl();
+            }
+            if !self.peek().starts_stmt() {
+                return BlockElement::Stmt(self.empty_stmt(start));
+            }
+        }
+        if self.stmt_macro_call() {
+            return self.stmt_macro();
+        }
         let start = self.next_start();
         match self.peek() {
             TokKind::Let => BlockElement::Stmt(self.let_stmt()),
@@ -628,10 +715,8 @@ impl<'s> Parser<'s> {
     /// the retired list forms get a pointed error, not a silent parse.)
     // r[impl check.contextual]
     fn check_intro(&self) -> bool {
-        let last = self.tokens.len() - 1;
-        let kw_end = self.tokens[self.next.min(last)].span().end();
-        let after = self.tokens[(self.next + 1).min(last)].span().start();
-        if self.src.inner()[kw_end..after].contains('\n') {
+        let after = self.meta_at(1);
+        if after.newline {
             return false;
         }
         match self.nth(1) {
@@ -648,7 +733,7 @@ impl<'s> Parser<'s> {
             TokKind::LeftParenthesis
             | TokKind::LeftSquare
             | TokKind::TildeLeftBrace
-            | TokKind::Minus => kw_end < after,
+            | TokKind::Minus => !after.glued,
             kind => Literal::try_from(kind).is_ok(),
         }
     }
@@ -657,10 +742,7 @@ impl<'s> Parser<'s> {
     /// same line -- a closure (`check |x| …`), or anything else, which
     /// `pact_law` then explains.
     fn law_intro(&self) -> bool {
-        let last = self.tokens.len() - 1;
-        let kw_end = self.tokens[self.next.min(last)].span().end();
-        let after = self.tokens[(self.next + 1).min(last)].span().start();
-        !self.src.inner()[kw_end..after].contains('\n')
+        !self.meta_at(1).newline
             && (matches!(self.nth(1), TokKind::Pipe | TokKind::DoublePipe) || self.check_intro())
     }
 
@@ -668,10 +750,7 @@ impl<'s> Parser<'s> {
     /// a declaration when a plain name follows on the same line — `unit(x)`,
     /// `unit = 4`, `unit.foo`, and `unit` alone stay ordinary expressions.
     fn unit_intro(&self) -> bool {
-        let last = self.tokens.len() - 1;
-        let kw_end = self.tokens[self.next.min(last)].span().end();
-        let after = self.tokens[(self.next + 1).min(last)].span().start();
-        if self.src.inner()[kw_end..after].contains('\n') {
+        if self.meta_at(1).newline {
             return false;
         }
         matches!(self.nth(1), TokKind::Ident(_))
@@ -710,7 +789,10 @@ impl<'s> Parser<'s> {
                 rhs.push(self.advance().kind());
             }
             spec_text = Some(
-                self.src.inner()[rhs_start..self.cursor()]
+                self.src
+                    .inner()
+                    .get(rhs_start..self.cursor())
+                    .unwrap_or_default()
                     .trim()
                     .to_string(),
             );
@@ -799,12 +881,7 @@ impl<'s> Parser<'s> {
         if self.at(TokKind::Eof) {
             return false;
         }
-        let gap = self
-            .src
-            .inner()
-            .get(self.cursor()..self.next_start())
-            .unwrap_or_default();
-        !gap.contains('\n') && self.peek().starts_expr()
+        !self.at_line_start() && self.peek().starts_expr()
     }
 
     /// The source text an expr was parsed from, for a check's display name.
@@ -1709,7 +1786,8 @@ impl<'s> Parser<'s> {
 
     /// A parameter's name, and maybe its type.
     fn binding(&mut self) -> Binding {
-        let mut binding = Binding::new(self.require_ident());
+        let name = self.require_ident();
+        let mut binding = Binding::new(self.hygiene_bind(name));
         binding.annotation = self.eat(TokKind::Colon).then(|| self.annotation());
         binding
     }
@@ -2376,12 +2454,23 @@ impl<'s> Parser<'s> {
     fn fstring(&mut self) -> Expr {
         /// Parses the expression inside a `{...}`. It gets a parser of its own, on the
         /// interpolation's slice of the real source.
-        fn interpolation<'s>(outer: &mut Parser<'s>, body: &'s str, offset: usize) -> Expr {
+        fn interpolation<'s>(
+            outer: &mut Parser<'s>,
+            body: &'s str,
+            offset: usize,
+            template: Option<(Location, u32)>,
+        ) -> Expr {
             let lexer = Lexer::new(body, outer.file_id, outer.file_name.clone())
                 .with_shadowed(crate::lex::shadow_at(&outer.shadow, offset));
-            let mut parser = Parser::with_src(lexer.with_offset(offset), outer.src());
+            let relocate = template.map(|(at, _)| at);
+            let mut parser = Parser::with_src_at(lexer.with_offset(offset), outer.src(), relocate);
             // nested f-strings would otherwise restart the depth guard
             parser.depth = outer.depth;
+            // r[impl mimas.macro.hygiene]
+            // a macro template's f-string names the template's own locals
+            if let Some((_, mark)) = template {
+                parser.adopt_template(&outer.hygiene, mark);
+            }
             let expr = parser.expr();
             if !parser.at(TokKind::Eof) {
                 parser.error(parser.unexpected_token());
@@ -2434,6 +2523,9 @@ impl<'s> Parser<'s> {
         let TokKind::FString(content) = self.peek() else {
             return self.literal();
         };
+        // an f-string a macro template wrote has no text in this file
+        let template =
+            (self.meta_at(0).mark != 0).then(|| (self.next_location(), self.meta_at(0).mark));
         self.advance();
         // the token covers `f"..."`, so the content begins two bytes in
         let content_start = start + 2;
@@ -2464,13 +2556,17 @@ impl<'s> Parser<'s> {
                     }
                     let Some(end) = interp_end(rest) else {
                         let open = content_start + at - 1;
+                        let at = template.map_or_else(
+                            || Location::new(self.file_id, Span::new(open, open + 1)),
+                            |(at, _)| at,
+                        );
                         self.error(UnterminatedFStringExpr {
                             src: self.src(),
-                            at: Location::new(self.file_id, Span::new(open, open + 1)).into(),
+                            at: at.into(),
                         });
                         break;
                     };
-                    let expr = interpolation(self, &rest[..end], content_start + at);
+                    let expr = interpolation(self, &rest[..end], content_start + at, template);
                     parts.push(FStringPart::Expr(expr));
                     at += end + 1;
                 }
@@ -2608,7 +2704,8 @@ impl<'s> Parser<'s> {
                 // r[impl mimas.struct.shorthand]
                 // shorthand: `Foo { x }` is `Foo { x = x }`
                 let value = if self.at(TokKind::Comma) || self.at(TokKind::RightBrace) {
-                    self.new_expr(field.clone(), field.location.span().start())
+                    let local = self.hygiene_use(field.clone());
+                    self.new_expr(local, field.location.span().start())
                 } else {
                     // r[impl mimas.record.separator] `x: 1` or `x = 1`
                     if !self.eat(TokKind::Colon) {
@@ -3143,22 +3240,23 @@ impl<'s> Parser<'s> {
                 // `f !x` errors at the statement boundary rather than
                 // silently meaning `(f!)(x)`. The `x !`-reads-unwrap
                 // spelling is `x!`.
+                // r[impl mimas.macro.call]
+                TokKind::Bang if self.expr_macro_call(&expr) => self.expr_macro(expr),
                 TokKind::Bang
-                    if self.cursor() == self.next_start()
-                        && expr.as_ident().is_some_and(|i| i.lexeme == "assert") =>
+                    if self.glued() && expr.as_ident().is_some_and(|i| i.lexeme == "assert") =>
                 {
                     self.assert_or_unwrap(expr)
                 }
-                TokKind::Bang if self.cursor() == self.next_start() => self.unwrap(expr),
+                TokKind::Bang if self.glued() => self.unwrap(expr),
                 // `?` hugs like `!`: `x?` propagates, a spaced `?` starts
                 // nothing (`?` opens no expression), so `f ?x` errors
                 // rather than silently reading `(f?)(x)`.
-                TokKind::Hook if self.cursor() == self.next_start() => self.propagate(expr),
+                TokKind::Hook if self.glued() => self.propagate(expr),
                 // `x%` hugs its operand and spells percent -- `50%` is `50 * 0.01`, the
                 // `pct` unit by another name. A spaced `%` is neither postfix nor modulo
                 // (`a mod b`); `binary` reports it. While a `±` tolerance parses the
                 // marker claim takes precedence (`x ± 10%`).
-                TokKind::Percent if !self.pct_marker && self.cursor() == self.next_start() => {
+                TokKind::Percent if !self.pct_marker && self.glued() => {
                     let at = expr.span().start();
                     self.advance();
                     let scale = self.new_expr(Literal::Float(0.01), at);
@@ -3559,7 +3657,8 @@ impl<'s> Parser<'s> {
                     }
                     named = true;
                     let name = match value.kind() {
-                        ExprKind::Ident(ident) => Some(ident.clone()),
+                        // a parameter's name, never a template's renamed local
+                        ExprKind::Ident(ident) => Some(macros::unhygienic(ident)),
                         _ => {
                             p.error(p.unexpected_token());
                             None
@@ -3713,13 +3812,11 @@ impl<'s> Parser<'s> {
             TokKind::Equal if named => {
                 // scan the first value at bracket depth 0: a comma on its line
                 // makes it an entry; `;`, `}` or a line break first, a block
-                let src = self.src.inner();
                 let mut depth = 0i32;
                 let mut i = self.next + 3;
-                let mut prev_end = self.tokens[(self.next + 2).min(self.tokens.len() - 1)].span().end();
                 while i < self.tokens.len() {
                     let tok = &self.tokens[i];
-                    if depth == 0 && src[prev_end..tok.span().start()].contains('\n') {
+                    if depth == 0 && self.meta[i].newline {
                         return false;
                     }
                     match tok.kind() {
@@ -3735,7 +3832,6 @@ impl<'s> Parser<'s> {
                         TokKind::SemiColon | TokKind::Eof if depth == 0 => return false,
                         _ => {}
                     }
-                    prev_end = tok.span().end();
                     i += 1;
                 }
                 false
@@ -3769,7 +3865,8 @@ impl<'s> Parser<'s> {
                     };
                     if p.at(TokKind::Comma) || p.at(TokKind::RightBrace) {
                         // shorthand: `{ qty, price }` is `{ qty: qty, price: price }`
-                        let value = p.new_expr(key.clone(), key.location.span().start());
+                        let local = p.hygiene_use(key.clone());
+                        let value = p.new_expr(local, key.location.span().start());
                         return (key, value);
                     }
                     if !p.eat(TokKind::Colon) {
@@ -3830,6 +3927,7 @@ impl<'s> Parser<'s> {
             }
             TokKind::Ident(_) => {
                 let ident = self.require_ident();
+                let ident = self.hygiene_use(ident);
                 self.new_expr(ident, start)
             }
             _ => {
@@ -4431,7 +4529,7 @@ impl<'s> Parser<'s> {
                             } else {
                                 // r[impl mimas.struct.shorthand]
                                 // shorthand: `Foo { x }` is `Foo { x = x }`
-                                Pat::from(name.clone())
+                                Pat::from(p.hygiene_bind(name.clone()))
                             };
                             Some((name.lexeme, sub))
                         });
@@ -4441,7 +4539,10 @@ impl<'s> Parser<'s> {
                     // bare path -- `Foo::Bar` with no payload
                     _ if is_path => self.new_pat(PatKind::Variant(Box::new(head_expr)), start),
                     // bare identifier -- binding/wildcard
-                    _ => self.new_pat(PatKind::Ident(first), start),
+                    _ => {
+                        let first = self.hygiene_bind(first);
+                        self.new_pat(PatKind::Ident(first), start)
+                    }
                 }
             }
             _ => match Literal::try_from(kind) {
@@ -4464,8 +4565,13 @@ impl<'s> Parser<'s> {
     fn require_ident(&mut self) -> Ident {
         let location = self.next_location();
         if let TokKind::Ident(lexeme) = self.peek() {
+            let mark = self.meta_at(0).mark;
             self.advance();
-            return Ident::new(lexeme, location);
+            let ident = Ident::new(lexeme, location);
+            if mark != 0 {
+                self.hygiene.marks.insert(ident.id, mark);
+            }
+            return ident;
         }
         self.expected("identifier");
         // `Ident` is a plain struct with nowhere to put a variant, so its poison is a lexeme no
@@ -4516,6 +4622,13 @@ impl<'s> Parser<'s> {
         self.tokens[self.next] = Tok::new(TokKind::Greater, location);
         self.tokens
             .insert(self.next, Tok::new(TokKind::Greater, location));
+        let first = self.meta[self.next];
+        self.meta.insert(self.next, first);
+        self.meta[self.next + 1] = TokMeta {
+            glued: true,
+            newline: false,
+            ..first
+        };
     }
 
     /// Takes a token the grammar already dispatched on.
@@ -4569,7 +4682,17 @@ impl<'s> Parser<'s> {
 
     /// Whether the next token is the first on its line.
     fn at_line_start(&self) -> bool {
-        self.src.inner()[self.cursor()..self.next_start()].contains('\n')
+        self.meta_at(0).newline
+    }
+
+    /// Whether the next token touches the last one taken, as `x!` and `50%` do.
+    fn glued(&self) -> bool {
+        self.meta_at(0).glued
+    }
+
+    /// The [`TokMeta`] of the token `n` past the next one.
+    fn meta_at(&self, n: usize) -> TokMeta {
+        self.meta[(self.next + n).min(self.meta.len() - 1)]
     }
 
     /// `#1.10`: a `#` glued to a number opens an exact literal, not an
@@ -4577,10 +4700,8 @@ impl<'s> Parser<'s> {
     fn at_exact_literal(&self) -> bool {
         self.peek() == TokKind::Hash
             && matches!(self.nth(1), TokKind::Int(_) | TokKind::Float(_) | TokKind::Quantity(..))
-            && self
-                .tokens
-                .get(self.next + 1)
-                .is_some_and(|t| t.span().start() == self.tokens[self.next].span().end())
+            && self.next + 1 < self.tokens.len()
+            && self.meta_at(1).glued
     }
 
     /// In a comma-optional sequence, a `-` glued to a numeric literal
@@ -4591,17 +4712,13 @@ impl<'s> Parser<'s> {
         if self.peek() != TokKind::Minus {
             return false;
         }
-        let minus = self.tokens[self.next].span();
-        let glued_right = self
-            .tokens
-            .get(self.next + 1)
-            .is_some_and(|t| t.span().start() == minus.end());
+        let glued_right = self.next + 1 < self.tokens.len() && self.meta_at(1).glued;
         glued_right
             && matches!(
                 self.nth(1),
                 TokKind::Int(_) | TokKind::Float(_) | TokKind::Quantity(..)
             )
-            && minus.start() != self.cursor()
+            && !self.glued()
     }
 
     /// End byte of the last token taken.
