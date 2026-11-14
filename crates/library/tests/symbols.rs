@@ -18,7 +18,7 @@ test_run!(
 test_run!(
     prefix_reductions,
     "∑ [1, 2, 3]" => "6",
-    "∑ [1.5, 2.5]" => "4",
+    "∑ [1.5, 2.5]" => "4.0",
     "∏ [2, 3, 4]" => "24",
     "⨅ [true, true]" => "true",
     "⨅ [true, false]" => "false",

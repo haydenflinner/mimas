@@ -5,6 +5,7 @@
 #[macro_use]
 mod test_runner;
 
+// r[verify mimas.unit.axis]
 test_run!(
     direction_words_fold_the_sign,
     "(up 50.0px).to(\"px\")" => "-50.0",
@@ -48,6 +49,7 @@ fn rejected(src: &str, needle: &str) {
     );
 }
 
+// r[verify mimas.unit.axis]
 #[test]
 fn cross_axis_arithmetic_is_rejected() {
     rejected("let a = up 5.0px + left 3.0px;", "cannot add");
@@ -58,6 +60,10 @@ fn cross_axis_arithmetic_is_rejected() {
     rejected("fn f(y: px↕) -> px↕ { y }\n let a = f(right 3.0px);", "along");
     rejected("axis wealth (poorer, richer);\n let a = richer 5usd + up 5usd;", "cannot add");
     rejected("let a = (up 5.0px < left 3.0px);", "cannot order");
+    // `atan2(dy, dx)` reads an (x, y) vector: the legs' axes differ on
+    // purpose, only the bare dims must agree
+    assert!(test_runner::try_execute("let dx: px↔ = 3.0px; let dy: px↕ = 4.0px; let a = dy.atan2(dx);").is_ok());
+    rejected("let dy: px↕ = 4.0px; let a = dy.atan2(2.0s);", "atan2");
 }
 
 #[test]
@@ -66,4 +72,58 @@ fn a_direction_word_is_only_a_word_when_declared() {
     assert!(test_runner::try_execute("let up = 3.0; let a = up + 1.0;").is_ok());
     // but in front of a quantity it is the builtin direction
     assert!(test_runner::try_execute("let a = up 3.0px;").is_ok());
+}
+
+// r[verify mimas.unit.tuple]
+test_run!(
+    tuples_keep_each_slots_axis,
+    "let p: (px↔, px↕) = (3.0px, up 4.0px)
+     let (a, b) = p
+     let pts: [(px↔, px↕)] = [(1.0px, 2.0px), (3.0px, 4.0px)]",
+    "p.0.to(\"px\")" => "3.0",
+    "p.1.to(\"px\")" => "-4.0",
+    "a.to(\"px\")" => "3.0",
+    "b.to(\"px\")" => "-4.0",
+    "pts[0].1.to(\"px\")" => "2.0",
+    // an untagged pair still adopts, slot by slot
+    "(3.0px, 4.0px).1.to(\"px\")" => "4.0",
+);
+
+// r[verify mimas.unit.norm]
+test_run!(
+    norms_are_axis_parities,
+    "let lx: snorm = 0.5
+     let lt: unorm = 0.8",
+    // untagged numbers adopt the norm — a literal never needs the name
+    "lx + 0.1" => "0.6",
+    "lx * 0.5" => "0.25",
+    "lx.to(\"snorm\")" => "0.5",
+    // `*` keeps the parity against a plain scalar, cancels against itself
+    "(lx * lx).to(\"snorm\")" => "0.25",
+);
+
+// r[verify mimas.unit.norm]
+#[test]
+fn norms_reject_cross_channel_and_quantities() {
+    rejected("let lx: snorm = 0.5; let lt: unorm = 0.8; let bad = lx + lt;", "along snorm");
+    rejected("let lx: snorm = 0.5; let lt: unorm = 0.8; let bad = lx + lt;", "along unorm");
+    rejected("let worse: snorm = 3.0px;", "pixels (px)");
+    // a norm is a unit of its own: `snorm` is the whole spelling
+    assert!(test_runner::try_execute("let v: snorm = 0.5; let w: snorm = v;").is_ok());
+}
+
+// r[verify mimas.unit.tuple]
+#[test]
+fn tuple_slots_reject_a_swapped_axis() {
+    rejected("let p: (px↔, px↕) = (up 1.0px, 2.0px);", "along y");
+    rejected("let p: (px↔, px↕) = (4.0px, right 3.0px);", "along x");
+    rejected("let p: (px↔, px↕) = (4.0px, right 3.0px);", "along y");
+    rejected(
+        "struct Pt { x: px↔, y: px↕ }\n let p = Pt { x = 1.0px, y = right 2.0px };",
+        "along x",
+    );
+    // a list of tuples keeps the check per element
+    rejected("let pts: [(px↔, px↕)] = [(1.0px, 2.0px), (3.0px, left 4.0px)];", "along x");
+    // a destructure hands each name its slot's axis: `c` is along x here
+    rejected("let (c, d) = (right 1.0px, 2.0px);\n let e: px↕ = c;", "along x");
 }

@@ -22,9 +22,20 @@ pub const N: usize = AXIS0 + MAX_AXES;
 /// the exponent slots. See [`Dim::axes`].
 pub const AXIS0: usize = FIRST_CUSTOM + MAX_CUSTOM;
 
-/// Axis slots: the four builtin axes (`x` `y` `z` `t`) and four for `axis` decls.
-pub const MAX_AXES: usize = 8;
+/// Axis slots: the four builtin axes (`x` `y` `z` `t`), four for `axis`
+/// decls, and two norm slots (`snorm`/`unorm`) at the end. Norm slots are
+/// parity-only namespaces — no direction words, not declarable — so a
+/// normalized channel gets the axis algebra (an untagged number adopts,
+/// two norms won't add) without spending a decl.
+pub const MAX_AXES: usize = 10;
 const BUILTIN_AXES: usize = 4;
+
+/// Where the norm slots start: every slot below is an axis a program may
+/// declare or a builtin axis; slots at and above are fixed namespaces.
+const NORM0: usize = 8;
+/// The norm slots, by name and parity index: `snorm` a signed `[-1, 1]`
+/// channel, `unorm` an unsigned `[0, 1]` one — the GPU format spellings.
+const NORMS: [(&str, usize); 2] = [("snorm", NORM0), ("unorm", NORM0 + 1)];
 
 /// Where a `unit tile;` declaration's base dimension sits in the [`Dim`]
 /// array -- the builtins occupy the slots before it.
@@ -42,11 +53,19 @@ pub const BASES: [&str; N] = [
     "m", "kg", "s", "A", "K", "mol", "cd", "usd", "px", "frame", "beat", "st", "b", "index", "rad",
     "", "", "", "", "", "", "", "",
     "", "", "", "", "", "", "", "",
+    "", "",
 ];
 
 /// An exponent per base dimension. All zeros is dimensionless.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Dim(pub [i8; N]);
+
+// `[i8; 33]` outgrew the array `Default` impls — `NONE` is the default.
+impl Default for Dim {
+    fn default() -> Self {
+        Self::NONE
+    }
+}
 
 impl Dim {
     pub const NONE: Dim = Dim([0; N]);
@@ -114,8 +133,8 @@ impl Dim {
     }
 
     /// The axis slots as a bitmask: which axes this quantity is along (odd parity).
-    pub const fn axes(&self) -> u8 {
-        let mut bits = 0u8;
+    pub const fn axes(&self) -> u16 {
+        let mut bits = 0u16;
         let mut i = 0;
         while i < MAX_AXES {
             if self.0[AXIS0 + i] != 0 {
@@ -148,6 +167,7 @@ impl Dim {
     /// exponents must match, and the axes must match unless one side has none --
     /// an untagged quantity adopts the other's axis (`b.x + BALL`), the way a
     /// plain number meets an `index`.
+    // r[impl mimas.unit.axis]
     pub fn agree(a: Dim, b: Dim) -> bool {
         a.bare() == b.bare() && (a.axes() == 0 || b.axes() == 0 || a.axes() == b.axes())
     }
@@ -595,10 +615,10 @@ pub fn declare_axis(name: &str, neg: &str, pos: &str) -> Result<Dim, String> {
                 Err(format!("`{name}` is already an axis with other directions"))
             };
         }
-        if c.axes.len() >= MAX_AXES - BUILTIN_AXES {
+        if c.axes.len() >= NORM0 - BUILTIN_AXES {
             return Err(format!(
                 "a program gets at most {} `axis` declarations",
-                MAX_AXES - BUILTIN_AXES
+                NORM0 - BUILTIN_AXES
             ));
         }
         c.axes.push((name.to_string(), neg.to_string(), pos.to_string()));
@@ -610,6 +630,9 @@ pub fn declare_axis(name: &str, neg: &str, pos: &str) -> Result<Dim, String> {
 pub fn axis_lookup(name: &str) -> Option<Dim> {
     if let Some(slot) = BUILTIN_AXIS.iter().position(|a| a.0 == name) {
         return Some(Dim::axis(slot));
+    }
+    if let Some((_, slot)) = NORMS.iter().find(|(n, _)| *n == name) {
+        return Some(Dim::axis(*slot));
     }
     CUSTOM.with(|c| {
         c.borrow()
@@ -669,6 +692,9 @@ pub fn direction(word: &str) -> Option<(Dim, bool)> {
 pub fn axis_name(slot: usize) -> String {
     if slot < BUILTIN_AXES {
         return BUILTIN_AXIS[slot].0.to_string();
+    }
+    if slot >= NORM0 {
+        return NORMS[slot - NORM0].0.to_string();
     }
     CUSTOM.with(|c| {
         c.borrow()
@@ -840,6 +866,13 @@ fn lookup_builtin(name: &str) -> Option<(Dim, f64)> {
         "bp" => (NONE, 1e-4),
         "prob" => (NONE, 1.0),
         "logit" => (NONE, 1.0),
+        // `snorm`/`unorm`, the GPU spellings: a plain number along a
+        // norm parity — `pad.lx + lt` is a clash, `pad.lx + 0.5`
+        // adopts, `lx * lx` is dimensionless again. Still only intent:
+        // nothing keeps `2.0snorm` out but the contract.
+        // r[impl mimas.unit.norm]
+        "snorm" => (Dim::axis(NORM0), 1.0),
+        "unorm" => (Dim::axis(NORM0 + 1), 1.0),
         _ => return None,
     })
 }

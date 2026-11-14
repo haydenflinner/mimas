@@ -45,6 +45,10 @@ enum D {
     Q(Dim),
     /// A list whose items share one dimension.
     Arr(Box<D>),
+    /// A tuple whose items may each carry a dimension — `(px↔, px↕)` a
+    /// point, where a list would demand one shared dimension.
+    // r[impl mimas.unit.tuple]
+    Tuple(Vec<D>),
     /// An `Interval` of numbers in this dimension: `lo`, `mid` and `hi` are all quantities of it,
     /// and arithmetic on it keeps the unit like arithmetic on a plain quantity does.
     Iv(Dim),
@@ -90,6 +94,9 @@ fn clash(a: &D, b: &D) -> Option<(Dim, Dim)> {
             Some((*x, *y))
         }
         (D::Arr(x), D::Arr(y)) => clash(x, y),
+        // member-wise: a swapped `(px↕, px↔)` reports its first bad slot,
+        // an arity miss the type solver's own error
+        (D::Tuple(x), D::Tuple(y)) => x.iter().zip(y).find_map(|(a, b)| clash(a, b)),
         _ => None,
     }
 }
@@ -109,6 +116,14 @@ fn join(a: D, b: &D) -> D {
         // plain accumulator into a quantity the next `theta * v` rejects.
         (D::Q(x), D::Q(y)) if angle_plain(x.bare(), y.bare()) => PLAIN,
         (D::Arr(x), D::Arr(y)) => D::Arr(Box::new(join((**x).clone(), y))),
+        // `[(a1, b1), (a2, b2)]` keeps both columns' tags when the
+        // arities match; a ragged mix degrades like any other doubt
+        (D::Tuple(x), D::Tuple(y)) if x.len() == y.len() => D::Tuple(
+            x.iter()
+                .zip(y)
+                .map(|(a, b)| join(a.clone(), b))
+                .collect(),
+        ),
         _ => D::Any,
     }
 }
@@ -485,6 +500,9 @@ impl<'a> Pass<'a> {
             }
             Annotation::Option(inner) | Annotation::Result(inner) => self.annotation(inner),
             Annotation::Array(inner, _) => D::Arr(Box::new(self.annotation(inner))),
+            Annotation::Tuple(parts) => {
+                D::Tuple(parts.iter().map(|p| self.annotation(p)).collect())
+            }
             _ => D::Any,
         }
     }
@@ -703,7 +721,22 @@ impl<'a> Pass<'a> {
                     self.env.insert(dec, d);
                 }
             }
-            PatKind::Tuple(pats) | PatKind::TupleVariant(_, pats) | PatKind::Or(pats) => {
+            PatKind::Tuple(pats) => {
+                // `let (a, b) = (x, y)` hands each name its own slot's
+                // dimension; a shape miss degrades like any destructure
+                if let D::Tuple(ds) = &d
+                    && ds.len() == pats.len()
+                {
+                    for (p, d) in pats.iter().zip(ds) {
+                        self.bind(p, d.clone());
+                    }
+                    return;
+                }
+                for p in pats {
+                    self.bind(p, D::Any);
+                }
+            }
+            PatKind::TupleVariant(_, pats) | PatKind::Or(pats) => {
                 for p in pats {
                     self.bind(p, D::Any);
                 }
@@ -719,7 +752,8 @@ impl<'a> Pass<'a> {
     }
 
     /// `bind` for a `const`: same shape walk, but the names land in `consts`. Destructured
-    /// leaves degrade to `Any`, same as a `let` tuple destructure.
+    /// leaves degrade to `Any` — except a tuple whose arity matches, which
+    /// hands each name its own slot's dimension.
     fn bind_const(&mut self, pat: &Pat, d: D) {
         match pat.kind() {
             PatKind::Ident(ident) => {
@@ -727,7 +761,20 @@ impl<'a> Pass<'a> {
                     self.consts.insert(dec, d);
                 }
             }
-            PatKind::Tuple(pats) | PatKind::TupleVariant(_, pats) | PatKind::Or(pats) => {
+            PatKind::Tuple(pats) => {
+                if let D::Tuple(ds) = &d
+                    && ds.len() == pats.len()
+                {
+                    for (p, d) in pats.iter().zip(ds) {
+                        self.bind_const(p, d.clone());
+                    }
+                    return;
+                }
+                for p in pats {
+                    self.bind_const(p, D::Any);
+                }
+            }
+            PatKind::TupleVariant(_, pats) | PatKind::Or(pats) => {
                 for p in pats {
                     self.bind_const(p, D::Any);
                 }
@@ -743,12 +790,6 @@ impl<'a> Pass<'a> {
     }
 
     // ---- expressions
-
-    fn exprs(&mut self, es: impl IntoIterator<Item = &'a Expr>) {
-        for e in es {
-            self.expr(e);
-        }
-    }
 
     fn is_zero(e: &Expr) -> bool {
         match e.kind() {
@@ -1132,8 +1173,7 @@ impl<'a> Pass<'a> {
                 D::Any
             }
             Literal::Tuple(items) => {
-                self.exprs(items.iter());
-                D::Any
+                D::Tuple(items.iter().map(|i| self.expr(i)).collect())
             }
             _ => D::Any,
         }
@@ -1232,6 +1272,12 @@ impl<'a> Pass<'a> {
             Access::Dot { left, right, .. } => {
                 let recv = self.expr(left);
                 // a field: look its declaration up by the receiver's struct
+                // `p.0`: a tuple's own slot, its own dimension
+                if let ExprKind::Literal(Literal::Int(i)) = right.kind()
+                    && let D::Tuple(ds) = &recv
+                {
+                    return ds.get(*i as usize).cloned().unwrap_or(D::Any);
+                }
                 if let ExprKind::Ident(field) = right.kind() {
                     if let D::Iv(d) = recv
                         && matches!(field.lexeme.as_str(), "lo" | "mid" | "hi")
@@ -1654,12 +1700,15 @@ impl<'a> Pass<'a> {
                 D::Q(units::ANGLE)
             }
             // `y.atan2(x)`: the two legs must measure the same thing —
-            // atan2(3px, 4px) is an angle, atan2(3px, 4s) is a bug.
-            (D::Q(_), "atan2") => {
-                if let Some(a) = args.first() {
+            // atan2(3px, 4px) is an angle, atan2(3px, 4s) is a bug. The
+            // legs carry perpendicular axes by design — `atan2(dy, dx)`
+            // reads an (x, y) vector — so only the bare dims compare;
+            // the parities are expected to differ.
+            (D::Q(d), "atan2") => {
+                if let Some(D::Q(g)) = args.first() {
                     self.expect(
-                        &recv,
-                        a,
+                        &D::Q(d.bare()),
+                        &D::Q(g.bare()),
                         c.arguments[0].value.location(),
                         "`atan2` needs both legs in the same dimension",
                     );
