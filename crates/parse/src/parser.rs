@@ -1062,7 +1062,10 @@ impl<'s> Parser<'s> {
         let last = self.tokens.len() - 1;
         let kw_end = self.tokens[self.next.min(last)].span().end();
         let after = self.tokens[(self.next + 1).min(last)].span().start();
-        if self.src.inner()[kw_end..after].contains('\n') {
+        // Expanded tokens carry template-vs-callsite spans that can invert
+        // or leave `src` entirely; an unreadable gap counts as no newline,
+        // the same as two tokens that sit side by side.
+        if self.src.inner().get(kw_end..after).is_some_and(|s| s.contains('\n')) {
             return None;
         }
         let next = self.nth(1);
