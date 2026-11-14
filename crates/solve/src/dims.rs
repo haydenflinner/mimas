@@ -1699,18 +1699,20 @@ impl<'a> Pass<'a> {
                 }
                 D::Q(units::ANGLE)
             }
-            // `y.atan2(x)`: the two legs must measure the same thing —
-            // atan2(3px, 4px) is an angle, atan2(3px, 4s) is a bug. The
-            // legs carry perpendicular axes by design — `atan2(dy, dx)`
-            // reads an (x, y) vector — so only the bare dims compare;
-            // the parities are expected to differ.
-            (D::Q(d), "atan2") => {
+            // `y.atan2(x)`, aliased `angle_to`: the two legs must measure
+            // the same thing — atan2(3px, 4px) is an angle, atan2(3px, 4s)
+            // is a bug (a vector's direction exists only when both legs
+            // live in the same space; px-vs-s legs change value with the
+            // units chosen). The legs carry perpendicular axes by design —
+            // `atan2(dy, dx)` reads an (x, y) vector — so only the bare
+            // dims compare; the parities are expected to differ.
+            (D::Q(d), "atan2" | "angle_to") => {
                 if let Some(D::Q(g)) = args.first() {
                     self.expect(
                         &D::Q(d.bare()),
                         &D::Q(g.bare()),
                         c.arguments[0].value.location(),
-                        "`atan2` needs both legs in the same dimension",
+                        &format!("`{name}` needs both legs in the same dimension"),
                     );
                 }
                 D::Q(units::ANGLE)

@@ -61,9 +61,12 @@ fn cross_axis_arithmetic_is_rejected() {
     rejected("axis wealth (poorer, richer);\n let a = richer 5usd + up 5usd;", "cannot add");
     rejected("let a = (up 5.0px < left 3.0px);", "cannot order");
     // `atan2(dy, dx)` reads an (x, y) vector: the legs' axes differ on
-    // purpose, only the bare dims must agree
+    // purpose, only the bare dims must agree. `angle_to` is the same
+    // call under a name that says what it returns.
     assert!(test_runner::try_execute("let dx: px↔ = 3.0px; let dy: px↕ = 4.0px; let a = dy.atan2(dx);").is_ok());
+    assert!(test_runner::try_execute("let dx: px↔ = 3.0px; let dy: px↕ = 4.0px; let a = dy.angle_to(dx);").is_ok());
     rejected("let dy: px↕ = 4.0px; let a = dy.atan2(2.0s);", "atan2");
+    rejected("let dy: px↕ = 4.0px; let a = dy.angle_to(2.0s);", "angle_to");
 }
 
 #[test]

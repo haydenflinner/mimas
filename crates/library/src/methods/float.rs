@@ -26,6 +26,9 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add_method(acos);
     api.add_method(atan);
     api.add_method(atan2);
+    // `angle_to` is the same call under a name that says what it returns —
+    // `dy.angle_to(dx)` reads "the angle of the (x, y) vector".
+    api.add_method_named("angle_to", atan2);
     api.add_method(pow);
     api.add_method(exp);
     api.add_method(tanh);
@@ -227,11 +230,13 @@ fn atan(n: f64) -> f64 {
 /// number this is called on. The result is between `-PI` and `PI`.
 ///
 /// Unlike `(y / x).atan()`, it uses the signs of both coordinates to find the right quadrant, and
-/// an `x` of `0.0` is fine.
+/// an `x` of `0.0` is fine. `angle_to` is the same call — `dy.angle_to(dx)` reads "the angle of
+/// the (x, y) vector".
 ///
 /// ```mimas
-/// let a = 1.0.atan2(1.0);  // 0.7853981633974483 (PI / 4.0)
-/// let b = 1.0.atan2(-1.0); // 2.356194490192345 (3.0 * PI / 4.0)
+/// let a = 1.0.atan2(1.0);   // 0.7853981633974483 (PI / 4.0)
+/// let b = 1.0.atan2(-1.0);  // 2.356194490192345 (3.0 * PI / 4.0)
+/// let c = 1.0.angle_to(1.0); // 0.7853981633974483 (PI / 4.0)
 /// ```
 fn atan2(y: f64, x: f64) -> f64 {
     y.atan2(x)
