@@ -115,6 +115,24 @@ fn norms_reject_cross_channel_and_quantities() {
     assert!(test_runner::try_execute("let v: snorm = 0.5; let w: snorm = v;").is_ok());
 }
 
+// r[verify mimas.unit.norm]
+#[test]
+fn norm_literals_out_of_range_reject() {
+    rejected("let v: snorm = 1.5;", "snorm");
+    rejected("let v: snorm = 1.5;", "[-1, 1]");
+    rejected("let v: unorm = -0.5;", "unorm");
+    rejected("let v: unorm = -0.5;", "[0, 1]");
+    rejected("let v: snorm = 2.0snorm;", "out of range");
+    // fields, args and returns check at the same boundary
+    rejected("struct P { v: snorm }\nlet p = P { v = 2.0 };", "out of range");
+    rejected("fn stick(v: snorm) -> snorm { v }\nlet s = stick(1.5);", "out of range");
+    rejected("fn f() -> snorm { 2.0 }\nlet s = f();", "out of range");
+    // computed values pass — the check is literals-only for now
+    assert!(test_runner::try_execute("let a = 3.0; let v: snorm = a * 0.5;").is_ok());
+    // in-range literals still fine, sign included
+    assert!(test_runner::try_execute("let v: snorm = -1.0; let w: unorm = 0.0; let u: unorm = 1.0;").is_ok());
+}
+
 // r[verify mimas.unit.tuple]
 #[test]
 fn tuple_slots_reject_a_swapped_axis() {

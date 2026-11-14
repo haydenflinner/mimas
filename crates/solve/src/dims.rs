@@ -455,6 +455,45 @@ impl<'a> Pass<'a> {
         }
     }
 
+    /// A numeric literal's value, sign included — `-1.0` is `Unary` over
+    /// a literal, not a literal itself.
+    fn num_lit(e: &Expr) -> Option<f64> {
+        let (n, sign) = match e.kind() {
+            ExprKind::Literal(Literal::Int(n)) => (*n as f64, 1.0),
+            ExprKind::Literal(Literal::Float(n)) => (*n, 1.0),
+            ExprKind::Unary(u) => match u.right.kind() {
+                ExprKind::Literal(Literal::Int(n)) => {
+                    (*n as f64, if u.op == UnaryOp::Negative { -1.0 } else { 1.0 })
+                }
+                ExprKind::Literal(Literal::Float(n)) => {
+                    (*n, if u.op == UnaryOp::Negative { -1.0 } else { 1.0 })
+                }
+                _ => return None,
+            },
+            _ => return None,
+        };
+        Some(n * sign)
+    }
+
+    /// A numeric literal landing in a `snorm`/`unorm` slot must sit inside
+    /// the range the name promises — `let lx: snorm = 1.5` is a bug the
+    /// type spells. Computed values pass for now: folding a runtime check
+    /// into the same boundary is a later layer.
+    // r[impl mimas.unit.norm]
+    fn range_check(&mut self, e: &'a Expr, want: &D) {
+        let D::Q(d) = want else { return };
+        let Some((name, lo, hi)) = units::norm_bounds(*d) else { return };
+        let Some(v) = Self::num_lit(e) else { return };
+        if v < lo || v > hi {
+            self.fail(
+                e.location(),
+                format!("`{name}` is [{lo}, {hi}], found {v}"),
+                format!("out of range: {v}"),
+                "a norm channel is a contract, not a clamp — write a value inside it or convert deliberately",
+            );
+        }
+    }
+
     /// Both known and different -> the error every mismatch shares.
     fn expect(&mut self, want: &D, got: &D, at: Location, what: &str) {
         if let Some((w, g)) = clash(want, got) {
@@ -604,6 +643,7 @@ impl<'a> Pass<'a> {
                             l.right.location(),
                             "declared type doesn't match",
                         );
+                        self.range_check(&l.right, &want);
                         want
                     }
                     None => got,
@@ -627,6 +667,7 @@ impl<'a> Pass<'a> {
                             a.right.location(),
                             "assignment doesn't match",
                         );
+                        self.range_check(&a.right, &left);
                     }
                     _ => {}
                 }
@@ -701,6 +742,7 @@ impl<'a> Pass<'a> {
                 // a body that ends in `return` never gets here with a value worth checking
                 let at = tail_location(&f.body);
                 s.expect(&ret, &body, at, "returns the wrong dimension");
+                s.range_check(tail_expr(&f.body), &ret);
             }
         });
     }
@@ -984,6 +1026,7 @@ impl<'a> Pass<'a> {
                     let got = self.expr(v);
                     if let Some(want) = self.rets.last().cloned() {
                         self.expect(&want, &got, v.location(), "returns the wrong dimension");
+                        self.range_check(v, &want);
                     }
                 }
                 D::Any
@@ -1147,6 +1190,7 @@ impl<'a> Pass<'a> {
                             value.location(),
                             &format!("field `{}`", k.lexeme),
                         );
+                        self.range_check(value, &want);
                     }
                 }
                 D::Any
@@ -1168,6 +1212,7 @@ impl<'a> Pass<'a> {
                             |s| s.annotation(&field.annotation),
                         );
                         self.expect(&want, &got, value.location(), &format!("field `{}`", k.lexeme));
+                        self.range_check(value, &want);
                     }
                 }
                 D::Any
@@ -1423,6 +1468,7 @@ impl<'a> Pass<'a> {
                 arg.value.location(),
                 &format!("argument {} of `{name}`", i + 1),
             );
+            self.range_check(&arg.value, &D::Q(*want));
         }
         Some(binding.sig.return_dim.map_or(D::Any, D::Q))
     }
@@ -1470,6 +1516,7 @@ impl<'a> Pass<'a> {
                     arg.value.location(),
                     &format!("argument `{pname}` of `{}`", f.name.lexeme),
                 );
+                s.range_check(&arg.value, &want);
             }
             f.return_type.as_ref().map_or(D::Any, |a| s.annotation(a))
         })
@@ -1790,6 +1837,17 @@ fn tail_location(body: &Expr) -> Location {
         return tail_location(y);
     }
     body.location()
+}
+
+/// The expression a block's value comes out of — the tail `tail_location`
+/// points at, as an `Expr` so checks can read its kind.
+fn tail_expr(body: &Expr) -> &Expr {
+    if let ExprKind::Block(b) = body.kind()
+        && let Some(y) = &b.yielded_expr
+    {
+        return tail_expr(y);
+    }
+    body
 }
 
 #[allow(dead_code)]

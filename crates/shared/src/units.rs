@@ -688,6 +688,19 @@ pub fn direction(word: &str) -> Option<(Dim, bool)> {
     })
 }
 
+/// The closed range a norm parity promises, and its name — `snorm`
+/// is `[-1, 1]`, `unorm` is `[0, 1]`. Other axes and bare dims have none.
+pub fn norm_bounds(d: Dim) -> Option<(&'static str, f64, f64)> {
+    let a = d.axes();
+    if a & (1 << NORM0) != 0 {
+        Some(("snorm", -1.0, 1.0))
+    } else if a & (1 << (NORM0 + 1)) != 0 {
+        Some(("unorm", 0.0, 1.0))
+    } else {
+        None
+    }
+}
+
 /// The name of an axis slot: `x`, or the declared name.
 pub fn axis_name(slot: usize) -> String {
     if slot < BUILTIN_AXES {
