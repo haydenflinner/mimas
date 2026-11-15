@@ -5,8 +5,8 @@ use crate::{
         AssignToConst, AssignToLoopVar, AssignToStringIndex, BareNullBinding, BoundNotSatisfied,
         CheckIsNotCallable, ExtraTupleMembers, FieldNotFound, InvalidAssignTarget, InvalidPattern,
         InvalidUseTarget, IteratingHere, MissingTupleMembers, MultipleConstDeclarations,
-        MutateWhileIterating, NonConstantValue, NotAPact, NotFound, PactRequires,
-        SelfOutOfContext, ViaRequiresImpl, ViaSignatureMismatch,
+        MutateWhileIterating, NonConstantValue, NotAPact, NotFound, PactRequires, SelfOutOfContext,
+        ViaRequiresImpl, ViaSignatureMismatch,
     },
     traits::*,
 };
@@ -218,6 +218,13 @@ pub struct Solver {
     /// type's default rather than a call.
     pub(crate) default_ctors: FxIndexMap<NodeId, AdtId>,
 
+    /// `multi fn` generics: the generic's dec → its per-position bound spaces
+    /// and the `method` arms registered against it. r[impl mimas.multi]
+    pub(crate) multis: FxHashMap<DecId, MultiData>,
+    /// Each call whose callee resolved to a `multi fn`'s dec: call node → the
+    /// generic's dec. Emit lowers these as runtime dispatch, not `CallDirect`.
+    pub(crate) multi_calls: FxIndexMap<NodeId, DecId>,
+
     /// Per-declaration read/write site counts, filled by the grades pass -- the `{0,1,ω}`
     /// usage grades behind the lint suite. Surfaces on [`Resolutions::dec_uses`].
     pub(crate) dec_uses: FxIndexMap<DecId, crate::grades::UseInfo>,
@@ -272,6 +279,34 @@ pub struct Solver {
     /// innermost last. `Ty::from_annotation` resolves a bare `T` through these before ribs,
     /// units, or builtins. Entries persist only for the duration of one item's solve.
     pub(crate) type_params: Vec<FxHashMap<String, ParamId>>,
+}
+
+/// A `multi fn`'s registered state: one bound space per parameter (the runtime
+/// type ids the position accepts; `None` = unconstrained) plus each `method`
+/// arm in declaration order. `bounds`/`keys` fill in at `check_multis`, once
+/// every impl is registered and pact-bound keys can enumerate implementers.
+/// r[impl mimas.multi]
+#[derive(Clone, Debug, Default)]
+pub(crate) struct MultiData {
+    /// The generic's declared parameter annotations, verbatim -- resolved to
+    /// `bounds` by `check_multis`.
+    pub bound_annotations: Vec<Option<parse::components::Annotation>>,
+    /// Resolved bound space per position (`None` = any value).
+    pub bounds: Vec<Option<FxHashSet<AdtId>>>,
+    pub methods: Vec<PendingMethod>,
+}
+
+/// One `method` arm of a `multi fn`: its own fn dec (the body lowers like any
+/// item) and, once `check_multis` resolves them, the key sets its parameters
+/// match against (`None` = wildcard).
+#[derive(Clone, Debug)]
+pub(crate) struct PendingMethod {
+    pub dec: DecId,
+    /// The method's declared parameter annotations, verbatim.
+    pub key_annotations: Vec<Option<parse::components::Annotation>>,
+    /// Resolved key set per position (`None` = wildcard).
+    pub keys: Vec<Option<FxHashSet<AdtId>>>,
+    pub location: Location,
 }
 
 // Public impls
@@ -335,6 +370,8 @@ impl Solver {
             member_units: FxHashMap::default(),
             len_checks: FxIndexMap::default(),
             default_ctors: FxIndexMap::default(),
+            multis: FxHashMap::default(),
+            multi_calls: FxIndexMap::default(),
             dec_uses: FxIndexMap::default(),
             fn_effects: FxIndexMap::default(),
             script_effects: FxIndexMap::default(),
@@ -662,6 +699,11 @@ impl Solver {
         // every bounded param that got filled: by a type that implements the pact?
         self.check_bounds()?;
         lap("check_bounds");
+        // `multi fn`s: resolve bound/key annotations now that every impl is
+        // registered, and check keys stay inside their bound + no arm is
+        // unreachable r[impl mimas.multi.coverage]
+        self.check_multis()?;
+        lap("check_multis");
         // last, once every node has its type: do the units add up?
         crate::dims::check(self, &asts)?;
         lap("dims");
@@ -2150,9 +2192,9 @@ impl Solver {
         fn allocates(lit: &Literal) -> bool {
             match lit {
                 Literal::Struct(_) => true,
-                Literal::Array(items) | Literal::Tuple(items) => items.iter().any(|e| {
-                    matches!(e.kind(), ExprKind::Literal(l) if allocates(l))
-                }),
+                Literal::Array(items) | Literal::Tuple(items) => items
+                    .iter()
+                    .any(|e| matches!(e.kind(), ExprKind::Literal(l) if allocates(l))),
                 _ => false,
             }
         }
@@ -2336,7 +2378,10 @@ impl Solver {
                     .get(&key)
                     .is_some_and(|(_, default)| default.is_some())
                 {
-                    (x_ty.clone(), self.pact_members.get(&(xid, key.clone())).copied())
+                    (
+                        x_ty.clone(),
+                        self.pact_members.get(&(xid, key.clone())).copied(),
+                    )
                 } else {
                     continue;
                 };
@@ -2387,7 +2432,12 @@ impl Solver {
         }
         let result = (|| {
             let target_ty = self.impl_target_ty().unwrap();
-            for name in self.pacts[pid].functions.keys().cloned().collect::<Vec<_>>() {
+            for name in self.pacts[pid]
+                .functions
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+            {
                 if self.adts[adt].impls.contains_key(&name) {
                     continue;
                 }
@@ -2454,12 +2504,11 @@ impl Solver {
             let ok = match &ty {
                 Ty::Vid(_) | Ty::Never => true,
                 Ty::Adt(aid, _) | Ty::Identity(aid, _) => self.pact_impls.contains(&(pact, *aid)),
-                Ty::Pacts(pids) => pids
-                    .iter()
-                    .any(|p| self.pact_closure(*p).contains(&pact)),
+                Ty::Pacts(pids) => pids.iter().any(|p| self.pact_closure(*p).contains(&pact)),
                 Ty::Skolem(p) => self.pact_closure(*p).contains(&pact),
                 Ty::Param(p) => self.param_bounds.get(p).is_some_and(|b| {
-                    b.iter().any(|bound| self.pact_closure(*bound).contains(&pact))
+                    b.iter()
+                        .any(|bound| self.pact_closure(*bound).contains(&pact))
                 }),
                 other => self
                     .builtin_adt(other)
@@ -2474,6 +2523,233 @@ impl Solver {
                 }
                 .into());
             }
+        }
+        Ok(())
+    }
+
+    /// The runtime ids an adt's values test as: a primitive's sentinel
+    /// (`int` → `AdtId::PRIM_INT`), an enum's variant layouts, anything
+    /// else the adt itself. Shared by `multi fn` bounds and `method` keys.
+    /// r[impl mimas.multi]
+    pub(crate) fn dispatch_set(&self, aid: AdtId) -> FxHashSet<AdtId> {
+        let adt = &self.adts[aid];
+        if let Some(p) = AdtId::primitive(&adt.name) {
+            return [p].into_iter().collect();
+        }
+        if adt.flags.contains(AdtFlags::IS_ENUM) {
+            return adt.variants.values().filter_map(|v| v.layout()).collect();
+        }
+        [aid].into_iter().collect()
+    }
+
+    /// The enum a variant layout adt belongs to (`V::Num`'s layout → `V`).
+    /// r[impl mimas.multi]
+    pub(crate) fn enum_parent(&self, layout: AdtId) -> Option<AdtId> {
+        self.adts
+            .iter()
+            .find(|(_, adt)| {
+                adt.flags.contains(AdtFlags::IS_ENUM)
+                    && adt.variants.values().any(|v| v.layout() == Some(layout))
+            })
+            .map(|(id, _)| id)
+    }
+
+    /// A dispatch annotation (`x: Ship`, `x: V::Num`, `x: Draw`, `x: int`) →
+    /// the runtime ids it matches. `None` back means the annotation isn't a
+    /// dispatchable type at all. r[impl mimas.multi]
+    fn multi_set_from_annotation(
+        &mut self,
+        annotation: &parse::components::Annotation,
+        at: Location,
+    ) -> Result<Option<FxHashSet<AdtId>>> {
+        use parse::components::Annotation as A;
+        // a name → its dispatch ids: an adt's own set, a pact's implementers'
+        // sets unioned. type params and anything else aren't dispatchable.
+        let from_ident = |solver: &mut Solver, ident: &Ident| -> Result<Option<FxHashSet<AdtId>>> {
+            let Some(dec) = solver.ribs.resolve(ident) else {
+                return Ok(None);
+            };
+            match solver.decs[dec].kind {
+                DecKind::Adt(aid) => Ok(Some(solver.dispatch_set(aid))),
+                DecKind::Pact(pid) => {
+                    let implementers: Vec<AdtId> = solver
+                        .pact_impls
+                        .iter()
+                        .filter(|(p, _)| *p == pid)
+                        .map(|(_, a)| *a)
+                        .collect();
+                    Ok(Some(
+                        implementers
+                            .into_iter()
+                            .flat_map(|a| solver.dispatch_set(a))
+                            .collect(),
+                    ))
+                }
+                _ => Ok(None),
+            }
+        };
+        match annotation {
+            A::Kw(kw) => Ok(Some(
+                [match kw {
+                    parse::lex::TyKw::Int => AdtId::PRIM_INT,
+                    parse::lex::TyKw::Float => AdtId::PRIM_FLOAT,
+                    parse::lex::TyKw::Str => AdtId::PRIM_STR,
+                    parse::lex::TyKw::Bool => AdtId::PRIM_BOOL,
+                }]
+                .into_iter()
+                .collect(),
+            )),
+            A::Ty(ident) => from_ident(self, ident),
+            // `E::V` -- exactly one variant layout of the enum
+            A::Path(segments) if segments.len() == 2 => {
+                let Some(dec) = self.ribs.resolve(&segments[0]) else {
+                    return Ok(None);
+                };
+                let DecKind::Adt(aid) = self.decs[dec].kind else {
+                    return Ok(None);
+                };
+                let adt = &self.adts[aid];
+                if !adt.flags.contains(AdtFlags::IS_ENUM) {
+                    return Ok(None);
+                }
+                let Some(variant) = adt.variants.get(&segments[1].lexeme) else {
+                    Err(crate::errors::MultiBadKey {
+                        src: self.src(at),
+                        at: at.into(),
+                        what: format!(
+                            "`{}` is not a variant of `{}`",
+                            segments[1].lexeme, adt.name
+                        ),
+                    })?
+                };
+                Ok(variant.layout().map(|l| [l].into_iter().collect()))
+            }
+            // `Pair<A, B>` -- dispatch sees the adt, never its type arguments
+            A::Applied(path, _) => path.last().map_or(Ok(None), |i| from_ident(self, i)),
+            _ => Ok(None),
+        }
+    }
+
+    /// The `multi fn` pass: resolve every bound and key annotation (impls all
+    /// registered by now), keep keys inside their bound, reject a `method`
+    /// that can never run, and check each arm's `->` agrees with the
+    /// generic's. Coverage itself needs no enumeration -- the `multi fn`'s
+    /// body is the mandatory fallback, so every tuple reaches an arm.
+    /// r[impl mimas.multi.coverage]
+    fn check_multis(&mut self) -> Result<()> {
+        if self.multis.is_empty() {
+            return Ok(());
+        }
+        let generics: Vec<DecId> = self.multis.keys().copied().collect();
+        for gdec in generics {
+            let (bound_annotations, method_sites, gloc) = {
+                let data = &self.multis[&gdec];
+                (
+                    data.bound_annotations.clone(),
+                    data.methods
+                        .iter()
+                        .map(|m| (m.dec, m.key_annotations.clone(), m.location))
+                        .collect::<Vec<_>>(),
+                    self.decs[gdec].location,
+                )
+            };
+            let mut bounds = Vec::with_capacity(bound_annotations.len());
+            for ann in &bound_annotations {
+                bounds.push(match ann {
+                    None => None,
+                    Some(a) => Some(self.multi_set_from_annotation(a, gloc)?.ok_or_else(|| {
+                        crate::errors::MultiBadKey {
+                            src: self.src(gloc),
+                            at: gloc.into(),
+                            what: format!("`{a}` is not a dispatchable type"),
+                        }
+                    })?),
+                });
+            }
+            let gret = self
+                .sub(self.decs[gdec].vid)
+                .and_then(|ty| match ty {
+                    Ty::Fn(h) => Some(h.return_ty.as_ref().clone()),
+                    _ => None,
+                })
+                .unwrap_or(Ty::Unit);
+
+            let mut seen: Vec<Vec<Option<FxHashSet<AdtId>>>> = Vec::new();
+            for (i, (mdec, key_annotations, mloc)) in method_sites.into_iter().enumerate() {
+                if key_annotations.len() != bounds.len() {
+                    Err(crate::errors::MultiArityMismatch {
+                        src: self.src(mloc),
+                        at: mloc.into(),
+                        expected: bounds.len(),
+                        found: key_annotations.len(),
+                    })?
+                }
+                let mut keys = Vec::with_capacity(key_annotations.len());
+                for (pos, ann) in key_annotations.iter().enumerate() {
+                    let key = match ann {
+                        None => None,
+                        Some(a) => {
+                            Some(self.multi_set_from_annotation(a, mloc)?.ok_or_else(|| {
+                                crate::errors::MultiBadKey {
+                                    src: self.src(mloc),
+                                    at: mloc.into(),
+                                    what: format!("`{a}` is not a dispatchable type"),
+                                }
+                            })?)
+                        }
+                    };
+                    if let (Some(k), Some(b)) = (&key, &bounds[pos])
+                        && !k.is_subset(b)
+                    {
+                        Err(crate::errors::MultiKeyOutOfBounds {
+                            src: self.src(mloc),
+                            at: mloc.into(),
+                            what: ann.as_ref().unwrap().to_string(),
+                        })?
+                    }
+                    keys.push(key);
+                }
+                // an arm is dead when an earlier arm's keys cover it at every
+                // position (`None` covers everything). first-match order makes
+                // the earlier arm win, so this one can never run.
+                let dead = seen.iter().any(|prev| {
+                    (0..keys.len()).all(|pos| match (&prev[pos], &keys[pos]) {
+                        (None, _) => true,
+                        (Some(_), None) => false,
+                        (Some(earlier), Some(later)) => later.is_subset(earlier),
+                    })
+                });
+                if dead {
+                    Err(crate::errors::MultiMethodUnreachable {
+                        src: self.src(mloc),
+                        at: mloc.into(),
+                        name: self.decs[gdec].name.clone(),
+                    })?
+                }
+                // the arm's `->` must agree with the generic's (an unwritten
+                // one on either side stays open and passes)
+                let mret = self
+                    .sub(self.decs[mdec].vid)
+                    .and_then(|ty| match ty {
+                        Ty::Fn(h) => Some(h.return_ty.as_ref().clone()),
+                        _ => None,
+                    })
+                    .unwrap_or(Ty::Unit);
+                let mut mret = mret.normalized(self);
+                let mut gret = gret.clone().normalized(self);
+                if Unification::unify(&mut mret, &mut gret, self).is_err() {
+                    Err(crate::errors::MultiReturnMismatch {
+                        src: self.src(mloc),
+                        at: mloc.into(),
+                        found: mret.to_string(),
+                        expected: gret.to_string(),
+                    })?
+                }
+                seen.push(keys.clone());
+                let data = self.multis.get_mut(&gdec).unwrap();
+                data.methods[i].keys = keys;
+            }
+            self.multis.get_mut(&gdec).unwrap().bounds = bounds;
         }
         Ok(())
     }
@@ -3443,7 +3719,10 @@ impl Solver {
 
     /// The `dec` type, once the library has registered it.
     pub(crate) fn dec_ty(&self) -> Option<Ty> {
-        self.adts.iter().find(|(_, a)| a.name == "dec").map(|(id, _)| Ty::adt(id))
+        self.adts
+            .iter()
+            .find(|(_, a)| a.name == "dec")
+            .map(|(id, _)| Ty::adt(id))
     }
 
     /// Mark a numeric literal (through `-` and parentheses) as a `dec`.
@@ -3460,7 +3739,9 @@ impl Solver {
                     }
                 }
             }
-            ExprKind::Unary(u) if matches!(u.op, parse::UnaryOp::Negative | parse::UnaryOp::Positive) => {
+            ExprKind::Unary(u)
+                if matches!(u.op, parse::UnaryOp::Negative | parse::UnaryOp::Positive) =>
+            {
                 self.dec_literal(&u.right)
             }
             ExprKind::Grouping(g) => self.dec_literal(&g.inner),
@@ -3521,7 +3802,9 @@ impl Solver {
         }
         match expr.kind() {
             ExprKind::Literal(Literal::Record(_) | Literal::Tuple(_)) => {
-                self.record_hints.entry(expr.id()).or_insert_with(|| ty.clone());
+                self.record_hints
+                    .entry(expr.id())
+                    .or_insert_with(|| ty.clone());
             }
             ExprKind::Literal(Literal::Array(items)) => {
                 let inner = match ty.clone().normalized(self) {
@@ -3574,7 +3857,8 @@ impl Solver {
     /// reduce returns raw location-tagged errors and we materialize them with source here.
     pub(crate) fn reduce_const_expr(&self, expr: &Expr) -> Result<Option<Literal>> {
         let env = ConstEnv::default();
-        self.reduce_const_in(expr, &env).map_err(|e| e.into_diag(self))
+        self.reduce_const_in(expr, &env)
+            .map_err(|e| e.into_diag(self))
     }
 
     /// `reduce` with a param/`let` env: the resolve callback answers idents
@@ -3770,10 +4054,7 @@ impl Solver {
     /// dot-call (`recv.f(..)` — the access's left). For a `T::f(recv, ..)`
     /// call `self` is just arg 0; a bare `f(..)` call on a method has no
     /// receiver to bind and is never const.
-    fn mimas_callee<'e>(
-        &self,
-        call: &'e Call,
-    ) -> Option<(DecId, &ConstItem, Option<&'e Expr>)> {
+    fn mimas_callee<'e>(&self, call: &'e Call) -> Option<(DecId, &ConstItem, Option<&'e Expr>)> {
         let dec = *self.node_decs.get(&call.left.id())?;
         if self.dec_to_native.contains_key(&dec) {
             return None;
@@ -3953,9 +4234,11 @@ impl Solver {
             return false;
         }
         match access {
-            Access::Dot { left, kind: AccessKind::Direct, .. } => {
-                self.is_const_expr_in(left, scope)
-            }
+            Access::Dot {
+                left,
+                kind: AccessKind::Direct,
+                ..
+            } => self.is_const_expr_in(left, scope),
             Access::Square {
                 left,
                 key,
@@ -3990,9 +4273,7 @@ impl Solver {
         };
         let params = &item.params[offset..];
         let defaults = match &self.decs[dec].kind {
-            DecKind::Item { defaults, .. } => {
-                defaults.get(offset..).unwrap_or(&[])
-            }
+            DecKind::Item { defaults, .. } => defaults.get(offset..).unwrap_or(&[]),
             _ => &[],
         };
         let required = params
@@ -4028,14 +4309,21 @@ impl Solver {
         impl parse::visit::Visitor for Probe<'_> {
             fn expr(&mut self, expr: &Expr) {
                 if let ExprKind::Ident(i) = expr.kind()
-                    && let Some(dec) = self.solver.node_decs.get(&i.id).or(self.solver.node_decs.get(&expr.id()))
+                    && let Some(dec) = self
+                        .solver
+                        .node_decs
+                        .get(&i.id)
+                        .or(self.solver.node_decs.get(&expr.id()))
                     && self.solver.computed_consts.iter().any(|(_, d, _)| d == dec)
                 {
                     self.hit = true;
                 }
             }
         }
-        let mut probe = Probe { solver: self, hit: false };
+        let mut probe = Probe {
+            solver: self,
+            hit: false,
+        };
         parse::visit::walk_expr(expr, &mut probe);
         probe.hit
     }
@@ -4071,13 +4359,17 @@ impl Solver {
         }
         impl parse::visit::Visitor for Walk<'_, '_> {
             fn expr(&mut self, call_expr: &Expr) {
-                let ExprKind::Call(call) = call_expr.kind() else { return };
+                let ExprKind::Call(call) = call_expr.kind() else {
+                    return;
+                };
                 let solver = self.solver;
                 if solver.ctor_names.contains_key(&call_expr.id()) {
                     return; // a struct built from values does no work
                 }
                 let callee = match call.left.kind() {
-                    ExprKind::Access(parse::Access::Dot { right, .. }) => right.as_ident().map(|i| i.id),
+                    ExprKind::Access(parse::Access::Dot { right, .. }) => {
+                        right.as_ident().map(|i| i.id)
+                    }
                     ExprKind::Access(parse::Access::DoubleColon { right, .. }) => Some(right.id),
                     _ => Some(call.left.id()),
                 };
@@ -4089,13 +4381,20 @@ impl Solver {
                     let value_method = binding.sig.recv.as_ref().is_some_and(|r| {
                         matches!(
                             r.clone().normalized(solver),
-                            Ty::Str | Ty::Int | Ty::Float | Ty::Bool | Ty::Array(..) | Ty::Dict(_) | Ty::Option(_)
+                            Ty::Str
+                                | Ty::Int
+                                | Ty::Float
+                                | Ty::Bool
+                                | Ty::Array(..)
+                                | Ty::Dict(_)
+                                | Ty::Option(_)
                         )
                     });
-                    self.fx |= binding
-                        .sig
-                        .effects
-                        .unwrap_or(if value_method { shared::Fx::pure() } else { shared::Fx::unknown() });
+                    self.fx |= binding.sig.effects.unwrap_or(if value_method {
+                        shared::Fx::pure()
+                    } else {
+                        shared::Fx::unknown()
+                    });
                     return;
                 }
                 match solver.decs[dec].kind {
@@ -4115,7 +4414,11 @@ impl Solver {
                 }
             }
         }
-        let mut walk = Walk { solver: self, seen, fx: shared::Fx::pure() };
+        let mut walk = Walk {
+            solver: self,
+            seen,
+            fx: shared::Fx::pure(),
+        };
         parse::visit::walk_expr(expr, &mut walk);
         walk.fx
     }
@@ -4185,8 +4488,7 @@ impl Solver {
             return None;
         };
         let (name, field_args, arity) = self.const_ctor_fields(expr)?;
-        if call.arguments.len() != arity || call.arguments.iter().any(|a| a.name.is_some())
-        {
+        if call.arguments.len() != arity || call.arguments.iter().any(|a| a.name.is_some()) {
             return None;
         }
         let mut fields = Vec::with_capacity(field_args.len());
@@ -4257,9 +4559,10 @@ impl Solver {
             return true;
         }
         match expr.kind() {
-            ExprKind::Ident(_) => self.node_decs.get(&expr.id()).is_some_and(|&dec| {
-                scope.decs.contains(&dec) || self.decs[dec].kind.is_constant()
-            }),
+            ExprKind::Ident(_) => self
+                .node_decs
+                .get(&expr.id())
+                .is_some_and(|&dec| scope.decs.contains(&dec) || self.decs[dec].kind.is_constant()),
             // elements may be anything const, structs and dicts included: an
             // array holding one allocates at each use site (`emit_const_dec`)
             ExprKind::Literal(parse::Literal::Array(elems) | parse::Literal::Tuple(elems)) => {
@@ -4289,7 +4592,10 @@ impl Solver {
                         .all(|a| a.name.is_none() && self.is_const_expr_in(&a.value, scope));
                 // `Vec2(0, -1)` on a named-field struct (r[mimas.struct.positional])
                 let struct_call = self.ctor_names.contains_key(&expr.id())
-                    && call.arguments.iter().all(|a| self.is_const_expr_in(&a.value, scope));
+                    && call
+                        .arguments
+                        .iter()
+                        .all(|a| self.is_const_expr_in(&a.value, scope));
                 // `f(const…)` where `f`'s body is itself a const expression
                 ctor || struct_call || self.is_const_mimas_call(call, scope)
             }
@@ -4767,7 +5073,8 @@ fn is_num_tree(expr: &Expr) -> bool {
         }
         ExprKind::Grouping(g) => is_num_tree(&g.inner),
         ExprKind::Unary(u) => {
-            matches!(u.op, parse::UnaryOp::Negative | parse::UnaryOp::Positive) && is_num_tree(&u.right)
+            matches!(u.op, parse::UnaryOp::Negative | parse::UnaryOp::Positive)
+                && is_num_tree(&u.right)
         }
         _ => is_num_literal(expr),
     }
@@ -4778,7 +5085,8 @@ fn is_num_literal(expr: &Expr) -> bool {
     match expr.kind() {
         ExprKind::Literal(Literal::Int(_) | Literal::Float(_)) => true,
         ExprKind::Unary(u) => {
-            matches!(u.op, parse::UnaryOp::Negative | parse::UnaryOp::Positive) && is_num_literal(&u.right)
+            matches!(u.op, parse::UnaryOp::Negative | parse::UnaryOp::Positive)
+                && is_num_literal(&u.right)
         }
         ExprKind::Grouping(g) => is_num_literal(&g.inner),
         _ => false,
@@ -4789,7 +5097,8 @@ fn is_int_literal(expr: &Expr) -> bool {
     match expr.kind() {
         ExprKind::Literal(Literal::Int(_)) => true,
         ExprKind::Unary(u) => {
-            matches!(u.op, parse::UnaryOp::Negative | parse::UnaryOp::Positive) && is_int_literal(&u.right)
+            matches!(u.op, parse::UnaryOp::Negative | parse::UnaryOp::Positive)
+                && is_int_literal(&u.right)
         }
         ExprKind::Grouping(g) => is_int_literal(&g.inner),
         _ => false,

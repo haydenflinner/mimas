@@ -512,6 +512,61 @@ impl<'s> Parser<'s> {
             TokKind::Ident("space") if self.opp_intro() => {
                 BlockElement::Stmt(self.space_stmt(start))
             }
+            // `multi fn f(a, b) { … }` declares a multiple-dispatch generic:
+            // its own body is the fallback every unmatched call reaches.
+            // Contextual like `notation`: only `multi fn` reads this way.
+            TokKind::Ident("multi") if self.nth(1) == TokKind::Fn => {
+                self.advance();
+                let mut f = self.function();
+                f.role = FnRole::Multi;
+                if f.is_method() {
+                    self.error_here(Misdirection {
+                        src: self.src(),
+                        at: self.next_location().into(),
+                        msg: "a `multi fn` takes no `self` -- it's a free generic, not an impl method".into(),
+                        label: "drop `self`".into(),
+                    });
+                }
+                if self.depth > 0 {
+                    self.error(Misdirection {
+                        src: self.src(),
+                        at: self.location(start).into(),
+                        msg: "`multi fn` decls are top-level only".into(),
+                        label: "declare the generic at the top of the file".into(),
+                    });
+                }
+                let item = Item::new(f.into(), self.location(start), false);
+                self.end_item(&item);
+                BlockElement::Stmt(self.new_stmt(item, start))
+            }
+            // `method f(a: V::Num, b: V::Num) { … }` adds an arm to the `multi
+            // fn` named `f`. Contextual like `notation`: a name and a `(`.
+            TokKind::Ident("method") if self.method_intro() => {
+                self.advance();
+                // `Some("")` parses `name(params) -> ret { body }` without a
+                // `fn` token -- same trick `notation` uses, with an empty prefix
+                let mut f = self.function_with(Some(""));
+                f.role = FnRole::Method;
+                if f.is_method() {
+                    self.error_here(Misdirection {
+                        src: self.src(),
+                        at: self.next_location().into(),
+                        msg: "a `method` takes no `self` -- annotate dispatch types on the ordinary params".into(),
+                        label: "drop `self`".into(),
+                    });
+                }
+                if self.depth > 0 {
+                    self.error(Misdirection {
+                        src: self.src(),
+                        at: self.location(start).into(),
+                        msg: "`method` decls are top-level only".into(),
+                        label: "declare the method at the top of the file".into(),
+                    });
+                }
+                let item = Item::new(f.into(), self.location(start), false);
+                self.end_item(&item);
+                BlockElement::Stmt(self.new_stmt(item, start))
+            }
             kind if kind.starts_item() && !self.at_exact_literal() => {
                 let first = self.next;
                 let item = self.item();
@@ -1597,6 +1652,7 @@ impl<'s> Parser<'s> {
         // another's method (`a.merge(b)` takes a `Self`)
         let func = Function {
             name: Ident::new(fn_name.clone(), at),
+            role: FnRole::Fn,
             type_params: vec![TypeParam::new(
                 Ident::new("__Law", at),
                 vec![Ident::new(pact.lexeme.clone(), at)],
@@ -1693,6 +1749,7 @@ impl<'s> Parser<'s> {
         Item::new(
             Function {
                 name: id("glyph"),
+                role: FnRole::Fn,
                 type_params: vec![],
                 parameters: vec![Binding::new(id("self"))],
                 wheres: vec![],
@@ -1743,6 +1800,12 @@ impl<'s> Parser<'s> {
     /// `notation name(` — a name and a paren after the word.
     fn notation_intro(&self) -> bool {
         matches!(self.nth(1), TokKind::Ident(_)) && matches!(self.nth(2), TokKind::LeftParenthesis)
+    }
+
+    /// `method name(` — the same shape `notation` opens on: the word, a name,
+    /// a `(`. `method` stays a name everywhere else.
+    fn method_intro(&self) -> bool {
+        self.notation_intro()
     }
 
     /// `opp Name {` — a type name and a brace after the word.
@@ -1867,6 +1930,7 @@ impl<'s> Parser<'s> {
         );
         let inv = Function {
             name: id("inv"),
+            role: FnRole::Fn,
             type_params: vec![],
             parameters: vec![Binding::new(id("self"))],
             wheres: vec![],
@@ -1979,6 +2043,7 @@ impl<'s> Parser<'s> {
         );
         let inv = Function {
             name: id("inv"),
+            role: FnRole::Fn,
             type_params: vec![],
             parameters: vec![Binding::new(id("self"))],
             wheres: vec![],
@@ -2153,6 +2218,7 @@ impl<'s> Parser<'s> {
 
         Function {
             name,
+            role: FnRole::Fn,
             type_params,
             parameters,
             wheres,

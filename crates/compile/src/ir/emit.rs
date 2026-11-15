@@ -5,9 +5,9 @@ use crate::{
 use api::NativeId;
 use parse::{
     Absolve, Access, AccessKind, Block, Break, Call, Closure, Coalescence, Collect, Continue,
-    Propagate, Equality, Evaluation, Expr, ExprKind, FString, FStringPart, For, Grouping, Ident, If,
-    In, Literal, Logical, Loop, Match, MatchCase, NodeId, Raise, Range, Return, Stmt, StmtKind,
-    Unary, Unwrap, While,
+    Equality, Evaluation, Expr, ExprKind, FString, FStringPart, For, Grouping, Ident, If, In,
+    Literal, Logical, Loop, Match, MatchCase, NodeId, Propagate, Raise, Range, Return, Stmt,
+    StmtKind, Unary, Unwrap, While,
     components::{Binding, Pat, PatKind},
 };
 use shared::{Located, PactId, ParamId};
@@ -1033,6 +1033,12 @@ impl Emit for Call {
         let defaults = dec_defaults(ir, callee_dec);
         let args = fill_call_args(ir, &fn_ty, &defaults, &self.arguments, None)?;
 
+        // a `multi fn` call: first-match dispatch over its `method` arms,
+        // the generic's own body as the final fallback. r[impl mimas.multi]
+        if let Some(&gdec) = ir.resolutions.multi_calls.get(&id) {
+            return dispatch_multi(ir, gdec, args);
+        }
+
         Some(match static_callee {
             Some(StaticCallee::Body(body)) => ir.current().call_direct(body, args),
             Some(StaticCallee::Native(nid)) => match ir.intrinsics.get(&nid) {
@@ -1161,7 +1167,12 @@ impl Emit for Evaluation {
         let out = emit_bin_op(ir, id, &self.left, self.op, &self.right)?;
         // a `dec` product of page units that don't compose to the result's:
         // the correction, as a `dec` (r[impl mimas.dec.units])
-        match ir.resolutions.dec_scales.get(&id).and_then(|k| shared::dec::Dec::from_f64(*k).ok()) {
+        match ir
+            .resolutions
+            .dec_scales
+            .get(&id)
+            .and_then(|k| shared::dec::Dec::from_f64(*k).ok())
+        {
             Some(k) => {
                 let k = ir.current().constant(Constant::Dec(k.to_bits()));
                 Some(ir.current().bin(BinOp::Mult, out, k, OperandKind::Generic))
@@ -1346,7 +1357,10 @@ impl Emit for FString {
                     // (r[impl check.report.units])
                     // through `__in_unit`, so a `dec` converts exactly and a float
                     // reads as its echo does (`20 px`)
-                    match (ir.resolutions.check_units.get(&expr.id()).cloned(), ir.resolutions.in_unit_native) {
+                    match (
+                        ir.resolutions.check_units.get(&expr.id()).cloned(),
+                        ir.resolutions.in_unit_native,
+                    ) {
                         (Some(shown), Some(nid)) => {
                             let k = ir.current().constant(Constant::Float(shown.scale));
                             let name = ir.intern_str(&shown.name);
@@ -1403,7 +1417,13 @@ impl Emit for Ident {
         match &ir.resolutions.decs[dec].kind {
             ResolvedDeclKind::Local | ResolvedDeclKind::Global => Some(ir.read_binding(dec)),
             ResolvedDeclKind::Item { .. } => {
-                let body = ir.item_body_for(dec);
+                // a `multi fn` as a value dispatches through a trampoline --
+                // the dec's own body is only its fallback. r[impl mimas.multi]
+                let body = if ir.resolutions.multis.contains_key(&dec) {
+                    ir.multi_trampoline(dec)
+                } else {
+                    ir.item_body_for(dec)
+                };
                 Some(ir.current().ref_body(body))
             }
             ResolvedDeclKind::Adt(adt) => {
@@ -1482,17 +1502,26 @@ impl Emit for Literal {
             Literal::String(s) => Constant::Str(ir.intern_str(s)),
             // r[impl mimas.num.literal]
             // r[impl mimas.dec.literal]
-            Literal::Int(i) if ir.resolutions.dec_literals.contains(&id) => {
-                Constant::Dec(shared::dec::Dec::from_int(*i).map(|d| d.to_bits()).unwrap_or(0))
-            }
+            Literal::Int(i) if ir.resolutions.dec_literals.contains(&id) => Constant::Dec(
+                shared::dec::Dec::from_int(*i)
+                    .map(|d| d.to_bits())
+                    .unwrap_or(0),
+            ),
             // from the text as written, so `3.50` keeps its scale
             Literal::Float(f) if ir.resolutions.dec_literals.contains(&id) => {
-                let written = ir.resolutions.dec_texts.get(&id).map(|t| t.replace(['_', ','], ""));
-                let d = written.and_then(|t| dec_of_written(&t, ir.resolutions.dec_scales.get(&id).copied()));
+                let written = ir
+                    .resolutions
+                    .dec_texts
+                    .get(&id)
+                    .map(|t| t.replace(['_', ','], ""));
+                let d = written
+                    .and_then(|t| dec_of_written(&t, ir.resolutions.dec_scales.get(&id).copied()));
                 let d = d.or_else(|| shared::dec::Dec::from_f64(*f).ok());
                 Constant::Dec(d.map(|d| d.to_bits()).unwrap_or(0))
             }
-            Literal::Int(i) if ir.resolutions.int_as_float.contains(&id) => Constant::Float(*i as f64),
+            Literal::Int(i) if ir.resolutions.int_as_float.contains(&id) => {
+                Constant::Float(*i as f64)
+            }
             Literal::Int(i) => Constant::Int(*i),
             Literal::Float(f) => Constant::Float(*f),
             Literal::Hex(h) => Constant::Int(i64::from_str_radix(h, 16).unwrap()),
@@ -1544,7 +1573,12 @@ impl Emit for Literal {
                     let names: Vec<String> = ir.resolutions.adts[adt].fields.clone();
                     let values: Option<Vec<InstId>> = names
                         .iter()
-                        .map(|name| supplied.iter().find(|(k, _)| k == name).and_then(|(_, v)| *v))
+                        .map(|name| {
+                            supplied
+                                .iter()
+                                .find(|(k, _)| k == name)
+                                .and_then(|(_, v)| *v)
+                        })
                         .collect();
                     return Some(ir.current().new_instance(adt, values?));
                 }
@@ -1969,7 +2003,10 @@ impl Emit for Propagate {
             .get(&id)
             .cloned()
             .expect("the checker decides every `?`");
-        let raised = matches!(ir.resolutions.node_tys.get(&self.expr.id()), Some(Ty::Result(_)));
+        let raised = matches!(
+            ir.resolutions.node_tys.get(&self.expr.id()),
+            Some(Ty::Result(_))
+        );
 
         let fail_block = ir.push_block("propagate_fail");
         let ok_block = ir.push_block("propagate_ok");
@@ -2197,6 +2234,54 @@ fn dispatch_pact_method(
     }
     // unreachable: the receiver's pact type guarantees one arm matches.
     ir.current().panic();
+    merge_branches(ir, merge, branches)
+}
+
+/// A `multi fn` call: each `method` arm tests AND over its positions, an OR of
+/// `is_instance` per position's key set (`None` keys match anything, so an arm
+/// of wildcards is unconditional). First match wins; the generic's own body is
+/// the mandatory fallback arm. r[impl mimas.multi]
+pub(crate) fn dispatch_multi(ir: &mut Ir, dec: DecId, args: Vec<InstId>) -> Option<InstId> {
+    let multi = ir.resolutions.multis.get(&dec)?.clone();
+    let merge = ir.push_block("multi_merge");
+    let mut branches = Vec::new();
+    for method in &multi.methods {
+        let body = ir.item_body_for(method.dec);
+        let hit = ir.push_block("multi_hit");
+        let next = ir.push_block("multi_next");
+        let mut cond: Option<InstId> = None;
+        for (i, ids) in method.keys.iter().enumerate() {
+            let Some(ids) = ids else { continue };
+            for &id in ids {
+                let test = ir.current().is_instance(args[i], id);
+                cond = Some(match cond {
+                    None => test,
+                    Some(c) => ir.current().bin(BinOp::And, c, test, OperandKind::Bool),
+                });
+            }
+        }
+        match cond {
+            Some(c) => ir.in_current(|block| {
+                block.jump_if_false(c, next);
+                block.jump(hit);
+            }),
+            None => {
+                ir.current().jump(hit);
+            }
+        }
+        ir.target(hit);
+        let value = ir.current().call_direct(body, args.clone());
+        let end = ir.current_block_id();
+        ir.current().jump(merge);
+        branches.push((end, value));
+        ir.target(next);
+    }
+    // the `multi fn`'s own body -- the required fallback -- always runs last
+    let fallback = ir.item_body_for(dec);
+    let value = ir.current().call_direct(fallback, args);
+    let end = ir.current_block_id();
+    ir.current().jump(merge);
+    branches.push((end, value));
     merge_branches(ir, merge, branches)
 }
 
@@ -2551,7 +2636,9 @@ fn default_inst(ir: &mut Ir, ty: &Ty) -> Option<InstId> {
 /// one of the per-impl checks the law pass writes (`__law_impl_…`,
 /// `__law_check_…`).
 pub(crate) fn is_generic_law(name: &str) -> bool {
-    name.starts_with("__law_") && !name.starts_with("__law_impl_") && !name.starts_with("__law_check_")
+    name.starts_with("__law_")
+        && !name.starts_with("__law_impl_")
+        && !name.starts_with("__law_check_")
 }
 
 /// A `dec` literal from its text: `3.50` keeps its scale, and a quantity

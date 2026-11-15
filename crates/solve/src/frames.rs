@@ -126,17 +126,17 @@ fn numeric_join(op: EvaluationOp, a: &Option<Ty>, b: &Option<Ty>) -> Option<Ty> 
         }
         // the named operators have no meaning on a column
         EvaluationOp::Wedge
-            | EvaluationOp::Vee
-            | EvaluationOp::Dot
-            | EvaluationOp::Cross
-            | EvaluationOp::Compose
-            | EvaluationOp::Tensor
-            | EvaluationOp::Odot
-            | EvaluationOp::Intersect
-            | EvaluationOp::Union
-            | EvaluationOp::Ominus
-            | EvaluationOp::Uplus
-            | EvaluationOp::Approx => None,
+        | EvaluationOp::Vee
+        | EvaluationOp::Dot
+        | EvaluationOp::Cross
+        | EvaluationOp::Compose
+        | EvaluationOp::Tensor
+        | EvaluationOp::Odot
+        | EvaluationOp::Intersect
+        | EvaluationOp::Union
+        | EvaluationOp::Ominus
+        | EvaluationOp::Uplus
+        | EvaluationOp::Approx => None,
     }
 }
 
@@ -1278,8 +1278,7 @@ impl Solver {
     /// (a bare `mimas check`, or the source answered `Opaque`) leaves the
     /// frame permissive, like `use "…"` with no splice.
     fn data_source_call(&mut self, id: NodeId, call: &Call) -> Result<()> {
-        let (Some(resolver), Some(name)) =
-            (self.data_resolver.clone(), Self::str_arg(call, 0))
+        let (Some(resolver), Some(name)) = (self.data_resolver.clone(), Self::str_arg(call, 0))
         else {
             return Ok(());
         };

@@ -1089,6 +1089,7 @@ stmt_test!(
     "fn foo(self) {}",
     Function {
         name: ident!("foo"),
+        role: FnRole::Fn,
         type_params: vec![],
         wheres: vec![],
         parameters: vec![Binding::new(ident!("self"))],
@@ -1134,6 +1135,45 @@ stmt_test!(
         Some(Annotation::Unit),
         block!(),
     )
+    .into_item()
+);
+
+stmt_test!(
+    multi_fn,
+    "multi fn combine(a, b) {}",
+    Function {
+        name: ident!("combine"),
+        role: FnRole::Multi,
+        type_params: vec![],
+        wheres: vec![],
+        parameters: vec![Binding::new(ident!("a")), Binding::new(ident!("b")),],
+        return_type: None,
+        body: block!(),
+    }
+    .into_item()
+);
+
+stmt_test!(
+    method_decl,
+    "method combine(a: V::Num, b: V::Num) {}",
+    Function {
+        name: ident!("combine"),
+        role: FnRole::Method,
+        type_params: vec![],
+        wheres: vec![],
+        parameters: vec![
+            Binding::new(ident!("a")).with_annotation(Annotation::Path(vec![
+                ident!("V"),
+                ident!("Num"),
+            ])),
+            Binding::new(ident!("b")).with_annotation(Annotation::Path(vec![
+                ident!("V"),
+                ident!("Num"),
+            ])),
+        ],
+        return_type: None,
+        body: block!(),
+    }
     .into_item()
 );
 
@@ -1210,6 +1250,7 @@ stmt_test!(
     "fn id<T>(x: T) -> T {}",
     Function {
         name: ident!("id"),
+        role: FnRole::Fn,
         type_params: vec![ident!("T").into()],
         wheres: vec![],
         parameters: vec![Binding::new(ident!("x")).with_annotation(Annotation::Ty(ident!("T")))],
@@ -1224,6 +1265,7 @@ stmt_test!(
     "fn map<T, U>(xs: [T]) {}",
     Function {
         name: ident!("map"),
+        role: FnRole::Fn,
         type_params: vec![ident!("T").into(), ident!("U").into()],
         wheres: vec![],
         parameters: vec![

@@ -116,6 +116,12 @@ pub struct Resolutions {
     /// no single impl, so emit dispatches at runtime over the bound's
     /// implementers, exactly like a method call through the pact.
     pub pact_ops: FxIndexMap<NodeId, PactOp>,
+    /// `multi fn` generics: dec → dispatch table. Emit lowers a call in
+    /// `multi_calls` as first-match dispatch over these arms, ending at the
+    /// generic's own body (the mandatory fallback). r[impl mimas.multi]
+    pub multis: FxHashMap<DecId, ResolvedMulti>,
+    /// Call sites whose callee resolved to a `multi fn`'s dec.
+    pub multi_calls: FxIndexMap<NodeId, DecId>,
     /// The pacts each declared type param is bounded by (`<T: Draw>`): a method call on a
     /// `T`-typed receiver dispatches through them at runtime, like a pact-typed one.
     pub param_bounds: FxIndexMap<ParamId, Vec<PactId>>,
@@ -551,6 +557,45 @@ impl From<Solver> for Resolutions {
             .map(|(node, decs)| (node, decs.into_iter().collect()))
             .collect();
 
+        let multis: FxHashMap<DecId, ResolvedMulti> = solver
+            .multis
+            .iter()
+            .map(|(gdec, data)| {
+                (
+                    *gdec,
+                    ResolvedMulti {
+                        methods: data
+                            .methods
+                            .iter()
+                            .map(|m| ResolvedMultiMethod {
+                                dec: m.dec,
+                                keys: m
+                                    .keys
+                                    .iter()
+                                    .map(|k| k.as_ref().map(|s| s.iter().copied().collect()))
+                                    .collect(),
+                            })
+                            .collect(),
+                    },
+                )
+            })
+            .collect();
+
+        // a `multi fn`'s callers dispatch through the generic's dec, so the
+        // fixpoint never unioned the method arms' effects into it -- do that
+        // here, before the callers' grades are read. r[impl mimas.multi]
+        let mut fn_effects = solver.fn_effects.clone();
+        for (gdec, data) in &solver.multis {
+            let union = data
+                .methods
+                .iter()
+                .filter_map(|m| fn_effects.get(&m.dec).copied())
+                .fold(shared::Fx::empty(), |acc, fx| acc | fx);
+            if union != shared::Fx::empty() {
+                *fn_effects.entry(*gdec).or_insert(shared::Fx::empty()) |= union;
+            }
+        }
+
         Self {
             node_tys,
             node_dims: solver.node_dims,
@@ -562,7 +607,7 @@ impl From<Solver> for Resolutions {
             dec_scales: solver.dec_scales,
             node_decs: solver.node_decs,
             dec_uses: solver.dec_uses,
-            fn_effects: solver.fn_effects,
+            fn_effects,
             script_effects: solver.script_effects,
             script_segments: solver.script_segments,
             page_needs: solver.page_needs,
@@ -584,10 +629,16 @@ impl From<Solver> for Resolutions {
             int_as_float: solver.int_as_float,
             dec_literals: solver.dec_literals,
             dec_texts: solver.dec_texts,
-            computed_consts: solver.computed_consts.iter().map(|(id, _, _)| *id).collect(),
+            computed_consts: solver
+                .computed_consts
+                .iter()
+                .map(|(id, _, _)| *id)
+                .collect(),
             field_hints: solver.field_hints,
             ctor_slots: solver.ctor_slots,
             pact_ops: solver.pact_ops,
+            multis,
+            multi_calls: solver.multi_calls,
             param_bounds: solver
                 .param_bounds
                 .iter()
@@ -597,6 +648,22 @@ impl From<Solver> for Resolutions {
             sources: solver.sources,
         }
     }
+}
+
+/// A `multi fn`'s dispatch table: its `method` arms in declaration order.
+/// Emit's chain is first-match -- an arm wins when every position passes, and
+/// the generic's own body is the final fallback. r[impl mimas.multi]
+#[derive(Debug, Clone)]
+pub struct ResolvedMulti {
+    pub methods: Vec<ResolvedMultiMethod>,
+}
+
+/// One `method` arm: `dec` is its body's fn dec; `keys[i]` is the set of
+/// runtime ids position `i` accepts (`None` = no test, matches anything).
+#[derive(Debug, Clone)]
+pub struct ResolvedMultiMethod {
+    pub dec: DecId,
+    pub keys: Vec<Option<Vec<AdtId>>>,
 }
 
 /// What the grades pass learned about a load, handed to hosts deciding whether

@@ -307,8 +307,18 @@ pub(crate) fn seq_op_dispatch(
 fn is_named_method(name: &str) -> bool {
     matches!(
         name,
-        "wedge" | "vee" | "dot" | "cross" | "compose" | "tensor" | "odot" | "intersect" | "union"
-            | "ominus" | "uplus" | "approx"
+        "wedge"
+            | "vee"
+            | "dot"
+            | "cross"
+            | "compose"
+            | "tensor"
+            | "odot"
+            | "intersect"
+            | "union"
+            | "ominus"
+            | "uplus"
+            | "approx"
     )
 }
 
@@ -1126,7 +1136,9 @@ impl Solve for Call {
                         let key = match &arg.name {
                             Some(name) => name.clone(),
                             None => {
-                                solver.field_hints.push((arg.value.location(), names[i].clone()));
+                                solver
+                                    .field_hints
+                                    .push((arg.value.location(), names[i].clone()));
                                 Ident::new(names[i].clone(), arg.value.location())
                             }
                         };
@@ -1189,7 +1201,9 @@ impl Solve for Call {
                         let (header, _) = solver.pacts[&pid].functions[&key].clone();
                         let ty = solver.instantiate_pact_fn(&header, &lhs);
                         let Ty::Fn(f) = &ty else { continue };
-                        let [_, operand] = f.parameters.as_slice() else { continue };
+                        let [_, operand] = f.parameters.as_slice() else {
+                            continue;
+                        };
                         if arg.value.fulfill_ty(operand.ty.clone(), solver).is_err() {
                             continue;
                         }
@@ -1293,6 +1307,15 @@ impl Solve for Call {
                     ty: ty.to_string(),
                 })?,
             };
+            // the callee names a `multi fn`: emit lowers this call as runtime
+            // dispatch over the method arms, not a direct call. the header's
+            // own params still check the arguments against the bound types.
+            // r[impl mimas.multi]
+            if let Some(&gdec) = solver.node_decs.get(&self.left.id())
+                && solver.multis.contains_key(&gdec)
+            {
+                solver.multi_calls.insert(id, gdec);
+            }
             let params: Vec<FnParam> = fn_data.parameters;
             let mut filled = vec![false; params.len()];
             let mut cursor = 0usize;
@@ -1649,7 +1672,9 @@ pub(crate) fn dec_overload_ty(lhs: &Ty, rhs: &Ty, solver: &Solver) -> Option<Ty>
         (true, true) => Some(lhs.clone()),
         (true, false) if matches!(rhs, Ty::Int) => Some(lhs.clone()),
         (false, true) if matches!(lhs, Ty::Int) => Some(rhs.clone()),
-        (true, false) | (false, true) if matches!(lhs, Ty::Float) || matches!(rhs, Ty::Float) => Some(Ty::Float),
+        (true, false) | (false, true) if matches!(lhs, Ty::Float) || matches!(rhs, Ty::Float) => {
+            Some(Ty::Float)
+        }
         _ => None,
     }
 }
@@ -2202,10 +2227,7 @@ impl Solve for Function {
         // (`fn a() { b() }`) waits for that fn's own solve.
         if let Ty::Vid(v) = expected_ty
             && solver.sub(v).is_none()
-            && !fn_data
-                .parameters
-                .iter()
-                .any(|p| p.ty.occurs(v, solver))
+            && !fn_data.parameters.iter().any(|p| p.ty.occurs(v, solver))
         {
             solver
                 .register_sub(v, Ty::Unit)
@@ -2524,7 +2546,9 @@ impl Solve for Impl {
                                 let inst = solver.instantiate_pact_fn(h, &target);
                                 overload_operand_of(&inst)
                                     .map(|o| o.normalized(solver))
-                                    .is_some_and(|o| mine.as_ref().is_some_and(|m| same_operand(&o, m)))
+                                    .is_some_and(|o| {
+                                        mine.as_ref().is_some_and(|m| same_operand(&o, m))
+                                    })
                             })
                             .cloned()
                             .collect()
@@ -2542,15 +2566,14 @@ impl Solve for Impl {
                         found.get_or_insert(f);
                     }
                 }
-                let (pact_header, _default) = found
-                    .ok_or_else(|| {
-                        miette::Error::from(PactFunctionNotFound {
-                            src: solver.src(function.name.location),
-                            at: function.name.location.into(),
-                            name: function.name.lexeme.clone(),
-                            pact: pact.name.clone(),
-                        })
-                    })?;
+                let (pact_header, _default) = found.ok_or_else(|| {
+                    miette::Error::from(PactFunctionNotFound {
+                        src: solver.src(function.name.location),
+                        at: function.name.location.into(),
+                        name: function.name.lexeme.clone(),
+                        pact: pact.name.clone(),
+                    })
+                })?;
 
                 // unify the whole function type against the (freshened) pact requirement --
                 // covers param count, per-param types, and the return type in one move.
@@ -2584,12 +2607,19 @@ impl Solve for Impl {
                 .filter(|(key, (_, default))| {
                     default.is_none() && !solver.via_covered.contains(&(aid, pid, (*key).clone()))
                 })
-                .map(|(key, (h, _))| match overload_operand_of(&Ty::Fn(h.clone())) {
-                    Some(o) if key.contains('#') || pact.functions.keys().any(|k| k != key && crate::pact_key_base(k) == crate::pact_key_base(key)) => {
-                        format!("{}(self, _: {})", crate::pact_key_base(key), o)
-                    }
-                    _ => key.clone(),
-                })
+                .map(
+                    |(key, (h, _))| match overload_operand_of(&Ty::Fn(h.clone())) {
+                        Some(o)
+                            if key.contains('#')
+                                || pact.functions.keys().any(|k| {
+                                    k != key && crate::pact_key_base(k) == crate::pact_key_base(key)
+                                }) =>
+                        {
+                            format!("{}(self, _: {})", crate::pact_key_base(key), o)
+                        }
+                        _ => key.clone(),
+                    },
+                )
                 .chain(
                     pact.constants
                         .keys()
@@ -2805,14 +2835,26 @@ impl Solve for Literal {
 
                 let keyed: Vec<(FieldKey, &Expr)> =
                     fields.iter().map(|(k, v)| (k.clone(), v)).collect();
-                let ty = struct_fields(solver, adt, &variant, layout, &keyed, base.as_ref(), location)?;
+                let ty = struct_fields(
+                    solver,
+                    adt,
+                    &variant,
+                    layout,
+                    &keyed,
+                    base.as_ref(),
+                    location,
+                )?;
                 solver.shadow_expr_ty(name.id(), Ty::adt(layout), name.location())?;
                 ty
             }
             // r[impl mimas.record.context]
             Literal::Record(fields) => {
                 // the struct the slot expects, when it expects one
-                let hint = solver.record_hints.get(&_id).cloned().map(|t| t.normalized(solver));
+                let hint = solver
+                    .record_hints
+                    .get(&_id)
+                    .cloned()
+                    .map(|t| t.normalized(solver));
                 let hint = match hint {
                     Some(Ty::Option(inner)) => Some(*inner),
                     other => other,
@@ -2847,7 +2889,11 @@ impl Solve for Literal {
                 // r[impl mimas.struct.positional]
                 // a tuple where a named-field struct is expected fills its
                 // fields in declaration order: `cells: [(0, -1), (0, 0)]`
-                let hint = solver.record_hints.get(&_id).cloned().map(|t| t.normalized(solver));
+                let hint = solver
+                    .record_hints
+                    .get(&_id)
+                    .cloned()
+                    .map(|t| t.normalized(solver));
                 let hint = match hint {
                     Some(Ty::Option(inner)) => Some(*inner),
                     other => other,
@@ -2921,66 +2967,66 @@ fn struct_fields(
     base: Option<&Expr>,
     location: Location,
 ) -> Result<Ty> {
-                // like a ctor call, the literal gets a fresh instantiation of the adt's
-                // params; each field's stored `Ty::Param`s are specialized with those args so
-                // what the fields end up as is exactly what the literal's type reports
-                let adt_ty = solver.instantiated_adt_at(adt, location);
-                let ctor_args: Vec<Ty> = match &adt_ty {
-                    Ty::Adt(_, args) => args.clone(),
-                    _ => vec![],
-                };
+    // like a ctor call, the literal gets a fresh instantiation of the adt's
+    // params; each field's stored `Ty::Param`s are specialized with those args so
+    // what the fields end up as is exactly what the literal's type reports
+    let adt_ty = solver.instantiated_adt_at(adt, location);
+    let ctor_args: Vec<Ty> = match &adt_ty {
+        Ty::Adt(_, args) => args.clone(),
+        _ => vec![],
+    };
 
-                let mut prototype_fields = variant.fields.clone();
-                for (field_name, value) in fields {
-                    let mut target = prototype_fields
-                        .swap_remove(&field_name.to_string())
-                        .ok_or_else(|| {
-                            Error::from(FieldNotFound {
-                                src: solver.src(location),
-                                at: location.into(),
-                                field_name: field_name.to_string(),
-                            })
-                        })?;
-                    target.ty = solver.specialize(&target.ty, adt, &ctor_args);
+    let mut prototype_fields = variant.fields.clone();
+    for (field_name, value) in fields {
+        let mut target = prototype_fields
+            .swap_remove(&field_name.to_string())
+            .ok_or_else(|| {
+                Error::from(FieldNotFound {
+                    src: solver.src(location),
+                    at: location.into(),
+                    field_name: field_name.to_string(),
+                })
+            })?;
+        target.ty = solver.specialize(&target.ty, adt, &ctor_args);
 
-                    if let FieldKey::Ident(key) = field_name {
-                        solver.note(key, target.ty.clone(), Some(target.dec));
-                    }
-                    solver
-                        .settle_field_ty(&target.ty, target.dec)
-                        .map_err(|e| e.into_type_mismatch(solver, value.location()))?;
-                    value.fulfill_ty(target.ty, solver)?;
-                }
+        if let FieldKey::Ident(key) = field_name {
+            solver.note(key, target.ty.clone(), Some(target.dec));
+        }
+        solver
+            .settle_field_ty(&target.ty, target.dec)
+            .map_err(|e| e.into_type_mismatch(solver, value.location()))?;
+        value.fulfill_ty(target.ty, solver)?;
+    }
 
-                // r[impl mimas.struct.update]
-                // `..base`: the rest of the fields come from a value of this very
-                // type -- a struct, not an enum variant, whose layout the base's
-                // own variant might not share
-                if let Some(base) = base {
-                    if layout != adt {
-                        Err(UpdateNeedsStruct {
-                            src: solver.src(base.location()),
-                            at: base.location().into(),
-                        })?;
-                    }
-                    base.fulfill_ty(adt_ty.clone(), solver)?;
-                }
+    // r[impl mimas.struct.update]
+    // `..base`: the rest of the fields come from a value of this very
+    // type -- a struct, not an enum variant, whose layout the base's
+    // own variant might not share
+    if let Some(base) = base {
+        if layout != adt {
+            Err(UpdateNeedsStruct {
+                src: solver.src(base.location()),
+                at: base.location().into(),
+            })?;
+        }
+        base.fulfill_ty(adt_ty.clone(), solver)?;
+    }
 
-                let remaining: Vec<String> = prototype_fields
-                    .iter()
-                    .filter(|(_, field)| !field.constant)
-                    .map(|v| v.0.clone())
-                    .collect();
+    let remaining: Vec<String> = prototype_fields
+        .iter()
+        .filter(|(_, field)| !field.constant)
+        .map(|v| v.0.clone())
+        .collect();
 
-                if base.is_none() && !remaining.is_empty() {
-                    Err(MissingStructFields {
-                        src: solver.src(location),
-                        at: location.into(),
-                        fields: remaining,
-                    })?;
-                }
+    if base.is_none() && !remaining.is_empty() {
+        Err(MissingStructFields {
+            src: solver.src(location),
+            at: location.into(),
+            fields: remaining,
+        })?;
+    }
 
-                Ok(adt_ty.normalized(solver))
+    Ok(adt_ty.normalized(solver))
 }
 
 impl Solve for Logical {
@@ -3154,7 +3200,9 @@ impl Solve for Unary {
                 (UnaryOp::Negative | UnaryOp::Positive, Ty::Int) => Ok(Ty::Int),
                 (UnaryOp::Negative | UnaryOp::Positive, Ty::Float) => Ok(Ty::Float),
                 // `-price` on a `dec` stays exact (r[impl mimas.dec])
-                (UnaryOp::Negative | UnaryOp::Positive, Ty::Adt(id, _)) if solver.adts[*id].name == "dec" => {
+                (UnaryOp::Negative | UnaryOp::Positive, Ty::Adt(id, _))
+                    if solver.adts[*id].name == "dec" =>
+                {
                     Ok(ty.clone())
                 }
                 (op, Ty::Tuple(elems)) => elems
@@ -3232,7 +3280,9 @@ impl Solve for parse::Propagate {
                 src: solver.src(location),
                 at: location.into(),
                 why: "there's no function here to return from".into(),
-                help: "at the top level, `x!` stops with an error and `x ?? fallback` picks a value".into(),
+                help:
+                    "at the top level, `x!` stops with an error and `x ?? fallback` picks a value"
+                        .into(),
             })?
         };
         let mut ret = ret.normalized(solver);
@@ -3548,7 +3598,11 @@ fn pick_source_overload(
     dec: crate::components::DecId,
     ty: Ty,
 ) -> Result<(crate::components::DecId, Ty)> {
-    let overloads = solver.adts[aid].overloads.get(name).cloned().unwrap_or_default();
+    let overloads = solver.adts[aid]
+        .overloads
+        .get(name)
+        .cloned()
+        .unwrap_or_default();
     let [arg] = call.arguments.as_slice() else {
         return Ok((dec, ty));
     };
@@ -3563,7 +3617,9 @@ fn pick_source_overload(
     }
     for (dec, sig) in &candidates {
         let Ty::Fn(f) = sig else { continue };
-        let [_, operand] = f.parameters.as_slice() else { continue };
+        let [_, operand] = f.parameters.as_slice() else {
+            continue;
+        };
         if arg.value.fulfill_ty(operand.ty.clone(), solver).is_ok() {
             return Ok((*dec, sig.clone()));
         }
@@ -3599,7 +3655,9 @@ fn pact_binary_dispatch(
     location: Location,
 ) -> Result<Option<Ty>> {
     for (recv_ty, name, arg, swap) in [(lhs, names.0, right, false), (rhs, names.1, left, true)] {
-        let Some(pids) = solver.pacts_of(recv_ty) else { continue };
+        let Some(pids) = solver.pacts_of(recv_ty) else {
+            continue;
+        };
         // the pact that declares the name, and its overload group
         let Some((pid, keys)) = pids.iter().find_map(|pid| {
             let pact = &solver.pacts[pid];
@@ -3617,8 +3675,12 @@ fn pact_binary_dispatch(
         };
         for key in keys {
             let (header, _) = solver.pacts[&pid].functions[&key].clone();
-            let Ty::Fn(f) = solver.instantiate_pact_fn(&header, recv_ty) else { continue };
-            let [_, operand] = f.parameters.as_slice() else { continue };
+            let Ty::Fn(f) = solver.instantiate_pact_fn(&header, recv_ty) else {
+                continue;
+            };
+            let [_, operand] = f.parameters.as_slice() else {
+                continue;
+            };
             if arg.fulfill_ty(operand.ty.clone(), solver).is_err() {
                 continue;
             }

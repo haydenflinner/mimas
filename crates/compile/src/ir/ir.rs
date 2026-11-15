@@ -41,6 +41,9 @@ pub struct Ir {
     /// a list, a tuple, a struct or a record. Its value is built once, at the start
     /// of the program, and frozen. Every use reads the slot (`mimas.const.shared`).
     pub(crate) const_slots: HashMap<DecId, Local>,
+    /// `multi fn` dec → the synthesized dispatch trampoline `ref_body` hands
+    /// out when the generic is used as a value. r[impl mimas.multi]
+    pub(crate) multi_tramps: HashMap<DecId, BodyId>,
 }
 
 impl Ir {
@@ -62,6 +65,7 @@ impl Ir {
             stmt_depth: 0,
             test_bodies: std::collections::HashSet::new(),
             const_slots: HashMap::new(),
+            multi_tramps: HashMap::new(),
         }
     }
 
@@ -357,6 +361,33 @@ impl Ir {
                 ir.current().ret(ret);
             });
         }
+        bid
+    }
+
+    /// A `multi fn` used as a value (`let f = combine`): the dec's own body is
+    /// only the fallback, so `ref_body` needs a trampoline that forwards its
+    /// params through the same first-match dispatch a call site emits.
+    /// r[impl mimas.multi]
+    pub(crate) fn multi_trampoline(&mut self, dec: DecId) -> BodyId {
+        if let Some(&bid) = self.multi_tramps.get(&dec) {
+            return bid;
+        }
+        let bid = self.bodies.push(Body::new());
+        self.multi_tramps.insert(dec, bid);
+        let Ty::Fn(header) = &self.resolutions.decs[dec].ty else {
+            panic!("a multi fn's dec ty is always a Ty::Fn")
+        };
+        let arity = header.parameters.len();
+        self.in_body(bid, |ir| {
+            let params: Vec<Local> = (0..arity)
+                .map(|i| ir.synthetic_local(&format!("$trampoline_arg{i}")))
+                .collect();
+            ir.current_body_mut().params = params.clone();
+            let args: Vec<InstId> = params.iter().map(|&p| ir.current().get_local(p)).collect();
+            let ret = crate::ir::emit::dispatch_multi(ir, dec, args)
+                .expect("a registered multi dispatches");
+            ir.current().ret(ret);
+        });
         bid
     }
 

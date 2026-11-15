@@ -148,7 +148,9 @@ impl<'a> HoistCtx<'a> {
                         .or_default()
                         .push(field);
                 } else {
-                    self.solver.adts[adt].impls.insert(ident.lexeme.clone(), field);
+                    self.solver.adts[adt]
+                        .impls
+                        .insert(ident.lexeme.clone(), field);
                 }
                 // def-site mapping: lets the item's own body lower via node_dec(expr.id())
                 if let Some(node_id) = self.node_id {
@@ -359,11 +361,12 @@ impl Hoist for Impl {
                     .iter()
                     .filter_map(|i| match i.kind() {
                         ItemKind::Function(f) => Some(f.name.lexeme.clone()),
-                        ItemKind::Const(c) => {
-                            Some(c.left.as_ident().map(|i| i.lexeme.clone()).unwrap_or_else(
-                                || c.left.to_string(),
-                            ))
-                        }
+                        ItemKind::Const(c) => Some(
+                            c.left
+                                .as_ident()
+                                .map(|i| i.lexeme.clone())
+                                .unwrap_or_else(|| c.left.to_string()),
+                        ),
                         _ => None,
                     })
                     .collect();
@@ -543,7 +546,9 @@ impl Hoist for Pact {
                         let key = format!("{base}#{}", group.len());
                         let mut group = group;
                         group.push(key.clone());
-                        ctx.solver.pact_groups.insert((pact_id, base.clone()), group);
+                        ctx.solver
+                            .pact_groups
+                            .insert((pact_id, base.clone()), group);
                         key
                     } else {
                         base.clone()
@@ -602,6 +607,12 @@ impl Hoist for Pact {
 
 impl Hoist for Function {
     fn hoist(&self, mut ctx: HoistCtx) -> Result<()> {
+        // a `method` arm declares no name -- it attaches to the `multi fn` its
+        // name resolves to and gets a body dec of its own. r[impl mimas.multi]
+        if self.role == FnRole::Method {
+            return hoist_method(self, ctx);
+        }
+
         // declared type params (`fn map<T, U>`) are in scope while the signature resolves --
         // they land in the stored `Ty::Fn` as `Ty::Param`s and get re-instantiated per use
         ctx.solver.push_type_params(&self.type_params);
@@ -637,9 +648,7 @@ impl Hoist for Function {
                     Some(expr) => match ctx.solver.default_literal(expr)? {
                         Some(lit) => Some(lit),
                         None => {
-                            ctx.solver
-                                .pending_defaults
-                                .push((dec, index, expr.clone()));
+                            ctx.solver.pending_defaults.push((dec, index, expr.clone()));
                             None
                         }
                     },
@@ -653,10 +662,101 @@ impl Hoist for Function {
                 *where_slot = self.wheres.clone();
                 *slot = defaults;
             }
+
+            // a `multi fn` registers its bound space (as raw annotations --
+            // `check_multis` resolves them once every impl is known) so the
+            // `method` arms that follow can find and key against it.
+            // r[impl mimas.multi]
+            if self.role == FnRole::Multi {
+                ctx.solver.multis.insert(
+                    dec,
+                    crate::solver::MultiData {
+                        bound_annotations: self
+                            .parameters
+                            .iter()
+                            .map(|b| b.annotation.clone())
+                            .collect(),
+                        bounds: vec![],
+                        methods: vec![],
+                    },
+                );
+            }
         }
 
         Ok(())
     }
+}
+
+/// Hoist a `method` arm: resolve the name to an existing `multi fn`'s
+/// dec, give the arm a body dec of its own (seeded exactly like
+/// `ctx.write` does for a plain `fn`, minus the rib binding -- the name
+/// stays the generic's), and record its key annotations on the generic.
+/// r[impl mimas.multi]
+fn hoist_method(this: &Function, ctx: HoistCtx) -> Result<()> {
+    let Some(gdec) = ctx.solver.ribs.resolve(&this.name) else {
+        Err(crate::errors::MultiNoGeneric {
+            src: ctx.solver.src(this.name.location),
+            at: this.name.location.into(),
+            name: this.name.lexeme.clone(),
+        })?
+    };
+    if !ctx.solver.multis.contains_key(&gdec) {
+        Err(crate::errors::MultiNotGeneric {
+            src: ctx.solver.src(this.name.location),
+            at: this.name.location.into(),
+            name: this.name.lexeme.clone(),
+        })?
+    }
+    let expected = ctx.solver.multis[&gdec].bound_annotations.len();
+    if expected != this.parameters.len() {
+        Err(crate::errors::MultiArityMismatch {
+            src: ctx.solver.src(this.name.location),
+            at: this.name.location.into(),
+            expected,
+            found: this.parameters.len(),
+        })?
+    }
+
+    // the arm's params type from their key annotations (`V::Num` reads as
+    // the variant's layout type); no `self` -- the parser rejected it.
+    ctx.solver.push_type_params(&this.type_params);
+    let fn_header = hoist_fn_header(ctx.solver, &this.parameters, &this.return_type, false, true);
+    ctx.solver.pop_type_params();
+    let ty = Ty::Fn(fn_header?);
+
+    let dec = ctx.solver.dec_id(
+        &this.name,
+        ty.clone(),
+        DecKind::Item {
+            defaults: vec![],
+            wheres: this.wheres.clone(),
+        },
+        ctx.vis,
+    );
+    if let Some(node_id) = ctx.node_id {
+        ctx.solver.node_decs.insert(node_id, dec);
+        let vid = ctx.solver.node_vid(node_id);
+        let loc = ctx.location;
+        ctx.solver
+            .register_sub(vid, ty)
+            .map_err(|e| e.into_type_mismatch(ctx.solver, loc))?;
+    }
+    ctx.solver
+        .multis
+        .get_mut(&gdec)
+        .unwrap()
+        .methods
+        .push(crate::solver::PendingMethod {
+            dec,
+            key_annotations: this
+                .parameters
+                .iter()
+                .map(|b| b.annotation.clone())
+                .collect(),
+            keys: vec![],
+            location: ctx.location,
+        });
+    Ok(())
 }
 
 impl Hoist for Tests {

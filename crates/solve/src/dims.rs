@@ -91,8 +91,7 @@ fn clash(a: &D, b: &D) -> Option<(Dim, Dim)> {
         (D::Q(x) | D::Iv(x), D::Q(y) | D::Iv(y))
             if !Dim::agree(*x, *y)
                 && !index_plain(x.bare(), y.bare())
-                && !angle_plain(x.bare(), y.bare())
-            =>
+                && !angle_plain(x.bare(), y.bare()) =>
         {
             Some((*x, *y))
         }
@@ -132,12 +131,9 @@ fn join(a: D, b: &D) -> D {
         (D::Arr(x), D::Arr(y)) => D::Arr(Box::new(join((**x).clone(), y))),
         // `[(a1, b1), (a2, b2)]` keeps both columns' tags when the
         // arities match; a ragged mix degrades like any other doubt
-        (D::Tuple(x), D::Tuple(y)) if x.len() == y.len() => D::Tuple(
-            x.iter()
-                .zip(y)
-                .map(|(a, b)| join(a.clone(), b))
-                .collect(),
-        ),
+        (D::Tuple(x), D::Tuple(y)) if x.len() == y.len() => {
+            D::Tuple(x.iter().zip(y).map(|(a, b)| join(a.clone(), b)).collect())
+        }
         _ => D::Any,
     }
 }
@@ -274,7 +270,13 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> Result<()> {
             .filter_map(|(loc, d)| pass.shown(&d).map(|s| (loc, s)))
             .collect();
         let check_texts = std::mem::take(&mut pass.check_texts);
-        let scale_of = |pass: &Pass, d: Dim| if d.is_none() { 1.0 } else { pass.shown(&D::Q(d)).map_or(1.0, |s| s.scale) };
+        let scale_of = |pass: &Pass, d: Dim| {
+            if d.is_none() {
+                1.0
+            } else {
+                pass.shown(&D::Q(d)).map_or(1.0, |s| s.scale)
+            }
+        };
         let dec_scales: Vec<(parse::NodeId, f64)> = std::mem::take(&mut pass.dec_notes)
             .into_iter()
             .map(|(id, note)| {
@@ -283,8 +285,18 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> Result<()> {
                     DecNote::Lit { dim, scale } => scale / scale_of(&pass, dim),
                     // a product or quotient of two page units, in the page's unit
                     // for the result (1 when the page's units agree)
-                    DecNote::Fix { mul: true, l, r, out } => scale_of(&pass, l) * scale_of(&pass, r) / scale_of(&pass, out),
-                    DecNote::Fix { mul: false, l, r, out } => scale_of(&pass, l) / scale_of(&pass, r) / scale_of(&pass, out),
+                    DecNote::Fix {
+                        mul: true,
+                        l,
+                        r,
+                        out,
+                    } => scale_of(&pass, l) * scale_of(&pass, r) / scale_of(&pass, out),
+                    DecNote::Fix {
+                        mul: false,
+                        l,
+                        r,
+                        out,
+                    } => scale_of(&pass, l) / scale_of(&pass, r) / scale_of(&pass, out),
                 };
                 (id, k)
             })
@@ -354,7 +366,11 @@ impl<'a> Pass<'a> {
                 for (bd, (bn, bsc)) in atoms.iter().copied() {
                     if ad.mul(*bd) == dim {
                         // a unit times itself is its square: `12 px²`, not `12 px*px`
-                        let name = if an == bn { format!("{an}²") } else { format!("{an}*{bn}") };
+                        let name = if an == bn {
+                            format!("{an}²")
+                        } else {
+                            format!("{an}*{bn}")
+                        };
                         return (name, asc * bsc);
                     }
                 }
@@ -476,9 +492,10 @@ impl<'a> Pass<'a> {
             ExprKind::Literal(Literal::Int(n)) => (*n as f64, 1.0),
             ExprKind::Literal(Literal::Float(n)) => (*n, 1.0),
             ExprKind::Unary(u) => match u.right.kind() {
-                ExprKind::Literal(Literal::Int(n)) => {
-                    (*n as f64, if u.op == UnaryOp::Negative { -1.0 } else { 1.0 })
-                }
+                ExprKind::Literal(Literal::Int(n)) => (
+                    *n as f64,
+                    if u.op == UnaryOp::Negative { -1.0 } else { 1.0 },
+                ),
                 ExprKind::Literal(Literal::Float(n)) => {
                     (*n, if u.op == UnaryOp::Negative { -1.0 } else { 1.0 })
                 }
@@ -496,7 +513,9 @@ impl<'a> Pass<'a> {
     // r[impl mimas.unit.norm]
     fn range_check(&mut self, e: &'a Expr, want: &D) {
         let D::Q(d) = want else { return };
-        let Some((name, lo, hi)) = units::norm_bounds(*d) else { return };
+        let Some((name, lo, hi)) = units::norm_bounds(*d) else {
+            return;
+        };
         let Some(v) = Self::num_lit(e) else { return };
         if v < lo || v > hi {
             self.fail(
@@ -548,7 +567,9 @@ impl<'a> Pass<'a> {
                 }
             }
             // `dec<usd>`: an exact decimal that carries a unit (r[impl mimas.dec.units])
-            Annotation::Applied(ty, args) if ty.len() == 1 && ty[0].lexeme == "dec" && args.len() == 1 => {
+            Annotation::Applied(ty, args)
+                if ty.len() == 1 && ty[0].lexeme == "dec" && args.len() == 1 =>
+            {
                 self.annotation(&args[0])
             }
             Annotation::Option(inner) | Annotation::Result(inner) => self.annotation(inner),
@@ -579,7 +600,9 @@ impl<'a> Pass<'a> {
                 if self.unit_of(ident).is_some()
                     && let Some((dim, scale)) = units::lookup(&ident.lexeme)
                 {
-                    self.written.entry(dim).or_insert((ident.lexeme.clone(), scale));
+                    self.written
+                        .entry(dim)
+                        .or_insert((ident.lexeme.clone(), scale));
                 }
             }
             Annotation::Quantity(parts) => {
@@ -877,12 +900,11 @@ impl<'a> Pass<'a> {
                     {
                         self.written.entry(dim).or_insert((name.clone(), scale));
                     }
-                    self
-                    .env
-                    .get(&dec)
-                    .or_else(|| self.consts.get(&dec))
-                    .cloned()
-                    .unwrap_or(D::Any)
+                    self.env
+                        .get(&dec)
+                        .or_else(|| self.consts.get(&dec))
+                        .cloned()
+                        .unwrap_or(D::Any)
                 }
                 None => D::Any,
             },
@@ -892,11 +914,13 @@ impl<'a> Pass<'a> {
                 match u.op {
                     // a direction word's wrapper puts its axis on a known quantity;
                     // an unknown one stays unknown rather than becoming a bare tag
-                    UnaryOp::Negative | UnaryOp::Positive => match (d, self.ast.direction(e.id())) {
-                        (D::Q(q), Some(axis)) => D::Q(q.mul(axis)),
-                        (D::Iv(q), Some(axis)) => D::Iv(q.mul(axis)),
-                        (d, _) => d,
-                    },
+                    UnaryOp::Negative | UnaryOp::Positive => {
+                        match (d, self.ast.direction(e.id())) {
+                            (D::Q(q), Some(axis)) => D::Q(q.mul(axis)),
+                            (D::Iv(q), Some(axis)) => D::Iv(q.mul(axis)),
+                            (d, _) => d,
+                        }
+                    }
                     _ => D::Any,
                 }
             }
@@ -1084,7 +1108,8 @@ impl<'a> Pass<'a> {
                             match text {
                                 Some(t)
                                     if matches!(d, D::Q(q) if !q.is_none())
-                                        && t.trim_start_matches('-').starts_with(|c: char| c.is_ascii_digit())
+                                        && t.trim_start_matches('-')
+                                            .starts_with(|c: char| c.is_ascii_digit())
                                         && t.ends_with(|c: char| c.is_alphabetic()) =>
                                 {
                                     self.check_texts.insert(x.id(), t);
@@ -1225,15 +1250,18 @@ impl<'a> Pass<'a> {
                             decl.type_params.iter().map(|i| i.lexeme.clone()).collect(),
                             |s| s.annotation(&field.annotation),
                         );
-                        self.expect(&want, &got, value.location(), &format!("field `{}`", k.lexeme));
+                        self.expect(
+                            &want,
+                            &got,
+                            value.location(),
+                            &format!("field `{}`", k.lexeme),
+                        );
                         self.range_check(value, &want);
                     }
                 }
                 D::Any
             }
-            Literal::Tuple(items) => {
-                D::Tuple(items.iter().map(|i| self.expr(i)).collect())
-            }
+            Literal::Tuple(items) => D::Tuple(items.iter().map(|i| self.expr(i)).collect()),
             _ => D::Any,
         }
     }
@@ -1292,7 +1320,15 @@ impl<'a> Pass<'a> {
                         };
                         if self.is_dec(e) && !(a.is_none() && b.is_none()) {
                             let mul = op == EvaluationOp::Multiply;
-                            self.dec_notes.insert(e.id(), DecNote::Fix { mul, l: a, r: b, out: d });
+                            self.dec_notes.insert(
+                                e.id(),
+                                DecNote::Fix {
+                                    mul,
+                                    l: a,
+                                    r: b,
+                                    out: d,
+                                },
+                            );
                         }
                         if interval { D::Iv(d) } else { D::Q(d) }
                     }
@@ -1307,7 +1343,10 @@ impl<'a> Pass<'a> {
 
     /// Whether the solver typed `e` as a `dec`.
     fn is_dec(&self, e: &Expr) -> bool {
-        self.solver.node_to_vid.get(&e.id()).is_some_and(|v| self.solver.is_dec(&Ty::Vid(*v)))
+        self.solver
+            .node_to_vid
+            .get(&e.id())
+            .is_some_and(|v| self.solver.is_dec(&Ty::Vid(*v)))
     }
 
     /// Whether the solver typed `e` as a `float`.
@@ -1592,7 +1631,13 @@ impl<'a> Pass<'a> {
     /// forms keep the same dims per group (a grouped result reads like a list).
     /// `None` when the callee isn't one of them.
     /// r[impl mimas.agg.free] r[impl mimas.agg.by]
-    fn aggregate(&mut self, e: &'a Expr, c: &'a parse::Call, callee: &Ident, args: &[D]) -> Option<D> {
+    fn aggregate(
+        &mut self,
+        e: &'a Expr,
+        c: &'a parse::Call,
+        callee: &Ident,
+        args: &[D],
+    ) -> Option<D> {
         let dec = self.dec_of(callee)?;
         self.solver.dec_to_native.get(&dec)?;
         let item = |d: Option<&D>| match d {

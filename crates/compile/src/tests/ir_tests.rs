@@ -145,7 +145,8 @@ fn an_indexed_field_read_on_a_const_list_builds_nothing() {
         "struct B { row: int, name: str }\nconst MENU = [B { row = 0, name = \"a\" }, B { row = 1, name = \"b\" }];\nlet n = 0;\nfor i in 2 { n = n + MENU[i].row; }",
     );
     assert!(
-        !ops.iter().any(|op| matches!(op, Op::NewInstance { .. } | Op::NewArray { .. })),
+        !ops.iter()
+            .any(|op| matches!(op, Op::NewInstance { .. } | Op::NewArray { .. })),
         "`MENU[i].row` should read one stored list:\n{ops:#?}"
     );
 }
@@ -156,7 +157,8 @@ fn an_indexed_field_read_on_a_const_list_builds_nothing() {
 // (`library/tests/const_read.rs`).
 #[test]
 fn without_std_a_const_used_whole_is_still_built() {
-    let ops = compile_ops("struct B { row: int }\nconst ONE = B { row = 0 };\nlet b = ONE;\nb.row = 5;");
+    let ops =
+        compile_ops("struct B { row: int }\nconst ONE = B { row = 0 };\nlet b = ONE;\nb.row = 5;");
     assert!(
         ops.iter().any(|op| matches!(op, Op::NewInstance { .. })),
         "a const bound to a name is a fresh struct:\n{ops:#?}"

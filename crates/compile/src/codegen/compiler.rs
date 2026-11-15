@@ -225,6 +225,21 @@ impl Compiler {
                 defaults,
             });
         }
+        // `multi fn` trampolines aren't item bodies -- they're synthesized for
+        // `ref_body`, but a `Val::Fn` still needs a signature to be called.
+        // r[impl mimas.multi]
+        for (dec, body) in std::mem::take(&mut ir.multi_tramps) {
+            let Ty::Fn(header) = ir.resolutions.decs[dec].ty.clone() else {
+                continue;
+            };
+            let defaults = vec![None; header.parameters.len()];
+            signatures[body] = Some(Function {
+                body,
+                vis: Vis::Private,
+                header,
+                defaults,
+            });
+        }
 
         let root = std::mem::take(&mut ir.resolutions.root);
         let root = export(ir, &signatures, root);

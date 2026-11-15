@@ -79,6 +79,25 @@ impl Unification {
                     .map_err(|_| ())
             }
 
+            // a variant's layout is-a its enum: a `V::Num`-typed value (`x:
+            // V::Num`, what a `method` arm's param carries) fulfills `V`, but
+            // `V` never fulfills `V::Num` -- direction matters, so this arm
+            // fires on the found side only. r[impl mimas.multi]
+            (Ty::Adt(lhs_adt, lhs_args), Ty::Adt(rhs_adt, rhs_args))
+            | (Ty::Identity(lhs_adt, lhs_args), Ty::Adt(rhs_adt, rhs_args))
+            | (Ty::Identity(lhs_adt, lhs_args), Ty::Identity(rhs_adt, rhs_args))
+                if lhs_args.len() == rhs_args.len()
+                    && solver.enum_parent(*lhs_adt) == Some(*rhs_adt) =>
+            {
+                lhs_args
+                    .iter_mut()
+                    .zip(rhs_args.iter_mut())
+                    .try_fold(Substitution::None, |sub, (l, r)| {
+                        Self::unify_inner(l, r, solver).map(|v| sub.combo(v))
+                    })
+                    .map_err(|_| ())
+            }
+
             // `Self` fulfills its own pact's bound (it's some implementer), but a bound never
             // fulfills `Self`, as the value could be any implementer, not necessarily the
             // receiver's type. Direction actually matters here, unlike the adt/pact
@@ -86,9 +105,7 @@ impl Unification {
             // `Self` fulfills its own pact's bound -- including the pacts it
             // requires (`pact A: B` makes `Self: A` a `B` too)
             (Ty::Skolem(pid), Ty::Pacts(pids))
-                if pids
-                    .iter()
-                    .all(|p| solver.pact_closure(*pid).contains(p)) =>
+                if pids.iter().all(|p| solver.pact_closure(*pid).contains(p)) =>
             {
                 Ok(Substitution::None)
             }

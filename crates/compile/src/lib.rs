@@ -3,8 +3,8 @@ mod ir {
     mod ir;
     pub use ir::*;
     mod emit;
-    use emit::*;
     pub(crate) use emit::is_generic_law;
+    use emit::*;
     mod place;
     use place::*;
     mod body;

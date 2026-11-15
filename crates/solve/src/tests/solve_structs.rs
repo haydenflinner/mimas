@@ -480,7 +480,10 @@ test_fail!(
     "struct S { x: int } let s = S { x = 0, z = 1 };"
 );
 // `S(0)` builds a named-field struct (`mimas.struct.positional`); too many values don't
-test_fail!(expected_tuple_struct, "struct S { x: int } let s = S(0, 1);");
+test_fail!(
+    expected_tuple_struct,
+    "struct S { x: int } let s = S(0, 1);"
+);
 
 // tuple indexing: out-of-bounds / non-int index / not-a-tuple receiver
 test_fail!(tuple_out_of_bounds_one, "let t = (0,); let x = t.1;");

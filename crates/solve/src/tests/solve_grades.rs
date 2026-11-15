@@ -975,10 +975,8 @@ fn spliced_include_effects_fit_the_grant() {
 fn spliced_include_beyond_its_grant_refuses() {
     let _t = TestResetter;
     native("net_get", Some(Fx::NET));
-    let e =
-        err("//# page: kit\nnet_get();\n//# page: \nuse \"kit\" granting {};\n").unwrap();
+    let e = err("//# page: kit\nnet_get();\n//# page: \nuse \"kit\" granting {};\n").unwrap();
     assert!(e.contains("`kit` needs"), "{e}");
-    let e =
-        err("//# page: kit\nnet_get();\n//# page: \nuse \"kit\" granting { io };\n").unwrap();
+    let e = err("//# page: kit\nnet_get();\n//# page: \nuse \"kit\" granting { io };\n").unwrap();
     assert!(e.contains("`kit` needs"), "{e}");
 }

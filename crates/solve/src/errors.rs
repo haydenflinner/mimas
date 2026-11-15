@@ -221,7 +221,9 @@ pub struct PropagateOutsideFallible {
 pub struct PropagateOnPlain {
     #[source_code]
     pub src: NamedSource<Arc<str>>,
-    #[label("this is `{ty}`, never null and never raised -- `?` passes on a `T?`'s null or a `T!`'s raise")]
+    #[label(
+        "this is `{ty}`, never null and never raised -- `?` passes on a `T?`'s null or a `T!`'s raise"
+    )]
     pub at: SourceSpan,
     pub ty: String,
 }
@@ -927,6 +929,87 @@ pub struct NestedFn {
 }
 
 #[derive(Error, Debug, Diagnostic)]
+#[error("`method {name}` has no `multi fn {name}` to attach to")]
+#[diagnostic(help("declare the generic first: `multi fn {name}(...) -> T {{ fallback }}`"))]
+pub struct MultiNoGeneric {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("no `multi fn` by this name is in scope")]
+    pub at: SourceSpan,
+    pub name: String,
+}
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("`method {name}` targets `{name}`, which isn't a `multi fn`")]
+#[diagnostic(help("only a `multi fn` takes `method` arms -- `{name}` is an ordinary `fn`"))]
+pub struct MultiNotGeneric {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("this `method` attaches to an ordinary `fn`")]
+    pub at: SourceSpan,
+    pub name: String,
+}
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("`method` arity doesn't match its `multi fn`")]
+pub struct MultiArityMismatch {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("this arm takes {found} parameters; the generic declares {expected}")]
+    pub at: SourceSpan,
+    pub expected: usize,
+    pub found: usize,
+}
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("undispatchable `method` parameter type")]
+#[diagnostic(help(
+    "a dispatch key must be a concrete type (`Ship`, `V::Num`, `int`), or a pact (`Draw`) -- not `{what}`"
+))]
+pub struct MultiBadKey {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("`{what}` can't be dispatched on")]
+    pub at: SourceSpan,
+    pub what: String,
+}
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("`method` key reaches outside its `multi fn`'s bound")]
+#[diagnostic(help(
+    "each `method` parameter must name a type the generic's parameter accepts -- `{what}` doesn't"
+))]
+pub struct MultiKeyOutOfBounds {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("`{what}` isn't covered by the generic's bound at this position")]
+    pub at: SourceSpan,
+    pub what: String,
+}
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("unreachable `method {name}` arm")]
+#[diagnostic(help("an earlier `method` arm already matches every call this one would"))]
+pub struct MultiMethodUnreachable {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("this arm can never run")]
+    pub at: SourceSpan,
+    pub name: String,
+}
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("`method` returns `{found}` but its `multi fn` returns `{expected}`")]
+pub struct MultiReturnMismatch {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("this arm's `->` disagrees with the generic's")]
+    pub at: SourceSpan,
+    pub found: String,
+    pub expected: String,
+}
+
+#[derive(Error, Debug, Diagnostic)]
 #[error("invalid iterator target")]
 pub struct InvalidIterTarget {
     #[source_code]
@@ -947,7 +1030,9 @@ pub struct NonConstDefault {
 
 #[derive(Error, Debug, Diagnostic)]
 #[error("a struct or dict can't be a parameter default")]
-#[diagnostic(help("a default is a number, string, bool, null, or a list of those -- make the parameter optional and build the value in the body"))]
+#[diagnostic(help(
+    "a default is a number, string, bool, null, or a list of those -- make the parameter optional and build the value in the body"
+))]
 pub struct NonScalarDefault {
     #[source_code]
     pub src: NamedSource<Arc<str>>,
@@ -1070,7 +1155,9 @@ pub struct PactRequires {
 
 #[derive(Error, Debug, Diagnostic)]
 #[error("`{via}` has members without defaults, so `via` can't synthesize its impl for `{target}`")]
-#[diagnostic(help("write `impl {via} for {target}` yourself -- `via` can only build an impl whose members all carry defaults"))]
+#[diagnostic(help(
+    "write `impl {via} for {target}` yourself -- `via` can only build an impl whose members all carry defaults"
+))]
 pub struct ViaRequiresImpl {
     #[source_code]
     pub src: NamedSource<Arc<str>>,
@@ -1082,8 +1169,12 @@ pub struct ViaRequiresImpl {
 }
 
 #[derive(Error, Debug, Diagnostic)]
-#[error("`{member}` has a different signature on `{pact}` than on `{via}`, so it can't be forwarded")]
-#[diagnostic(help("a `via` impl forwards by name -- write `{member}` in the impl block to keep a different shape"))]
+#[error(
+    "`{member}` has a different signature on `{pact}` than on `{via}`, so it can't be forwarded"
+)]
+#[diagnostic(help(
+    "a `via` impl forwards by name -- write `{member}` in the impl block to keep a different shape"
+))]
 pub struct ViaSignatureMismatch {
     #[source_code]
     pub src: NamedSource<Arc<str>>,
@@ -1424,9 +1515,7 @@ pub struct FxGate {
 /// The page's inferred effect set escapes the `needs` it declared.
 #[derive(Error, Debug, Diagnostic)]
 #[error("the page's code needs {missing} beyond its declared `needs {declared}`")]
-#[diagnostic(help(
-    "extend `needs` to cover what the code does, or take the effectful calls out"
-))]
+#[diagnostic(help("extend `needs` to cover what the code does, or take the effectful calls out"))]
 pub struct NeedsExceeded {
     #[source_code]
     pub src: NamedSource<Arc<str>>,

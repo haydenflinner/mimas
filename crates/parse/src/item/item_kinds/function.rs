@@ -7,11 +7,25 @@ use crate::{
     item::{IntoItem, ItemKind},
 };
 
+/// Which dispatch role a `fn`-shaped item plays: an ordinary `fn`, a `multi
+/// fn` generic (whose own body is the dispatch fallback), or a `method` arm
+/// of one (its parameter annotations are the dispatch keys). The ordinary
+/// `fn` is the default -- multis are opt-in.
+#[derive(Debug, PartialEq, Clone, Copy, Default)]
+pub enum FnRole {
+    #[default]
+    Fn,
+    Multi,
+    Method,
+}
+
 /// Representation of function declaration in mimas. Visibility lives on the wrapping [Item].
 #[derive(Debug, PartialEq, Clone)]
 pub struct Function {
     /// The name, if any, of this function. Anonymous functions do not have names.
     pub name: Ident,
+    /// Dispatch role: ordinary `fn`, `multi fn` generic, or `method` arm.
+    pub role: FnRole,
     /// The declared type parameters, `<T, U>` after the name. Empty for non-generic fns.
     pub type_params: Vec<TypeParam>,
     /// The parameters of this function.
@@ -38,6 +52,7 @@ impl Function {
     ) -> Self {
         Self {
             name,
+            role: FnRole::Fn,
             type_params: vec![],
             parameters,
             wheres: vec![],
@@ -78,8 +93,13 @@ impl std::fmt::Display for Function {
         } else {
             format!(" where {}", self.wheres.iter().join(", "))
         };
+        let keyword = match self.role {
+            FnRole::Fn => "fn",
+            FnRole::Multi => "multi fn",
+            FnRole::Method => "method",
+        };
         f.pad(&format!(
-            "fn {}{generics}({param_str}){ret_str}{where_str} {}",
+            "{keyword} {}{generics}({param_str}){ret_str}{where_str} {}",
             self.name, self.body
         ))
     }

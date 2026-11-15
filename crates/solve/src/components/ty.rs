@@ -285,6 +285,20 @@ impl TyExt for Ty {
                             ty: other.to_string(),
                         })?,
                     };
+                    // `x: V::Num` -- one enum variant's layout type, the key a
+                    // `method` arm writes to dispatch on a single variant.
+                    // r[impl mimas.multi]
+                    if solver.adts[adt].flags.contains(AdtFlags::IS_ENUM)
+                        && let Some((layout, vdec)) = solver.adts[adt]
+                            .variants
+                            .get(&segment.lexeme)
+                            .map(|v| (v.layout(), v.dec()))
+                    {
+                        let lty = layout.map(Ty::adt).unwrap_or(ty);
+                        solver.note(&segment, lty.clone(), vdec);
+                        ty = lty;
+                        continue;
+                    }
                     if !solver.adts[adt].flags.contains(AdtFlags::IS_MODULE) {
                         Err(NotAStruct {
                             src: solver.src(segment.location),

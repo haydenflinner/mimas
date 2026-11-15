@@ -517,7 +517,10 @@ test_fail!(
 test_fail!(eval_str_div, "let x = \"a\" / \"b\";");
 test_fail!(eval_bool_plus, "let x = true + false;");
 test_fail!(eval_array_plus, "let x = [0] + [1];");
-test_fail!(eval_dict_plus, "let a = {a:0}; let b = {b:1}; let x = a + b;");
+test_fail!(
+    eval_dict_plus,
+    "let a = {a:0}; let b = {b:1}; let x = a + b;"
+);
 test_fail!(eval_float_bitor, "let x = 1.0 | 1.0;");
 test_fail!(eval_shift_by_float, "let x = 1 << 1.0;");
 

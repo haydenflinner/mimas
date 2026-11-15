@@ -160,7 +160,10 @@ impl Constant {
         }
         // a tuple that is a struct (`const O: V = (0, 0)`) allocates the struct
         let struct_tuple = matches!(lit, Literal::Tuple(_))
-            && matches!(ir.resolutions.node_tys.get(&id), Some(solve::components::Ty::Adt(..) | solve::components::Ty::Identity(..)));
+            && matches!(
+                ir.resolutions.node_tys.get(&id),
+                Some(solve::components::Ty::Adt(..) | solve::components::Ty::Identity(..))
+            );
         // A const that is not stored (declared in a fn or an impl, or destructured)
         // is built here. Its value is frozen all the same: a constant cannot be
         // changed wherever it is written.
@@ -172,7 +175,11 @@ impl Constant {
             let aggregate = matches!(lit, Literal::Array(_) | Literal::Tuple(_));
             let constant = Self::from_literal(ir, lit);
             let value = ir.current().constant(constant);
-            Some(if aggregate { Self::frozen(ir, value) } else { value })
+            Some(if aggregate {
+                Self::frozen(ir, value)
+            } else {
+                value
+            })
         }
     }
 
@@ -273,7 +280,9 @@ impl Constant {
             }
             parts.push(part);
         }
-        Some(Self::Array(parts.iter().map(|e| Self::from_expr(ir, e)).collect()))
+        Some(Self::Array(
+            parts.iter().map(|e| Self::from_expr(ir, e)).collect(),
+        ))
     }
 
     /// Whether an expression has a scalar `Constant` form `from_expr` can make.
@@ -441,4 +450,3 @@ impl From<bool> for Constant {
         Self::Bool(value)
     }
 }
-
