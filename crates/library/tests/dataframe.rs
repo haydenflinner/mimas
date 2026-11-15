@@ -470,11 +470,11 @@ test_run_display!(
            "bo"     36124
        };"#,
     r#"samples
-       |> arrange(["rider", "clock"], [false, false])!
-       |> mutate([when(col("rider") == col("rider").shift(1),
+       .arrange(["rider", "clock"], [false, false])!
+       .mutate([when(col("rider") == col("rider").shift(1),
                       col("clock").diff(1),
                       col("clock") - lit(START)).alias("laptime")])!
-       |> select_names(["rider", "laptime"])!"# => r#"shape: (4, 2)
+       .select_names(["rider", "laptime"])!"# => r#"shape: (4, 2)
 ┌───────┬─────────┐
 │ rider ┆ laptime │
 │ ---   ┆ ---     │

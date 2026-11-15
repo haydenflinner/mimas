@@ -678,8 +678,9 @@ pub struct DuplicateImplDeclaration {
     pub src: NamedSource<Arc<str>>,
     #[label("...with the name used here")]
     pub at: SourceSpan,
+    // none for a member a host/native adt brought -- it has no source to point at
     #[label("'{name}' has already been declared")]
-    pub original_at: SourceSpan,
+    pub original_at: Option<SourceSpan>,
     pub name: String,
 }
 

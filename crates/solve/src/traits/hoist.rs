@@ -131,10 +131,14 @@ impl<'a> HoistCtx<'a> {
                     && !overload
                 {
                     let prev = &self.solver.decs[existing.dec];
+                    // a member the page's own source declared points back at it;
+                    // one a native adt carried in has no source to show
+                    let original_at = (!prev.location.span().is_synthetic())
+                        .then(|| prev.location.into());
                     Err(DuplicateImplDeclaration {
                         src: self.solver.src(ident.location),
                         at: ident.location.into(),
-                        original_at: prev.location.into(),
+                        original_at,
                         name: ident.lexeme.clone(),
                     })?;
                 }
@@ -434,7 +438,9 @@ impl Hoist for Impl {
                     .collect();
                 for name in omitted {
                     if let Some(existing) = ctx.solver.adts[adt].impls.get(&name) {
-                        let original_at = ctx.solver.decs[existing.dec].location.into();
+                        let loc = ctx.solver.decs[existing.dec].location;
+                        let original_at =
+                            (!loc.span().is_synthetic()).then(|| loc.into());
                         Err(DuplicateImplDeclaration {
                             src: ctx.solver.src(self.target.location()),
                             at: self.target.location().into(),

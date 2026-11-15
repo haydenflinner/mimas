@@ -4338,12 +4338,19 @@ impl Solver {
     pub(crate) fn check_computed_consts(&self) -> Result<()> {
         for (_, _, value) in &self.computed_consts {
             let mut seen = FxHashSet::default();
-            let fx = self.computed_effects(value, &mut seen);
+            let (fx, reasons) = self.computed_effects(value, &mut seen);
             if !(fx & shared::Fx::ANY).is_empty() {
+                let effects = if reasons.is_empty() {
+                    format!("{:?}", fx & shared::Fx::ANY)
+                } else {
+                    // name the impl(s) that keep this out of `const` -- the
+                    // author should know which one to reach for `let` over
+                    reasons.join(", ")
+                };
                 Err(crate::errors::ImpureConst {
                     src: self.src(value.location()),
                     at: value.location().into(),
-                    effects: format!("{:?}", fx & shared::Fx::ANY),
+                    effects,
                     help: "compute it in a `let` instead: a `let` runs with the page and may use effects".into(),
                 })?
             }
@@ -4351,11 +4358,16 @@ impl Solver {
         Ok(())
     }
 
-    fn computed_effects(&self, expr: &Expr, seen: &mut FxHashSet<DecId>) -> shared::Fx {
+    fn computed_effects(
+        &self,
+        expr: &Expr,
+        seen: &mut FxHashSet<DecId>,
+    ) -> (shared::Fx, Vec<String>) {
         struct Walk<'s, 'h> {
             solver: &'s Solver,
             seen: &'h mut FxHashSet<DecId>,
             fx: shared::Fx,
+            reasons: Vec<String>,
         }
         impl parse::visit::Visitor for Walk<'_, '_> {
             fn expr(&mut self, call_expr: &Expr) {
@@ -4400,12 +4412,32 @@ impl Solver {
                 match solver.decs[dec].kind {
                     DecKind::Adt(_) | DecKind::Variant { .. } | DecKind::Constant(_) => {}
                     // a Mimas fn: follow it once; a fn with no body here is a
-                    // host fn the checker can't see into, so it fails closed
+                    // host fn the checker can't see into, so it fails closed --
+                    // unless it's a pact member: the page is a closed world, so
+                    // every implementer is known and the call's effects are the
+                    // union of theirs. r[impl mimas.const.pact-fx]
                     DecKind::Item { .. } => match solver.const_items.get(&dec) {
                         Some(item) => {
                             if self.seen.insert(dec) {
-                                let fx = solver.computed_effects(&item.body, self.seen);
+                                let (fx, reasons) =
+                                    solver.computed_effects(&item.body, self.seen);
                                 self.fx |= fx;
+                                self.reasons.extend(reasons);
+                            }
+                        }
+                        None if solver.pact_members.values().any(|&m| m == dec) => {
+                            for (mdec, aname) in solver.member_impl_decs(dec) {
+                                match solver.fn_effects.get(&mdec) {
+                                    Some(fx) if (*fx & shared::Fx::ANY).is_empty() => {}
+                                    Some(fx) => {
+                                        self.fx |= *fx;
+                                        self.reasons.push(format!(
+                                            "`{name}` on `{aname}`",
+                                            name = solver.decs[dec].name,
+                                        ));
+                                    }
+                                    None => self.fx |= shared::Fx::unknown(),
+                                }
                             }
                         }
                         None => self.fx |= shared::Fx::unknown(),
@@ -4418,9 +4450,52 @@ impl Solver {
             solver: self,
             seen,
             fx: shared::Fx::pure(),
+            reasons: Vec::new(),
         };
         parse::visit::walk_expr(expr, &mut walk);
-        walk.fx
+        (walk.fx, walk.reasons)
+    }
+
+    /// Every method dec an implementer grafted for `member` (a pact member's
+    /// dec): `(method dec, implementer name)` per impl. Empty when the pact
+    /// has no impls -- the call then has no effects to union.
+    // r[impl mimas.const.pact-fx]
+    fn member_impl_decs(&self, member: DecId) -> Vec<(DecId, String)> {
+        let Some((&pid, key)) = self
+            .pact_members
+            .iter()
+            .find(|(_, d)| **d == member)
+            .map(|((p, k), _)| (p, k))
+        else {
+            return vec![];
+        };
+        self.pact_impls
+            .iter()
+            .filter(|(p, _)| *p == pid)
+            .flat_map(|(_, aid)| {
+                let adt = &self.adts[*aid];
+                let aname = adt.name.clone();
+                adt.impls
+                    .iter()
+                    .map(|(name, f)| (name, f.dec))
+                    .chain(
+                        adt.overloads
+                            .iter()
+                            .flat_map(|(n, fs)| fs.iter().map(move |f| (n, f.dec))),
+                    )
+                    .filter(move |(name, dec)| {
+                        // overloads graft under their member key (`mul#1`), so
+                        // `impl_member` identifies them; a plain member matches
+                        // by name
+                        self.impl_member
+                            .get(dec)
+                            .is_some_and(|ms| ms.contains(&member))
+                            || **name == *key
+                    })
+                    .map(move |(_, d)| (d, aname.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
     }
 
     fn calls_unsolved_fn(&self, expr: &Expr) -> bool {

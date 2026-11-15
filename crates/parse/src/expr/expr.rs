@@ -95,7 +95,7 @@ impl Expr {
     }
 
     /// Take the inner ExprKind, leaving the expr hollow — for rewrites
-    /// like `|>` that rebuild the node they parsed.
+    /// that rebuild the node they parsed.
     pub(crate) fn into_kind(self) -> ExprKind {
         *self.kind
     }

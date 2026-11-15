@@ -66,9 +66,9 @@ test_run!(
     // the handler's own block may hold a call; `==` still binds outside it
     "parse_pos(\"\") absolve |e| { need({ a: 4 }, \"a\")! } == 5" => "true",
     // `absolve` guards the whole expression to its left, like `??` —
-    // the pipeline's raise is what the handler recovers
-    "\"\" |> doubled absolve |e| { 0 }" => "0",
-    "\"x\" |> doubled absolve |e| { 0 } == 14" => "true",
+    // the call's raise is what the handler recovers
+    "doubled(\"\") absolve |e| { 0 }" => "0",
+    "doubled(\"x\") absolve |e| { 0 } == 14" => "true",
 );
 
 // r[verify mimas.propagate]

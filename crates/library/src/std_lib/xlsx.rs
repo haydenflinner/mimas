@@ -30,7 +30,7 @@ use vm::{Ctx, api::Api, conversion::Raisable};
 pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     let mut m = api.module("std::polars");
     m.add(from_xlsx);
-    // also a free function so `df |> to_xlsx("out.xlsx")` pipes resolve, same as the verbs
+    // also a free function so `to_xlsx(df, "out.xlsx")` resolves, same as the verbs
     m.add(to_xlsx);
     api.add_method(to_xlsx);
 }

@@ -17,7 +17,7 @@ use vm::{Ctx, api::Api, conversion::Raisable};
 pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     let mut m = api.module("std::polars");
     m.add(from_parquet);
-    // also a free function so `df |> to_parquet("out.parquet")` pipes resolve, same as the verbs
+    // also a free function so `to_parquet(df, "out.parquet")` resolves, same as the verbs
     m.add(to_parquet);
     api.add_method(to_parquet);
 }

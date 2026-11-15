@@ -737,8 +737,6 @@ impl<'s> Lex<'s, Tok<TokKind<'s>>, TokKind<'s>> for Lexer<'s> {
                         TokKind::DoublePipe
                     } else if self.match_chomp('=') {
                         TokKind::PipeEqual
-                    } else if self.match_chomp('>') {
-                        TokKind::PipeGreater
                     } else {
                         TokKind::Pipe
                     }

@@ -68,9 +68,8 @@ impl AscDesc {
         m.add(to_dataframe);
         m.add(from_csv);
         m.add(from_json);
-        // the verbs are also free functions so `df |> filter(..)` pipes
-        // resolve -- `|>` desugars `x |> f(a)` to `f(x, a)`, and methods alone
-        // would leave `f` unbound.
+        // the verbs are also free functions so `filter(df, ..)` works
+        // next to the method spelling `df.filter(..)`.
         m.add(filter);
         m.add(select);
         m.add(select_names);

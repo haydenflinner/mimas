@@ -55,7 +55,7 @@ This tree is a permanently separate fork of upstream [mimas](https://github.com/
 | Units of measure | Quantity literals `25kW`, `0.14usd/kWh`, `90deg` + compile-time dimensional analysis (`shared/src/units.rs`, `solve/src/dims.rs`); unit names work as annotations (`fn cost(e: kWh) -> usd`, `Interval<kW>`) and `pct`/`bp`/`prob`/`logit` are dimensionless intent scales | numbers are plain `int`/`float` |
 | `±` intervals | `x ± d` / `x ± d%` desugar to `Interval::within`/`Interval::pm` (`parse/src/parser.rs`, `library/src/std_lib/interval.rs`) | not present |
 | `%` / `mod` | `%` is postfix percent (`50%` = `0.5`, hugs its operand); modulo is the contextual word `a mod b`; `x %=` still means `x = x mod 2` | `%` is infix modulo |
-| `|>` | Pipeline infix, loosest precedence: `x |> f(a)` ≡ `f(x, a)` (`parse/src/lex/tok.rs` `PipeGreater`) | not present |
+| `|>` | Removed — method chains (`x.f(a)`) are the one spelling for pipelines | `x |> f(a)` ≡ `f(x, a)` |
 | `xor` / names | xor spells `⊕`/`⊻`/`xor`; `^` and `-` join identifiers, so `x^2` and `foo-bar` are single names (`parse/src/lex/lexer.rs`) | `^` is an operator; `-` is always minus |
 | `table {}` / `query {}` | Literal dataframes and PRQL-style query blocks with `$expr` splices (`parse/src/parser.rs`, `solve/src/traits/query.rs`); the checker tracks column→type schemas (`solve/src/frames.rs`) | not present |
 | `use` | `use "page-name";` is a host-resolved include (`Use::Host`, `parse/src/item/item_kinds/use.rs`); `name@<64-hex>` pins, `name@latest` follows, `granting {…}` caps effects | `use` takes `a::b::{…}` paths only |

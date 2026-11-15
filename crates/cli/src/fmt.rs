@@ -31,7 +31,7 @@
 //!
 //! * 4-space indents, one level per open `(`, `[`, `{`, `?[`; a line
 //!   opening with closers dedents by that many; a line that can't start
-//!   a statement (`|>`, `&&`, `.`, `in`, `=>`, `=`, …) takes one
+//!   a statement (`&&`, `.`, `in`, `=>`, `=`, …) takes one
 //!   continuation level, and a line the author over-indented keeps one.
 //! * `{` spaces around except dict-*type* braces and `use` paths —
 //!   `x: {int}`, `-> {Nd}`, `({bool}, …)`, `Vec<{int}>`,
@@ -303,8 +303,7 @@ fn is_closer(k: TokKind) -> bool {
 fn is_continuation(k: TokKind) -> bool {
     matches!(
         k,
-        TokKind::PipeGreater
-            | TokKind::DoubleAmpersand
+        TokKind::DoubleAmpersand
             | TokKind::DoubleHook
             | TokKind::DoubleHookEqual
             | TokKind::In
@@ -434,7 +433,6 @@ fn spaced(k: TokKind) -> bool {
             | TokKind::DoublePipe
             | TokKind::DoubleHook
             | TokKind::DoubleHookEqual
-            | TokKind::PipeGreater
             | TokKind::Plus
             | TokKind::Star
             | TokKind::Slash
@@ -724,7 +722,7 @@ impl<'s> Fmt<'s> {
     /// The statement or item after a `// fmt: skip` comment: from the
     /// next non-comment token until the first later line that starts
     /// back at its depth without continuing the statement — so a `{…}`
-    /// body or a `|>`-chain comes along, an `else` arm too.
+    /// body or a `.`-chain comes along, an `else` arm too.
     fn skip_node(&mut self, comment: usize) {
         let Some(first) = self.sig_next(comment) else {
             return;
@@ -1680,7 +1678,7 @@ mod tests {
     fn operator_spacing() {
         assert_eq!(fmt("let x=1+2*3\n"), "let x = 1 + 2 * 3\n");
         assert_eq!(fmt("x==y and y !=z\n"), "x == y && y != z\n");
-        assert_eq!(fmt("a|>f |> g()\n"), "a |> f |> g()\n");
+        assert_eq!(fmt("a&&b&&c\n"), "a && b && c\n");
     }
 
     #[test]
@@ -1749,7 +1747,7 @@ mod tests {
 
     #[test]
     fn continuation_lines() {
-        unchanged("let x = a\n    |> f\n    |> g\n");
+        unchanged("let x = a\n    .f()\n    .g()\n");
         unchanged("match x {\n    P => 1,\n    Q => 2,\n}\n");
     }
 
@@ -1863,8 +1861,8 @@ mod tests {
         // an item with a `{…}` body comes along whole
         let src = "// fmt: skip\nfn  weird()   {\n      let   x=1\n}\nlet y = 2\n";
         assert_eq!(fmt(src), src);
-        // a `|>` chain is one statement
-        let src = "// fmt: skip\nlet   x = a\n     |> f\nlet y = 2\n";
+        // a `.`-chain is one statement
+        let src = "// fmt: skip\nlet   x = a\n     .f()\nlet y = 2\n";
         assert_eq!(fmt(src), src);
     }
 

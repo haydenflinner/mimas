@@ -71,11 +71,11 @@ fn parquet_round_trips_dtypes() {
 }
 
 #[test]
-fn to_parquet_pipes_as_a_free_function() {
+fn to_parquet_calls_as_a_method() {
     let path = tmp("piped");
-    // `df |> to_parquet(..)` exercises the free-function registration
+    // `df.to_parquet(..)` exercises the method registration
     let preamble = format!(
-        "{WRITE} let ok = (df |> to_parquet({:?}))!;",
+        "{WRITE} let ok = (df.to_parquet({:?}))!;",
         path.display()
     );
     pretty_assertions::assert_eq!(test_runner::render(&preamble, "ok"), "true");

@@ -1986,112 +1986,18 @@ fn other_ident_bang_call_is_still_unwrap() {
     );
 }
 
-// — `|>` pipe: the loosest infix, desugared to a leading call argument —
+// — `|>` is gone: `x |> f` lexes `|` then `>`, and `|` as an infix
+// poisons on the `>` — a stale pipe is a hard error, never a silent
+// `f(x)`. At a line start `|` can't bind at all, so `x\n  |> f` ends at `x`.
 
-expr_test!(
-    pipe_bare_callee,
-    "x |> f",
-    Call::new(ident_expr!("f"), vec![Argument::new(ident_expr!("x"))])
-);
-
-expr_test!(
-    pipe_call,
-    "x |> f(1, 2)",
-    Call::new(
-        ident_expr!("f"),
-        vec![
-            Argument::new(ident_expr!("x")),
-            Argument::new(int!(1)),
-            Argument::new(int!(2)),
-        ]
-    )
-);
-
-expr_test!(
-    pipe_chains_left,
-    "x |> f |> g(2)",
-    Call::new(
-        ident_expr!("g"),
-        vec![
-            Argument::new(
-                Call::new(ident_expr!("f"), vec![Argument::new(ident_expr!("x"))]).into_expr(),
-            ),
-            Argument::new(int!(2)),
-        ]
-    )
-);
-
-expr_test!(
-    pipe_looser_than_everything,
-    "a + b |> f",
-    Call::new(
-        ident_expr!("f"),
-        vec![Argument::new(
-            Evaluation::new(ident_expr!("a"), EvaluationOp::Plus, ident_expr!("b")).into_expr(),
-        )]
-    )
-);
-
-expr_test!(
-    pipe_onto_access_call,
-    "x |> n.f(1)",
-    Call::new(
-        Access::Dot {
-            left: ident_expr!("n"),
-            right: ident_expr!("f"),
-            kind: AccessKind::Direct,
-        }
-        .into_expr(),
-        vec![Argument::new(ident_expr!("x")), Argument::new(int!(1))]
-    )
-);
-
-expr_test!(
-    pipe_call_then_unwrap,
-    "x |> f(1)!",
-    Unwrap {
-        expr: Call::new(
-            ident_expr!("f"),
-            vec![Argument::new(ident_expr!("x")), Argument::new(int!(1))],
-        )
-        .into_expr(),
+#[test]
+fn pipe_is_rejected() {
+    for src in ["x |> f", "x |> f(1, 2)", "a + b |> f"] {
+        let got = parse_expr(src);
+        assert!(got.contains("<poison>"), "pipe must not desugar: {src:?} gave {got}");
     }
-);
-
-expr_test!(
-    pipe_into_first_call_of_chain,
-    "x |> f(1)!.g(2)",
-    Call::new(
-        Access::Dot {
-            left: Unwrap {
-                expr: Call::new(
-                    ident_expr!("f"),
-                    vec![Argument::new(ident_expr!("x")), Argument::new(int!(1))],
-                )
-                .into_expr(),
-            }
-            .into_expr(),
-            right: ident_expr!("g"),
-            kind: AccessKind::Direct,
-        }
-        .into_expr(),
-        vec![Argument::new(int!(2))]
-    )
-);
-
-expr_test!(
-    pipe_continues_on_next_line,
-    "x\n  |> f\n  |> g(2)",
-    Call::new(
-        ident_expr!("g"),
-        vec![
-            Argument::new(
-                Call::new(ident_expr!("f"), vec![Argument::new(ident_expr!("x"))]).into_expr(),
-            ),
-            Argument::new(int!(2)),
-        ]
-    )
-);
+    assert_eq!(parse_expr("x\n  |> f"), "x");
+}
 
 // `x ± d` desugars to `Interval::within(x * 1.0, d * 1.0)`; `x ± d%` to
 // `Interval::pm(x * 1.0, d * 0.01)`.

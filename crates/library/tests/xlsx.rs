@@ -198,12 +198,12 @@ fn to_xlsx_round_trips_through_from_xlsx() {
 }
 
 #[test]
-fn to_xlsx_names_its_sheet_and_pipes() {
+fn to_xlsx_names_its_sheet() {
     let path = tmp("named_sheet");
-    // `df |> to_xlsx(..)` exercises the free-function registration; reading it back
+    // `df.to_xlsx(..)` exercises the method registration; reading it back
     // by name exercises `set_name`
     let preamble = format!(
-        "use std::polars::*; let df = from_xlsx({PRODUCTS:?})!; let ok = (df |> to_xlsx({:?}, \"Inventory\"))!;",
+        "use std::polars::*; let df = from_xlsx({PRODUCTS:?})!; let ok = (df.to_xlsx({:?}, \"Inventory\"))!;",
         path.display()
     );
     pretty_assertions::assert_eq!(test_runner::render(&preamble, "ok"), "true");

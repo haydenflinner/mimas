@@ -3,9 +3,9 @@
 // parse-level success that still breaks downstream shows up here.
 fn main() {
     for src in [
-        "fn add3(a: int, b: int, c: int) -> int { a + b + c }\ncheck 1 |> add3(10, 20, 30) == 61\n",
+        "fn add3(a: int, b: int, c: int) -> int { a + b + c }\ncheck add3(1, 10, 20, 30) == 61\n",
         "fn f(x: int) -> int { x + 1 }\ncheck f(2) == 3\n",
-        "fn add3(a: int, b: int, c: int) -> int { a + b + c }\nlet x = 1 |> add3(10, 20, 30);\ncheck x == 61\n",
+        "fn add3(a: int, b: int, c: int) -> int { a + b + c }\nlet x = add3(1, 10, 20, 30);\ncheck x == 61\n",
     ] {
         match mimas::Vm::compile(src, mimas::library::std) {
             Ok(mut vm) => {
