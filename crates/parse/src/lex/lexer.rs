@@ -21,6 +21,21 @@ define_error!(
     }
 );
 
+/// Lexing error for a ```` ``` ```` prose island that never meets its
+/// closing fence — it would otherwise eat the rest of the file.
+pub struct UnterminatedProseIsland(pub Location);
+define_error!(
+    UnterminatedProseIsland {
+        fn build(&self, builder: Builder) -> Builder {
+            builder.label(self.0.primary("this prose island was never closed with ```"))
+        }
+
+        fn location(&self) -> Location {
+            self.0
+        }
+    }
+);
+
 /// Lexing error for a whole number too big to hold.
 pub struct IntegerOutOfRange(pub Location);
 define_error!(
@@ -118,7 +133,9 @@ pub fn shadow_sets(pages: &[(&str, &str)]) -> Vec<[bool; 3]> {
 
 /// The `use "…"` names `text` includes, lowercased.
 fn uses(text: &str) -> Vec<String> {
+    let mut in_island = false;
     text.lines()
+        .filter(|l| !line_in_island(l, &mut in_island))
         .filter_map(|l| {
             let rest = l.trim().strip_prefix("use")?;
             if !rest.starts_with([' ', '\t']) {
@@ -159,8 +176,12 @@ pub fn inherited_shadow(files: &[(&str, &str)]) -> Vec<[bool; 3]> {
 pub fn shadow_table(source: &str) -> Vec<(usize, [bool; 3])> {
     let mut starts: Vec<(usize, &str)> = vec![(0, "")];
     let mut at = 0;
+    let mut in_island = false;
     for line in source.split_inclusive('\n') {
-        if let Some(name) = line.strip_prefix(PAGE_MARK) {
+        // a `//# page:` inside a prose island is island text, not a mark
+        if !line_in_island(line, &mut in_island)
+            && let Some(name) = line.strip_prefix(PAGE_MARK)
+        {
             starts.push((at, name.trim()));
         }
         at += line.len();
@@ -190,7 +211,11 @@ pub fn shadow_at(table: &[(usize, [bool; 3])], pos: usize) -> [bool; 3] {
 }
 
 fn shadowed_words_into(source: &str, out: &mut [bool; 3]) {
+    let mut in_island = false;
     for line in source.lines() {
+        if line_in_island(line, &mut in_island) {
+            continue;
+        }
         let t = line.trim_start();
         if t.starts_with("//") {
             continue;
@@ -464,6 +489,57 @@ impl<'s> Lexer<'s> {
         }
         &self.source[start..self.char_stream.position()]
     }
+
+    /// Whether `start` is the first non-blank char of its line — where a
+    /// ```` ``` ```` opens a prose island. Mid-line it stays an invalid
+    /// char, so `a ``` b` never reads as prose.
+    fn at_line_start(&self, start: usize) -> bool {
+        self.source[..start]
+            .rsplit('\n')
+            .next()
+            .is_some_and(|tail| tail.trim().is_empty())
+    }
+
+    /// Chomps the ```` ``` ````-fenced prose island opened at `start`:
+    /// the opening line and every line after it, verbatim — no per-line
+    /// prefix, nothing inside is lexed — up to and including the first
+    /// line whose whole content is ```` ``` ````. A longer fence or a
+    /// ```` ``` ```` with text beside it is just island text. An island
+    /// that never closes runs to end of input and reports on the opener.
+    /// Returns the whole island, fences included.
+    // r[impl mimas.prose.island]
+    fn construct_prose_island(&mut self, start: usize) -> &'s str {
+        let mut at = start;
+        let mut close = None;
+        loop {
+            let rest = &self.source[at..];
+            let (line, next) = match rest.find('\n') {
+                Some(i) => (&rest[..i], at + i + 1),
+                None => (rest, self.source.len()),
+            };
+            if at != start && line.trim() == "```" {
+                close = Some(at + line.len());
+                break;
+            }
+            if next == self.source.len() {
+                break;
+            }
+            at = next;
+        }
+        let end = match close {
+            Some(end) => end,
+            None => {
+                self.unterminated(start, start + "```".len(), |location| {
+                    UnterminatedProseIsland(location).into()
+                });
+                self.source.len()
+            }
+        };
+        while self.char_stream.position() < end {
+            self.char_stream.chomp();
+        }
+        &self.source[start..self.char_stream.position()]
+    }
 }
 
 impl<'s> Iterator for Lexer<'s> {
@@ -586,6 +662,10 @@ impl<'s> Lex<'s, Tok<TokKind<'s>>, TokKind<'s>> for Lexer<'s> {
             TokKind::FString(self.construct_quoted(start, body, fstring_end(body)))
         } else if let Some(body) = rest.strip_prefix('"') {
             TokKind::String(self.construct_quoted(start, body, string_end(body)))
+        } else if rest.starts_with("```") && self.at_line_start(start) {
+            // a line whose content opens with ``` starts a prose island:
+            // the lines up to its closing ``` are swallowed verbatim
+            TokKind::ProseIsland(self.construct_prose_island(start))
         } else if let Some(ident) = self.construct_ident() {
             let kind = match ident {
                 "self" => TokKind::SelfKeyword,
@@ -861,7 +941,9 @@ impl<'s> Lex<'s, Tok<TokKind<'s>>, TokKind<'s>> for Lexer<'s> {
                 }
                 '/' => {
                     if self.match_chomp('/') {
-                        let is_doc = self.match_chomp('/');
+                        // `//`, `///` doc, `//!` inner doc, `////` literal
+                        let mut chars = self.source[self.char_stream.position()..].chars();
+                        let kind = line_comment_kind(chars.next(), chars.next());
                         let stream = &mut self.char_stream;
                         loop {
                             while stream.match_chomp_with(|c| c != '\n' && c != '\r') {}
@@ -871,7 +953,7 @@ impl<'s> Lex<'s, Tok<TokKind<'s>>, TokKind<'s>> for Lexer<'s> {
                             stream.peek_while(|c| c == ' ' || c == '\t');
                             if stream.match_peek('/')
                                 && stream.match_peek('/')
-                                && stream.match_peek('/') == is_doc
+                                && line_comment_kind(stream.peek_move(), stream.peek_move()) == kind
                             {
                                 stream.chomp_peeks();
                             } else {
@@ -880,13 +962,23 @@ impl<'s> Lex<'s, Tok<TokKind<'s>>, TokKind<'s>> for Lexer<'s> {
                             }
                         }
                         let text = &self.source[start..self.char_stream.position()];
-                        if is_doc {
-                            TokKind::DocComment(text)
-                        } else {
-                            TokKind::Comment(text)
+                        match kind {
+                            CommentKind::Plain => TokKind::Comment(text),
+                            CommentKind::OuterDoc => TokKind::DocComment(text),
+                            CommentKind::InnerDoc => TokKind::InnerDocComment(text),
+                            CommentKind::Literal => TokKind::LiteralComment(text),
                         }
                     } else if self.match_chomp('*') {
-                        TokKind::Comment(self.construct_block_comment(start))
+                        // `/*`, `/**` doc, `/*!` inner doc, `/***` literal
+                        let mut chars = self.source[self.char_stream.position()..].chars();
+                        let kind = block_comment_kind(chars.next(), chars.next());
+                        let text = self.construct_block_comment(start);
+                        match kind {
+                            CommentKind::Plain => TokKind::Comment(text),
+                            CommentKind::OuterDoc => TokKind::DocComment(text),
+                            CommentKind::InnerDoc => TokKind::InnerDocComment(text),
+                            CommentKind::Literal => TokKind::LiteralComment(text),
+                        }
                     } else if self.match_chomp('=') {
                         TokKind::SlashEqual
                     } else {
@@ -932,6 +1024,65 @@ pub fn is_symbol_ident(c: char) -> bool {
             | 0xFE0F           // variation selector-16
             | 0x200D           // zero-width joiner
     )
+}
+
+/// The comment family a `//` or `/*` opener belongs to. `///` and
+/// `/**` document the next item (outer), `//!` and `/*!` the enclosing
+/// scope (inner); the forms that outnumber the doc marks — `////` (four
+/// slashes up) and `/***` (three stars up) — are literal comments:
+/// "commented out harder", usually dead code, so the editor keeps them
+/// in mono. Everything else is a plain comment.
+// r[impl mimas.comment.doc]
+// r[impl mimas.comment.literal]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommentKind {
+    Plain,
+    OuterDoc,
+    InnerDoc,
+    Literal,
+}
+
+/// Which comment a `//` opens, by the two chars that could follow it.
+fn line_comment_kind(first: Option<char>, second: Option<char>) -> CommentKind {
+    match (first, second) {
+        (Some('!'), _) => CommentKind::InnerDoc,
+        (Some('/'), Some('/')) => CommentKind::Literal,
+        (Some('/'), _) => CommentKind::OuterDoc,
+        _ => CommentKind::Plain,
+    }
+}
+
+/// Which comment a `/*` opens, by the two chars that could follow it.
+/// `/**/` reads as the empty block — the `/` closes it before the doc
+/// rule sees the star — and `/***/` is `/***` then `*/`, a literal.
+fn block_comment_kind(first: Option<char>, second: Option<char>) -> CommentKind {
+    match (first, second) {
+        (Some('!'), _) => CommentKind::InnerDoc,
+        (Some('*'), Some('/')) => CommentKind::Plain,
+        (Some('*'), Some('*')) => CommentKind::Literal,
+        (Some('*'), _) => CommentKind::OuterDoc,
+        _ => CommentKind::Plain,
+    }
+}
+
+/// Whether a raw source line sits inside a ```` ``` ```` prose island —
+/// true on the fence lines and on every line they hold, false on real
+/// code. `in_island` carries the state across a whole-file scan: a line
+/// whose content opens with ```` ``` ```` enters one, and once inside
+/// only a line whose whole content is ```` ``` ```` leaves. The same
+/// boundary the lexer swallows on, so line scans (`use`, `fn and`,
+/// `//# page:`) never read island text as code.
+// r[impl mimas.prose.island]
+pub fn line_in_island(line: &str, in_island: &mut bool) -> bool {
+    if *in_island {
+        if line.trim() == "```" {
+            *in_island = false;
+        }
+        true
+    } else {
+        *in_island = line.trim_start().starts_with("```");
+        *in_island
+    }
 }
 
 /// Where the string whose body is the start of `text` has its closing quote.

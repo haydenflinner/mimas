@@ -176,8 +176,12 @@ impl Ast {
         let src: &str = self.src.inner();
         let mut marks = vec![(0, "")];
         let mut at = 0;
+        let mut in_island = false;
         for line in src.split_inclusive('\n') {
-            if let Some(name) = line.strip_prefix(crate::lex::PAGE_MARK) {
+            // a `//# page:` inside a prose island is island text, not a mark
+            if !crate::lex::line_in_island(line, &mut in_island)
+                && let Some(name) = line.strip_prefix(crate::lex::PAGE_MARK)
+            {
                 marks.push((at, name.trim_end()));
             }
             at += line.len();

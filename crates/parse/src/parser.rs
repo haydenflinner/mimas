@@ -291,11 +291,26 @@ impl<'s> Parser<'s> {
             .docs
             .iter()
             .map(|(&at, doc)| {
-                let lines: Vec<_> = doc
+                // a `/** … */` block doc loses its frame first; then each
+                // line loses its margin — `*`s for a block, `/`s for a
+                // `///` run, so `/// * bullet` keeps its markdown bullet
+                let (body, block) = match doc.strip_prefix("/*") {
+                    Some(rest) => {
+                        let body = rest.strip_prefix('*').unwrap_or(rest);
+                        (body.strip_suffix("*/").unwrap_or(body), true)
+                    }
+                    None => (*doc, false),
+                };
+                let lines: Vec<_> = body
                     .lines()
                     .map(|line| {
-                        let line = line.trim_start().trim_start_matches('/');
-                        line.strip_prefix(' ').unwrap_or(line)
+                        let line = line.trim_start();
+                        let line = if block {
+                            line.trim_start_matches('*')
+                        } else {
+                            line.trim_start_matches('/')
+                        };
+                        line.strip_prefix(' ').unwrap_or(line).trim_end()
                     })
                     .collect();
                 (self.tokens[at].span().start(), lines.join("\n"))
