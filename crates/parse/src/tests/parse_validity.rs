@@ -109,6 +109,13 @@ test_ok!(
     "pact A: B + C { fn f() -> (); }"
 );
 
+// `pact P<R>` -- a pact head takes no type parameters
+// r[verify mimas.pact.no-params]
+test_fail!(
+    pact_type_params_rejected,
+    "pact Add<R> { fn add(self, o: R) -> Self; }"
+);
+
 // pact items
 test_ok!(
     valid_pact_items,

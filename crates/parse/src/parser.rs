@@ -1429,6 +1429,11 @@ impl<'s> Parser<'s> {
     fn pact_decl(&mut self) -> Pact {
         self.bump(TokKind::Pact);
         let pact_name = self.require_ident();
+        // No `<T>` production follows the name: a pact never takes type
+        // parameters. Relations between two parameters are declined; the
+        // spellings that cover them are a concrete operand, an overload,
+        // `rmul`, or a dedicated solver.
+        // r[impl mimas.pact.no-params]
         // `pact A: B + C` -- A requires B and C: every implementer of A must
         // also implement them, and their members are reachable through an
         // `A` bound. Same `+` spelling as a param bound.
