@@ -1000,6 +1000,24 @@ pub struct MultiMethodUnreachable {
 }
 
 #[derive(Error, Debug, Diagnostic)]
+#[error("ambiguous `method {name}` arms")]
+#[diagnostic(help(
+    "both arms can match the same call and neither's keys cover the other's -- \
+     order decides today, so split the overlap or add a more specific arm first"
+))]
+pub struct MultiMethodAmbiguous {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("this arm also matches calls the earlier arm answers")]
+    pub at: SourceSpan,
+    // `None` when the earlier arm lives in another file -- a label can only
+    // point into `src`
+    #[label("first-match order picks this arm over the later one")]
+    pub earlier_at: Option<SourceSpan>,
+    pub name: String,
+}
+
+#[derive(Error, Debug, Diagnostic)]
 #[error("`method` returns `{found}` but its `multi fn` returns `{expected}`")]
 pub struct MultiReturnMismatch {
     #[source_code]

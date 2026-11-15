@@ -919,7 +919,15 @@ impl<'a> Pass<'a> {
                     // `None` = the native never declared `#[effects]` -- fail closed
                     binding.sig.effects.unwrap_or_else(Fx::unknown)
                 } else if self.pact_members.contains(&dec) {
-                    Fx::unknown()
+                    // the page is a closed world: every implementer is known,
+                    // so a pact-dispatched call edges to each method dec and
+                    // the fixpoint unions their effects transitively (nested
+                    // pact calls fold in the same way, cycles settle like
+                    // ordinary recursion). r[impl mimas.fx.pact-call]
+                    for (mdec, _) in self.solver.member_impl_decs(dec) {
+                        self.edges.entry(caller).or_default().insert(mdec);
+                    }
+                    Fx::empty()
                 } else {
                     match self.solver.decs[dec].kind {
                         DecKind::Item { .. } => {

@@ -2252,11 +2252,21 @@ pub(crate) fn dispatch_multi(ir: &mut Ir, dec: DecId, args: Vec<InstId>) -> Opti
         let mut cond: Option<InstId> = None;
         for (i, ids) in method.keys.iter().enumerate() {
             let Some(ids) = ids else { continue };
+            // a position's key set is a union: an enum's variants, a pact's
+            // implementers, or one concrete id -- the arg matches when it's an
+            // instance of ANY of them. Positions AND together.
+            let mut pos: Option<InstId> = None;
             for &id in ids {
                 let test = ir.current().is_instance(args[i], id);
-                cond = Some(match cond {
+                pos = Some(match pos {
                     None => test,
-                    Some(c) => ir.current().bin(BinOp::And, c, test, OperandKind::Bool),
+                    Some(c) => ir.current().bin(BinOp::Or, c, test, OperandKind::Bool),
+                });
+            }
+            if let Some(p) = pos {
+                cond = Some(match cond {
+                    None => p,
+                    Some(c) => ir.current().bin(BinOp::And, c, p, OperandKind::Bool),
                 });
             }
         }

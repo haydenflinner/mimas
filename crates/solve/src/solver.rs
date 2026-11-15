@@ -1625,6 +1625,7 @@ impl Solver {
             impls: FxHashMap::default(),
             native_overloads: FxHashMap::default(),
             overloads: FxHashMap::default(),
+            enum_of: None,
             flags: match api_adt.kind {
                 ApiAdtKind::Enum => AdtFlags::IS_ENUM,
                 ApiAdtKind::Struct => AdtFlags::empty(),
@@ -1642,7 +1643,9 @@ impl Solver {
                 let qualified = format!("{}::{}", api_adt.name, v.name);
                 let layout_adt = {
                     let variant = &self.adts[api_adt.adt_id].variants[&v.name];
-                    Adt::new_variant_layout(qualified.clone(), variant)
+                    let mut adt = Adt::new_variant_layout(qualified.clone(), variant);
+                    adt.enum_of = Some(api_adt.adt_id);
+                    adt
                 };
                 let layout_pushed = self.push_adt(layout_adt);
                 debug_assert_eq!(layout_pushed, v.layout_id);
@@ -2542,16 +2545,11 @@ impl Solver {
         [aid].into_iter().collect()
     }
 
-    /// The enum a variant layout adt belongs to (`V::Num`'s layout → `V`).
-    /// r[impl mimas.multi]
+    /// The enum a variant layout adt belongs to (`V::Num`'s layout → `V`) —
+    /// recorded on the layout adt when it's pushed, so this is one lookup,
+    /// not a scan of every adt per unify. r[impl mimas.multi]
     pub(crate) fn enum_parent(&self, layout: AdtId) -> Option<AdtId> {
-        self.adts
-            .iter()
-            .find(|(_, adt)| {
-                adt.flags.contains(AdtFlags::IS_ENUM)
-                    && adt.variants.values().any(|v| v.layout() == Some(layout))
-            })
-            .map(|(id, _)| id)
+        self.adts[layout].enum_of
     }
 
     /// A dispatch annotation (`x: Ship`, `x: V::Num`, `x: Draw`, `x: int`) →
@@ -2674,7 +2672,7 @@ impl Solver {
                 })
                 .unwrap_or(Ty::Unit);
 
-            let mut seen: Vec<Vec<Option<FxHashSet<AdtId>>>> = Vec::new();
+            let mut seen: Vec<(Vec<Option<FxHashSet<AdtId>>>, Location)> = Vec::new();
             for (i, (mdec, key_annotations, mloc)) in method_sites.into_iter().enumerate() {
                 if key_annotations.len() != bounds.len() {
                     Err(crate::errors::MultiArityMismatch {
@@ -2712,7 +2710,8 @@ impl Solver {
                 // an arm is dead when an earlier arm's keys cover it at every
                 // position (`None` covers everything). first-match order makes
                 // the earlier arm win, so this one can never run.
-                let dead = seen.iter().any(|prev| {
+                // r[impl mimas.multi.dominated]
+                let dead = seen.iter().any(|(prev, _)| {
                     (0..keys.len()).all(|pos| match (&prev[pos], &keys[pos]) {
                         (None, _) => true,
                         (Some(_), None) => false,
@@ -2723,6 +2722,33 @@ impl Solver {
                     Err(crate::errors::MultiMethodUnreachable {
                         src: self.src(mloc),
                         at: mloc.into(),
+                        name: self.decs[gdec].name.clone(),
+                    })?
+                }
+                // overlapping but incomparable arms: `(int, P)` and `(P, int)`
+                // both match `(int, int)` when `int` implements `P`, yet
+                // neither's key space holds the other -- first-match order
+                // would silently pick one. That's an error: the author names
+                // the overlap with a more specific arm, or disjoins the keys.
+                // r[impl mimas.multi.ambiguous]
+                if let Some((_, ploc)) = seen.iter().find(|(prev, _)| {
+                    (0..keys.len()).all(|pos| match (&prev[pos], &keys[pos]) {
+                        // co-applicable: some value exists in both sets
+                        (None, _) | (_, None) => true,
+                        (Some(earlier), Some(later)) => !earlier.is_disjoint(later),
+                    }) && !(0..keys.len()).all(|pos| match (&prev[pos], &keys[pos]) {
+                        // earlier ⊆ later pointwise: the earlier arm is simply
+                        // the more specific one and wins on purpose
+                        (_, None) => true,
+                        (None, Some(_)) => false,
+                        (Some(earlier), Some(later)) => earlier.is_subset(later),
+                    })
+                }) {
+                    Err(crate::errors::MultiMethodAmbiguous {
+                        src: self.src(mloc),
+                        at: mloc.into(),
+                        earlier_at: (ploc.file_id == mloc.file_id)
+                            .then(|| (*ploc).into()),
                         name: self.decs[gdec].name.clone(),
                     })?
                 }
@@ -2745,7 +2771,7 @@ impl Solver {
                         expected: gret.to_string(),
                     })?
                 }
-                seen.push(keys.clone());
+                seen.push((keys.clone(), mloc));
                 let data = self.multis.get_mut(&gdec).unwrap();
                 data.methods[i].keys = keys;
             }
@@ -4460,7 +4486,7 @@ impl Solver {
     /// dec): `(method dec, implementer name)` per impl. Empty when the pact
     /// has no impls -- the call then has no effects to union.
     // r[impl mimas.const.pact-fx]
-    fn member_impl_decs(&self, member: DecId) -> Vec<(DecId, String)> {
+    pub(crate) fn member_impl_decs(&self, member: DecId) -> Vec<(DecId, String)> {
         let Some((&pid, key)) = self
             .pact_members
             .iter()

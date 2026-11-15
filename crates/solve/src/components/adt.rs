@@ -29,6 +29,10 @@ pub(crate) struct Adt {
     /// `fn mul(self, k: float)`. An operator or a call picks among the
     /// primary and these by what the operand is. r[impl mimas.op.overload]
     pub overloads: FxHashMap<String, Vec<Field>>,
+    /// For a variant's layout adt (`V::Num`), the enum it's a variant of.
+    /// Set when the layout is pushed — `Solver::enum_parent` reads it here
+    /// instead of scanning every adt.
+    pub enum_of: Option<shared::AdtId>,
     pub flags: AdtFlags,
 }
 impl Adt {
@@ -47,6 +51,7 @@ impl Adt {
             impls: FxHashMap::default(),
             native_overloads: FxHashMap::default(),
             overloads: FxHashMap::default(),
+            enum_of: None,
             flags: AdtFlags::empty(),
         }
     }
@@ -59,6 +64,7 @@ impl Adt {
             impls: FxHashMap::default(),
             native_overloads: FxHashMap::default(),
             overloads: FxHashMap::default(),
+            enum_of: None,
             flags: AdtFlags::IS_ENUM,
         }
     }
@@ -80,6 +86,7 @@ impl Adt {
             impls: FxHashMap::default(),
             native_overloads: FxHashMap::default(),
             overloads: FxHashMap::default(),
+            enum_of: None,
             flags: AdtFlags::empty(),
         }
     }

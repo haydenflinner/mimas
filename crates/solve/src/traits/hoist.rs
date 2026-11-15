@@ -239,7 +239,9 @@ impl Hoist for parse::item::Enum {
 
             let layout_adt = {
                 let variant = &ctx.solver.adts[id].variants[&name];
-                Adt::new_variant_layout(qualified.clone(), variant)
+                let mut adt = Adt::new_variant_layout(qualified.clone(), variant);
+                adt.enum_of = Some(id);
+                adt
             };
             let layout = ctx.solver.push_adt(layout_adt);
 
@@ -630,7 +632,21 @@ impl Hoist for Function {
             true,
         );
         ctx.solver.pop_type_params();
-        let fn_header = fn_header?;
+        let mut fn_header = fn_header?;
+
+        // a `multi fn` dispatches at runtime: an unannotated param accepts the
+        // whole call space (misses land in the mandatory fallback), so it must
+        // be `any` -- a Vid would pin to the first call site's type and a
+        // bound annotation only describes the dispatchable space, not the
+        // caller's obligation. the fallback narrows with `match` like any
+        // `any`-typed value. r[impl mimas.multi.decl]
+        if self.role == FnRole::Multi {
+            for (param, binding) in fn_header.parameters.iter_mut().zip(&self.parameters) {
+                if binding.annotation.is_none() {
+                    param.ty = Ty::Any;
+                }
+            }
+        }
 
         let ty = Ty::Fn(fn_header);
         let node_id = ctx.node_id;
