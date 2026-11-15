@@ -133,6 +133,50 @@ fn norm_literals_out_of_range_reject() {
     assert!(test_runner::try_execute("let v: snorm = -1.0; let w: unorm = 0.0; let u: unorm = 1.0;").is_ok());
 }
 
+// r[verify mimas.tuple.axis]
+test_run!(
+    axis_names_spell_tuple_slots,
+    "let p: (px↔, px↕) = (3.0px, up 4.0px)
+     let t = (1.0, 2.0, 3.0, 4.0)",
+    "p.x.to(\"px\")" => "3.0",
+    "p.y.to(\"px\")" => "-4.0",
+    "t.z" => "3.0",
+    "t.t" => "4.0",
+    // the slot's own tag survives the read: `p.x` stays along x
+    "(p.x + 1.0px).to(\"px\")" => "4.0",
+    "(p.x - right 1.0px).to(\"px\")" => "2.0",
+);
+
+// r[verify mimas.tuple.axis]
+#[test]
+fn tuple_axis_names_reject_other_idents() {
+    rejected("let p = (1.0, 2.0);\nlet a = p.w;", "dot-indexed");
+    rejected("let p = (1.0, 2.0);\nlet a = p.xx;", "dot-indexed");
+    // and the tags they read still clash across axes
+    rejected("let p: (px↔, px↕) = (1.0px, 2.0px);\nlet a = p.x + p.y;", "cannot add");
+}
+
+// r[verify mimas.unit.to]
+test_run!(
+    to_reads_back_across_an_axis,
+    "let span: px↔ = 40.0px",
+    // the quantity and the string spellings agree: `to` reads a plain
+    // number back, the axis is direction metadata, not a different unit
+    "span.to(1px)" => "40.0",
+    "span.to(1px↔)" => "40.0",
+    "(up 5.0px).to(1px)" => "-5.0",
+    "(right 3.0ft).to(1mi)" => "0.0005681818181818183",
+    "(right 3.0ft).to(\"ft\")" => "3.0",
+);
+
+// r[verify mimas.unit.to]
+#[test]
+fn to_still_refuses_a_real_mismatch() {
+    rejected("let span: px↔ = 40.0px;\nlet a = span.to(1px↕);", "cannot express");
+    rejected("let span: px↔ = 40.0px;\nlet a = span.to(1s);", "cannot express");
+    rejected("let span: px↔ = 40.0px;\nlet a = span.to(\"s\");", "cannot express");
+}
+
 // r[verify mimas.unit.tuple]
 #[test]
 fn tuple_slots_reject_a_swapped_axis() {

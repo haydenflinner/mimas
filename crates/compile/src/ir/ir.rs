@@ -262,6 +262,18 @@ impl Ir {
                 Ty::Adt(adt, _) | Ty::Identity(adt, _) => *adt,
                 other => panic!("field access on option of non-adt type: {other:?}"),
             },
+            // axis names spell tuple slots: `pt.x`/`pt.y`/`pt.z`/`pt.t` are the
+            // positions `.0`..`.3` index — the solver admits no other ident here.
+            // r[impl mimas.tuple.axis]
+            Some(Ty::Tuple(_)) => {
+                return match field {
+                    "x" => 0,
+                    "y" => 1,
+                    "z" => 2,
+                    "t" => 3,
+                    other => unreachable!("solver admitted `{other}` on a tuple"),
+                };
+            }
             other => panic!("field access on non-adt type: {other:?}"),
         };
         self.resolutions.adts[adt]

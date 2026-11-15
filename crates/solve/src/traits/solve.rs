@@ -601,17 +601,32 @@ impl Solve for Access {
 
                 let result = match &lhs {
                     Ty::Tuple(members) => {
-                        let ExprKind::Literal(Literal::Int(i)) = right.kind() else {
-                            Err(InvalidTupleIndex {
+                        // `pt.0`..`pt.3` index by slot; the axis names `x` `y`
+                        // `z` `t` spell the same slots, so a `(px↔, px↕)`
+                        // point reads `pt.x`/`pt.y` the way it means.
+                        // r[impl mimas.tuple.axis]
+                        let i = match right.kind() {
+                            ExprKind::Literal(Literal::Int(i)) => *i as usize,
+                            ExprKind::Ident(id) => match id.lexeme.as_str() {
+                                "x" => 0,
+                                "y" => 1,
+                                "z" => 2,
+                                "t" => 3,
+                                _ => Err(InvalidTupleIndex {
+                                    src: solver.src(right.location()),
+                                    at: right.location().into(),
+                                })?,
+                            },
+                            _ => Err(InvalidTupleIndex {
                                 src: solver.src(right.location()),
                                 at: right.location().into(),
-                            })?
+                            })?,
                         };
-                        members.get(*i as usize).cloned().ok_or_else(|| {
+                        members.get(i).cloned().ok_or_else(|| {
                             Error::from(OutOfBoundsTupleRead {
                                 src: solver.src(location),
                                 at: location.into(),
-                                tried_index: *i as usize,
+                                tried_index: i,
                                 max_index: members.len(),
                                 ty: Ty::Tuple(members.clone()).to_string(),
                             })

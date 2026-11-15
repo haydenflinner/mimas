@@ -333,6 +333,43 @@ impl Dim {
     }
 }
 
+/// A dimension claim that may nest inside a container parameter: `Vec<Px>`
+/// checks as `[px]`, `Vec<(PxX, PxY)>` as `(px↔, px↕)` element-wise. Native
+/// signatures carry these in `param_dims`; the solver's `D` mirrors the same
+/// shape for values it infers itself.
+// r[impl mimas.unit.nested]
+#[derive(Debug, Clone, PartialEq)]
+pub enum DimTree {
+    /// A measured quantity in this dimension (`Dim::NONE` = a plain number).
+    Q(Dim),
+    /// A list whose elements each satisfy this tree.
+    Arr(Box<DimTree>),
+    /// A tuple whose elements each satisfy the tree at their index.
+    Tup(Vec<DimTree>),
+}
+
+impl DimTree {
+    /// The unit spelling for a signature dump — `px`, `[px]`, `(px↔, px↕)`.
+    pub fn name(&self) -> String {
+        match self {
+            DimTree::Q(d) => d.name(),
+            DimTree::Arr(inner) => format!("[{}]", inner.name()),
+            DimTree::Tup(parts) => format!(
+                "({})",
+                parts.iter().map(DimTree::name).collect::<Vec<_>>().join(", ")
+            ),
+        }
+    }
+
+    /// The scalar `Dim` this tree asserts, when it is one.
+    pub fn scalar(&self) -> Option<Dim> {
+        match self {
+            DimTree::Q(d) => Some(*d),
+            _ => None,
+        }
+    }
+}
+
 /// How an echo shows a quantity: in the unit the program wrote for its
 /// dimension (`12lb` echoes `12 lb`, not `5.44 kg`), divided by `scale` (the
 /// unit's size in base units). `list` marks a list of such quantities, which

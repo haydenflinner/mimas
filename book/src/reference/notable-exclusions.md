@@ -21,3 +21,9 @@ There is no borrow checker -- garbage collection removes the need for one. Tradi
 ## A `let` / `mut` split
 
 There's no `mut`. Without a borrow checker there's little to gain from distinguishing mutable and immutable bindings, so the model is as simple as it gets: `let` is reassignable, `const` is not, and that's all. See [Variables & Constants](./variables.md).
+
+## First-class `fn`s
+
+A `fn` declaration is not a value -- it can't be bound (`let g = sub` is a compile error), can't nest, and can't capture. Languages that merge `fn` and lambda into one concept (Python, Swift) pay for it by giving every named function an environment it may not need. Mimas keeps the split because the split means something: a `fn` is context-free -- it sees only its parameters and top-level items -- which makes it the portable unit in a system where code is replayed, serialized, and shared between pages. A capture is a hidden dependency that never appears in a signature.
+
+The value use cases are already covered by [closures](./functions.md#closures), which are first-class and do capture. What remains parked, contingent on a real use case (a dispatch table of named handlers is the candidate so far), is a narrower coercion: letting a `fn` name evaluate to a non-capturing function value, with defaults padded callee-side so `f("localhost")` through a `let` still sees `port = 8080`. The wider merge -- nested `fn`, capturing `fn`, callee-side default padding everywhere -- was considered and rejected rather than deferred: a named closure is just a `let` closure already.

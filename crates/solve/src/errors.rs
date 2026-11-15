@@ -489,7 +489,7 @@ pub struct OutOfBoundsTupleRead {
 pub struct InvalidTupleIndex {
     #[source_code]
     pub src: NamedSource<Arc<str>>,
-    #[label("tuples can only be dot-indexed with integers")]
+    #[label("tuples are dot-indexed by slot (`.0`) or axis name (`.x` `.y` `.z` `.t`)")]
     pub at: SourceSpan,
 }
 

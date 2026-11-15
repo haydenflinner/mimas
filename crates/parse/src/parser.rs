@@ -4858,7 +4858,17 @@ impl<'s> Parser<'s> {
             }
             let kind = self.peek();
             if starts(kind) {
+                let at = self.next;
                 elements.push(element(self));
+                // A `starts`-accepted token the element left behind
+                // feeds the next iteration forever (`#[` inside call
+                // args was one: `Hash` starts an expr for the `#1.10`
+                // literal but `#[name]` parses nothing). Report it and
+                // step past.
+                if self.next == at {
+                    self.error(self.unexpected_token());
+                    self.skip();
+                }
             } else if kind.ends_list() {
                 self.expect(closer);
                 break;

@@ -735,7 +735,7 @@ macro_rules! impl_into_fn {
             fn install(self, api: &mut Api<'_, 'gc>, name: String, module: Vec<String>) -> NativeId {
                 let reg = api.library.registry();
                 let parameters = vec![$(<$arg as MimasType<'gc>>::mimas_ty(reg),)*];
-                let param_dims = vec![$(<$arg as MimasType<'gc>>::mimas_dim(reg),)*];
+                let param_dims = vec![$(<$arg as MimasType<'gc>>::mimas_dim_tree(reg),)*];
                 let return_ty = <R as IntoNativeResult<'gc>>::return_ty(reg);
                 let return_dim = <R as IntoNativeResult<'gc>>::return_dim(reg);
                 let (doc, param_names) = meta_for(
@@ -781,7 +781,7 @@ macro_rules! impl_into_fn {
             fn install_assoc(self, api: &mut Api<'_, 'gc>, recv_ty: Ty, name: String) {
                 let reg = api.library.registry();
                 let parameters = vec![$(<$arg as MimasType<'gc>>::mimas_ty(reg),)*];
-                let param_dims = vec![$(<$arg as MimasType<'gc>>::mimas_dim(reg),)*];
+                let param_dims = vec![$(<$arg as MimasType<'gc>>::mimas_dim_tree(reg),)*];
                 let return_ty = <R as IntoNativeResult<'gc>>::return_ty(reg);
                 let return_dim = <R as IntoNativeResult<'gc>>::return_dim(reg);
                 let (doc, param_names) = meta_for(
@@ -896,7 +896,7 @@ macro_rules! impl_into_method {
                 let recv_ty = <Recv as MimasType<'gc>>::mimas_ty(reg)
                     .expect("native method receiver must have a concrete Ty");
                 let parameters = vec![$(<$arg as MimasType<'gc>>::mimas_ty(reg),)*];
-                let param_dims = vec![$(<$arg as MimasType<'gc>>::mimas_dim(reg),)*];
+                let param_dims = vec![$(<$arg as MimasType<'gc>>::mimas_dim_tree(reg),)*];
                 let return_ty = <R as IntoNativeResult<'gc>>::return_ty(reg);
                 let return_dim = <R as IntoNativeResult<'gc>>::return_dim(reg);
                 let (doc, param_names) = meta_for(

@@ -1,4 +1,7 @@
-use shared::{AdtId, Fx, Literal, Ty, units::Dim};
+use shared::{
+    AdtId, Fx, Literal, Ty,
+    units::{Dim, DimTree},
+};
 
 /// A per-native literal checker, submitted via `vm::api::NativeValidator` and joined by Rust
 /// path (same mechanism as `NativeDoc`). The solver calls it when *every* call argument is a
@@ -82,8 +85,10 @@ pub struct ApiFunction<C> {
     pub module: Vec<String>,
     pub parameters: Vec<Option<Ty>>,
     /// Per-slot dimension the checker enforces at call sites, parallel to `parameters`
-    /// (`None` = unchecked). Populated from unit-carrying `MimasType`s like `Secs`/`Hz`.
-    pub param_dims: Vec<Option<Dim>>,
+    /// (`None` = unchecked). Populated from unit-carrying `MimasType`s like `Secs`/`Hz`;
+    /// a `DimTree` nests inside container params — `Vec<Px>` checks as `[px]`,
+    /// `Vec<(PxX, PxY)>` as `(px↔, px↕)` element-wise.
+    pub param_dims: Vec<Option<DimTree>>,
     /// The identifiers the Rust signature gave each parameter, parallel to `parameters`.
     /// Synthesized `arg{i}` names fill in for natives whose signature isn't on record
     /// (`add_described`, or a pruned `NativeMeta` submission -- see `vm::api::NativeMeta`).
@@ -113,7 +118,8 @@ pub struct ApiMethod<C> {
     pub name: String,
     pub parameters: Vec<Option<Ty>>,
     /// Per-slot dimension the checker enforces at call sites, parallel to `parameters`.
-    pub param_dims: Vec<Option<Dim>>,
+    /// Same deal as [`ApiFunction::param_dims`].
+    pub param_dims: Vec<Option<DimTree>>,
     /// Same deal as [`ApiFunction::param_names`].
     pub param_names: Vec<String>,
     pub return_ty: Option<Ty>,

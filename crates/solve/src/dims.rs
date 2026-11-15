@@ -32,7 +32,10 @@ use parse::{
     lex::TyKw,
     stmt::AssignmentOp,
 };
-use shared::{Located, Location, Ty, units, units::Dim};
+use shared::{
+    Located, Location, Ty, units,
+    units::{Dim, DimTree},
+};
 
 use crate::{Result, Solver, components::DecId, errors::DimensionMismatch};
 
@@ -98,6 +101,17 @@ fn clash(a: &D, b: &D) -> Option<(Dim, Dim)> {
         // an arity miss the type solver's own error
         (D::Tuple(x), D::Tuple(y)) => x.iter().zip(y).find_map(|(a, b)| clash(a, b)),
         _ => None,
+    }
+}
+
+/// A native signature's nested dimension claim as a `D` — `Vec<Px>` checks
+/// args as `[px]`, `Vec<(PxX, PxY)>` as `(px↔, px↕)` element-wise.
+// r[impl mimas.unit.nested]
+fn dim_tree(t: &DimTree) -> D {
+    match t {
+        DimTree::Q(d) => D::Q(*d),
+        DimTree::Arr(inner) => D::Arr(Box::new(dim_tree(inner))),
+        DimTree::Tup(parts) => D::Tuple(parts.iter().map(dim_tree).collect()),
     }
 }
 
@@ -1324,6 +1338,16 @@ impl<'a> Pass<'a> {
                     return ds.get(*i as usize).cloned().unwrap_or(D::Any);
                 }
                 if let ExprKind::Ident(field) = right.kind() {
+                    // `p.x`/`p.y`/`p.z`/`p.t`: axis names spell tuple slots,
+                    // so `(px↔, px↕)` keeps its tags through `p.x`/`p.y`.
+                    // r[impl mimas.tuple.axis]
+                    if let D::Tuple(ds) = &recv
+                        && let Some(i) = ["x", "y", "z", "t"]
+                            .iter()
+                            .position(|n| *n == field.lexeme.as_str())
+                    {
+                        return ds.get(i).cloned().unwrap_or(D::Any);
+                    }
                     if let D::Iv(d) = recv
                         && matches!(field.lexeme.as_str(), "lo" | "mid" | "hi")
                     {
@@ -1459,16 +1483,19 @@ impl<'a> Pass<'a> {
             let Some(Some(want)) = binding.sig.param_dims.get(i) else {
                 continue;
             };
-            if !want.is_none() {
-                self.want_dims.insert(arg.value.id(), *want);
+            if let Some(d) = want.scalar()
+                && !d.is_none()
+            {
+                self.want_dims.insert(arg.value.id(), d);
             }
+            let want = dim_tree(want);
             self.expect(
-                &D::Q(*want),
+                &want,
                 got,
                 arg.value.location(),
                 &format!("argument {} of `{name}`", i + 1),
             );
-            self.range_check(&arg.value, &D::Q(*want));
+            self.range_check(&arg.value, &want);
         }
         Some(binding.sig.return_dim.map_or(D::Any, D::Q))
     }
@@ -1797,11 +1824,13 @@ impl<'a> Pass<'a> {
                     }
                 }
                 // `x.to(1kWh)`: the argument itself is a quantity and `to` divides,
-                // so it must measure the same thing. A `str` arrives `Any` — this
-                // fires only on known numbers.
+                // so it must measure the same thing. Same check as the string
+                // path above — axes adopt, `px↔.to(1px)` reads back the
+                // magnitude. A `str` arrives `Any` — this fires only on
+                // known numbers.
                 // r[impl mimas.unit.to]
                 if let Some(D::Q(ud)) = args.first()
-                    && *ud != *d
+                    && !Dim::agree(*ud, *d)
                 {
                     self.fail(
                         c.arguments[0].value.location(),

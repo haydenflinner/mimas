@@ -1300,7 +1300,7 @@ impl Solver {
         &mut self,
         name: String,
         params: Vec<Option<Ty>>,
-        param_dims: Vec<Option<shared::units::Dim>>,
+        param_dims: Vec<Option<shared::units::DimTree>>,
         return_ty: Option<Ty>,
         return_dim: Option<shared::units::Dim>,
         native_id: NativeId,
@@ -2621,7 +2621,6 @@ impl Solver {
             | Ty::Float
             | Ty::Str
             | Ty::Any
-            | Ty::Vid(_)
             | Ty::Anon(_)
             | Ty::Pacts(_)
             | Ty::Skolem(_) => t.clone(),
@@ -4563,9 +4562,10 @@ pub(crate) struct FnRun {
 #[derive(Clone)]
 pub(crate) struct NativeFnSig {
     pub params: Vec<Option<Ty>>,
-    /// Per-slot dimension from unit-carrying `MimasType`s, parallel to `params`. The dims
+    /// Per-slot dimension claim from unit-carrying `MimasType`s, parallel to `params` —
+    /// a `DimTree` may nest inside container params (`[px]`, `(px↔, px↕)`). The dims
     /// pass checks call args against it; `None` leaves the slot unchecked.
-    pub param_dims: Vec<Option<shared::units::Dim>>,
+    pub param_dims: Vec<Option<shared::units::DimTree>>,
     pub return_ty: Option<Ty>,
     /// Dimension of the return value, when it measures something.
     pub return_dim: Option<shared::units::Dim>,

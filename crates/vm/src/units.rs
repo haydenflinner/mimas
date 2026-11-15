@@ -90,6 +90,17 @@ unit_ty!(
     /// Pixels -- screen-space positions and extents.
     Px, "px", units::PIXELS
 );
+// r[impl mimas.unit.nested]
+unit_ty!(
+    /// Pixels along x (`px↔`) -- a horizontal screen coordinate. Untagged `px`
+    /// arguments adopt the axis at the call site; a `px↕` argument does not.
+    PxX, "px↔", units::PIXELS.mul(Dim::axis(0))
+);
+unit_ty!(
+    /// Pixels along y (`px↕`) -- a vertical screen coordinate, down-positive
+    /// like the axis it rides.
+    PxY, "px↕", units::PIXELS.mul(Dim::axis(1))
+);
 // r[impl mimas.unit.angle]
 unit_ty!(
     /// Radians -- `deg`/`turn`/`grad`/`arcmin`/`arcsec`/`mrad` are the same

@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 
 use api::Registry;
-use shared::{FnHeader, FnParam, Ty, units::Dim};
+use shared::{
+    FnHeader, FnParam, Ty,
+    units::{Dim, DimTree},
+};
 
 use crate::{Array, Ctx, Dict, DictMap, Instance, RtErr, RtResult, Str, Val};
 use gc_arena::Gc;
@@ -24,6 +27,12 @@ pub trait MimasType<'gc>: Sized {
     /// measured quantity (`Secs` -> `s`). `None` means unchecked, the same as before.
     fn mimas_dim(_: &Registry) -> Option<Dim> {
         None
+    }
+    /// The dimension claim for this slot when it may nest inside a container —
+    /// `Vec<Px>` claims `[px]`, `(PxX, PxY)` claims `(px↔, px↕)` element-wise.
+    /// Defaults to the scalar [`Self::mimas_dim`]; containers override it.
+    fn mimas_dim_tree(reg: &Registry) -> Option<DimTree> {
+        Self::mimas_dim(reg).map(DimTree::Q)
     }
     fn from_value(ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError>;
     fn into_value(self, ctx: Ctx<'gc>) -> Val<'gc>;
@@ -458,6 +467,9 @@ impl<'gc, T: MimasType<'gc>> MimasType<'gc> for Option<T> {
     fn mimas_dim(reg: &Registry) -> Option<Dim> {
         T::mimas_dim(reg)
     }
+    fn mimas_dim_tree(reg: &Registry) -> Option<DimTree> {
+        T::mimas_dim_tree(reg)
+    }
     fn from_value(ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError> {
         if v == Val::Null {
             Ok(None)
@@ -494,6 +506,9 @@ impl<'gc, T: MimasType<'gc>> MimasType<'gc> for Raisable<T> {
     fn mimas_dim(reg: &Registry) -> Option<Dim> {
         T::mimas_dim(reg)
     }
+    fn mimas_dim_tree(reg: &Registry) -> Option<DimTree> {
+        T::mimas_dim_tree(reg)
+    }
     fn from_value(ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError> {
         match v {
             Val::Raised(s) => Ok(Raisable::Raised(
@@ -520,6 +535,9 @@ impl<'gc, T: MimasType<'gc>> MimasType<'gc> for Raisable<T> {
 impl<'gc, T: MimasType<'gc>> MimasType<'gc> for Vec<T> {
     fn mimas_ty(reg: &Registry) -> Option<Ty> {
         T::mimas_ty(reg).map(|i| Ty::array(i))
+    }
+    fn mimas_dim_tree(reg: &Registry) -> Option<DimTree> {
+        T::mimas_dim_tree(reg).map(|t| DimTree::Arr(Box::new(t)))
     }
     fn from_value(ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError> {
         let arr = v
@@ -677,6 +695,15 @@ macro_rules! impl_tuple {
                 Some(Ty::Tuple(vec![
                     <$head as MimasType<'gc>>::mimas_ty(reg)?,
                     $(<$tail as MimasType<'gc>>::mimas_ty(reg)?,)*
+                ]))
+            }
+            /// `(PxX, PxY)` claims `(px↔, px↕)` — only when every element has a
+            /// dim to check; a partly-measured tuple stays unchecked rather
+            /// than claim "plain number" for its unchecked slots.
+            fn mimas_dim_tree(reg: &Registry) -> Option<DimTree> {
+                Some(DimTree::Tup(vec![
+                    <$head as MimasType<'gc>>::mimas_dim_tree(reg)?,
+                    $(<$tail as MimasType<'gc>>::mimas_dim_tree(reg)?,)*
                 ]))
             }
             #[allow(non_snake_case)]
