@@ -900,8 +900,9 @@ fn scalar_replace(body: &mut Body) -> bool {
                             Inst::SetLocal(fields[*slot as usize], *value)
                         }
                         // the copy was dropped from its stream; leave a harmless
-                        // dead read in its place
-                        Inst::SetLocal(..) => Inst::GetLocal(fields[0]),
+                        // dead read in its place. a fieldless aggregate has no
+                        // field slots to read, so it reads the member's own local
+                        Inst::SetLocal(..) => Inst::GetLocal(fields.first().copied().unwrap_or(m)),
                         _ => unreachable!("checked above"),
                     };
                 }

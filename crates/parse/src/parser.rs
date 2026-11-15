@@ -2512,18 +2512,26 @@ impl<'s> Parser<'s> {
 
     fn null_coalecence(&mut self) -> Expr {
         let start = self.next_start();
-        let expr = self.binary(0);
-        if !self.infix_binds() {
-            return expr;
-        }
-        if self.eat(TokKind::DoubleHook) {
-            let value = self.expr();
-            self.new_expr(Coalescence::new(expr, value), start)
-        } else if self.eat(TokKind::Absolve) {
-            let handler = self.expr();
-            self.new_expr(Absolve::new(expr, handler), start)
-        } else {
-            expr
+        let mut expr = self.binary(0);
+        loop {
+            if !self.infix_binds() {
+                return expr;
+            }
+            expr = if self.eat(TokKind::DoubleHook) {
+                // `a ?? b ?? c` stays right-nested: the second `??` is
+                // inside the fallback's own expr
+                let value = self.expr();
+                self.new_expr(Coalescence::new(expr, value), start)
+            } else if self.eat(TokKind::Absolve) {
+                let handler = self.expr();
+                self.new_expr(Absolve::new(expr, handler), start)
+            } else {
+                return expr;
+            };
+            // A block-ended trailer hands the chain back to `binary_ops`, so an
+            // infix after the `}` binds the trailer's value, not the handler:
+            // `f() absolve |e| { d } == v` is `(f() absolve |e| { d }) == v`.
+            expr = self.binary_ops(expr, 0, start);
         }
     }
 
@@ -2531,7 +2539,13 @@ impl<'s> Parser<'s> {
     /// call may take; anything looser belongs to the caller.
     fn binary(&mut self, min_power: u8) -> Expr {
         let start = self.next_start();
-        let mut left = self.unary();
+        let left = self.unary();
+        self.binary_ops(left, min_power, start)
+    }
+
+    /// The infix loop of `binary`, split out so a `??`/`absolve` trailer can hand
+    /// its result back to the chain once its handler ends.
+    fn binary_ops(&mut self, mut left: Expr, min_power: u8, start: usize) -> Expr {
         // only looser operators can follow an `in`, which doesn't chain
         let mut max_power = u8::MAX;
         loop {

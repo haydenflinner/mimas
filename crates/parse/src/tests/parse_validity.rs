@@ -236,7 +236,11 @@ test_ok!(
     "check !done",
     // a check's expression may be a block
     "check { let a = 2; a * 3 } == 6",
-    "check {\n    xs.len() == 2\n}"
+    "check {\n    xs.len() == 2\n}",
+    // an `absolve` whose handler ended in `}` hands the chain back:
+    // the `==` binds the absolved value, same as the parenthesized form
+    "check f() absolve |_e| { 0 } == 5",
+    "check f() absolve |e| { g() } == h()",
 );
 test_fail!(
     // r[verify check.retired]

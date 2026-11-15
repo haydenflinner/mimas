@@ -195,6 +195,22 @@ fn a_faulting_check_leaves_the_world_for_the_next() {
     assert!(results[1].passed(), "{results:?}");
 }
 
+// A `check` whose left side ends in an `absolve` block takes the `==` on the
+// recovered value — `check f() absolve |_e| { 0 } == v` reads as
+// `check (f() absolve |_e| { 0 }) == v`, no parens needed. The second case
+// fails on the *value*, proving the `==` ran outside the handler.
+#[test]
+fn a_check_absolves_before_comparing() {
+    const SOURCE: &str = "fn f() -> int! { raise \"nope\" }\n\
+                          check f() absolve |_e| { 0 } == 0\n\
+                          check f() absolve |_e| { 0 } == 1\n";
+    let mut vm = vm::Vm::compile(SOURCE, library::std).unwrap();
+    let results = vm.run_tests();
+    assert_eq!(results.len(), 2, "{results:?}");
+    assert!(results[0].passed(), "{results:?}");
+    assert!(!results[1].passed(), "{results:?}");
+}
+
 // The failing check's operands come back on the `TestResult` as
 // `Inspect` trees — the example a debugger opens, left then right,
 // not just the text inside the message. r[verify check.line]

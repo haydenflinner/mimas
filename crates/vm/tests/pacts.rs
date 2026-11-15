@@ -100,6 +100,21 @@ test_vm!(
     "announce(Dog { tag = \"rex\" })" => str!("rex")
 );
 
+// the argument is an *empty* struct literal: scalarizing its zero-field
+// `NewInstance` must not panic in codegen. `outer` puts the call in a
+// non-entry body, where `scalar_replace` runs — `go(Fade { })` at the top
+// level never reached it
+test_vm!(
+    pact_typed_parameter_empty_struct_arg,
+    "pact Anim { fn k(self) -> float }
+     struct Fade { }
+     impl Anim for Fade { fn k(self) -> float { 0.5 } }
+     fn go(a: Anim) -> float { a.k() }
+     fn outer() -> float { go(Fade { }) }",
+    "go(Fade { })" => Float(0.5),
+    "outer()" => Float(0.5)
+);
+
 // struct field bound by multiple pacts (`A + B`): only S satisfies both, so monomorphic.
 test_vm!(
     pact_multi_bound_field,

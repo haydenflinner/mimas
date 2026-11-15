@@ -1830,6 +1830,79 @@ expr_test!(
     )
 );
 
+expr_test!(
+    // a block-ended handler hands the chain back: `==` binds the absolved
+    // value, not the handler (`f() absolve |e| { d } == v`)
+    absolve_then_equality,
+    "foo() absolve |e| {0} == 1",
+    Equality::new(
+        Absolve::new(
+            Call::new(ident_expr!("foo"), vec![]).into_expr(),
+            Closure::new(
+                vec![Binding::new(ident!("e"))],
+                Block::new_with_yield(vec![], int!(0)).into_expr(),
+            )
+            .into_expr(),
+        )
+        .into_expr(),
+        EqualityOp::Equal,
+        int!(1),
+    )
+);
+
+expr_test!(
+    // a *bare* handler body stays greedy: `|e| 0 == 1` reads `==` inside the
+    // closure, same as `??`'s fallback (`a ?? b == c`) — only a `}` ends the
+    // handler's own parse
+    absolve_bare_handler_stays_greedy,
+    "foo() absolve |e| 0 == 1",
+    Absolve::new(
+        Call::new(ident_expr!("foo"), vec![]).into_expr(),
+        Closure::new(
+            vec![Binding::new(ident!("e"))],
+            Equality::new(int!(0), EqualityOp::Equal, int!(1)).into_expr(),
+        )
+        .into_expr(),
+    )
+);
+
+expr_test!(
+    // `absolve` sits looser than the binary ops: it guards the whole
+    // expression to its left, `a + f() absolve h` is `(a + f()) absolve h`
+    // (which may then fail solving, e.g. `int + int!` — parens recover
+    // first: `a + (f() absolve h)`)
+    absolve_guards_the_sum,
+    "a + f() absolve |e| {0}",
+    Absolve::new(
+        Evaluation::new(
+            ident_expr!("a"),
+            EvaluationOp::Plus,
+            Call::new(ident_expr!("f"), vec![]).into_expr(),
+        )
+        .into_expr(),
+        Closure::new(
+            vec![Binding::new(ident!("e"))],
+            Block::new_with_yield(vec![], int!(0)).into_expr(),
+        )
+        .into_expr(),
+    )
+);
+
+expr_test!(
+    // same hand-back after a `??` whose fallback ended in a block
+    coalescence_then_equality,
+    "a ?? { b: 1 } == c",
+    Equality::new(
+        Coalescence::new(
+            ident_expr!("a"),
+            Literal::Record(vec![(ident!("b"), int!(1))]).into_expr(),
+        )
+        .into_expr(),
+        EqualityOp::Equal,
+        ident_expr!("c"),
+    )
+);
+
 expr_test!(membership, "1 in 1", In::new(int!(1), int!(1), true));
 
 expr_test!(not_membership, "1 !in 1", In::new(int!(1), int!(1), false));

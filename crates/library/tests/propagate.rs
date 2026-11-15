@@ -54,6 +54,23 @@ test_run!(
     "steps({ a: 1 })" => "null",
 );
 
+// an infix after a block-ended `absolve` handler binds the absolved value:
+// `f() absolve |e| { d } == v` is `(f() absolve |e| { d }) == v`
+test_run!(
+    absolve_then_infix,
+    FNS,
+    "parse_pos(\"\") absolve |e| { 0 } == 0" => "true",
+    "parse_pos(\"x\") absolve |e| { 0 } == 7" => "true",
+    // a block keeps a `let` to itself
+    "{ let v = parse_pos(\"\") absolve |e| { 0 }; v }" => "0",
+    // the handler's own block may hold a call; `==` still binds outside it
+    "parse_pos(\"\") absolve |e| { need({ a: 4 }, \"a\")! } == 5" => "true",
+    // `absolve` guards the whole expression to its left, like `??` —
+    // the pipeline's raise is what the handler recovers
+    "\"\" |> doubled absolve |e| { 0 }" => "0",
+    "\"x\" |> doubled absolve |e| { 0 } == 14" => "true",
+);
+
 // r[verify mimas.propagate]
 test_run!(
     propagate_in_closures,
