@@ -661,6 +661,24 @@ test_fail!(doubled_option_annotation, "let a: int?? = 5;");
 
 // misdirection: common habits from other languages get a teaching error
 test_fail!(misdirect_elif, "if x == 1 {} elif x == 2 {}");
+// A newline ends an expression, so a line that starts with `||` is a
+// closure with no parameters, made and dropped. It used to parse, and
+// `let both = a` kept only `a`.
+// r[verify mimas.stmt.double-pipe]
+test_fail!(
+    line_cannot_start_with_double_pipe,
+    "fn f(a: bool, b: bool) -> bool {\n    let both = a\n        || b;\n    both\n}",
+    "let x = a\n|| b;"
+);
+// `||` at the end of the line continues it, and a closure with no
+// parameters is still a value.
+test_ok!(
+    double_pipe_at_line_end_and_closure_values,
+    "let both = a ||\n    b;",
+    "let f = || 5;",
+    "fn make() -> () -> int { || 5 }",
+    "run(|| go());"
+);
 test_fail!(misdirect_as, "let y = x as float;");
 test_fail!(misdirect_if_assign, "if x = 5 {}");
 

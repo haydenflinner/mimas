@@ -95,6 +95,33 @@ const GREETING = "hello";      // valid -- a literal
 const NOPE = some_call();      // compile error: constants must be known at compile time
 ```
 
+### A constant is read-only, all the way down
+
+A constant cannot be changed, and neither can anything inside it. That holds for the constant's name and for every value you get from it: a field, an element, a field of an element, a name you bind it to, a function you pass it to.
+
+```mimas
+struct Lattice { rows: int, cols: int, origin: Point }
+const WELL = Lattice { rows = 20, cols = 10, origin = Point { x = 0, y = 0 } };
+
+WELL.rows = 5;          // compile error
+let w = WELL;
+w.rows = 5;             // error: cannot change a constant
+let o = WELL.origin;
+o.x = 1;                // error: this is inside a constant
+```
+
+In many languages a constant only protects its name, and the values inside it can still change. Here it does not stop at the name.
+
+To get a value you can change, copy it:
+
+```mimas
+let mine = deep_clone(WELL);
+mine.rows = 5;          // changes `mine`
+WELL.rows               // still 20
+```
+
+Because nothing can change it, a constant is **one value**. It is built once, when the program starts, and every use reads that one value. A table of a thousand rows costs the same to read as a number: `MENU[i]`, `for b in MENU`, `f(WELL)` and `WELL.area()` build nothing.
+
 The left side takes the same irrefutable patterns `let` does -- idents and tuples of them, nested as deep as you like -- so one `const` can declare a whole group:
 
 ```mimas

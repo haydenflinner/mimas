@@ -81,6 +81,9 @@ pub struct Resolutions {
     pub echo_native: Option<NativeId>,
     /// `__in_unit`: a quantity in a named unit, for failing checks.
     pub in_unit_native: Option<NativeId>,
+    /// `__freeze`: makes the value of a `const` read-only (`mimas.const.frozen`).
+    /// `None` when std is not installed: a const is then built fresh at each use.
+    pub freeze_native: Option<NativeId>,
     /// The `panic` native's id -- emit's contract-failure fallback when the
     /// prettier `__contract_fail` channel isn't installed.
     pub panic_native: Option<NativeId>,
@@ -478,6 +481,12 @@ impl From<Solver> for Resolutions {
             .filter(|(id, _)| solver.dec_to_native.contains_key(id))
             .find(|(_, dec)| dec.name == "__in_unit")
             .map(|(id, _)| solver.dec_to_native[&id].id);
+        let freeze_native = solver
+            .decs
+            .iter()
+            .filter(|(id, _)| solver.dec_to_native.contains_key(id))
+            .find(|(_, dec)| dec.name == "__freeze")
+            .map(|(id, _)| solver.dec_to_native[&id].id);
         let panic_native = solver
             .decs
             .iter()
@@ -568,6 +577,7 @@ impl From<Solver> for Resolutions {
             contract_native,
             echo_native,
             in_unit_native,
+            freeze_native,
             panic_native,
             op_decs: solver.op_decs,
             propagates: solver.propagates,

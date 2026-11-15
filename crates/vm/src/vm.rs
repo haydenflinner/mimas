@@ -1365,10 +1365,14 @@ pub(crate) fn step_one<'gc>(
             let value_reg = Reg::decode(code);
             let receiver = rd!(regs, receiver_reg);
             let value = rd!(regs, value_reg);
+            // a frozen value (a `const`) refuses the write lock
+            let frozen = |_| RtErr::const_write();
             match receiver {
-                Val::Instance(i) => i.0.borrow_mut(&ctx).fields[slot] = value,
-                Val::Array(a) => a.0.borrow_mut(&ctx)[slot] = value,
-                Val::IntArray(a) | Val::FloatArray(a) => a.0.borrow_mut(&ctx).set(ctx, slot, value),
+                Val::Instance(i) => i.0.try_borrow_mut(&ctx).map_err(frozen)?.fields[slot] = value,
+                Val::Array(a) => a.0.try_borrow_mut(&ctx).map_err(frozen)?[slot] = value,
+                Val::IntArray(a) | Val::FloatArray(a) => {
+                    a.0.try_borrow_mut(&ctx).map_err(frozen)?.set(ctx, slot, value)
+                }
                 Val::Null => return Err(RtErr::UnwrappedNull),
                 other => {
                     return Err(RtErr::Custom(format!("no fields on {:?}", other.capture())));
@@ -1382,11 +1386,16 @@ pub(crate) fn step_one<'gc>(
             match rd!(regs, array_reg) {
                 Val::Array(a) => {
                     ctx.charge(std::mem::size_of::<Val>());
-                    a.0.borrow_mut(&ctx).push(value)
+                    a.0.try_borrow_mut(&ctx).map_err(|_| RtErr::const_write())?.push(value)
                 }
                 // `IntArray`/`FloatArray`/`Anything` — typed push + demote,
                 // or the old `unwrap` panic for non-sequences
-                arr => seq_push(ctx, arr, value),
+                arr => {
+                    if ctx.is_frozen(arr) {
+                        return Err(RtErr::const_write());
+                    }
+                    seq_push(ctx, arr, value)
+                }
             }
         }
         OpCode::Len => {
@@ -2084,22 +2093,22 @@ pub fn set_index<'gc>(
     }
     match (set, index) {
         (Val::Array(a), Val::Int(i)) => {
-            let mut v = a.0.borrow_mut(&ctx);
+            let mut v = a.0.try_borrow_mut(&ctx).map_err(|_| RtErr::const_write())?;
             let p = pos(i, v.len())?;
             v[p] = value;
         }
         // typed write — stores the scalar in place, or demotes the whole
         // sequence to `Vals` when `value` doesn't fit the backing kind
         (Val::IntArray(a) | Val::FloatArray(a), Val::Int(i)) => {
-            let mut s = a.0.borrow_mut(&ctx);
+            let mut s = a.0.try_borrow_mut(&ctx).map_err(|_| RtErr::const_write())?;
             let p = pos(i, s.len())?;
             s.set(ctx, p, value);
         }
         (Val::Dict(d), Val::Str(key)) => {
-            d.0.borrow_mut(&ctx).insert(key, value);
+            d.0.try_borrow_mut(&ctx).map_err(|_| RtErr::const_write())?.insert(key, value);
         }
         (Val::Instance(inst), Val::Int(i)) => {
-            let mut inst = inst.0.borrow_mut(&ctx);
+            let mut inst = inst.0.try_borrow_mut(&ctx).map_err(|_| RtErr::const_write())?;
             let p = pos(i, inst.fields.len())?;
             inst.fields[p] = value;
         }
@@ -2343,7 +2352,7 @@ pub fn cold_dispatch<'gc>(
             let dict = rd!(regs, dict_reg).as_dict().unwrap();
             let value = rd!(regs, value_reg);
             let key = ctx.intern(strs.get(key_id));
-            dict.0.borrow_mut(&ctx).insert(key, value);
+            dict.0.try_borrow_mut(&ctx).map_err(|_| RtErr::const_write())?.insert(key, value);
         }
         OpCode::Format => {
             let dst = Reg::decode(code);

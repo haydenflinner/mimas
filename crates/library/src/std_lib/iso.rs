@@ -177,6 +177,16 @@ fn deep_clone<'gc>(ctx: Ctx<'gc>, v: anon::T<'gc>) -> anon::T<'gc> {
     anon::Anon(ctx.deep_clone(v.0))
 }
 
+/// `__freeze(v)`: make `v` read-only all the way down and give it back. The
+/// compiler calls it on the value of each `const`, once, where the value is
+/// built. Not for programs to call: a name with `__` is the compiler's.
+// r[impl mimas.const.frozen]
+#[native]
+fn __freeze<'gc>(ctx: Ctx<'gc>, v: anon::T<'gc>) -> anon::T<'gc> {
+    ctx.freeze(v.0);
+    v
+}
+
 /// `under(iso, f, x)` / `under(iso, f)` — Uiua's `⍜`. Intrinsic: codegen emits
 /// the transform+edit+rebuild sequence itself (and a `|x| ...` closure for the
 /// curried form).
@@ -205,6 +215,7 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add(lens);
     api.add(un);
     api.add(deep_clone);
+    api.add(__freeze);
     let id = api.add(under);
     api.mark_intrinsic(id, Intrinsic::Under);
     let id = api.add(at);

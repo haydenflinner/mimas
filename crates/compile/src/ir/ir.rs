@@ -37,6 +37,10 @@ pub struct Ir {
     /// on gets the tape of what it computed. The calls cost one no-op native entry while
     /// recording stays off. r[impl check.tape]
     pub(crate) test_bodies: std::collections::HashSet<BodyId>,
+    /// The entry-frame slot of each stored `const`: a top-level const whose value is
+    /// a list, a tuple, a struct or a record. Its value is built once, at the start
+    /// of the program, and frozen. Every use reads the slot (`mimas.const.shared`).
+    pub(crate) const_slots: HashMap<DecId, Local>,
 }
 
 impl Ir {
@@ -57,6 +61,7 @@ impl Ir {
             current_loc: Location::SYNTHETIC,
             stmt_depth: 0,
             test_bodies: std::collections::HashSet::new(),
+            const_slots: HashMap::new(),
         }
     }
 
@@ -76,11 +81,14 @@ impl Ir {
         for stmt in stmts {
             if let parse::StmtKind::Item(item) = stmt.kind()
                 && let parse::ItemKind::Const(con) = item.kind()
-                && self.resolutions.computed_consts.contains(&item.id())
             {
-                let value = self.with_loc(con.right.location(), |ir| con.right.lower(ir));
-                if let Some(value) = value {
-                    self.pattern(&con.left, Some(value));
+                if self.resolutions.computed_consts.contains(&item.id()) {
+                    let value = self.with_loc(con.right.location(), |ir| con.right.lower(ir));
+                    if let Some(value) = value {
+                        self.pattern(&con.left, Some(value));
+                    }
+                } else {
+                    self.store_const(item.id(), con);
                 }
             }
         }
@@ -92,6 +100,47 @@ impl Ir {
         if !self.is_terminated() {
             let null = self.current().constant(crate::Constant::Null);
             self.current().ret(null);
+        }
+    }
+
+    // r[impl mimas.const.shared]
+    /// A top-level `const` whose value is a list, a tuple, a struct or a record is
+    /// built here, once, frozen, and kept in a slot of the entry frame. Every use of
+    /// it reads that slot: one value for the whole program, which nothing can change.
+    /// Without the `__freeze` native (no std) nothing is stored, and each use builds
+    /// its own value as before.
+    fn store_const(&mut self, item: parse::NodeId, con: &parse::Const) {
+        use shared::Located;
+        if self.resolutions.freeze_native.is_none() {
+            return;
+        }
+        let Some(dec) = self.resolutions.node_decs.get(&item).copied() else {
+            return; // a destructuring const: its names are plain values
+        };
+        let solve::ResolvedDeclKind::Constant(lit) = &self.resolutions.decs[dec].kind else {
+            return;
+        };
+        if !matches!(
+            lit,
+            parse::Literal::Array(_)
+                | parse::Literal::Tuple(_)
+                | parse::Literal::Struct(_)
+                | parse::Literal::Record(_)
+        ) {
+            return;
+        }
+        // with no slot yet, this builds the value and freezes it
+        let value = self.with_loc(con.right.location(), |ir| {
+            crate::Constant::emit_const_dec(ir, dec, con.right.id())
+        });
+        if let Some(value) = value {
+            let local = self.local_in(dec, BodyId::ZERO);
+            // the slot's name says what it is: a live reload carries a `let` over to
+            // the edited program by its name, and must not carry a const (`rebind`)
+            let name = format!("const {}", self.resolutions.decs[dec].name);
+            self.bodies[BodyId::ZERO].artifacts.insert(local, name);
+            self.current().set_local(local, value);
+            self.const_slots.insert(dec, local);
         }
     }
 

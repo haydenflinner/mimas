@@ -48,7 +48,7 @@ pub fn clear() {
 }
 
 /// The text, kept for the life of the thread. Each distinct text is kept once.
-fn intern(text: &str) -> &'static str {
+pub(super) fn intern(text: &str) -> &'static str {
     TEXTS.with(|texts| {
         let mut texts = texts.borrow_mut();
         if let Some(&kept) = texts.get(text) {
@@ -522,7 +522,7 @@ impl<'s> Parser<'s> {
 
     /// The index of the closer that matches the opener at `open`, in the
     /// parser's own tokens.
-    fn closer_of(&self, open: usize) -> Option<usize> {
+    pub(super) fn closer_of(&self, open: usize) -> Option<usize> {
         let mut depth = 0usize;
         for i in open..self.tokens.len() {
             match self.tokens[i].kind {
@@ -540,7 +540,7 @@ impl<'s> Parser<'s> {
         None
     }
 
-    fn macro_error(&mut self, at: Location, msg: impl Into<String>, label: impl Into<String>) {
+    pub(super) fn macro_error(&mut self, at: Location, msg: impl Into<String>, label: impl Into<String>) {
         let err = Misdirection {
             src: self.src(),
             at: at.into(),
@@ -622,7 +622,7 @@ impl<'s> Parser<'s> {
         if self.nth(1) != TokKind::Bang || !self.meta_at(1).glued || !opens(self.nth(2)) {
             return false;
         }
-        if lookup(name).is_none() {
+        if lookup(name).is_none() && !reflect::is_builtin(name) {
             return false;
         }
         let Some(close) = self.closer_of(self.next + 2) else {
@@ -644,7 +644,7 @@ impl<'s> Parser<'s> {
         let TokKind::Ident(name) = self.tokens[self.next - 1].kind else {
             return false;
         };
-        expr.as_ident().is_some() && lookup(name).is_some()
+        expr.as_ident().is_some() && (lookup(name).is_some() || reflect::is_builtin(name))
     }
 
     /// A macro call as a statement. The expansion's tokens replace the call
@@ -719,7 +719,11 @@ impl<'s> Parser<'s> {
         let TokKind::Ident(name) = self.tokens[at].kind else {
             unreachable!("a macro call starts with its name");
         };
-        let def = lookup(name).expect("the caller looked the macro up");
+        // a declared macro of the name comes first; without one, the name
+        // is one of the reflection macros (`sig!`, `fns!`, …)
+        let Some(def) = lookup(name) else {
+            return self.expand_reflect(at, spot);
+        };
         let open = at + 2;
         let Some(close) = self.closer_of(open) else {
             self.next = open;
@@ -820,8 +824,24 @@ impl<'s> Parser<'s> {
         true
     }
 
+    /// The nesting depth of the expansion that wrote mark `mark`.
+    pub(super) fn hygiene_depth(&self, mark: u32) -> u32 {
+        self.hygiene.depths[mark as usize - 1]
+    }
+
+    /// Counts one more expansion, `depth` levels deep, and gives its mark.
+    /// `None` when that is too deep or one too many.
+    pub(super) fn hygiene_enter(&mut self, depth: u32) -> Option<u32> {
+        if depth > MAX_DEPTH || self.hygiene.expansions >= MAX_EXPANSIONS {
+            return None;
+        }
+        self.hygiene.expansions += 1;
+        self.hygiene.depths.push(depth);
+        Some(self.hygiene.expansions)
+    }
+
     /// Puts `out` in place of tokens `from..=to`.
-    fn splice(&mut self, from: usize, to: usize, out: Vec<(Tok<TokKind<'s>>, TokMeta)>) {
+    pub(super) fn splice(&mut self, from: usize, to: usize, out: Vec<(Tok<TokKind<'s>>, TokMeta)>) {
         let added = out.len();
         let removed = to + 1 - from;
         let (toks, meta): (Vec<_>, Vec<_>) = out.into_iter().unzip();

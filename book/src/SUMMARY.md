@@ -38,6 +38,7 @@
   - [Modules](./reference/modules.md)
   - [Scripts](./reference/scripts.md)
   - [Memory](./reference/memory.md)
+  - [Reflection](./reference/reflection.md)
   - [Notable Exclusions](./reference/notable-exclusions.md)
 - [Extension with Rust](./extension-with-rust.md)
   - [Basics](./extension/basics.md)

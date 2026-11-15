@@ -11,8 +11,13 @@ use std::{cell::Cell, sync::Arc};
 
 mod datalog;
 pub(crate) mod macros;
-/// Forgets every declared macro: a new program starts with none.
-pub use macros::clear as clear_macros;
+mod reflect;
+/// Forgets every declared macro, and every declaration the reflection
+/// macros answer for: a new program starts with none.
+pub fn clear_macros() {
+    macros::clear();
+    reflect::clear();
+}
 
 /// Recursively descends mimas source, incrementally returning various
 /// statements and expressions.
@@ -93,6 +98,10 @@ pub struct Parser<'s> {
     /// Top-level statements a declaration synthesized alongside itself
     /// (`opp`'s `impl Opp`), emitted right after it.
     pending: Vec<Stmt>,
+    /// Attributes on functions that are not the parser's own (`#[machine]`):
+    /// marks for `fns!` to read. One that no `fns!` call reads by the end
+    /// of the source is an unknown attribute (`reflect::unread_marks`).
+    pending_marks: Vec<(String, Location)>,
     /// One entry per token in `tokens`: how the token sits against the one
     /// before it, and which macro expansion wrote it. The parser asks this,
     /// not the spans, whether two tokens touch or a line breaks between
@@ -153,8 +162,8 @@ impl<'s> Parser<'s> {
         // A fresh source is a fresh unit scope — `unit` decls never leak
         // between standalone parses.
         shared::units::clear();
-        // and so is its macro table
-        macros::clear();
+        // and so is its macro table, and the declarations it can reflect on
+        clear_macros();
         Self::with_src(lexer, src)
     }
 
@@ -239,6 +248,7 @@ impl<'s> Parser<'s> {
             cut_short: lexer.cut_short(),
             shadow: lexer.shadow_table().to_vec(),
             pending: Vec::new(),
+            pending_marks: Vec::new(),
             file_id: lexer.file_id(),
             file_name: lexer.file_name().into(),
             src,
@@ -271,6 +281,7 @@ impl<'s> Parser<'s> {
                 self.reject_stmt(self.unexpected_token());
             }
         }
+        self.unread_marks();
         // the lexer's errors went in first
         self.errors.sort_by_cached_key(|err| {
             let label = err.labels().and_then(|mut labels| labels.next());
@@ -502,7 +513,9 @@ impl<'s> Parser<'s> {
                 BlockElement::Stmt(self.space_stmt(start))
             }
             kind if kind.starts_item() && !self.at_exact_literal() => {
+                let first = self.next;
                 let item = self.item();
+                self.record_decl(&item, first);
                 self.end_item(&item);
                 BlockElement::Stmt(self.new_stmt(item, start))
             }
@@ -680,6 +693,13 @@ impl<'s> Parser<'s> {
                             at: attr.name.location.into(),
                         }),
                     }
+                }
+                // A mark on a top-level function, for `fns!(name)` to read.
+                // It is judged at the end of the source: a mark nothing
+                // reads is an unknown attribute.
+                _ if allow_test && matches!(kind, ItemKind::Function(f) if !f.is_method()) => {
+                    self.pending_marks
+                        .push((attr.name.lexeme.clone(), attr.name.location));
                 }
                 _ => self.error(UnknownAttribute {
                     src: self.src(),
@@ -4449,6 +4469,25 @@ impl<'s> Parser<'s> {
             });
         }
 
+        // `a\n|| b`: a newline ends an expression, so the second line is a
+        // statement of its own, and `|| b` reads as a closure with no
+        // parameters. Nobody writes that statement on purpose: it makes a
+        // closure and drops it. Say what happened, as a leading `&&` does.
+        // r[impl mimas.stmt.double-pipe]
+        if let ExprKind::Closure(closure) = expr.kind()
+            && closure.parameters.is_empty()
+            && !self.at(TokKind::Eof)
+        {
+            self.error(Misdirection {
+                src: self.src(),
+                at: self.location(start).into(),
+                msg: "a line cannot start with `||`: the line above ended its expression, and \
+                      this line is a closure with no parameters that nothing calls"
+                    .into(),
+                label: "put `||` at the end of the line above".into(),
+            });
+        }
+
         let stmt = self.new_stmt(StmtKind::Expr(expr), start);
         if semicolon_optional || self.at(TokKind::Eof) {
             // The end of input ends an expression statement (Go's rule):
@@ -5129,6 +5168,20 @@ impl<'s> Parser<'s> {
             newline: false,
             ..first
         };
+        // Everything after the split sits one token later. A doc comment
+        // is kept by the index of the token it hangs on (`docs`), and so
+        // is the last error: both move with their tokens, as a macro's
+        // splice moves them.
+        let at = self.next;
+        self.docs = std::mem::take(&mut self.docs)
+            .into_iter()
+            .map(|(i, doc)| (if i > at { i + 1 } else { i }, doc))
+            .collect();
+        if let Some(e) = self.last_error
+            && e > at
+        {
+            self.last_error = Some(e + 1);
+        }
     }
 
     /// Takes a token the grammar already dispatched on.

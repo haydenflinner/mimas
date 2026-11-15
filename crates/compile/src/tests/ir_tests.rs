@@ -124,6 +124,45 @@ fn for_body_falls_through() {
     );
 }
 
+// A const is its literal, and a use of the whole const builds a fresh value. A read
+// of one field needs none of that: it is the field's own initializer.
+// r[verify mimas.const.read]
+#[test]
+fn a_field_read_on_a_const_struct_builds_nothing() {
+    let ops = compile_ops(
+        "struct L { rows: int, cw: float }\nconst WELL = L { rows = 20, cw = 33.0 };\nlet n = WELL.rows;\nlet w = WELL.cw;",
+    );
+    assert!(
+        !ops.iter().any(|op| matches!(op, Op::NewInstance { .. })),
+        "a field of a const struct should not build the struct:\n{ops:#?}"
+    );
+}
+
+// r[verify mimas.const.read]
+#[test]
+fn an_indexed_field_read_on_a_const_list_builds_nothing() {
+    let ops = compile_ops(
+        "struct B { row: int, name: str }\nconst MENU = [B { row = 0, name = \"a\" }, B { row = 1, name = \"b\" }];\nlet n = 0;\nfor i in 2 { n = n + MENU[i].row; }",
+    );
+    assert!(
+        !ops.iter().any(|op| matches!(op, Op::NewInstance { .. } | Op::NewArray { .. })),
+        "`MENU[i].row` should read one stored list:\n{ops:#?}"
+    );
+}
+
+// This harness has no std, so it has no `__freeze`: without it a const cannot be
+// made read-only, and so it is not shared. Each use builds its own value, as
+// before `mimas.const.shared`. With std the const is one stored value
+// (`library/tests/const_read.rs`).
+#[test]
+fn without_std_a_const_used_whole_is_still_built() {
+    let ops = compile_ops("struct B { row: int }\nconst ONE = B { row = 0 };\nlet b = ONE;\nb.row = 5;");
+    assert!(
+        ops.iter().any(|op| matches!(op, Op::NewInstance { .. })),
+        "a const bound to a name is a fresh struct:\n{ops:#?}"
+    );
+}
+
 #[test]
 fn loop_invariant_arith_const_becomes_immediate() {
     // `7` folds into the add as an immediate -- inlined, never loaded into a register at all.

@@ -24,9 +24,9 @@ test_fail!(
     "struct W { x: int } let a = 1; let w = W { a.x };",
 );
 
-// A const array may hold struct consts (game-kit's `DIRS4`): it has no
-// scalar constant form, so each use site allocates it fresh -- writing
-// into one use never reaches the next.
+// A const array may hold struct consts (game-kit's `DIRS4`). It is one value,
+// read-only all the way down (`mimas.const.frozen`). Code that wants to change
+// one takes a copy with `deep_clone`, and the constant stays as it is.
 test_run!(
     // r[verify mimas.const.variant]
     const_array_of_struct_consts,
@@ -35,7 +35,7 @@ test_run!(
      const DOWN = Dir { dx = 0.0, dy = 1.0 };
      const DIRS = [RIGHT DOWN];
      const NESTED = [[RIGHT], [DOWN RIGHT]];
-     fn poke() -> float { let ds = DIRS; ds[0] = DOWN; ds[0].dx }",
+     fn poke() -> float { let ds = deep_clone(DIRS); ds[0] = DOWN; ds[0].dx }",
     "DIRS.len()" => "2",
     "DIRS[1].dy" => "1.0",
     "NESTED[1][1].dx" => "1.0",
@@ -48,7 +48,7 @@ test_run!(
 // nothing else — inferred from its literal body — so a const may hold the
 // call: `Vec2::new(1.0, 0.0)` is the
 // `Vec2 { x = 1.0, y = 0.0 }` struct literal spelled as a call. Bare and
-// inside a const array (each use site allocates fresh, like a struct const).
+// inside a const array (one frozen value, like a struct const).
 test_run!(
     // r[verify mimas.const.ctor]
     const_holds_a_ctor_call,
@@ -57,7 +57,7 @@ test_run!(
      const P = Vec2::new(1.0 + 1.0, 3.0);
      const POINTS = [Vec2::new(1.0, 0.0), Vec2::new(0.0, 1.0)];
      const NESTED = [[Vec3::new(1.0, 2.0, 3.0)], [Vec3::new(4.0, 5.0, 6.0)]];
-     fn poke() -> float { let ps = POINTS; ps[0] = Vec2::new(9.0, 9.0); ps[0].x }",
+     fn poke() -> float { let ps = deep_clone(POINTS); ps[0] = Vec2::new(9.0, 9.0); ps[0].x }",
     "ORIGIN.x" => "0.0",
     "ORIGIN.y" => "0.0",
     "P.x" => "2.0",

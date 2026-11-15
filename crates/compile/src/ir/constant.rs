@@ -132,6 +132,15 @@ impl Constant {
         let solve::ResolvedDeclKind::Constant(lit) = &ir.resolutions.decs[dec].kind else {
             unreachable!("emit_const_dec called on non-constant dec {dec:?}");
         };
+        // r[impl mimas.const.shared]
+        // a stored const: the one value, built and frozen when the program started
+        if let Some(&local) = ir.const_slots.get(&dec) {
+            return Some(if ir.current_body == super::BodyId::ZERO {
+                ir.current().get_local(local)
+            } else {
+                ir.current().get_entry(local)
+            });
+        }
         let lit = lit.clone();
         // a unit variant (`const ME = Team::Blue`) is its path, lowered the
         // ordinary way — the struct-literal path would build the enum's type,
@@ -152,12 +161,27 @@ impl Constant {
         // a tuple that is a struct (`const O: V = (0, 0)`) allocates the struct
         let struct_tuple = matches!(lit, Literal::Tuple(_))
             && matches!(ir.resolutions.node_tys.get(&id), Some(solve::components::Ty::Adt(..) | solve::components::Ty::Identity(..)));
+        // A const that is not stored (declared in a fn or an impl, or destructured)
+        // is built here. Its value is frozen all the same: a constant cannot be
+        // changed wherever it is written.
         if struct_tuple || Self::needs_alloc(ir, &lit) {
             use super::Emit;
-            lit.emit(id, ir)
+            let value = lit.emit(id, ir)?;
+            Some(Self::frozen(ir, value))
         } else {
+            let aggregate = matches!(lit, Literal::Array(_) | Literal::Tuple(_));
             let constant = Self::from_literal(ir, lit);
-            Some(ir.current().constant(constant))
+            let value = ir.current().constant(constant);
+            Some(if aggregate { Self::frozen(ir, value) } else { value })
+        }
+    }
+
+    /// `value` made read-only, when std has the `__freeze` native.
+    // r[impl mimas.const.frozen]
+    fn frozen(ir: &mut Ir, value: crate::InstId) -> crate::InstId {
+        match ir.resolutions.freeze_native {
+            Some(native) => ir.current().call_native(native, vec![value]),
+            None => value,
         }
     }
 
@@ -171,6 +195,116 @@ impl Constant {
             Literal::Array(es) | Literal::Tuple(es) => {
                 es.iter().any(|e| Self::expr_needs_alloc(ir, e))
             }
+            _ => false,
+        }
+    }
+
+    /// The literal an expression is at compile time, when it is a const or a field
+    /// of one: `WELL`, `WELL.origin`, `(WELL)`. `None` for anything that has to run.
+    /// `inside` says the expression is part of a const's own literal. There a
+    /// written-out literal counts too. Outside it does not: `S { a = f(), b = 2 }.b`
+    /// in ordinary code must still call `f`.
+    fn view(ir: &Ir, expr: &Expr, inside: bool) -> Option<Literal> {
+        match expr.kind() {
+            ExprKind::Literal(lit) if inside => Some(lit.clone()),
+            ExprKind::Grouping(g) => Self::view(ir, &g.inner, inside),
+            ExprKind::Ident(_) => match ir
+                .resolutions
+                .node_decs
+                .get(&expr.id())
+                .map(|&d| &ir.resolutions.decs[d].kind)
+            {
+                Some(solve::ResolvedDeclKind::Constant(lit)) => Some(lit.clone()),
+                _ => None,
+            },
+            ExprKind::Access(parse::Access::Dot {
+                left,
+                right,
+                kind: parse::AccessKind::Direct,
+            }) => {
+                let ExprKind::Ident(field) = right.kind() else {
+                    return None;
+                };
+                let part = Self::part_of(ir, left, &field.lexeme, inside)?;
+                Self::view(ir, &part, true)
+            }
+            _ => None,
+        }
+    }
+
+    /// The initializer of one field of a const struct: for `WELL.rows`, the `20` in
+    /// `const WELL = Lattice { rows = 20, .. }`. A read of a const's field lowers
+    /// this one expression and never builds the struct around it. `None` when
+    /// `left` is not a const struct literal with that field written out (a `..base`
+    /// or a field left to its default has no initializer to take).
+    // r[impl mimas.const.read]
+    pub(crate) fn field_of(ir: &Ir, left: &Expr, field: &str) -> Option<Expr> {
+        Self::part_of(ir, left, field, false)
+    }
+
+    fn part_of(ir: &Ir, left: &Expr, field: &str, inside: bool) -> Option<Expr> {
+        let Literal::Struct(s) = Self::view(ir, left, inside)? else {
+            return None;
+        };
+        if s.base.is_some() {
+            return None;
+        }
+        s.fields.iter().find_map(|(key, value)| match key {
+            parse::FieldKey::Ident(name) if name.lexeme == field => Some(value.clone()),
+            _ => None,
+        })
+    }
+
+    /// One field of every element of a const list of structs, as a list constant:
+    /// for `MENU[i].row`, the `row` of each button. The read is then one stored
+    /// list and an index, and the buttons are never built. `None` unless every
+    /// element is a struct literal with that field written out as a plain value
+    /// (a number, a string, a bool).
+    // r[impl mimas.const.read]
+    pub(crate) fn column(ir: &mut Ir, list: &Expr, field: &str) -> Option<Self> {
+        let Literal::Array(elems) = Self::view(ir, list, false)? else {
+            return None;
+        };
+        let mut parts = Vec::with_capacity(elems.len());
+        for elem in &elems {
+            let part = Self::part_of(ir, elem, field, true)?;
+            if !Self::is_plain(ir, &part) {
+                return None;
+            }
+            parts.push(part);
+        }
+        Some(Self::Array(parts.iter().map(|e| Self::from_expr(ir, e)).collect()))
+    }
+
+    /// Whether an expression has a scalar `Constant` form `from_expr` can make.
+    pub(crate) fn is_plain(ir: &Ir, expr: &Expr) -> bool {
+        match expr.kind() {
+            ExprKind::Literal(
+                Literal::True
+                | Literal::False
+                | Literal::Int(_)
+                | Literal::Float(_)
+                | Literal::Hex(_)
+                | Literal::String(_),
+            ) => true,
+            ExprKind::Grouping(g) => Self::is_plain(ir, &g.inner),
+            ExprKind::Ident(_) => match ir
+                .resolutions
+                .node_decs
+                .get(&expr.id())
+                .map(|&d| &ir.resolutions.decs[d].kind)
+            {
+                Some(solve::ResolvedDeclKind::Constant(lit)) => matches!(
+                    lit,
+                    Literal::True
+                        | Literal::False
+                        | Literal::Int(_)
+                        | Literal::Float(_)
+                        | Literal::Hex(_)
+                        | Literal::String(_)
+                ),
+                _ => false,
+            },
             _ => false,
         }
     }

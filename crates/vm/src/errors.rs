@@ -117,6 +117,19 @@ pub enum RtErr {
 }
 
 impl RtErr {
+    /// A write to a value that came from a `const`.
+    // r[impl mimas.const.frozen]
+    pub fn const_write() -> Self {
+        RtErr::Custom(
+            "cannot change a constant: this value comes from a `const`, and a constant \
+             cannot be changed, nor anything inside it. Take a copy to change: \
+             `deep_clone(value)`"
+                .into(),
+        )
+    }
+}
+
+impl RtErr {
     /// Text for the primary label, paired with the bytecode-derived anchor by the dispatch
     /// loop. Most kinds get a generic "here"; richer kinds inline operand info.
     pub(crate) fn tag(&self) -> String {

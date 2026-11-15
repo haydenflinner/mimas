@@ -355,6 +355,37 @@ impl Emit for Access {
                     return Constant::emit_const_dec(ir, dec, id);
                 }
 
+                // A field of a const. The const's literal is known here, so emit the
+                // one field's initializer: `WELL.rows` is `20`, and the `Lattice` around
+                // it is never built. A const used whole is still built at each use: it
+                // is a fresh value there, and the program may change it.
+                if *kind == AccessKind::Direct
+                    && !left.taints_chain()
+                    && let ExprKind::Ident(field) = right.kind()
+                {
+                    // only a plain value is folded: a field that is a struct or a
+                    // list is read from the stored const, so it is the same frozen
+                    // value at every use
+                    if let Some(part) = Constant::field_of(ir, left, &field.lexeme)
+                        && Constant::is_plain(ir, &part)
+                    {
+                        return part.lower(ir);
+                    }
+                    // `MENU[i].row`: that field of every element is one stored list
+                    if let ExprKind::Access(Access::Square {
+                        left: list,
+                        key,
+                        kind: AccessKind::Direct,
+                    }) = left.kind()
+                        && !list.taints_chain()
+                        && let Some(column) = Constant::column(ir, list, &field.lexeme)
+                    {
+                        let column = ir.current().constant(column);
+                        let key = key.lower(ir)?;
+                        return Some(ir.current().get_index(column, key, AccessKind::Direct));
+                    }
+                }
+
                 // struct fields and tuple indices are positional and known at IR time, so
                 // we go directly to a slotted GetField instead of synthesizing a const + GetIndex.
                 let kind = if *kind == AccessKind::Option || left.taints_chain() {

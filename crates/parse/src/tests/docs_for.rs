@@ -54,3 +54,18 @@ fn plain_comment_is_not_a_doc() {
                   fn foo() {}";
     assert_eq!(docs_at(source, "fn"), None);
 }
+
+/// `>>` closes two generics at once: the parser splits it into two `>`
+/// tokens. Every token after it then sits one place later, and a doc
+/// comment after it used to hang on the token before its item.
+#[test]
+fn doc_after_a_nested_generic_stays_on_its_item() {
+    let source = "struct Pair<A, B> { a: A, b: B }
+                  fn wrap(p: Pair<int, Pair<int, int>>) -> int { 1 }
+                  /// After the split.
+                  fn after() {}";
+    assert_eq!(
+        docs_at(source, "fn after").as_deref(),
+        Some("After the split.")
+    );
+}

@@ -36,3 +36,21 @@ opp AscDesc { Asc "↗", Desc "↘" }
 opp BigSmall { Big "⬤", Small "●" }
 opp StartEnd { Start "⇤", End "⇥" }
 
+
+// Reflection: what the macros `sig!`, `fns!`, `fields!` and `variants!`
+// answer with (`parse::parser::reflect`). A type is text, as it was
+// written in the declaration.
+
+/// One parameter of a function.
+struct FnParam { name: str, ty: str }
+
+/// A function as data: its name, its parameters, its return type, its
+/// doc comment on one line, and the marks (`#[machine]`) it carries.
+struct FnSig { name: str, params: [FnParam], ret: str, doc: str, marks: [str] }
+
+/// One field of a struct, or of an enum variant. A variant written
+/// `Num(float)` has the field names `0`, `1`, ….
+struct StructField { name: str, ty: str }
+
+/// One variant of an enum.
+struct EnumVariant { name: str, fields: [StructField] }

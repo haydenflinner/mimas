@@ -514,6 +514,74 @@ impl<'gc> Ctx<'gc> {
         }
     }
 
+    /// Make a value read-only, all the way down: the value of a `const`. A list, a
+    /// dict or a struct is frozen by a shared borrow that is never given back, so
+    /// every later `borrow_mut` on it fails. Reads go on as before. This costs
+    /// nothing on a write to any other value: the borrow check is the one a write
+    /// already makes. The interpreter's writes turn the failure into
+    /// [`RtErr::const_write`]; a write path that does not check panics, and so
+    /// still cannot change the value.
+    // r[impl mimas.const.frozen]
+    pub fn freeze(self, value: Val<'gc>) {
+        match value {
+            Val::Array(a) => {
+                if a.0.try_borrow_mut(self.mutation).is_err() {
+                    return; // frozen already (or shared with a value that is)
+                }
+                let items: Vec<Val<'gc>> = a.0.borrow().iter().copied().collect();
+                std::mem::forget(a.0.borrow());
+                for v in items {
+                    self.freeze(v);
+                }
+            }
+            Val::IntArray(a) | Val::FloatArray(a) => {
+                if a.0.try_borrow_mut(self.mutation).is_err() {
+                    return;
+                }
+                let inner = match &*a.0.borrow() {
+                    ArrayStore::Vals(inner) => Some(*inner),
+                    _ => None,
+                };
+                std::mem::forget(a.0.borrow());
+                if let Some(inner) = inner {
+                    self.freeze(Val::Array(inner));
+                }
+            }
+            Val::Dict(d) => {
+                if d.0.try_borrow_mut(self.mutation).is_err() {
+                    return;
+                }
+                let items: Vec<Val<'gc>> = d.0.borrow().iter().map(|(_, &v)| v).collect();
+                std::mem::forget(d.0.borrow());
+                for v in items {
+                    self.freeze(v);
+                }
+            }
+            Val::Instance(i) => {
+                if i.0.try_borrow_mut(self.mutation).is_err() {
+                    return;
+                }
+                let items: Vec<Val<'gc>> = i.0.borrow().fields.iter().copied().collect();
+                std::mem::forget(i.0.borrow());
+                for v in items {
+                    self.freeze(v);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Whether a list, a dict or a struct is frozen (see [`freeze`](Self::freeze)).
+    pub fn is_frozen(self, value: Val<'gc>) -> bool {
+        match value {
+            Val::Array(a) => a.0.try_borrow_mut(self.mutation).is_err(),
+            Val::IntArray(a) | Val::FloatArray(a) => a.0.try_borrow_mut(self.mutation).is_err(),
+            Val::Dict(d) => d.0.try_borrow_mut(self.mutation).is_err(),
+            Val::Instance(i) => i.0.try_borrow_mut(self.mutation).is_err(),
+            _ => false,
+        }
+    }
+
     /// Render a value being *shown* -- strings are quoted (`"x"`). Use this for anything
     /// inspection-shaped: dbg output, test harnesses, error reports.
     ///

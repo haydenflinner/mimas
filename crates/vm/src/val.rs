@@ -226,7 +226,17 @@ impl<'gc> Val<'gc> {
     pub fn as_untyped_array(self, ctx: Ctx<'gc>) -> Option<Array<'gc>> {
         match self {
             Val::Array(a) => Some(a),
-            Val::IntArray(a) | Val::FloatArray(a) => Some(a.0.borrow_mut(&ctx).demote(ctx)),
+            Val::IntArray(a) | Val::FloatArray(a) => match a.0.try_borrow_mut(&ctx) {
+                Ok(mut store) => Some(store.demote(ctx)),
+                // A frozen list (the value of a `const`) cannot change its backing.
+                // The native gets a copy of the items: what it writes there is lost,
+                // and the constant stays as it is.
+                Err(_) => {
+                    let store = a.0.borrow();
+                    let items: Vec<Val<'gc>> = (0..store.len()).map(|i| store.at(i)).collect();
+                    Some(ctx.new_array(items))
+                }
+            },
             _ => None,
         }
     }

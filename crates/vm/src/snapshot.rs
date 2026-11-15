@@ -114,6 +114,9 @@ pub struct Snapshot {
     /// `Prints`' warn-dedupe set — carries across a restore so a warn that already fired
     /// inside a per-frame loop doesn't re-fire once into the host's popovers.
     pub warned: HashSet<(Location, String)>,
+    /// The nodes that were frozen: the values of `const`s, and what is inside them
+    /// (`Ctx::freeze`). A restore builds new objects, and freezes these again.
+    pub frozen: Vec<u32>,
 }
 
 /// Why a snapshot or restore couldn't happen.
@@ -326,7 +329,9 @@ impl Vm {
     pub fn snapshot(&mut self) -> Result<Snapshot, SnapError> {
         let Vm { code, arena, .. } = self;
         let ip = code.ip;
-        arena.mutate(|_, state| {
+        arena.mutate(|mc, state| {
+            let ctx = state.ctx(mc);
+            let mut frozen = Vec::new();
             let mut snapper = Snapper::default();
             let (regs, frames, ops_left) = {
                 let t = state.thread.borrow();
@@ -348,6 +353,11 @@ impl Vm {
                 (regs, frames, t.ops_left)
             };
             while let Some((i, v)) = snapper.pending.pop_front() {
+                // between dispatch runs nothing else holds a borrow, so a value
+                // that refuses the write lock is a frozen one
+                if ctx.is_frozen(v) {
+                    frozen.push(i);
+                }
                 snapper.fill(i, v)?;
             }
             let warned = state.fixtures.get::<Prints>().warned.borrow().clone();
@@ -358,6 +368,7 @@ impl Vm {
                 frames,
                 nodes: snapper.nodes,
                 warned,
+                frozen,
             })
         })
     }
@@ -433,6 +444,13 @@ impl Vm {
                     #[cfg(feature = "dataframe")]
                     (SnapNode::DataFrame(_) | SnapNode::PlExpr(_), _) => {} // whole at pre-allocation
                     _ => unreachable!("thawed node kind matches its snapshot kind"),
+                }
+            }
+            // r[impl mimas.const.frozen]
+            // the values of consts are read-only in the new heap too
+            for &i in &snap.frozen {
+                if let Some(v) = thaw.resolved[i as usize] {
+                    ctx.freeze(v);
                 }
             }
             {

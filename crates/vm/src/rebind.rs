@@ -121,6 +121,11 @@ impl Vm {
             let mut names: Vec<_> = nc.locals.iter().collect();
             names.sort_by_key(|(_, r)| r.index());
             for (name, nr) in names {
+                // a stored `const` is the edited program's own value, built and frozen
+                // again when it started: the old one is not carried over it
+                if name.starts_with("const ") {
+                    continue;
+                }
                 let at = nf.base + nr.index();
                 match oc.locals.get(name) {
                     Some(or) => {
@@ -140,6 +145,8 @@ impl Vm {
             frames: fresh.frames.clone(),
             nodes: out,
             warned: snap.warned.clone(),
+            // the fresh program's nodes come first in `out`, at the same indexes
+            frozen: fresh.frozen.clone(),
         };
         self.restore(&merged).map_err(|e| e.to_string())?;
         Ok(report)

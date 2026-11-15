@@ -262,7 +262,9 @@ pub struct GenericsNotAllowed {
 
 #[derive(Error, Debug, Diagnostic)]
 #[error("unknown attribute")]
-#[diagnostic(help("supported attributes are `#[test]` and `#[tests]`"))]
+#[diagnostic(help(
+    "supported attributes are `#[test]` and `#[tests]`. Any other name is a mark on a function, and it needs a `fns!(name)` in the program that reads it"
+))]
 pub struct UnknownAttribute {
     #[source_code]
     pub src: NamedSource<Arc<str>>,
