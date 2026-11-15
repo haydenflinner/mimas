@@ -862,3 +862,39 @@ fn a_granting_use_still_feeds_shadow_sets() {
     ];
     assert_eq!(crate::lex::shadow_sets(&pages)[1], [false, false, true]);
 }
+
+// r[verify mimas.comment.trivia]
+// every comment form is trivia — it never reaches the statement list and
+// never affects eval; a file of only comments has no statements at all
+test_ok!(
+    doc_and_literal_comments_are_trivia,
+    "//! scope docs\na = 1;",
+    "/// outer docs\na = 1;",
+    "//// dead code\na = 1;",
+    "/** block docs */\na = 1;",
+    "/*! inner block */\na = 1;",
+    "/*** dead block */\na = 1;",
+    "/***/\na = 1;"
+);
+test_ok!(
+    prose_island_is_trivia,
+    "```\nthe module doc\n```\na = 1;",
+    "a = 1;\n```\nnotes\n```",
+    "```\nbetween statements\n```\na = 1;\n```\nafter\n```"
+);
+
+#[test]
+fn prose_island_holds_no_statements() {
+    use crate::tests::utils::parse_to_strings;
+    let (stmts, errors) = parse_to_strings("```\nlet fake = 0;\nuse \"nothing\";\n```\n1 + 1;");
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_eq!(stmts, ["1 + 1"]);
+}
+
+#[test]
+fn page_mark_inside_island_is_island_text() {
+    use crate::tests::utils::parse;
+    let (ast, errors) = parse("```\n//# page: fake\n```\nlet a = 1;");
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_eq!(ast.page_marks(), vec![(0, "")]);
+}

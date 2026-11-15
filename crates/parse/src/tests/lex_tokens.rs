@@ -247,3 +247,84 @@ tok_test!(membership_glyphs: "x ∈ xs ∉ ys" => Ident("x"), In, Ident("xs"), N
 tok_test!(not_glyph: "¬ x" => NotWord, Ident("x"));
 tok_test!(reductions: "∑ ∏ ⨅ ⨆" => Sum, Prod, Inf, Sup);
 tok_test!(direction_glyphs: "→ ← ↑ ↓ ↔ ↕" => RightArrow, LeftArrow, UpArrow, DownArrow, LeftRightArrow, UpDownArrow);
+
+// r[verify mimas.comment.doc]
+// the doc-comment family, Rust-aligned: `///` documents the item that
+// follows, `//!` the enclosing scope; `/**`/`/*!` are the block forms.
+// Three slashes or two stars exactly — `////` and `/***` are below.
+tok_test!(doc_comment_block: "/** docs */" => DocComment("/** docs */"));
+tok_test!(doc_comment_block_multiline: "/** a\nb */" => DocComment("/** a\nb */"));
+tok_test!(inner_doc_comment: "//! the whole scope" => InnerDocComment("//! the whole scope"));
+tok_test!(inner_doc_comment_block: "/*! the whole scope */" => InnerDocComment("/*! the whole scope */"));
+tok_test!(doc_comment_empty_block: "/**/" => Comment("/**/"));
+tok_test!(
+    inner_doc_lines_merge,
+    "//! a\n     //! b",
+    InnerDocComment("//! a\n     //! b")
+);
+tok_test!(doc_then_inner_doc: "/// a\n//! b" => DocComment("/// a"), InnerDocComment("//! b"));
+tok_test!(inner_doc_splits_from_comment: "// a\n//! b" => Comment("// a"), InnerDocComment("//! b"));
+
+// r[verify mimas.comment.literal]
+// `////` (four slashes up) and `/***` (three stars up) are literal
+// comments — commented out harder, usually dead code — not doc comments
+tok_test!(literal_line_comment: "//// dead code" => LiteralComment("//// dead code"));
+tok_test!(literal_line_comment_long: "////// even more" => LiteralComment("////// even more"));
+tok_test!(literal_block_comment: "/*** dead code */" => LiteralComment("/*** dead code */"));
+tok_test!(literal_block_comment_solid: "/***/" => LiteralComment("/***/"));
+tok_test!(literal_block_comment_longer: "/****/" => LiteralComment("/****/"));
+tok_test!(
+    literal_lines_merge,
+    "//// a\n     //// b",
+    LiteralComment("//// a\n     //// b")
+);
+tok_test!(literal_splits_from_doc: "/// a\n//// b" => DocComment("/// a"), LiteralComment("//// b"));
+tok_test!(literal_splits_from_comment: "// a\n//// b" => Comment("// a"), LiteralComment("//// b"));
+
+// r[verify mimas.prose.island]
+// a line whose content opens with ``` starts a prose island: the lines
+// up to a line whose whole content is ``` are swallowed verbatim — no
+// per-line prefix, nothing inside is lexed
+tok_test!(prose_island: "```\nplain words, 1 + 2, \"quotes\"\n```" =>
+    ProseIsland("```\nplain words, 1 + 2, \"quotes\"\n```"));
+tok_test!(prose_island_indented: "  ```\ntext\n   ```" =>
+    ProseIsland("```\ntext\n   ```"));
+tok_test!(prose_island_closer_trailing_blanks: "```\ntext\n```   " =>
+    ProseIsland("```\ntext\n```   "));
+tok_test!(prose_island_mid_module: "1\n```\ntext\n```\n2" =>
+    Int(1), ProseIsland("```\ntext\n```"), Int(2));
+tok_test!(prose_island_at_top_then_code: "```\nthe module doc\n```\nfn f() {}" =>
+    ProseIsland("```\nthe module doc\n```"), Fn, Ident("f"), LeftParenthesis, RightParenthesis, LeftBrace, RightBrace);
+tok_test!(prose_island_opener_trailing_text: "``` a note\ntext\n```" =>
+    ProseIsland("``` a note\ntext\n```"));
+// a longer fence inside is just island text — only a lone ``` line closes
+tok_test!(prose_island_longer_fence_inside: "```\n````\n```" =>
+    ProseIsland("```\n````\n```"));
+// ``` with more text on the line is not a closer either
+tok_test!(prose_island_fence_with_text_inside: "```\n``` nope\n```" =>
+    ProseIsland("```\n``` nope\n```"));
+// mid-line backticks are not a fence — one Invalid each, as before
+tok_test!(midline_backticks: "a ``` b" => Ident("a"), Invalid("`"), Invalid("`"), Invalid("`"), Ident("b"));
+tok_test!(backtick_after_code: "1 ```" => Int(1), Invalid("`"), Invalid("`"), Invalid("`"));
+// a comment above an island doesn't merge into it — different trivia kinds
+tok_test!(comment_then_island: "// a\n```\nb\n```" => Comment("// a"), ProseIsland("```\nb\n```"));
+
+// an island that never closes eats the rest of the source and reports on
+// the opener — the token test macro wants a clean error list, so this
+// one walks the lexer itself
+#[test]
+fn prose_island_unterminated() {
+    let mut lexer = crate::lex::Lexer::new("```\nnever closed\n1 + 2", 0, "test".into());
+    let toks: Vec<_> = lexer.by_ref().map(|tok| tok.kind).collect();
+    assert_eq!(toks, vec![ProseIsland("```\nnever closed\n1 + 2")]);
+    let errors = lexer.take_errors();
+    assert_eq!(errors.len(), 1, "{errors:?}");
+}
+
+#[test]
+fn prose_island_opener_alone_is_unterminated() {
+    let mut lexer = crate::lex::Lexer::new("```", 0, "test".into());
+    let toks: Vec<_> = lexer.by_ref().map(|tok| tok.kind).collect();
+    assert_eq!(toks, vec![ProseIsland("```")]);
+    assert_eq!(lexer.take_errors().len(), 1);
+}

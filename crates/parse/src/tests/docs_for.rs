@@ -69,3 +69,38 @@ fn doc_after_a_nested_generic_stays_on_its_item() {
         Some("After the split.")
     );
 }
+
+#[test]
+fn block_doc_attaches() {
+    let source = "/** Adds. */
+                  fn add() {}";
+    assert_eq!(docs_at(source, "fn").as_deref(), Some("Adds."));
+}
+
+#[test]
+fn block_doc_lines_lose_their_stars() {
+    let source = "/** Adds two.
+                   * Returns the sum.
+                   */
+                  fn add() {}";
+    let docs = docs_at(source, "fn").unwrap();
+    assert_eq!(
+        docs.lines().collect::<Vec<_>>(),
+        ["Adds two.", "Returns the sum."]
+    );
+}
+
+#[test]
+fn inner_doc_is_not_the_items_doc() {
+    let source = "//! scope docs
+                  fn foo() {}";
+    assert_eq!(docs_at(source, "fn"), None);
+}
+
+#[test]
+fn literal_comment_is_not_a_doc() {
+    let source = "//// dead code
+                  /*** also dead */
+                  fn foo() {}";
+    assert_eq!(docs_at(source, "fn"), None);
+}

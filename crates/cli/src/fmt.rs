@@ -413,6 +413,9 @@ fn has_text(k: TokKind) -> bool {
             | TokKind::Invalid(_)
             | TokKind::Comment(_)
             | TokKind::DocComment(_)
+            | TokKind::InnerDocComment(_)
+            | TokKind::LiteralComment(_)
+            | TokKind::ProseIsland(_)
     )
 }
 
@@ -1634,7 +1637,11 @@ impl<'s> Fmt<'s> {
     fn emit_tok(&self, out: &mut String, i: usize, line_indent: usize) {
         let k = self.kind(i);
         match k {
-            TokKind::Comment(text) | TokKind::DocComment(text) => {
+            TokKind::Comment(text)
+            | TokKind::DocComment(text)
+            | TokKind::InnerDocComment(text)
+            | TokKind::LiteralComment(text)
+            | TokKind::ProseIsland(text) => {
                 emit_comment(out, text, line_indent);
             }
             TokKind::NotWord => out.push('!'),

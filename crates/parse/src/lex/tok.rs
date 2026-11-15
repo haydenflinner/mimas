@@ -161,8 +161,24 @@ pub enum TokKind<'s> {
     Tagged(&'s str, &'s str),
     Hex(&'s str),
     Invalid(&'s str),
+    /// `//` and `/* … */` — an ordinary comment. Whether it typesets as
+    /// prose or stays in mono is the editor's call, not the lexer's.
     Comment(&'s str),
+    /// `///` and `/** … */` — an outer doc comment; it documents the
+    /// item that follows. (`/**/` stays a plain Comment — the empty
+    /// block — and `/***` a LiteralComment.)
     DocComment(&'s str),
+    /// `//!` and `/*! … */` — an inner doc comment; it documents the
+    /// enclosing scope.
+    InnerDocComment(&'s str),
+    /// `////` (four slashes up) and `/***` (three stars up) — a literal
+    /// comment, "commented out harder": usually dead code, so the editor
+    /// keeps it in mono rather than typesetting it.
+    LiteralComment(&'s str),
+    /// A ```` ``` ````-fenced prose island: whole lines held verbatim,
+    /// fences included. Trivia like any comment — it never reaches the
+    /// AST, and at module top it is the module docstring.
+    ProseIsland(&'s str),
     /// Ends every token stream the parser reads. The lexer never produces one.
     Eof,
 }
@@ -296,6 +312,9 @@ impl Display for TokKind<'_> {
             TokKind::Invalid(_) => "INVALID_TOKEN",
             TokKind::Comment(s) => return f.pad(s.as_ref()),
             TokKind::DocComment(s) => return f.pad(s.as_ref()),
+            TokKind::InnerDocComment(s) => return f.pad(s.as_ref()),
+            TokKind::LiteralComment(s) => return f.pad(s.as_ref()),
+            TokKind::ProseIsland(s) => return f.pad(s.as_ref()),
             TokKind::Eof => return f.pad("end of input"),
         };
         f.pad(s)
@@ -434,9 +453,18 @@ impl TokKind<'_> {
         matches!(self, TokKind::Ident(_))
     }
 
-    /// Returns if this is a comment.
+    /// Returns if this is comment trivia — `//`, `/*`, the doc comments,
+    /// the literal comments and the prose islands all stay out of the
+    /// grammar the same way (r[impl mimas.comment.trivia]).
     pub fn is_comment(self) -> bool {
-        matches!(self, TokKind::Comment(_) | TokKind::DocComment(_))
+        matches!(
+            self,
+            TokKind::Comment(_)
+                | TokKind::DocComment(_)
+                | TokKind::InnerDocComment(_)
+                | TokKind::LiteralComment(_)
+                | TokKind::ProseIsland(_)
+        )
     }
 
     /// Returns if this is a keyword that starts a statement wherever it shows up. Recovery
