@@ -81,7 +81,7 @@ test_vm!(
 test_vm!(
     taint_ride_null_short_circuits,
     "let a: [{[[int]]}] = [{ foo : [[7]] }];
-     let b: [{[[int]]}] = [dict::new()];",
+     let b: [{[[int]]}] = [{ bar : [[8]] }];",
     "a[0][\"foo\"]?[0][0]" => Int(7),
     "b[0][\"foo\"]?[0][0]" => Null,
 );

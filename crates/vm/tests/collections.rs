@@ -48,7 +48,7 @@ test_vm!(
 test_vm!(
     dict_two_questions,
     "let nested: {{{int}}} = { a : { b : { c : 9 } } };
-     let hole: {{{int}}} = { a : dict::new() };",
+     let hole: {{{int}}} = { a : { z : { c : 1 } } };",
     "nested[\"a\"]?[\"b\"]?[\"c\"]" => Int(9),
     "hole[\"a\"]?[\"b\"]?[\"c\"]" => Null,
 );
