@@ -31,19 +31,20 @@ test_ty!(
     "fn foo(a: int = 0) {}",
     "foo" => func!((Int) -> Unit)
 );
-// test_ty!(
-//     infer_unannotated_params,
-//     "fn identity(a) -> int { a }
-//     fn add_one(a) -> int { a + 1 }
-//     fn suffix(a) -> str { a + \"!\" }
-//     fn first(a) -> int { a[0] }
-//     fn observe(a) { let ok = a == 0; }",
-//     "identity" => func!((Int) -> Int),
-//     "add_one" => func!((Int) -> Int),
-//     "suffix" => func!((Str) -> Str),
-//     "first" => func!((array!(Int)) -> Int),
-//     "observe" => func!((Int) -> Unit)
-// );
+// r[verify mimas.fn.inferred]
+test_ty!(
+    infer_unannotated_params,
+    "fn identity(a) -> int { a }
+    fn add_one(a) -> int { a + 1 }
+    fn suffix(a) -> str { a + \"!\" }
+    fn first(a) -> int { a[0] }
+    fn observe(a) { let ok = a == 0; }",
+    "identity" => func!((Int) -> Int),
+    "add_one" => func!((Int) -> Int),
+    "suffix" => func!((Str) -> Str),
+    "first" => func!((array!(Int)) -> Int),
+    "observe" => func!((Int) -> Unit)
+);
 
 // Control flow
 test_ty!(
@@ -262,7 +263,13 @@ test_ty!(
 );
 
 // Violations
-test_fail!(non_explicate_return_ty, "fn foo() { 0 }");
+// a missing `->` no longer rejects: the return infers from the body
+// (r[mimas.fn.inferred]) -- `non_explicate_return_ty` used to assert this failed
+test_ty!(
+    inferred_return_ty,
+    "fn foo() { 0 }",
+    "foo" => func!(() -> Int)
+);
 // test_fail!(uninferrable_param_echo, "fn echo(a) { a }");
 // test_fail!(uninferrable_param_unit_body, "fn foo(a) {}");
 // test_fail!(uninferrable_param_explicit_return, "fn foo(a) -> int { 0 }");

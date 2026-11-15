@@ -74,6 +74,7 @@ mod tests {
     mod solve_functions;
     mod solve_generics;
     mod solve_grades;
+    mod solve_inferred;
     mod solve_match;
     mod solve_modules;
     mod solve_options;

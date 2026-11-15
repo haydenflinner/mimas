@@ -2602,6 +2602,17 @@ impl Solver {
                 header.is_ctor = h.is_ctor;
                 Ty::Fn(header)
             }
+            // a Vid that already settled substitutes what it became: an inferred
+            // `->` that unified with a declared param reads back through the
+            // caller's `T` (`fn f<T>(x: T) { x }` instantiates `T -> T` per use),
+            // and one that settled concrete reports the concrete type. A still
+            // free Vid passes through shared -- one monotype across call sites
+            // (`mimas.fn.inferred`).
+            // r[impl mimas.fn.inferred]
+            Ty::Vid(v) => match self.sub(*v).cloned() {
+                Some(t) => self.substitute_params(&t, map),
+                None => t.clone(),
+            },
             Ty::Unit
             | Ty::Never
             | Ty::Null

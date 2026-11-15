@@ -2160,16 +2160,41 @@ impl Solve for Function {
 
         if body_ty != Ty::Unit {
             self.body.fulfill_ty(expected_ty.clone(), solver)?;
-        } else if expected_ty != Ty::Unit
-            && solver.control_flow.quantify(&flow) != Quantification::Universal
+        } else {
+            let expected = expected_ty.clone().normalized(solver);
+            // a still-open `->` isn't "known non-unit" -- skip NotAllPathsReturn
+            // for it and let the settle below give it `()`
+            if !matches!(expected, Ty::Vid(_))
+                && expected != Ty::Unit
+                && solver.control_flow.quantify(&flow) != Quantification::Universal
+            {
+                solver.pop_type_params();
+                solver.ribs.pop();
+                Err(NotAllPathsReturn {
+                    src: solver.src(self.body.location()),
+                    at: self.body.location().into(),
+                    ty: expected.to_string(),
+                })?;
+            }
+        }
+
+        // r[impl mimas.fn.inferred] an inferred `->` that stayed isolated --
+        // never unified into any param's type, at any depth -- settles to
+        // `()`: a call site must not get to pin the return of a body that
+        // produced nothing for it. A `->` that reaches a param stays open
+        // (`fn id(x) { x }` is `?x -> ?x`, `fn first(a) { a[0] }` is
+        // `[?e] -> ?e`), and one that only aliases another fn's unsettled `->`
+        // (`fn a() { b() }`) waits for that fn's own solve.
+        if let Ty::Vid(v) = expected_ty
+            && solver.sub(v).is_none()
+            && !fn_data
+                .parameters
+                .iter()
+                .any(|p| p.ty.occurs(v, solver))
         {
-            solver.pop_type_params();
-            solver.ribs.pop();
-            Err(NotAllPathsReturn {
-                src: solver.src(self.body.location()),
-                at: self.body.location().into(),
-                ty: expected_ty.to_string(),
-            })?;
+            solver
+                .register_sub(v, Ty::Unit)
+                .map_err(|e| e.into_type_mismatch(solver, self.body.location()))?;
         }
 
         solver.pop_type_params();

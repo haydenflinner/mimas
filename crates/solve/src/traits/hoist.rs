@@ -509,7 +509,8 @@ impl Hoist for Pact {
 
                     let default = body.as_ref().map(|v| Ty::Vid(ctx.solver.node_vid(v.id())));
 
-                    let header = hoist_fn_header(ctx.solver, parameters, return_type, is_method)?;
+                    let header =
+                        hoist_fn_header(ctx.solver, parameters, return_type, is_method, false)?;
                     // r[impl mimas.pact.overload]
                     // A second fn of one name is an overload when both are operator-shaped
                     // (`self` + one operand with a written type) and the operands differ —
@@ -609,6 +610,7 @@ impl Hoist for Function {
             &self.parameters,
             &self.return_type,
             self.is_method(),
+            true,
         );
         ctx.solver.pop_type_params();
         let fn_header = fn_header?;
@@ -713,10 +715,18 @@ fn hoist_fn_header(
     parameters: &[Binding],
     return_type: &Option<Annotation>,
     is_method: bool,
+    infer_return_ty: bool,
 ) -> Result<FnHeader> {
-    let expected_ty = return_type
-        .clone()
-        .map_or(Ok(Ty::Unit), |a| Ty::from_annotation(a, solver))?;
+    // `fn f(x) { x }` -- a `fn` with a body but no `->` leaves the return an
+    // open Vid the body's check settles: one monotype per hole, shared across
+    // call sites (`mimas.fn.inferred`). A signature with no body to read (a
+    // pact item) keeps `-> ()`.
+    // r[impl mimas.fn.inferred]
+    let expected_ty = match return_type {
+        Some(a) => Ty::from_annotation(a.clone(), solver)?,
+        None if infer_return_ty => Ty::Vid(solver.vid()),
+        None => Ty::Unit,
+    };
 
     // Resolve each parameter's type into an `FnParam` for the `FnHeader`. `bind_parameter`
     // allocates one `Vid` per param and unifies it directly (no `Dec`, no rib insertion) --
