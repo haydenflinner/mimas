@@ -365,13 +365,13 @@ impl<'gc> Val<'gc> {
 
 /// A Mimas string — either an interned `Gc<'gc, SharedStr>` or a short
 /// string packed directly into the word. Bit 0 of `raw` is the tag: clear
-/// means the word is a `Gc` pointer (8-aligned, so the bit is free), set
-/// means bits 1..4 hold the byte length (`0..=INLINE_MAX`) and the
-/// remaining 7 bytes carry the chars. Inline strings skip the interner
+/// means the word is an aligned `Gc` pointer, set means bits 1..3 hold
+/// the byte length (`0..=INLINE_MAX`) and the remaining bytes carry the
+/// chars. Inline strings skip the interner
 /// table and allocation entirely — `Ctx::intern` builds them whenever
 /// they fit.
 ///
-/// Layout is little-endian in memory (the inline chars sit at bytes 1..8
+/// Layout is little-endian in memory (the inline chars follow the tag byte
 /// of `raw`), so [`Str::inline`] only constructs on little-endian targets;
 /// everywhere else every string is heap-backed and the decode is dead.
 ///
@@ -407,8 +407,8 @@ impl std::fmt::Debug for Str<'_> {
 impl<'gc> Str<'gc> {
     /// Bit 0 of `raw`: set → the word IS the string.
     const INLINE_TAG: usize = 1;
-    /// Longest string packed inline — the 7 bytes after the tag/len byte.
-    pub const INLINE_MAX: usize = 7;
+    /// Bytes after the tag/length byte: seven on 64-bit, three on 32-bit.
+    pub const INLINE_MAX: usize = std::mem::size_of::<usize>() - 1;
 
     /// Wrap an interned `Gc` — the constructor for heap strings. New
     /// strings come from [`Ctx::intern`]; this is for sites already
@@ -428,7 +428,7 @@ impl<'gc> Str<'gc> {
         if !cfg!(target_endian = "little") || s.len() > Self::INLINE_MAX {
             return None;
         }
-        let mut b = [0u8; 8];
+        let mut b = [0u8; std::mem::size_of::<usize>()];
         b[1..1 + s.len()].copy_from_slice(s.as_bytes());
         let raw =
             usize::from_le_bytes(b) | ((s.len() as usize) << 1) | Self::INLINE_TAG;
@@ -1980,4 +1980,33 @@ pub fn unary<'gc>(this: Val<'gc>, ctx: Ctx<'gc>, op: UnaryOp) -> RtResult<Val<'g
 /// A whole number as a `dec`, for arithmetic that mixes the two.
 fn dec_of_int(n: i64) -> RtResult<shared::dec::Dec> {
     shared::dec::Dec::from_int(n).map_err(|e| RtErr::Custom(format!("dec: {n}: {e}")))
+}
+
+#[cfg(test)]
+mod inline_string_tests {
+    use super::Str;
+
+    #[test]
+    fn inline_capacity_fits_the_target_word() {
+        assert_eq!(std::mem::size_of::<Str<'_>>(), std::mem::size_of::<usize>());
+        let boundary = "x".repeat(Str::INLINE_MAX);
+        if cfg!(target_endian = "little") {
+            assert_eq!(Str::inline(&boundary).unwrap().as_str(), boundary);
+        }
+        assert!(Str::inline(&(boundary + "x")).is_none());
+    }
+
+    #[test]
+    fn inline_strings_preserve_utf8_and_zero_bytes() {
+        for text in ["", "a", "abc", "abcd", "abcdefg", "abcdefgh", "é", "☀", "🦀", "a\0b"] {
+            match Str::inline(text) {
+                Some(value) => {
+                    assert!(cfg!(target_endian = "little") && text.len() <= Str::INLINE_MAX);
+                    assert_eq!(value.as_str(), text);
+                    assert!(value.gc().is_none());
+                }
+                None => assert!(!cfg!(target_endian = "little") || text.len() > Str::INLINE_MAX),
+            }
+        }
+    }
 }
