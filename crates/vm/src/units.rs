@@ -97,9 +97,23 @@ unit_ty!(
     PxX, "px↔", units::PIXELS.mul(Dim::axis(0))
 );
 unit_ty!(
-    /// Pixels along y (`px↕`) -- a vertical screen coordinate, down-positive
-    /// like the axis it rides.
+    /// Pixels along y (`px↕`) -- a vertical screen coordinate, claiming
+    /// no convention: signed values normalize to the positive end.
     PxY, "px↕", units::PIXELS.mul(Dim::axis(1))
+);
+unit_ty!(
+    /// Pixels, right-positive (`px→`) — a horizontal position or delta
+    /// in the page's unspecified pixel space.
+    PxRight, "px→", units::PIXELS.mul(Dim::axis_dir(0, false))
+);
+unit_ty!(
+    /// Pixels, up-positive (`px↑`) — the y every coordinate a program
+    /// sees reads (the host flips at the boundary).
+    PxUp, "px↑", units::PIXELS.mul(Dim::axis_dir(1, false))
+);
+unit_ty!(
+    /// Pixels, down-positive (`px↓`) — a y-down space a page opts into.
+    PxDown, "px↓", units::PIXELS.mul(Dim::axis_dir(1, true))
 );
 unit_ty!(
     /// Screen pixels -- coordinates in a space the host owns (browser
