@@ -33,8 +33,8 @@ pub mod tensor;
 pub mod units;
 pub use ::glam;
 pub use units::{
-    Beats, Bits, Hz, Len, Px, PxS, PxS2, PxX, PxY, Rad, Secs, Spx, SpxDown, SpxRight, SpxUp, SpxX,
-    SpxY, St, Tempo, Wpx, WpxDown, WpxRight, WpxUp, WpxX, WpxY,
+    Beats, Bits, Hz, Len, Px, PxDown, PxRight, PxS, PxS2, PxUp, PxX, PxY, Rad, Secs, Spx, SpxDown,
+    SpxRight, SpxUp, SpxX, SpxY, St, Tempo, Wpx, WpxDown, WpxRight, WpxUp, WpxX, WpxY,
 };
 
 // re-exports the MimasEnum / MimasStruct derives resolve against -- saves user crates from
