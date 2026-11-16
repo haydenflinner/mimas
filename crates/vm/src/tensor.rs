@@ -259,6 +259,17 @@ pub fn swap_dims(t: Prim, a: usize, b: usize) -> Result<Prim, String> {
 }
 
 pub fn permute(t: Prim, axes: &[usize]) -> Result<Prim, String> {
+    let rank = dims(&t).len();
+    let mut seen = vec![false; rank];
+    if axes.len() != rank {
+        return Err(format!("permute({axes:?}) is not a permutation of rank {rank}"));
+    }
+    for &a in axes {
+        if a >= rank || seen[a] {
+            return Err(format!("permute({axes:?}) is not a permutation of rank {rank}"));
+        }
+        seen[a] = true;
+    }
     guard(|| B::float_permute(t, axes))
 }
 
