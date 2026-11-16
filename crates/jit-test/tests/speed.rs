@@ -70,6 +70,24 @@ fn speed_smoke() {
          let TEST_VALUE = f\"{s}\";",
     );
     compare(
+        "short_strs",
+        "let s = 0;
+         for i in 60000 {
+             let t = f\"{i mod 10}!\";
+             if t == \"3!\" { s += 1; }
+         }
+         let TEST_VALUE = f\"{s}\";",
+    );
+    compare(
+        "distinct_strs",
+        "let s = 0;
+         for i in 200000 {
+             let t = f\"v{i}\";
+             if t == \"nope\" { s += 1; }
+         }
+         let TEST_VALUE = f\"{s}\";",
+    );
+    compare(
         "subscripts",
         "struct C { data: [int] }
          impl C {
