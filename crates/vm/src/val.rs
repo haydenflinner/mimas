@@ -363,9 +363,124 @@ impl<'gc> Val<'gc> {
     }
 }
 
-#[derive(Copy, Clone, Collect, Debug)]
-#[collect(no_drop)]
-pub struct Str<'gc>(pub Gc<'gc, SharedStr>);
+/// A Mimas string — either an interned `Gc<'gc, SharedStr>` or a short
+/// string packed directly into the word. Bit 0 of `raw` is the tag: clear
+/// means the word is a `Gc` pointer (8-aligned, so the bit is free), set
+/// means bits 1..4 hold the byte length (`0..=INLINE_MAX`) and the
+/// remaining 7 bytes carry the chars. Inline strings skip the interner
+/// table and allocation entirely — `Ctx::intern` builds them whenever
+/// they fit.
+///
+/// Layout is little-endian in memory (the inline chars sit at bytes 1..8
+/// of `raw`), so [`Str::inline`] only constructs on little-endian targets;
+/// everywhere else every string is heap-backed and the decode is dead.
+///
+/// `PartialEq`/`Hash` are content-based so the two representations compare
+/// and key identically (dicts mix them freely). Interned-vs-interned stays
+/// O(1): dedup makes distinct `Gc`s distinct content, so the raw-equality
+/// check settles them without a byte compare.
+#[repr(transparent)]
+#[derive(Copy, Clone)]
+pub struct Str<'gc> {
+    raw: usize,
+    _gc: std::marker::PhantomData<Gc<'gc, SharedStr>>,
+}
+
+// SAFETY: `trace` reconstructs the `Gc` only when `raw` is untagged — an
+// inline word holds plain bytes and traces nothing.
+unsafe impl<'gc> Collect<'gc> for Str<'gc> {
+    const NEEDS_TRACE: bool = true;
+    #[inline]
+    fn trace<T: gc_arena::collect::Trace<'gc>>(&self, cc: &mut T) {
+        if let Some(gc) = self.gc() {
+            cc.trace(&gc);
+        }
+    }
+}
+
+impl std::fmt::Debug for Str<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.as_str().fmt(f)
+    }
+}
+
+impl<'gc> Str<'gc> {
+    /// Bit 0 of `raw`: set → the word IS the string.
+    const INLINE_TAG: usize = 1;
+    /// Longest string packed inline — the 7 bytes after the tag/len byte.
+    pub const INLINE_MAX: usize = 7;
+
+    /// Wrap an interned `Gc` — the constructor for heap strings. New
+    /// strings come from [`Ctx::intern`]; this is for sites already
+    /// holding a `Gc<SharedStr>` (snapshot restore, the layout probe).
+    pub fn from_gc(gc: Gc<'gc, SharedStr>) -> Self {
+        debug_assert_eq!(Gc::as_ptr(gc) as usize & Self::INLINE_TAG, 0);
+        Str {
+            raw: Gc::as_ptr(gc) as usize,
+            _gc: std::marker::PhantomData,
+        }
+    }
+
+    /// Pack `s` into the word — `Some` iff little-endian and
+    /// `s.len() <= INLINE_MAX`. The fast path `Ctx::intern` takes for
+    /// short strings: no table lookup, no allocation.
+    pub fn inline(s: &str) -> Option<Self> {
+        if !cfg!(target_endian = "little") || s.len() > Self::INLINE_MAX {
+            return None;
+        }
+        let mut b = [0u8; 8];
+        b[1..1 + s.len()].copy_from_slice(s.as_bytes());
+        let raw =
+            usize::from_le_bytes(b) | ((s.len() as usize) << 1) | Self::INLINE_TAG;
+        Some(Str {
+            raw,
+            _gc: std::marker::PhantomData,
+        })
+    }
+
+    /// The interned `Gc`, or `None` for an inline string.
+    pub fn gc(self) -> Option<Gc<'gc, SharedStr>> {
+        if self.raw & Self::INLINE_TAG == 0 {
+            // SAFETY: an untagged `raw` is a `Gc::as_ptr` result — only
+            // `from_gc` produces it.
+            Some(unsafe { Gc::from_ptr(self.raw as *const SharedStr) })
+        } else {
+            None
+        }
+    }
+
+    /// `&'gc str` into arena memory for a heap string — `None` for inline
+    /// (whose bytes live in `self`, not the arena). Sites needing the
+    /// arena lifetime materialize through [`Ctx::intern_heap`].
+    pub fn as_gc_str(self) -> Option<&'gc str> {
+        self.gc().map(|gc| Gc::as_ref(gc).as_ref())
+    }
+
+    /// The word the `Val::Str` payload stores — `bc::layout` locates the
+    /// payload offset through it.
+    #[doc(hidden)]
+    pub fn payload_bits(self) -> usize {
+        self.raw
+    }
+
+    /// The string's bytes. Borrows `self`: for an interned string that is
+    /// arena memory; for an inline string it is the word itself — either
+    /// way the result lives as long as the borrow, never `'gc`.
+    pub fn as_str(&self) -> &str {
+        if self.raw & Self::INLINE_TAG != 0 {
+            let len = ((self.raw >> 1) & 0x7) as usize;
+            // SAFETY: `inline` writes the chars at bytes 1..=len of the
+            // word on little-endian, the only place it constructs them.
+            unsafe {
+                let p = (&self.raw as *const usize).cast::<u8>().add(1);
+                std::str::from_utf8_unchecked(std::slice::from_raw_parts(p, len))
+            }
+        } else {
+            // SAFETY: untagged `raw` is a live `Gc<SharedStr>` — see `gc`.
+            unsafe { Gc::as_ref(Gc::from_ptr(self.raw as *const SharedStr)) }.as_ref()
+        }
+    }
+}
 
 #[derive(Copy, Clone, Collect, Debug)]
 #[collect(no_drop)]
@@ -924,22 +1039,25 @@ pub struct RawImage {
     pub bytes: Box<[u8]>,
 }
 
-impl<'gc> Str<'gc> {
-    pub fn as_str(self) -> &'gc str {
-        Gc::as_ref(self.0).as_ref()
-    }
-}
-
-impl<'gc> PartialEq for Str<'gc> {
+impl PartialEq for Str<'_> {
     fn eq(&self, other: &Self) -> bool {
-        Gc::ptr_eq(self.0, other.0)
+        if self.raw == other.raw {
+            return true;
+        }
+        // both interned: dedup makes distinct `Gc`s distinct content —
+        // settle without a byte compare. Only an inline-involved pair
+        // (≤7 bytes) pays a content compare.
+        if (self.raw | other.raw) & Str::INLINE_TAG == 0 {
+            return false;
+        }
+        self.as_str() == other.as_str()
     }
 }
-impl<'gc> Eq for Str<'gc> {}
+impl Eq for Str<'_> {}
 
-impl<'gc> std::hash::Hash for Str<'gc> {
+impl std::hash::Hash for Str<'_> {
     fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
-        Gc::as_ptr(self.0).hash(h);
+        self.as_str().hash(h);
     }
 }
 

@@ -173,7 +173,7 @@ impl<'gc> Snapper<'gc> {
             Val::Float(f) => SnapVal::Float(f),
             Val::Dec(d) => SnapVal::Dec(d.to_bits()),
             Val::Fn(b) => SnapVal::Fn(b.into()),
-            Val::Str(s) => SnapVal::Str(Gc::as_ref(s.0).clone()),
+            Val::Str(s) => SnapVal::Str(SharedStr::from(s.as_str())),
             Val::Raised(s) => SnapVal::Raised(Box::new(self.val(*s)?)),
             Val::Array(a) => self.node(Gc::as_ptr(a.0) as *const (), v),
             // A demoted typed array snaps as the *inner* `Array`'s node —
@@ -236,7 +236,7 @@ impl<'gc> Snapper<'gc> {
                 let items: Vec<(SharedStr, Val)> =
                     d.0.borrow()
                         .iter()
-                        .map(|(k, &v)| (Gc::as_ref(k.0).clone(), v))
+                        .map(|(k, &v)| (SharedStr::from(k.as_str()), v))
                         .collect();
                 let items = items
                     .into_iter()

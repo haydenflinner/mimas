@@ -825,7 +825,7 @@ pub mod jit {
         let (t_str, t_array, t_instance, arr_pay, inst_pay, rl_vec, rl_flag, rl_inst, rl_flag_i) =
             gc_arena::arena::rootless_mutate(|mc| {
                 use crate::val::{Array, Instance, InstanceData, SharedStr, Str};
-                let s = Str(Gc::new(mc, SharedStr::from("p")));
+                let s = Str::from_gc(Gc::new(mc, SharedStr::from("p")));
                 let a = Array(Gc::new(
                     mc,
                     gc_arena::RefLock::new(vec![Val::Int(11), Val::Int(22)].into()),
@@ -976,14 +976,14 @@ pub mod jit {
                 "Seq payload must sit at one offset for both tags"
             );
             let dict_pay = pay_of(&di, Gc::as_ptr(dg.0) as usize);
-            let sv_str = Val::Str(crate::val::Str(Gc::new(
+            let sv_str = Val::Str(crate::val::Str::from_gc(Gc::new(
                 mc,
                 crate::val::SharedStr::from("k"),
             )));
             let Val::Str(key_str) = sv_str else {
                 unreachable!()
             };
-            let str_pay = pay_of(&sv_str, Gc::as_ptr(key_str.0) as usize);
+            let str_pay = pay_of(&sv_str, key_str.payload_bits());
             // RefLock<ArrayStore>: inner-enum offset + per-T borrow flag —
             // the same trick `rl_vec`/`rl_flag` used for RefLock<Vec<Val>>.
             let rls = &*si.0;

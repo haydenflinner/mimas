@@ -197,8 +197,15 @@ impl<'gc> MimasType<'gc> for &'gc str {
         Some(Ty::Str)
     }
 
-    fn from_value(_ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError> {
-        Ok(v.as_str().ok_or_else(|| ty_error("str", v))?.as_str())
+    fn from_value(ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError> {
+        let s = v.as_str().ok_or_else(|| ty_error("str", v))?;
+        // `&'gc str` must point into arena memory — an inline `Str`
+        // carries its bytes in the value word, so materialize it through
+        // the table.
+        match s.as_gc_str() {
+            Some(g) => Ok(g),
+            None => Ok(ctx.intern_heap(s.as_str()).as_gc_str().unwrap()),
+        }
     }
 
     fn into_value(self, ctx: Ctx<'gc>) -> Val<'gc> {

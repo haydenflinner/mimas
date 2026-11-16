@@ -90,16 +90,28 @@ impl<'gc> InternedStrings<'gc> {
     }
 
     /// The interned `Str` for `s`, and whether this call allocated it.
+    /// Strings that fit `Str::INLINE_MAX` pack into the value word itself —
+    /// they never reach the table at all.
     pub fn intern(self, mc: &Mutation<'gc>, s: &str) -> (Str<'gc>, bool) {
+        if let Some(short) = Str::inline(s) {
+            return (short, false);
+        }
+        self.intern_heap_pair(mc, s)
+    }
+
+    /// Always-heap interning — used where an inline `Str` can't satisfy
+    /// the caller (a `'gc` borrow into arena memory). Shares the table
+    /// with `intern`, so a materialized short string still dedups.
+    fn intern_heap_pair(self, mc: &Mutation<'gc>, s: &str) -> (Str<'gc>, bool) {
         if let Some(weak) = self.0.borrow().get(s)
             && let Some(gc) = weak.upgrade(mc)
         {
-            return (Str(gc), false);
+            return (Str::from_gc(gc), false);
         }
         let shared: SharedStr = Arc::from(s);
         let gc = Gc::new(mc, shared.clone());
         self.0.borrow_mut(mc).insert(shared, Gc::downgrade(gc));
-        (Str(gc), true)
+        (Str::from_gc(gc), true)
     }
 
     /// Drop the table entries of strings the finished mark found dead, and return the byte total
@@ -256,6 +268,16 @@ impl<'gc> Ctx<'gc> {
 
     pub fn intern(self, s: &str) -> Str<'gc> {
         let (str, fresh) = self.state.strings.intern(self.mutation, s);
+        if fresh {
+            self.charge(s.len() + crate::mem::BOX_BYTES);
+        }
+        str
+    }
+
+    /// Intern always as a heap `Gc` — never inline — for callers that need
+    /// `Str::as_gc_str` (arena-memory `&'gc str`) rather than `as_str`.
+    pub fn intern_heap(self, s: &str) -> Str<'gc> {
+        let (str, fresh) = self.state.strings.intern_heap_pair(self.mutation, s);
         if fresh {
             self.charge(s.len() + crate::mem::BOX_BYTES);
         }
