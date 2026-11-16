@@ -74,7 +74,7 @@ This tree is a permanently separate fork of upstream [mimas](https://github.com/
 | Area | Ours | Upstream |
 | --- | --- | --- |
 | Native metadata | `#[native]`/`#[mimas]` submit `NativeMeta` via `inventory`: doc + `param_names` + `param_dims` on `ApiFunction`/`ApiMethod` (`api/src/records.rs`, `macros/src/lib.rs`) | `doc` only |
-| Axes and directions | `up 50.0px`, `← x`, `richer 5usd`: a direction word in front folds the sign and tags the axis; `px↕`/`usd@wealth` in types; `axis wealth (poorer, richer);`; `+ - < ==` need agreeing axes, `* /` xor them (`shared/src/units.rs` `AXIS0`, `solve/src/dims.rs`) | not present |
+| Axes and directions | `50.0px↑`, `x↓`, `5usd@in`: a direction after the value claims a sign convention on its axis; `px↕`/`wpx↑`/`usd@flow` in types; `axis flow (out, in);`; `+ - < ==` need agreeing axes, `* /` xor them (`shared/src/units.rs` `AXIS0`, `solve/src/dims.rs`) | not present |
 | Math spellings | `≠ ≤ ≥ ¬ ∧ ∨ ∈ ∉`; prefix reductions `∑ ∏ ⨅ ⨆`; `a ⋅ b`; a list against a scalar is a mask; `xs[idxs]` gathers (`parser.rs` `unary`, `library/src/methods/array.rs`) | not present |
 | Units at the boundary | `#[mimas_dim("s")]` field attr and `Px`/`Secs`/`Hz` wrapper types put dims on native signatures (`macros/src/derive.rs`, `vm/src/units.rs`) | not present |
 | Cooperative frames | Natives can `yield_frame`-pause the VM; host pumps via `Vm::debug_step`, caps work via `set_op_budget` (`vm/src/vm.rs`) | `Vm::run` to completion |

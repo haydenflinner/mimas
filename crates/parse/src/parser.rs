@@ -598,7 +598,7 @@ impl<'s> Parser<'s> {
                 let item = Item::new(self.check_block().into(), self.location(start), false);
                 BlockElement::Stmt(self.new_stmt(item, start))
             }
-            // `axis wealth (poorer, richer);` names an axis and its two direction
+            // `axis flow (out, in);` names an axis and its two direction
             // words. Contextual like `unit`.
             TokKind::Ident("axis") if self.unit_intro() => {
                 BlockElement::Stmt(self.axis_stmt(start))
@@ -1192,7 +1192,7 @@ impl<'s> Parser<'s> {
     }
 
     /// `axis NAME (NEG, POS);` -- an axis and its direction words, negative end
-    /// first. The pre-parse scan already registered it so `richer 5usd` parses
+    /// first. The pre-parse scan already registered it so `recv 5usd` parses
     /// anywhere in the file; this reports a bad declaration for real.
     fn axis_stmt(&mut self, start: usize) -> Stmt {
         let kw = self.advance(); // `axis`
@@ -1208,9 +1208,9 @@ impl<'s> Parser<'s> {
         let name_loc: Location = name.location;
         let mut words = None;
         if self.eat(TokKind::LeftParenthesis) {
-            let neg = self.require_ident();
+            let neg = self.direction_ident();
             self.expect(TokKind::Comma);
-            let pos = self.require_ident();
+            let pos = self.direction_ident();
             self.expect(TokKind::RightParenthesis);
             words = Some((neg, pos));
         } else {
@@ -3885,10 +3885,11 @@ impl<'s> Parser<'s> {
         self.new_expr(Call::new(left, vec![arg]), start)
     }
 
-    /// `x↑` — a direction glyph after its operand. Same desugar the old
-    /// `↑x` prefix had: the operand is wrapped in a `+`/`-` whose sign is
-    /// the direction's end on its axis, and the wrapper remembers the
-    /// axis for the dimension checker.
+    /// `x↑` — a direction glyph after its operand: a *convention claim*,
+    /// not a negation. `50↓` is +50 measured down-positive; the checker
+    /// inserts a `neg` only where the value meets the opposite
+    /// convention. The no-op `+` wrapper carries the signed axis to the
+    /// dimension checker.
     fn direction_suffix(&mut self, operand: Expr) -> Expr {
         let start = operand.span().start();
         let tok = self.advance();
@@ -3905,44 +3906,37 @@ impl<'s> Parser<'s> {
         };
         // the builtin glyphs always resolve — `direction` only fails
         // on words, and a glyph's word is builtin
-        let Some((axis, negative)) = shared::units::direction(word) else {
+        let Some((axis, _)) = shared::units::direction(word) else {
             unreachable!()
         };
-        let op = if negative {
-            UnaryOp::Negative
-        } else {
-            UnaryOp::Positive
-        };
-        let wrapped = self.new_expr(Unary::new(op, operand), start);
+        let wrapped = self.new_expr(Unary::new(UnaryOp::Positive, operand), start);
         self.directions.insert(wrapped.id(), axis);
         wrapped
     }
 
-    /// `5usd@richer`, `x@y` — a named direction or axis after its
-    /// operand. A direction word signs like the glyph; an axis name
-    /// tags without signing (`Positive` is the no-op wrap). `@word` is
-    /// for directions with no glyph (`richer`, `inward`): a word that
+    /// `5usd@in`, `x@y` — a named direction or axis after its
+    /// operand. A direction word claims its end's convention like the
+    /// glyph; an axis name tags without claiming an end. `@word` is
+    /// for directions with no glyph (`in`, `inward`): a word that
     /// has one spells it — `x↑`, not `x@up`.
     fn at_suffix(&mut self, operand: Expr) -> Expr {
         let start = operand.span().start();
         self.advance(); // `@`
-        let name = self.require_ident();
+        let name = self.direction_ident();
         // r[impl mimas.unit.direction.postfix]
-        if let Some(glyph) = shared::units::builtin_direction_glyph(&name.lexeme) {
-            self.error(Misdirection {
-                src: self.src(),
-                at: self.location(start).into(),
-                msg: format!("`{}` is a direction, and it has a glyph", name.lexeme),
-                label: format!("write `{glyph}` after the value, not `@{name}`", name = name.lexeme),
-            });
-        }
-        if let Some((axis, negative)) = shared::units::direction(&name.lexeme) {
-            let op = if negative {
-                UnaryOp::Negative
-            } else {
-                UnaryOp::Positive
-            };
-            let wrapped = self.new_expr(Unary::new(op, operand), start);
+        if let Some((axis, _)) = shared::units::direction(&name.lexeme) {
+            if let Some(glyph) = shared::units::builtin_direction_glyph(&name.lexeme) {
+                self.error(Misdirection {
+                    src: self.src(),
+                    at: self.location(start).into(),
+                    msg: format!("`{}` is a direction, and it has a glyph", name.lexeme),
+                    label: format!(
+                        "write `{glyph}` after the value, not `@{name}`",
+                        name = name.lexeme
+                    ),
+                });
+            }
+            let wrapped = self.new_expr(Unary::new(UnaryOp::Positive, operand), start);
             self.directions.insert(wrapped.id(), axis);
             return wrapped;
         }
@@ -4871,10 +4865,20 @@ impl<'s> Parser<'s> {
                         });
                         Annotation::Applied(segments, args)
                     }
-                    // `px↕`, `usd@wealth`: a lone unit followed by its axis
+                    // `px↕`, `usd@flow`, `wpx↓`: a lone unit followed by its axis
                     1 if matches!(
                         self.peek(),
-                        TokKind::LeftRightArrow | TokKind::UpDownArrow | TokKind::At
+                        TokKind::LeftRightArrow
+                            | TokKind::UpDownArrow
+                            | TokKind::At
+                            | TokKind::RightArrow
+                            | TokKind::LeftArrow
+                            | TokKind::UpArrow
+                            | TokKind::DownArrow
+                            | TokKind::CircledDot
+                            | TokKind::CircledTimes
+                            | TokKind::Rewind
+                            | TokKind::FastForward
                     ) =>
                     {
                         self.quantity_annotation(segments.remove(0))
@@ -4943,17 +4947,39 @@ impl<'s> Parser<'s> {
             let (unit, exp) = self.unit_name_exp(unit);
             parts.push((unit, sign * exp));
         }
-        // a trailing axis: `px/s↕`, `index@wealth` -- an axis glyph is a unit
-        // name to `units::lookup`, and `@name` the same for a declared axis
+        // a trailing axis: `px/s↕`, `wpx↓`, `index@flow` -- an axis or
+        // direction glyph is a unit name to `units::lookup`, and `@name`
+        // the same for a declared axis or direction
         match self.peek() {
-            TokKind::LeftRightArrow | TokKind::UpDownArrow => {
+            TokKind::LeftRightArrow
+            | TokKind::UpDownArrow
+            | TokKind::RightArrow
+            | TokKind::LeftArrow
+            | TokKind::UpArrow
+            | TokKind::DownArrow
+            | TokKind::CircledDot
+            | TokKind::CircledTimes
+            | TokKind::Rewind
+            | TokKind::FastForward => {
                 let tok = self.advance();
-                let glyph = if tok.kind() == TokKind::LeftRightArrow { "↔" } else { "↕" };
+                let glyph = match tok.kind() {
+                    TokKind::LeftRightArrow => "↔",
+                    TokKind::UpDownArrow => "↕",
+                    TokKind::RightArrow => "→",
+                    TokKind::LeftArrow => "←",
+                    TokKind::UpArrow => "↑",
+                    TokKind::DownArrow => "↓",
+                    TokKind::CircledDot => "⊙",
+                    TokKind::CircledTimes => "⊗",
+                    TokKind::Rewind => "⏪",
+                    TokKind::FastForward => "⏩",
+                    _ => unreachable!(),
+                };
                 parts.push((Ident::new(glyph, Location::from(tok.location())), 1));
             }
             TokKind::At => {
                 let at = self.advance();
-                let name = self.require_ident();
+                let name = self.direction_ident();
                 parts.push((Ident::new(format!("@{}", name.lexeme), Location::from(at.location())), 1));
             }
             _ => {}
@@ -5348,6 +5374,25 @@ impl<'s> Parser<'s> {
         Ident::new(POISON, self.location(self.next_start()))
     }
 
+    /// A direction word where the grammar expects one: `in` the keyword
+    /// still reads as the word `in` — after `@` or inside `axis (…)` it
+    /// can't open a `for` loop or a membership test. (`∈` shares the
+    /// token; only the two-byte `in` qualifies.)
+    fn direction_ident(&mut self) -> Ident {
+        let tok = self.tokens[self.next];
+        if tok.kind() == TokKind::In && tok.span().end() - tok.span().start() == 2 {
+            let mark = self.meta_at(0).mark;
+            let location = self.next_location();
+            self.advance();
+            let ident = Ident::new("in", location);
+            if mark != 0 {
+                self.hygiene.marks.insert(ident.id, mark);
+            }
+            return ident;
+        }
+        self.require_ident()
+    }
+
     // member-access position (right of `::`): also accepts type keywords as plain names so
     // namespaces like `std::random::int` work without colliding with the type system.
     fn require_member_name(&mut self) -> Ident {
@@ -5542,6 +5587,17 @@ fn valid_unit_name(name: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+/// A direction word in a decl or `@` position: an identifier, or the
+/// two-byte `in` — `∈` shares `TokKind::In` (3 bytes) and stays
+/// membership-only.
+fn direction_word<'a>(tok: &'a Tok<TokKind<'a>>) -> Option<&'a str> {
+    match tok.kind() {
+        TokKind::Ident(w) => Some(w),
+        TokKind::In if tok.span().end() - tok.span().start() == 2 => Some("in"),
+        _ => None,
+    }
+}
+
 /// The token scan that registers `unit` decls before the real lex — the
 /// lexer needs custom names in the table to read `18tile` as a quantity.
 /// Walks the probe tokens, finds `unit <name> [= spec]` at statement
@@ -5575,21 +5631,12 @@ fn declare_units(source: &str, tokens: &[Tok<TokKind<'_>>]) -> bool {
             && stmt_pos
             && matches!(toks[i].kind(), TokKind::Ident("axis"))
             && i + 6 < toks.len()
-            && let (
-                TokKind::Ident(name),
-                TokKind::LeftParenthesis,
-                TokKind::Ident(neg),
-                TokKind::Comma,
-                TokKind::Ident(pos),
-                TokKind::RightParenthesis,
-            ) = (
-                toks[i + 1].kind(),
-                toks[i + 2].kind(),
-                toks[i + 3].kind(),
-                toks[i + 4].kind(),
-                toks[i + 5].kind(),
-                toks[i + 6].kind(),
-            )
+            && matches!(toks[i + 2].kind(), TokKind::LeftParenthesis)
+            && matches!(toks[i + 4].kind(), TokKind::Comma)
+            && matches!(toks[i + 6].kind(), TokKind::RightParenthesis)
+            && let TokKind::Ident(name) = toks[i + 1].kind()
+            && let Some(neg) = direction_word(toks[i + 3])
+            && let Some(pos) = direction_word(toks[i + 5])
             && !source[toks[i].span().end()..toks[i + 1].span().start()].contains('\n')
         {
             fresh_axes |= shared::units::axis_lookup(name).is_none();

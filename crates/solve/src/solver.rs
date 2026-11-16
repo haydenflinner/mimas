@@ -174,6 +174,9 @@ pub struct Solver {
     pub(crate) check_texts: FxHashMap<NodeId, String>,
     /// `dec` literals and products to scale into the page's units.
     pub(crate) dec_scales: FxHashMap<NodeId, f64>,
+    /// Exprs whose value negates at emit — the dims pass marked them as
+    /// crossing to the opposite axis convention where they land.
+    pub(crate) sign_negs: FxHashSet<NodeId>,
     /// The type each bare-brace literal's slot expects (`{ x: 1 }` passed where a
     /// `Pt` goes), noted by `fulfill_ty` before the literal is solved — a struct
     /// hint makes it that struct, anything else leaves it a dict.
@@ -331,6 +334,7 @@ impl Solver {
             node_to_vid: FxIndexMap::default(),
             node_decs: FxIndexMap::default(),
             rewrites: FxIndexMap::default(),
+            sign_negs: FxHashSet::default(),
             raw_places: FxHashSet::default(),
             synth_removal: FxHashSet::default(),
             place_sources: FxIndexMap::default(),

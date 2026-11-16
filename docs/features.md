@@ -291,17 +291,17 @@ now.
 
 ## Axes and directions — which way a quantity points
 
-A quantity can be *along* an axis, and a direction word in front of it says
-which way: `up 50.0px` is `−50 px` along y, `← x` and `right 3.0px` are along
-x, `richer 5usd` is along an axis the program declared. The builtin axes are
-`x y z t` with `left/right`, `up/down` (down is positive: the screen's way),
-`outward/inward`, `earlier/later` and the glyphs `← → ↑ ↓ ⊙ ⏪ ⏩`; `axis
-wealth (poorer, richer);` declares one (negative end first, four per
-program) and `axis y (south, north);` renames a builtin's words. A word is a
-direction only when declared and when an operand follows it on the line —
-`up + 1` keeps `up` a name, `up(x)` with no gap is a call — so no existing
+A quantity can be *along* an axis, and a direction after it says which
+way: `50.0px↑` claims 50 px measured up-positive along y, `x↓` and
+`3.0px→` sign their ends, `5usd@in` is along an axis the program
+declared. The builtin axes are `x y z t` with `left/right`, `down/up`,
+`outward/inward`, `earlier/later` and the glyphs `← → ↑ ↓ ⊙ ⊗ ⏪ ⏩`; `axis
+flow (out, in);` declares one (negative end first, four per
+program) and `axis y (south, north);` renames a builtin's words. A word
+is a direction only after its operand — `up 50` is a call to a name —
+so no existing
 program changes meaning. In a type the axis follows the unit: `px↕`,
-`px/s↔`, `usd@wealth` (`@name` for any axis); a literal takes the same
+`px/s↔`, `usd@flow` (`@name` for any axis); a literal takes the same
 suffix, `40.0px↕`; `#[mimas_dim("px↕")]` carries it across a native field.
 
 The algebra is parity, not exponents. `Dim` grew eight axis slots after the

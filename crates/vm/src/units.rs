@@ -116,6 +116,49 @@ unit_ty!(
     /// Screen pixels along y (`spx↕`).
     SpxY, "spx↕", units::SCREEN_PX.mul(Dim::axis(1))
 );
+unit_ty!(
+    /// World pixels -- coordinates in the page's own world (the field,
+    /// board or chart plane the camera looks at), as `game::to_world`
+    /// returns them. `Wpx` values meet `Px` ones — `px` is the pixel
+    /// family's unspecified member — but never `Spx` ones: the seam
+    /// natives own that crossing.
+    Wpx, "wpx", units::WORLD_PX
+);
+unit_ty!(
+    /// World pixels along x (`wpx↔`).
+    WpxX, "wpx↔", units::WORLD_PX.mul(Dim::axis(0))
+);
+unit_ty!(
+    /// World pixels along y (`wpx↕`).
+    WpxY, "wpx↕", units::WORLD_PX.mul(Dim::axis(1))
+);
+unit_ty!(
+    /// Screen pixels, right-positive (`spx→`) — a horizontal position
+    /// or delta in the host's space.
+    SpxRight, "spx→", units::SCREEN_PX.mul(Dim::axis_dir(0, false))
+);
+unit_ty!(
+    /// Screen pixels, up-positive (`spx↑`) — the y the host hands page
+    /// code today (input arrives already flipped into game space).
+    SpxUp, "spx↑", units::SCREEN_PX.mul(Dim::axis_dir(1, false))
+);
+unit_ty!(
+    /// Screen pixels, down-positive (`spx↓`) — raw CSS-style y.
+    SpxDown, "spx↓", units::SCREEN_PX.mul(Dim::axis_dir(1, true))
+);
+unit_ty!(
+    /// World pixels, right-positive (`wpx→`).
+    WpxRight, "wpx→", units::WORLD_PX.mul(Dim::axis_dir(0, false))
+);
+unit_ty!(
+    /// World pixels, up-positive (`wpx↑`).
+    WpxUp, "wpx↑", units::WORLD_PX.mul(Dim::axis_dir(1, false))
+);
+unit_ty!(
+    /// World pixels, down-positive (`wpx↓`) — a world laid out the
+    /// sheet's way.
+    WpxDown, "wpx↓", units::WORLD_PX.mul(Dim::axis_dir(1, true))
+);
 // r[impl mimas.unit.angle]
 unit_ty!(
     /// Radians -- `deg`/`turn`/`grad`/`arcmin`/`arcsec`/`mrad` are the same

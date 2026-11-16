@@ -1,41 +1,52 @@
-//! Axes and directions: `50.0px↑` is a `px` along y with the direction's sign
-//! folded in (`↑` is the positive end — every coordinate a Mimas program sees
-//! is up-positive); `px↕` in a type says which axis; a glyph follows the
-//! value it signs (`v↓`, `(a + b)→`); `x@y` tags an axis without a sign and
-//! `x@word` is the spelling for a direction with no glyph (`5usd@richer`);
-//! `+ - < ==` need agreeing axes (an untagged side adopts); `* /` xor them.
+//! Axes and directions: `50.0px↑` is a `px` claimed at the `↑` convention —
+//! the value reads "50 in up-positive terms". A direction is a *convention
+//! claim*, not a negation: `50.0px↓` is +50 measured down-positive. Values
+//! mix conventions freely — `x↓ + y↑` converts the `↓` side (the checker
+//! negates it, the result reports the positive end), and a `px↓` argument
+//! into a `wpx↑` parameter converts at the boundary. `px↕` in a type is the
+//! unsigned axis claim — it adopts either convention. `x@y` tags an axis
+//! unsigned; `x@word` spells a direction with no glyph (`5usd@in`).
+//! `+ - < ==` need agreeing axes (an untagged side adopts); `* /` xor them
+//! and read every signed factor at its positive end.
 //! See the units book page and `plan.md` in the host repo.
 
 #[macro_use]
 mod test_runner;
 
-// r[verify mimas.unit.axis]
+// r[verify mimas.unit.direction.signed]
 test_run!(
-    direction_words_fold_the_sign,
+    direction_words_claim_a_convention,
+    // `50↓` is 50 in the down convention — +50 stored, and `.to` reads
+    // it back convention-free
     "(50.0px↑).to(\"px\")" => "50.0",
-    "(50.0px↓).to(\"px\")" => "-50.0",
-    "(2.0px←).to(\"px\")" => "-2.0",
+    "(50.0px↓).to(\"px\")" => "50.0",
+    "(2.0px←).to(\"px\")" => "2.0",
     "(2.0px→).to(\"px\")" => "2.0",
-    "(3.0px↓).to(\"px\")" => "-3.0",
-    "(3s⏪).to(\"s\")" => "-3.0",
+    "(3s⏪).to(\"s\")" => "3.0",
     "(3s⏩).to(\"s\")" => "3.0",
+    // `.to` can name the convention: "50 up" written in down-terms is −50
+    "(50.0px↑).to(\"px↓\")" => "-50.0",
+    "(50.0px↓).to(\"px↑\")" => "-50.0",
+    // mixed conventions add fine — the `↓` side negates to the positive end
     "(50.0px↑ + 20.0px↓).to(\"px\")" => "30.0",
+    "(50.0px↓ + 20.0px↑).to(\"px↓\")" => "30.0",
 );
 
-// r[verify mimas.unit.axis]
+// r[verify mimas.unit.direction.signed]
 test_run!(
-    direction_glyphs_fold_the_same_sign,
+    direction_glyphs_claim_the_same_convention,
     "let v: px↕ = 8.0px",
     "(50.0px↑).to(\"px\")" => "50.0",
-    "(50.0px↓).to(\"px\")" => "-50.0",
-    // a glyph follows any operand, not just literals
+    "(50.0px↓).to(\"px\")" => "50.0",
+    // a glyph follows any operand, not just literals — `v↓` claims the
+    // unsigned value at the down convention
     "(v↑).to(\"px\")" => "8.0",
-    "(v↓).to(\"px\")" => "-8.0",
-    // the physics pair reads as z: `⊙` out of the page (negative),
+    "(v↓).to(\"px\")" => "8.0",
+    // the physics pair reads as z: `⊙` out of the page (negative end),
     // `⊗` into it (positive)
-    "(5.0px⊙).to(\"px\")" => "-5.0",
+    "(5.0px⊙).to(\"px\")" => "5.0",
     "(5.0px⊗).to(\"px\")" => "5.0",
-    // `x@axis` tags without signing
+    // `x@axis` tags without claiming an end
     "(v@y).to(\"px\")" => "8.0",
 );
 
@@ -43,9 +54,9 @@ test_run!(
 #[test]
 fn a_rename_flips_the_glyph_with_the_word() {
     // `axis y (up, down)` makes `up` the negative end — `↑` spells the
-    // word, so it flips with it
+    // word, so `50↑` claims that end's convention instead
     assert_eq!(
-        test_runner::render("axis y (up, down);", "(50.0px↑).to(\"px\")"),
+        test_runner::render("axis y (up, down);", "(50.0px↑).to(\"px↓\")"),
         "-50.0"
     );
     assert_eq!(
@@ -65,7 +76,7 @@ test_run!(
      let x: px↔ = 40.0px↔;",
     "(x + BALL).to(\"px\")" => "58.0",
     "((2.0px↑) / (4.0px↓))" => "-0.5",
-    "((2.0px↑) * (3.0px←)).to(\"px*px\")" => "-6.0",   // axes xor away, the signs multiply
+    "((2.0px↑) * (3.0px←)).to(\"px*px\")" => "-6.0",   // axes xor away, factors read positive-end
     "(460.0px/s↑ * 0.5s).to(\"px\")" => "230.0",
 );
 
@@ -73,12 +84,42 @@ test_run!(
     axes_through_functions_and_annotations,
     "fn drop(y: px↕, by: px↕) -> px↕ { y + by }
      fn paddle(top: px↕) -> px↕ { top + 110.0px↓ }
-     axis wealth (poorer, richer);
-     fn pay(bal: usd@wealth, amt: usd@wealth) -> usd@wealth { bal + amt }",
+     axis flow (out, in);
+     fn pay(bal: usd@flow, amt: usd@flow) -> usd@flow { bal + amt }",
     "drop(300.0px↕, 20.0px↑).to(\"px\")" => "320.0",
-    "paddle(10.0px).to(\"px\")" => "-100.0",
-    "pay(10usd@richer, 4usd@poorer).to(\"usd\")" => "6.0",
+    "paddle(10.0px).to(\"px↓\")" => "120.0",
+    "pay(10usd@in, 4usd@out).to(\"usd\")" => "6.0",
 );
+
+// r[verify mimas.unit.direction.signed]
+test_run!(
+    conventions_convert_at_the_boundary,
+    // a `wpx↑` parameter declares the up convention — a `↓`-claimed
+    // value negates as it crosses
+    "fn rise(dy: wpx↑) -> wpx↑ { dy }
+     fn fall(dy: wpx↓) -> wpx↓ { dy }
+     fn slide(dy: wpx↕) -> wpx↕ { dy }
+     let base: wpx↑ = 100.0wpx
+     let u: wpx↕ = 8.0wpx",
+    "rise(40.0wpx↓).to(\"wpx\")" => "-40.0",
+    "fall(40.0wpx↑).to(\"wpx\")" => "-40.0",
+    // an unsigned slot takes any convention, reading it positive-end:
+    // "40 down" arrives as −40
+    "slide(40.0wpx↓).to(\"wpx\")" => "-40.0",
+    // and a `↕`-written value claims an end at the boundary
+    "rise(u).to(\"wpx\")" => "8.0",
+    "rise(base + 40.0wpx↓).to(\"wpx\")" => "60.0",
+);
+
+// r[verify mimas.unit.direction.signed]
+#[test]
+fn opposite_conventions_in_composites_still_reject() {
+    // a scalar converts; a tuple's element can't be negated wholesale
+    rejected("fn f(p: (wpx↑, wpx↑)) -> wpx↑ { p.0 }\nlet a = f((1.0wpx↓, 2.0wpx↑));", "wpx↓");
+    rejected("fn f(p: (wpx↑, wpx↑)) -> wpx↑ { p.0 }\nlet a = f((1.0wpx↓, 2.0wpx↑));", "expected");
+    // and the seams still hold: `wpx↓` never converts to `spx↓`
+    rejected("fn f(y: spx↓) -> spx↓ { y }\nlet a = f(1.0wpx↓);", "expected");
+}
 
 fn rejected(src: &str, needle: &str) {
     let err = test_runner::try_execute(src).expect_err(&format!("`{src}` should be rejected"));
@@ -98,7 +139,7 @@ fn cross_axis_arithmetic_is_rejected() {
     rejected("let a: px↕ = 3.0px→;", "along x");
     rejected("let a = (2.0px↑) * (3.0px←); let b: px↕ = a + 1.0px;", "along");
     rejected("fn f(y: px↕) -> px↕ { y }\n let a = f(3.0px→);", "along");
-    rejected("axis wealth (poorer, richer);\n let a = 5usd@richer + 5usd↑;", "cannot add");
+    rejected("axis flow (out, in);\n let a = 5usd@in + 5usd↑;", "cannot add");
     rejected("let a = (5.0px↑ < 3.0px←);", "cannot order");
     // `atan2(dy, dx)` reads an (x, y) vector: the legs' axes differ on
     // purpose, only the bare dims must agree. `angle_to` is the same
@@ -117,13 +158,33 @@ fn the_old_prefix_spelling_is_a_named_mistake() {
     // and the error says where the direction went
     rejected("let a = up 50.0px;", "directions follow their operand");
     rejected(
-        "axis wealth (poorer, richer);\nlet a = richer 5usd;",
+        "axis flow (out, in);\nlet a = out 5usd;",
         "directions follow their operand",
     );
     // `up` is still a usable name everywhere else
     assert!(test_runner::try_execute("let up = 3.0; let a = up + 1.0;").is_ok());
     // and a bogus `@word` names its own mistake
     rejected("let a = 5.0px@bogus;", "neither an axis nor a direction");
+}
+
+// r[verify mimas.unit.direction.postfix]
+#[test]
+fn in_is_a_direction_word_and_still_a_keyword() {
+    // `in` is the loop/membership keyword — as a direction word it only
+    // ever follows `@` or sits inside `axis (…)`, so both reads coexist
+    assert!(test_runner::try_execute("axis flow (out, in);\nlet a = 5usd@in;").is_ok());
+    assert_eq!(
+        test_runner::render("axis flow (out, in);", "(5usd@in + 4usd@out).to(\"usd\")"),
+        "1.0"
+    );
+    // `x@in` on a name takes the same suffix as the literal
+    assert_eq!(
+        test_runner::render("axis flow (out, in);\nlet v = 3.0usd;", "(v@in).to(\"usd\")"),
+        "3.0"
+    );
+    // and `in`/`∈` keep membership
+    assert_eq!(test_runner::render("", "2 in [1, 2, 3]"), "true");
+    assert_eq!(test_runner::render("", "2 ∈ [1, 2, 3]"), "true");
 }
 
 // r[verify mimas.unit.direction.postfix]
@@ -137,9 +198,9 @@ fn a_direction_with_a_glyph_spells_the_glyph() {
     // page) reads as the z axis now that tensor is `⊠`
     rejected("let a = 5.0px@inward;", "has a glyph");
     rejected("let a = 5.0px@inward;", "write `⊗` after the value");
-    // a declared direction with no glyph keeps `@word`, like `richer`
+    // a declared direction with no glyph keeps `@word`, like `in`
     assert!(test_runner::try_execute(
-        "axis wealth (poorer, richer);\nlet a = 5usd@richer;"
+        "axis flow (out, in);\nlet a = 5usd@in;"
     )
     .is_ok());
 }

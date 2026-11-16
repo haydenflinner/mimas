@@ -1,6 +1,6 @@
 use crate::{
     OperandKind,
-    ir::{BinOp, BlockId, BodyId, Constant, FormatPart, Inst, InstId, Ir, Local, LoopCtx, Place},
+    ir::{BinOp, BlockId, BodyId, Constant, FormatPart, Inst, InstId, Ir, Local, LoopCtx, Place, UnaryOp},
 };
 use api::NativeId;
 use parse::{
@@ -1263,6 +1263,15 @@ impl Lower for Expr {
             ExprKind::Unwrap(un) => un.emit(id, ir),
             ExprKind::While(while_expr) => while_expr.emit(id, ir),
         });
+        // a quantity crossing to the opposite axis convention where it
+        // lands — `40px↓` into a `wpx↑` slot, `x↓ + y↑` — negates at the
+        // seam the dims pass marked (r[impl mimas.unit.direction.signed])
+        let out = match out {
+            Some(v) if ir.resolutions.sign_negs.contains(&id) => {
+                Some(ir.current().unary(UnaryOp::Negative, v))
+            }
+            _ => out,
+        };
         if let Some(iid) = out {
             let kind = num_kind_of(ir, id);
             let slot = ir.current_body_mut().kinds.entry(iid).or_insert(kind);

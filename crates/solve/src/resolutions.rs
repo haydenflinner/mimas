@@ -37,6 +37,9 @@ pub struct Resolutions {
     /// factor from its written unit, or a product's correction
     /// (r[impl mimas.dec.units]).
     pub dec_scales: rustc_hash::FxHashMap<NodeId, f64>,
+    /// Exprs emit negates — the dims pass marked them as crossing to the
+    /// opposite axis convention where they land.
+    pub sign_negs: rustc_hash::FxHashSet<NodeId>,
     pub node_decs: FxIndexMap<NodeId, DecId>,
     pub rewrites: FxIndexMap<NodeId, parse::Expr>,
     /// Read/write site counts per declaration -- the `{0,1,ω}` usage grades the
@@ -617,6 +620,7 @@ impl From<Solver> for Resolutions {
             check_units: solver.check_units,
             check_texts: solver.check_texts,
             dec_scales: solver.dec_scales,
+            sign_negs: solver.sign_negs,
             node_decs: solver.node_decs,
             rewrites: solver.rewrites,
             dec_uses: solver.dec_uses,

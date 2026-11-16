@@ -22,6 +22,12 @@ pub const N: usize = AXIS0 + MAX_AXES;
 /// the exponent slots. See [`Dim::axes`].
 pub const AXIS0: usize = FIRST_CUSTOM + MAX_CUSTOM;
 
+/// Every slot that carries a unit exponent — builtin bases and `unit`
+/// decls alike, i.e. everything before the axis slots. Loops over a
+/// dim's "bare" part want this bound: `0..FIRST_CUSTOM` silently skips
+/// declared units.
+pub const UNIT_SLOTS: usize = AXIS0;
+
 /// Axis slots: the four builtin axes (`x` `y` `z` `t`), four for `axis`
 /// decls, and two norm slots (`snorm`/`unorm`) at the end. Norm slots are
 /// parity-only namespaces — no direction words, not declarable — so a
@@ -39,7 +45,7 @@ const NORMS: [(&str, usize); 2] = [("snorm", NORM0), ("unorm", NORM0 + 1)];
 
 /// Where a `unit tile;` declaration's base dimension sits in the [`Dim`]
 /// array -- the builtins occupy the slots before it.
-const FIRST_CUSTOM: usize = 16;
+const FIRST_CUSTOM: usize = 17;
 
 /// How many new base dimensions (`unit tile;`) one program may declare.
 /// Derived decls (`unit league = 3mi;`) don't spend a slot -- they share
@@ -51,7 +57,7 @@ pub const MAX_CUSTOM: usize = 8;
 /// a `Dim` that outlives its compilation.
 pub const BASES: [&str; N] = [
     "m", "kg", "s", "A", "K", "mol", "cd", "usd", "px", "frame", "beat", "st", "b", "index", "rad",
-    "spx",
+    "spx", "wpx",
     "", "", "", "", "", "", "", "",
     "", "", "", "", "", "", "", "",
     "", "",
@@ -82,9 +88,16 @@ impl Dim {
             out[i] += other.0[i];
             i += 1;
         }
-        // axis slots are parities: along x times along x is no longer along x
+        // axis slots are parities: along x times along x is no longer along x,
+        // whatever the convention — `x→·x←` cancels like `x↔·x↔` does (the
+        // value's sign correction is the checker's, not the dim's)
         while i < N {
-            out[i] = (out[i] + other.0[i]) & 1;
+            let (a, b) = (self.0[i], other.0[i]);
+            out[i] = if a == 0 || b == 0 {
+                a + b
+            } else {
+                0
+            };
             i += 1;
         }
         Dim(out)
@@ -98,7 +111,12 @@ impl Dim {
             i += 1;
         }
         while i < N {
-            out[i] = (out[i] + other.0[i]) & 1;
+            let (a, b) = (self.0[i], other.0[i]);
+            out[i] = if a == 0 || b == 0 {
+                a + b
+            } else {
+                0
+            };
             i += 1;
         }
         Dim(out)
@@ -113,7 +131,7 @@ impl Dim {
             i += 1;
         }
         while i < N {
-            out[i] = (out[i] * n) & 1;
+            out[i] = if n % 2 == 0 { 0 } else { out[i] };
             i += 1;
         }
         Dim(out)
@@ -123,11 +141,18 @@ impl Dim {
     pub const fn sqrt(self) -> Option<Dim> {
         let mut out = self.0;
         let mut i = 0;
-        while i < N {
+        while i < AXIS0 {
             if self.0[i] % 2 != 0 {
                 return None;
             }
             out[i] = self.0[i] / 2;
+            i += 1;
+        }
+        // an axis tag isn't an exponent — it can't halve; only an absent one roots
+        while i < N {
+            if self.0[i] == 1 {
+                return None;
+            }
             i += 1;
         }
         Some(Dim(out))
@@ -158,43 +183,166 @@ impl Dim {
     }
 
     /// A dimensionless quantity along one axis slot -- what a direction word tags.
+    /// Slot values: 0 absent, 1 an unsigned axis tag (`↔`/`↕`), +2 the positive
+    /// end (`→`/`↑`), −2 the negative end (`←`/`↓`).
     pub const fn axis(slot: usize) -> Dim {
         let mut e = [0i8; N];
         e[AXIS0 + slot] = 1;
         Dim(e)
     }
 
-    /// Whether two dimensions can meet in `+`, `-`, a comparison or a slot: the
-    /// exponents must match, and the axes must match unless one side has none --
-    /// an untagged quantity adopts the other's axis (`b.x + BALL`), the way a
-    /// plain number meets an `index`.
+    /// The signed end of an axis slot: `→`/`↑`/`⊗`/`⏩` are +2, `←`/`↓`/`⊙`/`⏪`
+    /// are −2. A direction *claim* on a type — `wpx↓` is world y measured
+    /// down-positive — where `axis()`'s unsigned tag accepts either
+    /// convention. Opposite-signed scalars convert by negating the value;
+    /// unsigned and absent sides still adopt.
+    // r[impl mimas.unit.direction.signed]
+    pub const fn axis_dir(slot: usize, negative: bool) -> Dim {
+        let mut e = [0i8; N];
+        e[AXIS0 + slot] = if negative { -2 } else { 2 };
+        Dim(e)
+    }
+
+    /// Two dims that agree except for opposite axis signs — `wpx↑` vs `wpx↓`
+    /// are conventions of the same quantity, convertible by negating a
+    /// scalar value. Composite containers and places can't convert
+    /// element-wise; the caller decides which it holds.
+    pub fn sign_convertible(want: Dim, got: Dim) -> bool {
+        let axes = want.axes() == 0
+            || got.axes() == 0
+            || (want.axes() == got.axes()
+                && (0..MAX_AXES).all(|i| {
+                    let (w, g) = (want.0[AXIS0 + i], got.0[AXIS0 + i]);
+                    w == 1 || g == 1 || w.abs() == g.abs()
+                }));
+        axes && (want.bare() == got.bare() || pixel_agree(want.bare(), got.bare()))
+    }
+
+    /// `a` holds the negative end of a slot `b` holds positive — `a` is
+    /// the side a conversion negates. The pair's opposition is
+    /// symmetric, but the flip belongs to `a`: `sign_opposed(a, b) ||
+    /// sign_opposed(b, a)` answers "do these differ by convention".
+    pub fn sign_opposed(a: Dim, b: Dim) -> bool {
+        (0..MAX_AXES).any(|i| {
+            let (a, b) = (a.0[AXIS0 + i], b.0[AXIS0 + i]);
+            a == -2 && b == 2
+        })
+    }
+
+    /// `got`'s value must negate to land in `want`'s convention: a
+    /// value is stored reading its positive end wherever the slot
+    /// doesn't claim the negative one, so the sign flips iff exactly
+    /// one side claims it — `40↓` under `wpx`, `wpx↕` or `wpx↑` is −40;
+    /// an unsigned value into a `wpx↓` slot is too.
+    pub fn sign_flip(want: Dim, got: Dim) -> bool {
+        (0..MAX_AXES).any(|i| {
+            let (w, g) = (want.0[AXIS0 + i], got.0[AXIS0 + i]);
+            (w == -2) != (g == -2)
+        })
+    }
+
+    /// `.to("px↓")` re-expresses the value in the named convention, so
+    /// the number negates when the source reads the other end. A bare
+    /// or unsigned target (`px`, `px↕`) names no end — `.to` returns
+    /// the scalar in the value's own convention as stored.
+    pub fn read_flip(want: Dim, got: Dim) -> bool {
+        (0..MAX_AXES).any(|i| {
+            let (w, g) = (want.0[AXIS0 + i], got.0[AXIS0 + i]);
+            (w == 2 || w == -2) && ((w == -2) != (g == -2))
+        })
+    }
+
+    /// Whether any slot carries the negative end — the factor a product
+    /// or quotient normalizes before composing.
+    pub fn has_neg_end(self) -> bool {
+        (0..MAX_AXES).any(|i| self.0[AXIS0 + i] == -2)
+    }
+
+    /// This dim with every signed axis read at its positive end — the
+    /// convention mixed `x↓ + y↑` arithmetic reports its result in.
+    pub fn pos_axes(self) -> Dim {
+        let mut out = self;
+        for e in &mut out.0[AXIS0..] {
+            if *e == -2 {
+                *e = 2;
+            }
+        }
+        out
+    }
+
+    /// This dim's axis claims written over `base`'s — the direction
+    /// suffix's merge: `x↓` claims the y convention whatever the operand
+    /// already carried there; an axis the suffix doesn't name is kept.
+    pub fn with_axes(self, base: Dim) -> Dim {
+        let mut out = base;
+        for i in 0..MAX_AXES {
+            if self.0[AXIS0 + i] != 0 {
+                out.0[AXIS0 + i] = self.0[AXIS0 + i];
+            }
+        }
+        out
+    }
+
+    /// Whether two dimensions can meet in `+`, `-`, a comparison or a slot:
+    /// the exponents must match — except inside the pixel family, where a
+    /// bare `px` is *unspecified* and stands for any specific pixel space —
+    /// and the axes must match unless one side has none: an untagged
+    /// quantity adopts the other's axis (`b.x + BALL`), the way a plain
+    /// number meets an `index`.
     // r[impl mimas.unit.axis]
+    // r[impl mimas.unit.pixels]
     pub fn agree(a: Dim, b: Dim) -> bool {
-        a.bare() == b.bare() && (a.axes() == 0 || b.axes() == 0 || a.axes() == b.axes())
+        (a.bare() == b.bare() || pixel_agree(a.bare(), b.bare()))
+            && (a.axes() == 0 || b.axes() == 0 || (a.axes() == b.axes() && Self::signs_ok(a, b)))
     }
 
-    /// The dimension two agreeing values share: the tagged one's.
+    /// Per-slot convention match under equal axis sets: same tag, or an
+    /// unsigned `↔`/`↕` adopting a signed `→`/`←`. Opposite signs disagree —
+    /// a scalar converts instead (`sign_convertible`), a composite clashes.
+    fn signs_ok(a: Dim, b: Dim) -> bool {
+        (0..MAX_AXES).all(|i| {
+            let (a, b) = (a.0[AXIS0 + i], b.0[AXIS0 + i]);
+            a == b || a == 1 || b == 1
+        })
+    }
+
+    /// The dimension two agreeing values share: the tagged one's — and the
+    /// specific pixel space's when the other side's pixels are unspecified.
+    /// An unsigned axis adopts the signed side's convention.
     pub fn absorb(a: Dim, b: Dim) -> Dim {
-        if a.axes() == 0 { b } else { a }
+        let bare = if a.bare() == b.bare() || specific_px_mass(a.bare()) != 0 {
+            a.bare()
+        } else {
+            b.bare()
+        };
+        let mut out = bare;
+        // agreeing axes are equal or one-sided, so the union is the
+        // adopted set — an unsigned slot takes the signed side's end
+        let mut i = 0;
+        while i < MAX_AXES {
+            let (a, b) = (a.0[AXIS0 + i], b.0[AXIS0 + i]);
+            out.0[AXIS0 + i] = if b != 0 && (a == 0 || a == 1) { b } else { a };
+            i += 1;
+        }
+        out
     }
 
-    /// `x`, `y`, `x·y` -- the axes this is along, by name.
+    /// `x`, `y`, `x·y` -- the axes this is along, by name. A signed slot
+    /// names its end: `y↑` reads "up-positive y".
     pub fn along(&self) -> String {
         (0..MAX_AXES)
             .filter(|i| self.0[AXIS0 + i] != 0)
-            .map(axis_name)
+            .map(|i| axis_dir_name(i, self.0[AXIS0 + i]))
             .collect::<Vec<_>>()
             .join("·")
     }
 
-    /// The suffix a type annotation writes for the axes: `↔`, `↕`, or `@name`.
+    /// The suffix a type annotation writes for the axes: `↔`, `↕`, `→`,
+    /// `↓`, or `@name`/`@dir`.
     fn axis_suffix(&self) -> String {
         (0..MAX_AXES)
             .filter(|i| self.0[AXIS0 + i] != 0)
-            .map(|i| match axis_glyph(i) {
-                Some(g) => g.to_string(),
-                None => format!("@{}", axis_name(i)),
-            })
+            .map(|i| axis_dir_suffix(i, self.0[AXIS0 + i]))
             .collect()
     }
 
@@ -419,46 +567,108 @@ const fn d(e: [i8; FIRST_CUSTOM]) -> Dim {
     Dim(out)
 }
 
-// exponents:        m  kg  s  A  K mol cd usd px frame beat st bit index rad spx
-pub const LENGTH: Dim = d([1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const MASS: Dim = d([0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const TIME: Dim = d([0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const CURRENT: Dim = d([0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const TEMP: Dim = d([0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const AMOUNT: Dim = d([0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const LUMINOUS: Dim = d([0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const MONEY: Dim = d([0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const PIXELS: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]);
-pub const FRAMES: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0]);
-pub const BEAT: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0]);
-pub const PITCH: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0]);
-pub const DATA: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0]);
+// exponents:        m  kg  s  A  K mol cd usd px frame beat st bit index rad spx wpx
+pub const LENGTH: Dim = d([1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const MASS: Dim = d([0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const TIME: Dim = d([0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const CURRENT: Dim = d([0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const TEMP: Dim = d([0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const AMOUNT: Dim = d([0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const LUMINOUS: Dim = d([0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const MONEY: Dim = d([0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const PIXELS: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const FRAMES: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]);
+pub const BEAT: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0]);
+pub const PITCH: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0]);
+pub const DATA: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0]);
 /// A position into a collection: `i: index` is an `int` that can't be mixed
 /// with any quantity (`i + 3px` is an error). Plain numbers convert freely
 /// (`i += 1`, `i < xs.len()`) -- the dimension exists to keep *measurements*
 /// out of index variables, not to make counting verbose.
-pub const INDEX: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0]);
+pub const INDEX: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0]);
 /// An angle, in radians: `deg`, `turn`, `grad`, `arcmin`, `arcsec` and `mrad`
 /// are scaled spellings of it. Unlike `prob`/`pct`, an angle *does* compose —
 /// `angle / s` is angular velocity and `rad^2` is a solid angle.
-pub const ANGLE: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0]);
-pub const FREQ: Dim = d([0, 0, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const FORCE: Dim = d([1, 1, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const PRESSURE: Dim = d([-1, 1, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const ENERGY: Dim = d([2, 1, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const POWER: Dim = d([2, 1, -3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const CHARGE: Dim = d([0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const VOLTAGE: Dim = d([2, 1, -3, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const ANGLE: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0]);
+pub const FREQ: Dim = d([0, 0, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const FORCE: Dim = d([1, 1, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const PRESSURE: Dim = d([-1, 1, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const ENERGY: Dim = d([2, 1, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const POWER: Dim = d([2, 1, -3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const CHARGE: Dim = d([0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const VOLTAGE: Dim = d([2, 1, -3, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
 /// A screen-space pixel: a coordinate the host measured in its own space
 /// (a browser point, a viewport extent, a sheet-plane position) and handed
-/// the page. `spx` and `px` are different *kinds* of pixel the way `px`
-/// and `m` are different kinds of length — the page must cross the seam
-/// deliberately (`game::to_world`/`game::to_screen`), so a host coord can
-/// never slide into world math unnoticed.
-pub const SCREEN_PX: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+/// the page. `spx` is a *specific* pixel space — it never meets `wpx` in
+/// arithmetic or a typed slot; the page crosses deliberately through
+/// `game::to_world`/`game::to_screen`. Bare `px` is the pixel family's
+/// unspecified member: it meets any specific space and absorbs into it.
+pub const SCREEN_PX: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0]);
+/// A world-space pixel: a coordinate in the page's own world — the field,
+/// board or chart plane the camera looks at. `wpx` never meets `spx`;
+/// `game::to_world`/`game::to_screen` own the seam. A render or
+/// backbuffer pixel (`rpx`) would join the family as a fourth member if
+/// a native ever hands raster coords across the boundary.
+pub const WORLD_PX: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+
+/// The pixel units: `PIXELS` (`px`) first — the family's *unspecified*
+/// member — then every specific pixel space. A render/backbuffer px
+/// (`rpx`) joins here if a native ever hands raster coords across.
+const PIXEL_UNITS: [Dim; 3] = [PIXELS, SCREEN_PX, WORLD_PX];
+
+/// The base slot a singleton dim occupies (`PIXELS` → the `px` slot).
+fn base_slot(u: Dim) -> usize {
+    u.0[..FIRST_CUSTOM]
+        .iter()
+        .position(|&e| e != 0)
+        .expect("a base unit")
+}
+
+/// The dim's exponent mass on the *specific* pixel spaces (`spx`, `wpx`),
+/// ignoring `px` itself: `wpx/s` → 1, `px/s` → 0.
+fn specific_px_mass(d: Dim) -> i8 {
+    PIXEL_UNITS[1..]
+        .iter()
+        .map(|u| d.0[base_slot(*u)])
+        .sum()
+}
+
+/// Pixel-family agreement for `Dim::agree`: non-pixel exponents must match
+/// exactly; on the pixel slots, each side's *specific* mass must either
+/// match the other's or be supplied entirely by the other's `px` mass.
+/// So `px` meets `wpx` and `px/s` meets `wpx/s` — the unspecified unit
+/// stands in for the space — while `wpx` and `spx` never meet, and a
+/// `px` mass too small to cover the other's specifics (or any leftovers)
+/// keeps the dims apart.
+// r[impl mimas.unit.pixels]
+fn pixel_agree(a: Dim, b: Dim) -> bool {
+    let px_i = base_slot(PIXELS);
+    let (mut pa, mut pb) = (0i8, 0i8);
+    let mut spec_eq = true;
+    let (mut sa, mut sb) = (0i8, 0i8);
+    // every unit slot compares, custom units included — `tile` and
+    // `elixir` differ above FIRST_CUSTOM and must not "agree" here
+    for i in 0..UNIT_SLOTS {
+        let (x, y) = (a.0[i], b.0[i]);
+        if i == px_i {
+            (pa, pb) = (x, y);
+        } else if PIXEL_UNITS[1..].iter().any(|u| base_slot(*u) == i) {
+            spec_eq &= x == y;
+            sa += x;
+            sb += y;
+        } else if x != y {
+            return false;
+        }
+    }
+    if spec_eq {
+        pa == pb
+    } else {
+        (sa == 0 && pa == pb + sb) || (sb == 0 && pb == pa + sa)
+    }
+}
 
 /// Dimension families, for error messages.
-const SI: [(&str, Dim); 24] = [
+const SI: [(&str, Dim); 25] = [
     ("length", LENGTH),
     ("volume", LENGTH.powi(3)),
     ("mass", MASS),
@@ -483,10 +693,11 @@ const SI: [(&str, Dim); 24] = [
     ("index", INDEX),
     ("angle", ANGLE),
     ("screen pixels", SCREEN_PX),
+    ("world pixels", WORLD_PX),
 ];
 
 /// The coherent unit each family is kept in.
-const NAMED: [(&str, Dim, f64); 23] = [
+const NAMED: [(&str, Dim, f64); 24] = [
     ("m", LENGTH, 1.0),
     ("kg", MASS, 1.0),
     ("s", TIME, 1.0),
@@ -510,6 +721,7 @@ const NAMED: [(&str, Dim, f64); 23] = [
     ("idx", INDEX, 1.0),
     ("rad", ANGLE, 1.0),
     ("spx", SCREEN_PX, 1.0),
+    ("wpx", WORLD_PX, 1.0),
 ];
 
 /// The word for base-dimension slot `i` — builtins by name, custom slots
@@ -539,7 +751,7 @@ pub struct CustomUnits {
     /// Declared base dims, in declaration order — entry `i` names the
     /// `Dim` slot `FIRST_CUSTOM + i`.
     bases: Vec<String>,
-    /// `axis wealth (poorer, richer);` decls: the axis name and its direction
+    /// `axis flow (out, in);` decls: the axis name and its direction
     /// words, negative first. Slot `BUILTIN_AXES + i`.
     axes: Vec<(String, String, String)>,
     /// A builtin axis redeclared with other words (`axis y (south, north);`):
@@ -724,10 +936,10 @@ pub fn direction(word: &str) -> Option<(Dim, bool)> {
             let c = c.borrow();
             for (i, (_, neg, pos)) in c.axes.iter().enumerate() {
                 if word == neg {
-                    return Some((Dim::axis(BUILTIN_AXES + i), true));
+                    return Some((Dim::axis_dir(BUILTIN_AXES + i, true), true));
                 }
                 if word == pos {
-                    return Some((Dim::axis(BUILTIN_AXES + i), false));
+                    return Some((Dim::axis_dir(BUILTIN_AXES + i, false), false));
                 }
             }
             for (slot, a) in BUILTIN_AXIS.iter().enumerate() {
@@ -736,10 +948,10 @@ pub fn direction(word: &str) -> Option<(Dim, bool)> {
                     None => (a.1, a.2),
                 };
                 if word == neg {
-                    return Some((Dim::axis(slot), true));
+                    return Some((Dim::axis_dir(slot, true), true));
                 }
                 if word == pos {
-                    return Some((Dim::axis(slot), false));
+                    return Some((Dim::axis_dir(slot, false), false));
                 }
             }
             None
@@ -748,9 +960,9 @@ pub fn direction(word: &str) -> Option<(Dim, bool)> {
             glyph.then(|| {
                 BUILTIN_AXIS.iter().enumerate().find_map(|(slot, a)| {
                     if word == a.1 {
-                        Some((Dim::axis(slot), true))
+                        Some((Dim::axis_dir(slot, true), true))
                     } else {
-                        (word == a.2).then(|| (Dim::axis(slot), false))
+                        (word == a.2).then(|| (Dim::axis_dir(slot, false), false))
                     }
                 })
             })?
@@ -802,9 +1014,68 @@ pub fn axis_name(slot: usize) -> String {
     })
 }
 
-/// The glyph an axis writes in a type, if it has one.
-fn axis_glyph(slot: usize) -> Option<&'static str> {
-    BUILTIN_AXIS.get(slot).and_then(|a| a.3)
+/// The name of an axis end for prose: `x`, `x→`, `flow`, `flow(inward)`.
+fn axis_dir_name(slot: usize, signed: i8) -> String {
+    if signed.abs() != 2 {
+        return axis_name(slot);
+    }
+    if slot < BUILTIN_AXES {
+        let a = &BUILTIN_AXIS[slot];
+        return format!("{}{}", a.0, if signed == 2 { a.5 } else { a.4 });
+    }
+    let dir = CUSTOM.with(|c| {
+        c.borrow()
+            .axes
+            .get(slot - BUILTIN_AXES)
+            .map(|a| if signed == 2 { a.2.clone() } else { a.1.clone() })
+    });
+    match dir {
+        Some(d) => format!("{}({d})", axis_name(slot)),
+        None => axis_name(slot),
+    }
+}
+
+/// The annotation spelling of an axis slot's claim: `↔`/`↕` unsigned,
+/// `→`/`↓` signed, `@name`/`@dir` where a glyph doesn't exist.
+fn axis_dir_suffix(slot: usize, signed: i8) -> String {
+    if slot < BUILTIN_AXES {
+        let a = &BUILTIN_AXIS[slot];
+        let g = match signed {
+            2 => Some(a.5),
+            -2 => Some(a.4),
+            _ => a.3,
+        };
+        if let Some(g) = g {
+            return g.to_string();
+        }
+    }
+    let word = CUSTOM.with(|c| {
+        c.borrow()
+            .axes
+            .get(slot.wrapping_sub(BUILTIN_AXES))
+            .map(|a| match signed {
+                2 => a.2.clone(),
+                -2 => a.1.clone(),
+                _ => a.0.clone(),
+            })
+    });
+    format!("@{}", word.unwrap_or_else(|| axis_name(slot)))
+}
+
+/// A direction *glyph* as a signed axis claim: `wpx↓` is world y
+/// measured down-positive, `px→` right-positive x — the signed end the
+/// unsigned `axis_of_glyph` arrows (`↔`/`↕`) leave open.
+// r[impl mimas.unit.direction.signed]
+pub fn dir_of_glyph(c: char) -> Option<Dim> {
+    BUILTIN_AXIS.iter().enumerate().find_map(|(slot, a)| {
+        if a.4.chars().next() == Some(c) {
+            Some(Dim::axis_dir(slot, true))
+        } else if a.5.chars().next() == Some(c) {
+            Some(Dim::axis_dir(slot, false))
+        } else {
+            None
+        }
+    })
 }
 
 /// The declared name behind a custom base-dimension slot.
@@ -817,13 +1088,15 @@ fn custom_name(slot: usize) -> Option<String> {
 // r[impl mimas.unit.literal]
 // r[impl mimas.unit.editor-list]
 pub fn lookup(name: &str) -> Option<(Dim, f64)> {
-    // an axis in unit position: the glyph (`px↕`) or `@name` (`usd@wealth`)
+    // an axis in unit position: the glyph (`px↕`, `wpx↓`) or `@name`
+    // (`usd@flow`, `px@down`)
     if let Some(rest) = name.strip_prefix('@') {
-        return axis_lookup(rest).map(|d| (d, 1.0));
+        let axis = axis_lookup(rest).or_else(|| direction(rest).map(|(d, _)| d));
+        return axis.map(|d| (d, 1.0));
     }
     let mut chars = name.chars();
     if let (Some(c), None) = (chars.next(), chars.next())
-        && let Some(d) = axis_of_glyph(c)
+        && let Some(d) = axis_of_glyph(c).or_else(|| dir_of_glyph(c))
     {
         return Some((d, 1.0));
     }
@@ -901,11 +1174,13 @@ fn lookup_builtin(name: &str) -> Option<(Dim, f64)> {
         "MW" => (POWER, 1e6),
         // money and graphics: their own base dimensions. `spx` is a
         // *host-space* pixel — browser/sheet coords a fixture or native
-        // hands the page, kept apart from `px` so a screen/world slip is
-        // a compile error, converted only through the seam natives.
+        // hands the page — and `wpx` a *world-space* one. They never meet
+        // each other; bare `px` is the unspecified member that absorbs
+        // into whichever specific space it touches.
         "usd" => (MONEY, 1.0),
         "px" => (PIXELS, 1.0),
         "spx" => (SCREEN_PX, 1.0),
+        "wpx" => (WORLD_PX, 1.0),
         "frame" => (FRAMES, 1.0),
         // index: an `int` position into a collection. its own dimension so a
         // quantity can never pass for one (`xs[i] + 3px` fails), but plain
@@ -1016,14 +1291,18 @@ pub fn parse(expr: &str) -> Option<(Dim, f64)> {
                 op = c;
                 rest = &tail[1..];
             }
-            // a trailing axis: `px↕`, `px/s↔`, `usd@wealth` -- ends the expression
-            Some(c) if axis_of_glyph(c).is_some() => {
+            // a trailing axis: `px↕`, `px/s↔`, `wpx↓`, `usd@flow` -- ends the expression
+            Some(c) if axis_of_glyph(c).is_some() || dir_of_glyph(c).is_some() => {
                 let after = &tail[c.len_utf8()..];
-                return after
-                    .is_empty()
-                    .then(|| (dim.mul(axis_of_glyph(c).unwrap()), scale));
+                let axis = axis_of_glyph(c).or_else(|| dir_of_glyph(c)).unwrap();
+                return after.is_empty().then(|| (dim.mul(axis), scale));
             }
-            Some('@') => return axis_lookup(&tail[1..]).map(|a| (dim.mul(a), scale)),
+            Some('@') => {
+                let word = &tail[1..];
+                // an axis name tags unsigned; a direction word signs its end
+                let axis = axis_lookup(word).or_else(|| direction(word).map(|(d, _)| d));
+                return axis.map(|a| (dim.mul(a), scale));
+            }
             Some(_) => return None,
         }
     }
@@ -1060,14 +1339,21 @@ pub fn scan_suffix(rest: &str) -> Option<usize> {
         end += 1 + n;
         end += exponent(&rest[end..]);
     }
-    // a trailing axis rides the suffix: `40.0px↕`, `3col@wealth`
+    // a trailing axis rides the suffix: `40.0px↕`, `8.0wpx↓`, `3col@flow`
     if let Some(c) = rest[end..].chars().next()
-        && axis_of_glyph(c).is_some()
+        && (axis_of_glyph(c).is_some() || dir_of_glyph(c).is_some())
     {
         end += c.len_utf8();
     } else if let Some(after) = rest[end..].strip_prefix('@') {
         let n = ident(after);
-        if n > 0 && axis_lookup(&after[..n]).is_some() {
+        // an axis name, or a direction word with no glyph (`@in`,
+        // `@north`) — a word that has a glyph stays for `at_suffix`,
+        // which refuses `@up` and points at `↑`
+        let word = &after[..n];
+        if n > 0
+            && (axis_lookup(word).is_some()
+                || (direction(word).is_some() && builtin_direction_glyph(word).is_none()))
+        {
             end += 1 + n;
         }
     }
@@ -1164,6 +1450,55 @@ mod tests {
         assert_eq!(LENGTH.powi(2).sqrt(), Some(LENGTH));
         assert_eq!(LENGTH.sqrt(), None);
     }
+
+    // r[verify mimas.unit.pixels]
+    #[test]
+    fn px_is_the_unspecified_pixel() {
+        let ax = Dim::axis(0);
+        let (px, px_x) = (PIXELS, PIXELS.mul(ax));
+        let (spx_x, wpx_x) = (SCREEN_PX.mul(ax), WORLD_PX.mul(ax));
+
+        // the specified spaces never meet each other, on either axis
+        for (a, b) in [
+            (SCREEN_PX, WORLD_PX),
+            (spx_x, wpx_x),
+            (SCREEN_PX.div(TIME), WORLD_PX.div(TIME)),
+        ] {
+            assert!(!Dim::agree(a, b), "{a:?} met {b:?}");
+        }
+
+        // `px` meets either space and absorbs into it — `4px + ball_x`
+        // keeps the ball's space; an untagged `px` adopts the axis too
+        for specific in [SCREEN_PX, WORLD_PX] {
+            assert!(Dim::agree(px, specific));
+            assert!(Dim::agree(specific, px));
+            assert_eq!(Dim::absorb(px, specific), specific);
+            assert_eq!(Dim::absorb(specific, px), specific);
+            assert!(Dim::agree(px_x, specific.mul(ax)));
+            assert!(Dim::agree(px, specific.mul(ax)));
+            assert_eq!(Dim::absorb(px_x, specific), specific.mul(ax));
+        }
+
+        // compounds keep the rule: `px/s` is an unspecified velocity and
+        // meets `wpx/s`, but `wpx/s` never meets `spx/s`
+        let (ps, ws, ss) = (PIXELS.div(TIME), WORLD_PX.div(TIME), SCREEN_PX.div(TIME));
+        assert!(Dim::agree(ps, ws));
+        assert!(Dim::agree(ps, ss));
+        assert!(!Dim::agree(ws, ss));
+        assert_eq!(Dim::absorb(ps, ws), ws);
+        // areas too: `px²` meets `wpx²`, never `px²` meets `wpx`
+        assert!(Dim::agree(PIXELS.powi(2), WORLD_PX.powi(2)));
+        assert!(!Dim::agree(PIXELS.powi(2), WORLD_PX));
+        assert!(!Dim::agree(PIXELS, WORLD_PX.powi(2)));
+
+        // a wrong axis still fails inside the family
+        let wpx_y = WORLD_PX.mul(Dim::axis(1));
+        assert!(!Dim::agree(px_x, wpx_y));
+        assert!(!Dim::agree(wpx_x, wpx_y));
+        // and a specific space can never shed its tag into `px`
+        assert_eq!(Dim::absorb(spx_x, px_x), spx_x);
+        assert_eq!(Dim::absorb(wpx_x, px_x), wpx_x);
+    }
 }
 
 #[cfg(test)]
@@ -1172,11 +1507,53 @@ mod dir_tests {
 
     #[test]
     fn directions_resolve() {
-        assert_eq!(direction("up"), Some((Dim::axis(1), false)));
-        assert_eq!(direction("down"), Some((Dim::axis(1), true)));
-        assert_eq!(direction("↑"), Some((Dim::axis(1), false)));
-        assert_eq!(direction("↓"), Some((Dim::axis(1), true)));
-        assert_eq!(direction("→"), Some((Dim::axis(0), false)));
+        // a direction is a signed claim on its axis's end
+        assert_eq!(direction("up"), Some((Dim::axis_dir(1, false), false)));
+        assert_eq!(direction("down"), Some((Dim::axis_dir(1, true), true)));
+        assert_eq!(direction("↑"), Some((Dim::axis_dir(1, false), false)));
+        assert_eq!(direction("↓"), Some((Dim::axis_dir(1, true), true)));
+        assert_eq!(direction("→"), Some((Dim::axis_dir(0, false), false)));
         assert_eq!(direction("bogus"), None);
+    }
+
+    // r[verify mimas.unit.direction.signed]
+    #[test]
+    fn signed_axes_agree_convert_and_print() {
+        let (up, dn, any) = (
+            WORLD_PX.mul(Dim::axis_dir(1, false)),
+            WORLD_PX.mul(Dim::axis_dir(1, true)),
+            WORLD_PX.mul(Dim::axis(1)),
+        );
+
+        // same end and unsigned-vs-signed meet; opposite ends don't —
+        // a scalar converts instead (`x↓ + y↑` negates the `↓` side)
+        assert!(Dim::agree(up, up));
+        assert!(Dim::agree(up, any));
+        assert!(Dim::agree(any, dn));
+        assert!(!Dim::agree(up, dn));
+        assert!(Dim::sign_convertible(up, dn));
+        assert!(Dim::sign_opposed(dn, up));
+        assert!(!Dim::sign_opposed(up, dn));
+
+        // opposite ends are still *different* conventions, not just
+        // different tags: `wpx↓` can't meet `spx↓` across the seam
+        let spx_dn = SCREEN_PX.mul(Dim::axis_dir(1, true));
+        assert!(!Dim::sign_convertible(dn, spx_dn));
+        // and the ends disagree cross-axis: `wpx↑` never meets `wpx→`
+        let right = WORLD_PX.mul(Dim::axis_dir(0, false));
+        assert!(!Dim::sign_convertible(up, right));
+
+        // unsigned absorbs into the signed end either way
+        assert_eq!(Dim::absorb(any, dn), dn);
+        assert_eq!(Dim::absorb(up, any), up);
+        // an axis an end doesn't claim is kept (`x↕` + `y↓` claim ≠ clobber)
+        assert_eq!(Dim::axis_dir(1, true).with_axes(any), dn);
+
+        // annotations and prose spell the end, not the axis
+        assert_eq!(dn.name(), "wpx↓");
+        assert_eq!(up.name(), "wpx↑");
+        assert_eq!(parse("wpx↓"), Some((dn, 1.0)));
+        assert_eq!(parse("px@down"), Some((PIXELS.mul(Dim::axis_dir(1, true)), 1.0)));
+        assert_eq!(parse("spx↕"), Some((SCREEN_PX.mul(Dim::axis(1)), 1.0)));
     }
 }

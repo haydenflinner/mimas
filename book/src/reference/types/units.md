@@ -100,38 +100,42 @@ Printing a quantity shows its base-unit value with its unit (`25kW` prints `2500
 
 ## Axes and directions
 
-A quantity can also say *which way it points*. A direction word in front of a number puts it along that direction's axis and folds the sign in:
+A quantity can also say *which axis it runs along* and *which reading is positive*. A direction after the value is a convention claim, not a negation — `40.0px↓` is the float `+40.0` measured down-positive:
 
 ```mimas
 const PADDLE_SPEED = 460.0px/s;
 let p: px↕ = 330.0px;
-p += up PADDLE_SPEED * dt;      // −460 px/s along y, times dt: along y
-p += down PADDLE_SPEED * dt;
-let v = right 3.0px;            // 3 px along x
-let w = ← 3.0px;                // the glyph form; −3 px along x
+p += PADDLE_SPEED↑ * dt;        // a speed measured up-positive, along y
+p += PADDLE_SPEED↓ * dt;
+let v = 3.0px→;                 // 3 px measured right-positive, along x
+let w = 3.0px←;                 // 3 px measured left-positive
 ```
 
-The builtin axes are `x` (`left`, `right`; `← →`), `y` (`up`, `down`; `↑ ↓` -- down is positive, the screen's way), `z` (`outward`, `inward`; `⊙`) and `t` (`earlier`, `later`; `⏪ ⏩`). A program declares its own with the negative end first:
+The builtin axes are `x` (`left`, `right`; `← →`), `y` (`down`, `up`; `↓ ↑` — up is positive, the way the games draw), `z` (`outward`, `inward`; `⊙ ⊗`) and `t` (`earlier`, `later`; `⏪ ⏩`). A program declares its own with the negative end first:
 
 ```mimas
-axis wealth (poorer, richer);
-let bal = richer 10usd + poorer 4usd;   // 6 usd along wealth
-axis y (south, north);                  // renames the builtin words for y
+axis flow (out, in);
+let bal = 10usd@in + 4usd@out;   // 6 usd along flow
+axis y (south, north);           // renames y's words; `south` is now the negative end
+axis y (up, down);               // a mirror: `down` becomes positive page-wide
 ```
 
-A direction word is only a word when it is declared (the builtin ones always are) and an operand follows it on the line; `up + 1` keeps `up` a plain name, and `up(x)` with no gap is a call.
+A direction without a glyph spells `@word` (`5usd@in`); a builtin word with a glyph must spell the glyph in value position — `@up` is an error pointing at `↑`. `in`/`out` are contextual: they read as direction words after `@` and inside `axis (…)` while `for x in xs` and `2 ∈ xs` keep their meanings.
 
-In a type, the axis goes after the unit: `px↕`, `px/s↔`, `usd@wealth` (`@name` for any axis, glyph or not). A literal takes the same suffix: `40.0px↕`.
+In a type, the axis goes after the unit: `px↕`, `px/s↔`, `usd@flow` (`@name` for any axis, glyph or not). A direction glyph on a *type* claims a convention: `wpx↑` is world pixels read up-positive. A literal takes the same suffixes: `40.0px↕`, `40.0px↑`.
 
 ```mimas
-fn paddle(top: px↕) -> px↕ { top + down 110.0px }
-fn pay(bal: usd@wealth, amt: usd@wealth) -> usd@wealth { bal + amt }
+fn paddle(top: px↕) -> px↕ { top + 110.0px↓ }
+fn rise(dy: wpx↑) -> wpx↑ { dy }
+fn pay(bal: usd@flow, amt: usd@flow) -> usd@flow { bal + amt }
 ```
 
 What the checker enforces, on top of the dimension rules above:
 
 - `+`, `-`, comparisons and slots need agreeing axes. An untagged quantity adopts the other side's axis (`b.x + BALL` is along x; a size has no direction of its own), the way a plain number meets an `index`. Two different axes are an error that names both: `cannot add pixels (px) along y and pixels (px) along x`.
-- `*` and `/` xor the axes: along x times along x is along neither (a square, a ratio), along x times along y is along `x·y` (an area, a slope), and `slope * dx` lands back on y. The rule is parity: a quantity along x is one that flips sign when x is mirrored, and that is all the checker tracks.
-- `.to("px")` reads any axis back as a plain number.
+- Opposed conventions *convert*, they do not error: `50↑ + 20↓` reads both at the positive end (`50 + (−20)` is `30↑`), and `40wpx↓` into `rise` above is negated at the call. An unsigned `↕`/`↔` slot accepts either convention and reads the value at the positive end.
+- `*` and `/` xor the axes: along x times along x is along neither (a square, a ratio), along x times along y is along `x·y` (an area, a slope), and `slope * dx` lands back on y. Signed factors read at their positive end first.
+- `.to("px")` reads the stored magnitude as a plain number; `.to("px↓")` re-expresses in that convention and flips the sign when the ends differ.
+- The one sign error left is a place: `inout`/`&` can't convert — a `px↑` slot can't lend to a `px↓` place, since a write-back would land in the wrong convention.
 
-Nothing changes at run time: `up 50.0px` is the float `-50.0`.
+At run time `50.0px↓` is the float `50.0`; the flips the checker inserted are ordinary negations.

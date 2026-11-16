@@ -106,6 +106,22 @@ fn clash(a: &D, b: &D) -> Option<(Dim, Dim)> {
     }
 }
 
+/// A composite slot (tuple, list) whose elements claim a convention the
+/// slot doesn't share — there's no one value to negate, so unlike a
+/// scalar it fails rather than convert.
+fn signed_uncovered(want: &D, got: &D) -> bool {
+    match (want, got) {
+        (D::Q(w) | D::Iv(w), D::Q(g) | D::Iv(g)) => {
+            Dim::sign_flip(*w, *g) || Dim::sign_flip(*g, *w)
+        }
+        (D::Arr(w), D::Arr(g)) => signed_uncovered(w, g),
+        (D::Tuple(w), D::Tuple(g)) => {
+            w.iter().zip(g).any(|(w, g)| signed_uncovered(w, g))
+        }
+        _ => false,
+    }
+}
+
 /// A native signature's nested dimension claim as a `D` — `Vec<Px>` checks
 /// args as `[px]`, `Vec<(PxX, PxY)>` as `(px↔, px↕)` element-wise.
 // r[impl mimas.unit.nested]
@@ -191,6 +207,10 @@ struct Pass<'a> {
     /// One slot per enclosing loop: the joined dim of the values its `collect`s
     /// hand over, so `for i in .. collect qty[i] * price[i]` is a list of usd.
     collects: Vec<Option<D>>,
+    /// Exprs whose value crosses to the opposite axis convention where it
+    /// lands — `40px↓` into a `wpx↑` param, `x↓ + y↑`. Emit negates them
+    /// (r[impl mimas.unit.direction.signed]).
+    sign_negs: rustc_hash::FxHashSet<NodeId>,
     report: bool,
     errors: Vec<miette::Report>,
 }
@@ -236,6 +256,7 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> Result<()> {
                 .map(|(name, (dec, _))| (*dec, name.clone()))
                 .collect(),
             collects: Vec::new(),
+            sign_negs: Default::default(),
             report: false,
             errors: Vec::new(),
         };
@@ -260,6 +281,7 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> Result<()> {
             }
         }
         let dims = std::mem::take(&mut pass.dims);
+        let sign_negs = std::mem::take(&mut pass.sign_negs);
         let want_dims = std::mem::take(&mut pass.want_dims);
         let print_dims = std::mem::take(&mut pass.print_dims);
         // a print site's unit as the page writes it, for a `dec` quantity,
@@ -318,6 +340,7 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> Result<()> {
         solver.check_texts.extend(check_texts);
         solver.dec_scales.extend(dec_scales);
         solver.node_dims.extend(dims);
+        solver.sign_negs.extend(sign_negs);
         solver.want_dims.extend(want_dims);
         solver.print_dims.extend(print_dims);
         solver.member_units.extend(member_units);
@@ -542,6 +565,112 @@ impl<'a> Pass<'a> {
         }
     }
 
+    /// `expect` for a value the caller has in hand, with scalar
+    /// convention conversion: `40px↓` into a `wpx↑` slot negates at the
+    /// boundary rather than failing. The one hard wall is a *place* —
+    /// an `inout` slot writes back in its own convention, so an
+    /// opposite-signed place can't stand in for it.
+    // r[impl mimas.unit.direction.signed]
+    fn expect_conv(&mut self, want: &D, got: &D, val: &'a Expr, what: &str) {
+        if let D::Place(inner) = got
+            && let D::Q(w) | D::Iv(w) = want
+            && let Some(g) = inner.dim()
+            && (Dim::sign_opposed(*w, g) || Dim::sign_opposed(g, *w))
+        {
+            self.fail(
+                val.location(),
+                format!(
+                    "{what}: a place holds its own convention ({}), which {} can't adopt",
+                    Self::describe(&g),
+                    Self::describe(w)
+                ),
+                format!("this place is {}", Self::describe(&g)),
+                "bind the converted value (`let v = -x`) and pass `v` instead",
+            );
+            return;
+        }
+        // a scalar crosses conventions where it lands: a signed value
+        // reads at its positive end wherever the slot doesn't claim the
+        // negative one — `40↓` is −40 under `wpx↕` or `wpx`, and negates
+        // into a `wpx↑` slot
+        if let (D::Q(w) | D::Iv(w), D::Q(g) | D::Iv(g)) = (want, got)
+            && Dim::sign_convertible(*w, *g)
+            && Dim::sign_flip(*w, *g)
+        {
+            self.sign_negs.insert(val.id());
+            return;
+        }
+        // a composite (tuple element, list item) has no single value to
+        // negate — signed elements it doesn't share fail outright
+        if signed_uncovered(want, got) {
+            self.fail(
+                val.location(),
+                format!(
+                    "{what}: expected {}, found {}",
+                    self.describe_d(want),
+                    self.describe_d(got)
+                ),
+                "its signed elements can't convert inside a composite".into(),
+                "convert the element itself (`let v = -x`) before it goes in",
+            );
+            return;
+        }
+        self.expect(want, got, val.location(), what);
+    }
+
+    /// A `D`'s own description, for messages that name a whole shape.
+    fn describe_d(&self, d: &D) -> String {
+        match d {
+            D::Q(q) | D::Iv(q) => Self::describe(q),
+            D::Arr(i) => format!("[{}]", self.describe_d(i)),
+            D::Tuple(parts) => format!(
+                "({})",
+                parts.iter().map(|p| self.describe_d(p)).collect::<Vec<_>>().join(", ")
+            ),
+            D::Place(i) => self.describe_d(i),
+            _ => "a value".into(),
+        }
+    }
+
+    /// Two operands that agree but for opposite conventions — `x↓ + y↑`.
+    /// Both convert to the positive end, whichever side holds `↓`
+    /// negating, and the joined dim reports the positive convention.
+    fn conv_pair(
+        &mut self,
+        l: &D,
+        le: Option<&'a Expr>,
+        r: &D,
+        re: Option<&'a Expr>,
+    ) -> Option<(D, D)> {
+        let (D::Q(lq) | D::Iv(lq), D::Q(rq) | D::Iv(rq)) = (l, r) else {
+            return None;
+        };
+        if !Dim::sign_convertible(*lq, *rq) {
+            return None;
+        }
+        // no slot opposed: same conventions or an unsigned side adopting —
+        // the values add as they stand, keeping their shared convention
+        if !Dim::sign_opposed(*lq, *rq) && !Dim::sign_opposed(*rq, *lq) {
+            return Some((l.clone(), r.clone()));
+        }
+        if Dim::sign_opposed(*lq, *rq)
+            && let Some(le) = le
+        {
+            self.sign_negs.insert(le.id());
+        }
+        if Dim::sign_opposed(*rq, *lq)
+            && let Some(re) = re
+        {
+            self.sign_negs.insert(re.id());
+        }
+        let norm = |d: &D| match d {
+            D::Q(q) => D::Q(q.pos_axes()),
+            D::Iv(q) => D::Iv(q.pos_axes()),
+            _ => d.clone(),
+        };
+        Some((norm(l), norm(r)))
+    }
+
     // ---- annotations
 
     fn annotation(&self, a: &Annotation) -> D {
@@ -669,7 +798,7 @@ impl<'a> Pass<'a> {
             {
                 let left = self.expr(&a.left);
                 let right = self.expr(&a.right);
-                self.expect(&left, &right, a.right.location(), "assignment doesn't match");
+                self.expect_conv(&left, &right, &a.right, "assignment doesn't match");
                 self.range_check(&a.right, &left);
             }
             self.expr(rewritten);
@@ -689,12 +818,7 @@ impl<'a> Pass<'a> {
                 let d = match &l.annotation {
                     Some(a) => {
                         let want = self.annotation(a);
-                        self.expect(
-                            &want,
-                            &got,
-                            l.right.location(),
-                            "declared type doesn't match",
-                        );
+                        self.expect_conv(&want, &got, &l.right, "declared type doesn't match");
                         self.range_check(&l.right, &want);
                         want
                     }
@@ -713,12 +837,7 @@ impl<'a> Pass<'a> {
                 let right = self.expr(&a.right);
                 match a.op {
                     AssignmentOp::Identity | AssignmentOp::PlusEqual | AssignmentOp::MinusEqual => {
-                        self.expect(
-                            &left,
-                            &right,
-                            a.right.location(),
-                            "assignment doesn't match",
-                        );
+                        self.expect_conv(&left, &right, &a.right, "assignment doesn't match");
                         self.range_check(&a.right, &left);
                     }
                     _ => {}
@@ -747,12 +866,7 @@ impl<'a> Pass<'a> {
                 let d = match &c.annotation {
                     Some(a) => {
                         let want = self.annotation(a);
-                        self.expect(
-                            &want,
-                            &got,
-                            c.right.location(),
-                            "declared type doesn't match",
-                        );
+                        self.expect_conv(&want, &got, &c.right, "declared type doesn't match");
                         want
                     }
                     None => got,
@@ -792,8 +906,8 @@ impl<'a> Pass<'a> {
             s.rets.pop();
             if f.return_type.is_some() {
                 // a body that ends in `return` never gets here with a value worth checking
-                let at = tail_location(&f.body);
-                s.expect(&ret, &body, at, "returns the wrong dimension");
+                let _at = tail_location(&f.body);
+                s.expect_conv(&ret, &body, tail_expr(&f.body), "returns the wrong dimension");
                 s.range_check(tail_expr(&f.body), &ret);
             }
         });
@@ -937,12 +1051,23 @@ impl<'a> Pass<'a> {
             ExprKind::Unary(u) => {
                 let d = self.expr(&u.right);
                 match u.op {
-                    // a direction word's wrapper puts its axis on a known quantity;
-                    // an unknown one stays unknown rather than becoming a bare tag
+                    // a direction word's wrapper re-claims the axis's
+                    // convention: an operand already signed the other way
+                    // negates to read in the claimed end
                     UnaryOp::Negative | UnaryOp::Positive => {
                         match (d, self.ast.direction(e.id())) {
-                            (D::Q(q), Some(axis)) => D::Q(q.mul(axis)),
-                            (D::Iv(q), Some(axis)) => D::Iv(q.mul(axis)),
+                            (D::Q(q), Some(axis)) => {
+                                if Dim::sign_opposed(axis, q) || Dim::sign_opposed(q, axis) {
+                                    self.sign_negs.insert(u.right.id());
+                                }
+                                D::Q(axis.with_axes(q))
+                            }
+                            (D::Iv(q), Some(axis)) => {
+                                if Dim::sign_opposed(axis, q) || Dim::sign_opposed(q, axis) {
+                                    self.sign_negs.insert(u.right.id());
+                                }
+                                D::Iv(axis.with_axes(q))
+                            }
                             (d, _) => d,
                         }
                     }
@@ -957,9 +1082,14 @@ impl<'a> Pass<'a> {
             ExprKind::Equality(eq) => {
                 let l = self.expr(&eq.left);
                 let r = self.expr(&eq.right);
+                // opposite conventions compare fine — `40↑ < 40↓` is
+                // "40 above" against "40 below", ordered in up-terms
                 if !Self::is_zero(&eq.left)
                     && !Self::is_zero(&eq.right)
                     && let Some((a, b)) = clash(&l, &r)
+                    && self
+                        .conv_pair(&l, Some(&eq.left), &r, Some(&eq.right))
+                        .is_none()
                 {
                     let verb = match eq.op {
                         EqualityOp::Equal | EqualityOp::NotEqual => "compare",
@@ -990,12 +1120,7 @@ impl<'a> Pass<'a> {
             ExprKind::Coalescence(c) => {
                 let l = self.expr(&c.left);
                 let r = self.expr(&c.right);
-                self.expect(
-                    &l,
-                    &r,
-                    c.right.location(),
-                    "`??` fallback has a different dimension",
-                );
+                self.expect_conv(&l, &r, &c.right, "`??` fallback has a different dimension");
                 l
             }
             ExprKind::Unwrap(u) => self.expr(&u.expr),
@@ -1018,7 +1143,7 @@ impl<'a> Pass<'a> {
                 match &i.else_expr {
                     Some(other) => {
                         let els = self.expr(other);
-                        self.branches(then, els, other.location())
+                        self.branches(then, Some(&i.main_body), els, other, other.location())
                     }
                     None => D::Any,
                 }
@@ -1034,7 +1159,9 @@ impl<'a> Pass<'a> {
                     let d = self.expr(case.body());
                     out = Some(match out {
                         None => d,
-                        Some(prev) => self.branches(prev, d, case.body().location()),
+                        Some(prev) => {
+                            self.branches(prev, None, d, case.body(), case.body().location())
+                        }
                     });
                 }
                 out.unwrap_or(D::Any)
@@ -1075,12 +1202,20 @@ impl<'a> Pass<'a> {
                 p.expr(&l.body);
             }),
             ExprKind::Collect(c) => {
-                let d = self.expr(&c.value);
+                let mut d = self.expr(&c.value);
+                let prev = self.collects.last_mut().and_then(Option::take);
+                let joined = match prev {
+                    None => d.clone(),
+                    Some(prev) => match self.conv_pair(&prev, None, &d, Some(&c.value)) {
+                        Some((p2, d2)) => {
+                            d = d2;
+                            join(p2, &d)
+                        }
+                        None => join(prev, &d),
+                    },
+                };
                 if let Some(slot) = self.collects.last_mut() {
-                    *slot = Some(match slot.take() {
-                        None => d,
-                        Some(prev) => join(prev, &d),
-                    });
+                    *slot = Some(joined);
                 }
                 D::Any
             }
@@ -1088,7 +1223,7 @@ impl<'a> Pass<'a> {
                 if let Some(v) = &r.value {
                     let got = self.expr(v);
                     if let Some(want) = self.rets.last().cloned() {
-                        self.expect(&want, &got, v.location(), "returns the wrong dimension");
+                        self.expect_conv(&want, &got, v, "returns the wrong dimension");
                         self.range_check(v, &want);
                     }
                 }
@@ -1152,8 +1287,14 @@ impl<'a> Pass<'a> {
         }
     }
 
-    /// Two arms of an `if`/`match` that disagree are a mistake; otherwise their shared dimension.
-    fn branches(&mut self, a: D, b: D, at: Location) -> D {
+    /// Two arms of an `if`/`match` that disagree are a mistake; otherwise
+    /// their shared dimension. Opposite conventions normalize to the
+    /// positive end, negating whichever arm reads the other way.
+    fn branches(&mut self, mut a: D, ae: Option<&'a Expr>, mut b: D, be: &'a Expr, at: Location) -> D {
+        // `if c { x↑ } else { y↓ }` gives an `↑`, the `↓` arm negated
+        if let Some((a2, b2)) = self.conv_pair(&a, ae, &b, Some(be)) {
+            (a, b) = (a2, b2);
+        }
         if let Some((x, y)) = clash(&a, &b) {
             self.fail(
                 at,
@@ -1248,12 +1389,7 @@ impl<'a> Pass<'a> {
                             decl.type_params.iter().map(|i| i.lexeme.clone()).collect(),
                             |s| s.annotation(&field.annotation),
                         );
-                        self.expect(
-                            &want,
-                            &got,
-                            value.location(),
-                            &format!("field `{}`", k.lexeme),
-                        );
+                        self.expect_conv(&want, &got, value, &format!("field `{}`", k.lexeme));
                         self.range_check(value, &want);
                     }
                 }
@@ -1275,12 +1411,7 @@ impl<'a> Pass<'a> {
                             decl.type_params.iter().map(|i| i.lexeme.clone()).collect(),
                             |s| s.annotation(&field.annotation),
                         );
-                        self.expect(
-                            &want,
-                            &got,
-                            value.location(),
-                            &format!("field `{}`", k.lexeme),
-                        );
+                        self.expect_conv(&want, &got, value, &format!("field `{}`", k.lexeme));
                         self.range_check(value, &want);
                     }
                 }
@@ -1291,7 +1422,7 @@ impl<'a> Pass<'a> {
         }
     }
 
-    fn evaluation(&mut self, e: &Expr, op: EvaluationOp, l: D, r: D) -> D {
+    fn evaluation(&mut self, e: &'a Expr, op: EvaluationOp, mut l: D, mut r: D) -> D {
         // a `dec` quantity is held in the page's unit and a float one in SI,
         // so the two can't meet (r[impl mimas.dec.units])
         if let ExprKind::Evaluation(ev) = e.kind() {
@@ -1314,6 +1445,14 @@ impl<'a> Pass<'a> {
         };
         match op {
             EvaluationOp::Plus | EvaluationOp::Minus | EvaluationOp::Modulo => {
+                // `x↓ + y↑` — both convert to the positive end, the `↓`
+                // side negating; the result reports the positive convention
+                if let ExprKind::Evaluation(ev) = e.kind()
+                    && let Some((l2, r2)) =
+                        self.conv_pair(&l, Some(&ev.left), &r, Some(&ev.right))
+                {
+                    (l, r) = (l2, r2);
+                }
                 if let Some((a, b)) = clash(&l, &r) {
                     let (da, db) = match e.kind() {
                         ExprKind::Evaluation(ev) => (
@@ -1335,8 +1474,21 @@ impl<'a> Pass<'a> {
                 }
             }
             EvaluationOp::Multiply | EvaluationOp::Divide | EvaluationOp::Div => {
+                // a signed factor reads at its positive end in a product:
+                // `40↓ · 2` is −80 in ↑-terms, `x↓ · y↓` composes +80
+                if let ExprKind::Evaluation(ev) = e.kind() {
+                    if l.dim().is_some_and(Dim::has_neg_end) {
+                        self.sign_negs.insert(ev.left.id());
+                    }
+                    if r.dim().is_some_and(Dim::has_neg_end) {
+                        self.sign_negs.insert(ev.right.id());
+                    }
+                }
                 let interval = matches!(l, D::Iv(_)) || matches!(r, D::Iv(_));
-                match (l.dim(), r.dim()) {
+                match (
+                    l.dim().map(Dim::pos_axes),
+                    r.dim().map(Dim::pos_axes),
+                ) {
                     (Some(a), Some(b)) => {
                         let d = if op == EvaluationOp::Multiply {
                             a.mul(b)
@@ -1460,8 +1612,8 @@ impl<'a> Pass<'a> {
                     return (**element).clone();
                 }
                 if method.lexeme == "write" && let Some(value) = args.first() {
-                    self.expect(
-                        element, value, c.arguments[0].value.location(),
+                    self.expect_conv(
+                        element, value, &c.arguments[0].value,
                         "place assignment doesn't match",
                     );
                     self.range_check(&c.arguments[0].value, element);
@@ -1566,10 +1718,10 @@ impl<'a> Pass<'a> {
                 self.want_dims.insert(arg.value.id(), d);
             }
             let want = dim_tree(want);
-            self.expect(
+            self.expect_conv(
                 &want,
                 got,
-                arg.value.location(),
+                &arg.value,
                 &format!("argument {} of `{name}`", i + 1),
             );
             self.range_check(&arg.value, &want);
@@ -1614,10 +1766,10 @@ impl<'a> Pass<'a> {
                     s.want_dims.insert(arg.value.id(), d);
                 }
                 let pname = p.left.as_ident().map_or("argument", |i| i.lexeme.as_str());
-                s.expect(
+                s.expect_conv(
                     &want,
                     got,
-                    arg.value.location(),
+                    &arg.value,
                     &format!("argument `{pname}` of `{}`", f.name.lexeme),
                 );
                 s.range_check(&arg.value, &want);
@@ -1640,10 +1792,10 @@ impl<'a> Pass<'a> {
         };
         for &i in &measured[1..] {
             if let Some(a) = args.get(i) {
-                self.expect(
+                self.expect_conv(
                     first,
                     a,
-                    c.arguments[i].value.location(),
+                    &c.arguments[i].value,
                     &format!("`Interval::{name}` bounds need the same dimension"),
                 );
             }
@@ -1748,10 +1900,10 @@ impl<'a> Pass<'a> {
             (D::Iv(d), "sample") => D::Q(*d),
             (D::Iv(d), "contains") => {
                 if let Some(a) = args.first() {
-                    self.expect(
+                    self.expect_conv(
                         &D::Q(*d),
                         a,
-                        c.arguments[0].value.location(),
+                        &c.arguments[0].value,
                         "`contains` needs the same dimension",
                     );
                 }
@@ -1759,10 +1911,10 @@ impl<'a> Pass<'a> {
             }
             (D::Iv(d), "overlaps") => {
                 if let Some(a) = args.first() {
-                    self.expect(
+                    self.expect_conv(
                         &D::Iv(*d),
                         a,
-                        c.arguments[0].value.location(),
+                        &c.arguments[0].value,
                         "`overlaps` needs the same dimension",
                     );
                 }
@@ -1786,10 +1938,10 @@ impl<'a> Pass<'a> {
             (D::Q(_), "signum") => PLAIN,
             (D::Q(d), "min" | "max" | "hypot") => {
                 if let Some(a) = args.first() {
-                    self.expect(
+                    self.expect_conv(
                         &recv,
                         a,
-                        c.arguments[0].value.location(),
+                        &c.arguments[0].value,
                         &format!("`{name}` needs the same dimension"),
                     );
                 }
@@ -1797,10 +1949,10 @@ impl<'a> Pass<'a> {
             }
             (D::Q(d), "clamp") => {
                 for (a, arg) in args.iter().zip(&c.arguments) {
-                    self.expect(
+                    self.expect_conv(
                         &recv,
                         a,
-                        arg.value.location(),
+                        &arg.value,
                         "`clamp` bounds need the same dimension",
                     );
                 }
@@ -1891,6 +2043,16 @@ impl<'a> Pass<'a> {
                     c.arguments.first().map(|a| a.value.kind())
                 {
                     match units::parse(u) {
+                        // `x↓.to("px↑")` — the strip reads in the named
+                        // convention, so the number negates too. An
+                        // unsigned value reads positive-end, so
+                        // `x↕.to("px↓")` flips as well.
+                        Some((ud, _))
+                            if Dim::sign_convertible(ud, *d)
+                                && Dim::read_flip(ud, *d) =>
+                        {
+                            self.sign_negs.insert(e.id());
+                        }
                         Some((ud, _)) if !Dim::agree(ud, *d) => self.fail(
                             c.arguments[0].value.location(),
                             format!("cannot express {} in {u}", Self::describe(d)),
@@ -1912,25 +2074,27 @@ impl<'a> Pass<'a> {
                 // magnitude. A `str` arrives `Any` — this fires only on
                 // known numbers.
                 // r[impl mimas.unit.to]
-                if let Some(D::Q(ud)) = args.first()
-                    && !Dim::agree(*ud, *d)
-                {
-                    self.fail(
-                        c.arguments[0].value.location(),
-                        format!(
-                            "cannot express {} in {}",
-                            Self::describe(d),
-                            Self::describe(ud)
-                        ),
-                        "the argument is a quantity".into(),
-                        "`to` divides — pick a quantity of the same kind (x.to(1kWh)), or give the unit's name",
-                    );
+                if let Some(D::Q(ud)) = args.first() {
+                    if Dim::sign_convertible(*ud, *d) && Dim::read_flip(*ud, *d) {
+                        self.sign_negs.insert(e.id());
+                    } else if !Dim::agree(*ud, *d) {
+                        self.fail(
+                            c.arguments[0].value.location(),
+                            format!(
+                                "cannot express {} in {}",
+                                Self::describe(d),
+                                Self::describe(ud)
+                            ),
+                            "the argument is a quantity".into(),
+                            "`to` divides — pick a quantity of the same kind (x.to(1kWh)), or give the unit's name",
+                        );
+                    }
                 }
                 PLAIN
             }
             (D::Arr(inner), "push") => {
                 if let Some(a) = args.first() {
-                    self.expect(inner, a, c.arguments[0].value.location(), "list item");
+                    self.expect_conv(inner, a, &c.arguments[0].value, "list item");
                 }
                 D::Any
             }
