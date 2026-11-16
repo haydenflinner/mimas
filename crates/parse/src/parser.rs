@@ -89,8 +89,8 @@ pub struct Parser<'s> {
     exact_literals: std::collections::HashSet<NodeId>,
     /// The unit text as written for each literal in `quantities` (`5ft` -> `"ft"`).
     quantity_units: HashMap<NodeId, String>,
-    /// The axis a direction word tagged an expression with (`up 50.0px`), by the
-    /// wrapper node -- see `direction_intro`.
+    /// The axis a direction suffix tagged an expression with (`50.0px↑`), by
+    /// the wrapper node -- see `direction_suffix`.
     directions: HashMap<NodeId, shared::units::Dim>,
     /// The source's per-page shadow table (`Lexer::shadow_table`) — an
     /// f-string interpolation sublexer takes its page's set.
@@ -834,7 +834,8 @@ impl<'s> Parser<'s> {
             // `check ∑ xs == 6` -- a prefix reduction opens one like a name does
             TokKind::Sum | TokKind::Prod | TokKind::Inf | TokKind::Sup => true,
             TokKind::RightArrow | TokKind::LeftArrow | TokKind::UpArrow | TokKind::DownArrow
-            | TokKind::CircledDot | TokKind::Rewind | TokKind::FastForward => true,
+            | TokKind::CircledDot | TokKind::CircledTimes
+            | TokKind::Rewind | TokKind::FastForward => true,
             // `check (a * b).same(c)`, `check [1 2] == xs`, `check -x < 0`:
             // a gap after the word opens a check, as it does before a name;
             // `check(x)` and `check[i]` touching the word stay a call and
@@ -1126,45 +1127,6 @@ impl<'s> Parser<'s> {
         let stmt = self.new_stmt(Unit::new(name, spec), start);
         self.end_stmt(stmt.location());
         stmt
-    }
-
-    /// A direction word or glyph in front of an operand: `up 50.0px`, `← x`,
-    /// `richer 5usd`. The axis it lies on and whether it is the negative end.
-    /// A word is only a direction when the program declared it (or `use`d the
-    /// builtin pair) and an operand follows on the same line; `(`/`[` need a
-    /// gap after the word, since a touching one is a call or an index on the
-    /// name, and an operator can't open the operand (`up + 1` keeps `up` a name).
-    fn direction_intro(&self) -> Option<(shared::units::Dim, bool)> {
-        let dir = match self.peek() {
-            TokKind::RightArrow => "→",
-            TokKind::LeftArrow => "←",
-            TokKind::UpArrow => "↑",
-            TokKind::DownArrow => "↓",
-            TokKind::CircledDot => "⊙",
-            TokKind::Rewind => "⏪",
-            TokKind::FastForward => "⏩",
-            TokKind::Ident(w) => w,
-            _ => return None,
-        };
-        let found = shared::units::direction(dir)?;
-        let last = self.tokens.len() - 1;
-        let kw_end = self.tokens[self.next.min(last)].span().end();
-        let after = self.tokens[(self.next + 1).min(last)].span().start();
-        // Expanded tokens carry template-vs-callsite spans that can invert
-        // or leave `src` entirely; an unreadable gap counts as no newline,
-        // the same as two tokens that sit side by side.
-        if self.src.inner().get(kw_end..after).is_some_and(|s| s.contains('\n')) {
-            return None;
-        }
-        let next = self.nth(1);
-        let opens = match next {
-            TokKind::Ident(_) | TokKind::SelfKeyword | TokKind::NotWord => true,
-            TokKind::RightArrow | TokKind::LeftArrow | TokKind::UpArrow | TokKind::DownArrow
-            | TokKind::CircledDot | TokKind::Rewind | TokKind::FastForward => true,
-            TokKind::LeftParenthesis | TokKind::LeftSquare => kw_end < after,
-            kind => Literal::try_from(kind).is_ok(),
-        };
-        opens.then_some(found)
     }
 
     /// A `check` is one line: `check <expr>` — `check f(2) == 3` — becoming one
@@ -2840,18 +2802,30 @@ impl<'s> Parser<'s> {
             );
             return self.new_expr(Call::new(callee, args), start);
         }
-        // `up 50.0px` -- a direction in front of a quantity puts it along the
-        // direction's axis with the direction's sign: the operand is wrapped in
-        // a `+`/`-` and the wrapper remembers the axis for the dimension checker.
-        if let Some((axis, negative)) = self.direction_intro() {
+        // `↑ x` — the old prefix spelling. Directions follow their
+        // operand now (`x↑`), so a direction glyph here is a mistake to
+        // name, not a form to parse.
+        if matches!(
+            self.peek(),
+            TokKind::RightArrow
+                | TokKind::LeftArrow
+                | TokKind::UpArrow
+                | TokKind::DownArrow
+                | TokKind::CircledDot
+                | TokKind::CircledTimes
+                | TokKind::Rewind
+                | TokKind::FastForward
+        ) {
+            self.error(Misdirection {
+                src: self.src(),
+                at: self.next_location().into(),
+                msg: "a direction follows its operand".into(),
+                label: "write `x↑`, not `↑x`".into(),
+            });
             self.advance();
-            let operand = self
+            return self
                 .nested(Self::unary)
                 .unwrap_or_else(|| self.poison_expr(self.cursor()));
-            let op = if negative { UnaryOp::Negative } else { UnaryOp::Positive };
-            let wrapped = self.new_expr(Unary::new(op, operand), start);
-            self.directions.insert(wrapped.id(), axis);
-            return wrapped;
         }
         let operator = if self.at(TokKind::NotWord) {
             UnaryOp::Not
@@ -3711,6 +3685,23 @@ impl<'s> Parser<'s> {
                     let scale = self.new_expr(Literal::Float(0.01), at);
                     self.new_expr(Evaluation::new(expr, EvaluationOp::Multiply, scale), at)
                 }
+                // `x↑` — a direction follows its operand and folds the
+                // sign in: `v↑` is `+v` along y (up is the positive end)
+                // or `-v` in a page that renamed the axis. `x@down` is
+                // the word spelling; `x@y` an axis tag without a sign.
+                TokKind::RightArrow
+                | TokKind::LeftArrow
+                | TokKind::UpArrow
+                | TokKind::DownArrow
+                | TokKind::CircledDot
+                | TokKind::CircledTimes
+                | TokKind::Rewind
+                | TokKind::FastForward
+                    if !fresh_line =>
+                {
+                    self.direction_suffix(expr)
+                }
+                TokKind::At if !fresh_line => self.at_suffix(expr),
                 // `x y` — juxtaposition applies: `f x` is `f(x)`, the same
                 // call `f (x)` already was. Same-line only (the `(`/`[`/`!`
                 // rule), atoms only (`f - x` stays subtraction), and never
@@ -3732,10 +3723,10 @@ impl<'s> Parser<'s> {
         }
     }
 
-    /// `x y` — `x` applied to the atom that follows: `f x` is `f(x)`,
-    /// `up PADDLE_SPEED` the direction's own spelling. The argument is a
-    /// unary atom (a name with its own postfix chain, a literal, a
-    /// group) parsed with juxtaposition off, so `f x y` is `(f x) y`.
+    /// `x y` — `x` applied to the atom that follows: `f x` is `f(x)`.
+    /// The argument is a unary atom (a name with its own postfix chain,
+    /// a literal, a group) parsed with juxtaposition off, so `f x y` is
+    /// `(f x) y`.
     fn juxta_apply(&mut self, left: Expr) -> Expr {
         let start = left.span().start();
         let arg = self.with_juxta(Juxta::Off, Self::unary);
@@ -3744,6 +3735,81 @@ impl<'s> Parser<'s> {
             value: arg,
         };
         self.new_expr(Call::new(left, vec![arg]), start)
+    }
+
+    /// `x↑` — a direction glyph after its operand. Same desugar the old
+    /// `↑x` prefix had: the operand is wrapped in a `+`/`-` whose sign is
+    /// the direction's end on its axis, and the wrapper remembers the
+    /// axis for the dimension checker.
+    fn direction_suffix(&mut self, operand: Expr) -> Expr {
+        let start = operand.span().start();
+        let tok = self.advance();
+        let word = match tok.kind() {
+            TokKind::RightArrow => "→",
+            TokKind::LeftArrow => "←",
+            TokKind::UpArrow => "↑",
+            TokKind::DownArrow => "↓",
+            TokKind::CircledDot => "⊙",
+            TokKind::CircledTimes => "⊗",
+            TokKind::Rewind => "⏪",
+            TokKind::FastForward => "⏩",
+            _ => unreachable!(),
+        };
+        // the builtin glyphs always resolve — `direction` only fails
+        // on words, and a glyph's word is builtin
+        let Some((axis, negative)) = shared::units::direction(word) else {
+            unreachable!()
+        };
+        let op = if negative {
+            UnaryOp::Negative
+        } else {
+            UnaryOp::Positive
+        };
+        let wrapped = self.new_expr(Unary::new(op, operand), start);
+        self.directions.insert(wrapped.id(), axis);
+        wrapped
+    }
+
+    /// `5usd@richer`, `x@y` — a named direction or axis after its
+    /// operand. A direction word signs like the glyph; an axis name
+    /// tags without signing (`Positive` is the no-op wrap). `@word` is
+    /// for directions with no glyph (`richer`, `inward`): a word that
+    /// has one spells it — `x↑`, not `x@up`.
+    fn at_suffix(&mut self, operand: Expr) -> Expr {
+        let start = operand.span().start();
+        self.advance(); // `@`
+        let name = self.require_ident();
+        // r[impl mimas.unit.direction.postfix]
+        if let Some(glyph) = shared::units::builtin_direction_glyph(&name.lexeme) {
+            self.error(Misdirection {
+                src: self.src(),
+                at: self.location(start).into(),
+                msg: format!("`{}` is a direction, and it has a glyph", name.lexeme),
+                label: format!("write `{glyph}` after the value, not `@{name}`", name = name.lexeme),
+            });
+        }
+        if let Some((axis, negative)) = shared::units::direction(&name.lexeme) {
+            let op = if negative {
+                UnaryOp::Negative
+            } else {
+                UnaryOp::Positive
+            };
+            let wrapped = self.new_expr(Unary::new(op, operand), start);
+            self.directions.insert(wrapped.id(), axis);
+            return wrapped;
+        }
+        if let Some(axis) = shared::units::axis_lookup(&name.lexeme) {
+            let wrapped = self.new_expr(Unary::new(UnaryOp::Positive, operand), start);
+            self.directions.insert(wrapped.id(), axis);
+            return wrapped;
+        }
+        self.error(Misdirection {
+            src: self.src(),
+            at: self.location(start).into(),
+            msg: format!("`@{}` is neither an axis nor a direction", name.lexeme),
+            label: "an `axis` decl names its two directions: `axis y (down, up)`".into(),
+        });
+        operand
     }
 
     /// Postfix chaining for block expressions. `(` and `[` directly after a block are ambiguous
@@ -5612,7 +5678,7 @@ impl BinaryOp {
             6
         } else {
             // the multiplicative ops (and the named ones that bind like
-            // `*`: `∧ ⋅ × ∘ ⊗ ⊙ ∩`), which bind tightest
+            // `*`: `∧ ⋅ × ∘ ⊠ ∩`), which bind tightest
             7
         };
         Some((Self::Eval(op), power))

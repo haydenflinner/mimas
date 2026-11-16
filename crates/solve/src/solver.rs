@@ -1125,6 +1125,7 @@ impl Solver {
                     src: self.src(first.location),
                     at: first.location.into(),
                     name: first.lexeme.clone(),
+                    help: None,
                 })?,
             None,
         );
@@ -3249,6 +3250,7 @@ impl Solver {
                         src: self.src(root.location),
                         at: root.location.into(),
                         name: root.lexeme.clone(),
+                        help: None,
                     })?,
                 };
                 // `x = v` doesn't *read* x, but the grades pass needs the target's dec to
@@ -3681,6 +3683,7 @@ impl Solver {
                         Err(NotFound {
                             src: self.src(read_location),
                             at: read_location.into(),
+                            help: direction_help(&name),
                             name,
                         })?
                     }
@@ -5204,4 +5207,16 @@ fn is_int_literal(expr: &Expr) -> bool {
         ExprKind::Grouping(g) => is_int_literal(&g.inner),
         _ => false,
     }
+}
+
+/// `up 50px` used to spell a direction in front; `50px↑` spells it
+/// after (`50px@word` for a direction with no glyph). An unresolved
+/// name that is a direction word gets that note as its help.
+fn direction_help(name: &str) -> Option<String> {
+    shared::units::direction(name).map(|_| {
+        match shared::units::builtin_direction_glyph(name) {
+            Some(g) => format!("directions follow their operand — write `x{g}`, not `{name} x`"),
+            None => format!("directions follow their operand — write `x@{name}`, not `{name} x`"),
+        }
+    })
 }

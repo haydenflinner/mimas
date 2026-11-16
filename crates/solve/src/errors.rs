@@ -88,6 +88,8 @@ pub struct NotFound {
     #[label("could not find a value for '{name}' in scope")]
     pub at: SourceSpan,
     pub name: String,
+    #[help]
+    pub help: Option<String>,
 }
 
 #[derive(Error, Debug, Diagnostic)]

@@ -235,8 +235,8 @@ tok_test!(symbol_operators_stay: "a ⊕ b" => Ident("a"), CircledPlus, Ident("b"
 
 // r[verify mimas.op.glyphs]
 // the named operators are tokens of their own, with no built-in meaning
-tok_test!(named_operators_multiplicative: "a ∧ b ⋅ c · d × e ∘ f ⊗ g ⊙ h ∩ i" => Ident("a"), Wedge, Ident("b"), DotOp, Ident("c"), DotOp, Ident("d"), Cross, Ident("e"), Compose, Ident("f"), Tensor, Ident("g"), CircledDot, Ident("h"), Intersect, Ident("i"));
-tok_test!(named_operators_additive: "a ∨ b ∪ c ⊖ d ⊎ e" => Ident("a"), Vee, Ident("b"), Union, Ident("c"), Ominus, Ident("d"), Uplus, Ident("e"));
+tok_test!(named_operators_multiplicative: "a ∧ b ⋅ c · d × e ∘ f ⊠ g ⊡ h ∩ i" => Ident("a"), Wedge, Ident("b"), DotOp, Ident("c"), DotOp, Ident("d"), Cross, Ident("e"), Compose, Ident("f"), Tensor, Ident("g"), SqDot, Ident("h"), Intersect, Ident("i"));
+tok_test!(named_operators_additive: "a ∨ b ∪ c ⊖ d ⊎ e ⊞ f ⊟ g" => Ident("a"), Vee, Ident("b"), Union, Ident("c"), Ominus, Ident("d"), Uplus, Ident("e"), SqPlus, Ident("f"), SqMinus, Ident("g"));
 tok_test!(named_operator_hugs_names: "a∧b" => Ident("a"), Wedge, Ident("b"));
 // r[verify mimas.op.cmp-glyphs]
 // the comparison and membership glyphs are the ASCII tokens

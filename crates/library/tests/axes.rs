@@ -1,6 +1,10 @@
-//! Axes and directions: `up 50.0px` is a `px` along y with the sign folded in; `px↕` in a
-//! type says which axis; `+ - < ==` need agreeing axes (an untagged side adopts); `* /`
-//! xor them. See the units book page and `plan.md` in the host repo.
+//! Axes and directions: `50.0px↑` is a `px` along y with the direction's sign
+//! folded in (`↑` is the positive end — every coordinate a Mimas program sees
+//! is up-positive); `px↕` in a type says which axis; a glyph follows the
+//! value it signs (`v↓`, `(a + b)→`); `x@y` tags an axis without a sign and
+//! `x@word` is the spelling for a direction with no glyph (`5usd@richer`);
+//! `+ - < ==` need agreeing axes (an untagged side adopts); `* /` xor them.
+//! See the units book page and `plan.md` in the host repo.
 
 #[macro_use]
 mod test_runner;
@@ -8,36 +12,72 @@ mod test_runner;
 // r[verify mimas.unit.axis]
 test_run!(
     direction_words_fold_the_sign,
-    "(up 50.0px).to(\"px\")" => "-50.0",
-    "(down 50.0px).to(\"px\")" => "50.0",
-    "(left 2.0px).to(\"px\")" => "-2.0",
-    "(right 2.0px).to(\"px\")" => "2.0",
-    "(← 2.0px).to(\"px\")" => "-2.0",
-    "(↓ 3.0px).to(\"px\")" => "3.0",
-    "(earlier 3s).to(\"s\")" => "-3.0",
-    "(⏩ 3s).to(\"s\")" => "3.0",
-    "(up 50.0px + down 20.0px).to(\"px\")" => "-30.0",
+    "(50.0px↑).to(\"px\")" => "50.0",
+    "(50.0px↓).to(\"px\")" => "-50.0",
+    "(2.0px←).to(\"px\")" => "-2.0",
+    "(2.0px→).to(\"px\")" => "2.0",
+    "(3.0px↓).to(\"px\")" => "-3.0",
+    "(3s⏪).to(\"s\")" => "-3.0",
+    "(3s⏩).to(\"s\")" => "3.0",
+    "(50.0px↑ + 20.0px↓).to(\"px\")" => "30.0",
 );
+
+// r[verify mimas.unit.axis]
+test_run!(
+    direction_glyphs_fold_the_same_sign,
+    "let v: px↕ = 8.0px",
+    "(50.0px↑).to(\"px\")" => "50.0",
+    "(50.0px↓).to(\"px\")" => "-50.0",
+    // a glyph follows any operand, not just literals
+    "(v↑).to(\"px\")" => "8.0",
+    "(v↓).to(\"px\")" => "-8.0",
+    // the physics pair reads as z: `⊙` out of the page (negative),
+    // `⊗` into it (positive)
+    "(5.0px⊙).to(\"px\")" => "-5.0",
+    "(5.0px⊗).to(\"px\")" => "5.0",
+    // `x@axis` tags without signing
+    "(v@y).to(\"px\")" => "8.0",
+);
+
+// r[verify mimas.unit.axis]
+#[test]
+fn a_rename_flips_the_glyph_with_the_word() {
+    // `axis y (up, down)` makes `up` the negative end — `↑` spells the
+    // word, so it flips with it
+    assert_eq!(
+        test_runner::render("axis y (up, down);", "(50.0px↑).to(\"px\")"),
+        "-50.0"
+    );
+    assert_eq!(
+        test_runner::render("axis y (up, down);", "(50.0px↓).to(\"px\")"),
+        "50.0"
+    );
+    // a renamed word with no glyph spells `@word`
+    assert_eq!(
+        test_runner::render("axis y (south, north);", "(50.0px@north).to(\"px\")"),
+        "50.0"
+    );
+}
 
 test_run!(
     untagged_adopts_and_products_xor,
     "const BALL = 18.0px
      let x: px↔ = 40.0px↔;",
     "(x + BALL).to(\"px\")" => "58.0",
-    "((up 2.0px) / (down 4.0px))" => "-0.5",
-    "((up 2.0px) * (left 3.0px)).to(\"px*px\")" => "6.0",   // two negatives: the axes xor away, the signs multiply
-    "(up 460.0px/s * 0.5s).to(\"px\")" => "-230.0",
+    "((2.0px↑) / (4.0px↓))" => "-0.5",
+    "((2.0px↑) * (3.0px←)).to(\"px*px\")" => "-6.0",   // axes xor away, the signs multiply
+    "(460.0px/s↑ * 0.5s).to(\"px\")" => "230.0",
 );
 
 test_run!(
     axes_through_functions_and_annotations,
     "fn drop(y: px↕, by: px↕) -> px↕ { y + by }
-     fn paddle(top: px↕) -> px↕ { top + down 110.0px }
+     fn paddle(top: px↕) -> px↕ { top + 110.0px↓ }
      axis wealth (poorer, richer);
      fn pay(bal: usd@wealth, amt: usd@wealth) -> usd@wealth { bal + amt }",
-    "drop(300.0px↕, up 20.0px).to(\"px\")" => "280.0",
-    "paddle(10.0px).to(\"px\")" => "120.0",
-    "pay(richer 10usd, poorer 4usd).to(\"usd\")" => "6.0",
+    "drop(300.0px↕, 20.0px↑).to(\"px\")" => "320.0",
+    "paddle(10.0px).to(\"px\")" => "-100.0",
+    "pay(10usd@richer, 4usd@poorer).to(\"usd\")" => "6.0",
 );
 
 fn rejected(src: &str, needle: &str) {
@@ -52,14 +92,14 @@ fn rejected(src: &str, needle: &str) {
 // r[verify mimas.unit.axis]
 #[test]
 fn cross_axis_arithmetic_is_rejected() {
-    rejected("let a = up 5.0px + left 3.0px;", "cannot add");
-    rejected("let a = up 5.0px + left 3.0px;", "along y");
-    rejected("let a = up 5.0px + left 3.0px;", "along x");
-    rejected("let a: px↕ = right 3.0px;", "along x");
-    rejected("let a = (up 2.0px) * (left 3.0px); let b: px↕ = a + 1.0px;", "along");
-    rejected("fn f(y: px↕) -> px↕ { y }\n let a = f(right 3.0px);", "along");
-    rejected("axis wealth (poorer, richer);\n let a = richer 5usd + up 5usd;", "cannot add");
-    rejected("let a = (up 5.0px < left 3.0px);", "cannot order");
+    rejected("let a = 5.0px↑ + 3.0px←;", "cannot add");
+    rejected("let a = 5.0px↑ + 3.0px←;", "along y");
+    rejected("let a = 5.0px↑ + 3.0px←;", "along x");
+    rejected("let a: px↕ = 3.0px→;", "along x");
+    rejected("let a = (2.0px↑) * (3.0px←); let b: px↕ = a + 1.0px;", "along");
+    rejected("fn f(y: px↕) -> px↕ { y }\n let a = f(3.0px→);", "along");
+    rejected("axis wealth (poorer, richer);\n let a = 5usd@richer + 5usd↑;", "cannot add");
+    rejected("let a = (5.0px↑ < 3.0px←);", "cannot order");
     // `atan2(dy, dx)` reads an (x, y) vector: the legs' axes differ on
     // purpose, only the bare dims must agree. `angle_to` is the same
     // call under a name that says what it returns.
@@ -70,23 +110,50 @@ fn cross_axis_arithmetic_is_rejected() {
 }
 
 #[test]
-fn a_direction_word_is_only_a_word_when_declared() {
-    // `up` as a name: no declaration makes it a direction in front of an operator
+fn the_old_prefix_spelling_is_a_named_mistake() {
+    rejected("let a = ↑50.0px;", "a direction follows its operand");
+    rejected("let a = ↓ x;", "a direction follows its operand");
+    // the word form in front is a call to a name that doesn't exist —
+    // and the error says where the direction went
+    rejected("let a = up 50.0px;", "directions follow their operand");
+    rejected(
+        "axis wealth (poorer, richer);\nlet a = richer 5usd;",
+        "directions follow their operand",
+    );
+    // `up` is still a usable name everywhere else
     assert!(test_runner::try_execute("let up = 3.0; let a = up + 1.0;").is_ok());
-    // but in front of a quantity it is the builtin direction
-    assert!(test_runner::try_execute("let a = up 3.0px;").is_ok());
+    // and a bogus `@word` names its own mistake
+    rejected("let a = 5.0px@bogus;", "neither an axis nor a direction");
+}
+
+// r[verify mimas.unit.direction.postfix]
+#[test]
+fn a_direction_with_a_glyph_spells_the_glyph() {
+    // `x@up` is a second spelling for `x↑` — the error points at the glyph
+    rejected("let a = 5.0px@up;", "has a glyph");
+    rejected("let a = 5.0px@up;", "write `↑` after the value");
+    rejected("let a = 3.0s@earlier;", "has a glyph");
+    // `inward` spells `⊗` — the physics pair `⊙`/`⊗` (out of, into the
+    // page) reads as the z axis now that tensor is `⊠`
+    rejected("let a = 5.0px@inward;", "has a glyph");
+    rejected("let a = 5.0px@inward;", "write `⊗` after the value");
+    // a declared direction with no glyph keeps `@word`, like `richer`
+    assert!(test_runner::try_execute(
+        "axis wealth (poorer, richer);\nlet a = 5usd@richer;"
+    )
+    .is_ok());
 }
 
 // r[verify mimas.unit.tuple]
 test_run!(
     tuples_keep_each_slots_axis,
-    "let p: (px↔, px↕) = (3.0px, up 4.0px)
+    "let p: (px↔, px↕) = (3.0px, 4.0px↑)
      let (a, b) = p
      let pts: [(px↔, px↕)] = [(1.0px, 2.0px), (3.0px, 4.0px)]",
     "p.0.to(\"px\")" => "3.0",
-    "p.1.to(\"px\")" => "-4.0",
+    "p.1.to(\"px\")" => "4.0",
     "a.to(\"px\")" => "3.0",
-    "b.to(\"px\")" => "-4.0",
+    "b.to(\"px\")" => "4.0",
     "pts[0].1.to(\"px\")" => "2.0",
     // an untagged pair still adopts, slot by slot
     "(3.0px, 4.0px).1.to(\"px\")" => "4.0",
@@ -136,15 +203,15 @@ fn norm_literals_out_of_range_reject() {
 // r[verify mimas.tuple.axis]
 test_run!(
     axis_names_spell_tuple_slots,
-    "let p: (px↔, px↕) = (3.0px, up 4.0px)
+    "let p: (px↔, px↕) = (3.0px, 4.0px↑)
      let t = (1.0, 2.0, 3.0, 4.0)",
     "p.x.to(\"px\")" => "3.0",
-    "p.y.to(\"px\")" => "-4.0",
+    "p.y.to(\"px\")" => "4.0",
     "t.z" => "3.0",
     "t.t" => "4.0",
     // the slot's own tag survives the read: `p.x` stays along x
     "(p.x + 1.0px).to(\"px\")" => "4.0",
-    "(p.x - right 1.0px).to(\"px\")" => "2.0",
+    "(p.x - 1.0px→).to(\"px\")" => "2.0",
 );
 
 // r[verify mimas.tuple.axis]
@@ -164,9 +231,9 @@ test_run!(
     // number back, the axis is direction metadata, not a different unit
     "span.to(1px)" => "40.0",
     "span.to(1px↔)" => "40.0",
-    "(up 5.0px).to(1px)" => "-5.0",
-    "(right 3.0ft).to(1mi)" => "0.0005681818181818183",
-    "(right 3.0ft).to(\"ft\")" => "3.0",
+    "(5.0px↑).to(1px)" => "5.0",
+    "(3.0ft→).to(1mi)" => "0.0005681818181818183",
+    "(3.0ft→).to(\"ft\")" => "3.0",
 );
 
 // r[verify mimas.unit.to]
@@ -180,15 +247,15 @@ fn to_still_refuses_a_real_mismatch() {
 // r[verify mimas.unit.tuple]
 #[test]
 fn tuple_slots_reject_a_swapped_axis() {
-    rejected("let p: (px↔, px↕) = (up 1.0px, 2.0px);", "along y");
-    rejected("let p: (px↔, px↕) = (4.0px, right 3.0px);", "along x");
-    rejected("let p: (px↔, px↕) = (4.0px, right 3.0px);", "along y");
+    rejected("let p: (px↔, px↕) = (1.0px↑, 2.0px);", "along y");
+    rejected("let p: (px↔, px↕) = (4.0px, 3.0px→);", "along x");
+    rejected("let p: (px↔, px↕) = (4.0px, 3.0px→);", "along y");
     rejected(
-        "struct Pt { x: px↔, y: px↕ }\n let p = Pt { x = 1.0px, y = right 2.0px };",
+        "struct Pt { x: px↔, y: px↕ }\n let p = Pt { x = 1.0px, y = 2.0px→ };",
         "along x",
     );
     // a list of tuples keeps the check per element
-    rejected("let pts: [(px↔, px↕)] = [(1.0px, 2.0px), (3.0px, left 4.0px)];", "along x");
+    rejected("let pts: [(px↔, px↕)] = [(1.0px, 2.0px), (3.0px, 4.0px←)];", "along x");
     // a destructure hands each name its slot's axis: `c` is along x here
-    rejected("let (c, d) = (right 1.0px, 2.0px);\n let e: px↕ = c;", "along x");
+    rejected("let (c, d) = (1.0px→, 2.0px);\n let e: px↕ = c;", "along x");
 }

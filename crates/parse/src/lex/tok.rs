@@ -97,7 +97,7 @@ pub enum TokKind<'s> {
     // symbols the lexer knows and the parser ranks, with no built-in meaning.
     // `a ∧ b` is `a.wedge(b)` (or `b.rwedge(a)`) and nothing else; on a
     // primitive it is an error that names the method to write. The
-    // multiplicative tier (binds like `*`): `∧` `⋅` `×` `∘` `⊗` `⊙` `∩`. The
+    // multiplicative tier (binds like `*`): `∧` `⋅` `×` `∘` `⊠` `⊡` `∩`. The
     // additive tier (like `+`): `∨` `∪` `⊖` `⊎`.
     /// `∧` — wedge (the exterior product).
     Wedge,
@@ -109,8 +109,14 @@ pub enum TokKind<'s> {
     Cross,
     /// `∘` — compose.
     Compose,
-    /// `⊗` — tensor.
+    /// `⊠` — tensor product (squared times).
     Tensor,
+    /// `⊞` — boxplus (squared plus).
+    SqPlus,
+    /// `⊟` — boxminus (squared minus).
+    SqMinus,
+    /// `⊡` — the hadamard product (squared dot, the boxed `⊙`).
+    SqDot,
     /// `∩` — intersect.
     Intersect,
     /// `∪` — union.
@@ -135,8 +141,11 @@ pub enum TokKind<'s> {
     DownArrow,
     LeftRightArrow,
     UpDownArrow,
-    /// `⊙` (out of the page), `⏪` `⏩` (backward, forward in time): directions.
+    /// `⊙` `⊗` (out of the page, into it), `⏪` `⏩` (backward, forward
+    /// in time): directions. `⊗` was the tensor spelling — tensor moved to
+    /// `⊠` so the physics pair `⊙`/`⊗` could read as the z axis.
     CircledDot,
+    CircledTimes,
     Rewind,
     FastForward,
     Tilde,
@@ -271,7 +280,10 @@ impl Display for TokKind<'_> {
             TokKind::DotOp => "⋅",
             TokKind::Cross => "×",
             TokKind::Compose => "∘",
-            TokKind::Tensor => "⊗",
+            TokKind::Tensor => "⊠",
+            TokKind::SqPlus => "⊞",
+            TokKind::SqMinus => "⊟",
+            TokKind::SqDot => "⊡",
             TokKind::Intersect => "∩",
             TokKind::Union => "∪",
             TokKind::Ominus => "⊖",
@@ -287,6 +299,7 @@ impl Display for TokKind<'_> {
             TokKind::LeftRightArrow => "↔",
             TokKind::UpDownArrow => "↕",
             TokKind::CircledDot => "⊙",
+            TokKind::CircledTimes => "⊗",
             TokKind::Rewind => "⏪",
             TokKind::FastForward => "⏩",
             TokKind::Tilde => "~",
@@ -381,6 +394,7 @@ impl TokKind<'_> {
                     | TokKind::UpArrow
                     | TokKind::DownArrow
                     | TokKind::CircledDot
+                    | TokKind::CircledTimes
                     | TokKind::Rewind
                     | TokKind::FastForward
                     | TokKind::SelfKeyword

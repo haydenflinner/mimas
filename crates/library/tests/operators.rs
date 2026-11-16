@@ -147,7 +147,7 @@ test_fail!(
 
 // ---- the named operators ---------------------------------------------
 //
-// Julia's table, Mimas's rule: `∧ ⋅ × ∘ ⊗ ⊙ ∩` bind like `*`, `∨ ∪ ⊖ ⊎`
+// Julia's table, Mimas's rule: `∧ ⋅ × ∘ ⊠ ∩` bind like `*`, `∨ ∪ ⊖ ⊎`
 // like `+`, and none has a meaning until a type gives it one — `a ∧ b` is
 // `a.wedge(b)` (or `b.rwedge(a)`) and nothing else.
 

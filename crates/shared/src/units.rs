@@ -618,12 +618,13 @@ pub fn declare(name: &str, spec: Option<(Dim, f64)>) -> Result<(Dim, f64), Strin
 }
 
 /// The builtin axes: name, negative direction word, positive direction word,
-/// and the glyphs for the axis and its two directions. `y` is down-positive
-/// because the screen is; `z` is into the screen; `t` is time.
+/// and the glyphs for the axis and its two directions. `y` is up-positive —
+/// every coordinate a Mimas program sees (game prims, mouse, squish) is —
+/// `z` is into the screen; `t` is time.
 const BUILTIN_AXIS: [(&str, &str, &str, Option<&str>, &str, &str); BUILTIN_AXES] = [
     ("x", "left", "right", Some("↔"), "←", "→"),
-    ("y", "up", "down", Some("↕"), "↑", "↓"),
-    ("z", "outward", "inward", None, "⊙", ""),
+    ("y", "down", "up", Some("↕"), "↓", "↑"),
+    ("z", "outward", "inward", None, "⊙", "⊗"),
     ("t", "earlier", "later", None, "⏪", "⏩"),
 ];
 
@@ -689,39 +690,76 @@ pub fn axis_of_glyph(c: char) -> Option<Dim> {
 }
 
 /// A direction word or glyph: the axis it lies on and whether it is the
-/// negative end (`up` and `←` are; `down` and `→` are not).
+/// negative end (`down` and `←` are; `up` and `→` are not). A glyph is a
+/// spelling of its builtin word — `↑` resolves wherever `up` does, so an
+/// `axis y (up, down)` rename that makes up the negative end flips `↑`
+/// with it. When a rename drops the word entirely (`axis y (south,
+/// north)`) the glyph keeps its builtin meaning.
 pub fn direction(word: &str) -> Option<(Dim, bool)> {
-    for (slot, a) in BUILTIN_AXIS.iter().enumerate() {
-        if word == a.4 && !word.is_empty() {
-            return Some((Dim::axis(slot), true));
-        }
-        if word == a.5 && !word.is_empty() {
-            return Some((Dim::axis(slot), false));
-        }
-    }
-    CUSTOM.with(|c| {
-        let c = c.borrow();
-        for (i, (_, neg, pos)) in c.axes.iter().enumerate() {
-            if word == neg {
-                return Some((Dim::axis(BUILTIN_AXES + i), true));
+    // glyphs spell the builtin direction words
+    let glyph = matches!(word, "←" | "→" | "↑" | "↓" | "⊙" | "⊗" | "⏪" | "⏩");
+    let word = match word {
+        "←" => "left",
+        "→" => "right",
+        "↑" => "up",
+        "↓" => "down",
+        "⊙" => "outward",
+        "⊗" => "inward",
+        "⏪" => "earlier",
+        "⏩" => "later",
+        w => w,
+    };
+    CUSTOM
+        .with(|c| {
+            let c = c.borrow();
+            for (i, (_, neg, pos)) in c.axes.iter().enumerate() {
+                if word == neg {
+                    return Some((Dim::axis(BUILTIN_AXES + i), true));
+                }
+                if word == pos {
+                    return Some((Dim::axis(BUILTIN_AXES + i), false));
+                }
             }
-            if word == pos {
-                return Some((Dim::axis(BUILTIN_AXES + i), false));
+            for (slot, a) in BUILTIN_AXIS.iter().enumerate() {
+                let (neg, pos) = match c.renamed.get(&slot) {
+                    Some((n, p)) => (n.as_str(), p.as_str()),
+                    None => (a.1, a.2),
+                };
+                if word == neg {
+                    return Some((Dim::axis(slot), true));
+                }
+                if word == pos {
+                    return Some((Dim::axis(slot), false));
+                }
             }
-        }
-        for (slot, a) in BUILTIN_AXIS.iter().enumerate() {
-            let (neg, pos) = match c.renamed.get(&slot) {
-                Some((n, p)) => (n.as_str(), p.as_str()),
-                None => (a.1, a.2),
-            };
-            if word == neg {
-                return Some((Dim::axis(slot), true));
-            }
-            if word == pos {
-                return Some((Dim::axis(slot), false));
-            }
-        }
-        None
+            None
+        })
+        .or_else(|| {
+            glyph.then(|| {
+                BUILTIN_AXIS.iter().enumerate().find_map(|(slot, a)| {
+                    if word == a.1 {
+                        Some((Dim::axis(slot), true))
+                    } else {
+                        (word == a.2).then(|| (Dim::axis(slot), false))
+                    }
+                })
+            })?
+        })
+}
+
+/// The glyph a builtin direction word spells. `⊙`/`⊗` are the physics
+/// pair — out of the page, into it — now that tensor spells `⊠`.
+pub fn builtin_direction_glyph(word: &str) -> Option<&'static str> {
+    Some(match word {
+        "left" => "←",
+        "right" => "→",
+        "up" => "↑",
+        "down" => "↓",
+        "outward" => "⊙",
+        "inward" => "⊗",
+        "earlier" => "⏪",
+        "later" => "⏩",
+        _ => return None,
     })
 }
 
@@ -1111,5 +1149,20 @@ mod tests {
     fn square_roots_need_even_exponents() {
         assert_eq!(LENGTH.powi(2).sqrt(), Some(LENGTH));
         assert_eq!(LENGTH.sqrt(), None);
+    }
+}
+
+#[cfg(test)]
+mod dir_tests {
+    use super::*;
+
+    #[test]
+    fn directions_resolve() {
+        assert_eq!(direction("up"), Some((Dim::axis(1), false)));
+        assert_eq!(direction("down"), Some((Dim::axis(1), true)));
+        assert_eq!(direction("↑"), Some((Dim::axis(1), false)));
+        assert_eq!(direction("↓"), Some((Dim::axis(1), true)));
+        assert_eq!(direction("→"), Some((Dim::axis(0), false)));
+        assert_eq!(direction("bogus"), None);
     }
 }

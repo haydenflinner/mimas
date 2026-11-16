@@ -46,9 +46,12 @@ op!(
         Cross => Cross,
         Compose => Compose,
         Tensor => Tensor,
-        // `⊙` lexes as CircledDot (outward's direction glyph); infix it is
-        // the named `odot` op, prefix it opens a direction — position decides.
-        CircledDot => Odot,
+        // `⊡` is the boxed `⊙` — odot's infix spelling. `⊙` itself is
+        // `outward`'s direction glyph: circles are directions, boxes are
+        // operators. `a ⊙ b` applies `a` tagged outward, never hadamard.
+        SqDot => Odot,
+        SqPlus => Boxplus,
+        SqMinus => Boxminus,
         Intersect => Intersect,
         Union => Union,
         Ominus => Ominus,
@@ -87,7 +90,7 @@ impl EvaluationOp {
         matches!(self, EvaluationOp::Plus | EvaluationOp::Minus)
     }
 
-    /// The named operators — `∧ ⋅ × ∘ ⊗ ⊙ ∩ ∨ ∪ ⊖ ⊎` — have no built-in
+    /// The named operators — `∧ ⋅ × ∘ ⊠ ⊡ ∩ ∨ ∪ ⊖ ⊎ ⊞ ⊟` — have no built-in
     /// meaning on any type: each is its method (`wedge`, `dot`, …) or an
     /// error. r[impl mimas.op.named]
     pub fn is_named(&self) -> bool {
@@ -100,6 +103,8 @@ impl EvaluationOp {
                 | EvaluationOp::Compose
                 | EvaluationOp::Tensor
                 | EvaluationOp::Odot
+                | EvaluationOp::Boxplus
+                | EvaluationOp::Boxminus
                 | EvaluationOp::Intersect
                 | EvaluationOp::Union
                 | EvaluationOp::Ominus
@@ -108,11 +113,17 @@ impl EvaluationOp {
         )
     }
 
-    /// The named operators that bind like `+`: `∨ ∪ ⊖ ⊎` (the rest bind like `*`).
+    /// The named operators that bind like `+`: `∨ ∪ ⊖ ⊎ ⊞ ⊟` (the rest
+    /// bind like `*`).
     pub(crate) fn is_named_additive(&self) -> bool {
         matches!(
             self,
-            EvaluationOp::Vee | EvaluationOp::Union | EvaluationOp::Ominus | EvaluationOp::Uplus
+            EvaluationOp::Vee
+                | EvaluationOp::Union
+                | EvaluationOp::Ominus
+                | EvaluationOp::Uplus
+                | EvaluationOp::Boxplus
+                | EvaluationOp::Boxminus
         )
     }
 }

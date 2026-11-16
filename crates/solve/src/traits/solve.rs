@@ -120,6 +120,8 @@ fn op_method_names(op: EvaluationOp) -> (&'static str, &'static str) {
         EvaluationOp::Compose => ("compose", "rcompose"),
         EvaluationOp::Tensor => ("tensor", "rtensor"),
         EvaluationOp::Odot => ("odot", "rodot"),
+        EvaluationOp::Boxplus => ("boxplus", "rboxplus"),
+        EvaluationOp::Boxminus => ("boxminus", "rboxminus"),
         EvaluationOp::Intersect => ("intersect", "rintersect"),
         EvaluationOp::Union => ("union", "runion"),
         EvaluationOp::Ominus => ("ominus", "rominus"),
@@ -2793,6 +2795,7 @@ impl Solve for Literal {
                             src: solver.src(ident.location),
                             at: ident.location.into(),
                             name: ident.lexeme.clone(),
+                            help: None,
                         })?;
                         if solver.decs[dec].kind.as_adt().is_none() {
                             Err(NotAStruct {
