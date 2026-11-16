@@ -205,6 +205,7 @@ pub(crate) static SPECS: LazyLock<Vec<Spec>> = LazyLock::new(|| {
         spec!("mj_flush", jit::flush, [P, P, P], Void),
         spec!("mj_call_body", jit::call_body, [P, P, P, P, P, P], P),
         spec!("mj_call_dyn", jit::call_dyn, [P, P, P, P, P, P, P], P),
+        spec!("mj_format", jit::format, [P, P, P, Ctx, P, P], U8),
     ]
 });
 
@@ -268,6 +269,7 @@ pub(crate) enum H {
     Flush,
     CallBody,
     CallDyn,
+    Format,
 }
 
 impl H {
@@ -282,7 +284,7 @@ impl H {
 pub fn compile(program: &Program) -> Result<Jit, Error> {
     debug_assert_eq!(
         SPECS.len(),
-        H::CallDyn as usize + 1,
+        H::Format as usize + 1,
         "H/SPECS order drifted"
     );
     let mut flags = cranelift_codegen::settings::builder();

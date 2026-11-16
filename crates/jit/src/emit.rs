@@ -26,7 +26,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::H;
-use compile::{AccessKind, BlockTarget, Constant, Op, Program, Reg};
+use compile::{AccessKind, BlockTarget, Constant, Op, OpFormatPart, Program, Reg};
 use cranelift_codegen::Context;
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::{
@@ -1440,7 +1440,40 @@ impl Em<'_> {
                 let (tb, fb) = (self.tgt_blk(target), self.next_blk(i));
                 self.fb.ins().brif(hit, tb, &[], fb, &[]);
             }
-            Op::Switch { .. } | Op::Format { .. } => self.estep(),
+            Op::Switch { .. } => self.estep(),
+            Op::Format { parts, .. } => {
+                // selective materialization instead of `flush_seq` — only the
+                // value parts' regs are read by `mj_format`. `dst` is `W::Dyn`
+                // (never shadowed) so the helper's `regs[dst]` store needs no
+                // `refresh_shadow`.
+                let mut seen: Vec<usize> = Vec::new();
+                for part in parts {
+                    if let OpFormatPart::Value(r) = part
+                        && !seen.contains(&r.index())
+                    {
+                        seen.push(r.index());
+                        self.val_ptr(r.index() as u32);
+                    }
+                }
+                self.mark_op(off, next);
+                let (regs, o) = (self.regs(), self.iconst(off as i64));
+                let k = self
+                    .hcall(
+                        H::Format,
+                        &[
+                            regs,
+                            self.env.code,
+                            o,
+                            self.env.ctx0,
+                            self.env.ctx1,
+                            self.env.strs,
+                            self.env.out,
+                        ],
+                    )
+                    .unwrap();
+                let nb = self.next_blk(i);
+                self.fb.ins().brif(k, self.ex.eret, &[], nb, &[]);
+            }
             Op::Return { val } => {
                 let vp = self.val_ptr(val.index() as u32);
                 let do_ret = self.fb.create_block();

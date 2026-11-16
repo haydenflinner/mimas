@@ -228,8 +228,8 @@ pub use crate::{
 };
 pub use api::NativeId;
 pub use compile::{
-    AccessKind, BinOp, BlockTarget, BodyId, Chunk, Constant, Decoder, Function, Op, OpCode,
-    OpFormatPart, Reg, UnaryOp,
+    AccessKind, BinOp, BlockTarget, BodyId, Chunk, Constant, Decode, Decoder, Function, Op,
+    OpCode, OpFormatPart, Reg, UnaryOp,
 };
 pub use gc_arena::Gc;
 pub use shared::{IdVec, StrId, StrInterner};
@@ -1527,6 +1527,65 @@ pub mod jit {
     // Each mirrors its `step_one`/`cold_dispatch` arm verbatim, reading and
     // writing the caller's register window by index. Errors go to `out` with a
     // 1 return (propagate); success writes `regs[dst]` and returns 0.
+
+    /// `Op::Format` — renders the parts decoded at byte offset `off` in
+    /// `code`, mirroring the `OpCode::Format` step arm. The emitter passes
+    /// the op's offset because `Program::ops` decodes into scratch storage
+    /// that doesn't outlive compile, so this seeks the shared decoder,
+    /// decodes `dst` + parts exactly like `step` would, and restores `ip`
+    /// (already the next op — `mark_op` set it for anything `to_string_into`
+    /// reaches). Errors go to `out` with a 1 return.
+    pub unsafe extern "C" fn format<'gc>(
+        regs: *mut Val<'gc>,
+        code: *mut Decoder,
+        off: usize,
+        ctx: Ctx<'gc>,
+        strs: *const StrInterner,
+        out: *mut RtResult<Flow<'gc>>,
+    ) -> u8 {
+        unsafe {
+            let code = &mut *code;
+            let saved = code.ip;
+            code.ip = off;
+            debug_assert!(matches!(OpCode::decode(code), OpCode::Format));
+            let dst = Reg::decode(code);
+            let len = code.u16();
+            let r = FORMAT_SCRATCH.with(|s| -> RtResult<Val<'gc>> {
+                let mut text = s.borrow_mut();
+                text.clear();
+                for _ in 0..len {
+                    match OpFormatPart::decode(code) {
+                        OpFormatPart::Literal(str_id) => {
+                            text.push_str((*strs).get(str_id))
+                        }
+                        OpFormatPart::Value(reg) => {
+                            ctx.to_string_into(&mut text, *regs.add(reg.index()))?
+                        }
+                    }
+                }
+                Ok(Val::Str(ctx.intern(&text)))
+            });
+            code.ip = saved;
+            match r {
+                Ok(v) => {
+                    *regs.add(dst.index()) = v;
+                    0
+                }
+                Err(e) => {
+                    *out = Err(e);
+                    1
+                }
+            }
+        }
+    }
+
+    thread_local! {
+        /// Scratch `String` for `Op::Format` helper calls — `to_string_into`
+        /// never runs user code (no re-entry possible), so one buffer per
+        /// thread skips the per-op malloc the interpreter arm pays.
+        static FORMAT_SCRATCH: std::cell::RefCell<String> =
+            const { std::cell::RefCell::new(String::new()) };
+    }
 
     /// `Op::Len` — the length of `regs[s]` lands in `*v`; the destination may
     /// be shadowed so the caller writes it (regs or shadow) itself. Errors go

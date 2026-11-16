@@ -88,8 +88,6 @@ fn repro_in() {
 }
 
 #[test]
-
-#[test]
 fn repro_subscripts() {
     let decl = "struct C { data: [int], gone: [int], log: int }";
     for src in [
