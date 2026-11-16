@@ -13,6 +13,8 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     let id = api.add_method(push);
     api.mark_intrinsic(id, Intrinsic::Push);
     api.add_method(pop);
+    api.add_method(remove);
+    api.add_method(get);
     api.add_method(shuffle);
     // `xs + x`/`xs - x`/`xs + ys`/`xs - ys` — the Z-set surface of `+`/`-`
     // on sequences. `add`/`sub` take an element (append / drop-first);
@@ -794,4 +796,25 @@ fn sup_int_rows(arr: Vec<Vec<i64>>) -> Vec<Option<i64>> {
 /// `⨆ xss` on float rows -- each row's maximum (`null` for an empty row).
 fn sup_float_rows(arr: Vec<Vec<f64>>) -> Vec<Option<f64>> {
     arr.iter().map(|r| r.iter().copied().reduce(f64::max)).collect()
+}
+
+/// Removes one slot and shifts the following elements left.
+// r[impl mimas.place.list-remove]
+#[native]
+fn remove<'gc>(ctx: Ctx<'gc>, arr: anon::SeqOf<'gc, 0>, index: i64) -> Result<anon::T<'gc>, RtErr> {
+    let index = usize::try_from(index).map_err(|_| RtErr::IndexOutOfBounds)?;
+    arr.0.seq_remove(ctx, index).map(anon::Anon)
+}
+
+// `SeqOf` carries a shared handle, so the Rust signature cannot express
+// receiver mutation with `&mut`. Keep the solver's iteration guard explicit.
+vm::inventory::submit! {
+    vm::api::NativeMutates { path: concat!(module_path!(), "::remove"), index: 0 }
+}
+
+// r[impl mimas.list.get]
+#[native]
+#[effects()]
+fn get<'gc>(arr: anon::SeqOf<'gc, 0>, index: i64) -> Option<anon::T<'gc>> {
+    usize::try_from(index).ok().and_then(|i| arr.0.seq_get(i)).map(anon::Anon)
 }

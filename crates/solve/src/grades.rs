@@ -970,6 +970,10 @@ impl<'a> Pass<'a> {
     }
 
     fn stmt(&mut self, stmt: &'a Stmt) {
+        if let Some(rewritten) = self.solver.rewrites.get(&stmt.id()) {
+            self.expr(rewritten);
+            return;
+        }
         match stmt.kind() {
             StmtKind::Let(l) => {
                 self.expr(&l.right);
@@ -1208,6 +1212,10 @@ impl<'a> Pass<'a> {
     }
 
     fn expr(&mut self, e: &'a Expr) {
+        if let Some(rewritten) = self.solver.rewrites.get(&e.id()) {
+            self.expr(rewritten);
+            return;
+        }
         match e.kind() {
             ExprKind::Ident(ident) => {
                 if let Some(dec) = self.dec_of(ident) {
@@ -1326,6 +1334,12 @@ impl<'a> Pass<'a> {
                     && let Some(root_dec) = self.dec_of(root)
                 {
                     self.write(root_dec, root.location, false);
+                }
+                if callee_name == "__cleanup_register"
+                    && let Some(action) = c.arguments.first()
+                    && !matches!(action.value.kind(), ExprKind::Closure(_))
+                {
+                    self.call_effect(&action.value);
                 }
                 self.call_effect(&c.left);
             }

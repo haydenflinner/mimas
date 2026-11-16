@@ -1610,3 +1610,13 @@ pub struct ParamHasNoBound {
     pub param: String,
     pub member: String,
 }
+
+#[derive(Error, Debug, Diagnostic)]
+#[error("{message}")]
+pub struct SubscriptUse {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("this accessor use is unsupported")]
+    pub at: SourceSpan,
+    pub message: String,
+}

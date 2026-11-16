@@ -26,6 +26,7 @@ pub struct Body {
 
     pub(crate) current_block: BlockId,
     pub(crate) loop_stack: Vec<LoopCtx>,
+    pub(crate) cleanup_scopes: Vec<InstId>,
 
     #[cfg(feature = "logging")]
     pub(crate) block_names: HashMap<BlockId, String>,
@@ -45,6 +46,7 @@ impl Body {
             captures: Vec::new(),
             current_block: BlockId::ZERO,
             loop_stack: vec![],
+            cleanup_scopes: vec![],
             artifacts: HashMap::new(),
             shadows: HashMap::new(),
             kinds: HashMap::new(),

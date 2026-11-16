@@ -161,3 +161,19 @@ test_fail!(
      fn t<T: P>(x: T) -> T { x + x }
      t(2.0)",
 );
+
+// a pact name resolves for `P::member` paths but is not a value: a stray
+// one (the second name of `impl P for S via Q Q`, or any bare use) is a
+// compile error, not an ICE at codegen
+test_fail!(
+    pact_names_are_not_values,
+    "pact P { fn m(self) -> int { 1 } }
+     pact Q { fn m(self) -> int { 2 } }
+     struct S { x: int }
+     impl P for S via Q Q",
+    "pact P { fn m(self) -> int { 1 } }
+     fn f(x: int) -> int { x }
+     f(P)",
+    "pact P { fn m(self) -> int { 1 } }
+     [P]",
+);

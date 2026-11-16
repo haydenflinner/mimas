@@ -44,6 +44,8 @@ use crate::{Result, Solver, components::DecId, errors::DimensionMismatch};
 enum D {
     /// Can't tell (or isn't a number): never an error.
     Any,
+    /// A projection carries its element dimension.
+    Place(Box<D>),
     /// A number in this dimension; [`Dim::NONE`] is a plain number.
     Q(Dim),
     /// A list whose items share one dimension.
@@ -64,6 +66,7 @@ impl D {
     fn dim(&self) -> Option<Dim> {
         match self {
             D::Q(d) | D::Iv(d) => Some(*d),
+            D::Place(inner) => inner.dim(),
             _ => None,
         }
     }
@@ -660,6 +663,18 @@ impl<'a> Pass<'a> {
     }
 
     fn stmt(&mut self, stmt: &'a Stmt) {
+        if let Some(rewritten) = self.solver.rewrites.get(&stmt.id()) {
+            if let StmtKind::Assignment(a) = stmt.kind()
+                && matches!(a.op, AssignmentOp::Identity | AssignmentOp::PlusEqual | AssignmentOp::MinusEqual)
+            {
+                let left = self.expr(&a.left);
+                let right = self.expr(&a.right);
+                self.expect(&left, &right, a.right.location(), "assignment doesn't match");
+                self.range_check(&a.right, &left);
+            }
+            self.expr(rewritten);
+            return;
+        }
         match stmt.kind() {
             StmtKind::Let(l) => {
                 // a declared unit is how the program asks to see its
@@ -880,6 +895,16 @@ impl<'a> Pass<'a> {
     }
 
     fn expr(&mut self, e: &'a Expr) -> D {
+        if let Some(source) = self.solver.place_sources.get(&e.id()) {
+            return D::Place(Box::new(self.expr(source)));
+        }
+        if let Some(rewritten) = self.solver.rewrites.get(&e.id()) {
+            let d = self.expr(rewritten);
+            if let D::Q(dim) = d {
+                self.dims.insert(e.id(), dim);
+            }
+            return d;
+        }
         let d = self.expr_dim(e);
         // record dimensionless results too: a lookup miss means "dim unknown"
         // (`b.x + BALL` joining an `Any` field), which is a different answer
@@ -1430,6 +1455,19 @@ impl<'a> Pass<'a> {
         {
             let recv = self.expr(left);
             let args: Vec<D> = c.arguments.iter().map(|a| self.expr(&a.value)).collect();
+            if let D::Place(element) = &recv {
+                if method.lexeme == "read" {
+                    return (**element).clone();
+                }
+                if method.lexeme == "write" && let Some(value) = args.first() {
+                    self.expect(
+                        element, value, c.arguments[0].value.location(),
+                        "place assignment doesn't match",
+                    );
+                    self.range_check(&c.arguments[0].value, element);
+                    return D::Any;
+                }
+            }
             if let Some(ty) = self.adt_name(left)
                 && let Some(f) = self
                     .methods
@@ -1536,7 +1574,7 @@ impl<'a> Pass<'a> {
             );
             self.range_check(&arg.value, &want);
         }
-        Some(binding.sig.return_dim.map_or(D::Any, D::Q))
+        Some(binding.sig.return_dim.as_ref().map_or(D::Any, dim_tree))
     }
 
     /// Check a call to a user function against its declared parameters; its declared return is
@@ -1896,7 +1934,7 @@ impl<'a> Pass<'a> {
                 }
                 D::Any
             }
-            (D::Arr(inner), "pop" | "max" | "min" | "sum") => (**inner).clone(),
+            (D::Arr(inner), "pop" | "remove" | "get" | "max" | "min" | "sum") => (**inner).clone(),
             (D::Arr(_), "len") => PLAIN,
             _ => D::Any,
         }

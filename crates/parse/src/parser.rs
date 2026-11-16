@@ -12,6 +12,7 @@ use std::{cell::Cell, sync::Arc};
 mod datalog;
 pub(crate) mod macros;
 mod reflect;
+mod subscripts;
 /// Forgets every declared macro, and every declaration the reflection
 /// macros answer for: a new program starts with none.
 pub fn clear_macros() {
@@ -72,6 +73,8 @@ pub struct Parser<'s> {
     /// Inside a `(...)` group (call args, tuples, `#[tests]` lists), where an infix operator
     /// may bind across a newline.
     group_depth: usize,
+    generator_type: Option<Annotation>,
+    accessor_yield: bool,
     /// On while `±`'s tolerance parses, so a trailing `%` stays the percent marker
     /// (`x ± 10%`) instead of folding as postfix percent. Groups reset it -- inside
     /// `x ± (50%)` the `%` is postfix again.
@@ -255,6 +258,8 @@ impl<'s> Parser<'s> {
             struct_literals: true,
             juxta: Juxta::Apply,
             group_depth: 0,
+            generator_type: None,
+            accessor_yield: false,
             pct_marker: false,
             assert_id: 0,
             with_id: 0,
@@ -405,6 +410,7 @@ impl<'s> Parser<'s> {
     /// finished. A newline before the operator ends the expression (the semicolon-insertion
     /// rule), so `a\n+ b` is not addition; `a +\n b` still is, because the operator itself is
     /// on the same line as `a`. A `(...)` group opts back into newline-crossing.
+    /// `binary_ops` also permits a leading logical OR after a left operand.
     fn infix_binds(&self) -> bool {
         self.group_depth > 0 || !self.at_line_start()
     }
@@ -483,6 +489,106 @@ impl<'s> Parser<'s> {
         let start = self.next_start();
         match self.peek() {
             TokKind::Let => BlockElement::Stmt(self.let_stmt()),
+            TokKind::Pub if self.nth(1) == TokKind::Ident("subscript") => {
+                self.advance();
+                let mut items = self.accessor_items(false, true).into_iter();
+                let Some(item) = items.next() else { return BlockElement::Stmt(self.empty_stmt(start)); };
+                for item in items { let stmt = self.new_stmt(item, start); self.pending.push(stmt); }
+                BlockElement::Stmt(self.new_stmt(item, start))
+            }
+            TokKind::Ident("subscript") if self.accessor_intro() => {
+                let mut items = self.accessor_items(false, false).into_iter();
+                let Some(item) = items.next() else { return BlockElement::Stmt(self.empty_stmt(start)); };
+                for item in items { let stmt = self.new_stmt(item, start); self.pending.push(stmt); }
+                BlockElement::Stmt(self.new_stmt(item, start))
+            }
+            TokKind::Ident("yield") if self.accessor_yield => {
+                self.advance();
+                let target = self.expr();
+                let call = self.generator_call("__accessor_yield", vec![target], start);
+                let stmt = self.new_stmt(StmtKind::Expr(call), start);
+                self.end_stmt(stmt.location());
+                BlockElement::Stmt(stmt)
+            }
+            // r[impl mimas.generator.decl]
+            TokKind::Ident("subscript") if self.notation_intro() => {
+                self.advance();
+                let (name, type_params, parameters, element) = self.function_sig(true, Some(""));
+                let element = element.unwrap_or_else(|| {
+                    self.expected("a yielded type after `->`");
+                    Annotation::Unit
+                });
+                if matches!(element, Annotation::Unit | Annotation::Option(_)) {
+                    self.error_here(Misdirection {
+                        src: self.src(),
+                        at: self.next_location().into(),
+                        msg: "a generator must yield a non-null value".into(),
+                        label: "wrap optional values in a struct so null can mark exhaustion"
+                            .into(),
+                    });
+                }
+                let wheres = self.where_clause();
+                let saved = self.generator_type.replace(element.clone());
+                let body = self.block();
+                self.generator_type = saved;
+                let mut parameter = Binding::new(self.ident_at("__generator_type", start));
+                parameter.annotation = Some(element.clone());
+                let closure = self.new_expr(
+                    Closure {
+                        parameters: vec![parameter],
+                        body,
+                        return_type: Some(Annotation::Unit),
+                    },
+                    start,
+                );
+                let body = self.generator_call("__generator", vec![closure], start);
+                let f = Function {
+                    name,
+                    role: FnRole::Fn,
+                    type_params,
+                    parameters,
+                    wheres,
+                    return_type: Some(Annotation::Function(
+                        vec![],
+                        Box::new(Annotation::Option(Box::new(element))),
+                    )),
+                    body,
+                };
+                let item = Item::new(f.into(), self.location(start), false);
+                self.end_item(&item);
+                BlockElement::Stmt(self.new_stmt(item, start))
+            }
+            TokKind::Ident("yield")
+                if self.generator_type.is_some() && self.nth(1).starts_expr() =>
+            {
+                self.advance();
+                let value = self.expr();
+                let name = self.ident_at("__yield_value", start);
+                let bind = self.new_stmt(
+                    Let {
+                        left: name.clone().into(),
+                        annotation: self.generator_type.clone(),
+                        right: value,
+                        else_branch: None,
+                    },
+                    start,
+                );
+                let value = self.new_expr(name, start);
+                let call = self.generator_call("__generator_yield", vec![value], start);
+                let emit = self.new_stmt(StmtKind::Expr(call), start);
+                self.end_stmt(self.location(start));
+                BlockElement::Stmt(self.new_stmt(
+                    StmtKind::Expr(self.new_expr(
+                        Block {
+                            body: vec![bind, emit],
+                            yielded_expr: None,
+                        },
+                        start,
+                    )),
+                    start,
+                ))
+            }
+
             TokKind::Module => BlockElement::Stmt(self.module_stmt()),
             // `check <expr>` -- the literate spelling of a `#[tests]` case. The word stays
             // contextual: it only opens a check when a same-line expr follows, so `check(x)`
@@ -494,7 +600,9 @@ impl<'s> Parser<'s> {
             }
             // `axis wealth (poorer, richer);` names an axis and its two direction
             // words. Contextual like `unit`.
-            TokKind::Ident("axis") if self.unit_intro() => BlockElement::Stmt(self.axis_stmt(start)),
+            TokKind::Ident("axis") if self.unit_intro() => {
+                BlockElement::Stmt(self.axis_stmt(start))
+            }
             // `unit tile` declares a base dimension; `unit league = 3mi`
             // a scale of known units. Contextual like `check`: `unit(x)`,
             // `unit = 4`, `unit.foo` stay expressions.
@@ -2097,6 +2205,10 @@ impl<'s> Parser<'s> {
                 self.peek()
             };
             match kind {
+                TokKind::Ident("subscript") => {
+                    let public = self.eat(TokKind::Pub);
+                    items.extend(self.accessor_items(true, public));
+                }
                 TokKind::Const | TokKind::Fn => {
                     let item = self.item();
                     self.end_item(&item);
@@ -2170,6 +2282,19 @@ impl<'s> Parser<'s> {
         binding
     }
 
+    fn generator_call(&self, name: &str, values: Vec<Expr>, start: usize) -> Expr {
+        self.new_expr(
+            Call::new(
+                self.new_expr(self.ident_at(name, start), start),
+                values
+                    .into_iter()
+                    .map(|value| Argument { name: None, value })
+                    .collect(),
+            ),
+            start,
+        )
+    }
+
     fn function(&mut self) -> Function {
         self.function_with(None)
     }
@@ -2178,6 +2303,13 @@ impl<'s> Parser<'s> {
     /// keyword already consumed, its name prefixed (`notation x` is
     /// `fn __lit_x`).
     fn function_with(&mut self, prefix: Option<&str>) -> Function {
+        let generator = self.generator_type.take();
+        let f = self.ordinary_function_with(prefix);
+        self.generator_type = generator;
+        f
+    }
+
+    fn ordinary_function_with(&mut self, prefix: Option<&str>) -> Function {
         let start = self.next_start();
         let (name, type_params, parameters, return_type) = self.function_sig(true, prefix);
         let wheres = self.where_clause();
@@ -2229,6 +2361,13 @@ impl<'s> Parser<'s> {
     }
 
     fn closure(&mut self) -> Expr {
+        let generator = self.generator_type.take();
+        let closure = self.ordinary_closure();
+        self.generator_type = generator;
+        closure
+    }
+
+    fn ordinary_closure(&mut self) -> Expr {
         let start = self.next_start();
         if self.eat(TokKind::DoublePipe) {
             let return_type = self.eat(TokKind::Arrow).then(|| self.annotation());
@@ -2652,7 +2791,11 @@ impl<'s> Parser<'s> {
             let Some((op, power)) = BinaryOp::of(self.peek()) else {
                 break;
             };
-            if !(min_power..max_power).contains(&power) || !self.infix_binds() {
+            // r[impl mimas.stmt.double-pipe]
+            // After a left operand, `||` continues the expression across a newline.
+            // Where a new expression is expected, prefix `||` still opens a closure.
+            let continues = self.infix_binds() || self.at(TokKind::DoublePipe);
+            if !(min_power..max_power).contains(&power) || !continues {
                 break;
             }
             self.advance();
@@ -2753,6 +2896,11 @@ impl<'s> Parser<'s> {
 
     fn unary(&mut self) -> Expr {
         let start = self.next_start();
+        if self.eat(TokKind::Ampersand) {
+            let place = self.unary();
+            return self.generator_call("__borrow_place", vec![place], start);
+        }
+
         // `∑ xs` -- a reduction is the big form of its operator, and desugars to
         // the method it names on the operand: `∑` `.sum()`, `∏` `.product()`,
         // `⨅` `.inf()` (meet: all/min), `⨆` `.sup()` (join: any/max). It binds
@@ -4313,6 +4461,14 @@ impl<'s> Parser<'s> {
             self.expect(TokKind::RightSquare);
             return self.slice_call(left, key, end, inclusive, start);
         }
+        let key = if self.eat(TokKind::Comma) {
+            let mut keys = vec![key];
+            while !self.at(TokKind::RightSquare) && !self.at(TokKind::Eof) {
+                keys.push(self.struct_literals(true, Self::expr));
+                if !self.eat(TokKind::Comma) { break; }
+            }
+            self.new_expr(Literal::Tuple(keys), start)
+        } else { key };
         self.expect(TokKind::RightSquare);
         self.new_expr(Access::Square { left, key, kind }, start)
     }
@@ -4549,25 +4705,6 @@ impl<'s> Parser<'s> {
                 at: ident.location.into(),
                 msg: msg.into(),
                 label: label.into(),
-            });
-        }
-
-        // `a\n|| b`: a newline ends an expression, so the second line is a
-        // statement of its own, and `|| b` reads as a closure with no
-        // parameters. Nobody writes that statement on purpose: it makes a
-        // closure and drops it. Say what happened, as a leading `&&` does.
-        // r[impl mimas.stmt.double-pipe]
-        if let ExprKind::Closure(closure) = expr.kind()
-            && closure.parameters.is_empty()
-            && !self.at(TokKind::Eof)
-        {
-            self.error(Misdirection {
-                src: self.src(),
-                at: self.location(start).into(),
-                msg: "a line cannot start with `||`: the line above ended its expression, and \
-                      this line is a closure with no parameters that nothing calls"
-                    .into(),
-                label: "put `||` at the end of the line above".into(),
             });
         }
 
@@ -5875,6 +6012,8 @@ fn with_expr_escape(expr: &Expr, in_loop: bool, in_fn: bool) -> Option<(Location
     let scan_opt = |e: &Option<Expr>| e.as_ref().and_then(|e| scan(e));
     match expr.kind() {
         // exits aimed past the region — the desugared pop never runs
+        ExprKind::Call(c) if !in_fn && matches!(c.left.kind(),
+            ExprKind::Ident(i) if i.lexeme == "__generator_yield") => Some((expr.location(), "yield")),
         ExprKind::Return(_) if !in_fn => Some((expr.location(), "return")),
         ExprKind::Raise(_) if !in_fn => Some((expr.location(), "raise")),
         ExprKind::Propagate(_) if !in_fn => Some((expr.location(), "`?`")),

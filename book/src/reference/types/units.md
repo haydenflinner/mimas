@@ -42,7 +42,7 @@ If your program declares a type with the same name as a unit (a `struct W`, say)
 | power | `W` `mW` `kW` `MW` |
 | other SI | `K` `mol` `cd` |
 | money | `usd` |
-| graphics | `px` `frame` (so `px/frame` is a speed in pixels per frame) |
+| graphics | `px` `spx` `frame` (so `px/frame` is a speed in pixels per frame) |
 | music | `beat` `meas` `phrase` `bpm` `cpm` (`1meas` is 4 beats, `132bpm` is 2.2 beats per second) |
 | pitch | `st` `oct` (semitones; `1oct` is `12st`) |
 | data | `b` `bit` `B` `kB` `KiB` `MB` `MiB` `GB` `GiB` `TB` (`b` is **bit**, not beat; `B` is a byte) |
@@ -50,6 +50,8 @@ If your program declares a type with the same name as a unit (a `struct W`, say)
 | plain numbers | `rad` `deg` `pct` `bp` `prob` `logit` (`90deg` is `1.5708`, `6pct` is `0.06`, `25bp` is `0.0025`; `prob`/`logit` are intent annotations like `rad`, scale 1) |
 
 Money, music, pitch, data and the graphics units are dimensions of their own: `usd` can't be added to `s`, `px` isn't a length, and `beat` converts to `s` only through a tempo (`4meas / 132bpm` is a time). The `music` stdlib's mini-notation abuses `b` for *beat* inside pattern strings (`"C2 1b"`) — the checker never sees those, and in real code `b` stays a bit.
+
+`spx` is a *screen pixel*: coordinates a host measured in its own space (a browser point, a viewport extent, a sheet position) and handed the page. It takes the same axes as `px` — `spx↔`, `spx↕` — but it can never meet `px` in arithmetic or a typed slot: the page crosses the seam deliberately (`game::to_world`, `game::to_screen`), so a host-measured coordinate can't slip into world math unconverted. Page-authored code almost never writes `spx` itself; it appears on host input fields like `input().mouse_x`.
 
 `index` (or `idx`) is the odd one out: it's the only unit that annotates as `int`, because a position into a collection has to be one — `xs[i]` takes it directly. It's still its own dimension, so an index can't mix with a quantity: `i + 3px` and `let p: px = i` are errors. But plain numbers convert freely, since stepping and bounds-checking are the whole point of an index: `i += 1`, `i < xs.len()`, and `f(3)` into an `i: index` parameter all just work.
 

@@ -39,7 +39,7 @@ const NORMS: [(&str, usize); 2] = [("snorm", NORM0), ("unorm", NORM0 + 1)];
 
 /// Where a `unit tile;` declaration's base dimension sits in the [`Dim`]
 /// array -- the builtins occupy the slots before it.
-const FIRST_CUSTOM: usize = 15;
+const FIRST_CUSTOM: usize = 16;
 
 /// How many new base dimensions (`unit tile;`) one program may declare.
 /// Derived decls (`unit league = 3mi;`) don't spend a slot -- they share
@@ -51,6 +51,7 @@ pub const MAX_CUSTOM: usize = 8;
 /// a `Dim` that outlives its compilation.
 pub const BASES: [&str; N] = [
     "m", "kg", "s", "A", "K", "mol", "cd", "usd", "px", "frame", "beat", "st", "b", "index", "rad",
+    "spx",
     "", "", "", "", "", "", "", "",
     "", "", "", "", "", "", "", "",
     "", "",
@@ -418,39 +419,46 @@ const fn d(e: [i8; FIRST_CUSTOM]) -> Dim {
     Dim(out)
 }
 
-// exponents:        m  kg  s  A  K mol cd usd px frame beat st bit index rad
-pub const LENGTH: Dim = d([1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const MASS: Dim = d([0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const TIME: Dim = d([0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const CURRENT: Dim = d([0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const TEMP: Dim = d([0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const AMOUNT: Dim = d([0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const LUMINOUS: Dim = d([0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const MONEY: Dim = d([0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]);
-pub const PIXELS: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0]);
-pub const FRAMES: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0]);
-pub const BEAT: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0]);
-pub const PITCH: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0]);
-pub const DATA: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0]);
+// exponents:        m  kg  s  A  K mol cd usd px frame beat st bit index rad spx
+pub const LENGTH: Dim = d([1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const MASS: Dim = d([0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const TIME: Dim = d([0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const CURRENT: Dim = d([0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const TEMP: Dim = d([0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const AMOUNT: Dim = d([0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const LUMINOUS: Dim = d([0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const MONEY: Dim = d([0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const PIXELS: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]);
+pub const FRAMES: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0]);
+pub const BEAT: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0]);
+pub const PITCH: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0]);
+pub const DATA: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0]);
 /// A position into a collection: `i: index` is an `int` that can't be mixed
 /// with any quantity (`i + 3px` is an error). Plain numbers convert freely
 /// (`i += 1`, `i < xs.len()`) -- the dimension exists to keep *measurements*
 /// out of index variables, not to make counting verbose.
-pub const INDEX: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0]);
+pub const INDEX: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0]);
 /// An angle, in radians: `deg`, `turn`, `grad`, `arcmin`, `arcsec` and `mrad`
 /// are scaled spellings of it. Unlike `prob`/`pct`, an angle *does* compose —
 /// `angle / s` is angular velocity and `rad^2` is a solid angle.
-pub const ANGLE: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
-pub const FREQ: Dim = d([0, 0, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const FORCE: Dim = d([1, 1, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const PRESSURE: Dim = d([-1, 1, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const ENERGY: Dim = d([2, 1, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const POWER: Dim = d([2, 1, -3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const CHARGE: Dim = d([0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const VOLTAGE: Dim = d([2, 1, -3, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const ANGLE: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0]);
+pub const FREQ: Dim = d([0, 0, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const FORCE: Dim = d([1, 1, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const PRESSURE: Dim = d([-1, 1, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const ENERGY: Dim = d([2, 1, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const POWER: Dim = d([2, 1, -3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const CHARGE: Dim = d([0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const VOLTAGE: Dim = d([2, 1, -3, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+/// A screen-space pixel: a coordinate the host measured in its own space
+/// (a browser point, a viewport extent, a sheet-plane position) and handed
+/// the page. `spx` and `px` are different *kinds* of pixel the way `px`
+/// and `m` are different kinds of length — the page must cross the seam
+/// deliberately (`game::to_world`/`game::to_screen`), so a host coord can
+/// never slide into world math unnoticed.
+pub const SCREEN_PX: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
 
 /// Dimension families, for error messages.
-const SI: [(&str, Dim); 23] = [
+const SI: [(&str, Dim); 24] = [
     ("length", LENGTH),
     ("volume", LENGTH.powi(3)),
     ("mass", MASS),
@@ -474,10 +482,11 @@ const SI: [(&str, Dim); 23] = [
     ("voltage", VOLTAGE),
     ("index", INDEX),
     ("angle", ANGLE),
+    ("screen pixels", SCREEN_PX),
 ];
 
 /// The coherent unit each family is kept in.
-const NAMED: [(&str, Dim, f64); 22] = [
+const NAMED: [(&str, Dim, f64); 23] = [
     ("m", LENGTH, 1.0),
     ("kg", MASS, 1.0),
     ("s", TIME, 1.0),
@@ -500,6 +509,7 @@ const NAMED: [(&str, Dim, f64); 22] = [
     ("V", VOLTAGE, 1.0),
     ("idx", INDEX, 1.0),
     ("rad", ANGLE, 1.0),
+    ("spx", SCREEN_PX, 1.0),
 ];
 
 /// The word for base-dimension slot `i` — builtins by name, custom slots
@@ -889,9 +899,13 @@ fn lookup_builtin(name: &str) -> Option<(Dim, f64)> {
         "mW" => (POWER, 1e-3),
         "kW" => (POWER, 1e3),
         "MW" => (POWER, 1e6),
-        // money and graphics: their own base dimensions
+        // money and graphics: their own base dimensions. `spx` is a
+        // *host-space* pixel — browser/sheet coords a fixture or native
+        // hands the page, kept apart from `px` so a screen/world slip is
+        // a compile error, converted only through the seam natives.
         "usd" => (MONEY, 1.0),
         "px" => (PIXELS, 1.0),
+        "spx" => (SCREEN_PX, 1.0),
         "frame" => (FRAMES, 1.0),
         // index: an `int` position into a collection. its own dimension so a
         // quantity can never pass for one (`xs[i] + 3px` fails), but plain

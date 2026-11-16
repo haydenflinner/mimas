@@ -56,6 +56,9 @@ impl Vm {
     /// its state is replaced. On error nothing is written.
     pub fn rebind(&mut self, old: &mut Vm, snap: &Snapshot) -> Result<Rebind, String> {
         let fresh = self.snapshot().map_err(|e| e.to_string())?;
+        if !snap.cleanups.is_empty() || !fresh.cleanups.is_empty() {
+            return Err("pending accessor cleanup requires replay after an edit".into());
+        }
         let n = snap.frames.len();
         if fresh.frames.len() != n {
             return Err(format!(
@@ -143,6 +146,7 @@ impl Vm {
             ops_left: fresh.ops_left,
             regs,
             frames: fresh.frames.clone(),
+            cleanups: vec![],
             nodes: out,
             warned: snap.warned.clone(),
             // the fresh program's nodes come first in `out`, at the same indexes
@@ -314,7 +318,16 @@ impl<'a> Tx<'a> {
                     fields: vals,
                 }
             }
-            SnapNode::Closure { function, captures } => {
+            SnapNode::Closure {
+                function,
+                captures,
+                generator,
+            } => {
+                if generator.is_some() {
+                    return Err(format!(
+                        "`{path}` holds a suspended generator; replay it in the edited program"
+                    ));
+                }
                 let function = self.body(*function, path)?;
                 let mut vals = Vec::with_capacity(captures.len());
                 for (k, v) in captures.iter().enumerate() {
@@ -323,6 +336,7 @@ impl<'a> Tx<'a> {
                 SnapNode::Closure {
                     function,
                     captures: vals,
+                    generator: None,
                 }
             }
         };

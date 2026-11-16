@@ -384,6 +384,7 @@ impl TokKind<'_> {
             || matches!(
                 self,
                 TokKind::Ident(_)
+                    | TokKind::Ampersand
                     | TokKind::NotWord
                     | TokKind::Sum
                     | TokKind::Prod

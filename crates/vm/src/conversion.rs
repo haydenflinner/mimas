@@ -43,8 +43,9 @@ pub trait MimasType<'gc>: Sized {
 /// this trait so users don't need to pick a different registration path just to be able to fail.
 pub trait IntoNativeResult<'gc> {
     fn return_ty(reg: &Registry) -> Option<Ty>;
-    /// The dimension the return value carries, when it stands for a measured quantity.
-    fn return_dim(reg: &Registry) -> Option<Dim> {
+    /// The dimension claim the return value carries, when it stands for measured
+    /// quantities — a [`DimTree`] so a `(PxX, PxY)` return claims `(px↔, px↕)`.
+    fn return_dim(reg: &Registry) -> Option<DimTree> {
         let _ = reg;
         None
     }
@@ -58,8 +59,8 @@ where
     fn return_ty(reg: &Registry) -> Option<Ty> {
         <T as MimasType<'gc>>::mimas_ty(reg)
     }
-    fn return_dim(reg: &Registry) -> Option<Dim> {
-        <T as MimasType<'gc>>::mimas_dim(reg)
+    fn return_dim(reg: &Registry) -> Option<DimTree> {
+        <T as MimasType<'gc>>::mimas_dim_tree(reg)
     }
     fn into_native_result(self, ctx: Ctx<'gc>) -> RtResult<Val<'gc>> {
         Ok(self.into_value(ctx))
@@ -74,8 +75,8 @@ where
     fn return_ty(reg: &Registry) -> Option<Ty> {
         <T as MimasType<'gc>>::mimas_ty(reg)
     }
-    fn return_dim(reg: &Registry) -> Option<Dim> {
-        <T as MimasType<'gc>>::mimas_dim(reg)
+    fn return_dim(reg: &Registry) -> Option<DimTree> {
+        <T as MimasType<'gc>>::mimas_dim_tree(reg)
     }
     fn into_native_result(self, ctx: Ctx<'gc>) -> RtResult<Val<'gc>> {
         self.map(|v| v.into_value(ctx)).map_err(Into::into)
@@ -603,6 +604,14 @@ impl<'gc, const N: u32> MimasType<'gc> for crate::anon::ArrayOf<'gc, N> {
     }
 }
 
+impl<'gc, const N: u32> MimasType<'gc> for crate::anon::SeqOf<'gc, N> {
+    fn mimas_ty(_: &Registry) -> Option<Ty> { Some(Ty::array(Ty::Anon(N))) }
+    fn from_value(_ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError> {
+        if v.is_seq() { Ok(crate::anon::SeqOf(v)) } else { Err(ty_error("array", v)) }
+    }
+    fn into_value(self, _ctx: Ctx<'gc>) -> Val<'gc> { self.0 }
+}
+
 impl<'gc, const N: u32> MimasType<'gc> for crate::anon::DictOf<'gc, N> {
     fn mimas_ty(_: &Registry) -> Option<Ty> {
         Some(Ty::Dict(Box::new(Ty::Anon(N))))
@@ -819,3 +828,15 @@ impl_args!(A, B, C, D, E);
 impl_args!(A, B, C, D, E, F);
 impl_args!(A, B, C, D, E, F, G);
 impl_args!(A, B, C, D, E, F, G, H);
+
+impl<'gc, R: MimasType<'gc>> MimasType<'gc> for crate::anon::Fn0<'gc, R> {
+    fn mimas_ty(reg: &Registry) -> Option<Ty> {
+        Some(Ty::Fn(FnHeader::new(vec![], R::mimas_ty(reg)?, false)))
+    }
+    fn from_value(_ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError> {
+        Ok(crate::anon::Fn0(v, std::marker::PhantomData))
+    }
+    fn into_value(self, _ctx: Ctx<'gc>) -> Val<'gc> {
+        self.0
+    }
+}

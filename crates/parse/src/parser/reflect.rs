@@ -1,6 +1,6 @@
 //! Reflection on declarations. A program can ask what it declared.
 //!
-//! Four built-in macros answer, each in two forms. The plain form
+//! Declaration queries answer in two forms. The plain form
 //! expands to a value. The `=>` form hands the declaration to a macro
 //! of yours as tokens, so a macro can write code from it.
 //!
@@ -21,7 +21,17 @@
 //!
 //! variants!(Val)          // [EnumVariant { name = "Num", fields = [StructField { name = "0", …
 //! variants!(Val => m)     // m!(Val; Num(float), Bit(bool), Nothing)
+//!
+//! graph!(full_adder)      // FnGraph { name = "full_adder", ins = ["a", "b", "c"], … }
+//! graph!(full_adder => m) // m!(full_adder; FnGraph { … })
 //! ```
+//!
+//! `graph!` lowers a function's body to a dataflow: one `in` node per
+//! parameter, a `const` per literal, a `call` per call, a `sel` for one
+//! part of a call's result. `rets` names the nodes the result is made
+//! of. A body that is not calls, tuples, `let`, parameters and literals
+//! (a `match`, a loop, an operator) is not dataflow: the answer's
+//! `opaque` is true and `why` says what the body was instead.
 //!
 //! The answer is what the parser has read so far: a declaration is
 //! visible after it, in the same file and in every file of the program
@@ -36,6 +46,8 @@
 //! way a declared macro's template is. The struct types it names
 //! (`FnSig`, `FnParam`, `StructField`, `EnumVariant`) are declared in
 //! std (`library/src/reflect.mim`).
+
+mod mirror;
 
 use super::macros::Spot;
 use super::*;
@@ -55,6 +67,9 @@ struct FnRec {
     ret: String,
     doc: String,
     marks: Vec<String>,
+    /// The body as parsed. `graph!` lowers it to a dataflow; the other
+    /// macros never look at it.
+    body: Option<Expr>,
 }
 
 #[derive(Clone)]
@@ -72,6 +87,8 @@ struct Decls {
     fns: Vec<FnRec>,
     structs: Vec<(String, Vec<Named>)>,
     enums: Vec<(String, Vec<VariantRec>)>,
+    impls: Vec<(String, String)>,
+    pacts: Vec<(String, Vec<String>)>,
     /// Every mark some `fns!` call has asked for.
     read_marks: HashSet<String>,
 }
@@ -89,7 +106,7 @@ pub(super) fn clear() {
 
 /// Whether `name!(…)` is one of the reflection macros.
 pub(super) fn is_builtin(name: &str) -> bool {
-    matches!(name, "sig" | "fns" | "fields" | "variants")
+    matches!(name, "sig" | "fns" | "fields" | "variants" | "graph" | "mirror" | "🪞")
 }
 
 /// Whether some `fns!` call has read functions marked `#[name]`.
@@ -212,6 +229,7 @@ impl<'s> Parser<'s> {
                         .map(|a| a.name.lexeme.clone())
                         .filter(|n| n != "test")
                         .collect(),
+                    body: Some(f.body.clone()),
                 };
                 DECLS.with(|d| {
                     let fns = &mut d.borrow_mut().fns;
@@ -274,6 +292,14 @@ impl<'s> Parser<'s> {
                     enums.push((name, variants));
                 });
             }
+            ItemKind::Impl(i) => {
+                if let Some(pact) = &i.pact {
+                    DECLS.with(|d| d.borrow_mut().impls.push((i.target.lexeme.clone(), pact.lexeme.clone())));
+                }
+            }
+            ItemKind::Pact(p) => {
+                DECLS.with(|d| d.borrow_mut().pacts.push((p.name.lexeme.clone(), p.requires.iter().map(|r| r.lexeme.clone()).collect())));
+            }
             _ => {}
         }
     }
@@ -299,6 +325,7 @@ impl<'s> Parser<'s> {
         let TokKind::Ident(name) = self.tokens[at].kind else {
             unreachable!("a macro call starts with its name");
         };
+        if matches!(name, "mirror" | "🪞") { return self.expand_mirror(at, spot); }
         let open = at + 2;
         let Some(close) = self.closer_of(open) else {
             self.next = open;
@@ -510,7 +537,21 @@ impl<'s> Parser<'s> {
                         ),
                     })
                 }
-                _ => unreachable!("`is_builtin` names four macros"),
+                "graph" => {
+                    let target = need("a function")?;
+                    let f = d.fns.iter().find(|f| f.name == target).ok_or_else(|| {
+                        (
+                            format!("no function `{target}` is declared before this `graph!`"),
+                            format!("`graph!` sees the top-level functions above it; `{target}` is not one"),
+                        )
+                    })?;
+                    let text = f.graph_value();
+                    Ok(match mac {
+                        Some(m) => format!("{m}!({target}; {text})"),
+                        None => text,
+                    })
+                }
+                _ => unreachable!("`is_builtin` names five macros"),
             }
         })
     }
@@ -523,5 +564,284 @@ fn named_field(f: &StructField) -> Named {
             FieldKey::Int(i) => i.to_string(),
         },
         ty: f.annotation.to_string(),
+    }
+}
+
+// ---- `graph!`: a body as dataflow --------------------------------------
+
+/// One node of a lowered body. `op` is `in` (a parameter), `const` (a
+/// literal), `call` (a call by name) or `sel` (one part of a call's
+/// result). `args` are node indexes: the call's argument wires, or the
+/// node a `sel` picks from.
+struct GNode {
+    op: &'static str,
+    name: String,
+    args: Vec<usize>,
+}
+
+/// The dataflow a body lowers to, or the reason it is not dataflow.
+struct Lowered {
+    nodes: Vec<GNode>,
+    rets: Vec<usize>,
+    why: Option<String>,
+}
+
+/// A name and the wires it stands for. A call with several results is
+/// several wires: a `let (a, b)` or a `.0` picks one with a `sel`.
+struct Lower {
+    nodes: Vec<GNode>,
+    env: Vec<(String, Vec<usize>)>,
+}
+
+type LResult<T> = std::result::Result<T, String>;
+
+/// How many results a return type names: `()` none, `(A, B)` two, the
+/// rest one.
+fn out_names(ret: &str) -> Vec<String> {
+    let t = ret.trim();
+    if t == "()" {
+        return vec![];
+    }
+    let Some(inner) = t.strip_prefix('(').and_then(|s| s.strip_suffix(')')) else {
+        return vec!["out".to_string()];
+    };
+    let mut depth = 0i32;
+    let mut n = 1;
+    for c in inner.chars() {
+        match c {
+            '(' | '[' | '{' | '<' => depth += 1,
+            ')' | ']' | '}' | '>' => depth -= 1,
+            ',' if depth == 0 => n += 1,
+            _ => {}
+        }
+    }
+    (0..n).map(|i| i.to_string()).collect()
+}
+
+/// A word for the expression kind, for `why`.
+fn kind_word(kind: &ExprKind) -> &'static str {
+    match kind {
+        ExprKind::Absolve(_) => "absolve",
+        ExprKind::Access(_) => "access",
+        ExprKind::Block(_) => "block",
+        ExprKind::Break(_) => "break",
+        ExprKind::Call(_) => "call",
+        ExprKind::Closure(_) => "closure",
+        ExprKind::Collect(_) => "collect",
+        ExprKind::Continue(_) => "continue",
+        ExprKind::Equality(_) => "equality",
+        ExprKind::Evaluation(_) => "operator",
+        ExprKind::For(_) => "for",
+        ExprKind::FString(_) => "interpolated string",
+        ExprKind::Grouping(_) => "grouping",
+        ExprKind::Ident(_) => "name",
+        ExprKind::If(_) => "if",
+        ExprKind::In(_) => "in",
+        ExprKind::Literal(_) => "literal",
+        ExprKind::Logical(_) => "logical",
+        ExprKind::Loop(_) => "loop",
+        ExprKind::Match(_) => "match",
+        ExprKind::Coalescence(_) => "else",
+        ExprKind::Propagate(_) => "propagate",
+        ExprKind::Raise(_) => "raise",
+        ExprKind::Range(_) => "range",
+        ExprKind::Return(_) => "return",
+        ExprKind::Unary(_) => "unary",
+        ExprKind::Unwrap(_) => "unwrap",
+        ExprKind::While(_) => "while",
+        ExprKind::Poison(_) => "poison",
+    }
+}
+
+impl Lower {
+    fn node(&mut self, op: &'static str, name: String, args: Vec<usize>) -> usize {
+        self.nodes.push(GNode { op, name, args });
+        self.nodes.len() - 1
+    }
+
+    fn bind(&mut self, name: &str, wires: Vec<usize>) {
+        self.env.push((name.to_string(), wires));
+    }
+
+    fn lookup(&self, name: &str) -> Option<Vec<usize>> {
+        self.env
+            .iter()
+            .rev()
+            .find(|(n, _)| n == name)
+            .map(|(_, w)| w.clone())
+    }
+
+    /// The wires one expression is made of: one node for most, one per
+    /// part for a tuple.
+    fn wires(&mut self, e: &Expr) -> LResult<Vec<usize>> {
+        match e.kind() {
+            ExprKind::Block(b) => self.block(b),
+            ExprKind::Grouping(g) => self.wires(&g.inner),
+            ExprKind::Ident(i) => self
+                .lookup(&i.lexeme)
+                .ok_or_else(|| format!("`{}` is a name nothing is bound to", i.lexeme)),
+            ExprKind::Literal(Literal::Tuple(xs)) => {
+                let mut out = vec![];
+                for x in xs {
+                    out.extend(self.wires(x)?);
+                }
+                Ok(out)
+            }
+            ExprKind::Literal(l) => Ok(vec![self.node("const", l.to_string(), vec![])]),
+            ExprKind::Call(c) => {
+                let Some(name) = c.left.as_ident().map(|i| i.lexeme.clone()) else {
+                    return Err("a call of something that is not a name".to_string());
+                };
+                if self.lookup(&name).is_some() {
+                    return Err(format!("a call of `{name}`, which is a wire here"));
+                }
+                let mut args = vec![];
+                for a in &c.arguments {
+                    if let Some(n) = a.name.as_ref() {
+                        return Err(format!("a named argument `{}`", n.lexeme));
+                    }
+                    let w = self.wires(&a.value)?;
+                    if w.len() != 1 {
+                        return Err(format!("an argument of `{name}` that is not one wire"));
+                    }
+                    args.push(w[0]);
+                }
+                Ok(vec![self.node("call", name, args)])
+            }
+            ExprKind::Access(Access::Dot {
+                left,
+                right,
+                kind: AccessKind::Direct,
+            }) => {
+                let w = self.wires(left)?;
+                if w.len() != 1 {
+                    return Err("a `.` on more than one wire".to_string());
+                }
+                let name = match right.kind() {
+                    ExprKind::Ident(i) => i.lexeme.clone(),
+                    _ => right.to_string(),
+                };
+                Ok(vec![self.node("sel", name, vec![w[0]])])
+            }
+            ExprKind::Access(Access::DoubleColon { .. }) => {
+                Ok(vec![self.node("const", e.to_string(), vec![])])
+            }
+            kind => Err(format!("a {} expression", kind_word(kind))),
+        }
+    }
+
+    /// A `let` binds names to wires. Any other statement is not
+    /// dataflow.
+    fn stmt(&mut self, s: &Stmt) -> LResult<()> {
+        let StmtKind::Let(l) = s.kind() else {
+            return Err("a statement that is not a let".to_string());
+        };
+        if l.else_branch.is_some() {
+            return Err("a `let` with an `else`".to_string());
+        }
+        let right = self.wires(&l.right)?;
+        match l.left.kind() {
+            PatKind::Ident(i) => self.bind(&i.lexeme, right),
+            PatKind::Tuple(pats) => {
+                let mut names = vec![];
+                for p in pats {
+                    let Some(i) = p.as_ident() else {
+                        return Err("a pattern that is not names".to_string());
+                    };
+                    names.push(i.lexeme.clone());
+                }
+                if right.len() == names.len() {
+                    for (n, w) in names.into_iter().zip(right) {
+                        self.bind(&n, vec![w]);
+                    }
+                } else if right.len() == 1 {
+                    for (k, n) in names.into_iter().enumerate() {
+                        let sel = self.node("sel", k.to_string(), vec![right[0]]);
+                        self.bind(&n, vec![sel]);
+                    }
+                } else {
+                    return Err("a destructure and its value are different widths".to_string());
+                }
+            }
+            _ => return Err("a pattern that is not names".to_string()),
+        }
+        Ok(())
+    }
+
+    fn block(&mut self, b: &Block) -> LResult<Vec<usize>> {
+        let scope = self.env.len();
+        let out = (|| {
+            for s in &b.body {
+                self.stmt(s)?;
+            }
+            match b.yielded_expr.as_ref() {
+                Some(e) => self.wires(e),
+                None => Ok(vec![]),
+            }
+        })();
+        self.env.truncate(scope);
+        out
+    }
+}
+
+/// Lower the body of `f` to nodes, or the reason it is not dataflow.
+fn lower_fn(f: &FnRec) -> Lowered {
+    let mut lower = Lower {
+        nodes: vec![],
+        env: vec![],
+    };
+    for p in f.params.iter() {
+        let n = lower.node("in", p.name.clone(), vec![]);
+        lower.env.push((p.name.clone(), vec![n]));
+    }
+    let out = f.body.as_ref().map(|b| lower.wires(b)).unwrap_or(Ok(vec![]));
+    match out {
+        Ok(rets) => Lowered {
+            nodes: lower.nodes,
+            rets,
+            why: None,
+        },
+        Err(why) => Lowered {
+            nodes: vec![],
+            rets: vec![],
+            why: Some(why),
+        },
+    }
+}
+
+impl FnRec {
+    /// The `FnGraph` value `graph!(name)` expands to.
+    // r[impl mimas.reflect.graph]
+    fn graph_value(&self) -> String {
+        let lowered = lower_fn(self);
+        let nodes: Vec<String> = lowered
+            .nodes
+            .iter()
+            .map(|n| {
+                format!(
+                    "FnNode {{ op = {}, name = {}, args = {} }}",
+                    quote(n.op),
+                    quote(&n.name),
+                    list_value(
+                        "int",
+                        n.args.iter().map(|i| i.to_string()).collect()
+                    )
+                )
+            })
+            .collect();
+        let (opaque, why) = match lowered.why {
+            Some(w) => ("true", w),
+            None => ("false", String::new()),
+        };
+        format!(
+            "FnGraph {{ name = {}, ins = {}, outs = {}, nodes = {}, rets = {}, opaque = {}, why = {} }}",
+            quote(&self.name),
+            list_value("str", self.params.iter().map(|p| quote(&p.name)).collect()),
+            list_value("str", out_names(&self.ret).iter().map(|n| quote(n)).collect()),
+            list_value("FnNode", nodes),
+            list_value("int", lowered.rets.iter().map(|i| i.to_string()).collect()),
+            opaque,
+            quote(&why),
+        )
     }
 }

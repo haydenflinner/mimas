@@ -665,14 +665,14 @@ test_fail!(doubled_option_annotation, "let a: int?? = 5;");
 
 // misdirection: common habits from other languages get a teaching error
 test_fail!(misdirect_elif, "if x == 1 {} elif x == 2 {}");
-// A newline ends an expression, so a line that starts with `||` is a
-// closure with no parameters, made and dropped. It used to parse, and
-// `let both = a` kept only `a`.
+// A leading `||` continues an existing expression.
 // r[verify mimas.stmt.double-pipe]
-test_fail!(
-    line_cannot_start_with_double_pipe,
+test_ok!(
+    line_can_start_with_double_pipe,
     "fn f(a: bool, b: bool) -> bool {\n    let both = a\n        || b;\n    both\n}",
-    "let x = a\n|| b;"
+    "let x = a\n|| b;",
+    "check false\n|| true",
+    "let x = a\n// another alternative\n|| b\n|| c;"
 );
 // `||` at the end of the line continues it, and a closure with no
 // parameters is still a value.
@@ -901,4 +901,37 @@ fn page_mark_inside_island_is_island_text() {
     let (ast, errors) = parse("```\n//# page: fake\n```\nlet a = 1;");
     assert!(errors.is_empty(), "{errors:?}");
     assert_eq!(ast.page_marks(), vec![(0, "")]);
+}
+
+// r[verify mimas.stmt.double-pipe]
+#[test]
+fn leading_double_pipe_in_conditions_continues_the_expression() {
+    for source in [
+        "if a\n || b { let x = 1; }",
+        "while a\n || b { break; }",
+        "if a\n || b\n || c { let x = 1; }",
+        "if a ||\n b {}",
+        "if (a\n || b) {}",
+        "while (a\n || b) {}",
+    ] {
+        crate::tests::utils::assert_parses(source);
+    }
+}
+
+// r[verify mimas.sub.decl]
+// r[verify mimas.sub.arms]
+#[test]
+fn accessor_prefixes_recover_without_panicking() {
+    let source = "struct G { a: [int] } impl G { subscript(i: int) -> int { inout { yield self.a[i]; } remove { self.a[i] = 0; } } } let g = G { a = [1] }; let p = &g[0]; p.remove();";
+    for end in 0..=source.len() {
+        assert!(std::panic::catch_unwind(|| crate::tests::utils::parse(&source[..end])).is_ok(), "accessor prefix {end}: {:?}", &source[..end]);
+    }
+}
+
+#[test]
+fn mirror_prefixes_recover_without_panicking() {
+    let source = "struct W { a: [int] } let w = W { a = [1] }; 🪞!(W, w, [int] => |field| { let x = field.value[0]; });";
+    for end in (0..source.len()).filter(|&end| source.is_char_boundary(end)) {
+        assert!(std::panic::catch_unwind(|| crate::tests::utils::parse(&source[..end])).is_ok(), "mirror prefix {end}: {:?}", &source[..end]);
+    }
 }

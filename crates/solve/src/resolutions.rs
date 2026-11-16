@@ -38,6 +38,7 @@ pub struct Resolutions {
     /// (r[impl mimas.dec.units]).
     pub dec_scales: rustc_hash::FxHashMap<NodeId, f64>,
     pub node_decs: FxIndexMap<NodeId, DecId>,
+    pub rewrites: FxIndexMap<NodeId, parse::Expr>,
     /// Read/write site counts per declaration -- the `{0,1,ω}` usage grades the
     /// lint suite is built on (`Use::Never` is what "unused" warnings report on).
     pub dec_uses: FxIndexMap<DecId, UseInfo>,
@@ -79,6 +80,7 @@ pub struct Resolutions {
     /// statement's value to it, so a host can show the value at its line.
     /// `None` without the stdlib — then nothing is emitted.
     pub echo_native: Option<NativeId>,
+    pub cleanup_natives: Option<(NativeId, NativeId)>,
     /// `__in_unit`: a quantity in a named unit, for failing checks.
     pub in_unit_native: Option<NativeId>,
     /// `__freeze`: makes the value of a `const` read-only (`mimas.const.frozen`).
@@ -475,6 +477,16 @@ impl From<Solver> for Resolutions {
             .filter(|(id, _)| solver.dec_to_native.contains_key(id))
             .find(|(_, dec)| dec.name == "__contract_fail")
             .map(|(id, _)| solver.dec_to_native[&id].id);
+        let cleanup_natives = solver.decs.iter()
+            .find(|(id, dec)| matches!(dec.name.as_str(), "__cleanup_register" | "__cleanup_promote")
+                && solver.dec_to_native.contains_key(id)
+                && solver.node_decs.values().any(|used| used == id))
+            .and_then(|_| {
+                let native = |name: &str| solver.decs.iter()
+                    .find(|(id, dec)| dec.name == name && solver.dec_to_native.contains_key(id))
+                    .map(|(id, _)| solver.dec_to_native[&id].id);
+                Some((native("__cleanup_mark")?, native("__cleanup_take")?))
+            });
         let echo_native = solver
             .decs
             .iter()
@@ -606,6 +618,7 @@ impl From<Solver> for Resolutions {
             check_texts: solver.check_texts,
             dec_scales: solver.dec_scales,
             node_decs: solver.node_decs,
+            rewrites: solver.rewrites,
             dec_uses: solver.dec_uses,
             fn_effects,
             script_effects: solver.script_effects,
@@ -621,6 +634,7 @@ impl From<Solver> for Resolutions {
             default_ctors: solver.default_ctors,
             contract_native,
             echo_native,
+            cleanup_natives,
             in_unit_native,
             freeze_native,
             panic_native,

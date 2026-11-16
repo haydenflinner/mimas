@@ -217,6 +217,27 @@ impl<'gc> Val<'gc> {
         }
     }
 
+    /// Remove one slot without demoting primitive stores or allocating a copy.
+    // r[impl mimas.place.list-remove]
+    pub fn seq_remove(self, ctx: Ctx<'gc>, index: usize) -> RtResult<Val<'gc>> {
+        if index >= self.seq_len().ok_or(RtErr::IndexOutOfBounds)? {
+            return Err(RtErr::IndexOutOfBounds);
+        }
+        Ok(match self {
+            Val::Array(a) => a.0.try_borrow_mut(&ctx).map_err(|_| RtErr::const_write())?.remove(index),
+            Val::IntArray(a) | Val::FloatArray(a) => {
+                let mut store = a.0.try_borrow_mut(&ctx).map_err(|_| RtErr::const_write())?;
+                match &mut *store {
+                    ArrayStore::Ints(v) => Val::Int(v.remove(index)),
+                    ArrayStore::Floats(v) => Val::Float(v.remove(index)),
+                    ArrayStore::Vals(a) => a.0.try_borrow_mut(&ctx).map_err(|_| RtErr::const_write())?.remove(index),
+                    ArrayStore::Empty => return Err(RtErr::IndexOutOfBounds),
+                }
+            }
+            _ => return Err(RtErr::IndexOutOfBounds),
+        })
+    }
+
     /// An `Array` handle on this sequence's contents, whatever the backing.
     /// For a typed array this *demotes in place*: the store becomes
     /// [`ArrayStore::Vals`] wrapping a fresh `Array`, and that inner handle is
@@ -814,6 +835,7 @@ pub struct Closure<'gc>(pub Gc<'gc, ClosureData<'gc>>);
 pub struct ClosureData<'gc> {
     pub function: BodyId,
     pub captures: Vec<Val<'gc>>,
+    pub generator: Option<crate::heap::Thread<'gc>>,
 }
 
 // Manual so a full mark tallies the capture buffer for the memory budget (see `crate::mem`).
@@ -821,6 +843,7 @@ unsafe impl<'gc> Collect<'gc> for ClosureData<'gc> {
     fn trace<T: gc_arena::collect::Trace<'gc>>(&self, cc: &mut T) {
         crate::mem::note_traced(self.captures.capacity() * std::mem::size_of::<Val>());
         cc.trace(&self.captures);
+        cc.trace(&self.generator);
     }
 }
 

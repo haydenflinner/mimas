@@ -38,6 +38,10 @@ impl Ir {
     }
 
     fn stmt_at(&mut self, stmt: &Stmt) -> Option<()> {
+        if let Some(rewritten) = self.resolutions.rewrites.get(&stmt.id()).cloned() {
+            rewritten.lower(self)?;
+            return Some(());
+        }
         self.with_loc(stmt.location(), |ir| match stmt.kind() {
             StmtKind::Let(s) => {
                 let value = s.right.lower(ir)?;
@@ -57,7 +61,19 @@ impl Ir {
                             && matches!(s.left.kind(), PatKind::Ident(_))
                             && let Some(nid) = ir.resolutions.echo_native
                         {
-                            ir.current().call_native(nid, vec![value]);
+                            let display = match ir.resolutions.node_tys
+                                .get(&s.right.id()).and_then(|ty| ty.applied())
+                            {
+                                Some((aid, _)) if matches!(
+                                    ir.resolutions.adts[aid].name.as_str(),
+                                    "__Place" | "__RemovablePlace"
+                                ) => {
+                                    let read = ir.current().get_field(value, 0, AccessKind::Direct);
+                                    ir.current().call(read, vec![])
+                                }
+                                _ => value,
+                            };
+                            ir.current().call_native(nid, vec![display]);
                         }
                     }
                     Some(else_expr) => {
@@ -71,6 +87,7 @@ impl Ir {
                         // `panic` call emits no terminator of its own).
                         if !ir.is_terminated() {
                             let null = ir.current().constant(Constant::Null);
+                            ir.finish_cleanup_scopes(0);
                             ir.current().ret(null);
                         }
                         ir.target(cont);
@@ -422,7 +439,9 @@ impl Emit for Access {
                     ResolvedDeclKind::Local | ResolvedDeclKind::Global => {
                         unreachable!("`::` never resolves to a local")
                     }
-                    ResolvedDeclKind::Pact(_) => todo!(),
+                    ResolvedDeclKind::Pact(_) => {
+                        unreachable!("solver rejects a pact name in value position")
+                    }
                 }
             }
             Access::Square { left, key, kind } => {
@@ -452,14 +471,31 @@ impl Emit for Block {
         ir.current().jump(block_id);
         ir.target(block_id);
 
-        for stmt in &self.body {
-            ir.stmt(stmt)?;
+        struct CleanupUse(bool);
+        impl parse::Visitor for CleanupUse {
+            fn expr(&mut self, e: &Expr) {
+                if let ExprKind::Call(c) = e.kind()
+                    && c.left.as_ident().is_some_and(|i| matches!(i.lexeme.as_str(), "__borrow_place" | "__cleanup_register" | "__cleanup_promote"))
+                { self.0 = true; }
+            }
         }
-
-        let value = match &self.yielded_expr {
-            Some(expr) => expr.lower(ir)?,
-            None => ir.current().constant(Constant::Null),
-        };
+        let mut needs = CleanupUse(false);
+        parse::walk_stmts(&self.body, &mut needs);
+        if let Some(value) = &self.yielded_expr { parse::walk_expr(value, &mut needs); }
+        let scoped = needs.0 && ir.begin_cleanup_scope();
+        let result = (|| {
+            for stmt in &self.body { ir.stmt(stmt)?; }
+            match &self.yielded_expr {
+                Some(expr) => expr.lower(ir),
+                None => Some(ir.current().constant(Constant::Null)),
+            }
+        })();
+        if scoped {
+            let floor = ir.current_body().cleanup_scopes.len() - 1;
+            if result.is_some() { ir.finish_cleanup_scopes(floor); }
+            ir.current_body_mut().cleanup_scopes.pop();
+        }
+        let value = result?;
 
         let continuation = ir.push_block("continuation");
         ir.current().jump(continuation);
@@ -476,6 +512,8 @@ impl Emit for Break {
             None => ir.current().constant(Constant::Null),
         };
 
+        let floor = ir.current_body().loop_stack.last().unwrap().cleanup_depth;
+        ir.finish_cleanup_scopes(floor);
         let block = ir.current_block_id();
         let this_loop = ir
             .loop_stack_mut()
@@ -1120,6 +1158,8 @@ impl Emit for Coalescence {
 impl Emit for Collect {
     fn emit(&self, _id: NodeId, ir: &mut Ir) -> Option<InstId> {
         let value = self.value.lower(ir)?;
+        let floor = ir.current_body().loop_stack.last().unwrap().cleanup_depth;
+        ir.finish_cleanup_scopes(floor);
         let block = ir.current_block_id();
         let this_loop = ir
             .loop_stack_mut()
@@ -1142,6 +1182,8 @@ impl Emit for Collect {
 
 impl Emit for Continue {
     fn emit(&self, _id: NodeId, ir: &mut Ir) -> Option<InstId> {
+        let floor = ir.current_body().loop_stack.last().unwrap().cleanup_depth;
+        ir.finish_cleanup_scopes(floor);
         let block = ir.current_block_id();
         let this_loop = ir
             .loop_stack_mut()
@@ -1185,6 +1227,9 @@ impl Emit for Evaluation {
 impl Lower for Expr {
     fn lower(&self, ir: &mut Ir) -> Option<InstId> {
         let id = self.id();
+        if let Some(rewritten) = ir.resolutions.rewrites.get(&id).cloned() {
+            return rewritten.lower(ir);
+        }
         let out = ir.with_loc(self.location(), |ir| match self.kind() {
             ExprKind::Poison(poison) => poison.escaped(),
             ExprKind::Absolve(absolve) => absolve.emit(id, ir),
@@ -1241,6 +1286,46 @@ impl Lower for Expr {
 impl Emit for For {
     fn emit(&self, _id: NodeId, ir: &mut Ir) -> Option<InstId> {
         let collection = loop_collects(&self.body).then(|| ir.current().new_array());
+        // r[impl mimas.generator.for]
+        if matches!(
+            ir.resolutions.node_tys.get(&self.iterator.id()),
+            Some(Ty::Fn(_))
+        ) {
+            let generator = self.iterator.lower(ir)?;
+            let header = ir.push_block("generator_next");
+            let body = ir.push_block("generator_body");
+            let empty = ir.push_block("generator_done");
+            let exit = ir.push_block("generator_exit");
+            let null = ir.current().constant(Constant::Null);
+            ir.current().jump(header);
+            ir.target(header);
+            let value = ir.current().call(generator, vec![]);
+            let done = ir
+                .current()
+                .bin(BinOp::Identity, value, null, OperandKind::Generic);
+            ir.current().jump_if_false(done, body);
+            ir.current().jump(empty);
+            ir.target(empty);
+            ir.current().jump(exit);
+            ir.target(body);
+            ir.pattern(&self.binding, Some(value))?;
+            let cleanup_depth = ir.current_body().cleanup_scopes.len();
+            ir.loop_stack_mut()
+                .push(LoopCtx::new(header, exit, collection, cleanup_depth));
+            self.body.lower(ir).map(|_| ir.current().jump(header));
+            let LoopCtx {
+                mut breaks,
+                collection,
+                ..
+            } = ir.loop_stack_mut().pop().unwrap();
+            breaks.push((empty, null));
+            ir.target(exit);
+            return if let Some(collection) = collection {
+                Some(collection)
+            } else {
+                loop_result(ir, exit, breaks)
+            };
+        }
 
         let (idx_local, start, frozen_bound, seq) = match self.iterator.kind() {
             ExprKind::Range(Range {
@@ -1312,8 +1397,9 @@ impl Emit for For {
             ir.pattern(&self.binding, Some(elem))?;
         }
 
+        let cleanup_depth = ir.current_body().cleanup_scopes.len();
         ir.loop_stack_mut()
-            .push(LoopCtx::new(latch, exit, collection));
+            .push(LoopCtx::new(latch, exit, collection, cleanup_depth));
         self.body.lower(ir).map(|_| ir.current().jump(latch));
         let LoopCtx {
             mut breaks,
@@ -1434,7 +1520,9 @@ impl Emit for Ident {
                 let body = ir.item_body_for(dec);
                 Some(ir.current().ref_body(body))
             }
-            ResolvedDeclKind::Pact(_) => todo!(),
+            ResolvedDeclKind::Pact(_) => {
+                unreachable!("solver rejects a pact name in value position")
+            }
             ResolvedDeclKind::Constant(_) => Constant::emit_const_dec(ir, dec, id),
             ResolvedDeclKind::Variant { .. } => unreachable!(
                 "bare-ident reference to a variant -- variants are reached via `Foo::Bar`, not bare names"
@@ -1719,8 +1807,9 @@ impl Emit for Loop {
         let collection = loop_collects(&self.body).then(|| ir.current().new_array());
         ir.current().jump(body_block);
 
+        let cleanup_depth = ir.current_body().cleanup_scopes.len();
         ir.loop_stack_mut()
-            .push(LoopCtx::new(body_block, exit_block, collection));
+            .push(LoopCtx::new(body_block, exit_block, collection, cleanup_depth));
 
         ir.in_block(body_block, |block| {
             if block.emit_expr(&self.body).is_some() {
@@ -1952,6 +2041,7 @@ impl Emit for Return {
             Some(expr) => expr.lower(ir)?,
             None => ir.current().constant(Constant::Null),
         };
+        ir.finish_cleanup_scopes(0);
         ir.current().ret(value);
         None
     }
@@ -2028,20 +2118,22 @@ impl Emit for Propagate {
             Propagation::RaiseNull(m) => Some(ir.intern_str(m)),
             _ => None,
         };
-        ir.in_block(fail_block, |b| match how {
+        ir.target(fail_block);
+        ir.finish_cleanup_scopes(0);
+        match how {
             Propagation::ReturnNull => {
-                let null = b.constant(Constant::Null);
-                b.ret(null);
+                let null = ir.current().constant(Constant::Null);
+                ir.current().ret(null);
             }
             Propagation::Reraise => {
-                let payload = b.unwrap_raised(value);
-                b.raise(payload);
+                let payload = ir.current().unwrap_raised(value);
+                ir.current().raise(payload);
             }
             Propagation::RaiseNull(_) => {
-                let m = b.constant(Constant::Str(msg.unwrap()));
-                b.raise(m);
+                let m = ir.current().constant(Constant::Str(msg.unwrap()));
+                ir.current().raise(m);
             }
-        });
+        }
 
         // a non-null option's runtime value is its inner value, and so is an
         // unraised result's
@@ -2096,8 +2188,9 @@ impl Emit for While {
         let collection = loop_collects(&self.body).then(|| ir.current().new_array());
         ir.current().jump(condition_block);
 
+        let cleanup_depth = ir.current_body().cleanup_scopes.len();
         ir.loop_stack_mut()
-            .push(LoopCtx::new(condition_block, exit, collection));
+            .push(LoopCtx::new(condition_block, exit, collection, cleanup_depth));
 
         let needs_null_test = self
             .binding

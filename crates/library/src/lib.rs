@@ -8,11 +8,13 @@
 //! sweep stay available for a *host's own* natives, which are reliably linked when defined in their
 //! binary.)
 mod methods {
+    pub(crate) mod accessor_cleanup;
     pub(crate) mod array;
     pub(crate) mod bool;
     pub(crate) mod dec;
     pub(crate) mod dict;
     pub(crate) mod float;
+    pub(crate) mod generator;
     pub(crate) mod int;
     pub(crate) mod rng;
     pub(crate) mod str;
@@ -61,11 +63,11 @@ pub fn fsum(xs: impl IntoIterator<Item = f64>) -> f64 {
     s + c
 }
 
-pub use std_lib::sys::ScriptArgs;
 /// `std::parse`'s `Value` adt, re-exported so host natives (e.g. `use
 /// cad`'s mesh/STEP emitters) can hand a `model-gen` card the same
 /// `Object`/`String` shapes a page builds in source.
 pub use std_lib::parse::Value as JsonValue;
+pub use std_lib::sys::ScriptArgs;
 
 use vm::api::Api;
 
@@ -95,6 +97,8 @@ pub fn std<'gc>(api: &mut Api<'_, 'gc>) {
     methods::str::install(api);
     methods::bool::install(api);
     methods::rng::install(api);
+    methods::generator::install(api);
+    methods::accessor_cleanup::install(api);
     #[cfg(feature = "dataframe")]
     std_lib::dataframe::install(api);
     #[cfg(feature = "tensor")]

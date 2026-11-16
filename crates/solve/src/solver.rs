@@ -59,6 +59,13 @@ pub struct Solver {
     pub(crate) pact_self: Option<PactId>,
     pub(crate) node_to_vid: FxIndexMap<NodeId, Vid>,
     pub(crate) node_decs: FxIndexMap<NodeId, DecId>,
+    pub(crate) rewrites: FxIndexMap<NodeId, Expr>,
+    pub(crate) raw_places: FxHashSet<NodeId>,
+    /// `list.remove(key)` calls lowered from `list[key].remove()`. Without
+    /// the mark the synthesized call re-enters `subscript_removal`, and a
+    /// `list` that is itself `a[i]` trips the zero-argument guard.
+    pub(crate) synth_removal: FxHashSet<NodeId>,
+    pub(crate) place_sources: FxIndexMap<NodeId, Expr>,
     pub(crate) op_decs: FxIndexMap<NodeId, crate::OpDispatch>,
     pub(crate) propagates: FxIndexMap<NodeId, crate::Propagation>,
     pub(crate) pact_ops: FxIndexMap<NodeId, crate::PactOp>,
@@ -323,6 +330,10 @@ impl Solver {
             pact_self: None,
             node_to_vid: FxIndexMap::default(),
             node_decs: FxIndexMap::default(),
+            rewrites: FxIndexMap::default(),
+            raw_places: FxHashSet::default(),
+            synth_removal: FxHashSet::default(),
+            place_sources: FxIndexMap::default(),
             op_decs: FxIndexMap::default(),
             propagates: FxIndexMap::default(),
             pact_ops: FxIndexMap::default(),
@@ -640,6 +651,7 @@ impl Solver {
         // declared, every impl registered
         run_phase(self, Self::resolve_pending_impls, &mut saved_ribs)?;
         lap("resolve_pending_impls");
+        self.check_subscript_names()?;
 
         // fixpoint: hoist_uses + solve_consts. each round may resolve more consts (e.g. a const
         // that references another module's const reduces only once that other const is bound).
@@ -1345,7 +1357,7 @@ impl Solver {
         params: Vec<Option<Ty>>,
         param_dims: Vec<Option<shared::units::DimTree>>,
         return_ty: Option<Ty>,
-        return_dim: Option<shared::units::Dim>,
+        return_dim: Option<shared::units::DimTree>,
         native_id: NativeId,
         validate: Option<api::LitValidator>,
         src: Option<api::NativeSrc>,
@@ -1739,7 +1751,7 @@ impl Solver {
                         f.parameters.clone(),
                         f.param_dims.clone(),
                         f.return_ty.clone(),
-                        f.return_dim,
+                        f.return_dim.clone(),
                         id,
                         f.validate,
                         f.src,
@@ -1756,7 +1768,7 @@ impl Solver {
                         params: f.parameters.clone(),
                         param_dims: f.param_dims.clone(),
                         return_ty: f.return_ty.clone(),
-                        return_dim: f.return_dim,
+                        return_dim: f.return_dim.clone(),
                         recv: None,
                         effects: f.effects,
                         consumes: f.consumes.clone(),
@@ -1812,7 +1824,7 @@ impl Solver {
                         params: m.parameters.clone(),
                         param_dims: m.param_dims.clone(),
                         return_ty: m.return_ty.clone(),
-                        return_dim: m.return_dim,
+                        return_dim: m.return_dim.clone(),
                         recv: Some(m.recv_ty.clone()),
                         effects: m.effects,
                         consumes: m.consumes.clone(),
@@ -3224,6 +3236,7 @@ impl Solver {
         println!("{}", crate::utils::Printer::stmt(stmt));
         match stmt.kind() {
             StmtKind::Assignment(Assignment { left, right, op }) => {
+                if self.subscript_assignment(stmt.id(), &Assignment { left: left.clone(), right: right.clone(), op: *op })? { return Ok(()); }
                 fn find_root(left: &Expr) -> std::result::Result<&Ident, Location> {
                     match left.kind() {
                         ExprKind::Ident(ident) => Ok(ident),
@@ -4977,8 +4990,9 @@ pub(crate) struct NativeFnSig {
     /// pass checks call args against it; `None` leaves the slot unchecked.
     pub param_dims: Vec<Option<shared::units::DimTree>>,
     pub return_ty: Option<Ty>,
-    /// Dimension of the return value, when it measures something.
-    pub return_dim: Option<shared::units::Dim>,
+    /// Dimension claim of the return value, when it measures something — a
+    /// `DimTree` so a `(PxX, PxY)`-typed native can promise `(px↔, px↕)`.
+    pub return_dim: Option<shared::units::DimTree>,
     pub recv: Option<Ty>,
     /// The native's declared effect footprint (`#[effects(...)]`), read by the grades
     /// pass. `None` = unannotated: inference treats the call as `Fx::unknown()`.

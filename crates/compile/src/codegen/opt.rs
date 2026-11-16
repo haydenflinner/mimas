@@ -147,7 +147,8 @@ fn inlinable(
         for &iid in &block.stream {
             match &body.instructions[iid] {
                 Inst::Raise(_) => return false,
-                Inst::CallNative { id, .. } if frame_natives.contains(id) => return false,
+                Inst::CallNative { id, .. } if frame_natives.contains(id)
+                    || ir.resolutions.cleanup_natives.is_some_and(|(mark, take)| *id == mark || *id == take) => return false,
                 _ => {}
             }
         }

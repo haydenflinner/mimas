@@ -312,7 +312,17 @@ impl Vm {
     /// generated code still produces the same `Flow`s, so calls, returns, fuel,
     /// pauses and snapshots ride the usual machinery.
     pub fn install_bc(&mut self, bodies: Vec<Option<crate::bc::BodyFn>>) {
-        self.bc = Some(bodies);
+        // A suspended generator owns a separate register stack. Compiled dynamic-call
+        // caches do not yet distinguish it from an ordinary closure.
+        self.bc = if self
+            .chunks
+            .iter()
+            .any(|(_, c)| c.locals.contains_key("__generator_type"))
+        {
+            None
+        } else {
+            Some(bodies)
+        };
     }
 
     /// Load `program`, replacing whatever this Vm was running.
@@ -423,6 +433,8 @@ impl Vm {
             let ctx = state.ctx(mc);
             ctx.reset_roots();
             let mut t = state.thread.borrow_mut(mc);
+            t.cleanups.borrow_mut(mc).clear();
+            state.active_cleanups.set(mc, t.cleanups);
             t.regs.clear();
             t.regs.resize(regs_count, Val::Null);
             t.frames.clear();
@@ -1042,6 +1054,134 @@ fn run_dispatch<'gc>(
     sources: &Sources,
     thread: &mut ThreadState<'gc>,
     bc: Option<&[Option<crate::bc::BodyFn>]>,
+    fuel: usize,
+    stop_depth: usize,
+) -> Result<bool, Error> {
+    let result = run_dispatch_inner(
+        ctx, code, chunks, signatures, strs, sources, thread, bc, fuel, stop_depth,
+    );
+    if result.is_err() {
+        unwind_cleanups(
+            ctx, code, chunks, signatures, strs, sources, thread, bc, stop_depth,
+        );
+    }
+    result
+}
+
+// r[impl mimas.sub.end]
+// r[impl mimas.sub.cleanup-fault]
+// r[impl mimas.sub.cleanup-budget]
+#[allow(clippy::too_many_arguments)]
+fn unwind_cleanups<'gc>(
+    ctx: Ctx<'gc>,
+    code: &mut Decoder,
+    chunks: &IdVec<BodyId, Chunk>,
+    signatures: &IdVec<BodyId, Option<Function>>,
+    strs: &StrInterner,
+    sources: &Sources,
+    thread: &mut ThreadState<'gc>,
+    bc: Option<&[Option<crate::bc::BodyFn>]>,
+    floor: usize,
+) {
+    // One reserve covers the whole unwind, including nested cleanup faults.
+    // A looping finalizer cannot prevent the host from regaining control.
+    let nested = ctx.state().unwinding_cleanup.replace(true);
+    let old_ops = thread.ops_left;
+    let old_max = thread.max_frames;
+    let old_ip = code.ip;
+    let old_pause = ctx.state().paused.replace(false);
+    let old_signal = ctx.state().mem.signal.replace(0);
+    if !nested {
+        thread.ops_left = 4096;
+    }
+    if !nested {
+        thread.max_frames = old_max.saturating_add(32);
+    }
+    loop {
+        let next = {
+            let mut stack = thread.cleanups.borrow_mut(&ctx);
+            if stack.last().is_some_and(|c| c.depth >= floor) {
+                stack.pop()
+            } else {
+                None
+            }
+        };
+        let Some(cleanup) = next else {
+            break;
+        };
+        if thread.ops_left == 0 {
+            continue;
+        }
+        thread.frames.truncate(cleanup.depth);
+        let Some(owner) = thread.frames.last() else {
+            continue;
+        };
+        let base = owner.base;
+        thread
+            .regs
+            .truncate(base + chunks[owner.chunk].regs as usize);
+        let r0 = thread.regs[base];
+        let (body, captures) = match cleanup.action {
+            Val::Closure(c) => (c.0.function, Gc::as_ref(c.0).captures.as_slice()),
+            Val::Fn(body) => (body, &[][..]),
+            _ => continue,
+        };
+        let depth = thread.frames.len();
+        let regs = thread.regs.len();
+        let calls = &ctx.state().mem.nested;
+        if calls.get() >= crate::mem::MAX_NESTED_CALLS {
+            continue;
+        }
+        calls.set(calls.get() + 1);
+        if enter_call(thread, code, chunks, body, Reg::ZERO, &[], captures).is_ok() {
+            loop {
+                let ran = run_dispatch(
+                    ctx,
+                    code,
+                    chunks,
+                    signatures,
+                    strs,
+                    sources,
+                    thread,
+                    bc,
+                    usize::MAX,
+                    depth + 1,
+                );
+                if matches!(ran, Ok(false)) {
+                    ctx.state().paused.set(false);
+                } else {
+                    break;
+                }
+            }
+        }
+        calls.set(calls.get() - 1);
+        thread.frames.truncate(depth);
+        thread.regs.truncate(regs);
+        thread.regs[base] = r0;
+    }
+    if !nested {
+        thread.ops_left = old_ops;
+    }
+    thread.max_frames = old_max;
+    code.ip = old_ip;
+    ctx.state().paused.set(old_pause);
+    ctx.state()
+        .mem
+        .signal
+        .set(ctx.state().mem.signal.get() | old_signal);
+    ctx.state().unwinding_cleanup.set(nested);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_dispatch_inner<'gc>(
+    ctx: Ctx<'gc>,
+    code: &mut Decoder,
+    chunks: &IdVec<BodyId, Chunk>,
+    signatures: &IdVec<BodyId, Option<Function>>,
+    strs: &StrInterner,
+    sources: &Sources,
+    thread: &mut ThreadState<'gc>,
+    bc: Option<&[Option<crate::bc::BodyFn>]>,
     mut fuel: usize,
     stop_depth: usize,
 ) -> Result<bool, Error> {
@@ -1159,6 +1299,115 @@ fn run_dispatch<'gc>(
                 (regs_ptr, regs_len) = window(thread, chunks);
             }
             Ok(Flow::Call { target, dst, args }) => {
+                // r[impl mimas.generator.pull]
+                // r[impl mimas.generator.end]
+                // r[impl mimas.generator.budget]
+                if let CallTarget::Closure(c) = &target {
+                    if let Some(saved) = c.0.generator {
+                        if Gc::ptr_eq(ctx.thread(), ctx.state().thread) {
+                            // The root stack stays fixed while the child dispatch runs.
+                            ctx.state().entry_regs.set(thread.regs.as_mut_ptr().cast());
+                        }
+                        if !args.is_empty() {
+                            return Err(Error::msg(RtErr::WrongArity {
+                                wanted: 0,
+                                got: args.len(),
+                            }));
+                        }
+                        let caller_ip = code.ip;
+                        let mut child = saved.try_borrow_mut(&ctx).map_err(|_| {
+                            Error::msg(RtErr::Custom("a generator cannot resume itself".into()))
+                        })?;
+                        let mut value = Val::Null;
+                        if !child.frames.is_empty() || child.regs.is_empty() {
+                            child.ops_left = thread.ops_left;
+                            child.max_frames =
+                                thread.max_frames.saturating_sub(thread.frames.len());
+                            if child.max_frames == 0 {
+                                return Err(Error::msg(RtErr::RecursionTooDeep {
+                                    depth: thread.max_frames,
+                                }));
+                            }
+                            if child.frames.is_empty() {
+                                let chunk = &chunks[c.0.function];
+                                child.regs.resize(chunk.regs as usize, Val::Null);
+                                for (reg, cap) in chunk.captures.iter().zip(&c.0.captures) {
+                                    child.regs[reg.index()] = *cap;
+                                }
+                                child.frames.push(Frame {
+                                    chunk: c.0.function,
+                                    ip: chunk.offset,
+                                    return_reg: 0,
+                                    base: 0,
+                                });
+                            }
+                            code.ip = child.frames.last().unwrap().ip;
+                            let previous = ctx.state().active_thread.get();
+                            ctx.state().active_thread.set(&ctx, saved);
+                            let previous_cleanups = ctx.state().active_cleanups.get();
+                            ctx.state().active_cleanups.set(&ctx, child.cleanups);
+                            let nested = &ctx.state().mem.nested;
+                            if nested.get() >= crate::mem::MAX_NESTED_CALLS {
+                                ctx.state().active_thread.set(&ctx, previous);
+                                ctx.state().active_cleanups.set(&ctx, previous_cleanups);
+                                code.ip = caller_ip;
+                                return Err(Error::msg(RtErr::RecursionTooDeep {
+                                    depth: thread.frames.len(),
+                                }));
+                            }
+                            nested.set(nested.get() + 1);
+                            let parents = ctx.state().generator_parents.borrow().len();
+                            ctx.state().generator_parents.borrow_mut().extend(thread.frames.iter().cloned());
+                            let ran = run_dispatch(
+                                ctx,
+                                code,
+                                chunks,
+                                signatures,
+                                strs,
+                                sources,
+                                &mut child,
+                                None,
+                                usize::MAX,
+                                1,
+                            );
+                            nested.set(nested.get() - 1);
+                            ctx.state().generator_parents.borrow_mut().truncate(parents);
+                            ctx.state().active_thread.set(&ctx, previous);
+                            ctx.state().active_cleanups.set(&ctx, previous_cleanups);
+                            thread.ops_left = child.ops_left;
+                            if let Some(top) = child.frames.last_mut() {
+                                top.ip = code.ip;
+                            }
+                            code.ip = caller_ip;
+                            let emitted = ctx.state().generator_value.get();
+                            ctx.state().generator_value.set(&ctx, None);
+                            let frame_pause = ctx.state().paused.get() && emitted.is_none();
+                            ctx.state().paused.set(false);
+                            if matches!(ran, Ok(false)) && frame_pause {
+                                // Retry only this call op next frame. Its arguments are already
+                                // in registers, and the child's own ip is saved above.
+                                code.ip = op_ip;
+                                thread.frames.last_mut().unwrap().ip = op_ip;
+                                ctx.state().paused.set(true);
+                                return Ok(false);
+                            }
+                            match ran {
+                                Ok(true) | Err(_) => {
+                                    child.frames.clear();
+                                    child.regs.clear();
+                                    child.regs.push(Val::Null);
+                                }
+                                Ok(false) => {}
+                            }
+                            ran?;
+                            value = emitted.unwrap_or(Val::Null);
+                        }
+                        let base = thread.frames.last().unwrap().base;
+                        thread.regs[base + dst.index()] = value;
+                        (regs_ptr, regs_len) = window(thread, chunks);
+                        continue;
+                    }
+                }
                 let (body, captures): (BodyId, &[Val<'gc>]) = match &target {
                     CallTarget::Fn(b) => (*b, &[]),
                     CallTarget::Value(b) => {
@@ -1269,18 +1518,29 @@ pub(crate) fn step_one<'gc>(
             // lies strictly above the slots they touch: `regs.as_ptr() - base` is
             // `thread.regs[0]`, disjoint from the live `&mut [Val]` window.
             let base = frames.last().map(|f| f.base).unwrap_or(0);
-            debug_assert!(base > 0, "entry-frame op ran in the entry frame");
-            let v = unsafe { *regs.as_ptr().sub(base).add(slot.index()) };
+            let entry = if Gc::ptr_eq(ctx.thread(), ctx.state().thread) {
+                debug_assert!(base > 0, "entry-frame op ran in the entry frame");
+                unsafe { regs.as_ptr().sub(base) }
+            } else {
+                ctx.state().entry_regs.get().cast::<Val<'_>>() as *const Val<'_>
+            };
+            // SAFETY: a generator runs only while its root dispatch is suspended.
+            let v = unsafe { *entry.add(slot.index()) };
             wr!(regs, dst, v);
         }
         OpCode::StoreEntry => {
             let slot = Reg::decode(code);
             let src = Reg::decode(code);
             let base = frames.last().map(|f| f.base).unwrap_or(0);
-            debug_assert!(base > 0, "entry-frame op ran in the entry frame");
+            let entry = if Gc::ptr_eq(ctx.thread(), ctx.state().thread) {
+                debug_assert!(base > 0, "entry-frame op ran in the entry frame");
+                unsafe { regs.as_mut_ptr().sub(base) }
+            } else {
+                ctx.state().entry_regs.get().cast::<Val<'_>>()
+            };
             let v = rd!(regs, src);
-            // SAFETY: same disjointness argument as LoadEntry -- the slot is below the window.
-            unsafe { *regs.as_mut_ptr().sub(base).add(slot.index()) = v };
+            // SAFETY: the root slots are disjoint from this live frame's window.
+            unsafe { *entry.add(slot.index()) = v };
         }
         OpCode::Jump => {
             code.ip = code.u32() as usize;
@@ -1514,6 +1774,7 @@ pub(crate) fn step_one<'gc>(
             {
                 let mut stack = ctx.fixture::<DebugInfo>().stack.borrow_mut();
                 stack.clear();
+                stack.extend(ctx.state().generator_parents.borrow().iter().map(|f| (f.chunk, f.ip as u32)));
                 stack.extend(frames.iter().map(|f| (f.chunk, f.ip as u32)));
                 if let Some(top) = stack.last_mut() {
                     top.1 = code.ip as u32;

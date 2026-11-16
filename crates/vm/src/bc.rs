@@ -1114,6 +1114,7 @@ pub mod jit {
                 ClosureData {
                     function: BodyId::ZERO,
                     captures: vec![Val::Int(9)],
+                    generator: None,
                 },
             ));
             let t_closure = tagv(&bytes(&Val::Closure(cv)));

@@ -42,9 +42,20 @@ pub struct Frame {
     pub base: usize,
 }
 
+#[derive(Collect, Clone, Debug)]
+#[collect(no_drop)]
+pub struct Cleanup<'gc> {
+    pub depth: usize,
+    pub action: Val<'gc>,
+}
+
+pub type Cleanups<'gc> = Gc<'gc, RefLock<Vec<Cleanup<'gc>>>>;
+
+#[derive(Debug)]
 pub struct ThreadState<'gc> {
     pub regs: Vec<Val<'gc>>,
     pub frames: Vec<Frame>,
+    pub cleanups: Cleanups<'gc>,
     /// Ops this thread may still run before `RtErr::OutOfFuel`; the host re-arms it per entry
     /// (`Vm::set_op_budget`). `u64::MAX` (the default) is effectively unlimited.
     pub ops_left: u64,
@@ -58,10 +69,12 @@ pub struct ThreadState<'gc> {
 unsafe impl<'gc> Collect<'gc> for ThreadState<'gc> {
     fn trace<T: gc_arena::collect::Trace<'gc>>(&self, cc: &mut T) {
         crate::mem::note_traced(
-            self.regs.capacity() * std::mem::size_of::<Val>()
+            self.cleanups.borrow().capacity() * std::mem::size_of::<Cleanup>()
+                + self.regs.capacity() * std::mem::size_of::<Val>()
                 + self.frames.capacity() * std::mem::size_of::<Frame>(),
         );
         cc.trace(&self.regs);
+        cc.trace(&self.cleanups);
     }
 }
 
@@ -111,6 +124,14 @@ impl<'gc> InternedStrings<'gc> {
 pub struct State<'gc> {
     pub strings: InternedStrings<'gc>,
     pub thread: Thread<'gc>,
+    pub active_thread: Gc<'gc, Lock<Thread<'gc>>>,
+    pub active_cleanups: Gc<'gc, Lock<Cleanups<'gc>>>,
+    // Transient dispatch pointer. The root thread traces these values.
+    #[collect(require_static)]
+    pub entry_regs: Cell<*mut ()>,
+    #[collect(require_static)]
+    pub generator_parents: RefCell<Vec<Frame>>,
+    pub generator_value: Gc<'gc, Lock<Option<Val<'gc>>>>,
     pub natives: Gc<'gc, RefLock<Vec<Option<crate::native::NativeRef<'gc>>>>>,
     pub mimas_bindings: Gc<'gc, RefLock<MimasBindings>>,
     pub fixtures: Gc<'gc, crate::fixtures::Fixtures>,
@@ -138,6 +159,8 @@ pub struct State<'gc> {
     /// run -- a native writing thread state mid-op would double-borrow and panic. The
     /// dispatch loop reads it per op like a second fuel line.
     pub paused: Cell<bool>,
+    #[collect(require_static)]
+    pub unwinding_cleanup: Cell<bool>,
     /// The memory budget and the nested-call count — see [`crate::mem`].
     #[collect(require_static)]
     pub mem: crate::mem::MemBudget,
@@ -150,6 +173,7 @@ impl<'gc> State<'gc> {
             RefLock::new(ThreadState {
                 regs: Vec::new(),
                 frames: Vec::new(),
+                cleanups: Gc::new(mc, RefLock::new(vec![])),
                 ops_left: u64::MAX,
                 max_frames: crate::mem::DEFAULT_MAX_FRAMES,
             }),
@@ -163,6 +187,11 @@ impl<'gc> State<'gc> {
         State {
             strings: InternedStrings::new(mc),
             thread,
+            active_thread: Gc::new(mc, Lock::new(thread)),
+            active_cleanups: Gc::new(mc, Lock::new(thread.borrow().cleanups)),
+            entry_regs: Cell::new(std::ptr::null_mut()),
+            generator_parents: RefCell::new(vec![]),
+            generator_value: Gc::new(mc, Lock::new(None)),
             natives,
             mimas_bindings,
             fixtures,
@@ -171,6 +200,7 @@ impl<'gc> State<'gc> {
             variant_ordinals,
             roots: Gc::new(mc, Lock::new(DynamicRootSet::new(mc))),
             paused: Cell::new(false),
+            unwinding_cleanup: Cell::new(false),
             mem: crate::mem::MemBudget::default(),
         }
     }
@@ -298,8 +328,66 @@ impl<'gc> Ctx<'gc> {
         }
     }
 
+    /// Register cleanup without borrowing the thread held by dispatch.
+    pub fn defer(self, action: Val<'gc>) {
+        let depth = self
+            .fixture::<crate::fixtures::DebugInfo>()
+            .stack
+            .borrow()
+            .len()
+            .saturating_sub(self.state.generator_parents.borrow().len())
+            .max(1);
+        self.charge(std::mem::size_of::<Cleanup>());
+        self.state
+            .active_cleanups
+            .get()
+            .borrow_mut(&self)
+            .push(Cleanup { depth, action });
+    }
+
+    pub fn promote_cleanups(self) {
+        let depth = self
+            .fixture::<crate::fixtures::DebugInfo>()
+            .stack
+            .borrow()
+            .len()
+            .saturating_sub(self.state.generator_parents.borrow().len());
+        for cleanup in self
+            .state
+            .active_cleanups
+            .get()
+            .borrow_mut(&self)
+            .iter_mut()
+        {
+            if cleanup.depth == depth {
+                cleanup.depth = depth.saturating_sub(1).max(1);
+            }
+        }
+    }
+
+    pub fn cleanup_mark(self) -> usize {
+        self.state.active_cleanups.get().borrow().len()
+    }
+
+    // r[impl mimas.sub.cleanup-order]
+    pub fn take_cleanup(self, mark: usize) -> Option<Val<'gc>> {
+        let depth = self
+            .fixture::<crate::fixtures::DebugInfo>()
+            .stack
+            .borrow()
+            .len()
+            .saturating_sub(self.state.generator_parents.borrow().len());
+        let stack = self.state.active_cleanups.get();
+        let mut stack = stack.borrow_mut(&self);
+        if stack.len() > mark && stack.last().is_some_and(|c| c.depth >= depth) {
+            stack.pop().map(|c| c.action)
+        } else {
+            None
+        }
+    }
+
     pub fn thread(self) -> Thread<'gc> {
-        self.state.thread
+        self.state.active_thread.get()
     }
 
     /// Hand a value to the host. The returned handle has no `'gc` of its own, so it can be held
@@ -435,9 +523,39 @@ impl<'gc> Ctx<'gc> {
         ))
     }
 
+    pub fn new_generator(self, closure: Closure<'gc>) -> Closure<'gc> {
+        let data = Gc::as_ref(closure.0);
+        self.charge(2 * crate::mem::BOX_BYTES + data.captures.len() * std::mem::size_of::<Val>());
+        let thread = Gc::new(
+            self.mutation,
+            RefLock::new(ThreadState {
+                regs: vec![],
+                frames: vec![],
+                cleanups: Gc::new(self.mutation, RefLock::new(vec![])),
+                ops_left: 0,
+                max_frames: 0,
+            }),
+        );
+        Closure(Gc::new(
+            self.mutation,
+            ClosureData {
+                function: data.function,
+                captures: data.captures.clone(),
+                generator: Some(thread),
+            },
+        ))
+    }
+
     pub fn new_closure(self, function: BodyId, captures: Vec<Val<'gc>>) -> Closure<'gc> {
         self.charge(crate::mem::BOX_BYTES + captures.capacity() * std::mem::size_of::<Val>());
-        Closure(Gc::new(self.mutation, ClosureData { function, captures }))
+        Closure(Gc::new(
+            self.mutation,
+            ClosureData {
+                function,
+                captures,
+                generator: None,
+            },
+        ))
     }
 
     #[cfg(feature = "dataframe")]

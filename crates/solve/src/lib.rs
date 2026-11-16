@@ -83,3 +83,5 @@ mod tests {
     mod solve_structs;
     mod solve_variables;
 }
+
+mod subscripts;

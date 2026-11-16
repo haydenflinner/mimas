@@ -79,6 +79,7 @@ pub enum SnapNode {
     Closure {
         function: u32,
         captures: Vec<SnapVal>,
+        generator: Option<(Vec<Frame>, Vec<SnapVal>, Vec<(usize, SnapVal)>)>,
     },
     /// A data frame — polars columns are `Arc`-shared, so the clone is a
     /// handle copy, and a write after restore copies on write like any
@@ -109,6 +110,7 @@ pub struct Snapshot {
     /// The flat register file — every live frame's window sits inside it.
     pub regs: Vec<SnapVal>,
     pub frames: Vec<SnapFrame>,
+    pub cleanups: Vec<(usize, SnapVal)>,
     /// Heap objects in discovery order — `SnapVal::Node` indexes here.
     pub nodes: Vec<SnapNode>,
     /// `Prints`' warn-dedupe set — carries across a restore so a warn that already fired
@@ -262,7 +264,26 @@ impl<'gc> Snapper<'gc> {
                     .iter()
                     .map(|&v| self.val(v))
                     .collect::<Result<_, _>>()?;
-                SnapNode::Closure { function, captures }
+                // r[impl mimas.generator.snapshot]
+                let generator = if let Some(thread) = c.0.generator {
+                    let thread = thread.borrow();
+                    let regs = thread
+                        .regs
+                        .iter()
+                        .map(|&v| self.val(v))
+                        .collect::<Result<_, _>>()?;
+                    let cleanups = thread.cleanups.borrow().iter()
+                        .map(|c| Ok((c.depth, self.val(c.action)?)))
+                        .collect::<Result<Vec<_>, SnapError>>()?;
+                    Some((thread.frames.clone(), regs, cleanups))
+                } else {
+                    None
+                };
+                SnapNode::Closure {
+                    function,
+                    captures,
+                    generator,
+                }
             }
             #[cfg(feature = "dataframe")]
             Val::DataFrame(d) => SnapNode::DataFrame(d.0.borrow().0.clone()),
@@ -305,7 +326,12 @@ impl<'gc> Thaw<'gc, '_> {
     }
 
     fn thaw_closure(&mut self, i: u32) -> Result<Val<'gc>, SnapError> {
-        let SnapNode::Closure { function, captures } = &self.nodes[i as usize] else {
+        let SnapNode::Closure {
+            function,
+            captures,
+            generator,
+        } = &self.nodes[i as usize]
+        else {
             unreachable!("pre-allocated nodes are never thawed");
         };
         if !self.visiting.insert(i) {
@@ -315,8 +341,21 @@ impl<'gc> Thaw<'gc, '_> {
             .iter()
             .map(|sv| self.thaw(sv))
             .collect::<Result<Vec<_>, _>>()?;
+        let mut c = self.ctx.new_closure(BodyId::from(*function), captures);
+        if let Some((frames, regs, cleanups)) = generator {
+            c = self.ctx.new_generator(c);
+            let regs = regs
+                .iter()
+                .map(|v| self.thaw(v))
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut thread = c.0.generator.unwrap().borrow_mut(&self.ctx);
+            thread.frames = frames.clone();
+            thread.regs = regs;
+            *thread.cleanups.borrow_mut(&self.ctx) = cleanups.iter()
+                .map(|(depth, action)| Ok(crate::heap::Cleanup { depth: *depth, action: self.thaw(action)? }))
+                .collect::<Result<Vec<_>, SnapError>>()?;
+        }
         self.visiting.remove(&i);
-        let c = self.ctx.new_closure(BodyId::from(*function), captures);
         let v = Val::Closure(c);
         self.resolved[i as usize] = Some(v);
         Ok(v)
@@ -333,7 +372,7 @@ impl Vm {
             let ctx = state.ctx(mc);
             let mut frozen = Vec::new();
             let mut snapper = Snapper::default();
-            let (regs, frames, ops_left) = {
+            let (regs, frames, ops_left, cleanups) = {
                 let t = state.thread.borrow();
                 let regs = t
                     .regs
@@ -350,7 +389,10 @@ impl Vm {
                         base: f.base,
                     })
                     .collect();
-                (regs, frames, t.ops_left)
+                let cleanups = t.cleanups.borrow().iter()
+                    .map(|c| Ok((c.depth, snapper.val(c.action)?)))
+                    .collect::<Result<Vec<_>, SnapError>>()?;
+                (regs, frames, t.ops_left, cleanups)
             };
             while let Some((i, v)) = snapper.pending.pop_front() {
                 // between dispatch runs nothing else holds a borrow, so a value
@@ -366,6 +408,7 @@ impl Vm {
                 ops_left,
                 regs,
                 frames,
+                cleanups,
                 nodes: snapper.nodes,
                 warned,
                 frozen,
@@ -467,6 +510,10 @@ impl Vm {
                     })
                     .collect();
                 t.ops_left = snap.ops_left;
+                *t.cleanups.borrow_mut(mc) = snap.cleanups.iter()
+                    .map(|(depth, action)| Ok(crate::heap::Cleanup { depth: *depth, action: thaw.thaw(action)? }))
+                    .collect::<Result<Vec<_>, SnapError>>()?;
+                state.active_cleanups.set(mc, t.cleanups);
             }
             code.ip = snap.ip;
             // Stashed host handles name the heap the snapshot replaced — invalidate them

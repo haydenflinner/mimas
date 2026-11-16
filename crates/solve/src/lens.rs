@@ -247,4 +247,4 @@ fn render_have(dims: &[Option<usize>]) -> String {
 /// Array methods that change a collection's length -- rejected on `[T; n]`
 /// receivers. In-place permutations (`sort`, `reverse`, `shuffle`) aren't listed:
 /// they keep the pinned length intact.
-pub(crate) const LEN_MUTATING: &[&str] = &["push", "pop", "extend"];
+pub(crate) const LEN_MUTATING: &[&str] = &["push", "pop", "extend", "remove"];

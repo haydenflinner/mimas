@@ -17,6 +17,11 @@ pub struct Anon<'gc, const N: u32>(pub Val<'gc>);
 /// registered type is `Array(Anon(N))` -- the bare `Array<'gc>` handle would erase `N` to 0.
 pub struct ArrayOf<'gc, const N: u32>(pub Array<'gc>);
 
+/// A generic list handle that keeps primitive sequence storage intact.
+/// Unlike `ArrayOf`, converting this view does not demote numeric arrays.
+#[derive(Clone, Copy)]
+pub struct SeqOf<'gc, const N: u32>(pub Val<'gc>);
+
 /// Registration view of a gc dict whose values are placeholder slot `N` -- the dict analogue of
 /// [`ArrayOf`].
 pub struct DictOf<'gc, const N: u32>(pub Dict<'gc>);
@@ -89,3 +94,5 @@ pub type V<'gc> = Anon<'gc, 2>;
 /// Placeholder parameter type for native signatures. Can represent any type but must be the same as
 /// every other `W` within the context of this specific signature.
 pub type W<'gc> = Anon<'gc, 3>;
+
+pub struct Fn0<'gc, R>(pub Val<'gc>, pub PhantomData<fn() -> R>);

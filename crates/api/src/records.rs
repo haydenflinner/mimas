@@ -94,8 +94,9 @@ pub struct ApiFunction<C> {
     /// (`add_described`, or a pruned `NativeMeta` submission -- see `vm::api::NativeMeta`).
     pub param_names: Vec<String>,
     pub return_ty: Option<Ty>,
-    /// Dimension of the return value, when it measures something.
-    pub return_dim: Option<Dim>,
+    /// Dimension of the return value, when it measures something — a
+    /// `DimTree` so a `(PxX, PxY)` return can claim `(px↔, px↕)`.
+    pub return_dim: Option<DimTree>,
     /// The native's declared side-effect footprint, from a `#[effects(...)]` submission
     /// joined like `doc`. `None` = nobody said — effect inference treats the call as
     /// `Fx::unknown()` so gating peer code fails closed.
@@ -124,7 +125,8 @@ pub struct ApiMethod<C> {
     pub param_names: Vec<String>,
     pub return_ty: Option<Ty>,
     /// Dimension of the return value, when it measures something.
-    pub return_dim: Option<Dim>,
+    /// Same deal as [`ApiFunction::return_dim`].
+    pub return_dim: Option<DimTree>,
     pub takes_self: bool,
     /// The receiver is mutated by the call -- a `&mut` first param on the Rust side. Set by
     /// matching the registered fn's path against `vm::api::NativeMutates` submissions, the

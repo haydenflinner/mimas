@@ -101,6 +101,21 @@ unit_ty!(
     /// like the axis it rides.
     PxY, "px↕", units::PIXELS.mul(Dim::axis(1))
 );
+unit_ty!(
+    /// Screen pixels -- coordinates in a space the host owns (browser
+    /// points, viewport extents, sheet-plane positions), as delivered on
+    /// input fixtures. `Spx` values can't meet `Px` ones in arithmetic or
+    /// typed slots: the page crosses with `game::to_world`/`to_screen`.
+    Spx, "spx", units::SCREEN_PX
+);
+unit_ty!(
+    /// Screen pixels along x (`spx↔`).
+    SpxX, "spx↔", units::SCREEN_PX.mul(Dim::axis(0))
+);
+unit_ty!(
+    /// Screen pixels along y (`spx↕`).
+    SpxY, "spx↕", units::SCREEN_PX.mul(Dim::axis(1))
+);
 // r[impl mimas.unit.angle]
 unit_ty!(
     /// Radians -- `deg`/`turn`/`grad`/`arcmin`/`arcsec`/`mrad` are the same

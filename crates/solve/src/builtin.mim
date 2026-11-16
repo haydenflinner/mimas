@@ -54,3 +54,18 @@ struct StructField { name: str, ty: str }
 
 /// One variant of an enum.
 struct EnumVariant { name: str, fields: [StructField] }
+
+/// One node of a function's dataflow (`graph!`): `in` is a parameter,
+/// `const` a literal, `call` a call by name, `sel` one part of a call's
+/// result. `args` are node indexes.
+struct FnNode { op: str, name: str, args: [int] }
+
+/// A function's body as data (`graph!`): its parameter names, the name
+/// of each result part, the nodes in the order they bind, and which
+/// nodes make the result. `opaque` says the body was not dataflow;
+/// `why` says what it was instead.
+struct FnGraph { name: str, ins: [str], outs: [str], nodes: [FnNode], rets: [int], opaque: bool, why: str }
+
+// Internal place descriptors. The solver reads and writes through these bindings.
+struct __Place<T> { read: () -> T, write: (T) -> () }
+struct __RemovablePlace<T> { read: () -> T, write: (T) -> (), remove: () -> () }

@@ -166,3 +166,192 @@ test_run!(
     "sig!(after).doc" => "\"Still here.\"",
     "sig!(wrap).params[0].ty" => "\"Pair<int, Pair<int, int>>\"",
 );
+
+const GRAPH: &str = r#"
+fn half_adder(a: int, b: int) -> (int, int) { (a, b) }
+
+fn full_adder(a: int, b: int, c: int) -> (int, int) {
+    let (s1, c1) = half_adder(a, b);
+    let (s2, c2) = half_adder(s1, c);
+    (s2, c1)
+}
+
+fn opaque(a: int, b: int) -> int {
+    match (a, b) {
+        (1, 1) => 0,
+        _ => 1,
+    }
+}
+"#;
+
+test_run!(
+    // r[verify mimas.reflect.graph]
+    graph_is_a_functions_body_as_data,
+    GRAPH,
+    "graph!(full_adder).name" => "\"full_adder\"",
+    "graph!(full_adder).ins" => "[\"a\", \"b\", \"c\"]",
+    "graph!(full_adder).outs" => "[\"0\", \"1\"]",
+    "graph!(full_adder).opaque" => "false",
+    // in-nodes, then the two calls, then the sels the destructures made
+    "graph!(full_adder).nodes.map(|n| n.op).join(\",\")" => "\"in,in,in,call,sel,sel,call,sel,sel\"",
+    "graph!(full_adder).nodes[3].name" => "\"half_adder\"",
+    "graph!(full_adder).nodes[3].args" => "[0, 1]",
+    "graph!(full_adder).nodes[4].name" => "\"0\"",
+    "graph!(full_adder).nodes[6].args" => "[4, 2]",
+    "graph!(full_adder).rets" => "[7, 5]",
+    // a tuple result of single out-parts is its own wires
+    "graph!(half_adder).rets" => "[0, 1]",
+    // what is not dataflow is opaque, and says why
+    "graph!(opaque).opaque" => "true",
+    "graph!(opaque).why" => "\"a match expression\"",
+    "graph!(opaque).ins" => "[\"a\", \"b\"]",
+);
+
+test_run!(
+    // r[verify mimas.reflect.hand]
+    // r[verify mimas.reflect.graph]
+    graph_hands_the_graph_to_a_macro,
+    "macro pick($f:ident; $g:expr) { $g.name + \"!\" }\nfn half(a: int) -> int { a }",
+    "graph!(half => pick)" => "\"half!\"",
+);
+
+test_fail!(
+    // r[verify mimas.reflect.visible]
+    graph_errors,
+    "let TEST_VALUE = graph!(later).name;\nfn later() -> int { 1 }",
+    "let TEST_VALUE = graph!(nothing).name;",
+);
+
+// r[verify mimas.reflect.mirror]
+// r[verify mimas.reflect.mirror-filter]
+test_run!(
+    mirrors_typed_fields_without_runtime_metadata,
+    "pact Entity { fn value(self) -> int; }
+     struct A { n: int } struct B { n: int }
+     impl Entity for A { fn value(self) -> int { self.n } }
+     impl Entity for B { fn value(self) -> int { self.n * 2 } }
+     struct World { aa: [A], count: int, bb: [B] }
+     let w = World { aa = [A { n = 3 }], count = 99, bb = [B { n = 4 }] };
+     let out: [int] = []; let names: [str] = [];
+     mirror!(World, w, [Entity] => |field| {
+        names.push(field.key);
+        for item in field.value { out.push(item.value()); }
+     });",
+    "out" => "[3, 8]",
+    "names" => "[\"a\", \"b\"]",
+);
+
+test_run!(
+    mirrors_generate_mutable_accessors,
+    "pact Entity { fn erase(self); }
+     struct A { gone: bool } struct B { gone: bool }
+     impl Entity for A { fn erase(self) { self.gone = true; } }
+     impl Entity for B { fn erase(self) { self.gone = true; } }
+     struct World { aa: [A], bb: [B] }
+     mirror!(World, [Entity] => |field| {
+        impl World { subscript field.key_ident(i: int) -> field.item_type {
+            inout { yield self.field.ident[i]; }
+            remove { self.field.ident[i].erase(); }
+        } }
+     });
+     let w = World { aa = [A { gone = false }], bb = [B { gone = false }] };
+     w.a[0].remove(); w.b[0].gone = true;",
+    "w.aa[0].gone" => "true",
+    "w.bb[0].gone" => "true",
+);
+
+test_run!(
+    mirror_generated_accessors_keep_each_dimension,
+    "struct W { lengths: [px], times: [s] }
+     mirror!(W, [_] => |field| { impl W {
+        subscript field.key_ident(i: int) -> field.item_type { inout { yield self.field.ident[i]; } }
+     } });
+     let w = W { lengths = [1px], times = [1s] }; w.px[0] = 3px; w.s[0] = 2s;",
+    "w.px[0].to(1px)" => "3.0",
+    "w.s[0].to(1s)" => "2.0",
+);
+
+// r[verify mimas.reflect.mirror-cost]
+#[test]
+fn mirrors_cost_the_same_as_typed_loops() {
+    let mut vm = vm::Vm::execute(
+        "struct W { a: [int], b: [int], ignore: str }
+         let xs: [int] = []; for i in 1000 { xs.push(i); }
+         let w = W { a = xs, b = xs, ignore = \"skip\" };
+         fn direct() -> int { let sum = 0; for n in w.a { sum += n; } for n in w.b { sum += n; } sum }
+         fn mirrored() -> int { let sum = 0; mirror!(W, w, [int] => |field| { for n in field.value { sum += n; } }); sum }",
+        library::std,
+    ).unwrap();
+    vm.set_op_budget(100_000);
+    let direct = vm.call_fn_result("direct").unwrap().to_string();
+    let direct_ops = 100_000 - vm.ops_left();
+    vm.set_op_budget(100_000);
+    assert_eq!(vm.call_fn_result("mirrored").unwrap().to_string(), direct);
+    let mirror_ops = 100_000 - vm.ops_left();
+    assert!(mirror_ops <= direct_ops + 8, "mirror {mirror_ops}, direct {direct_ops}");
+}
+
+// r[verify mimas.reflect.mirror-symbol]
+test_run!(
+    mirror_interpolation_preserves_literal_text_and_captured_locals,
+    "struct W { a: [int] } let w = W { a = [7] }; let n = 2; let out: [str] = [];
+     🪞!(W, w, [int] => |field| { out.push(f\"field.name {{literal}} {field.name}:{n}:{field.value[0]}\"); });",
+    "out" => "[\"field.name {literal} a:2:7\"]",
+);
+
+test_fail!(
+    mirrors_report_bad_filters_and_properties,
+    "struct W { a: int } let w = W { a = 3 }; mirror!(W, w, NotAType => |f| { f.value; });",
+    "struct W { a: int } let w = W { a = 3 }; mirror!(W, w, _ => |f| { f.missing; });",
+    "struct W { a: int } mirror!(W, _ => |f| { let x = f.value; });",
+    "struct W { a: [px], b: [s] } mirror!(W, [_] => |f| { impl W { subscript f.key_ident(i: int) -> f.item_type { inout { yield self.f.ident[i]; } } } }); let w = W { a = [1px], b = [1s] }; w.px[0] = 2s;",
+);
+
+test_run!(
+    nested_mirrors_can_shadow_the_field_parameter,
+    "struct W { a: [int], b: [int] } let w = W { a = [1], b = [2] }; let out: [str] = [];
+     mirror!(W, w, [int] => |field| {
+        let outer = field.name;
+        mirror!(W, w, [int] => |field| { out.push(outer + field.name); });
+     });",
+    "out" => "[\"aa\", \"ab\", \"ba\", \"bb\"]",
+);
+
+// r[verify mimas.reflect.mirror-once]
+test_run!(
+    mirrors_evaluate_receiver_once_even_without_matching_fields,
+    "struct W { a: [int] } fn owner(log: [int]) -> W { log.push(1); W { a = [3] } }
+     let log: [int] = [];
+     mirror!(W, owner(log), [int] => |f| { let _x = f.value[0]; });
+     mirror!(W, owner(log), [str] => |f| { let _x = f.value[0]; });",
+    "log" => "[1, 1]",
+);
+
+// r[verify mimas.reflect.mirror-order]
+test_run!(
+    mirror_priorities_preserve_unlisted_fields,
+    "struct W { a: int, b: int, c: int } let w = W { a = 1, b = 2, c = 3 }; let out: [int] = [];
+     mirror!(W, w, int, [\"b\"] => |f| { out.push(f.value); });",
+    "out" => "[2, 1, 3]",
+);
+
+test_run!(
+    mirrors_expand_inside_accessor_arms_and_keep_later_arms,
+    "struct W { a: [int], b: [int] }
+     impl W {
+        subscript total() -> int {
+            get { let n = 0; mirror!(W, self, [int] => |f| { for x in f.value { n += x; } }); n }
+            set { self.a[0] = new_value; }
+        }
+     }
+     let w = W { a = [1], b = [2] }; let before = w.total; w.total = 7;",
+    "before" => "3",
+    "w.total" => "9",
+);
+
+test_run!(
+    mirrors_keep_nested_fixed_list_element_types,
+    "struct W { rows: [[int; 2]] } let w = W { rows = [[1, 2]] }; let names: [str] = [];
+     mirror!(W, w, [_] => |f| { names.push(f.item_name); let row: f.item_type = f.value[0]; names.push(f\"{row[1]}\"); });",
+    "names" => "[\"[int;2]\", \"2\"]",
+);

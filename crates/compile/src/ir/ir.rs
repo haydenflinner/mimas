@@ -69,6 +69,36 @@ impl Ir {
         }
     }
 
+    pub(crate) fn begin_cleanup_scope(&mut self) -> bool {
+        let Some((mark, _)) = self.resolutions.cleanup_natives else {
+            return false;
+        };
+        let value = self.current().call_native(mark, vec![]);
+        self.current_body_mut().cleanup_scopes.push(value);
+        true
+    }
+
+    pub(crate) fn finish_cleanup_scopes(&mut self, floor: usize) {
+        let Some((_, take)) = self.resolutions.cleanup_natives else {
+            return;
+        };
+        let Some(&mark) = self.current_body().cleanup_scopes.get(floor) else {
+            return;
+        };
+        let next = self.push_block("cleanup_next");
+        let invoke = self.push_block("cleanup_invoke");
+        let done = self.push_block("cleanup_done");
+        self.current().jump(next);
+        self.target(next);
+        let action = self.current().call_native(take, vec![mark]);
+        self.current().jump_if_null(action, done);
+        self.current().jump(invoke);
+        self.target(invoke);
+        self.current().call(action, vec![]);
+        self.current().jump(next);
+        self.target(done);
+    }
+
     pub(crate) fn with_loc<R>(&mut self, loc: Location, f: impl FnOnce(&mut Self) -> R) -> R {
         let prev = std::mem::replace(&mut self.current_loc, loc);
         let r = f(self);
@@ -407,17 +437,19 @@ pub struct LoopCtx {
     pub(crate) breaks: Vec<(BlockId, InstId)>,
     pub(crate) continues: Vec<BlockId>,
     pub(crate) collection: Option<InstId>,
+    pub(crate) cleanup_depth: usize,
     pub(crate) collects: Vec<BlockId>,
 }
 
 impl LoopCtx {
-    pub(super) fn new(continuation: BlockId, exit: BlockId, collection: Option<InstId>) -> Self {
+    pub(super) fn new(continuation: BlockId, exit: BlockId, collection: Option<InstId>, cleanup_depth: usize) -> Self {
         Self {
             continuation,
             exit,
             breaks: Vec::new(),
             continues: Vec::new(),
             collection,
+            cleanup_depth,
             collects: Vec::new(),
         }
     }

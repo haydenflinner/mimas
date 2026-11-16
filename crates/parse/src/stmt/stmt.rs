@@ -48,7 +48,7 @@ pub struct Stmt {
 }
 impl Stmt {
     /// Creates a new stmt.
-    pub(crate) fn new(kind: StmtKind, id: NodeId, location: Location) -> Self {
+    pub fn new(kind: StmtKind, id: NodeId, location: Location) -> Self {
         Self {
             kind: Box::new(kind),
             id,

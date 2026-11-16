@@ -403,6 +403,8 @@ fn pact_unary_dispatch(
 
 impl Solve for Access {
     fn solve(&self, id: NodeId, location: Location, solver: &mut Solver) -> Result<Ty> {
+        if let Some(ty) = solver.subscript_read(id, self, location)? { return Ok(ty); }
+
         fn handle_adt_access(
             id: NodeId,
             solver: &mut Solver,
@@ -478,6 +480,16 @@ impl Solve for Access {
             }
 
             let dec = field.dec;
+            // `mod::Pact` names a pact, not a value -- the same hole a bare
+            // `P` hits through `Ident::solve`, one path further along.
+            if solver.non_value != Some(id)
+                && matches!(solver.decs[dec].kind, DecKind::Pact(_))
+            {
+                Err(crate::errors::PactIsNotAValue {
+                    src: solver.src(right.location()),
+                    at: right.location().into(),
+                })?;
+            }
             solver.check_vis(dec, right.location())?;
             solver.node_decs.insert(id, dec);
             // module-nested natives need fresh type vars per call site, same as free natives.
@@ -967,6 +979,10 @@ impl Solve for Break {
 
 impl Solve for Call {
     fn solve(&self, id: NodeId, location: Location, solver: &mut Solver) -> Result<Ty> {
+        if let Some(ty) = solver.validate_place_target(id, self, location)? { return Ok(ty); }
+        if let Some(ty) = solver.borrow_place(id, self, location)? { return Ok(ty); }
+        if let Some(ty) = solver.subscript_removal(id, self, location)? { return Ok(ty); }
+
         let adt = match self.left.kind() {
             ExprKind::Access(Access::DoubleColon { left, right }) => {
                 let adt = match adt_from_type_path(left, solver) {
@@ -2066,6 +2082,18 @@ impl Solve for For {
 
         let iter_ty = self.iterator.query(solver)?.normalized(solver);
         match &iter_ty {
+            Ty::Fn(header) if header.parameters.is_empty() => {
+                if let Ty::Option(element) = header.return_ty.as_ref() {
+                    solver.solve_pat(&self.binding, element.as_ref().clone())?;
+                } else {
+                    return Err(InvalidIterTarget {
+                        src: solver.src(self.iterator.location()),
+                        at: self.iterator.location().into(),
+                        ty: iter_ty.to_string(),
+                    }
+                    .into());
+                }
+            }
             Ty::Str => {
                 solver.solve_pat(&self.binding, Ty::Str)?;
             }
@@ -2282,6 +2310,8 @@ impl Solve for Ident {
         });
         let bound = resolved.is_some();
 
+        if let Some(value) = solver.place_read(id, self, &ty)? { return Ok(value); }
+
         // mark this usage; every closure boundary crossed on the way to the binding captures it
         if let Some((dec_id, crossed)) = resolved {
             solver.node_decs.insert(id, dec_id);
@@ -2293,6 +2323,16 @@ impl Solve for Ident {
                         .or_default()
                         .insert(dec_id);
                 }
+            }
+            // a pact name resolves so `P::CONST` paths have a head type, but
+            // it has no value form -- a bare use ICEs at codegen. The `let`
+            // check covers only ident RHSes; expression statements like the
+            // stray second name of `impl P for S via Q Q` land here.
+            if matches!(solver.decs[dec_id].kind, DecKind::Pact(_)) {
+                Err(crate::errors::PactIsNotAValue {
+                    src: solver.src(self.location()),
+                    at: self.location().into(),
+                })?;
             }
         }
 
