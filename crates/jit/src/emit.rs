@@ -1456,9 +1456,13 @@ impl Em<'_> {
                 self.fb.ins().jump(self.ex.eerr, &[]);
             }
             // JIT bodies bypass call tracing like bcgen ones; nothing to emit
-            Op::TraceEdge { .. } => {}
-            // no debugger reads a JIT frame: the shadow copy is dropped
-            Op::Shadow { .. } => {}
+            Op::TraceEdge { .. } | Op::Shadow { .. } => {
+                // no debugger reads a JIT frame: the shadow copy is dropped.
+                // Still a semantic no-op, but every arm must terminate its
+                // block before `fill_gate_tramp` runs.
+                let nb = self.next_blk(i);
+                self.fb.ins().jump(nb, &[]);
+            }
             Op::Raise { val } => {
                 self.flush_seq();
                 self.mark_op(off, next);

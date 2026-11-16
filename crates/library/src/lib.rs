@@ -84,6 +84,21 @@ pub const APPROX_SRC: &str = include_str!("approx.mim");
 /// values (`arb.mim`), shipped with std.
 pub const ARB_SRC: &str = include_str!("arb.mim");
 
+/// The natives generated code can call into: `inout` arms defer
+/// cleanup through `__cleanup_*` and guard borrows with
+/// `__place_live`; value generators are `__generator` closures fed by
+/// `__generator_yield`; and `&list[i]`/`&dict[k]` places synthesize
+/// `read`/`write`/`remove` closures over the collection methods. An
+/// embedder that compiles source needs these even when it installs no
+/// other part of std — this is the subset [`std`] installs for the
+/// language's own lowering.
+pub fn codegen<'gc>(api: &mut Api<'_, 'gc>) {
+    methods::accessor_cleanup::install(api);
+    methods::array::install(api);
+    methods::dict::install(api);
+    methods::generator::install(api);
+}
+
 pub fn std<'gc>(api: &mut Api<'_, 'gc>) {
     api.library.add_source("<std::opp>", OPP_SRC);
     api.library.add_source("<std::approx>", APPROX_SRC);

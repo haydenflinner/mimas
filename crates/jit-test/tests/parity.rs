@@ -67,6 +67,20 @@ fn mixed_parity() {
     assert_eq!(run(source, None), run(source, Some(j.bodies())));
 }
 
+/// Accessor arms, borrowed places, place removal and a generator that
+/// suspends while a borrow is live — the op families this cycle added.
+/// `step_at` should make parity total, and this fixture proves it for
+/// the new lowering paths rather than assuming it.
+#[test]
+fn subscripts_parity() {
+    let source = include_str!("../fixtures/subscripts.mimas");
+    let j = jit_bodies(source);
+    assert!(j.bodies().iter().all(|b| b.is_some()));
+    let (v, k, e) = run(source, Some(j.bodies()));
+    assert!(e.is_none(), "jit subscripts run errored: {e:?}");
+    assert_eq!(run(source, None), (v, k, e));
+}
+
 /// Sanity that the JIT path is actually being exercised, not silently skipped
 /// — a jit-run fixture must produce the right answer, not just *an* answer
 /// matching the interpreter's (which would also pass if `install_bc` were a

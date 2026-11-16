@@ -5,6 +5,11 @@
 // definitions in one `include!`d file is what guarantees that.
 
 pub fn install(api: &mut vm::api::Api<'_, '_>) {
+    // Some lowering paths emit calls into std natives (e.g. inout
+    // arms call `__cleanup_register`), so fixtures get the
+    // codegen-required subset — not full std, whose own mimas sources
+    // would add chunks the JIT must also cover.
+    library::codegen(api);
     api.add_named("host_add", host_add);
     api.add_named("keep", keep);
     api.add_named("pause", pause);

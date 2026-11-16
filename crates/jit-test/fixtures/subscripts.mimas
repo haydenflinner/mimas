@@ -1,0 +1,32 @@
+// jit-test runs a bare Vm (no library::std), so the arms accumulate
+// `log` as digits instead of list pushes and builtin list removal is
+// left to the library tests — accessor places, borrows and generators
+// are all core language.
+struct C { data: [int], gone: [int], log: int }
+impl C {
+    subscript(i: int, j: int) -> int {
+        get { self.log = self.log * 10 + 1; self.data[i * 3 + j] }
+        set { self.log = self.log * 10 + 2; self.data[i * 3 + j] = new_value; }
+        inout { self.log = self.log * 10 + 6; yield self.data[i * 3 + j]; self.log = self.log * 10 + 7; }
+        remove { self.log = self.log * 10 + 4; self.gone[i * 3 + j] = 1; }
+    }
+}
+let c = C { data = [0, 1, 2, 3, 4, 5], gone = [0, 0, 0, 0, 0, 0], log = 0 };
+let v1 = c[1, 2];
+c[0, 1] = 40;
+c[1, 0] += 100;
+{ let p = &c[0, 0]; p = 9; };
+{ let p = &c[1, 1]; p.remove(); };
+c[0, 1].remove();
+let xs = [1, 2, 3];
+xs[1] += 30;
+let m = [[1, 2], [3]];
+m[1][0] += 10;
+subscript work() -> int {
+    { let p = &c[0, 2]; yield 500; p += 1; }
+    yield 600;
+}
+let it = work();
+let a = it();
+let b = it();
+let TEST_VALUE = f"{v1}|{a}|{b}|{c.data}|{c.gone}|{c.log}|{xs}|{m}";

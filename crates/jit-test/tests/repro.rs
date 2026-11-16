@@ -86,3 +86,72 @@ fn repro_in() {
         assert_eq!(run(src, None), run(src, Some(j.bodies())), "src: {src}");
     }
 }
+
+#[test]
+
+#[test]
+fn repro_subscripts() {
+    let decl = "struct C { data: [int], gone: [int], log: int }";
+    for src in [
+        // get/set arms + reads, writes, compounds (get+set path)
+        &format!("{decl}
+            impl C {{ subscript(i: int) -> int {{ get {{ self.data[i] }} set {{ self.data[i] = new_value; }} }} }}
+            let c = C {{ data = [1, 2], gone = [0, 0], log = 0 }};
+            let v = c[0]; c[1] = 9; c[0] += 4;
+            let TEST_VALUE = f\"{{v}}|{{c.data}}\";"),
+        // multi-index accessor
+        &format!("{decl}
+            impl C {{ subscript(i: int, j: int) -> int {{ get {{ self.data[i * 2 + j] }} set {{ self.data[i * 2 + j] = new_value; }} }} }}
+            let c = C {{ data = [1, 2, 3, 4], gone = [0, 0, 0, 0], log = 0 }};
+            c[1, 0] = 9;
+            let TEST_VALUE = f\"{{c.data}}\";"),
+        // remove arm dispatch
+        &format!("{decl}
+            impl C {{ subscript(i: int) -> int {{ get {{ self.data[i] }} set {{ self.data[i] = new_value; }} remove {{ self.gone[i] = 1; }} }} }}
+            let c = C {{ data = [1, 2], gone = [0, 0], log = 0 }};
+            c[0].remove();
+            let TEST_VALUE = f\"{{c.gone}}\";"),
+        // inout-only accessor: read/write through the synthesized ops
+        &format!("{decl}
+            impl C {{ subscript(i: int) -> int {{ inout {{ yield self.data[i]; }} }} }}
+            let c = C {{ data = [1, 2], gone = [0, 0], log = 0 }};
+            let v = c[0]; c[1] = 9;
+            let TEST_VALUE = f\"{{v}}|{{c.data}}\";"),
+        // scoped borrow + write-through
+        &format!("{decl}
+            impl C {{ subscript(i: int) -> int {{ inout {{ yield self.data[i]; }} }} }}
+            let c = C {{ data = [1, 2], gone = [0, 0], log = 0 }};
+            {{ let p = &c[1]; p = 9; }};
+            let TEST_VALUE = f\"{{c.data}}\";"),
+        // borrow + place removal (the __RemovablePlace path -- emits
+        // trace_edge ops that used to crash the JIT emitter)
+        &format!("{decl}
+            impl C {{ subscript(i: int) -> int {{ inout {{ yield self.data[i]; }} remove {{ self.gone[i] = 1; }} }} }}
+            let c = C {{ data = [1, 2], gone = [0, 0], log = 0 }};
+            {{ let p = &c[1]; p.remove(); }};
+            let TEST_VALUE = f\"{{c.gone}}\";"),
+        // all four arms: compound dispatch prefers inout's modify
+        &format!("{decl}
+            impl C {{ subscript(i: int) -> int {{ get {{ self.data[i] }} set {{ self.data[i] = new_value; }} inout {{ yield self.data[i]; }} remove {{ self.gone[i] = 1; }} }} }}
+            let c = C {{ data = [1, 2], gone = [0, 0], log = 0 }};
+            c[0] += 9;
+            let TEST_VALUE = f\"{{c.data}}\";"),
+        // builtin list slot borrow
+        r#"let xs = [1, 2]; { let p = &xs[0]; p = 9; };
+           let TEST_VALUE = f"{xs}";"#,
+        // nested list slots
+        r#"let m = [[1, 2], [3]]; m[1][0] += 10;
+           let TEST_VALUE = f"{m}";"#,
+        // a generator suspending while a borrow is live
+        &format!("{decl}
+            impl C {{ subscript(i: int) -> int {{ inout {{ yield self.data[i]; }} }} }}
+            let c = C {{ data = [1, 2], gone = [0, 0], log = 0 }};
+            subscript work() -> int {{ {{ let p = &c[0]; yield 5; p += 1; }} yield 6; }}
+            let it = work();
+            let a = it(); let b = it();
+            let TEST_VALUE = f\"{{a}}|{{b}}|{{c.data}}\";"),
+    ] {
+        let j = jit_bodies(src);
+        assert_eq!(run(src, None), run(src, Some(j.bodies())), "src: {src}");
+    }
+}
