@@ -929,9 +929,9 @@ fn accessor_prefixes_recover_without_panicking() {
 }
 
 #[test]
-fn mirror_prefixes_recover_without_panicking() {
-    let source = "struct W { a: [int] } let w = W { a = [1] }; 🪞!(W, w, [int] => |field| { let x = field.value[0]; });";
+fn for_fields_prefixes_recover_without_panicking() {
+    let source = "struct W { a: [int] } let w = W { a = [1] }; for_fields!(W, w, [int] => |field| { let x = field.value[0]; });";
     for end in (0..source.len()).filter(|&end| source.is_char_boundary(end)) {
-        assert!(std::panic::catch_unwind(|| crate::tests::utils::parse(&source[..end])).is_ok(), "mirror prefix {end}: {:?}", &source[..end]);
+        assert!(std::panic::catch_unwind(|| crate::tests::utils::parse(&source[..end])).is_ok(), "for_fields prefix {end}: {:?}", &source[..end]);
     }
 }

@@ -1011,8 +1011,6 @@ pub fn is_symbol_ident(c: char) -> bool {
     // `px↕` is `px` then `↕`, and a name must not swallow a direction
     // (`x→` is `x` then `→`). Every other arrow stays a name char:
     // `↻` `⇄` `⤡` are the moves' names.
-    // r[impl mimas.reflect.mirror-symbol]
-    if c == '🪞' { return true; }
     if matches!(c, '→' | '←' | '↑' | '↓' | '↔' | '↕' | '⏪' | '⏩') {
         return false;
     }

@@ -54,16 +54,16 @@ impl Decls {
         }
         false
     }
-    // r[impl mimas.reflect.mirror-filter]
-    fn mirror_fields(
+    // r[impl mimas.reflect.for-fields-filter]
+    fn matching_fields(
         &self,
         owner: &str,
         filter: &str,
     ) -> std::result::Result<Vec<Named>, (String, String)> {
         let Some((_, fields)) = self.structs.iter().find(|(name, _)| name == owner) else {
             return Err((
-                format!("no struct `{owner}` is declared before this mirror"),
-                "put the mirror after its struct declaration".into(),
+                format!("no struct `{owner}` is declared before this `for_fields!`"),
+                "put `for_fields!` after its struct declaration".into(),
             ));
         };
         let wanted = item_type(filter).unwrap_or(filter);
@@ -81,7 +81,7 @@ impl Decls {
             });
         if !known {
             return Err((
-                format!("unknown mirror field filter `{filter}`"),
+                format!("unknown `for_fields!` field filter `{filter}`"),
                 "use a declared type, pact, or `_`".into(),
             ));
         }
@@ -105,11 +105,11 @@ impl Decls {
 }
 
 impl<'s> Parser<'s> {
-    // r[impl mimas.reflect.mirror]
-    // r[impl mimas.reflect.mirror-cost]
-    // r[impl mimas.reflect.mirror-once]
-    // r[impl mimas.reflect.mirror-order]
-    pub(super) fn expand_mirror(&mut self, at: usize, spot: Spot) -> bool {
+    // r[impl mimas.reflect.for-fields]
+    // r[impl mimas.reflect.for-fields-cost]
+    // r[impl mimas.reflect.for-fields-once]
+    // r[impl mimas.reflect.for-fields-order]
+    pub(super) fn expand_for_fields(&mut self, at: usize, spot: Spot) -> bool {
         let open = at + 2;
         let Some(close) = self.closer_of(open) else {
             self.next = open;
@@ -125,7 +125,7 @@ impl<'s> Parser<'s> {
         );
         let fail = |p: &mut Self, msg: String| {
             p.next = close + 1;
-            p.macro_error(call, msg, "write `mirror!(Type, value, [Pact] => |field| { ... })` or omit the value to declare items");
+            p.macro_error(call, msg, "write `for_fields!(Type, value, [Pact] => |field| { ... })` or omit the value to declare items");
             false
         };
         let mut depth = 0;
@@ -146,20 +146,20 @@ impl<'s> Parser<'s> {
             }
         }
         let Some(arrow) = arrow else {
-            return fail(self, "a mirror needs `=> |field| { ... }`".into());
+            return fail(self, "`for_fields!` needs `=> |field| { ... }`".into());
         };
         if !(cuts.len() == 2 || cuts.len() == 3 || cuts.len() == 4) {
             return fail(
                 self,
-                "a mirror takes a type, an optional receiver, and a field filter".into(),
+                "`for_fields!` takes a type, an optional receiver, and a field filter".into(),
             );
         }
         let owner_end = cuts[1] - 1;
         if owner_end != cuts[0] + 1 {
-            return fail(self, "the first mirror argument is a struct name".into());
+            return fail(self, "the first `for_fields!` argument is a struct name".into());
         }
         let TokKind::Ident(owner) = self.tokens[cuts[0]].kind() else {
-            return fail(self, "the first mirror argument is a struct name".into());
+            return fail(self, "the first `for_fields!` argument is a struct name".into());
         };
         let body_name = arrow + 2;
         if self.tokens.get(arrow + 1).map(|t| t.kind()) != Some(TokKind::Pipe)
@@ -171,7 +171,7 @@ impl<'s> Parser<'s> {
             || self.tokens.get(arrow + 4).map(|t| t.kind()) != Some(TokKind::LeftBrace)
             || self.closer_of(arrow + 4) != Some(close - 1)
         {
-            return fail(self, "a mirror body is `|field| { ... }`".into());
+            return fail(self, "a `for_fields!` body is `|field| { ... }`".into());
         }
         let TokKind::Ident(binding) = self.tokens[body_name].kind() else {
             unreachable!()
@@ -181,7 +181,7 @@ impl<'s> Parser<'s> {
         let filter = (filter_start..filter_end)
             .map(|i| self.tokens[i].kind().to_string())
             .collect::<String>();
-        let mut fields = match DECLS.with(|d| d.borrow().mirror_fields(owner, &filter)) {
+        let mut fields = match DECLS.with(|d| d.borrow().matching_fields(owner, &filter)) {
             Ok(fields) => fields,
             Err((msg, label)) => {
                 self.next = close + 1;
@@ -196,7 +196,7 @@ impl<'s> Parser<'s> {
             {
                 return fail(
                     self,
-                    "mirror ordering is a list of field-name strings".into(),
+                    "`for_fields!` ordering is a list of field-name strings".into(),
                 );
             }
             let mut order = vec![];
@@ -211,7 +211,7 @@ impl<'s> Parser<'s> {
                     _ => {
                         return fail(
                             self,
-                            "mirror ordering is a list of field-name strings".into(),
+                            "`for_fields!` ordering is a list of field-name strings".into(),
                         );
                     }
                 }
@@ -221,7 +221,7 @@ impl<'s> Parser<'s> {
                 if !seen.insert(*name) || !fields.iter().any(|f| f.name == *name) {
                     return fail(
                         self,
-                        format!("unknown or repeated mirror field in ordering: `{name}`"),
+                        format!("unknown or repeated `for_fields!` field in ordering: `{name}`"),
                     );
                 }
             }
@@ -234,9 +234,9 @@ impl<'s> Parser<'s> {
         }
         let receiver = (cuts.len() >= 3).then(|| cuts[1]..cuts[2] - 1);
         if receiver.is_none() && spot == Spot::Expr {
-            return fail(self, "a declaration mirror belongs at a statement".into());
+            return fail(self, "a declaration `for_fields!` belongs at statement position".into());
         }
-        let owner_name = format!("__mirror_owner_{}", NodeId::new().index());
+        let owner_name = format!("__for_fields_owner_{}", NodeId::new().index());
         let outer = self.meta[at].mark;
         let depth = if outer == 0 {
             1
@@ -244,7 +244,7 @@ impl<'s> Parser<'s> {
             self.hygiene_depth(outer) + 1
         };
         let Some(mark) = self.hygiene_enter(depth) else {
-            return fail(self, "mirror expansion is too deep".into());
+            return fail(self, "`for_fields!` expansion is too deep".into());
         };
         let file_id = self.file_id;
         let file_name = self.file_name.clone();
@@ -295,8 +295,8 @@ impl<'s> Parser<'s> {
                     "key" => quote(&key),
                     "key_ident" => key.clone(),
                     "value" if receiver.is_some() => format!("{owner_name}.{}", field.name),
-                    "value" => return Err("`field.value` needs a mirror receiver".into()),
-                    _ => return Err(format!("unknown mirror field property `{property}`")),
+                    "value" => return Err("`field.value` needs a `for_fields!` receiver".into()),
+                    _ => return Err(format!("unknown `for_fields!` field property `{property}`")),
                 })
             };
             let mut i = arrow + 5;
@@ -384,7 +384,7 @@ fn rewrite_fstring(
             at += c.len_utf8();
         } else if c == '{' {
             let end = crate::lex::interp_end(&content[at..])
-                .ok_or("unterminated mirror interpolation")?;
+                .ok_or("unterminated `for_fields!` interpolation")?;
             let text = &content[at..at + end];
             let tokens: Vec<_> = Lexer::new(text, file_id, file_name.to_string()).collect();
             let mut from = 0;

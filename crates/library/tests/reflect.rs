@@ -1,4 +1,4 @@
-//! Reflection on declarations: `sig!`, `fns!`, `fields!` and `variants!`,
+//! Reflection on declarations: `sig!`, `fns!`, `fields!`, `variants!` and `for_fields!`,
 //! expanded by the parser (see `parse::parser::reflect`).
 #[macro_use]
 mod test_runner;
@@ -222,10 +222,10 @@ test_fail!(
     "let TEST_VALUE = graph!(nothing).name;",
 );
 
-// r[verify mimas.reflect.mirror]
-// r[verify mimas.reflect.mirror-filter]
+// r[verify mimas.reflect.for-fields]
+// r[verify mimas.reflect.for-fields-filter]
 test_run!(
-    mirrors_typed_fields_without_runtime_metadata,
+    for_fields_typed_fields_without_runtime_metadata,
     "pact Entity { fn value(self) -> int; }
      struct A { n: int } struct B { n: int }
      impl Entity for A { fn value(self) -> int { self.n } }
@@ -233,7 +233,7 @@ test_run!(
      struct World { aa: [A], count: int, bb: [B] }
      let w = World { aa = [A { n = 3 }], count = 99, bb = [B { n = 4 }] };
      let out: [int] = []; let names: [str] = [];
-     mirror!(World, w, [Entity] => |field| {
+     for_fields!(World, w, [Entity] => |field| {
         names.push(field.key);
         for item in field.value { out.push(item.value()); }
      });",
@@ -242,13 +242,13 @@ test_run!(
 );
 
 test_run!(
-    mirrors_generate_mutable_accessors,
+    for_fields_generate_mutable_accessors,
     "pact Entity { fn erase(self); }
      struct A { gone: bool } struct B { gone: bool }
      impl Entity for A { fn erase(self) { self.gone = true; } }
      impl Entity for B { fn erase(self) { self.gone = true; } }
      struct World { aa: [A], bb: [B] }
-     mirror!(World, [Entity] => |field| {
+     for_fields!(World, [Entity] => |field| {
         impl World { subscript field.key_ident(i: int) -> field.item_type {
             inout { yield self.field.ident[i]; }
             remove { self.field.ident[i].erase(); }
@@ -261,9 +261,9 @@ test_run!(
 );
 
 test_run!(
-    mirror_generated_accessors_keep_each_dimension,
+    for_fields_generated_accessors_keep_each_dimension,
     "struct W { lengths: [px], times: [s] }
-     mirror!(W, [_] => |field| { impl W {
+     for_fields!(W, [_] => |field| { impl W {
         subscript field.key_ident(i: int) -> field.item_type { inout { yield self.field.ident[i]; } }
      } });
      let w = W { lengths = [1px], times = [1s] }; w.px[0] = 3px; w.s[0] = 2s;",
@@ -271,76 +271,82 @@ test_run!(
     "w.s[0].to(1s)" => "2.0",
 );
 
-// r[verify mimas.reflect.mirror-cost]
+// r[verify mimas.reflect.for-fields-cost]
 #[test]
-fn mirrors_cost_the_same_as_typed_loops() {
+fn for_fields_cost_the_same_as_typed_loops() {
     let mut vm = vm::Vm::execute(
         "struct W { a: [int], b: [int], ignore: str }
          let xs: [int] = []; for i in 1000 { xs.push(i); }
          let w = W { a = xs, b = xs, ignore = \"skip\" };
          fn direct() -> int { let sum = 0; for n in w.a { sum += n; } for n in w.b { sum += n; } sum }
-         fn mirrored() -> int { let sum = 0; mirror!(W, w, [int] => |field| { for n in field.value { sum += n; } }); sum }",
+         fn expanded() -> int { let sum = 0; for_fields!(W, w, [int] => |field| { for n in field.value { sum += n; } }); sum }",
         library::std,
     ).unwrap();
     vm.set_op_budget(100_000);
     let direct = vm.call_fn_result("direct").unwrap().to_string();
     let direct_ops = 100_000 - vm.ops_left();
     vm.set_op_budget(100_000);
-    assert_eq!(vm.call_fn_result("mirrored").unwrap().to_string(), direct);
-    let mirror_ops = 100_000 - vm.ops_left();
-    assert!(mirror_ops <= direct_ops + 8, "mirror {mirror_ops}, direct {direct_ops}");
+    assert_eq!(vm.call_fn_result("expanded").unwrap().to_string(), direct);
+    let for_fields_ops = 100_000 - vm.ops_left();
+    assert!(for_fields_ops <= direct_ops + 8, "for_fields {for_fields_ops}, direct {direct_ops}");
 }
 
-// r[verify mimas.reflect.mirror-symbol]
+// r[verify mimas.reflect.for-fields]
 test_run!(
-    mirror_interpolation_preserves_literal_text_and_captured_locals,
+    for_fields_interpolation_preserves_literal_text_and_captured_locals,
     "struct W { a: [int] } let w = W { a = [7] }; let n = 2; let out: [str] = [];
-     🪞!(W, w, [int] => |field| { out.push(f\"field.name {{literal}} {field.name}:{n}:{field.value[0]}\"); });",
+     for_fields!(W, w, [int] => |field| { out.push(f\"field.name {{literal}} {field.name}:{n}:{field.value[0]}\"); });",
     "out" => "[\"field.name {literal} a:2:7\"]",
 );
 
 test_fail!(
-    mirrors_report_bad_filters_and_properties,
-    "struct W { a: int } let w = W { a = 3 }; mirror!(W, w, NotAType => |f| { f.value; });",
-    "struct W { a: int } let w = W { a = 3 }; mirror!(W, w, _ => |f| { f.missing; });",
-    "struct W { a: int } mirror!(W, _ => |f| { let x = f.value; });",
-    "struct W { a: [px], b: [s] } mirror!(W, [_] => |f| { impl W { subscript f.key_ident(i: int) -> f.item_type { inout { yield self.f.ident[i]; } } } }); let w = W { a = [1px], b = [1s] }; w.px[0] = 2s;",
+    for_fields_report_bad_filters_and_properties,
+    "struct W { a: int } let w = W { a = 3 }; for_fields!(W, w, NotAType => |f| { f.value; });",
+    "struct W { a: int } let w = W { a = 3 }; for_fields!(W, w, _ => |f| { f.missing; });",
+    "struct W { a: int } for_fields!(W, _ => |f| { let x = f.value; });",
+    "struct W { a: [px], b: [s] } for_fields!(W, [_] => |f| { impl W { subscript f.key_ident(i: int) -> f.item_type { inout { yield self.f.ident[i]; } } } }); let w = W { a = [1px], b = [1s] }; w.px[0] = 2s;",
+);
+
+test_fail!(
+    removed_field_expansion_spellings_are_not_builtins,
+    "struct W { a: int } let w = W { a = 3 }; mirror!(W, w, _ => |f| { f.value; });",
+    "struct W { a: int } let w = W { a = 3 }; 🪞!(W, w, _ => |f| { f.value; });",
 );
 
 test_run!(
-    nested_mirrors_can_shadow_the_field_parameter,
+    nested_for_fields_can_shadow_the_field_parameter,
     "struct W { a: [int], b: [int] } let w = W { a = [1], b = [2] }; let out: [str] = [];
-     mirror!(W, w, [int] => |field| {
+     for_fields!(W, w, [int] => |field| {
         let outer = field.name;
-        mirror!(W, w, [int] => |field| { out.push(outer + field.name); });
+        for_fields!(W, w, [int] => |field| { out.push(outer + field.name); });
      });",
     "out" => "[\"aa\", \"ab\", \"ba\", \"bb\"]",
 );
 
-// r[verify mimas.reflect.mirror-once]
+// r[verify mimas.reflect.for-fields-once]
 test_run!(
-    mirrors_evaluate_receiver_once_even_without_matching_fields,
+    for_fields_evaluate_receiver_once_even_without_matching_fields,
     "struct W { a: [int] } fn owner(log: [int]) -> W { log.push(1); W { a = [3] } }
      let log: [int] = [];
-     mirror!(W, owner(log), [int] => |f| { let _x = f.value[0]; });
-     mirror!(W, owner(log), [str] => |f| { let _x = f.value[0]; });",
+     for_fields!(W, owner(log), [int] => |f| { let _x = f.value[0]; });
+     for_fields!(W, owner(log), [str] => |f| { let _x = f.value[0]; });",
     "log" => "[1, 1]",
 );
 
-// r[verify mimas.reflect.mirror-order]
+// r[verify mimas.reflect.for-fields-order]
 test_run!(
-    mirror_priorities_preserve_unlisted_fields,
+    for_fields_priorities_preserve_unlisted_fields,
     "struct W { a: int, b: int, c: int } let w = W { a = 1, b = 2, c = 3 }; let out: [int] = [];
-     mirror!(W, w, int, [\"b\"] => |f| { out.push(f.value); });",
+     for_fields!(W, w, int, [\"b\"] => |f| { out.push(f.value); });",
     "out" => "[2, 1, 3]",
 );
 
 test_run!(
-    mirrors_expand_inside_accessor_arms_and_keep_later_arms,
+    for_fields_expand_inside_accessor_arms_and_keep_later_arms,
     "struct W { a: [int], b: [int] }
      impl W {
         subscript total() -> int {
-            get { let n = 0; mirror!(W, self, [int] => |f| { for x in f.value { n += x; } }); n }
+            get { let n = 0; for_fields!(W, self, [int] => |f| { for x in f.value { n += x; } }); n }
             set { self.a[0] = new_value; }
         }
      }
@@ -350,8 +356,8 @@ test_run!(
 );
 
 test_run!(
-    mirrors_keep_nested_fixed_list_element_types,
+    for_fields_keep_nested_fixed_list_element_types,
     "struct W { rows: [[int; 2]] } let w = W { rows = [[1, 2]] }; let names: [str] = [];
-     mirror!(W, w, [_] => |f| { names.push(f.item_name); let row: f.item_type = f.value[0]; names.push(f\"{row[1]}\"); });",
+     for_fields!(W, w, [_] => |f| { names.push(f.item_name); let row: f.item_type = f.value[0]; names.push(f\"{row[1]}\"); });",
     "names" => "[\"[int;2]\", \"2\"]",
 );

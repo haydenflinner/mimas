@@ -47,7 +47,7 @@
 //! (`FnSig`, `FnParam`, `StructField`, `EnumVariant`) are declared in
 //! std (`library/src/reflect.mim`).
 
-mod mirror;
+mod for_fields;
 
 use super::macros::Spot;
 use super::*;
@@ -106,7 +106,7 @@ pub(super) fn clear() {
 
 /// Whether `name!(…)` is one of the reflection macros.
 pub(super) fn is_builtin(name: &str) -> bool {
-    matches!(name, "sig" | "fns" | "fields" | "variants" | "graph" | "mirror" | "🪞")
+    matches!(name, "sig" | "fns" | "fields" | "variants" | "graph" | "for_fields")
 }
 
 /// Whether some `fns!` call has read functions marked `#[name]`.
@@ -325,7 +325,7 @@ impl<'s> Parser<'s> {
         let TokKind::Ident(name) = self.tokens[at].kind else {
             unreachable!("a macro call starts with its name");
         };
-        if matches!(name, "mirror" | "🪞") { return self.expand_mirror(at, spot); }
+        if name == "for_fields" { return self.expand_for_fields(at, spot); }
         let open = at + 2;
         let Some(close) = self.closer_of(open) else {
             self.next = open;

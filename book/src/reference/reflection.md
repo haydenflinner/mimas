@@ -2,8 +2,9 @@
 
 A program can ask what it declared. Built-in macros answer:
 `sig!` for one function, `fns!` for many, `fields!` for a struct,
-`variants!` for an enum, `graph!` for a body, and `mirror!` for typed field templates. The parser expands
-them, as it expands a macro you declare, before anything is checked.
+`variants!` for an enum, `graph!` for a body, and `for_fields!` for typed
+field templates. The parser expands them, as it expands a macro you
+declare, before anything is checked.
 
 ## A function as data
 
@@ -106,10 +107,9 @@ struct EnumVariant { name: str, fields: [StructField] }
 
 A variant written `Circle(float)` has fields named `0`, `1`, and so on.
 
-## Typed field mirrors
+## Typed field expansion with `for_fields!`
 
-A mirror expands a template once per selected field. `🪞!` is the same
-operation, with a shorter spelling.
+`for_fields!` expands a template once per selected field.
 
 ```mimas
 pact Entity { fn tick(self); }
@@ -118,7 +118,7 @@ impl Entity for Ball { fn tick(self) { self.ticks += 1; } }
 struct World { balls: [Ball], paused: bool }
 let w = World { balls = [Ball { ticks = 0 }], paused = false };
 
-mirror!(World, w, [Entity] => |field| {
+for_fields!(World, w, [Entity] => |field| {
     for entity in field.value { entity.tick(); }
 });
 ```
@@ -154,7 +154,7 @@ Omit the receiver to declare items. This derives mutable accessors and a
 collection-owned removal policy from the same list declarations:
 
 ```mimas
-mirror!(World, [Entity] => |field| {
+for_fields!(World, [Entity] => |field| {
     impl World {
         subscript field.key_ident(i: int) -> field.item_type {
             inout { yield self.field.ident[i]; }
@@ -171,7 +171,7 @@ in its removal arm. The caller's spelling stays the same.
 An optional list of field names sets priorities:
 
 ```mimas
-mirror!(World, w, [Entity], ["balls"] => |field| {
+for_fields!(World, w, [Entity], ["balls"] => |field| {
     for entity in field.value { entity.tick(); }
 });
 ```
@@ -180,7 +180,7 @@ Listed fields come first. Remaining matches keep declaration order, so a
 new entity list is included without another registry entry. Unknown or
 repeated priority names are errors.
 
-Put mirrors after the struct and the pact implementations they inspect.
+Put `for_fields!` after the struct and the pact implementations it inspects.
 The body is a template, not a runtime closure. A `return` returns from its
 enclosing function. A loop inside the template has ordinary loop rules.
 
