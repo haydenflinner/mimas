@@ -226,7 +226,8 @@ pub struct Chunk {
     pub locs: Vec<(u32, Location)>,
     /// Value class of each register, indexed by `Reg`. Registers are only reused within one
     /// class (`Str`/`Generic` share a class and widen to `Generic`), so every write to a
-    /// register holds a value of its kind. The VM ignores this; wasm lowering reads it.
+    /// register holds a value of its kind. The VM ignores this; wasmgen's
+    /// `analyze_body` re-derives classes rather than reading it.
     pub kinds: Vec<OperandKind>,
 }
 
