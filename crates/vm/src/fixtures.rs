@@ -109,6 +109,23 @@ pub struct Trace {
     /// inlined inside bcgen bodies bypass it, the same observability
     /// trade the debugger makes.
     pub calls: RefCell<HashMap<u64, u32>>,
+    /// Ops dispatched so far: the monotone clock `edge_stack` start
+    /// values are taken from. `ops_left` resets at every entry, so it
+    /// cannot measure how long a frame lived; this only ever grows.
+    pub ops_total: Cell<u64>,
+    /// The live frame stack as `(caller_body, callee_body, ops_total at
+    /// push)`, kept in step with `ThreadState::frames` by the
+    /// dispatch's push/pop hooks. A frame pushed by a path the hooks
+    /// do not see (bcgen bodies' in-body calls) never lands here, and
+    /// `pop_frame` notices the chunk mismatch and leaves the stack
+    /// alone — an unrecorded call folds into its parent's ops instead
+    /// of desyncing the stack.
+    pub edge_stack: RefCell<Vec<(u32, u32, u64)>>,
+    /// `(caller_body << 32) | callee_body` → ops that ran while the
+    /// callee frame was on the stack under that caller, cumulative
+    /// over the program. `u32::MAX` is the caller of the entry frame.
+    /// Read by `Vm::op_tree`; reset with the program.
+    pub edge_ops: RefCell<HashMap<u64, u64>>,
 }
 
 impl Trace {
@@ -117,9 +134,59 @@ impl Trace {
     /// calls) must never hit a live `RefMut` and panic.
     #[inline]
     pub fn tick(&self, ip: usize) {
+        self.ops_total.set(self.ops_total.get() + 1);
         if let Some(h) = self.hits.borrow_mut().get_mut(ip) {
             *h = h.wrapping_add(1);
         }
+    }
+
+    /// A bulk op debit — natives charge `ops_debt` for work that never
+    /// passes `tick`, so the clock takes it in one step.
+    pub fn charge(&self, ops: u64) {
+        self.ops_total.set(self.ops_total.get() + ops);
+    }
+
+    /// A frame `callee` pushed under `caller` (`u32::MAX` for the entry
+    /// frame): remember when it started so `pop_frame` can charge the
+    /// edge.
+    pub fn push_frame(&self, caller: u32, callee: u32) {
+        self.edge_stack
+            .borrow_mut()
+            .push((caller, callee, self.ops_total.get()));
+    }
+
+    /// A frame `callee` popped: charge `ops_total - start` to its edge.
+    /// If the top entry names another chunk, this frame was pushed by
+    /// a path the hooks miss — leave the stack aligned and fold its
+    /// ops into the parent's edge.
+    pub fn pop_frame(&self, callee: u32) {
+        let mut stack = self.edge_stack.borrow_mut();
+        if let Some(&(caller, top, start)) = stack.last() {
+            if top == callee {
+                stack.pop();
+                let spent = self.ops_total.get().saturating_sub(start);
+                *self
+                    .edge_ops
+                    .borrow_mut()
+                    .entry(((caller as u64) << 32) | callee as u64)
+                    .or_default() += spent;
+            }
+        }
+    }
+
+    /// `n` frames dropped at once (an unwind truncate or a thread's
+    /// clear): each pops in order.
+    pub fn pop_frames(&self, callee: &[u32]) {
+        for &c in callee.iter().rev() {
+            self.pop_frame(c);
+        }
+    }
+
+    /// Program load or reset: the clock and the frame edges start
+    /// fresh; `edge_ops` drains like `take_calls` so hosts can read it.
+    pub fn reset_frames(&self) {
+        self.edge_stack.borrow_mut().clear();
+        self.ops_total.set(0);
     }
 
     /// One call edge taken: `caller` (the frame on top at dispatch) →

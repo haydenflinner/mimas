@@ -26,6 +26,20 @@ mod op_count {
 
     pub static COUNTS: [AtomicU64; OpCode::COUNT] = [const { AtomicU64::new(0) }; OpCode::COUNT];
 
+    /// Ops tallied against the running frame's `chunk` — the same
+    /// per-op fetch_add the opcode table pays, but indexed by the
+    /// function the op ran in, so the report can name hot functions
+    /// rather than hot opcodes. Chunks past `CHUNK_CAP` fall into the
+    /// last slot under the label `chunk>=cap`.
+    pub const CHUNK_CAP: usize = 1 << 15;
+
+    pub static CHUNKS: [AtomicU64; CHUNK_CAP + 1] =
+        [const { AtomicU64::new(0) }; CHUNK_CAP + 1];
+
+    pub fn note(body: compile::BodyId) {
+        CHUNKS[body.index().min(CHUNK_CAP)].fetch_add(1, Relaxed);
+    }
+
     pub fn report() {
         let mut rows: Vec<(OpCode, u64)> = (0..OpCode::COUNT)
             // SAFETY: repr(u8) enum, i < COUNT, same as the decode transmute
@@ -415,6 +429,8 @@ impl Vm {
             let trace = state.fixtures.get::<crate::fixtures::Trace>();
             *trace.hits.borrow_mut() = vec![0; code_len];
             trace.calls.borrow_mut().clear();
+            trace.edge_ops.borrow_mut().clear();
+            trace.reset_frames();
         });
         self.reset_to_entry();
     }
@@ -444,6 +460,9 @@ impl Vm {
                 return_reg: 0,
                 base: 0,
             });
+            let trace = state.fixtures.get::<crate::fixtures::Trace>();
+            trace.reset_frames();
+            trace.push_frame(u32::MAX, entry_body.index() as u32);
             // the frames every `with rng` scope hung on are gone — restore
             // the state the outermost one saved
             // r[impl mimas.fx.with.restore]
@@ -690,6 +709,154 @@ impl Vm {
     pub fn ops_left(&self) -> u64 {
         self.arena
             .mutate(|mc, state| state.thread.borrow_mut(mc).ops_left)
+    }
+
+    /// Inspect a [`Ctx::stash`]ed value: the read half of a host
+    /// watch channel — the program stashes a live object each frame
+    /// and the host inspects it on demand, so the answer follows the
+    /// world as it is now, not a copy from when it was stashed.
+    pub fn inspect_stashed(&self, stashed: &Stashed) -> Option<Inspect> {
+        let field_names = &self.field_names;
+        let variant_ordinals = &self.variant_ordinals;
+        self.arena.mutate(|mc, state| {
+            let ctx = state.ctx(mc);
+            let struct_names = state.struct_names.borrow();
+            let mut seen = std::collections::HashSet::new();
+            Some(ctx.fetch(stashed).inspect(&struct_names, field_names, variant_ordinals, &mut seen))
+        })
+    }
+
+    /// The `op-count` feature's per-function tally: `(name, ops)` rows
+    /// sorted largest first. The answer to "which function ate the
+    /// frame budget" — `name` is the chunk's source name (`fn` or
+    /// operator), `body#N` when the chunk has no name.
+    #[cfg(feature = "op-count")]
+    pub fn op_histogram(&self) -> Vec<(String, u64)> {
+        use std::sync::atomic::Ordering::Relaxed;
+        let mut rows: Vec<(String, u64)> = op_count::CHUNKS
+            .iter()
+            .enumerate()
+            .filter_map(|(i, c)| {
+                let n = c.load(Relaxed);
+                (n > 0).then(|| {
+                    let name = if i == op_count::CHUNK_CAP {
+                        "chunk>=cap".to_string()
+                    } else {
+                        let body = compile::BodyId::from(i as u32);
+                        self.chunk_names
+                            .get(&body)
+                            .cloned()
+                            .unwrap_or_else(|| format!("body#{}", i))
+                    };
+                    (name, n)
+                })
+            })
+            .collect();
+        rows.sort_by_key(|&(_, n)| std::cmp::Reverse(n));
+        rows
+    }
+
+    /// The op-cost call tree: `(depth, name, incl, own)` rows in DFS
+    /// order. `incl` is every op dispatched while that callee frame sat
+    /// under that caller, deeper calls included — the `u32::MAX`→entry
+    /// edge is the root. `own` is `incl` minus the callee's outgoing
+    /// edges: ops spent in the callee itself, clamped at 0 — a callee
+    /// shared by several callers carries each edge's share under that
+    /// caller, but its outgoing edges aggregate all callers, so `own`
+    /// can read low. A call cycle is walked once and the revisit
+    /// marked `↻`. Frames still open at the read (the entry frame
+    /// among them) charge their ops-so-far.
+    pub fn op_tree(&self) -> Vec<(usize, String, u64, u64)> {
+        let (mut edges, open, clock) = self.arena.mutate(|_, state| {
+            let trace = state.fixtures.get::<crate::fixtures::Trace>();
+            (
+                trace.edge_ops.borrow().clone(),
+                trace.edge_stack.borrow().clone(),
+                trace.ops_total.get(),
+            )
+        });
+        for &(caller, callee, start) in &open {
+            *edges
+                .entry(((caller as u64) << 32) | callee as u64)
+                .or_default() += clock.saturating_sub(start);
+        }
+        let mut children: std::collections::HashMap<u32, Vec<(u32, u64)>> =
+            std::collections::HashMap::new();
+        let mut outgoing: std::collections::HashMap<u32, u64> =
+            std::collections::HashMap::new();
+        for (key, ops) in &edges {
+            let (caller, callee) = ((key >> 32) as u32, *key as u32);
+            children.entry(caller).or_default().push((callee, *ops));
+            *outgoing.entry(callee).or_default() += *ops;
+        }
+        let name_of = |body: u32| {
+            self.chunk_names
+                .get(&compile::BodyId::from(body))
+                .cloned()
+                .unwrap_or_else(|| format!("body#{body}"))
+        };
+        let mut rows = Vec::new();
+        let mut on_path = std::collections::HashSet::new();
+        // `stack` is the DFS path of callee chunks; `next` holds each
+        // level's remaining edges, biggest first.
+        let mut stack: Vec<u32> = Vec::new();
+        let kids = |caller: u32| -> std::vec::IntoIter<(u32, u64)> {
+            let mut k = children.get(&caller).cloned().unwrap_or_default();
+            k.sort_by_key(|&(_, n)| std::cmp::Reverse(n));
+            k.into_iter()
+        };
+        let mut next = vec![kids(u32::MAX)];
+        while let Some(it) = next.last_mut() {
+            match it.next() {
+                None => {
+                    next.pop();
+                    if let Some(callee) = stack.pop() {
+                        on_path.remove(&callee);
+                    }
+                }
+                Some((callee, incl)) => {
+                    let own = incl.saturating_sub(*outgoing.get(&callee).unwrap_or(&0));
+                    let depth = stack.len();
+                    if on_path.contains(&callee) {
+                        rows.push((depth, format!("{} ↻", name_of(callee)), incl, own));
+                    } else {
+                        rows.push((depth, name_of(callee), incl, own));
+                        on_path.insert(callee);
+                        stack.push(callee);
+                        next.push(kids(callee));
+                    }
+                }
+            }
+        }
+        rows
+    }
+
+    /// Call frequency per callee: `(name, count)` rows sorted largest
+    /// first — how many times each function was *entered*, next to the
+    /// op histogram's how much each cost. Reads the `Trace.calls` map
+    /// without draining it; a fn called only through bcgen in-body
+    /// calls misses the count, the same blind spot `calls` documents.
+    pub fn call_histogram(&self) -> Vec<(String, u64)> {
+        let calls = self
+            .arena
+            .mutate(|_, state| state.fixtures.get::<crate::fixtures::Trace>().calls.borrow().clone());
+        let mut by_callee: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
+        for (key, n) in calls {
+            *by_callee.entry(key as u32).or_default() += n as u64;
+        }
+        let mut rows: Vec<(String, u64)> = by_callee
+            .into_iter()
+            .map(|(body, n)| {
+                let name = self
+                    .chunk_names
+                    .get(&compile::BodyId::from(body))
+                    .cloned()
+                    .unwrap_or_else(|| format!("body#{body}"));
+                (name, n)
+            })
+            .collect();
+        rows.sort_by_key(|&(_, n)| std::cmp::Reverse(n));
+        rows
     }
 
     /// `pc → (fn, loc)` tables for the loaded program — one call per
@@ -1112,6 +1279,13 @@ fn unwind_cleanups<'gc>(
         if thread.ops_left == 0 {
             continue;
         }
+        let trace = ctx.state().fixtures.get::<crate::fixtures::Trace>();
+        trace.pop_frames(
+            &thread.frames[cleanup.depth..]
+                .iter()
+                .map(|f| f.chunk.index() as u32)
+                .collect::<Vec<_>>(),
+        );
         thread.frames.truncate(cleanup.depth);
         let Some(owner) = thread.frames.last() else {
             continue;
@@ -1155,6 +1329,12 @@ fn unwind_cleanups<'gc>(
             }
         }
         calls.set(calls.get() - 1);
+        trace.pop_frames(
+            &thread.frames[depth..]
+                .iter()
+                .map(|f| f.chunk.index() as u32)
+                .collect::<Vec<_>>(),
+        );
         thread.frames.truncate(depth);
         thread.regs.truncate(regs);
         thread.regs[base] = r0;
@@ -1208,7 +1388,9 @@ fn run_dispatch_inner<'gc>(
         let mut mem_signal = ctx.state().mem.signal.get();
         if mem_signal & crate::mem::SIG_OPS != 0 {
             let m = &ctx.state().mem;
-            thread.ops_left = thread.ops_left.saturating_sub(m.ops_debt.replace(0));
+            let debt = m.ops_debt.replace(0);
+            trace.charge(debt);
+            thread.ops_left = thread.ops_left.saturating_sub(debt);
             mem_signal &= !crate::mem::SIG_OPS;
             m.signal.set(mem_signal);
             if thread.ops_left == 0 {
@@ -1282,8 +1464,13 @@ fn run_dispatch_inner<'gc>(
                 fuel -= 1;
                 thread.ops_left -= 1;
                 #[cfg(feature = "op-count")]
-                op_count::COUNTS[code.bytes[op_ip] as usize]
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                {
+                    op_count::COUNTS[code.bytes[op_ip] as usize]
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if let Some(top) = thread.frames.last() {
+                        op_count::note(top.chunk);
+                    }
+                }
                 // SAFETY: regs_ptr/regs_len describe the current top frame's window
                 // (regs[base..base+count]), refreshed after every resize/truncate
                 // below. The pointer is the only live reference into the window.
@@ -1340,6 +1527,10 @@ fn run_dispatch_inner<'gc>(
                                     return_reg: 0,
                                     base: 0,
                                 });
+                                trace.push_frame(
+                                    thread.frames.last().unwrap().chunk.index() as u32,
+                                    c.0.function.index() as u32,
+                                );
                             }
                             code.ip = child.frames.last().unwrap().ip;
                             let previous = ctx.state().active_thread.get();
@@ -1393,6 +1584,13 @@ fn run_dispatch_inner<'gc>(
                             }
                             match ran {
                                 Ok(true) | Err(_) => {
+                                    trace.pop_frames(
+                                        &child
+                                            .frames
+                                            .iter()
+                                            .map(|f| f.chunk.index() as u32)
+                                            .collect::<Vec<_>>(),
+                                    );
                                     child.frames.clear();
                                     child.regs.clear();
                                     child.regs.push(Val::Null);
@@ -1422,13 +1620,12 @@ fn run_dispatch_inner<'gc>(
                         (data.function, &data.captures)
                     }
                 };
-                trace.call(
-                    thread.frames.last().unwrap().chunk.index() as u32,
-                    body.index() as u32,
-                );
+                let caller_chunk = thread.frames.last().unwrap().chunk.index() as u32;
+                trace.call(caller_chunk, body.index() as u32);
                 if let Err(kind) = enter_call(thread, code, chunks, body, dst, &args, captures) {
                     Err(Error::msg(locate(kind, op_ip, thread, chunks, sources)))?;
                 }
+                trace.push_frame(caller_chunk, body.index() as u32);
                 (regs_ptr, regs_len) = window(thread, chunks);
             }
             Ok(Flow::Return(value)) => {
@@ -1437,6 +1634,7 @@ fn run_dispatch_inner<'gc>(
                     return Ok(true);
                 }
                 let popped = thread.frames.pop().unwrap();
+                trace.pop_frame(popped.chunk.index() as u32);
                 thread.regs.truncate(popped.base);
                 let caller = thread.frames.last().unwrap();
                 code.ip = caller.ip;
@@ -2231,6 +2429,15 @@ fn inject_call_inner<'gc>(
     }
     // a fault returns without unwinding, so the callee's frames are still stacked
     if ran.is_err() {
+        ctx.state()
+            .fixtures
+            .get::<crate::fixtures::Trace>()
+            .pop_frames(
+                &thread.frames[depth..]
+                    .iter()
+                    .map(|f| f.chunk.index() as u32)
+                    .collect::<Vec<_>>(),
+            );
         thread.frames.truncate(depth);
         thread.regs.truncate(regs);
         code.ip = ip;
@@ -2934,6 +3141,12 @@ impl Vm {
             self.code.ip = ip;
             self.arena.mutate(|mc, state| {
                 let mut thread = state.thread.borrow_mut(mc);
+                state.fixtures.get::<crate::fixtures::Trace>().pop_frames(
+                    &thread.frames[stop_depth - 1..]
+                        .iter()
+                        .map(|f| f.chunk.index() as u32)
+                        .collect::<Vec<_>>(),
+                );
                 thread.frames.truncate(stop_depth - 1);
                 thread.regs.truncate(regs_len);
                 // `with rng` scopes the unwound frames left behind restore here
