@@ -7,19 +7,18 @@
 //! shadows, the batched `bcn` quota, the shared exit blocks and the
 //! `step_at` op fallback all mirror it 1:1. `Switch` and `Constant::Array`/
 //! `Dec` still go through `step` — everything else either lowers inline or
-//! delegates to the same `mj_*` extern-C shims, bound by baked absolute
-//! address (the text-format analogue of `JITBuilder::symbol`).
+//! delegates to the same `mj_*` extern-C shims.
 //!
-//! Helper calls come out as `llvm.call` through `inttoptr`'d immediates, so
-//! the object has no undefined symbols and can be `dlopen`ed (or statically
-//! linked) as long as it runs in a process with the same `mimas-vm` image —
-//! this is a JIT-shaped pipeline, not a distributable AOT artifact.
+//! Helper calls come out as direct `llvm.call @mj_*` against bodiless
+//! declarations, so the object links by name against any companion runtime
+//! exporting the `vm::bc::nat` symbols (`mimas-natrt`'s staticlib/cdylib) —
+//! no baked addresses, a real symbol seam.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 
 use compile::{BlockTarget, Constant, Op, OpFormatPart, Program, Reg};
-use vm::bc::{BodyEnv, jit::Layout};
+use vm::bc::{BodyEnv, INLINE_CALL_DEPTH, jit::Layout};
 
 // `RtErr` codes, matching `jit/src/emit.rs` (vm::bc::RtErr discriminants).
 const ERR_PANIC: i64 = 0; // MatchPanicReached
@@ -594,9 +593,9 @@ enum A {
 
 struct Em<'a> {
     ops: &'a [(usize, Op)],
+    prog: &'a Program,
     lyt: &'a Layout,
     sh: &'a Sh,
-    addrs: &'a HashMap<&'static str, usize>,
 
     /// Completed blocks, in creation order: `(label, lines)`.
     done: Vec<(String, Vec<String>)>,
@@ -627,41 +626,75 @@ struct Em<'a> {
     rl: HashMap<Vec<u32>, String>,
 }
 
-/// Emit `.pliron` text for every chunk of `prog`, plus the
+/// `(ret_ty, ptys)` for a helper signature — the shared spelling used by
+/// the extern declarations and by [`Em::hcall`].
+fn sig(params: &[Pt], ret: Hr) -> (String, String) {
+    let ret_ty = match ret {
+        Hr::Void => VOID,
+        Hr::U8 => I8,
+        Hr::P => PTR,
+    };
+    let mut ptys = String::new();
+    for p in params.iter() {
+        let n = match p {
+            Pt::Ctx => 2,
+            _ => 1,
+        };
+        for _ in 0..n {
+            if !ptys.is_empty() {
+                ptys.push_str(", ");
+            }
+            ptys.push_str(match p {
+                Pt::P | Pt::Ctx => PTR,
+                Pt::I8 => I8,
+                Pt::I32 => I32,
+                Pt::F64 => F64,
+            });
+        }
+    }
+    (ret_ty.to_string(), ptys)
+}
+
+/// Emit `.pliron` text for every chunk of `prog`, the bodiless `mj_*`
+/// extern declarations, and the
 /// `@mimas_pliron_bodies`/`@mimas_pliron_nbodies` globals.
 ///
-/// `addrs` maps every [`spec_names`] entry to the `jit` helper's address in
-/// *this* process — the emitted calls bind by absolute address, so the
-/// object is only valid in-process (same caveat as `JITBuilder::symbol`).
-pub fn emit_module(prog: &Program, lyt: &Layout, addrs: &HashMap<&'static str, usize>) -> String {
-    for name in spec_names() {
-        assert!(
-            addrs.contains_key(name),
-            "missing helper address for {name}"
-        );
-    }
+/// Helper references are real `llvm.call @mj_*` symbols: link the object
+/// against a runtime that exports them (`mimas-natrt`'s `staticlib`/
+/// `cdylib`, or any artifact providing `vm::bc::nat`).
+pub fn emit_module(prog: &Program, lyt: &Layout) -> String {
     let nbodies = prog.chunks.len();
     let mut members: Vec<String> = Vec::new();
 
-    // function-pointer table the host reads for `install_bc`, and the body's
-    // `call_body`/`call_dyn` `tbl` argument.
-    let mut syms = String::new();
-    for i in 0..nbodies {
-        if i > 0 {
-            syms.push_str(", ");
-        }
-        write!(syms, "llvm.symbol_addr <@{} : {PTR}>", body_name(i)).unwrap();
+    // extern declarations for the helper surface — bodiless `llvm.func`s
+    // (Import linkage), resolved by the companion runtime at link time.
+    for (_, name, params, ret) in SPECS {
+        let (ret_ty, ptys) = sig(params, *ret);
+        members.push(format!(
+            "llvm.func @{name}: llvm.func <{ret_ty} ({ptys}) variadic = false> []"
+        ));
     }
-    let arrty = format!("llvm.array [{nbodies} x {PTR}]");
+
+    // function-pointer table the body's `call_body`/`call_dyn` `tbl`
+    // argument indexes. The text path can't carry symbol initializers
+    // (scan zero-fills every defined global), so the table is emitted
+    // mutable+zero and the host fills it after dlopen from the
+    // `mimas_body_*` symbols — which is also how it learns the table for
+    // `install_bc`. Entries are i64s: ptr-sized and scalar-typed, so the
+    // aggregate survives the parser.
+    let zeros = vec!["builtin.integer <0: i64>"; nbodies].join(", ");
+    let zi64 = format!("llvm.array [{nbodies} x {I64}]");
     members.push(format!(
-        "llvm.global @{BODIES_GLOBAL} : {arrty}\n    [llvm_global_linkage: llvm.linkage ExternalLinkage, llvm_global_constant: builtin.bool true] = llvm.aggregate <[{syms}] : {arrty}>"
+        "llvm.global @{BODIES_GLOBAL} : {zi64}\n    [llvm_global_linkage: llvm.linkage ExternalLinkage, llvm_global_constant: builtin.bool false] = llvm.aggregate <[{zeros}] : {zi64}>"
     ));
+    // the pair's scalar half — a standalone host reads this instead of
+    // re-deriving the count from the Program.
     members.push(format!(
         "llvm.global @{NBODIES_GLOBAL} : {I64}\n    [llvm_global_linkage: llvm.linkage ExternalLinkage, llvm_global_constant: builtin.bool true] = builtin.integer <{nbodies}: i64>"
     ));
 
     for body in 0..nbodies {
-        members.push(emit_body(prog, body, lyt, addrs));
+        members.push(emit_body(prog, body, lyt));
     }
 
     format!(
@@ -670,12 +703,7 @@ pub fn emit_module(prog: &Program, lyt: &Layout, addrs: &HashMap<&'static str, u
     )
 }
 
-fn emit_body(
-    prog: &Program,
-    body: usize,
-    lyt: &Layout,
-    addrs: &HashMap<&'static str, usize>,
-) -> String {
+fn emit_body(prog: &Program, body: usize, lyt: &Layout) -> String {
     let body_id = compile::BodyId::from(body as u32);
     let ops = prog.ops(body_id);
     let chunk = &prog.chunks[body_id];
@@ -683,9 +711,9 @@ fn emit_body(
 
     let mut em = Em {
         ops: &ops,
+        prog,
         lyt,
         sh: &sh,
-        addrs,
         done: Vec::new(),
         cur_name: String::new(),
         cur: Vec::new(),
@@ -1158,6 +1186,17 @@ impl Em<'_> {
         ))
     }
 
+    /// `a & b` on `i1` flags (the gate conjunctions in the inline call
+    /// path — `llvm.and` takes no overflow-flags attr).
+    fn band1(&mut self, a: &str, b: &str) -> String {
+        self.ev(format!("llvm.and {a}, {b} : {I1}"))
+    }
+
+    /// Zero-extend to `i64` (`i32` fields like `Frame::return_reg`).
+    fn zext64(&mut self, v: &str) -> String {
+        self.ev(format!("llvm.zext <nneg=false> {v} to {I64}"))
+    }
+
     /// `icmp` — the type annotation is the *operand* type.
     fn icmp(&mut self, oty: &str, cc: &str, a: &str, b: &str) -> String {
         self.ev(format!("llvm.icmp {a} <{cc}> {b} : {oty}"))
@@ -1204,11 +1243,11 @@ impl Em<'_> {
         self.ln("llvm.return".into());
     }
 
-    /// Call a `vm::bc::jit` helper by baked absolute address; returns the
+    /// Call a `vm::bc::jit` helper as a direct `llvm.call @mj_*` symbol
+    /// (resolved at link time against the companion runtime); returns the
     /// `u8` status or pointer result if the signature has one.
     fn hcall(&mut self, h: H, args: &[A]) -> Option<String> {
-        let (_, params, ret) = spec(h);
-        let addr = self.addrs[spec(h).0];
+        let (name, params, ret) = spec(h);
         // expand the flat arg list over `Ctx` (two P params)
         let mut av: Vec<String> = Vec::new();
         let mut ai = args.iter();
@@ -1250,35 +1289,15 @@ impl Em<'_> {
                 },
             }
         }
-        assert!(ai.next().is_none(), "extra args for {}", spec(h).0);
-        let ret_ty = match ret {
-            Hr::Void => VOID,
-            Hr::U8 => I8,
-            Hr::P => PTR,
-        };
-        let mut ptys = String::new();
-        for p in params.iter() {
-            let n = match p {
-                Pt::Ctx => 2,
-                _ => 1,
-            };
-            for _ in 0..n {
-                if !ptys.is_empty() {
-                    ptys.push_str(", ");
-                }
-                ptys.push_str(match p {
-                    Pt::P | Pt::Ctx => PTR,
-                    Pt::I8 => I8,
-                    Pt::I32 => I32,
-                    Pt::F64 => F64,
-                });
-            }
-        }
+        assert!(ai.next().is_none(), "extra args for {name}");
+        let (ret_ty, ptys) = sig(params, ret);
         let fty = format!("llvm.func <{ret_ty} ({ptys}) variadic = false>");
-        let c = self.iconst(addr as i64);
-        let fp = self.i2p(&c);
+        // `llvm.call` is one-result even for `llvm.void` — always bind.
         let v = self.v();
-        self.ln(format!("{v} = llvm.call {fp} ({}) : {fty}", av.join(", ")));
+        self.ln(format!(
+            "{v} = llvm.call @{name} ({}) : {fty}",
+            av.join(", ")
+        ));
         match ret {
             Hr::Void => None,
             _ => Some(v),
@@ -3093,8 +3112,8 @@ impl Em<'_> {
     /// `CallDirect` — one `mj_call_body` hop: the megashim enters the callee
     /// frame (Flow::Call at the depth cap / arity check), runs the callee
     /// body through the same bodies table, and pops on `Flow::Return`. The
-    /// jit tier's inline frame-push fast path is not ported; see the
-    /// devlog for what that costs.
+    /// jit tier's inline frame-push fast path is ported below; this arm is
+    /// the slow half of its gate.
     fn emit_call_direct(
         &mut self,
         i: usize,
@@ -3104,6 +3123,17 @@ impl Em<'_> {
         body: compile::BodyId,
         args: &[Reg],
     ) {
+        let cchunk = &self.prog.chunks[body];
+        // Compile-time gates — see jit::emit_call_direct: a static arity
+        // miss and a capturing callee keep the megashim; large frames skip
+        // the unrolled Null fill.
+        if std::env::var("PLGEN_NO_INLINE_CALL").is_err()
+            && args.len() == cchunk.args as usize
+            && cchunk.captures.is_empty()
+            && (cchunk.regs as usize) <= 64
+        {
+            return self.emit_call_direct_inline(i, off, next, dst, body, args, cchunk);
+        }
         let ap = self.reg_list_slot(args);
         let nargs = args.len();
         self.flush_seq();
@@ -3131,6 +3161,231 @@ impl Em<'_> {
             )
             .unwrap();
         self.post_call(i, dst, &rp);
+    }
+
+    /// The inline `CallDirect` fast path — `jit/src/emit.rs`
+    /// `emit_call_direct_inline` ported op for op: under the runtime gates
+    /// (depth cap, `regs`/`frames` capacity) the callee frame is pushed
+    /// inline over the probed layout, `mimas_body_N` runs as a direct
+    /// `llvm.call`, and the `Flow::Return` tail is popped inline.
+    /// Anything slower — capacity growth, the depth cap (which must
+    /// produce `Flow::Call`) — routes to the `mj_call_body` megashim.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_call_direct_inline(
+        &mut self,
+        i: usize,
+        off: usize,
+        next: usize,
+        dst: Reg,
+        body: compile::BodyId,
+        args: &[Reg],
+        cchunk: &compile::Chunk,
+    ) {
+        let vs = self.lyt.val_size as u32;
+        let fsz = self.lyt.frame_size as u32;
+        self.flush_seq();
+        // `code.ip = next; *op_ip = off` — on the fast path `code.ip` gets
+        // overwritten with the callee offset below, but `*op_ip` locates
+        // this op for any propagated error, and the slow path needs both.
+        self.mark_op(off, next);
+        self.settle_seq();
+
+        // Runtime gates, all checked in the pre-branch block:
+        //   frames.len() < INLINE_CALL_DEPTH    (else Flow::Call to driver)
+        //   regs.cap - regs.len >= callee.regs  (else Vec grow → shim)
+        //   frames.len() < frames.cap           (ditto for the push)
+        let thread = self.env.thread.clone();
+        let flen = self.frames_len();
+        let dcap = self.iconst(INLINE_CALL_DEPTH as i64);
+        let depth_ok = self.icmp(I64, "ULT", &flen, &dcap);
+        let rlen = self.ld(I64, &thread, (self.lyt.regs_off + self.lyt.vec_len) as u32, 8);
+        let rcap = self.ld(I64, &thread, (self.lyt.regs_off + self.lyt.vec_cap) as u32, 8);
+        let slack = self.sub(&rcap, &rlen);
+        let need = self.iconst(cchunk.regs as i64);
+        let regs_ok = self.icmp(I64, "UGE", &slack, &need);
+        let fcap = self.ld(I64, &thread, (self.lyt.frames_off + self.lyt.vec_cap) as u32, 8);
+        let frames_ok = self.icmp(I64, "ULT", &flen, &fcap);
+        let ok01 = self.band1(&depth_ok, &regs_ok);
+        let ok = self.band1(&ok01, &frames_ok);
+        let fast = self.create_block();
+        let slow = self.create_block();
+        self.cbr(&ok, &fast, &slow);
+
+        // ---- slow: the megashim handles Flow::Call-at-cap, grows, errors ----
+        self.start_block(&slow);
+        let ap = self.reg_list_slot(args);
+        let b = self.iconst(body.index() as i64);
+        let d = self.iconst(dst.index() as i64);
+        let n = self.iconst(args.len() as i64);
+        let rp = self
+            .hcall(
+                H::CallBody,
+                &[
+                    A::P(self.env.env.clone()),
+                    A::P(self.env.bodies_tbl.clone()),
+                    A::V(b),
+                    A::V(d),
+                    A::P(ap),
+                    A::V(n),
+                ],
+            )
+            .unwrap();
+        self.post_call(i, dst, &rp);
+
+        // ---- fast: enter_call_regs inline ----
+        self.start_block(&fast);
+        let rp0 = self.ld(
+            PTR,
+            &thread,
+            (self.lyt.regs_off + self.lyt.vec_ptr) as u32,
+            8,
+        );
+        // new_base = old regs.len (loaded above as `rlen`)
+        let vsc = self.iconst(vs as i64);
+        let nboff = self.mul(&rlen, &vsc);
+        let nwin = self.gep_dyn(&rp0, &nboff); // callee window base
+        // resize fill: `Val::Null` — only the tag byte is ever read
+        let tnull = self.tconst(self.lyt.t_null);
+        for k in 0..cchunk.regs as u32 {
+            self.st_off(
+                &nwin,
+                &tnull,
+                k * vs + self.lyt.val_tag as u32,
+                self.lyt.tag_size as u32,
+            );
+        }
+        let nregs_c = self.iconst(cchunk.regs as i64);
+        let nlen = self.add(&rlen, &nregs_c);
+        self.st_off(
+            &thread,
+            &nlen,
+            (self.lyt.regs_off + self.lyt.vec_len) as u32,
+            8,
+        );
+        // arg copies: `regs[new_base + param] = regs[caller_base + arg]` —
+        // both indices are compile-time constants; the caller window is
+        // `v_regs` (unmoved — capacity was checked).
+        let caller = self.regs();
+        for (i, &pr) in cchunk.params.iter().enumerate() {
+            let s = self.vaddr(&caller, args[i].index() as u32);
+            let d = self.vaddr(&nwin, pr.index() as u32);
+            self.cpy_val(&d, &s);
+        }
+        // caller frame's saved ip = resume offset (what `code.ip` held)
+        let fptr = self.ld(
+            PTR,
+            &thread,
+            (self.lyt.frames_off + self.lyt.vec_ptr) as u32,
+            8,
+        );
+        let one = self.iconst(1);
+        let two = self.iconst(2);
+        let fm1 = self.sub(&flen, &one);
+        let fszc = self.iconst(fsz as i64);
+        let cfo = self.mul(&fm1, &fszc);
+        let cf = self.gep_dyn(&fptr, &cfo);
+        let nxt = self.iconst(next as i64);
+        self.st_off(&cf, &nxt, self.lyt.frame_ip as u32, 8);
+        // push the callee frame
+        let nfo = self.mul(&flen, &fszc);
+        let nf = self.gep_dyn(&fptr, &nfo);
+        let bi = self.iconst32(body.index() as i64);
+        self.st_off(&nf, &bi, self.lyt.frame_chunk as u32, 4);
+        let cip = self.iconst(cchunk.offset as i64);
+        self.st_off(&nf, &cip, self.lyt.frame_ip as u32, 8);
+        let rr = self.iconst32(dst.index() as i64);
+        self.st_off(&nf, &rr, self.lyt.frame_ret as u32, 4);
+        self.st_off(&nf, &rlen, self.lyt.frame_base as u32, 8);
+        let nfl = self.add(&flen, &one);
+        self.st_off(
+            &thread,
+            &nfl,
+            (self.lyt.frames_off + self.lyt.vec_len) as u32,
+            8,
+        );
+        // code.ip = callee chunk offset
+        self.store_ip(&cip);
+        // the call itself — a direct native call, same `env` bundle (the
+        // callee reads its own fields out of it; `env.out` is shared)
+        let rv = self.v();
+        self.ln(format!(
+            "{rv} = llvm.call @{} ({}) : llvm.func <{VOID} ({PTR}) variadic = false>",
+            body_name(body.index()),
+            self.env.env
+        ));
+        // driver's `Flow::Return` pop, inlined over the probed
+        // `RtResult<Flow>`/Frame layout: `*out == Ok(Flow::Return(v))` → pop
+        // the callee frame, truncate `regs`, restore the caller's saved ip,
+        // write `v` into the `return_reg` slot; anything else propagates
+        // `out` verbatim through `eret` (what `mj_pop_return`'s non-2 tags
+        // did).
+        let oty = match self.lyt.out_tsz {
+            1 => I8,
+            2 => I16,
+            4 => I32,
+            8 => I64,
+            d => unreachable!("bad out tag width {d}"),
+        };
+        let out = self.env.out.clone();
+        let otag = self.ld(oty, &out, self.lyt.out_tag as u32, self.lyt.out_tsz as u32);
+        let orwant = self.iconst_ty(oty, self.lyt.out_ret as i64);
+        let isret = self.icmp(oty, "EQ", &otag, &orwant);
+        let resumed = self.create_block();
+        let er = self.ex.eret.clone();
+        self.cbr(&isret, &resumed, &er);
+        self.start_block(&resumed);
+        // popped = frames[flen-1]; frames.len -= 1; regs.len = popped.base
+        let flen2 = self.frames_len();
+        let fptr2 = self.ld(
+            PTR,
+            &thread,
+            (self.lyt.frames_off + self.lyt.vec_ptr) as u32,
+            8,
+        );
+        let fm2 = self.sub(&flen2, &one);
+        let pfo = self.mul(&fm2, &fszc);
+        let pf = self.gep_dyn(&fptr2, &pfo);
+        let pbase = self.ld(I64, &pf, self.lyt.frame_base as u32, 8);
+        let pret32 = self.ld(I32, &pf, self.lyt.frame_ret as u32, 4);
+        let pret = self.zext64(&pret32);
+        self.st_off(
+            &thread,
+            &fm2,
+            (self.lyt.frames_off + self.lyt.vec_len) as u32,
+            8,
+        );
+        self.st_off(
+            &thread,
+            &pbase,
+            (self.lyt.regs_off + self.lyt.vec_len) as u32,
+            8,
+        );
+        // caller = frames[flen-2]; code.ip = caller.ip
+        let fm3 = self.sub(&flen2, &two);
+        let cfo2 = self.mul(&fm3, &fszc);
+        let cf2 = self.gep_dyn(&fptr2, &cfo2);
+        let cip2 = self.ld(I64, &cf2, self.lyt.frame_ip as u32, 8);
+        self.store_ip(&cip2);
+        let cbase = self.ld(I64, &cf2, self.lyt.frame_base as u32, 8);
+        // `thread.regs` may have moved under the callee — rebuild the window
+        // and write the return value into `caller_base + return_reg`
+        let rp2 = self.ld(
+            PTR,
+            &thread,
+            (self.lyt.regs_off + self.lyt.vec_ptr) as u32,
+            8,
+        );
+        let widx = self.add(&cbase, &pret);
+        let woff = self.mul(&widx, &vsc);
+        let daddr = self.gep_dyn(&rp2, &woff);
+        let retp = self.gep(&out, self.lyt.out_ret_pay as u32);
+        self.cpy_val(&daddr, &retp);
+        let boff2 = self.mul(&cbase, &vsc);
+        let regs2 = self.gep_dyn(&rp2, &boff2);
+        let a = self.v_regs.clone();
+        self.st(&a, &regs2);
+        self.rearm_seq();
+        self.dst_refresh(i, dst, &regs2);
     }
 
     /// `Call` — one `mj_call_dyn` hop: callee resolution (incl. the

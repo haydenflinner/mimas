@@ -418,7 +418,7 @@ pub mod jit {
     /// rustc layout change yields different numbers, not silent breakage.
     /// Anything the probe can't verify panics at compile time.
     #[repr(C)]
-    #[derive(Clone, Copy, Debug)]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct Layout {
         /// `size_of::<Val>` — the window stride (multiple of 8).
         pub val_size: usize,
@@ -1313,6 +1313,15 @@ pub mod jit {
             if ofound.is_some() {
                 break 'ow;
             }
+        }
+        if std::env::var("PLIRON_LAYOUT").is_ok() {
+            eprintln!(
+                "oret:  {:02x?}\nonext: {:02x?}\noerr:  {:02x?}\nocall: {:02x?}\nofound={ofound:?}",
+                &oret_b[..48],
+                &onext_b[..48],
+                &oerr_b[..48],
+                &ocall_b[..48]
+            );
         }
         let (out_tag, out_tsz) = ofound.expect("no discriminant found in RtResult<Flow>");
         let out_ret = {
@@ -2347,5 +2356,169 @@ pub mod jit {
             let f: BodyFn = std::mem::transmute(*tbl.add(body.index()));
             enter_run_pop(env, body, dst, args_idx, nargs, captures, f)
         }
+    }
+}
+
+/// `#[unsafe(no_mangle)]` exports of the `jit` helper surface — the symbol
+/// seam a separately-linked object binds against (a plgen `.o` calls
+/// `mj_*` by name where the Cranelift JIT binds a baked address). Same
+/// signatures, same bodies; a companion-runtime artifact such as
+/// `mimas-natrt` (`crate-type = ["staticlib", "cdylib"]`) carries them.
+#[doc(hidden)]
+pub mod nat {
+    use super::jit::{self, FlushEnt};
+    use super::*;
+
+    macro_rules! nat {
+        ($( $mj:ident = $f:ident ( $($a:ident : $t:ty),* $(,)? ) $(-> $r:ty)? ;)*) => {$(
+            #[unsafe(no_mangle)]
+            pub unsafe extern "C" fn $mj<'gc>($($a: $t),*) $(-> $r)? {
+                unsafe { jit::$f($($a),*) }
+            }
+        )*};
+    }
+
+    nat! {
+        mj_paused_ptr = paused_ptr(ctx: Ctx<'gc>) -> *const bool;
+        mj_ops_left_ptr = ops_left_ptr(thread: *mut ThreadState<'gc>) -> *mut u64;
+        mj_ip_ptr = ip_ptr(code: *mut Decoder) -> *mut usize;
+        mj_frame_base = frame_base(thread: *const ThreadState<'gc>) -> usize;
+        mj_frame_nregs = frame_nregs(thread: *const ThreadState<'gc>, chunks: *const IdVec<BodyId, Chunk>) -> usize;
+        mj_regs_ptr = regs_ptr(thread: *mut ThreadState<'gc>) -> *mut Val<'gc>;
+        mj_frames_len = frames_len(thread: *const ThreadState<'gc>) -> usize;
+        mj_ri = ri(regs: *const Val<'gc>, i: usize, v: *mut i64) -> u8;
+        mj_rf = rf(regs: *const Val<'gc>, i: usize, v: *mut f64) -> u8;
+        mj_rb = rb(regs: *const Val<'gc>, i: usize, v: *mut u8) -> u8;
+        mj_is_bool = is_bool(regs: *const Val<'gc>, i: usize, b: u8) -> u8;
+        mj_wr_i = wr_i(regs: *mut Val<'gc>, i: usize, v: i64);
+        mj_wr_f = wr_f(regs: *mut Val<'gc>, i: usize, v: f64);
+        mj_wr_b = wr_b(regs: *mut Val<'gc>, i: usize, v: u8);
+        mj_wr_null = wr_null(regs: *mut Val<'gc>, i: usize);
+        mj_wr_fn = wr_fn(regs: *mut Val<'gc>, i: usize, body: u32);
+        mj_wr_v = wr_v(regs: *mut Val<'gc>, i: usize, v: *const Val<'gc>);
+        mj_mv = mv(regs: *mut Val<'gc>, d: usize, s: usize);
+        mj_rval = rval(regs: *const Val<'gc>, i: usize) -> *const Val<'gc>;
+        mj_flush = flush(regs: *mut Val<'gc>, buf: *const FlushEnt, n: usize);
+        mj_out_next = out_next(out: *mut RtResult<Flow<'gc>>);
+        mj_out_err = out_err(out: *mut RtResult<Flow<'gc>>, kind: u8);
+        mj_out_return = out_return(out: *mut RtResult<Flow<'gc>>, v: *const Val<'gc>);
+        mj_out_kind = out_kind(out: *const RtResult<Flow<'gc>>) -> u8;
+        mj_out_call = out_call(out: *mut RtResult<Flow<'gc>>, regs: *const Val<'gc>, callee: usize, dst: usize, args_idx: *const u32, nargs: usize);
+        mj_out_call_direct = out_call_direct(out: *mut RtResult<Flow<'gc>>, regs: *const Val<'gc>, body: u32, dst: usize, args_idx: *const u32, nargs: usize);
+        mj_format = format(regs: *mut Val<'gc>, code: *mut Decoder, off: usize, ctx: Ctx<'gc>, strs: *const StrInterner, out: *mut RtResult<Flow<'gc>>) -> u8;
+        mj_len = len(regs: *const Val<'gc>, s: usize, v: *mut i64, out: *mut RtResult<Flow<'gc>>) -> u8;
+        mj_is_raised = is_raised(regs: *mut Val<'gc>, d: usize, s: usize);
+        mj_unwrap_raised = unwrap_raised(regs: *mut Val<'gc>, d: usize, s: usize);
+        mj_unwrap = unwrap(regs: *mut Val<'gc>, d: usize, s: usize, ctx: Ctx<'gc>, out: *mut RtResult<Flow<'gc>>) -> u8;
+        mj_unwrap_unit = unwrap_unit(regs: *mut Val<'gc>, d: usize, s: usize, ctx: Ctx<'gc>, out: *mut RtResult<Flow<'gc>>) -> u8;
+        mj_raise = raise(regs: *const Val<'gc>, s: usize, ctx: Ctx<'gc>, out: *mut RtResult<Flow<'gc>>);
+        mj_bin = bin(regs: *mut Val<'gc>, d: usize, l: usize, op: u8, r: usize, ctx: Ctx<'gc>, out: *mut RtResult<Flow<'gc>>) -> u8;
+        mj_unary = unary(regs: *mut Val<'gc>, d: usize, op: u8, s: usize, ctx: Ctx<'gc>, out: *mut RtResult<Flow<'gc>>) -> u8;
+        mj_get_index = get_index(regs: *mut Val<'gc>, d: usize, s: usize, i: usize, kind: u8, ctx: Ctx<'gc>, out: *mut RtResult<Flow<'gc>>) -> u8;
+        mj_set_index = set_index(regs: *mut Val<'gc>, s: usize, i: usize, v: usize, ctx: Ctx<'gc>, out: *mut RtResult<Flow<'gc>>) -> u8;
+        mj_get_field = get_field(regs: *mut Val<'gc>, d: usize, src: usize, slot: usize, kind: u8, out: *mut RtResult<Flow<'gc>>) -> u8;
+        mj_set_field = set_field(regs: *mut Val<'gc>, receiver: usize, slot: usize, value: usize, ctx: Ctx<'gc>, out: *mut RtResult<Flow<'gc>>) -> u8;
+        mj_push = push(regs: *mut Val<'gc>, array: usize, value: usize, ctx: Ctx<'gc>);
+        mj_insert = insert(regs: *mut Val<'gc>, dict: usize, key: u32, value: usize, ctx: Ctx<'gc>, strs: *const StrInterner);
+        mj_contains = contains_op(regs: *mut Val<'gc>, d: usize, needle: usize, haystack: usize, condition: u8);
+        mj_bin_str = bin_str(regs: *mut Val<'gc>, d: usize, l: usize, r: usize, eq: u8) -> u8;
+        mj_load_const_str = load_const_str(regs: *mut Val<'gc>, d: usize, id: u32, ctx: Ctx<'gc>, strs: *const StrInterner);
+        mj_is_instance = is_instance(regs: *mut Val<'gc>, d: usize, s: usize, adt: u32);
+        mj_new_array = new_array(regs: *mut Val<'gc>, d: usize, ctx: Ctx<'gc>);
+        mj_new_dict = new_dict(regs: *mut Val<'gc>, d: usize, ctx: Ctx<'gc>);
+        mj_new_instance = new_instance(regs: *mut Val<'gc>, d: usize, adt: u32, fields_idx: *const u32, nfields: usize, ctx: Ctx<'gc>);
+        mj_new_closure = new_closure(regs: *mut Val<'gc>, d: usize, body: u32, caps_idx: *const u32, ncaps: usize, ctx: Ctx<'gc>);
+        mj_call_native = call_native(thread: *mut ThreadState<'gc>, regs: *mut Val<'gc>, d: usize, id: u32, args_idx: *const u32, nargs: usize, code: *mut Decoder, mc: *const Mutation<'gc>, st: *const State<'gc>, out: *mut RtResult<Flow<'gc>>) -> u8;
+        mj_call_target = call_target(regs: *const Val<'gc>, callee: usize, signatures: *const IdVec<BodyId, Option<Function>>, body: *mut u32, caps: *mut *const Val<'gc>, ncaps: *mut usize, out: *mut RtResult<Flow<'gc>>) -> u8;
+        mj_enter = enter(thread: *mut ThreadState<'gc>, code: *mut Decoder, chunks: *const IdVec<BodyId, Chunk>, body: u32, dst: usize, regs: *const Val<'gc>, args_idx: *const u32, nargs: usize, caps: *const Val<'gc>, ncaps: usize, out: *mut RtResult<Flow<'gc>>) -> u8;
+        mj_pop_return = pop_return(thread: *mut ThreadState<'gc>, code: *mut Decoder, out: *const RtResult<Flow<'gc>>) -> u8;
+    }
+
+    /// `*out = jit::layout()` — the ABI self-check. `pliron-mimas` fetches this
+    /// through the natrt dylib and compares it against its own
+    /// `vm::bc::jit::layout()`: the generated code bakes these constants against
+    /// the *archive's* compiled `Val`/`Flow`/`RtResult` layouts, so a dependency
+    /// drift between the two builds (a second `smallvec`, a feature flip) must
+    /// panic here instead of miscompiling every tag compare.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn mj_layout(out: *mut jit::Layout) {
+        unsafe { *out = jit::layout() }
+    }
+
+    /// Slow-path call counters — a generated body increments one whenever
+    /// its inline-call gate misses and it drops to `mj_call_body`/`mj_call_dyn`.
+    /// The driver reads them back over dlopen to verify the fast path fires.
+    pub static MJ_SLOW_CALL_BODY: core::sync::atomic::AtomicU64 =
+        core::sync::atomic::AtomicU64::new(0);
+    /// See [`MJ_SLOW_CALL_BODY`].
+    pub static MJ_SLOW_CALL_DYN: core::sync::atomic::AtomicU64 =
+        core::sync::atomic::AtomicU64::new(0);
+
+    /// `MJ_SLOW_CALL_BODY`'s value — a function accessor because an
+    /// exported *static* doesn't survive `ld -dead_strip` reliably.
+    #[unsafe(no_mangle)]
+    pub extern "C" fn mj_slow_call_body_count() -> u64 {
+        MJ_SLOW_CALL_BODY.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// See [`mj_slow_call_body_count`].
+    #[unsafe(no_mangle)]
+    pub extern "C" fn mj_slow_call_dyn_count() -> u64 {
+        MJ_SLOW_CALL_DYN.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// How many ops a generated body handed back to the interpreter through
+    /// `mj_step_at` — the estep path. Nonzero means the body isn't covering
+    /// the op stream itself.
+    pub static MJ_ESTEP: core::sync::atomic::AtomicU64 =
+        core::sync::atomic::AtomicU64::new(0);
+
+    /// See [`MJ_ESTEP`].
+    #[unsafe(no_mangle)]
+    pub extern "C" fn mj_estep_count() -> u64 {
+        MJ_ESTEP.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// `jit::step_at` plus the estep counter — kept outside the `nat!` macro
+    /// for the bump.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn mj_step_at<'gc>(
+        thread: *mut ThreadState<'gc>,
+        regs: *mut Val<'gc>,
+        nregs: usize,
+        code: *mut Decoder,
+        ctx: Ctx<'gc>,
+        strs: *const StrInterner,
+        out: *mut RtResult<Flow<'gc>>,
+    ) -> u8 {
+        MJ_ESTEP.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        unsafe { jit::step_at(thread, regs, nregs, code, ctx, strs, out) }
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn mj_call_body<'gc>(
+        env: *const BodyEnv<'gc>,
+        tbl: *const usize,
+        body: u32,
+        dst: u32,
+        args_idx: *const u32,
+        nargs: usize,
+    ) -> *mut Val<'gc> {
+        MJ_SLOW_CALL_BODY.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        unsafe { jit::call_body(env, tbl, body, dst, args_idx, nargs) }
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn mj_call_dyn<'gc>(
+        env: *const BodyEnv<'gc>,
+        tbl: *const usize,
+        regs: *const Val<'gc>,
+        callee: usize,
+        dst: u32,
+        args_idx: *const u32,
+        nargs: usize,
+    ) -> *mut Val<'gc> {
+        MJ_SLOW_CALL_DYN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        unsafe { jit::call_dyn(env, tbl, regs, callee, dst, args_idx, nargs) }
     }
 }

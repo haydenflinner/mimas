@@ -1,0 +1,17 @@
+[package]
+name = "mimas-natrt"
+version = "0.2.0"
+edition = "2024"
+publish = false
+description = "Native-runtime link target for separately-compiled mimas bodies: exports the vm::bc::jit helper surface as unmangled mj_* symbols (staticlib + cdylib) so a plgen object file links and loads by name instead of a baked address."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "mimas_natrt"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+vm = { package = "mimas-vm", path = "../vm", version = "0.2.0", default-features = false }

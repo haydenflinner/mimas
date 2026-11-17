@@ -2,21 +2,7 @@
 //! the end-to-end parse/lower/run check lives in the `pliron-mimas` driver
 //! (tools/pliron-mimas in the outer repo), which owns the pliron deps.
 
-use std::collections::HashMap;
-
 use vm::Vm;
-use vm::bc::jit as j;
-
-fn addrs() -> HashMap<&'static str, usize> {
-    let mut m = HashMap::new();
-    for name in mimas_plgen::spec_names() {
-        // bind by table order — every name in plgen's SPECS names a
-        // `vm::bc::jit` fn; the driver's map is the binding of record, this
-        // just needs *a* valid address per name.
-        m.insert(name, j::step_at as *const u8 as usize);
-    }
-    m
-}
 
 #[test]
 fn emits_func_per_chunk_and_body_table() {
@@ -28,7 +14,7 @@ fn emits_func_per_chunk_and_body_table() {
         |api| library::codegen(api),
     )
     .expect("compiles");
-    let text = mimas_plgen::emit_module(&program, &vm::bc::jit::layout(), &addrs());
+    let text = mimas_plgen::emit_module(&program, &vm::bc::jit::layout());
     assert!(text.starts_with("builtin.module @mimas_pliron {"));
     // one llvm.func per chunk plus the exported globals
     for (i, _) in program.chunks.iter() {
@@ -40,8 +26,14 @@ fn emits_func_per_chunk_and_body_table() {
     }
     assert!(text.contains(mimas_plgen::BODIES_GLOBAL));
     assert!(text.contains(mimas_plgen::NBODIES_GLOBAL));
+    // extern decls for the helper surface — the companion-runtime symbols
+    for name in mimas_plgen::spec_names() {
+        assert!(text.contains(&format!("llvm.func @{name}:")), "missing {name}");
+    }
     // dispatch is the llvm.switch over op byte offsets
     assert!(text.contains("llvm.switch"));
+    // direct symbol calls, no baked address immediates
+    assert!(text.contains("llvm.call @mj_step_at"));
     // braces balance
     assert_eq!(text.matches('{').count(), text.matches('}').count());
 }

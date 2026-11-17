@@ -26,7 +26,13 @@ mutants.workspace = true
 gc-arena.workspace = true
 miette.workspace = true
 thiserror.workspace = true
-smallvec = "1.15.1"
+# `SmallVec<[Val; 8]>` sits inside `Flow::Call`, which crosses the
+# separately-compiled-body ABI (`mj_*`, plgen/`mimas-natrt`). Pin the exact
+# version AND the layout-affecting features (`union` changes `SmallVecData`'s
+# representation) — a caret range or feature-set drift between two builds of
+# `vm` moves the `RtResult<Flow>` discriminant and native bodies misread the
+# out-slot. `mj_layout` cross-checks the two builds at harness start.
+smallvec = { version = "=1.16.5", features = ["const_generics", "serde", "union"] }
 rustc-hash = "2"
 itoa = "1.0.18"
 glam.workspace = true
