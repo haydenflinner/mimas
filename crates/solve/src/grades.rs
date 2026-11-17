@@ -49,7 +49,7 @@ use crate::{FxHashMap, FxHashSet};
 use miette::Report;
 use parse::{
     Access, Ast, Expr, ExprKind, FStringPart, Function, Ident, Item, ItemKind, Literal, PactItem,
-    Stmt, StmtKind,
+    Stmt, StmtKind, Visitor,
     components::{Pat, PatKind},
     stmt::AssignmentOp,
 };
@@ -59,8 +59,8 @@ use crate::{
     GuardSeg, Solver,
     components::{DecId, DecKind},
     errors::{
-        ConsumeForbidden, DeadStore, MustUseResult, ShadowedBuiltin, UnusedBinding, UnusedParam,
-        UseAfterConsume,
+        ConsumeForbidden, DeadStore, LoopCall, MustUseResult, ShadowedBuiltin, UnusedBinding,
+        UnusedParam, UseAfterConsume,
     },
 };
 
@@ -317,6 +317,47 @@ struct Pass<'a> {
     /// or ambient `Fx::ANY` when it declares none) -- and the spliced-in
     /// page's inferred set must fit the grant.
     grants: Vec<(Location, String, Fx)>,
+
+    /// Call sites walked under an enclosing loop: `(site, caller, callee
+    /// Fns marked `#[scans]` — their collection walks are deliberate:
+    /// calls to them, and looped calls inside them, don't lint.
+    scan_marked: FxHashSet<DecId>,
+    /// dec, per-arg ambient bits)`. `loop_reads` non-empty is the
+    /// "inside a loop" signal — it is pushed before a `while` header
+    /// walks and survives into closures, the two places a per-iteration
+    /// call hides. Pact calls record each impl dec, since the pact dec
+    /// itself owns no edges. Arg positions line up with the callee's
+    /// parameters, the receiver counted as 0 on `x.m(..)` calls.
+    loop_calls: Vec<(Location, Caller, DecId, Vec<bool>)>,
+    /// Callers whose own body holds a `for`/`while`/`loop` — the seeds
+    /// the `iterates` fixpoint propagates outward through `edges`.
+    own_loops: FxHashSet<Caller>,
+
+    /// dec -> the position of the fn parameter that bound it (`self`
+    /// is position 0 for methods). Flat: a dec names one binding ever,
+    /// so an entry left by another fn's walk can never resolve wrongly.
+    param_pos: FxHashMap<DecId, u32>,
+    /// local dec -> the param positions its value derives from. `let
+    /// bs = w.balls` stands `bs` for `w`, a `for` binding stands for
+    /// its iterator's roots, and a fresh `f(w)` or `[]` roots at none.
+    provenance: FxHashMap<DecId, FxHashSet<u32>>,
+    /// caller -> the param positions its own `for` iterators and
+    /// `while` headers root at: `for t in w.things` scans `w`, `for i
+    /// in 0 .. n` scans nothing. Seeds the `scans` fixpoint.
+    own_scans: FxHashMap<Caller, FxHashSet<u32>>,
+    /// Every resolved call: `(caller, callee, per-arg param
+    /// positions)`, aligned like `loop_calls`'s args. The scans
+    /// fixpoint walks it backward — a callee scanning position p marks
+    /// the caller scanning whatever roots its arg at p.
+    call_args: Vec<(Caller, DecId, Vec<FxHashSet<u32>>)>,
+}
+
+/// The expensive-precision lints — `loop-call` today — run unless the
+/// host opts out with `MIMAS_DEEP_LINT=0` (or an empty value). The
+/// corpus compiles clean under them, so on is the default: a quadratic
+/// shape is exactly the thing a call site cannot show a reader.
+fn deep_lints() -> bool {
+    !matches!(std::env::var("MIMAS_DEEP_LINT"), Ok(v) if v == "0" || v.is_empty())
 }
 
 /// Fill `solver.dec_uses`, `solver.fn_effects`, `solver.script_effects`, `solver.warnings`.
@@ -334,6 +375,15 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> crate::errors::Result
     // per file, in `asts` order: its `needs` decls and `granting` sites --
     // checked per page once the fixpoint has every caller's set
     let mut decl_fx: Vec<(Vec<(Location, Fx)>, Vec<(Location, String, Fx)>)> = Vec::new();
+    // the quadratic lint's raw material: call sites under an enclosing
+    // loop, callers holding their own loops (the `iterates` seeds), the
+    // param positions each caller's loops scan, and every call's arg
+    // roots for propagating those scans up the graph
+    let mut loop_calls: Vec<(Location, Caller, DecId, Vec<bool>)> = Vec::new();
+    let mut own_loops: FxHashSet<Caller> = FxHashSet::default();
+    let mut own_scans: FxHashMap<Caller, FxHashSet<u32>> = FxHashMap::default();
+    let mut call_args: Vec<(Caller, DecId, Vec<FxHashSet<u32>>)> = Vec::new();
+    let mut scan_marked: FxHashSet<DecId> = FxHashSet::default();
 
     for ast in asts {
         let mut dec_by_site = FxHashMap::default();
@@ -371,6 +421,13 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> crate::errors::Result
             pact_members: solver.pact_members.values().copied().collect(),
             needs: Vec::new(),
             grants: Vec::new(),
+            loop_calls: Vec::new(),
+            own_loops: FxHashSet::default(),
+            param_pos: FxHashMap::default(),
+            provenance: FxHashMap::default(),
+            own_scans: FxHashMap::default(),
+            call_args: Vec::new(),
+            scan_marked: FxHashSet::default(),
         };
         pass.push_scope();
         pass.run_top(ast.stmts());
@@ -404,6 +461,16 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> crate::errors::Result
                 edges.entry(d).or_default().extend(callees);
             }
         }
+        loop_calls.extend(pass.loop_calls.iter().cloned());
+        own_loops.extend(pass.own_loops.iter().copied());
+        call_args.extend(pass.call_args.iter().cloned());
+        for (caller, set) in pass.own_scans.iter() {
+            own_scans
+                .entry(*caller)
+                .or_insert_with(FxHashSet::default)
+                .extend(set.iter().copied());
+        }
+        scan_marked.extend(pass.scan_marked.iter().copied());
         // `pass` borrows `&*solver`; pull its results out before writing solver fields
         let Pass {
             uses,
@@ -446,6 +513,130 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> crate::errors::Result
         for (caller, acc) in grown {
             *fn_fx.entry(caller).or_insert(Fx::empty()) |= acc;
         }
+    }
+    // r[impl mimas.lint.loop-call] -- a call under an enclosing loop to a
+    // callee that iterates too is the Shlemiel shape: every outer pass
+    // pays the inner collection's walk again. But the verdict has to hold
+    // without the caller in the graph: `visit` calling `visit` on each
+    // child is a descent, not a rescan, and a callee that only "iterates"
+    // by reaching back into this caller is the same cycle painted twice.
+    // `iterates` is therefore recomputed per caller over the graph minus
+    // that caller — seeds at callers holding a loop, grown along `edges`
+    // to stability like the fx fixpoint's.
+    //
+    // A deep lint, on by default (`MIMAS_DEEP_LINT=0` opts out): the
+    // corpus's deliberate scanners carry `#[scans]`, so what remains is a
+    // real quadratic shape the call site cannot show a reader.
+    if !deep_lints() {
+        loop_calls.clear();
+    }
+    // `scans[f]` — the param positions `f`'s loops read, directly or
+    // through calls. Seeds are `own_scans` (`for t in w.things` marks
+    // `w`); the fixpoint walks `call_args` backward the way `fn_fx`'s
+    // walks `edges`, so `handle(w) → feed(w)` makes `handle` scan `w`
+    // too. Recursive cycles settle on their own.
+    let mut scans: FxHashMap<DecId, FxHashSet<u32>> = FxHashMap::default();
+    for (caller, set) in &own_scans {
+        if let Caller::Fn(d) = caller {
+            scans.entry(*d).or_default().extend(set.iter().copied());
+        }
+    }
+    loop {
+        let mut grown: Vec<(DecId, FxHashSet<u32>)> = Vec::new();
+        for (caller, callee, args) in &call_args {
+            let Caller::Fn(f) = caller else { continue };
+            let Some(cs) = scans.get(callee) else { continue };
+            let mut add = FxHashSet::default();
+            for p in cs.iter() {
+                if let Some(roots) = args.get(*p as usize) {
+                    add.extend(roots.iter().copied());
+                }
+            }
+            let have = scans.get(f).cloned().unwrap_or_default();
+            if !add.is_empty() && !add.is_subset(&have) {
+                grown.push((*f, add));
+            }
+        }
+        if grown.is_empty() {
+            break;
+        }
+        for (f, add) in grown {
+            scans.entry(f).or_default().extend(add);
+        }
+    }
+    let seeds: FxHashSet<DecId> = own_loops
+        .iter()
+        .filter_map(|c| match c {
+            Caller::Fn(d) => Some(*d),
+            Caller::Script(_) => None,
+        })
+        .collect();
+    let mut iterates_of: FxHashMap<Option<DecId>, FxHashSet<DecId>> = FxHashMap::default();
+    let mut reported = FxHashSet::default();
+    for (at, caller, callee, ambients) in loop_calls {
+        let (blocked, outer) = match caller {
+            Caller::Fn(d) => (Some(d), solver.decs[d].name.clone()),
+            Caller::Script(_) => (None, "the top level".to_string()),
+        };
+        let name = &solver.decs[callee].name;
+        if name.starts_with("__")
+            || outer.starts_with("__")
+            || !reported.insert((at.file_id, at.span.start, callee))
+        {
+            continue;
+        }
+        let iterates = iterates_of.entry(blocked).or_insert_with(|| {
+            let mut set: FxHashSet<DecId> =
+                seeds.iter().copied().filter(|d| Some(*d) != blocked).collect();
+            loop {
+                let mut grown = Vec::new();
+                for (caller, callees) in &edges {
+                    if Some(*caller) == blocked || set.contains(caller) {
+                        continue;
+                    }
+                    if callees
+                        .iter()
+                        .any(|g| Some(*g) != blocked && set.contains(g))
+                    {
+                        grown.push(*caller);
+                    }
+                }
+                if grown.is_empty() {
+                    break;
+                }
+                set.extend(grown);
+            }
+            set
+        });
+        // iterating is not enough — the callee must scan a shared
+        // place, not the element the caller just handed it. `num(t)`
+        // per token `t` costs O(|t|) a call; `ball_index(w, ..)` per
+        // ball costs O(world) a call, and that is the quadratic shape.
+        let scans_arg = scans.get(&callee).is_some_and(|cs| {
+            cs.iter()
+                .any(|p| ambients.get(*p as usize).copied().unwrap_or(false))
+        });
+        if !iterates.contains(&callee)
+            || Some(callee) == blocked
+            || !scans_arg
+            // `#[scans]` on the callee says its walks are deliberate;
+            // on the caller, that its looped calls are. Either way the
+            // pair is acknowledged, not flagged.
+            || scan_marked.contains(&callee)
+            || blocked.is_some_and(|d| scan_marked.contains(&d))
+        {
+            continue;
+        }
+        let name = name.clone();
+        solver.warnings.push(std::rc::Rc::new(
+            LoopCall {
+                src: solver.src(at),
+                at: at.into(),
+                name,
+                outer,
+            }
+            .into(),
+        ));
     }
     for (caller, fx) in fn_fx {
         solver.fn_effects.insert(caller, fx);
@@ -577,6 +768,112 @@ impl<'a> Pass<'a> {
 
     fn cur(&self) -> Caller {
         *self.callers.last().unwrap_or(&Caller::Script(0))
+    }
+
+    /// Every dec a pattern binds — `bind`'s match arms without the side
+    /// effects, for provenance and param-position bookkeeping.
+    fn pat_decs(&self, pat: &Pat) -> Vec<DecId> {
+        let mut out = Vec::new();
+        fn go(p: &Pat, out: &mut Vec<DecId>, pass: &Pass) {
+            match p.kind() {
+                PatKind::Ident(ident) => {
+                    if let Some(dec) = pass.dec_of(ident) {
+                        out.push(dec);
+                    }
+                }
+                PatKind::Tuple(pats) | PatKind::TupleVariant(_, pats) | PatKind::Or(pats) => {
+                    for p in pats {
+                        go(p, out, pass);
+                    }
+                }
+                PatKind::Struct(_, fields) => {
+                    for p in fields.values() {
+                        go(p, out, pass);
+                    }
+                }
+                PatKind::NullBind(p) => go(p, out, pass),
+                _ => {}
+            }
+        }
+        go(pat, &mut out, self);
+        out
+    }
+
+    /// The param positions `e`'s value derives from. `w.balls` roots at
+    /// `w`; `bs` bound `let bs = w.balls` stands for `w` through
+    /// `provenance`; a fn dec or a literal roots at none — iterating
+    /// `f(w)`'s result is still recorded as `w`-scaled work, a safe
+    /// over-read for the scans fixpoint.
+    fn param_roots(&self, e: &Expr) -> FxHashSet<u32> {
+        struct Roots<'p, 'a> {
+            pass: &'p Pass<'a>,
+            out: FxHashSet<u32>,
+        }
+        impl Visitor for Roots<'_, '_> {
+            fn ident(&mut self, ident: &Ident) {
+                let Some(dec) = self.pass.dec_of(ident) else {
+                    return;
+                };
+                if let Some(&p) = self.pass.param_pos.get(&dec) {
+                    self.out.insert(p);
+                }
+                if let Some(ps) = self.pass.provenance.get(&dec) {
+                    self.out.extend(ps.iter().copied());
+                }
+            }
+        }
+        let mut roots = Roots {
+            pass: self,
+            out: FxHashSet::default(),
+        };
+        parse::walk_expr(e, &mut roots);
+        roots.out
+    }
+
+    /// `true` when `e` names a place bound outside the innermost loop —
+    /// a shared `w` or `w.balls` re-read every pass, not a value the
+    /// loop made (`b.id`, `f(w)`, a literal). A place indexed by a
+    /// loop-bound key reads as per-element: `w.balls[i]` is `b` again.
+    fn place_ambient(&self, e: &Expr) -> bool {
+        let floor = self.loop_floors.last().copied().unwrap_or(usize::MAX);
+        let inside = |pass: &Pass, dec: DecId| {
+            pass.dec_scope.get(&dec).copied().unwrap_or(0) > floor
+        };
+        let mut spine = e;
+        loop {
+            match spine.kind() {
+                ExprKind::Ident(i) => {
+                    let Some(dec) = self.dec_of(i) else {
+                        return false;
+                    };
+                    return !inside(self, dec);
+                }
+                ExprKind::Access(Access::Dot { left, .. }) => spine = left,
+                ExprKind::Access(Access::Square { left, key, .. }) => {
+                    struct Keys<'p, 'a> {
+                        pass: &'p Pass<'a>,
+                        decs: Vec<DecId>,
+                    }
+                    impl Visitor for Keys<'_, '_> {
+                        fn ident(&mut self, ident: &Ident) {
+                            if let Some(dec) = self.pass.dec_of(ident) {
+                                self.decs.push(dec);
+                            }
+                        }
+                    }
+                    let mut keys = Keys {
+                        pass: self,
+                        decs: Vec::new(),
+                    };
+                    parse::walk_expr(key, &mut keys);
+                    if keys.decs.iter().any(|&d| inside(self, d)) {
+                        return false;
+                    }
+                    spine = left;
+                }
+                _ => return false,
+            }
+        }
     }
 
     /// `true` when `dec` was bound at or outside the innermost closure boundary -- pending
@@ -976,6 +1273,7 @@ impl<'a> Pass<'a> {
         }
         match stmt.kind() {
             StmtKind::Let(l) => {
+                let roots = self.param_roots(&l.right);
                 self.expr(&l.right);
                 if let Some(else_branch) = &l.else_branch {
                     // `else` always diverges, but its stores still die with this scope
@@ -986,6 +1284,11 @@ impl<'a> Pass<'a> {
                     self.retired.push(end);
                 }
                 self.bind(&l.left, Site::Binding, true);
+                if !roots.is_empty() {
+                    for d in self.pat_decs(&l.left) {
+                        self.provenance.insert(d, roots.clone());
+                    }
+                }
             }
             StmtKind::Assignment(a) => {
                 match a.left.kind() {
@@ -998,9 +1301,27 @@ impl<'a> Pass<'a> {
                         {
                             self.read(dec, ident.location);
                         }
+                        let roots = self.param_roots(&a.right);
                         self.expr(&a.right);
                         if let Some(dec) = dec {
                             self.write(dec, ident.location, true);
+                            // `x = v` re-roots x to v's params (`x = []`
+                            // clears them); `x += v` only adds.
+                            match a.op {
+                                AssignmentOp::Identity if roots.is_empty() => {
+                                    self.provenance.remove(&dec);
+                                }
+                                AssignmentOp::Identity => {
+                                    self.provenance.insert(dec, roots);
+                                }
+                                _ if !roots.is_empty() => {
+                                    self.provenance
+                                        .entry(dec)
+                                        .or_default()
+                                        .extend(roots);
+                                }
+                                _ => {}
+                            }
                         }
                     }
                     _ => {
@@ -1097,7 +1418,16 @@ impl<'a> Pass<'a> {
                     self.grants.push((item.location(), host.name.clone(), fx));
                 }
             }
-            ItemKind::Function(f) => self.function(f),
+            ItemKind::Function(f) => {
+                if item.attrs().iter().any(|a| a.name.lexeme == "scans")
+                    && let Some(&d) = self
+                        .dec_by_site
+                        .get(&(f.name.location.file_id, f.name.location.span.start))
+                {
+                    self.scan_marked.insert(d);
+                }
+                self.function(f);
+            }
             ItemKind::Const(c) => self.expr(&c.right),
             ItemKind::Impl(imp) => {
                 let was = std::mem::replace(&mut self.in_pact_impl, imp.pact.is_some());
@@ -1128,8 +1458,11 @@ impl<'a> Pass<'a> {
                             // included) is the contract, not a mistake to lint
                             // r[impl mimas.lint.pact-default]
                             let linted = s.lint_targets.len();
-                            for p in parameters {
+                            for (i, p) in parameters.iter().enumerate() {
                                 s.bind(&p.left, Site::Param, false);
+                                for d in s.pat_decs(&p.left) {
+                                    s.param_pos.insert(d, i as u32);
+                                }
                             }
                             s.lint_targets.truncate(linted);
                             s.expr(body);
@@ -1199,8 +1532,11 @@ impl<'a> Pass<'a> {
         self.in_fn(|s| {
             // r[impl mimas.lint.pact-default]
             let linted = s.lint_targets.len();
-            for p in &f.parameters {
+            for (i, p) in f.parameters.iter().enumerate() {
                 s.bind(&p.left, Site::Param, false);
+                for d in s.pat_decs(&p.left) {
+                    s.param_pos.insert(d, i as u32);
+                }
             }
             if pact_sig {
                 s.lint_targets.truncate(linted);
@@ -1342,6 +1678,52 @@ impl<'a> Pass<'a> {
                     self.call_effect(&action.value);
                 }
                 self.call_effect(&c.left);
+                // A call under an enclosing loop is quadratic iff the
+                // callee iterates a shared place — a verdict that needs
+                // the whole call graph, so every site records its arg
+                // roots here and judges after the fixpoint. The
+                // receiver counts as position 0 on `x.m(..)`, matching
+                // `self` in the method's parameters; a pact call names
+                // every impl dec, since the pact dec owns no edges.
+                // r[impl mimas.lint.loop-call]
+                if let Some(d) = callee {
+                    let mut positions = Vec::with_capacity(c.arguments.len() + 1);
+                    if let ExprKind::Access(Access::Dot { left, .. }) = c.left.kind() {
+                        positions.push(self.param_roots(left));
+                    }
+                    for arg in &c.arguments {
+                        positions.push(self.param_roots(&arg.value));
+                    }
+                    let mut ambients = Vec::new();
+                    if !self.loop_reads.is_empty() {
+                        ambients.reserve(c.arguments.len() + 1);
+                        if let ExprKind::Access(Access::Dot { left, .. }) = c.left.kind() {
+                            ambients.push(self.place_ambient(left));
+                        }
+                        for arg in &c.arguments {
+                            ambients.push(self.place_ambient(&arg.value));
+                        }
+                    }
+                    if self.pact_members.contains(&d) {
+                        for (m, _) in self.solver.member_impl_decs(d) {
+                            self.call_args.push((self.cur(), m, positions.clone()));
+                            if !self.loop_reads.is_empty() {
+                                self.loop_calls.push((
+                                    e.location(),
+                                    self.cur(),
+                                    m,
+                                    ambients.clone(),
+                                ));
+                            }
+                        }
+                    } else {
+                        self.call_args.push((self.cur(), d, positions));
+                        if !self.loop_reads.is_empty() {
+                            self.loop_calls
+                                .push((e.location(), self.cur(), d, ambients));
+                        }
+                    }
+                }
             }
             ExprKind::Access(Access::Dot { left, right, .. }) => {
                 // `r.id` reads `r.id`, not all of `r` -- check the place at its
@@ -1418,6 +1800,22 @@ impl<'a> Pass<'a> {
                 self.breaks = saved_breaks;
             }
             ExprKind::For(f) => {
+                self.own_loops.insert(self.cur());
+                // the iterated collection's param roots are this
+                // caller's own scans; the bound element inherits them
+                // as provenance (`for b in w.balls` makes `b` a `w`).
+                // A literal collection runs a bounded count of passes
+                // however big the world gets — `for t in [w.machines,
+                // w.gates]` is the kinds' width, not a `w` scan — while
+                // the element still reads as a `w` value, so a loop
+                // over IT scales.
+                let roots = self.param_roots(&f.iterator);
+                if !roots.is_empty() && !matches!(f.iterator.kind(), ExprKind::Literal(_)) {
+                    self.own_scans
+                        .entry(self.cur())
+                        .or_default()
+                        .extend(roots.iter().copied());
+                }
                 self.expr(&f.iterator);
                 let pre = self.flow.clone();
                 // the body may run zero times: its kills need the merge's arbitration
@@ -1427,6 +1825,11 @@ impl<'a> Pass<'a> {
                 self.loop_reads.push(FxHashSet::default());
                 self.push_scope();
                 self.bind(&f.binding, Site::Binding, false);
+                if !roots.is_empty() {
+                    for d in self.pat_decs(&f.binding) {
+                        self.provenance.insert(d, roots.clone());
+                    }
+                }
                 self.expr(&f.body);
                 self.pop_scope();
                 self.loop_floors.pop();
@@ -1435,6 +1838,16 @@ impl<'a> Pass<'a> {
                 self.end_loop(Some(pre), body_end);
             }
             ExprKind::While(w) => {
+                self.own_loops.insert(self.cur());
+                // `while i < w.balls.len()` paces itself on `w` — that
+                // is a `w` scan, the same as `for b in w.balls`
+                let roots = self.param_roots(&w.header);
+                if !roots.is_empty() {
+                    self.own_scans
+                        .entry(self.cur())
+                        .or_default()
+                        .extend(roots.iter().copied());
+                }
                 // the header re-evaluates per pass, so its reads count
                 // toward the back-edge set too
                 self.loop_reads.push(FxHashSet::default());
@@ -1446,6 +1859,11 @@ impl<'a> Pass<'a> {
                 self.push_scope();
                 if let Some(b) = &w.binding {
                     self.bind(b, Site::Binding, false);
+                    if !roots.is_empty() {
+                        for d in self.pat_decs(b) {
+                            self.provenance.insert(d, roots.clone());
+                        }
+                    }
                 }
                 self.expr(&w.body);
                 self.pop_scope();
@@ -1454,6 +1872,7 @@ impl<'a> Pass<'a> {
                 self.end_loop(Some(pre), body_end);
             }
             ExprKind::Loop(l) => {
+                self.own_loops.insert(self.cur());
                 self.breaks.push(Vec::new());
                 self.loop_floors.push(self.scope_decs.len());
                 self.loop_reads.push(FxHashSet::default());

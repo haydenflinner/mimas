@@ -87,6 +87,11 @@ impl Item {
         self.kind.as_ref()
     }
 
+    /// Consume the item and return its kind.
+    pub(crate) fn into_kind(self) -> ItemKind {
+        *self.kind
+    }
+
     pub(crate) fn kind_mut(&mut self) -> &mut ItemKind {
         self.kind.as_mut()
     }

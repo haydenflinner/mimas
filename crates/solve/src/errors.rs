@@ -1402,6 +1402,22 @@ pub struct DeadStore {
     pub name: String,
 }
 
+#[derive(Error, Debug, Diagnostic)]
+#[error("`{outer}` calls `{name}` inside a loop, and `{name}` iterates too")]
+#[diagnostic(
+    code(loop_call),
+    severity(Warning),
+    help("hoist `{name}` out of the loop, or pass it a cursor so its scan resumes where it stopped")
+)]
+pub struct LoopCall {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("`{name}` re-walks its collection on every pass")]
+    pub at: SourceSpan,
+    pub name: String,
+    pub outer: String,
+}
+
 // ---- grade-pass refusals (Stage 1 `consuming`) -- these fail the solve: a
 // consumed binding has been given away and the program must not pretend it
 // still has it.
