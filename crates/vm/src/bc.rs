@@ -426,6 +426,10 @@ pub mod jit {
         pub val_tag: usize,
         /// Width of the discriminant in bytes (1/2/4/8).
         pub tag_size: usize,
+        /// Byte width of `usize`/`isize` fields (`rl_flag`,
+        /// `vec_len`, `frame_ip`, `code_ip`, ...) — `size_of::<usize>()`,
+        /// 4 on wasm32, where an i64 load would read past the field.
+        pub word_size: usize,
         /// Byte offset of the `i64`/`f64` payload inside `Val::Int`/`Val::Float`
         /// (the two share the union's 8-byte slot).
         pub val_pay: usize,
@@ -599,6 +603,10 @@ pub mod jit {
 
         const N: usize = size_of::<Val<'static>>();
         let vsz = N;
+        /// Machine-word width — the pointer/payload scans below probe
+        /// word-sized slots, which are 4B on wasm32 (the wasm32 Layout
+        /// probe runs this same code there).
+        const PSZ: usize = size_of::<usize>();
         assert_eq!(vsz % 8, 0, "Val size not a multiple of 8");
         assert!(vsz <= 64, "Val unexpectedly large: {vsz}");
         // Raw bytes of a live `Val`. Uninit padding may hold garbage, so
@@ -809,9 +817,9 @@ pub mod jit {
                 .unwrap_or_else(|| panic!("Vec word {w:#x} not found in {words:x?}"))
         };
         let (vec_ptr, vec_len, vec_cap) = (
-            pos(v.as_ptr() as usize) * 8,
-            pos(v.len()) * 8,
-            pos(v.capacity()) * 8,
+            pos(v.as_ptr() as usize) * PSZ,
+            pos(v.len()) * PSZ,
+            pos(v.capacity()) * PSZ,
         );
         assert!(
             vec_ptr != vec_len && vec_len != vec_cap && vec_ptr != vec_cap,
@@ -849,8 +857,8 @@ pub mod jit {
                     let b = bytes(v);
                     let want = p.to_ne_bytes();
                     let mut found = None;
-                    for off in 0..=vsz - 8 {
-                        if b[off..off + 8] == want {
+                    for off in 0..=vsz - PSZ {
+                        if b[off..off + PSZ] == want {
                             assert!(found.is_none(), "ambiguous gc payload offset");
                             found = Some(off);
                         }
@@ -866,10 +874,10 @@ pub mod jit {
                 let rli: &gc_arena::RefLock<InstanceData> = &*i.0;
                 let rl_inst = rli.as_ptr() as usize - rli as *const _ as usize;
                 // borrow flag: the word that goes 0 → nonzero on `borrow()`.
-                let nwords = size_of::<gc_arena::RefLock<Vec<Val>>>() / 8;
-                let words = |p: *const u8| -> Vec<i64> {
+                let nwords = size_of::<gc_arena::RefLock<Vec<Val>>>() / PSZ;
+                let words = |p: *const u8| -> Vec<usize> {
                     (0..nwords)
-                        .map(|w| unsafe { p.add(w * 8).cast::<i64>().read_unaligned() })
+                        .map(|w| unsafe { p.add(w * PSZ).cast::<usize>().read_unaligned() })
                         .collect()
                 };
                 let rlb = rl as *const _ as *const u8;
@@ -885,17 +893,17 @@ pub mod jit {
                     if before[w] == 0 && during[w] == 1 {
                         // one shared borrow: flag == 1; mut borrow is -1
                         assert!(flag.is_none(), "ambiguous borrow flag word");
-                        flag = Some(w * 8);
+                        flag = Some(w * PSZ);
                     }
                 }
                 let rl_flag = flag.expect("RefCell borrow flag not found");
                 // same flag probe for `RefLock<InstanceData>` — `RefCell`'s
                 // field order is rustc's to choose per T
-                let nwords_i = size_of::<gc_arena::RefLock<InstanceData>>() / 8;
+                let nwords_i = size_of::<gc_arena::RefLock<InstanceData>>() / PSZ;
                 let rlib = rli as *const _ as *const u8;
-                let words_i = |p: *const u8| -> Vec<i64> {
+                let words_i = |p: *const u8| -> Vec<usize> {
                     (0..nwords_i)
-                        .map(|w| unsafe { p.add(w * 8).cast::<i64>().read_unaligned() })
+                        .map(|w| unsafe { p.add(w * PSZ).cast::<usize>().read_unaligned() })
                         .collect()
                 };
                 let before_i = words_i(rlib);
@@ -909,7 +917,7 @@ pub mod jit {
                 for w in 0..nwords_i {
                     if before_i[w] == 0 && during_i[w] == 1 {
                         assert!(flag_i.is_none(), "ambiguous borrow flag word");
-                        flag_i = Some(w * 8);
+                        flag_i = Some(w * PSZ);
                     }
                 }
                 let rl_flag_i = flag_i.expect("RefCell borrow flag not found");
@@ -959,8 +967,8 @@ pub mod jit {
                 let b = bytes(v);
                 let want = p.to_ne_bytes();
                 let mut found = None;
-                for off in 0..=vsz - 8 {
-                    if b[off..off + 8] == want {
+                for off in 0..=vsz - PSZ {
+                    if b[off..off + PSZ] == want {
                         assert!(found.is_none(), "ambiguous gc payload offset");
                         found = Some(off);
                     }
@@ -988,11 +996,11 @@ pub mod jit {
             // the same trick `rl_vec`/`rl_flag` used for RefLock<Vec<Val>>.
             let rls = &*si.0;
             let rl_seq = rls.as_ptr() as usize - rls as *const _ as usize;
-            let nwords_s = size_of_val(rls) / 8;
+            let nwords_s = size_of_val(rls) / PSZ;
             let rlsb = rls as *const _ as *const u8;
-            let words_s = |p: *const u8| -> Vec<i64> {
+            let words_s = |p: *const u8| -> Vec<usize> {
                 (0..nwords_s)
-                    .map(|w| unsafe { p.add(w * 8).cast::<i64>().read_unaligned() })
+                    .map(|w| unsafe { p.add(w * PSZ).cast::<usize>().read_unaligned() })
                     .collect()
             };
             let before_s = words_s(rlsb);
@@ -1006,7 +1014,7 @@ pub mod jit {
             for w in 0..nwords_s {
                 if before_s[w] == 0 && during_s[w] == 1 {
                     assert!(flag_s.is_none(), "ambiguous borrow flag word");
-                    flag_s = Some(w * 8);
+                    flag_s = Some(w * PSZ);
                 }
             }
             let rl_flag_s = flag_s.expect("RefLock<ArrayStore> flag probe failed");
@@ -1337,6 +1345,7 @@ pub mod jit {
             val_size: vsz,
             val_tag: tag,
             tag_size: dsz,
+            word_size: size_of::<usize>(),
             val_pay: pay,
             bool_pay,
             fn_pay,
@@ -1400,6 +1409,48 @@ pub mod jit {
             cl_func: offset_of!(crate::val::ClosureData, function),
             cl_caps: offset_of!(crate::val::ClosureData, captures),
         }
+    }
+
+    /// `Layout` as a flat `u64` list — the cross-target probe encoding.
+    /// A wasm build of `mimas-plwasm` runs `layout()` there and returns
+    /// these values over the wasm ABI; the host-side harness rebuilds a
+    /// `Layout` with [`layout_from_pairs`] so generated wasm gets the
+    /// *wasm32* offsets, not the host's. The macro list drives the
+    /// `Layout { .. }` literal in `layout_from_pairs`, so a field added
+    /// to `Layout` but not listed here fails to compile — the two
+    /// directions can't drift.
+    macro_rules! layout_fields {
+        ($($f:ident),+ $(,)?) => {
+            /// `layout()`'s values in the `layout_fields!` order.
+            pub fn layout_pairs(l: &Layout) -> Vec<u64> {
+                vec![$(l.$f as u64),+]
+            }
+            /// Inverse of [`layout_pairs`]; panics on a length mismatch.
+            pub fn layout_from_pairs(v: &[u64]) -> Layout {
+                let mut it = v.iter().copied();
+                let l = Layout {
+                    $($f: it.next().expect("layout_from_pairs: short") as _),+
+                };
+                assert!(it.next().is_none(), "layout_from_pairs: extra values");
+                l
+            }
+        };
+    }
+
+    layout_fields! {
+        val_size, val_tag, tag_size, word_size, val_pay, bool_pay, fn_pay,
+        t_null, t_bool, t_int, t_float, t_fn,
+        regs_off, frames_off, ops_left_off, vec_ptr, vec_len, vec_cap,
+        frame_size, frame_base, frame_chunk, frame_ip, frame_ret,
+        code_ip, state_paused,
+        t_str, t_array, t_instance, arr_pay, inst_pay, rl_vec, rl_flag,
+        id_sid, id_fields, rl_inst, rl_flag_i,
+        fld_tag, fld_tsz, fld_inline, fld_len, fld_data, fld_spilled,
+        out_tag, out_tsz, out_ret, out_ret_pay,
+        t_intarray, t_floatarray, t_dict, seq_pay, dict_pay, str_pay,
+        rl_seq, rl_flag_s, as_tag, as_tsz, as_ints, as_floats,
+        as_ints_vec, as_floats_vec, as_vals, as_vals_arr,
+        t_closure, cl_pay, cl_func, cl_caps,
     }
 
     // ---- result-slot writers (`out: *mut RtResult<Flow>`) ----
@@ -1556,7 +1607,8 @@ pub mod jit {
             let code = &mut *code;
             let saved = code.ip;
             code.ip = off;
-            debug_assert!(matches!(OpCode::decode(code), OpCode::Format));
+            let _op = OpCode::decode(code);
+            debug_assert!(matches!(_op, OpCode::Format));
             let dst = Reg::decode(code);
             let len = code.u16();
             let r = FORMAT_SCRATCH.with(|s| -> RtResult<Val<'gc>> {

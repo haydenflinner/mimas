@@ -5750,6 +5750,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "mimas-plwasm"
+version = "0.2.0"
+dependencies = [
+ "getrandom 0.4.3",
+ "mimas-compile",
+ "mimas-library",
+ "mimas-vm",
+]
+
+[[package]]
 name = "mimas-shared"
 version = "0.2.0"
 dependencies = [
