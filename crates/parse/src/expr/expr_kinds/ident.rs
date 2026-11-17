@@ -30,6 +30,15 @@ impl Ident {
     pub fn is_identity(&self) -> bool {
         matches!(self.lexeme.as_str(), "self" | "Self")
     }
+
+    // r[impl mimas.self.unread]
+    /// Whether this ident names a method's receiver parameter: `self`,
+    /// or the deliberately-unread `_self`. `_self` binds under its own
+    /// name — `self.` does not resolve inside the body — and the usual
+    /// `_` convention keeps the unused-parameter lint quiet.
+    pub fn is_receiver(&self) -> bool {
+        matches!(self.lexeme.as_str(), "self" | "_self")
+    }
 }
 
 impl From<Ident> for String {

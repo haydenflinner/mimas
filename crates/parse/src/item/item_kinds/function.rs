@@ -65,7 +65,7 @@ impl Function {
         self.parameters
             .first()
             .and_then(|b| b.left.as_ident())
-            .is_some_and(|i| i.lexeme == "self")
+            .is_some_and(|i| i.is_receiver())
     }
 }
 impl From<Function> for ItemKind {

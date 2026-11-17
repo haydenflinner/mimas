@@ -4810,8 +4810,9 @@ impl Solver {
 
         // `self` inside an impl method gets its type fixed to the impl target -- same effect as
         // writing `self: Self` explicitly. outside an impl, the body-pass declare leaves it as a
-        // vid and SelfOutOfContext fires at first use.
-        if ident.lexeme == "self"
+        // vid and SelfOutOfContext fires at first use. `_self` counts too: it is the receiver
+        // under a deliberately-unread name.
+        if ident.is_receiver()
             && let Some(mut target) = self.impl_target_ty()
         {
             ty.fulfill_ty(&mut target, self)

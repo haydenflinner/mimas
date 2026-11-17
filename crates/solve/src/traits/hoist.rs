@@ -516,7 +516,7 @@ impl Hoist for Pact {
                     let is_method = parameters
                         .first()
                         .and_then(|b| b.left.as_ident())
-                        .is_some_and(|i| i.lexeme == "self");
+                        .is_some_and(|i| i.is_receiver());
 
                     let default = body.as_ref().map(|v| Ty::Vid(ctx.solver.node_vid(v.id())));
 

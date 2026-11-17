@@ -50,7 +50,7 @@ impl Parser<'_> {
         if member
             && !parameters
                 .first()
-                .is_some_and(|p| p.left.to_string() == "self")
+                .is_some_and(|p| p.left.as_ident().is_some_and(|i| i.is_receiver()))
         {
             parameters.insert(0, Binding::new(self.ident_at("self", self.next_start())));
         }
@@ -233,7 +233,7 @@ impl Parser<'_> {
         // the receiver rides first, as accessor arms' `self` does.
         if !parameters
             .first()
-            .is_some_and(|p| p.left.to_string() == "self")
+            .is_some_and(|p| p.left.as_ident().is_some_and(|i| i.is_receiver()))
         {
             parameters.insert(0, Binding::new(self.ident_at("self", self.next_start())));
         }
@@ -491,7 +491,7 @@ impl Parser<'_> {
             if removable {
                 let member = parameters
                     .first()
-                    .is_some_and(|p| p.left.to_string() == "self");
+                    .is_some_and(|p| p.left.as_ident().is_some_and(|i| i.is_receiver()));
                 let method =
                     self.new_expr(self.ident_at(format!("__sub_{name}_remove"), start), start);
                 let callee = if member {
