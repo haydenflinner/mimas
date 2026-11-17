@@ -1237,7 +1237,21 @@ impl Lower for Expr {
             ExprKind::Access(access) => access.emit(id, ir),
             ExprKind::Block(block) => block.emit(id, ir),
             ExprKind::Break(b) => b.emit(id, ir),
-            ExprKind::Call(call) => call.emit(id, ir),
+            ExprKind::Call(call) => {
+                // `f(&g[i])` lends the place for the call only: the borrow's
+                // pending cleanup drains when the callee returns, ahead of the
+                // block scope a `let p = &g[i]` alias would keep.
+                // r[impl mimas.inout.param]
+                let scoped =
+                    ir.resolutions.inout_calls.contains(&id) && ir.begin_cleanup_scope();
+                let out = call.emit(id, ir);
+                if scoped {
+                    let floor = ir.current_body().cleanup_scopes.len() - 1;
+                    if out.is_some() { ir.finish_cleanup_scopes(floor); }
+                    ir.current_body_mut().cleanup_scopes.pop();
+                }
+                out
+            }
             ExprKind::Closure(closure) => closure.emit(id, ir),
             ExprKind::Coalescence(coalescence) => coalescence.emit(id, ir),
             ExprKind::Collect(collect) => collect.emit(id, ir),

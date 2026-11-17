@@ -2,8 +2,8 @@ use crate::FxHashMap;
 use crate::{
     Error, FnRun, LoopRun, Result, Solver, Unification, array,
     components::{
-        Adt, AdtFlags, AdtId, DecKind, Field, Flow, FnHeader, FnParam, Len, Quantification, Ty,
-        TyExt, Variant,
+        Adt, AdtFlags, AdtId, DecId, DecKind, Field, Flow, FnHeader, FnParam, Len, Quantification,
+        Ty, TyExt, Variant,
     },
     errors::*,
     option,
@@ -1396,6 +1396,23 @@ impl Solve for Call {
             let (closures, rest): (Vec<_>, Vec<_>) = args_by_slot
                 .iter()
                 .partition(|(_, arg)| matches!(arg.value.kind(), ExprKind::Closure(_)));
+            // `&` loans collect their root decs so exclusivity can check them
+            // pairwise and against the roots a sibling argument reads.
+            // r[impl mimas.inout.exclusive]
+            let mut lent: Vec<(DecId, String, Location)> = Vec::new();
+            let mut plain_roots: Vec<(DecId, String, Location)> = Vec::new();
+            let borrow_root = |solver: &Solver, arg: &parse::Argument| {
+                solver
+                    .place_sources
+                    .get(&arg.value.id())
+                    .and_then(crate::root_and_path)
+                    .and_then(|(root, _)| {
+                        solver
+                            .ribs
+                            .resolve(root)
+                            .map(|dec| (dec, root.lexeme.clone(), root.location()))
+                    })
+            };
             for &(slot, arg) in rest.iter().chain(&closures) {
                 if matches!(arg.value.kind(), ExprKind::Closure(_))
                     && let Ty::Fn(header) = params[slot].ty.clone().normalized(solver)
@@ -1404,7 +1421,81 @@ impl Solve for Call {
                         .expected_closures
                         .insert(arg.value.id(), header.parameters);
                 }
-                arg.value.fulfill_ty(params[slot].ty.clone(), solver)?;
+                let is_borrow = matches!(arg.value.kind(), ExprKind::Call(c) if c
+                    .left
+                    .as_ident()
+                    .is_some_and(|i| i.lexeme == "__borrow_place"));
+                match solver.place_element(&params[slot].ty) {
+                    Some((removable, mut elem)) => {
+                        // an `inout` parameter takes a place, spelled `&` at the
+                        // call -- a bare value has no slot to write back through.
+                        // r[impl mimas.inout.param]
+                        if !is_borrow {
+                            Err(crate::errors::InoutArgument {
+                                src: solver.src(arg.value.location()),
+                                at: arg.value.location().into(),
+                                param: params[slot]
+                                    .name
+                                    .clone()
+                                    .unwrap_or_else(|| "parameter".to_string()),
+                            })?
+                        }
+                        solver.allowed_borrows.insert(arg.value.id());
+                        let mut arg_ty = arg.value.query(solver)?;
+                        match solver.place_element(&arg_ty) {
+                            // a removable place still lends where removal is
+                            // not on offer; the reverse would fabricate a
+                            // `remove` the source place doesn't have.
+                            Some((arg_removable, _)) if removable && !arg_removable => {
+                                let mut want = params[slot].ty.clone();
+                                arg_ty
+                                    .fulfill_ty(&mut want, solver)
+                                    .map_err(|e| {
+                                        e.into_type_mismatch(solver, arg.value.location())
+                                    })?;
+                            }
+                            Some((_, mut arg_elem)) => {
+                                arg_elem
+                                    .fulfill_ty(&mut elem, solver)
+                                    .map_err(|e| {
+                                        e.into_type_mismatch(solver, arg.value.location())
+                                    })?;
+                            }
+                            None => {
+                                arg.value.fulfill_ty(params[slot].ty.clone(), solver)?;
+                            }
+                        }
+                        if let Some(rooted) = borrow_root(solver, arg) {
+                            lent.push(rooted);
+                        }
+                        solver.inout_calls.insert(id);
+                    }
+                    None => {
+                        // a `&` here was never claimed by an inout slot, so the
+                        // borrow errors inside `fulfill_ty` -- only plain args
+                        // reach the roots below.
+                        arg.value.fulfill_ty(params[slot].ty.clone(), solver)?;
+                        if let Some((root, _)) = crate::root_and_path(&arg.value)
+                            && let Some(dec) = solver.ribs.resolve(root)
+                        {
+                            plain_roots.push((dec, root.lexeme.clone(), root.location()));
+                        }
+                    }
+                }
+            }
+            // r[impl mimas.inout.exclusive]
+            for (i, (dec, name, at)) in lent.iter().enumerate() {
+                let overlap = lent[..i]
+                    .iter()
+                    .chain(&plain_roots)
+                    .find(|(d, ..)| d == dec);
+                if overlap.is_some() {
+                    Err(crate::errors::InoutAlias {
+                        src: solver.src(*at),
+                        at: (*at).into(),
+                        root: name.clone(),
+                    })?
+                }
             }
             if params
                 .iter()
@@ -1478,6 +1569,11 @@ impl Solve for Closure {
                 binding.left.id(),
                 param.ty.clone(),
             )?;
+            if solver.inout_params.contains(&binding.left.id())
+                && let Some(&dec) = solver.node_decs.get(&binding.left.id())
+            {
+                solver.inout_decs.insert(dec);
+            }
             parameters.push(param);
         }
 
@@ -2214,6 +2310,14 @@ impl Solve for Function {
 
         for (param, Binding { left, .. }) in param_tys.zip(parse_params) {
             solver.declare(left.as_ident().unwrap(), left.id(), param.ty.clone())?;
+            // an `inout` param's dec holds a lent place: captures and returns
+            // of it are escapes, so the name is worth remembering.
+            // r[impl mimas.inout.escape]
+            if solver.inout_params.contains(&left.id())
+                && let Some(&dec) = solver.node_decs.get(&left.id())
+            {
+                solver.inout_decs.insert(dec);
+            }
         }
 
         // `where` predicates solve in the parameter scope -- `xs.len() > 2` sees
@@ -2321,12 +2425,23 @@ impl Solve for Ident {
         if let Some((dec_id, crossed)) = resolved {
             solver.node_decs.insert(id, dec_id);
             if matches!(solver.decs[dec_id].kind, DecKind::Local | DecKind::LoopVar) {
-                for closure in crossed {
+                for closure in &crossed {
                     solver
                         .closure_captures
-                        .entry(closure)
+                        .entry(*closure)
                         .or_default()
                         .insert(dec_id);
+                }
+                // an inout param's place is lent for the call it arrived on --
+                // a closure that keeps it would outlive the loan.
+                // r[impl mimas.inout.escape]
+                if solver.inout_decs.contains(&dec_id) && !crossed.is_empty() {
+                    Err(crate::errors::InoutEscape {
+                        src: solver.src(self.location()),
+                        at: self.location().into(),
+                        name: self.lexeme.clone(),
+                        via: "captured by a closure".to_string(),
+                    })?;
                 }
             }
             // a pact name resolves so `P::CONST` paths have a head type, but
@@ -3176,6 +3291,23 @@ impl Solve for Return {
             .value
             .as_ref()
             .map_or(Ok(Ty::Unit), |e| e.query(solver))?;
+
+        // `return &x` on an inout param: the lent place would outlive the call.
+        // r[impl mimas.inout.escape]
+        if let Some(value) = &self.value
+            && let Some(source) = solver.place_sources.get(&value.id())
+            && let Some((root, _)) = crate::root_and_path(source)
+        {
+            let root_dec = solver.ribs.resolve(root);
+            if root_dec.is_some_and(|d| solver.inout_decs.contains(&d)) {
+                Err(crate::errors::InoutEscape {
+                    src: solver.src(root.location()),
+                    at: root.location().into(),
+                    name: root.lexeme.clone(),
+                    via: "returned".to_string(),
+                })?;
+            }
+        }
 
         this_ty
             .fulfill_ty(&mut expected_ty, solver)

@@ -29,6 +29,9 @@ pub enum Annotation {
     /// type arguments for a generic type, or a single unit (`Interval<kW>`) -- the checker
     /// knows which the head is.
     Applied(Vec<Ident>, Vec<Annotation>),
+    /// `x: inout T` -- the `inout` call convention before a parameter's type: the callee
+    /// binds the place the caller lent with `&`. The keyword keeps its ident for errors.
+    Inout(Ident, Box<Annotation>),
     Poison(Poison),
 }
 
@@ -77,6 +80,7 @@ impl std::fmt::Display for Annotation {
                 ty.iter().map(|i| i.to_string()).join("::"),
                 args.iter().join(", ")
             )),
+            Annotation::Inout(_, inner) => f.pad(&format!("inout {inner}")),
             Annotation::Poison(_) => f.pad(POISON),
         }
     }

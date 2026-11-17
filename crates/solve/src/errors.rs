@@ -1636,3 +1636,62 @@ pub struct SubscriptUse {
     pub at: SourceSpan,
     pub message: String,
 }
+
+/// `inout` written off a parameter's annotation. It is a call convention,
+/// not a type, so fields, returns, lets and bounds cannot hold it.
+#[derive(Error, Debug, Diagnostic)]
+#[error("`inout` is a call convention, not a type")]
+pub struct InoutPosition {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("only a parameter's type can be `inout` — `fn f(x: inout int)`")]
+    pub at: SourceSpan,
+}
+
+/// A plain value where an `inout` parameter wants a place: the call must
+/// mark the argument `&` so the callee reads and writes the caller's slot.
+#[derive(Error, Debug, Diagnostic)]
+#[error("`{param}` is an `inout` parameter — lend it a place")]
+pub struct InoutArgument {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("write `&` in front — `&` lends a place, a bare value has none")]
+    pub at: SourceSpan,
+    pub param: String,
+}
+
+/// Two arguments share one root binding where `&` loans must be exclusive:
+/// the lent places could alias the same slot.
+#[derive(Error, Debug, Diagnostic)]
+#[error("`&` arguments overlap at `{root}`")]
+pub struct InoutAlias {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("another argument loans from the same `{root}` binding")]
+    pub at: SourceSpan,
+    pub root: String,
+}
+
+/// A lent place leaving its call: captured by a closure or returned, so the
+/// descriptor could outlive the loan.
+#[derive(Error, Debug, Diagnostic)]
+#[error("the `{name}` place is lent for this call only")]
+pub struct InoutEscape {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("an inout parameter cannot be {via}")]
+    pub at: SourceSpan,
+    pub name: String,
+    pub via: String,
+}
+
+/// `x: inout T = v` — a loan has no value to default to; the caller must
+/// always lend its own place.
+#[derive(Error, Debug, Diagnostic)]
+#[error("an `inout` parameter takes no default value")]
+pub struct InoutDefault {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("the caller supplies the place with `&`; there is nothing to default to")]
+    pub at: SourceSpan,
+}
