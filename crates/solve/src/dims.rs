@@ -704,6 +704,9 @@ impl<'a> Pass<'a> {
             {
                 self.annotation(&args[0])
             }
+            // `inout` lends a place: the binding's reads/writes dim at the
+            // element, so the descriptor carries `Place`, like a `&` source
+            Annotation::Inout(_, inner) => D::Place(Box::new(self.annotation(inner))),
             Annotation::Option(inner) | Annotation::Result(inner) => self.annotation(inner),
             Annotation::Array(inner, _) => D::Arr(Box::new(self.annotation(inner))),
             Annotation::Tuple(parts) => {
@@ -756,7 +759,10 @@ impl<'a> Pass<'a> {
                     self.written.entry(dim).or_insert((text, scale));
                 }
             }
-            Annotation::Array(inner, _) | Annotation::Option(inner) | Annotation::Result(inner) => {
+            Annotation::Array(inner, _)
+            | Annotation::Option(inner)
+            | Annotation::Result(inner)
+            | Annotation::Inout(_, inner) => {
                 self.note_written(inner)
             }
             // `dec<usd>`, `Interval<kW>`: the unit inside

@@ -226,3 +226,92 @@ test_fail!(
     inout_param_takes_no_default,
     "fn bump(x: inout int = 0) { x += 1; }",
 );
+
+// an `inout` type may be any name the param scope resolves -- a sibling
+// file's decl (the `use "…"` splice shape), a `use`-imported module member,
+// or a path -- not only a local or builtin. r[verify mimas.inout.param]
+#[test]
+fn inout_param_type_from_host_spliced_file() {
+    let kit = r#"
+struct Tour { step: int }
+fn tour() -> Tour { Tour { step = 0 } }
+"#;
+    let main = r#"
+use "tour-kit";
+fn next(b: inout Tour) { b.step += 1; }
+struct W { tour: Tour }
+let w = W { tour = tour() };
+next(&w.tour);
+"#;
+    vm::Vm::execute_files(&[("tour-kit", kit), ("main", main)], library::std)
+        .expect("spliced-file inout param type resolves");
+}
+
+// r[verify mimas.inout.param]
+#[test]
+fn inout_param_type_from_module_uses() {
+    let kit = r#"
+module kit;
+pub struct Tour { step: int }
+pub fn tour() -> Tour { Tour { step = 0 } }
+"#;
+    // `use kit::Tour` then `inout Tour`; `use kit` then `inout kit::Tour`
+    let named = r#"
+use kit::Tour;
+use kit::tour;
+fn next(b: inout Tour) { b.step += 1; }
+struct W { tour: Tour }
+let w = W { tour = tour() };
+next(&w.tour);
+"#;
+    let pathed = r#"
+use kit;
+fn next(b: inout kit::Tour) { b.step += 1; }
+struct W { tour: kit::Tour }
+let w = W { tour = kit::tour() };
+next(&w.tour);
+"#;
+    for main in [named, pathed] {
+        vm::Vm::execute_files(&[("kit", kit), ("main", main)], library::std)
+            .expect("module-imported inout param type resolves");
+    }
+}
+
+// r[verify mimas.inout.param]
+#[test]
+fn inout_param_type_across_page_marks() {
+    // the host splices `use "…"` pages in under `//# page:` marks -- the
+    // marks bound operator shadowing, never name resolution
+    let src = r#"//# page: tour-kit
+struct Tour { step: int }
+fn tour() -> Tour { Tour { step = 0 } }
+fn to(b: inout Tour, step: int) { b.step = step; }
+
+//# page:
+use "tour-kit";
+fn next(b: inout Tour) { to(&b, 7); }
+struct W { tour: Tour }
+let w = W { tour = tour() };
+next(&w.tour);
+"#;
+    vm::Vm::execute(src, library::std).expect("page-spliced inout param resolves");
+}
+
+// `x: inout s` lends a place of `s`: the callee's writes check against
+// the element dimension, like `x: s` checks its assignments.
+// r[verify mimas.inout.param]
+test_fail!(
+    inout_param_writes_check_the_element_dim,
+    "fn f(x: inout s) { x += 1.0 }",
+);
+
+// r[verify mimas.inout.param]
+test_run!(
+    inout_param_writes_keep_the_element_dim,
+    "fn f(x: inout s) { x += 1.0s; }
+     struct B { t: s }
+     let b = B { t = 1.0s };
+     f(&b.t);
+     let got = b.t.to(1s);",
+    "got" => "2.0",
+);
