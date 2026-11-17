@@ -1,0 +1,20 @@
+[package]
+name = "mimas-plgen"
+version = "0.2.0"
+edition = "2024"
+publish = false
+description = "pliron LLVM-dialect emitter for mimas bytecode: emits one llvm.func per chunk at the BodyFn ABI as .pliron text, for the pliron-clif-lower object pipeline. Unspecialized ops delegate to the interpreter via the same extern-C shims the Cranelift JIT uses."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "mimas_plgen"
+
+[dependencies]
+vm = { package = "mimas-vm", path = "../vm", version = "0.2.0", default-features = false }
+compile = { package = "mimas-compile", path = "../compile", version = "0.2.0" }
+
+[dev-dependencies]
+library = { package = "mimas-library", path = "../library", default-features = false }
