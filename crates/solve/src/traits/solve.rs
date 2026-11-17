@@ -1646,8 +1646,13 @@ impl Solve for Enum {
             })
             .collect();
         solver.adts[adt] = normalized;
-        for (layout, adt) in layouts {
-            solver.adts[layout] = adt;
+        for (layout, mut layout_adt) in layouts {
+            // the rebuild drops what hoist recorded: the layout still
+            // belongs to this enum, or `enum_parent` can't answer and the
+            // variant-is-a-enum widening below has nothing to find.
+            // r[impl mimas.multi]
+            layout_adt.enum_of = Some(adt);
+            solver.adts[layout] = layout_adt;
         }
 
         Ok(Ty::adt(adt))
