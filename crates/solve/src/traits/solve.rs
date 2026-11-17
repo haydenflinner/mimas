@@ -1469,6 +1469,12 @@ impl Solve for Call {
                             lent.push(rooted);
                         }
                         solver.inout_calls.insert(id);
+                        // a `&binding` loans through a cell: the call writes
+                        // `__cell[0]` back into the binding when it returns.
+                        // r[impl mimas.inout.binding]
+                        if let Some(&writeback) = solver.binding_borrows.get(&arg.value.id()) {
+                            solver.inout_writebacks.entry(id).or_default().push(writeback);
+                        }
                     }
                     None => {
                         // a `&` here was never claimed by an inout slot, so the

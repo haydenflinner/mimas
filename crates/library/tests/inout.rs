@@ -315,3 +315,131 @@ test_run!(
      let got = b.t.to(1s);",
     "got" => "2.0",
 );
+
+// `&c` lends a whole `let` binding: the descriptor reads and writes a
+// one-slot cell, and the call stores the cell back into `c` when it
+// returns -- the tour kit's `let c = tour(); to(&c, 3)` shape.
+// r[verify mimas.inout.binding]
+test_run!(
+    inout_lends_a_whole_binding,
+    "struct Tour { step: int }
+     fn tour() -> Tour { Tour { step = 0 } }
+     fn to(b: inout Tour, step: int) { b.step = step; }
+     let c = tour();
+     to(&c, 3);
+     let got = c.step;",
+    "got" => "3",
+);
+
+// a scalar binding lends the same way -- `&n` on a bare `int`.
+// r[verify mimas.inout.binding]
+test_run!(
+    inout_lends_a_scalar_binding,
+    "fn bump(x: inout int) { x += 1; }
+     let n = 0;
+     bump(&n);
+     bump(&n);
+     bump(&n);
+     let got = n;",
+    "got" => "3",
+);
+
+// `&w` on a function's own param -- the `tick(w) -> W` game-loop shape
+// where helpers take `inout` of the world struct.
+// r[verify mimas.inout.binding]
+test_run!(
+    inout_lends_a_param_binding,
+    "struct Tour { step: int }
+     struct W { tour: Tour }
+     fn bump(w: inout W) { w.tour.step += 1; }
+     fn tick(w: W) -> W { bump(&w); bump(&w); w }
+     let w = tick(W { tour = Tour { step = 0 } });
+     let got = w.tour.step;",
+    "got" => "2",
+);
+
+// a top-level `let` lends from inside a function's body.
+// r[verify mimas.inout.binding]
+test_run!(
+    inout_lends_a_global_binding,
+    "fn bump(x: inout int) { x += 1; }
+     let g = 0;
+     fn f() { bump(&g); }
+     f();
+     f();
+     let got = g;",
+    "got" => "2",
+);
+
+// a whole `[T]` binding lends; the callee's mutation lands in the list.
+// r[verify mimas.inout.binding]
+test_run!(
+    inout_lends_a_list_binding,
+    "fn push(l: inout [int]) { l.push(9); }
+     let xs = [1, 2];
+     push(&xs);
+     let got = xs.len();",
+    "got" => "3",
+);
+
+// writes land when the call returns: a later read sees them, and a
+// later loan starts from them. r[verify mimas.inout.binding]
+test_run!(
+    inout_writebacks_are_sequential,
+    "fn bump(x: inout int) { x += 10; }
+     fn read(x: int) -> int { x }
+     let n = 1;
+     bump(&n);
+     let r = read(n);
+     bump(&n);
+     let got = n + r;",
+    "got" => "32",
+);
+
+// `let p = &c` on a bare binding has no call boundary to write back at.
+// r[verify mimas.inout.binding]
+test_fail!(
+    inout_binding_lend_is_call_scoped,
+    "fn bump(x: inout int) { x += 1; }
+     let n = 0;
+     let p = &n;",
+);
+
+// `&c` of a captured binding would write the closure's copy back, never
+// the original. r[verify mimas.inout.escape]
+test_fail!(
+    inout_binding_lend_rejects_captures,
+    "fn bump(x: inout int) { x += 1; }
+     fn f() {
+         let n = 0;
+         let g = || bump(&n);
+         g();
+     }",
+);
+
+// a `for` variable's binding is the loop's, not the body's.
+// r[verify mimas.inout.binding]
+test_fail!(
+    inout_binding_lend_rejects_loop_vars,
+    "fn bump(x: inout int) { x += 1; }
+     for n in [1, 2] { bump(&n); }",
+);
+
+// two whole-binding lends of the same root alias one slot.
+// r[verify mimas.inout.exclusive]
+test_fail!(
+    inout_binding_lends_stay_exclusive,
+    "fn swap(a: inout int, b: inout int) { let t = a; a = b; b = t; }
+     let n = 1;
+     swap(&n, &n);",
+);
+
+// `&c` of a plain `c` can't fill an `inout s` slot any more than `c`
+// could fill `x: s` -- the place clashes on its element.
+// r[verify mimas.inout.binding]
+test_fail!(
+    inout_binding_lend_checks_the_element_dim,
+    "fn f(x: inout s) { x += 1.0s; }
+     let c = 0.0;
+     f(&c);",
+);

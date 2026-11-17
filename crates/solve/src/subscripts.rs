@@ -505,6 +505,10 @@ impl Solver {
             self.builtin_place(id, &argument.value)?
         };
         let ty = rewritten.query(self)?;
+        if let Some((root, cell)) = self.binding_borrow_cells.remove(&id) {
+            let cell = self.node_decs[&cell.id];
+            self.binding_borrows.insert(id, (root, cell));
+        }
         self.rewrites.insert(id, rewritten);
         Ok(Some(ty))
     }
@@ -656,6 +660,69 @@ impl Solver {
                         Access::Dot {
                             left: ident(&receiver, at),
                             right: right.clone(),
+                            kind: AccessKind::Direct,
+                        },
+                        at,
+                    ),
+                    None,
+                )
+            }
+            ExprKind::Ident(name) => {
+                // `&c` lends a whole binding: the descriptor's closures
+                // capture copies, so `c` itself is out of reach. The place
+                // reads/writes a one-slot cell instead, and the call that
+                // holds the loan stores `__cell[0]` back into `c` when it
+                // returns -- a kept `&c` has no call boundary to write back
+                // at, so it can't exist. r[impl mimas.inout.binding]
+                if self.kept_borrows.contains(&id) {
+                    return Err(crate::errors::SubscriptUse {
+                        src: self.src(at),
+                        at: at.into(),
+                        message: "a `&` on a bare binding lends to an `inout` call only -- a kept place needs a field, a list slot, or a mutable accessor".into(),
+                    }
+                    .into());
+                }
+                e.query(self)?;
+                let Some((dec, crossed)) = self.ribs.resolve_with_closures(name) else {
+                    unreachable!("a `&` operand the solver queried resolves");
+                };
+                if matches!(self.decs[dec].kind, DecKind::LoopVar) {
+                    return Err(crate::errors::SubscriptUse {
+                        src: self.src(at),
+                        at: at.into(),
+                        message: "a `&` can't lend a `for` variable -- its binding is the loop's, not the body's".into(),
+                    }
+                    .into());
+                }
+                // a captured `c` is the closure's copy: the write-back would
+                // land there and the original's slot would never see it
+                if !crossed.is_empty() {
+                    return Err(crate::errors::SubscriptUse {
+                        src: self.src(at),
+                        at: at.into(),
+                        message: "a `&` can't lend a captured binding -- the loan can't reach the original's slot".into(),
+                    }
+                    .into());
+                }
+                self.check_iter_guard(dec, &[], at)?;
+                let cell = Ident::new(&receiver, at);
+                body.push(Stmt::new(
+                    Let {
+                        left: cell.clone().into(),
+                        annotation: None,
+                        right: expr(Literal::Array(vec![e.clone()]), at),
+                        else_branch: None,
+                    }
+                    .into(),
+                    NodeId::new(),
+                    at,
+                ));
+                self.binding_borrow_cells.insert(id, (dec, cell));
+                (
+                    expr(
+                        Access::Square {
+                            left: ident(&receiver, at),
+                            key: expr(Literal::Int(0), at),
                             kind: AccessKind::Direct,
                         },
                         at,

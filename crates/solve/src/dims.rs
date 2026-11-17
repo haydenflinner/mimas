@@ -99,6 +99,9 @@ fn clash(a: &D, b: &D) -> Option<(Dim, Dim)> {
             Some((*x, *y))
         }
         (D::Arr(x), D::Arr(y)) => clash(x, y),
+        // a place clashes on its element: `&c` of a plain `c` can't fill an
+        // `inout s` slot any more than `c` could fill `x: s`
+        (D::Place(x), D::Place(y)) => clash(x, y),
         // member-wise: a swapped `(px↕, px↔)` reports its first bad slot,
         // an arity miss the type solver's own error
         (D::Tuple(x), D::Tuple(y)) => x.iter().zip(y).find_map(|(a, b)| clash(a, b)),
