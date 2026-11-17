@@ -120,6 +120,19 @@ pub struct Solver {
     /// where `borrow_place` runs.
     /// r[impl mimas.place.marker]
     pub(crate) allowed_borrows: FxHashSet<NodeId>,
+    /// The `let`-claimed subset of `allowed_borrows`: a kept place writes
+    /// through shared storage, which a whole-binding `&` can't promise.
+    pub(crate) kept_borrows: FxHashSet<NodeId>,
+    /// `&` on a bare binding (`&c`): the descriptor loans a one-slot cell
+    /// instead, so the `&` node maps to the binding's dec and the cell
+    /// binding's ident until the cell's dec exists.
+    pub(crate) binding_borrow_cells: FxIndexMap<NodeId, (DecId, Ident)>,
+    /// Resolved `binding_borrow_cells`: `&` node → (root dec, cell dec).
+    pub(crate) binding_borrows: FxIndexMap<NodeId, (DecId, DecId)>,
+    /// Calls whose `&` args loan whole bindings: call node → `(binding,
+    /// cell)` pairs whose write-backs emit after the call returns.
+    /// r[impl mimas.inout.param]
+    pub(crate) inout_writebacks: FxIndexMap<NodeId, Vec<(DecId, DecId)>>,
     pub(crate) expected_closures: FxIndexMap<NodeId, Vec<FnParam>>,
     vids: IdVec<Vid, ()>,
     subs: IdVec<Vid, Option<Ty>>,
@@ -361,6 +374,10 @@ impl Solver {
             inout_decs: FxHashSet::default(),
             inout_calls: FxHashSet::default(),
             allowed_borrows: FxHashSet::default(),
+            kept_borrows: FxHashSet::default(),
+            binding_borrow_cells: FxIndexMap::default(),
+            binding_borrows: FxIndexMap::default(),
+            inout_writebacks: FxIndexMap::default(),
             expected_closures: FxIndexMap::default(),
             control_flow: ControlFlow::new(),
             node_visits: FxHashSet::default(),
@@ -3444,6 +3461,7 @@ impl Solver {
                         .is_some_and(|i| i.lexeme == "__borrow_place")
                 {
                     self.allowed_borrows.insert(rhs.id());
+                    self.kept_borrows.insert(rhs.id());
                 }
 
                 right.fulfill_ty(ty.clone(), self)?;

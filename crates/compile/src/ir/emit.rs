@@ -1250,6 +1250,22 @@ impl Lower for Expr {
                     if out.is_some() { ir.finish_cleanup_scopes(floor); }
                     ir.current_body_mut().cleanup_scopes.pop();
                 }
+                // a `&binding` arg loans a one-slot cell: the callee's writes
+                // land in the cell, so the loan stores `cell[0]` back into
+                // the binding when the call returns. r[impl mimas.inout.binding]
+                if let Some(writebacks) = ir.resolutions.inout_writebacks.get(&id) {
+                    for &(root, cell) in writebacks.clone().iter() {
+                        let array = ir.read_binding(cell);
+                        let zero = ir.current().constant(Constant::Int(0));
+                        let v = ir.current().get_index(array, zero, AccessKind::Direct);
+                        let local = ir.local_for(root);
+                        if ir.body_for_dec(root) != ir.current_body {
+                            ir.current().set_entry(local, v);
+                        } else {
+                            ir.current().set_local(local, v);
+                        }
+                    }
+                }
                 out
             }
             ExprKind::Closure(closure) => closure.emit(id, ir),
