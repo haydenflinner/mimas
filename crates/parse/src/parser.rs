@@ -2207,7 +2207,14 @@ impl<'s> Parser<'s> {
             match kind {
                 TokKind::Ident("subscript") => {
                     let public = self.eat(TokKind::Pub);
-                    items.extend(self.accessor_items(true, public));
+                    if self.accessor_intro() {
+                        items.extend(self.accessor_items(true, public));
+                    } else {
+                        // a named member subscript with a plain body is a
+                        // value generator over the receiver, the way a plain
+                        // free body is: `s.live` gives a `() -> T?` pull.
+                        items.push(self.member_generator_item(public));
+                    }
                 }
                 TokKind::Const | TokKind::Fn => {
                     let item = self.item();

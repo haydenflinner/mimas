@@ -485,3 +485,78 @@ fn indexed_get_and_remove_preserve_primitive_storage() {
     ).unwrap();
     assert_eq!(vm.call_fn_result("result").unwrap().to_string(), "true");
 }
+
+// r[verify mimas.generator.member]
+test_run!(
+    member_generator_subscript_is_a_lazy_view,
+    "struct S { xs: [int], floor: int }
+     impl S {
+        subscript live() -> int {
+            for x in self.xs { if x > self.floor { yield x; } }
+        }
+     }
+     let s = S { xs = [1, 2, 3, 4], floor = 1 };
+     fn gather() -> [int] { let out: [int] = []; for v in s.live { out.push(v); } out }
+     fn pull() -> int? { let it = s.live; it() }
+     fn exhausted() -> int? { let it = s.live; for _v in s.live { it(); } it() }",
+    "gather()" => "[2, 3, 4]",
+    "pull()" => "2",
+);
+
+// r[verify mimas.generator.member]
+test_run!(
+    member_generator_runs_lazily_between_pulls,
+    "struct S { xs: [int], log: [int] }
+     impl S {
+        subscript live() -> int {
+            for x in self.xs { self.log.push(x); yield x; }
+        }
+     }
+     let s = S { xs = [1, 2, 3], log = [] };
+     fn after_two() -> [int] { let it = s.live; it(); it(); s.log }
+     fn drained() -> int? { let it = s.live; it(); it(); it(); it() }",
+    "after_two()" => "[1, 2]",
+    "drained()" => "null",
+);
+
+// r[verify mimas.generator.member]
+test_run!(
+    member_generator_takes_bracket_keys,
+    "struct S { xs: [int] }
+     impl S {
+        subscript window(k: int) -> int {
+            let i = 0;
+            while i < k && i < self.xs.len() {
+                yield self.xs[i];
+                i += 1;
+            }
+        }
+     }
+     let s = S { xs = [1, 2, 3] };
+     fn gather() -> [int] { let out: [int] = []; for v in s.window[2] { out.push(v); } out }
+     fn wide() -> [int] { let t: S = s; let out: [int] = []; for v in t.window[5] { out.push(v); } out }",
+    "gather()" => "[1, 2]",
+    "wide()" => "[1, 2, 3]",
+);
+
+// r[verify mimas.generator.member]
+test_fail!(
+    member_generator_rejects_writes_and_borrows,
+    "struct S { xs: [int] }
+     impl S { subscript live() -> int { for x in self.xs { yield x; } } }
+     let s = S { xs = [1] };
+     s.live = 5;",
+    "struct S { xs: [int] }
+     impl S { subscript live() -> int { for x in self.xs { yield x; } } }
+     let s = S { xs = [1] };
+     let p = &s.live;",
+);
+
+// r[verify mimas.generator.member]
+test_fail!(
+    member_generator_rejects_null_and_unit_elements,
+    "struct S { xs: [int] }
+     impl S { subscript live() -> int? { yield self.xs[0]; } }",
+    "struct S { xs: [int] }
+     impl S { subscript live() { } }",
+);
