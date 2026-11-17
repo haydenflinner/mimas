@@ -717,6 +717,9 @@ impl<'s> Scoped<'s> {
     fn annotation(&mut self, annotation: &Annotation) {
         match annotation {
             Annotation::Ty(ident) => self.ty_reference(ident),
+            // `inout` wraps the param's real annotation; the keyword
+            // ident carries a span, not a name.
+            Annotation::Inout(_, inner) => self.annotation(inner),
             Annotation::Option(inner)
             | Annotation::Result(inner)
             | Annotation::Array(inner, _)
