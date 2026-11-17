@@ -830,6 +830,36 @@ impl<'a> Pass<'a> {
         roots.out
     }
 
+    /// Param positions a `while` header paces a collection on: the roots
+    /// of places it indexes or calls into — `w.balls.len()`, `m[k]`,
+    /// `q.next()` pace on the caller's collection, so the trip count
+    /// scales with it. `while d > PI` paces on a scalar and isn't a
+    /// scan; `while f(w)` paces on `f`, not `w`.
+    fn paced_roots(&self, e: &Expr) -> FxHashSet<u32> {
+        struct Paced<'p, 'a> {
+            pass: &'p Pass<'a>,
+            out: FxHashSet<u32>,
+        }
+        impl Visitor for Paced<'_, '_> {
+            fn expr(&mut self, expr: &Expr) {
+                let left = match expr.kind() {
+                    ExprKind::Call(c) => Some(&c.left),
+                    ExprKind::Access(Access::Square { left, .. }) => Some(left),
+                    _ => None,
+                };
+                if let Some(left) = left {
+                    self.out.extend(self.pass.param_roots(left));
+                }
+            }
+        }
+        let mut paced = Paced {
+            pass: self,
+            out: FxHashSet::default(),
+        };
+        parse::walk_expr(e, &mut paced);
+        paced.out
+    }
+
     /// `true` when `e` names a place bound outside the innermost loop —
     /// a shared `w` or `w.balls` re-read every pass, not a value the
     /// loop made (`b.id`, `f(w)`, a literal). A place indexed by a
@@ -1841,7 +1871,7 @@ impl<'a> Pass<'a> {
                 self.own_loops.insert(self.cur());
                 // `while i < w.balls.len()` paces itself on `w` — that
                 // is a `w` scan, the same as `for b in w.balls`
-                let roots = self.param_roots(&w.header);
+                let roots = self.paced_roots(&w.header);
                 if !roots.is_empty() {
                     self.own_scans
                         .entry(self.cur())
