@@ -512,49 +512,7 @@ impl<'s> Parser<'s> {
             }
             // r[impl mimas.generator.decl]
             TokKind::Ident("subscript") if self.notation_intro() => {
-                self.advance();
-                let (name, type_params, parameters, element) = self.function_sig(true, Some(""));
-                let element = element.unwrap_or_else(|| {
-                    self.expected("a yielded type after `->`");
-                    Annotation::Unit
-                });
-                if matches!(element, Annotation::Unit | Annotation::Option(_)) {
-                    self.error_here(Misdirection {
-                        src: self.src(),
-                        at: self.next_location().into(),
-                        msg: "a generator must yield a non-null value".into(),
-                        label: "wrap optional values in a struct so null can mark exhaustion"
-                            .into(),
-                    });
-                }
-                let wheres = self.where_clause();
-                let saved = self.generator_type.replace(element.clone());
-                let body = self.block();
-                self.generator_type = saved;
-                let mut parameter = Binding::new(self.ident_at("__generator_type", start));
-                parameter.annotation = Some(element.clone());
-                let closure = self.new_expr(
-                    Closure {
-                        parameters: vec![parameter],
-                        body,
-                        return_type: Some(Annotation::Unit),
-                    },
-                    start,
-                );
-                let body = self.generator_call("__generator", vec![closure], start);
-                let f = Function {
-                    name,
-                    role: FnRole::Fn,
-                    type_params,
-                    parameters,
-                    wheres,
-                    return_type: Some(Annotation::Function(
-                        vec![],
-                        Box::new(Annotation::Option(Box::new(element))),
-                    )),
-                    body,
-                };
-                let item = Item::new(f.into(), self.location(start), false);
+                let item = self.generator_subscript_item(start, false);
                 self.end_item(&item);
                 BlockElement::Stmt(self.new_stmt(item, start))
             }
@@ -784,6 +742,13 @@ impl<'s> Parser<'s> {
 
         let kind = if has_tests {
             self.tests_list().into()
+        } else if self.at(TokKind::Ident("subscript")) {
+            // `#[attr] subscript …` — a subscript only reaches `item`
+            // carrying attributes, which `with_attrs` lands on the fn (or
+            // accessor fns) it lowers to. `#[scans]` marks the generator
+            // for the loop-call lint (`mimas.lint.loop-call`).
+            self.nested(|p| p.subscript_item(public, start))
+                .unwrap_or(Poison.into())
         } else {
             self.nested(inner).unwrap_or(Poison.into())
         };
@@ -868,6 +833,18 @@ impl<'s> Parser<'s> {
                             src: self.src(),
                             at: attr.name.location.into(),
                         }),
+                    }
+                }
+                // `#[scans]` — the fn walks its input collections on
+                // purpose: the loop-call lint trusts calls to it and
+                // looped calls inside it (`mimas.lint.loop-call`).
+                "scans" => {
+                    if !matches!(kind, ItemKind::Function(_)) {
+                        self.error(AttributeNotOnFunction {
+                            src: self.src(),
+                            at: attr.name.location.into(),
+                            name: attr.name.lexeme.clone(),
+                        });
                     }
                 }
                 // A mark on a top-level function, for `fns!(name)` to read.
@@ -1883,6 +1860,75 @@ impl<'s> Parser<'s> {
     /// `notation name(` — a name and a paren after the word.
     fn notation_intro(&self) -> bool {
         matches!(self.nth(1), TokKind::Ident(_)) && matches!(self.nth(2), TokKind::LeftParenthesis)
+    }
+
+    /// `subscript name(params) -> T { …yield… }` — a named generator: it
+    /// lowers to a `fn name` whose body is the `__generator` call wrapping
+    /// the closure. The caller ends the item.
+    fn generator_subscript_item(&mut self, start: usize, public: bool) -> Item {
+        self.advance();
+        let (name, type_params, parameters, element) = self.function_sig(true, Some(""));
+        let element = element.unwrap_or_else(|| {
+            self.expected("a yielded type after `->`");
+            Annotation::Unit
+        });
+        if matches!(element, Annotation::Unit | Annotation::Option(_)) {
+            self.error_here(Misdirection {
+                src: self.src(),
+                at: self.next_location().into(),
+                msg: "a generator must yield a non-null value".into(),
+                label: "wrap optional values in a struct so null can mark exhaustion".into(),
+            });
+        }
+        let wheres = self.where_clause();
+        let saved = self.generator_type.replace(element.clone());
+        let body = self.block();
+        self.generator_type = saved;
+        let mut parameter = Binding::new(self.ident_at("__generator_type", start));
+        parameter.annotation = Some(element.clone());
+        let closure = self.new_expr(
+            Closure {
+                parameters: vec![parameter],
+                body,
+                return_type: Some(Annotation::Unit),
+            },
+            start,
+        );
+        let body = self.generator_call("__generator", vec![closure], start);
+        let f = Function {
+            name,
+            role: FnRole::Fn,
+            type_params,
+            parameters,
+            wheres,
+            return_type: Some(Annotation::Function(
+                vec![],
+                Box::new(Annotation::Option(Box::new(element))),
+            )),
+            body,
+        };
+        Item::new(f.into(), self.location(start), public)
+    }
+
+    /// A `subscript` reached through `item` — the leading attributes
+    /// `item` collected belong on the item it lowers to. An accessor
+    /// lowers to several fns (one per arm): the first carries the attrs,
+    /// the rest are pushed back as pending items.
+    fn subscript_item(&mut self, public: bool, start: usize) -> ItemKind {
+        if self.accessor_intro() {
+            let mut items = self.accessor_items(false, public).into_iter();
+            let Some(first) = items.next() else { return Poison.into() };
+            for extra in items {
+                let stmt = self.new_stmt(extra, start);
+                self.pending.push(stmt);
+            }
+            first.into_kind()
+        } else if self.notation_intro() {
+            self.generator_subscript_item(start, public).into_kind()
+        } else {
+            self.expected("an accessor or generator subscript");
+            Poison.into()
+        }
     }
 
     /// `method name(` — the same shape `notation` opens on: the word, a name,
