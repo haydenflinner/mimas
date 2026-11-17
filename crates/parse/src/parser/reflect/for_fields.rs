@@ -4,13 +4,24 @@ fn compact(text: &str) -> String {
     text.chars().filter(|c| !c.is_whitespace()).collect()
 }
 fn item_type(ty: &str) -> Option<&str> {
-    let inner = ty.strip_prefix('[')?.strip_suffix(']')?;
+    let inner = if let Some(inner) = ty.strip_prefix('[').and_then(|t| t.strip_suffix(']')) {
+        inner
+    } else {
+        // `G<elem, ..>` — a generic store's item is its first argument,
+        // so a `SoA<Thing>` field answers to a `[Thing]` filter.
+        let open = ty.find('<')?;
+        let close = ty.rfind('>')?;
+        if close <= open {
+            return None;
+        }
+        &ty[open + 1..close]
+    };
     let mut depth = 0;
     for (at, c) in inner.char_indices() {
         match c {
             '[' | '(' | '<' => depth += 1,
             ']' | ')' | '>' => depth -= 1,
-            ';' if depth == 0 => return Some(&inner[..at]),
+            ';' | ',' if depth == 0 => return Some(&inner[..at]),
             _ => {}
         }
     }
