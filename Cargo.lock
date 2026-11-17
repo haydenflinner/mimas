@@ -5734,6 +5734,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mimas-plgen"
+version = "0.2.0"
+dependencies = [
+ "mimas-compile",
+ "mimas-library",
+ "mimas-vm",
+]
+
+[[package]]
 name = "mimas-shared"
 version = "0.2.0"
 dependencies = [
