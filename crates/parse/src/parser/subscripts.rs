@@ -206,6 +206,72 @@ impl Parser<'_> {
         items
     }
 
+    // r[impl mimas.generator.member]
+    /// A named member subscript with a plain (non-arm) body: a lazy pull
+    /// iterator over the receiver. `subscript live() -> T { yield v; }` in an
+    /// impl lowers to the `get` slot of the subscript's method table —
+    /// `recv.live` resolves through the usual subscript dispatch to
+    /// `recv.__sub_live_get()`, which returns `() -> T?` exactly like the
+    /// free form's `live()`.
+    pub(super) fn member_generator_item(&mut self, public: bool) -> Item {
+        let start = self.next_start();
+        self.advance(); // contextual `subscript`
+        let (name, type_params, mut parameters, element) =
+            self.function_sig(true, Some(""));
+        let element = element.unwrap_or_else(|| {
+            self.expected("a yielded type after `->`");
+            Annotation::Unit
+        });
+        if matches!(element, Annotation::Unit | Annotation::Option(_)) {
+            self.error_here(Misdirection {
+                src: self.src(),
+                at: self.next_location().into(),
+                msg: "a generator must yield a non-null value".into(),
+                label: "wrap optional values in a struct so null can mark exhaustion".into(),
+            });
+        }
+        // the receiver rides first, as accessor arms' `self` does.
+        if !parameters
+            .first()
+            .is_some_and(|p| p.left.to_string() == "self")
+        {
+            parameters.insert(0, Binding::new(self.ident_at("self", self.next_start())));
+        }
+        let wheres = self.where_clause();
+        let saved = self.generator_type.replace(element.clone());
+        let body = self.block();
+        self.generator_type = saved;
+        let mut parameter = Binding::new(self.ident_at("__generator_type", start));
+        parameter.annotation = Some(element.clone());
+        let closure = self.new_expr(
+            Closure {
+                parameters: vec![parameter],
+                body,
+                return_type: Some(Annotation::Unit),
+            },
+            start,
+        );
+        let body = self.generator_call("__generator", vec![closure], start);
+        let f = Function {
+            name: Ident::new(
+                format!("__sub_{}_get", name.lexeme),
+                name.location,
+            ),
+            role: FnRole::Fn,
+            type_params,
+            parameters,
+            wheres,
+            return_type: Some(Annotation::Function(
+                vec![],
+                Box::new(Annotation::Option(Box::new(element))),
+            )),
+            body,
+        };
+        let item = Item::new(f.into(), self.location(start), public);
+        self.end_item(&item);
+        item
+    }
+
     fn fresh_place(&self, e: &Expr) -> Expr {
         let kind = match e.kind() {
             ExprKind::Access(Access::Square { left, key, kind }) => Access::Square {
