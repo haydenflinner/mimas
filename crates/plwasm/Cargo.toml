@@ -1,0 +1,23 @@
+[package]
+name = "mimas-plwasm"
+version = "0.2.0"
+edition = "2024"
+publish = false
+description = "wasm32 companion-runtime entry for plgen-compiled mimas bodies: links a generated `mimas_pliron` wasm object (mimas_body_*/mimas_pliron_init exports, env.mj_* imports) against mimas-vm's mj_* runtime and runs a source program under install_bc — the wasm twin of the pliron-mimas dylib lane."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "mimas_plwasm"
+crate-type = ["cdylib"]
+
+[dependencies]
+vm = { package = "mimas-vm", path = "../vm", version = "0.2.0", default-features = false }
+compile = { package = "mimas-compile", path = "../compile", version = "0.2.0" }
+library = { package = "mimas-library", path = "../library", version = "0.2.0", default-features = false }
+# `register_custom_getrandom!` — the build passes
+# `--cfg getrandom_backend="custom"` so `rand` (via library) links on
+# wasm32-unknown-unknown without JS shims.
+getrandom = "0.4"

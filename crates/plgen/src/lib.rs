@@ -17,7 +17,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 
-use compile::{BlockTarget, Constant, Op, OpFormatPart, Program, Reg};
+use compile::{AccessKind, BlockTarget, Constant, Op, OpFormatPart, Program, Reg};
 use vm::bc::{BodyEnv, INLINE_CALL_DEPTH, jit::Layout};
 
 // `RtErr` codes, matching `jit/src/emit.rs` (vm::bc::RtErr discriminants).
@@ -40,6 +40,12 @@ const VOID: &str = "llvm.void";
 pub const BODIES_GLOBAL: &str = "mimas_pliron_bodies";
 /// The exported name of the `i64` body count global.
 pub const NBODIES_GLOBAL: &str = "mimas_pliron_nbodies";
+/// Exported initializer: fills `mimas_pliron_bodies` from `llvm.addressof`
+/// — a real address natively, the `GOT.func` table index on wasm, where
+/// no host-side `dlsym` fill exists.
+pub const INIT_FN: &str = "mimas_pliron_init";
+/// `mimas_pliron_init`'s single entry block.
+const INIT_ENTRY: &str = "init_entry";
 /// Emitted body functions are named `mimas_body_{index}`.
 pub fn body_name(i: usize) -> String {
     format!("mimas_body_{i}")
@@ -222,6 +228,9 @@ static SPECS: &[(H, &str, &[Pt], Hr)] = &[
     (
         H::CallNative,
         "mj_call_native",
+        // `mj_call_native`'s Rust sig takes `mc`/`st` as two explicit
+        // params (not a by-value `Ctx`), so it wants two words on both
+        // ABIs — `Pt::P, Pt::P` where the other helpers write `Ctx`.
         &[
             Pt::P,
             Pt::P,
@@ -230,7 +239,8 @@ static SPECS: &[(H, &str, &[Pt], Hr)] = &[
             Pt::P,
             Pt::P,
             Pt::P,
-            Ctx,
+            Pt::P,
+            Pt::P,
             Pt::P,
         ],
         Hr::U8,
@@ -553,6 +563,9 @@ struct Env {
     code: String,
     ctx0: String,
     ctx1: String,
+    /// `&env.mutation` — the two-word `Ctx` pair's address, passed as the
+    /// single indirect `Ctx` arg on wasm.
+    ctx_p: String,
     strs: String,
     fuel_p: String,
     opip_p: String,
@@ -596,6 +609,8 @@ struct Em<'a> {
     prog: &'a Program,
     lyt: &'a Layout,
     sh: &'a Sh,
+    /// wasm32 ABI: `Ctx` args pass indirectly (see [`sig`]).
+    wasm: bool,
 
     /// Completed blocks, in creation order: `(label, lines)`.
     done: Vec<(String, Vec<String>)>,
@@ -627,8 +642,10 @@ struct Em<'a> {
 }
 
 /// `(ret_ty, ptys)` for a helper signature — the shared spelling used by
-/// the extern declarations and by [`Em::hcall`].
-fn sig(params: &[Pt], ret: Hr) -> (String, String) {
+/// the extern declarations and by [`Em::hcall`]. On wasm `Ctx` lowers
+/// indirectly (one pointer to the two-word pair) instead of the two
+/// machine words the native ABI splits it into.
+fn sig(params: &[Pt], ret: Hr, wasm: bool) -> (String, String) {
     let ret_ty = match ret {
         Hr::Void => VOID,
         Hr::U8 => I8,
@@ -637,7 +654,7 @@ fn sig(params: &[Pt], ret: Hr) -> (String, String) {
     let mut ptys = String::new();
     for p in params.iter() {
         let n = match p {
-            Pt::Ctx => 2,
+            Pt::Ctx if !wasm => 2,
             _ => 1,
         };
         for _ in 0..n {
@@ -662,16 +679,27 @@ fn sig(params: &[Pt], ret: Hr) -> (String, String) {
 /// Helper references are real `llvm.call @mj_*` symbols: link the object
 /// against a runtime that exports them (`mimas-natrt`'s `staticlib`/
 /// `cdylib`, or any artifact providing `vm::bc::nat`).
-pub fn emit_module(prog: &Program, lyt: &Layout) -> String {
+pub fn emit_module(prog: &Program, lyt: &Layout, wasm: bool) -> String {
     let nbodies = prog.chunks.len();
     let mut members: Vec<String> = Vec::new();
 
     // extern declarations for the helper surface — bodiless `llvm.func`s
     // (Import linkage), resolved by the companion runtime at link time.
-    for (_, name, params, ret) in SPECS {
-        let (ret_ty, ptys) = sig(params, *ret);
+    // Each declares `llvm_func_attrs` so the contract facts a bodiless
+    // decl can't be IPO-inferred for travel in the text: `willreturn`
+    // (every helper returns or aborts on a violated contract) and
+    // `nounwind` (a Rust panic hits the extern "C" abort shim, it never
+    // unwinds into the body). `nocapture` is a per-parameter fact and
+    // the dialect has no declared slot for it — the consumer seeds it.
+    // Each decl gets its own `!N` outline index; refs are unique per op.
+    let mut outlines: Vec<String> = Vec::new();
+    for (i, (_, name, params, ret)) in SPECS.iter().enumerate() {
+        let (ret_ty, ptys) = sig(params, *ret, wasm);
         members.push(format!(
-            "llvm.func @{name}: llvm.func <{ret_ty} ({ptys}) variadic = false> []"
+            "llvm.func @{name}: llvm.func <{ret_ty} ({ptys}) variadic = false> [] !{i}"
+        ));
+        outlines.push(format!(
+            "!{i} = [llvm_func_attrs = llvm.attributes [\"nounwind\", \"willreturn\"]]"
         ));
     }
 
@@ -680,30 +708,56 @@ pub fn emit_module(prog: &Program, lyt: &Layout) -> String {
     // (scan zero-fills every defined global), so the table is emitted
     // mutable+zero and the host fills it after dlopen from the
     // `mimas_body_*` symbols — which is also how it learns the table for
-    // `install_bc`. Entries are i64s: ptr-sized and scalar-typed, so the
-    // aggregate survives the parser.
-    let zeros = vec!["builtin.integer <0: i64>"; nbodies].join(", ");
-    let zi64 = format!("llvm.array [{nbodies} x {I64}]");
+    // `install_bc`. Entries are word-sized ints (ptr-sized and
+    // scalar-typed, so the aggregate survives the parser): the runtime
+    // reads the table as `*const usize`, so elements must step at
+    // `word_size` — i64 natively, i32 on wasm32.
+    let wt = if lyt.word_size == 4 { I32 } else { I64 };
+    let w = lyt.word_size;
+    let zeros = vec![format!("builtin.integer <0: i{w}>"); nbodies].join(", ");
+    let zw = format!("llvm.array [{nbodies} x {wt}]");
     members.push(format!(
-        "llvm.global @{BODIES_GLOBAL} : {zi64}\n    [llvm_global_linkage: llvm.linkage ExternalLinkage, llvm_global_constant: builtin.bool false] = llvm.aggregate <[{zeros}] : {zi64}>"
+        "llvm.global @{BODIES_GLOBAL} : {zw}\n    [llvm_global_linkage: llvm.linkage ExternalLinkage, llvm_global_constant: builtin.bool false] = llvm.aggregate <[{zeros}] : {zw}>"
     ));
     // the pair's scalar half — a standalone host reads this instead of
-    // re-deriving the count from the Program.
+    // re-deriving the count from the Program. Mutable+zero like the
+    // table: the wasm object's data section can't carry the constant
+    // initializer, so `mimas_pliron_init` stores the count alongside
+    // the table fill (the shim reads it after calling init).
     members.push(format!(
-        "llvm.global @{NBODIES_GLOBAL} : {I64}\n    [llvm_global_linkage: llvm.linkage ExternalLinkage, llvm_global_constant: builtin.bool true] = builtin.integer <{nbodies}: i64>"
+        "llvm.global @{NBODIES_GLOBAL} : {I64}\n    [llvm_global_linkage: llvm.linkage ExternalLinkage, llvm_global_constant: builtin.bool false] = builtin.integer <0: i64>"
     ));
 
+    // `mimas_pliron_init` fills the table from code: `llvm.addressof`
+    // yields the callee's address natively and its `GOT.func` table
+    // index on wasm (where symbol-initializer relocs can't come from the
+    // text path and there is no host `dlsym` to fill the table). The
+    // wasm shim calls it once before `install_bc`.
+    let mut init = format!(
+        "llvm.func @{INIT_FN}: llvm.func <{VOID} () variadic = false>\n    [llvm_function_linkage: llvm.linkage ExternalLinkage]\n  {{\n^{INIT_ENTRY}():\n    a_tbl = llvm.addressof @{BODIES_GLOBAL} : {PTR};\n    a_nb = llvm.addressof @{NBODIES_GLOBAL} : {PTR};\n    v_nb = llvm.constant <builtin.integer <{nbodies}: i64>> : {I64};\n    llvm.store *a_nb <- v_nb [align : 8];\n"
+    );
+    for i in 0..nbodies {
+        init.push_str(&format!(
+            "    a_f{i} = llvm.addressof @{} : {PTR};\n    v_f{i} = llvm.ptrtoint a_f{i} to {wt};\n    a_p{i} = llvm.gep <{I8}> (a_tbl)[Constant({off})] : {PTR};\n    llvm.store *a_p{i} <- v_f{i} [align : {w}];\n",
+            body_name(i),
+            off = i * w
+        ));
+    }
+    init.push_str("    llvm.return\n  }");
+    members.push(init);
+
     for body in 0..nbodies {
-        members.push(emit_body(prog, body, lyt));
+        members.push(emit_body(prog, body, lyt, wasm));
     }
 
     format!(
-        "builtin.module @mimas_pliron {{\n^block0():\n  {}\n}}\n",
-        members.join(";\n  ")
+        "builtin.module @mimas_pliron {{\n^block0():\n  {}\n}}\n\noutlined_attributes:\n{}\n",
+        members.join(";\n  "),
+        outlines.join("\n")
     )
 }
 
-fn emit_body(prog: &Program, body: usize, lyt: &Layout) -> String {
+fn emit_body(prog: &Program, body: usize, lyt: &Layout, wasm: bool) -> String {
     let body_id = compile::BodyId::from(body as u32);
     let ops = prog.ops(body_id);
     let chunk = &prog.chunks[body_id];
@@ -714,6 +768,7 @@ fn emit_body(prog: &Program, body: usize, lyt: &Layout) -> String {
         prog,
         lyt,
         sh: &sh,
+        wasm,
         done: Vec::new(),
         cur_name: String::new(),
         cur: Vec::new(),
@@ -780,14 +835,27 @@ fn emit_body(prog: &Program, body: usize, lyt: &Layout) -> String {
         env: env_p.clone(),
         ..Env::default()
     };
-    env.thread = em.envld(&env_p, std::mem::offset_of!(BodyEnv<'_>, thread));
-    env.code = em.envld(&env_p, std::mem::offset_of!(BodyEnv<'_>, code));
-    env.ctx0 = em.envld(&env_p, std::mem::offset_of!(BodyEnv<'_>, mutation));
-    env.ctx1 = em.envld(&env_p, std::mem::offset_of!(BodyEnv<'_>, state));
-    env.strs = em.envld(&env_p, std::mem::offset_of!(BodyEnv<'_>, strs));
-    env.fuel_p = em.envld(&env_p, std::mem::offset_of!(BodyEnv<'_>, fuel));
-    env.opip_p = em.envld(&env_p, std::mem::offset_of!(BodyEnv<'_>, op_ip));
-    env.out = em.envld(&env_p, std::mem::offset_of!(BodyEnv<'_>, out));
+    // `BodyEnv` is `repr(C)` with all-pointer fields, so a field offset
+    // is `index * word_size`: deriving the index from the host
+    // `offset_of!` (a compile-checked field reference) and rescaling by
+    // the probed word size keeps this correct on wasm32, where the same
+    // struct packs at a 4-byte stride.
+    let envoff = |off: usize| off / std::mem::size_of::<usize>() * lyt.word_size;
+    env.thread = em.envld(&env_p, envoff(std::mem::offset_of!(BodyEnv<'_>, thread)));
+    env.code = em.envld(&env_p, envoff(std::mem::offset_of!(BodyEnv<'_>, code)));
+    env.ctx0 = em.envld(&env_p, envoff(std::mem::offset_of!(BodyEnv<'_>, mutation)));
+    env.ctx1 = em.envld(&env_p, envoff(std::mem::offset_of!(BodyEnv<'_>, state)));
+    if wasm {
+        // `mutation`/`state` are adjacent `repr(C)` fields — a gep to
+        // `mutation` is the `{mutation, state}` pair's address, the
+        // single indirect `Ctx` arg the wasm ABI wants.
+        let c = em.iconst(envoff(std::mem::offset_of!(BodyEnv<'_>, mutation)) as i64);
+        env.ctx_p = em.gep_dyn(&env_p, &c);
+    }
+    env.strs = em.envld(&env_p, envoff(std::mem::offset_of!(BodyEnv<'_>, strs)));
+    env.fuel_p = em.envld(&env_p, envoff(std::mem::offset_of!(BodyEnv<'_>, fuel)));
+    env.opip_p = em.envld(&env_p, envoff(std::mem::offset_of!(BodyEnv<'_>, op_ip)));
+    env.out = em.envld(&env_p, envoff(std::mem::offset_of!(BodyEnv<'_>, out)));
     {
         let c = em.iconst(lyt.state_paused as i64);
         env.paused_p = em.gep_dyn(&env.ctx1, &c);
@@ -805,7 +873,7 @@ fn emit_body(prog: &Program, body: usize, lyt: &Layout) -> String {
     let flen = {
         let c = em.iconst((lyt.frames_off + lyt.vec_len) as i64);
         let a = em.gep_dyn(&env.thread, &c);
-        em.ld(I64, &a, 0, 8)
+        em.ld_word(&a, 0)
     };
     let one = em.iconst(1);
     let fm1 = em.sub(&flen, &one);
@@ -815,7 +883,7 @@ fn emit_body(prog: &Program, body: usize, lyt: &Layout) -> String {
     env.base = {
         let c = em.iconst(lyt.frame_base as i64);
         let a = em.gep_dyn(&faddr, &c);
-        em.ld(I64, &a, 0, 8)
+        em.ld_word(&a, 0)
     };
     // `regs = thread.regs.as_mut_ptr() + base * val_size`
     let rp = {
@@ -897,7 +965,7 @@ fn emit_body(prog: &Program, body: usize, lyt: &Layout) -> String {
         let g = em.ex.estep_g.clone();
         em.br(&g);
     } else {
-        let ip = em.ld(I64, &em.env.ip_p.clone(), 0, 8);
+        let ip = em.ld_word(&em.env.ip_p.clone(), 0);
         let mut cases = String::new();
         for (i, (off, _)) in ops.iter().enumerate() {
             write!(cases, "\n      {{ <{off}: i64>: ^op{i}() }},").unwrap();
@@ -1094,7 +1162,7 @@ impl Em<'_> {
     fn envld(&mut self, env_p: &str, off: usize) -> String {
         let c = self.iconst(off as i64);
         let a = self.gep_dyn(env_p, &c);
-        self.ld(PTR, &a, 0, 8)
+        self.ld(PTR, &a, 0, self.lyt.word_size as u32)
     }
 
     // ---- value helpers ----
@@ -1197,9 +1265,59 @@ impl Em<'_> {
         self.ev(format!("llvm.zext <nneg=false> {v} to {I64}"))
     }
 
-    /// `icmp` — the type annotation is the *operand* type.
-    fn icmp(&mut self, oty: &str, cc: &str, a: &str, b: &str) -> String {
-        self.ev(format!("llvm.icmp {a} <{cc}> {b} : {oty}"))
+    fn sext64(&mut self, v: &str) -> String {
+        self.ev(format!("llvm.sext {v} to {I64}"))
+    }
+
+    fn trunc_to(&mut self, ty: &str, v: &str) -> String {
+        self.ev(format!("llvm.trunc {v} to {ty}"))
+    }
+
+    /// `usize` field load, zero-extended to i64 — the probed `word_size`
+    /// is 4 on wasm32, where an i64 load would read the next field too.
+    /// Arithmetic stays i64 everywhere downstream.
+    fn ld_word(&mut self, p: &str, off: u32) -> String {
+        let wty = self.wty(self.lyt.word_size);
+        let v = self.ld(wty, p, off, self.lyt.word_size as u32);
+        if self.lyt.word_size < 8 {
+            self.zext64(&v)
+        } else {
+            v
+        }
+    }
+
+    /// `isize` borrow-flag load — sign-extended (negative = live
+    /// `borrow_mut`, which the fast paths route to the slow call).
+    fn ld_flag(&mut self, p: &str, off: u32) -> String {
+        let wty = self.wty(self.lyt.word_size);
+        let v = self.ld(wty, p, off, self.lyt.word_size as u32);
+        if self.lyt.word_size < 8 {
+            self.sext64(&v)
+        } else {
+            v
+        }
+    }
+
+    /// `usize` field store — truncates the i64 working value on wasm32.
+    fn st_word(&mut self, p: &str, v: &str, off: u32) {
+        let owned;
+        let v = if self.lyt.word_size < 8 {
+            let wty = self.wty(self.lyt.word_size);
+            owned = self.trunc_to(wty, v);
+            &owned
+        } else {
+            v
+        };
+        self.st_off(p, v, off, self.lyt.word_size as u32);
+    }
+
+    /// `a <cc> b` as `i1`, for `_oty`-typed operands. The trailing type in
+    /// `llvm.icmp`/`llvm.fcmp` is the *result* type (`type($0)` binds
+    /// `result[0]`, not the operand type like LLVM's syntax) — annotating
+    /// the operand width here gave every compare an `oty`-typed result,
+    /// which then fed `i1` slots (`cond_br`, `and : i1`, `select`).
+    fn icmp(&mut self, _oty: &str, cc: &str, a: &str, b: &str) -> String {
+        self.ev(format!("llvm.icmp {a} <{cc}> {b} : {I1}"))
     }
 
     /// `a != 0` as `i1`, for `oty`-typed `a`.
@@ -1209,7 +1327,7 @@ impl Em<'_> {
     }
 
     fn fcmp(&mut self, cc: &str, a: &str, b: &str) -> String {
-        self.ev(format!("llvm.fcmp {a} <{cc}> {b} : {F64}"))
+        self.ev(format!("llvm.fcmp {a} <{cc}> {b} : {I1}"))
     }
 
     /// `i1 → i8` for flag/`Val::Bool` payloads (`c ? 1 : 0`).
@@ -1254,15 +1372,25 @@ impl Em<'_> {
         for p in params.iter() {
             match p {
                 Pt::Ctx => {
-                    for _ in 0..2 {
-                        match ai.next().unwrap() {
-                            A::V(v) => {
-                                let v = v.clone();
-                                let p = self.i2p(&v);
-                                av.push(p);
+                    if self.wasm {
+                        // Two arg slots but one ABI word: `&env.mutation`
+                        // addresses the live `{mutation, state}` pair
+                        // (adjacent `repr(C)` fields) — the indirect
+                        // `Ctx` the callee dereferences.
+                        ai.next().unwrap();
+                        ai.next().unwrap();
+                        av.push(self.env.ctx_p.clone());
+                    } else {
+                        for _ in 0..2 {
+                            match ai.next().unwrap() {
+                                A::V(v) => {
+                                    let v = v.clone();
+                                    let p = self.i2p(&v);
+                                    av.push(p);
+                                }
+                                A::P(v) => av.push(v.clone()),
+                                _ => panic!("Ctx param needs a word/ptr arg"),
                             }
-                            A::P(v) => av.push(v.clone()),
-                            _ => panic!("Ctx param needs a word/ptr arg"),
                         }
                     }
                 }
@@ -1290,7 +1418,7 @@ impl Em<'_> {
             }
         }
         assert!(ai.next().is_none(), "extra args for {name}");
-        let (ret_ty, ptys) = sig(params, ret);
+        let (ret_ty, ptys) = sig(params, ret, self.wasm);
         let fty = format!("llvm.func <{ret_ty} ({ptys}) variadic = false>");
         // `llvm.call` is one-result even for `llvm.void` — always bind.
         let v = self.v();
@@ -1336,7 +1464,7 @@ impl Em<'_> {
     fn frames_len(&mut self) -> String {
         let c = self.iconst((self.lyt.frames_off + self.lyt.vec_len) as i64);
         let a = self.gep_dyn(&self.env.thread.clone(), &c);
-        self.ld(I64, &a, 0, 8)
+        self.ld_word(&a, 0)
     }
 
     /// `regs + r*val_size` — `&regs[r]` for a window base `regs`.
@@ -1344,15 +1472,20 @@ impl Em<'_> {
         self.gep(regs, r * self.lyt.val_size as u32)
     }
 
-    /// The discriminant's IR type (its probed byte width).
-    fn tag_ty(&self) -> &'static str {
-        match self.lyt.tag_size {
+    /// The integer IR type of byte width `w` (any probed tag/flag width).
+    fn wty(&self, w: usize) -> &'static str {
+        match w {
             1 => I8,
             2 => I16,
             4 => I32,
             8 => I64,
             d => unreachable!("bad tag width {d}"),
         }
+    }
+
+    /// The discriminant's IR type (its probed byte width).
+    fn tag_ty(&self) -> &'static str {
+        self.wty(self.lyt.tag_size)
     }
 
     /// A discriminant constant at the probed width.
@@ -1452,6 +1585,31 @@ impl Em<'_> {
         }
     }
 
+    /// Fast-path tail for an inline container read: `regs[dst] = *elem`,
+    /// re-derive dst's shadow from the authoritative slot, then `next`.
+    fn copy_to_dst(&mut self, i: usize, dst: Reg, elem: &str) {
+        let regs = self.regs();
+        let d = self.vaddr(&regs, dst.index() as u32);
+        self.cpy_val(&d, elem);
+        self.refresh_shadow(dst.index() as u32);
+        let nb = self.next_blk(i);
+        self.br(&nb);
+    }
+
+    /// `llvm.switch idx, ^dflt() [{ <j: i64>: ^tgt_j() }]` — one case per
+    /// table entry; an `idx` that matches no case (negative, past the end,
+    /// wrapped) lands on `dflt`, which is what the interpreter's
+    /// bounds check does with it.
+    fn emit_switch_tbl(&mut self, idx: &str, dflt: &str, table: &[BlockTarget]) {
+        let mut cases = String::new();
+        for (j, t) in table.iter().enumerate() {
+            let b = self.tgt_blk(t);
+            write!(cases, "\n      {{ <{j}: i64>: ^{b}() }},").unwrap();
+        }
+        cases.pop();
+        self.ln(format!("llvm.switch {idx}, ^{dflt}() [{cases}\n    ]"));
+    }
+
     /// The block implementing the op at byte offset `t` — jump targets
     /// always land on op starts, so the map is exact.
     fn tgt_blk(&self, t: &BlockTarget) -> String {
@@ -1518,13 +1676,13 @@ impl Em<'_> {
     /// `code.ip = v` through the hoisted cell pointer.
     fn store_ip(&mut self, v: &str) {
         let p = self.env.ip_p.clone();
-        self.st(&p, v);
+        self.st_word(&p, v, 0);
     }
 
     /// `*op_ip = v` through the hoisted cell pointer.
     fn store_opip(&mut self, v: &str) {
         let p = self.env.opip_p.clone();
-        self.st(&p, v);
+        self.st_word(&p, v, 0);
     }
 
     /// `code.ip = next; *op_ip = off` — bcgen's pre-helper/pre-call idiom.
@@ -1779,10 +1937,10 @@ impl Em<'_> {
         let spent = self.sub(&b0, &b);
         let a = self.v_bcn0.clone();
         self.st(&a, &b);
-        let f = self.ld(I64, &self.env.fuel_p.clone(), 0, 8);
+        let f = self.ld_word(&self.env.fuel_p.clone(), 0);
         let f2 = self.sub(&f, &spent);
         let p = self.env.fuel_p.clone();
-        self.st(&p, &f2);
+        self.st_word(&p, &f2, 0);
         let ol = self.ld(I64, &self.env.opsleft_p.clone(), 0, 8);
         let ol2 = self.sub(&ol, &spent);
         let p = self.env.opsleft_p.clone();
@@ -1794,7 +1952,7 @@ impl Em<'_> {
     /// wherever quota was spent outside our count (a megashim callee draws
     /// from the same counters through its own `bcn`).
     fn rearm_seq(&mut self) {
-        let f = self.ld(I64, &self.env.fuel_p.clone(), 0, 8);
+        let f = self.ld_word(&self.env.fuel_p.clone(), 0);
         let ol = self.ld(I64, &self.env.opsleft_p.clone(), 0, 8);
         let lt = self.icmp(I64, "ULT", &f, &ol);
         let m = self.sel(I64, &lt, &f, &ol);
@@ -1907,7 +2065,12 @@ impl Em<'_> {
                 let (tb, fb) = (self.tgt_blk(target), self.next_blk(i));
                 self.cbr(&hit, &tb, &fb);
             }
-            Op::Switch { .. } => self.estep(),
+            Op::Switch {
+                scrut,
+                base,
+                default,
+                table,
+            } => self.emit_switch(*scrut, *base, default, table),
             Op::Format { parts, .. } => {
                 // selective materialization instead of `flush_seq` — only the
                 // value parts' regs are read by `mj_format`.
@@ -2450,57 +2613,13 @@ impl Em<'_> {
                 set,
                 index,
                 kind,
-            } => {
-                let regs = self.regs();
-                let d = self.iconst(dst.index() as i64);
-                let s = self.iconst(set.index() as i64);
-                let ii = self.iconst(index.index() as i64);
-                let kk = self.iconst8(*kind as i64);
-                self.helper_op_read(
-                    i,
-                    off,
-                    next,
-                    H::GetIndex,
-                    &[
-                        A::P(regs),
-                        A::V(d),
-                        A::V(s),
-                        A::V(ii),
-                        A::I8(kk),
-                        A::P(self.env.ctx0.clone()),
-                        A::P(self.env.ctx1.clone()),
-                        A::P(self.env.out.clone()),
-                    ],
-                    *dst,
-                );
-            }
+            } => self.emit_get_index(i, off, next, *dst, *set, *index, *kind),
             Op::GetField {
                 dst,
                 src,
                 slot,
                 kind,
-            } => {
-                let regs = self.regs();
-                let d = self.iconst(dst.index() as i64);
-                let s = self.iconst(src.index() as i64);
-                let sl = self.iconst(*slot as i64);
-                let kk = self.iconst8(*kind as i64);
-                self.helper_op_read(
-                    i,
-                    off,
-                    next,
-                    H::GetField,
-                    &[
-                        A::P(regs),
-                        A::V(d),
-                        A::V(s),
-                        A::V(sl),
-                        A::I8(kk),
-                        A::P(self.env.out.clone()),
-                    ],
-                    *dst,
-                );
-            }
+            } => self.emit_get_field(i, off, next, *dst, *src, *slot, *kind),
             Op::SetField {
                 receiver,
                 slot,
@@ -2728,6 +2847,284 @@ impl Em<'_> {
                 self.emit_call(i, off, next, *dst, *callee, args);
             }
         }
+    }
+
+    /// `Op::GetIndex` read fast path: `regs[set]` a `Val::Array` and
+    /// `regs[index]` a `Val::Int` reads the `Vec<Val>` element through the
+    /// `RefLock` inline (the borrow flag is only read, never held — a
+    /// nonzero flag means a borrow survived an op boundary, impossible —
+    /// and `estep` preserves the panic the interpreter's `borrow()` would
+    /// raise). A tag miss, an `IntArray`/`FloatArray`/`Dict`/`Str`
+    /// receiver, or an out-of-range index falls to `mj_get_index`, whose
+    /// `pos()` bounds error needs no inline copy.
+    fn emit_get_index(
+        &mut self,
+        i: usize,
+        off: usize,
+        next: usize,
+        dst: Reg,
+        set: Reg,
+        index: Reg,
+        kind: AccessKind,
+    ) {
+        let sp = self.val_ptr(set.index() as u32);
+        let ip = self.val_ptr(index.index() as u32);
+        let ty = self.tag_ty();
+        let es = self.ex.estep.clone();
+
+        // `Option` access on Null short-circuits before any tag dispatch.
+        if kind == AccessKind::Option {
+            let (b_null, b_nn) = (self.create_block(), self.create_block());
+            let tn = self.tconst(self.lyt.t_null);
+            let ts0 = self.ld_tag(&sp);
+            let isn = self.icmp(ty, "EQ", &ts0, &tn);
+            self.cbr(&isn, &b_null, &b_nn);
+            self.start_block(&b_null);
+            let regs = self.regs();
+            let d = self.vaddr(&regs, dst.index() as u32);
+            self.st_null(&d);
+            self.refresh_shadow(dst.index() as u32);
+            let nb = self.next_blk(i);
+            self.br(&nb);
+            self.start_block(&b_nn);
+        }
+
+        let ts = self.ld_tag(&sp);
+        let ta = self.tconst(self.lyt.t_array);
+        let isa = self.icmp(ty, "EQ", &ts, &ta);
+        let ti = self.ld_tag(&ip);
+        let tint = self.tconst(self.lyt.t_int);
+        let isi = self.icmp(ty, "EQ", &ti, &tint);
+        let both = self.ev(format!("llvm.and {isa}, {isi} : {I1}"));
+        let (b_fast, b_slow) = (self.create_block(), self.create_block());
+        self.cbr(&both, &b_fast, &b_slow);
+
+        // the helper covers every other receiver/index shape, and the
+        // `pos()` out-of-bounds `RtErr` (an error value, not a panic).
+        self.start_block(&b_slow);
+        let regs = self.regs();
+        let d = self.iconst(dst.index() as i64);
+        let s = self.iconst(set.index() as i64);
+        let ii = self.iconst(index.index() as i64);
+        let kk = self.iconst8(kind as i64);
+        self.helper_op_read(
+            i,
+            off,
+            next,
+            H::GetIndex,
+            &[
+                A::P(regs),
+                A::V(d),
+                A::V(s),
+                A::V(ii),
+                A::I8(kk),
+                A::P(self.env.ctx0.clone()),
+                A::P(self.env.ctx1.clone()),
+                A::P(self.env.out.clone()),
+            ],
+            dst,
+        );
+
+        self.start_block(&b_fast);
+        let gc = self.ld(PTR, &sp, self.lyt.arr_pay as u32, 8);
+        let fl = self.ld_flag(&gc, self.lyt.rl_flag as u32);
+        let z = self.iconst(0);
+        let neg = self.icmp(I64, "SLT", &fl, &z);
+        let b_ok = self.create_block();
+        self.cbr(&neg, &es, &b_ok);
+        self.start_block(&b_ok);
+        let vec = self.gep(&gc, self.lyt.rl_vec as u32);
+        let len = self.ld_word(&vec, self.lyt.vec_len as u32);
+        let iv = self.ld(I64, &ip, self.lyt.val_pay as u32, 8);
+        // `usize::try_from(i)` folded into one compare: a negative index is
+        // unsigned-huge, so ULT fails exactly when `pos()` would error.
+        let inb = self.icmp(I64, "ULT", &iv, &len);
+        let b_hit = self.create_block();
+        self.cbr(&inb, &b_hit, &b_slow);
+        self.start_block(&b_hit);
+        let base = self.ld(PTR, &vec, self.lyt.vec_ptr as u32, 8);
+        let vs = self.iconst(self.lyt.val_size as i64);
+        let eoff = self.mul(&iv, &vs);
+        let elem = self.gep_dyn(&base, &eoff);
+        self.copy_to_dst(i, dst, &elem);
+    }
+
+    /// `Op::GetField` read fast paths — `Instance` fields (Inline `data`
+    /// and `Spilled` vec) and `Array` vec indexing read through the
+    /// `RefLock` inline under the same borrow-flag contract as
+    /// `emit_get_index`. Typed arrays (`at()` boxes the element), `Dict`,
+    /// a `Direct`-kind `Null`, and any out-of-bounds slot take
+    /// `mj_get_field`; a held write lock takes `estep` for panic parity,
+    /// and `Option` on `Null` answers `Null` inline.
+    fn emit_get_field(
+        &mut self,
+        i: usize,
+        off: usize,
+        next: usize,
+        dst: Reg,
+        src: Reg,
+        slot: u32,
+        kind: AccessKind,
+    ) {
+        let sp = self.val_ptr(src.index() as u32);
+        let t = self.ld_tag(&sp);
+        let ty = self.tag_ty();
+        let es = self.ex.estep.clone();
+        let sc = self.iconst(slot as i64);
+
+        if kind == AccessKind::Option {
+            let (b_null, b_nn) = (self.create_block(), self.create_block());
+            let tn = self.tconst(self.lyt.t_null);
+            let isn = self.icmp(ty, "EQ", &t, &tn);
+            self.cbr(&isn, &b_null, &b_nn);
+            self.start_block(&b_null);
+            let regs = self.regs();
+            let d = self.vaddr(&regs, dst.index() as u32);
+            self.st_null(&d);
+            self.refresh_shadow(dst.index() as u32);
+            let nb = self.next_blk(i);
+            self.br(&nb);
+            self.start_block(&b_nn);
+        }
+
+        let (b_inst, b_arrq, b_slow) =
+            (self.create_block(), self.create_block(), self.create_block());
+        let ti = self.tconst(self.lyt.t_instance);
+        let isi = self.icmp(ty, "EQ", &t, &ti);
+        self.cbr(&isi, &b_inst, &b_arrq);
+
+        self.start_block(&b_arrq);
+        let ta = self.tconst(self.lyt.t_array);
+        let isa = self.icmp(ty, "EQ", &t, &ta);
+        let b_arr = self.create_block();
+        self.cbr(&isa, &b_arr, &b_slow);
+
+        self.start_block(&b_slow);
+        let regs = self.regs();
+        let d = self.iconst(dst.index() as i64);
+        let s = self.iconst(src.index() as i64);
+        let sl = self.iconst(slot as i64);
+        let kk = self.iconst8(kind as i64);
+        self.helper_op_read(
+            i,
+            off,
+            next,
+            H::GetField,
+            &[
+                A::P(regs),
+                A::V(d),
+                A::V(s),
+                A::V(sl),
+                A::I8(kk),
+                A::P(self.env.out.clone()),
+            ],
+            dst,
+        );
+
+        // Instance: Gc -> RefLock flag -> InstanceData.fields
+        self.start_block(&b_inst);
+        let gc = self.ld(PTR, &sp, self.lyt.inst_pay as u32, 8);
+        let fl = self.ld_flag(&gc, self.lyt.rl_flag_i as u32);
+        let z = self.iconst(0);
+        let neg = self.icmp(I64, "SLT", &fl, &z);
+        let b_fd = self.create_block();
+        self.cbr(&neg, &es, &b_fd);
+        self.start_block(&b_fd);
+        let fp = self.gep(&gc, (self.lyt.rl_inst + self.lyt.id_fields) as u32);
+        let fty = self.wty(self.lyt.fld_tsz);
+        let ft = self.ld(fty, &fp, self.lyt.fld_tag as u32, self.lyt.fld_tsz as u32);
+        let fin = self.iconst_ty(fty, self.lyt.fld_inline as i64);
+        let isinl = self.icmp(fty, "EQ", &ft, &fin);
+        let (b_inl, b_spl) = (self.create_block(), self.create_block());
+        self.cbr(&isinl, &b_inl, &b_spl);
+        // Fields::Inline { len: u8, data: [Val; INLINE_FIELDS] }
+        self.start_block(&b_inl);
+        let len = self.ld(I8, &fp, self.lyt.fld_len as u32, 1);
+        let lenz = self.zext64(&len);
+        let inb = self.icmp(I64, "ULT", &sc, &lenz);
+        let b_ih = self.create_block();
+        self.cbr(&inb, &b_ih, &es);
+        self.start_block(&b_ih);
+        let data = self.gep(&fp, self.lyt.fld_data as u32);
+        let el = self.gep(&data, slot * self.lyt.val_size as u32);
+        self.copy_to_dst(i, dst, &el);
+        // Fields::Spilled(Vec<Val>)
+        self.start_block(&b_spl);
+        let vl = self.ld_word(&fp, (self.lyt.fld_spilled + self.lyt.vec_len) as u32);
+        let inb2 = self.icmp(I64, "ULT", &sc, &vl);
+        let b_sh = self.create_block();
+        self.cbr(&inb2, &b_sh, &es);
+        self.start_block(&b_sh);
+        let vb = self.ld(
+            PTR,
+            &fp,
+            (self.lyt.fld_spilled + self.lyt.vec_ptr) as u32,
+            8,
+        );
+        let el2 = self.gep(&vb, slot * self.lyt.val_size as u32);
+        self.copy_to_dst(i, dst, &el2);
+
+        // Array receiver: `a.0.borrow()[slot]` — plain Vec<Val> index.
+        self.start_block(&b_arr);
+        let gca = self.ld(PTR, &sp, self.lyt.arr_pay as u32, 8);
+        let fla = self.ld_flag(&gca, self.lyt.rl_flag as u32);
+        let nega = self.icmp(I64, "SLT", &fla, &z);
+        let b_ao = self.create_block();
+        self.cbr(&nega, &es, &b_ao);
+        self.start_block(&b_ao);
+        let vec = self.gep(&gca, self.lyt.rl_vec as u32);
+        let al = self.ld_word(&vec, self.lyt.vec_len as u32);
+        let ainb = self.icmp(I64, "ULT", &sc, &al);
+        let b_ah = self.create_block();
+        self.cbr(&ainb, &b_ah, &es);
+        self.start_block(&b_ah);
+        let vb2 = self.ld(PTR, &vec, self.lyt.vec_ptr as u32, 8);
+        let el3 = self.gep(&vb2, slot * self.lyt.val_size as u32);
+        self.copy_to_dst(i, dst, &el3);
+    }
+
+    /// `Op::Switch` — the interpreter's `code.ip` jump table as a real
+    /// `llvm.switch` per scrutinee arm: `Val::Int` subtracts `base` in i64
+    /// (the interpreter's `0 <= idx < len` is exactly "names a case"),
+    /// `Val::Instance` subtracts it from `struct_id` `zext`ed (a `sid <
+    /// base` negative is no case — the same default the u32 wrap landing
+    /// past the table end takes). Any other tag is `default` outright.
+    fn emit_switch(&mut self, scrut: Reg, base: u32, default: &BlockTarget, table: &[BlockTarget]) {
+        let sp = self.val_ptr(scrut.index() as u32);
+        let t = self.ld_tag(&sp);
+        let ty = self.tag_ty();
+        let es = self.ex.estep.clone();
+        let dblk = self.tgt_blk(default);
+        let b64 = self.iconst(base as i64);
+
+        let (b_int, b_chk) = (self.create_block(), self.create_block());
+        let ti = self.tconst(self.lyt.t_int);
+        let isi = self.icmp(ty, "EQ", &t, &ti);
+        self.cbr(&isi, &b_int, &b_chk);
+        self.start_block(&b_chk);
+        let tins = self.tconst(self.lyt.t_instance);
+        let isn = self.icmp(ty, "EQ", &t, &tins);
+        let b_inst = self.create_block();
+        self.cbr(&isn, &b_inst, &dblk);
+
+        self.start_block(&b_int);
+        let v = self.ld(I64, &sp, self.lyt.val_pay as u32, 8);
+        let idx = self.sub(&v, &b64);
+        self.emit_switch_tbl(&idx, &dblk, table);
+
+        self.start_block(&b_inst);
+        let gc = self.ld(PTR, &sp, self.lyt.inst_pay as u32, 8);
+        let fl = self.ld_flag(&gc, self.lyt.rl_flag_i as u32);
+        let z = self.iconst(0);
+        let neg = self.icmp(I64, "SLT", &fl, &z);
+        let b_ok = self.create_block();
+        self.cbr(&neg, &es, &b_ok);
+        self.start_block(&b_ok);
+        let sidp = self.gep(&gc, (self.lyt.rl_inst + self.lyt.id_sid) as u32);
+        let sid32 = self.ld(I32, &sidp, 0, 4);
+        let sid = self.zext64(&sid32);
+        let idx2 = self.sub(&sid, &b64);
+        self.emit_switch_tbl(&idx2, &dblk, table);
     }
 
     /// A masked `is_bool` answer: a cond reg with a live scalar shadow holds
@@ -3198,12 +3595,12 @@ impl Em<'_> {
         let flen = self.frames_len();
         let dcap = self.iconst(INLINE_CALL_DEPTH as i64);
         let depth_ok = self.icmp(I64, "ULT", &flen, &dcap);
-        let rlen = self.ld(I64, &thread, (self.lyt.regs_off + self.lyt.vec_len) as u32, 8);
-        let rcap = self.ld(I64, &thread, (self.lyt.regs_off + self.lyt.vec_cap) as u32, 8);
+        let rlen = self.ld_word(&thread, (self.lyt.regs_off + self.lyt.vec_len) as u32);
+        let rcap = self.ld_word(&thread, (self.lyt.regs_off + self.lyt.vec_cap) as u32);
         let slack = self.sub(&rcap, &rlen);
         let need = self.iconst(cchunk.regs as i64);
         let regs_ok = self.icmp(I64, "UGE", &slack, &need);
-        let fcap = self.ld(I64, &thread, (self.lyt.frames_off + self.lyt.vec_cap) as u32, 8);
+        let fcap = self.ld_word(&thread, (self.lyt.frames_off + self.lyt.vec_cap) as u32);
         let frames_ok = self.icmp(I64, "ULT", &flen, &fcap);
         let ok01 = self.band1(&depth_ok, &regs_ok);
         let ok = self.band1(&ok01, &frames_ok);
@@ -3256,12 +3653,7 @@ impl Em<'_> {
         }
         let nregs_c = self.iconst(cchunk.regs as i64);
         let nlen = self.add(&rlen, &nregs_c);
-        self.st_off(
-            &thread,
-            &nlen,
-            (self.lyt.regs_off + self.lyt.vec_len) as u32,
-            8,
-        );
+        self.st_word(&thread, &nlen, (self.lyt.regs_off + self.lyt.vec_len) as u32);
         // arg copies: `regs[new_base + param] = regs[caller_base + arg]` —
         // both indices are compile-time constants; the caller window is
         // `v_regs` (unmoved — capacity was checked).
@@ -3285,24 +3677,19 @@ impl Em<'_> {
         let cfo = self.mul(&fm1, &fszc);
         let cf = self.gep_dyn(&fptr, &cfo);
         let nxt = self.iconst(next as i64);
-        self.st_off(&cf, &nxt, self.lyt.frame_ip as u32, 8);
+        self.st_word(&cf, &nxt, self.lyt.frame_ip as u32);
         // push the callee frame
         let nfo = self.mul(&flen, &fszc);
         let nf = self.gep_dyn(&fptr, &nfo);
         let bi = self.iconst32(body.index() as i64);
         self.st_off(&nf, &bi, self.lyt.frame_chunk as u32, 4);
         let cip = self.iconst(cchunk.offset as i64);
-        self.st_off(&nf, &cip, self.lyt.frame_ip as u32, 8);
+        self.st_word(&nf, &cip, self.lyt.frame_ip as u32);
         let rr = self.iconst32(dst.index() as i64);
         self.st_off(&nf, &rr, self.lyt.frame_ret as u32, 4);
-        self.st_off(&nf, &rlen, self.lyt.frame_base as u32, 8);
+        self.st_word(&nf, &rlen, self.lyt.frame_base as u32);
         let nfl = self.add(&flen, &one);
-        self.st_off(
-            &thread,
-            &nfl,
-            (self.lyt.frames_off + self.lyt.vec_len) as u32,
-            8,
-        );
+        self.st_word(&thread, &nfl, (self.lyt.frames_off + self.lyt.vec_len) as u32);
         // code.ip = callee chunk offset
         self.store_ip(&cip);
         // the call itself — a direct native call, same `env` bundle (the
@@ -3345,28 +3732,18 @@ impl Em<'_> {
         let fm2 = self.sub(&flen2, &one);
         let pfo = self.mul(&fm2, &fszc);
         let pf = self.gep_dyn(&fptr2, &pfo);
-        let pbase = self.ld(I64, &pf, self.lyt.frame_base as u32, 8);
+        let pbase = self.ld_word(&pf, self.lyt.frame_base as u32);
         let pret32 = self.ld(I32, &pf, self.lyt.frame_ret as u32, 4);
         let pret = self.zext64(&pret32);
-        self.st_off(
-            &thread,
-            &fm2,
-            (self.lyt.frames_off + self.lyt.vec_len) as u32,
-            8,
-        );
-        self.st_off(
-            &thread,
-            &pbase,
-            (self.lyt.regs_off + self.lyt.vec_len) as u32,
-            8,
-        );
+        self.st_word(&thread, &fm2, (self.lyt.frames_off + self.lyt.vec_len) as u32);
+        self.st_word(&thread, &pbase, (self.lyt.regs_off + self.lyt.vec_len) as u32);
         // caller = frames[flen-2]; code.ip = caller.ip
         let fm3 = self.sub(&flen2, &two);
         let cfo2 = self.mul(&fm3, &fszc);
         let cf2 = self.gep_dyn(&fptr2, &cfo2);
-        let cip2 = self.ld(I64, &cf2, self.lyt.frame_ip as u32, 8);
+        let cip2 = self.ld_word(&cf2, self.lyt.frame_ip as u32);
         self.store_ip(&cip2);
-        let cbase = self.ld(I64, &cf2, self.lyt.frame_base as u32, 8);
+        let cbase = self.ld_word(&cf2, self.lyt.frame_base as u32);
         // `thread.regs` may have moved under the callee — rebuild the window
         // and write the return value into `caller_base + return_reg`
         let rp2 = self.ld(

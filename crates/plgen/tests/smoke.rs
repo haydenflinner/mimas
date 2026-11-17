@@ -14,7 +14,7 @@ fn emits_func_per_chunk_and_body_table() {
         |api| library::codegen(api),
     )
     .expect("compiles");
-    let text = mimas_plgen::emit_module(&program, &vm::bc::jit::layout());
+    let text = mimas_plgen::emit_module(&program, &vm::bc::jit::layout(), false);
     assert!(text.starts_with("builtin.module @mimas_pliron {"));
     // one llvm.func per chunk plus the exported globals
     for (i, _) in program.chunks.iter() {
@@ -26,10 +26,15 @@ fn emits_func_per_chunk_and_body_table() {
     }
     assert!(text.contains(mimas_plgen::BODIES_GLOBAL));
     assert!(text.contains(mimas_plgen::NBODIES_GLOBAL));
-    // extern decls for the helper surface — the companion-runtime symbols
+    // extern decls for the helper surface — the companion-runtime symbols,
+    // each carrying llvm_func_attrs in the outlined_attributes trailer
     for name in mimas_plgen::spec_names() {
         assert!(text.contains(&format!("llvm.func @{name}:")), "missing {name}");
     }
+    assert!(
+        text.contains("outlined_attributes:\n!0 = [llvm_func_attrs = llvm.attributes"),
+        "missing llvm_func_attrs trailer"
+    );
     // dispatch is the llvm.switch over op byte offsets
     assert!(text.contains("llvm.switch"));
     // direct symbol calls, no baked address immediates
