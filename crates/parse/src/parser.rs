@@ -4820,6 +4820,12 @@ impl<'s> Parser<'s> {
 
     fn annotation(&mut self) -> Annotation {
         fn inner(parser: &mut Parser) -> Annotation {
+            // `x: inout T` -- a parameter's call convention. Parsed anywhere a
+            // type can appear; the checker owns rejecting it off a parameter.
+            if parser.at(TokKind::Ident("inout")) {
+                let kw = parser.require_ident();
+                return Annotation::Inout(kw, Box::new(inner(parser)));
+            }
             let atom = parser.annotation_atom();
 
             if parser.at(TokKind::Plus) {

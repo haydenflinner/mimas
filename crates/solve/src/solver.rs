@@ -105,6 +105,21 @@ pub struct Solver {
     /// obligation against it. `None` when the caller has no use site to blame.
     pub(crate) obligation_at: Option<Location>,
     pub(crate) closure_captures: FxIndexMap<NodeId, FxIndexSet<DecId>>,
+    /// Param bindings spelled `x: inout T`, by the binding ident's node id --
+    /// `Function::solve` marks the dec each declares once it exists.
+    pub(crate) inout_params: FxHashSet<NodeId>,
+    /// Decs of `inout` parameters: the place each holds is lent for the call,
+    /// so a closure capture or a returned `&` of one is an escape.
+    /// r[impl mimas.inout.escape]
+    pub(crate) inout_decs: FxHashSet<DecId>,
+    /// Calls that lend a `&` argument: emit scopes the borrow's pending
+    /// cleanup to the call so the loan ends when the callee returns.
+    pub(crate) inout_calls: FxHashSet<NodeId>,
+    /// `&` call nodes a lending or keeping context claimed: an `inout`
+    /// parameter's argument or a `let`'s value. Any other `&` is rejected
+    /// where `borrow_place` runs.
+    /// r[impl mimas.place.marker]
+    pub(crate) allowed_borrows: FxHashSet<NodeId>,
     pub(crate) expected_closures: FxIndexMap<NodeId, Vec<FnParam>>,
     vids: IdVec<Vid, ()>,
     subs: IdVec<Vid, Option<Ty>>,
@@ -342,6 +357,10 @@ impl Solver {
             propagates: FxIndexMap::default(),
             pact_ops: FxIndexMap::default(),
             closure_captures: FxIndexMap::default(),
+            inout_params: FxHashSet::default(),
+            inout_decs: FxHashSet::default(),
+            inout_calls: FxHashSet::default(),
+            allowed_borrows: FxHashSet::default(),
             expected_closures: FxIndexMap::default(),
             control_flow: ControlFlow::new(),
             node_visits: FxHashSet::default(),
@@ -3412,6 +3431,21 @@ impl Solver {
                     self.fulfill_annotation(&mut ty, annotation, right, left.location())?;
                 };
 
+                // `let p = &e` keeps the place: claim the `&` for this binding
+                // before it solves, since `&` is an error everywhere else.
+                // r[impl mimas.place.let]
+                let mut rhs = right;
+                while let ExprKind::Grouping(g) = rhs.kind() {
+                    rhs = &g.inner;
+                }
+                if let ExprKind::Call(c) = rhs.kind()
+                    && c.left
+                        .as_ident()
+                        .is_some_and(|i| i.lexeme == "__borrow_place")
+                {
+                    self.allowed_borrows.insert(rhs.id());
+                }
+
                 right.fulfill_ty(ty.clone(), self)?;
 
                 if annotation.is_none() && ty.clone().normalized(self) == Ty::Null {
@@ -3451,6 +3485,34 @@ impl Solver {
                             })?;
                         }
                         self.solve_match_pat(left, ty, false)?;
+                    }
+                }
+
+                // `let p = &x` where `x` is an inout param re-lends the same
+                // place: the fresh binding keeps the loan's escape rules.
+                // r[impl mimas.inout.escape]
+                if let Some(source) = self.place_sources.get(&right.id())
+                    && let Some((root, _)) = crate::root_and_path(source)
+                    && self
+                        .ribs
+                        .resolve(root)
+                        .is_some_and(|d| self.inout_decs.contains(&d))
+                {
+                    let mut stack = vec![left];
+                    while let Some(pat) = stack.pop() {
+                        match pat.kind() {
+                            PatKind::Ident(_) => {
+                                if let Some(&dec) = self.node_decs.get(&pat.id()) {
+                                    self.inout_decs.insert(dec);
+                                }
+                            }
+                            PatKind::Tuple(pats)
+                            | PatKind::TupleVariant(_, pats)
+                            | PatKind::Or(pats) => stack.extend(pats),
+                            PatKind::Struct(_, fields) => stack.extend(fields.values()),
+                            PatKind::NullBind(inner) => stack.push(inner),
+                            _ => {}
+                        }
                     }
                 }
 
@@ -3509,6 +3571,11 @@ impl Solver {
                                 binding.left.id(),
                                 param.ty,
                             )?;
+                            if self.inout_params.contains(&binding.left.id())
+                                && let Some(&dec) = self.node_decs.get(&binding.left.id())
+                            {
+                                self.inout_decs.insert(dec);
+                            }
                         }
                         let expected = return_type
                             .clone()
@@ -4819,12 +4886,33 @@ impl Solver {
                 .map_err(|e| e.into_type_mismatch(self, ident.location))?;
         }
 
-        if let Some(annotation) = annotation.clone() {
+        // `x: inout T` declares the convention: the callee holds the `__Place<T>`
+        // descriptor the caller lent with `&`, so the param's own type is that
+        // descriptor -- place_read / place_assignment then route the body's
+        // reads and writes through it like any other place binding.
+        // r[impl mimas.inout.param]
+        let annotation = annotation.clone().map(|a| match a {
+            Annotation::Inout(_, inner) => {
+                self.inout_params.insert(left.id());
+                let place = Ident::new("__Place".to_string(), left.location());
+                Annotation::Applied(vec![place], vec![*inner])
+            }
+            a => a,
+        });
+        if let Some(annotation) = annotation {
             let mut target = Ty::from_annotation(annotation, self)?;
             ty.fulfill_ty(&mut target, self)
                 .map_err(|e| e.into_type_mismatch(self, ident.location))?;
         }
         let has_default = if let Some(right) = right {
+            if matches!(binding.annotation, Some(Annotation::Inout(..))) {
+                // a loan has no value of its own to fall back on
+                return Err(crate::errors::InoutDefault {
+                    src: self.src(right.location()),
+                    at: right.location().into(),
+                }
+                .into());
+            }
             let mut rhs_ty = right.query(self)?;
             ty.fulfill_ty(&mut rhs_ty, self)
                 .map_err(|e| e.into_type_mismatch(self, ident.location))?;

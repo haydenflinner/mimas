@@ -396,13 +396,24 @@ impl Solver {
 }
 
 impl Solver {
-    fn is_place_type(&self, ty: &Ty) -> Option<bool> {
+    pub(crate) fn is_place_type(&self, ty: &Ty) -> Option<bool> {
         let (aid, _) = ty.applied()?;
         match self.adts[aid].name.as_str() {
             "__Place" => Some(false),
             "__RemovablePlace" => Some(true),
             _ => None,
         }
+    }
+
+    /// `(removable, element)` for a place descriptor's `__Place<T>` /
+    /// `__RemovablePlace<T>` type. An unremovable place unifies with either
+    /// param side; a removable one only lends where removal stays on offer.
+    pub(crate) fn place_element(&mut self, ty: &Ty) -> Option<(bool, Ty)> {
+        let ty = ty.clone().normalized(self);
+        let removable = self.is_place_type(&ty)?;
+        let (_, args) = ty.applied()?;
+        let element = args.first().cloned().unwrap_or(Ty::Unit);
+        Some((removable, element))
     }
     fn raw_place(&mut self, name: &Ident) -> Expr {
         let e = expr(name.clone(), name.location());
@@ -465,6 +476,16 @@ impl Solver {
         let [argument] = c.arguments.as_slice() else {
             return Err(self.accessor_error(at, "one place argument"));
         };
+        // a `&` has no value of its own -- only a context that can lend or
+        // keep a place may hold one. r[impl mimas.place.marker]
+        if !self.allowed_borrows.contains(&id) {
+            return Err(crate::errors::SubscriptUse {
+                src: self.src(at),
+                at: at.into(),
+                message: "`&` stands only where a place can be lent or kept: an `inout` argument, a `let`'s value, or a `yield`'s place".into(),
+            }
+            .into());
+        }
         self.check_place_write(&argument.value)?;
         argument.value.query(self)?;
         self.place_sources.insert(id, argument.value.clone());

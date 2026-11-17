@@ -69,6 +69,9 @@ pub struct Resolutions {
     pub pact_names: IdVec<PactId, String>,
     pub module_paths: FxHashMap<AdtId, Vec<String>>,
     pub closure_captures: FxIndexMap<NodeId, Vec<DecId>>,
+    /// Calls that lend a `&` argument to an `inout` parameter: emit scopes the
+    /// borrow's pending cleanup to the call so the loan ends when it returns.
+    pub inout_calls: rustc_hash::FxHashSet<NodeId>,
     /// Exprs whose array lengths the solver couldn't prove against a `[T; n]`
     /// contract -- emit wraps each in a runtime dim check (see `lens.rs`).
     pub len_checks: FxIndexMap<NodeId, Vec<Option<usize>>>,
@@ -634,6 +637,7 @@ impl From<Solver> for Resolutions {
             pact_names,
             module_paths: paths,
             closure_captures,
+            inout_calls: solver.inout_calls,
             len_checks: solver.len_checks,
             default_ctors: solver.default_ctors,
             contract_native,

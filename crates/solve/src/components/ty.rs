@@ -118,6 +118,14 @@ impl TyExt for Ty {
 
     fn from_annotation(annotation: Annotation, solver: &mut Solver) -> Result<Ty> {
         match annotation {
+            // `inout` parses anywhere a type can appear but means a parameter's
+            // call convention -- `bind_parameter` peels it before this sees it.
+            // r[impl mimas.inout.param]
+            Annotation::Inout(kw, _) => Err(crate::errors::InoutPosition {
+                src: solver.src(kw.location),
+                at: kw.location.into(),
+            }
+            .into()),
             Annotation::Unit => Ok(Ty::Unit),
             Annotation::Poison(poison) => poison.escaped(),
             Annotation::Kw(kw) => Ok(ty_from_kw(kw)),
