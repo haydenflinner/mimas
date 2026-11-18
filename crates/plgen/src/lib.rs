@@ -725,6 +725,14 @@ struct Em<'a> {
     v_bcn0: String,
     int: BTreeMap<u32, (String, String)>,
     float: BTreeMap<u32, (String, String)>,
+    /// Shadowed regs whose `sv` was stored since the last `flush_seq` —
+    /// the only regs memory can be stale on. `refresh_shadow`/
+    /// `dst_refresh`/`ok = 0` paths re-derive from or write memory, so
+    /// they *un*mark: `flush_seq` writes back `dirty` only, not every
+    /// shadowed reg (the flush used to be O(shadowed) per boundary —
+    /// ~700 emitted lines per op on bodies with big register files).
+    dirty_int: BTreeSet<u32>,
+    dirty_float: BTreeSet<u32>,
     /// Scratch i64 cell for `Len`'s out-param.
     slot_i: String,
     /// `reg_list` slots, deduplicated by index list: alloca `[i32 x n]`.
@@ -1215,6 +1223,8 @@ pub fn emit_body(prog: &Program, body: usize, lyt: &Layout, wasm: bool) -> Strin
         v_bcn0: String::new(),
         int: BTreeMap::new(),
         float: BTreeMap::new(),
+        dirty_int: BTreeSet::new(),
+        dirty_float: BTreeSet::new(),
         slot_i: String::new(),
         rl: HashMap::new(),
         self_i: body,
@@ -1776,15 +1786,23 @@ impl Em<'_> {
         self.ev(format!("llvm.select {c} ? {t} : {f} : {ty}"))
     }
 
+    /// Every terminator flushes dirty shadows first (`flush_seq` inside
+    /// `br`/`cbr`/`ret`/`emit_switch_tbl`): each block then *enters* with
+    /// memory synced on all in-edges, so `dirty_*` only ever means
+    /// "written since this block's entry" — joins can't lose a write the
+    /// way they would if the set tracked emitter order across blocks.
     fn br(&mut self, t: &str) {
+        self.flush_seq();
         self.ln(format!("llvm.br ^{t}()"));
     }
 
     fn cbr(&mut self, c: &str, t: &str, f: &str) {
+        self.flush_seq();
         self.ln(format!("llvm.cond_br if {c} ^{t}() else ^{f}()"));
     }
 
     fn ret(&mut self) {
+        self.flush_seq();
         self.ln("llvm.return".into());
     }
 
@@ -1871,18 +1889,6 @@ impl Em<'_> {
 
     fn bcn(&mut self) -> String {
         self.ld(I64, &self.v_bcn.clone(), 0, 8)
-    }
-
-    fn sh_int(&self) -> Vec<u32> {
-        let mut v: Vec<u32> = self.sh.int.iter().copied().collect();
-        v.sort_unstable();
-        v
-    }
-
-    fn sh_float(&self) -> Vec<u32> {
-        let mut v: Vec<u32> = self.sh.float.iter().copied().collect();
-        v.sort_unstable();
-        v
     }
 
     // ---- inline `Val` access over the probed layout (`lyt`) ----
@@ -2034,6 +2040,7 @@ impl Em<'_> {
             write!(cases, "\n      {{ <{j}: i64>: ^{b}() }},").unwrap();
         }
         cases.pop();
+        self.flush_seq();
         self.ln(format!("llvm.switch {idx}, ^{dflt}() [{cases}\n    ]"));
     }
 
@@ -2063,15 +2070,20 @@ impl Em<'_> {
     }
 
     /// The inline shadow-writeback sequence — see `jit/src/emit.rs`
-    /// `flush_seq`; a `select` per field keeps it branch-free.
+    /// `flush_seq`; a `select` per field keeps it branch-free. Only
+    /// `dirty` regs are written back: a shadow loaded from memory and
+    /// never stored already agrees with memory, and every call site is
+    /// an unconditional emission point, so clearing here is safe.
     fn flush_seq(&mut self) {
-        if self.sh.int.is_empty() && self.sh.float.is_empty() {
+        let dirty_i = std::mem::take(&mut self.dirty_int);
+        let dirty_f = std::mem::take(&mut self.dirty_float);
+        if dirty_i.is_empty() && dirty_f.is_empty() {
             return;
         }
         let regs = self.regs();
         let tint = self.tconst(self.lyt.t_int);
         let tag_ty = self.tag_ty();
-        for r in self.sh_int() {
+        for r in dirty_i {
             let (sv_a, ok_a) = self.int[&r].clone();
             let okv = self.ld(I8, &ok_a, 0, 1);
             let ok1 = self.icmp_ne0(I8, &okv);
@@ -2085,7 +2097,7 @@ impl Em<'_> {
             self.st_off(&a, &np, self.lyt.val_pay as u32, 8);
         }
         let tflt = self.tconst(self.lyt.t_float);
-        for r in self.sh_float() {
+        for r in dirty_f {
             let (sv_a, ok_a) = self.float[&r].clone();
             let okv = self.ld(I8, &ok_a, 0, 1);
             let ok1 = self.icmp_ne0(I8, &okv);
@@ -2220,6 +2232,7 @@ impl Em<'_> {
             self.st(&sv, v);
             let one = self.iconst8(1);
             self.st(&ok, &one);
+            self.dirty_int.insert(d);
         } else {
             let regs = self.regs();
             let a = self.vaddr(&regs, d);
@@ -2232,6 +2245,7 @@ impl Em<'_> {
             self.st(&sv, v);
             let one = self.iconst8(1);
             self.st(&ok, &one);
+            self.dirty_float.insert(d);
         } else {
             let regs = self.regs();
             let a = self.vaddr(&regs, d);
@@ -2330,6 +2344,9 @@ impl Em<'_> {
             let k8 = self.i1_to_i8(&k);
             self.st(&ok, &k8);
         }
+        // Re-derived from memory — synced, not dirty.
+        self.dirty_int.remove(&r);
+        self.dirty_float.remove(&r);
     }
 
     /// `helper_op` + a post-call [`Em::refresh_shadow`] on `dst`.
@@ -3856,6 +3873,8 @@ impl Em<'_> {
             let k = self.ld(I8, &sok, 0, 1);
             self.st(&dsv, &v);
             self.st_al(&dok, &k, 1);
+            // `dok = sok` may be 1 → dst's memory stale on that path.
+            self.dirty_int.insert(d);
             let c = self.create_block();
             let w = self.create_block();
             let dokv = self.ld(I8, &dok, 0, 1);
@@ -3873,6 +3892,7 @@ impl Em<'_> {
             let k = self.ld(I8, &sok, 0, 1);
             self.st(&dsv, &v);
             self.st_al(&dok, &k, 1);
+            self.dirty_float.insert(d);
             let c = self.create_block();
             let w = self.create_block();
             let dokv = self.ld(I8, &dok, 0, 1);
@@ -3964,6 +3984,13 @@ impl Em<'_> {
         self.st(&dsv, &v);
         let one = self.iconst8(1);
         self.st_al(&dok, &one, 1);
+        // `dsv` holds a value `regs[d]` doesn't — the miss arm writes
+        // memory and `dok = 0`, but that's the sibling path; mark stays.
+        if dst_is_int {
+            self.dirty_int.insert(d);
+        } else {
+            self.dirty_float.insert(d);
+        }
         self.br(&done);
         self.start_block(&miss);
         let regs = self.regs();
@@ -4325,6 +4352,10 @@ impl Em<'_> {
             let k8 = self.i1_to_i8(&k);
             self.st_al(&ok, &k8, 1);
         }
+        // Re-derived from memory — synced (a no-op today: nothing can
+        // mark `d` between the pre-call flush and here).
+        self.dirty_int.remove(&d);
+        self.dirty_float.remove(&d);
         let nb = self.next_blk(i);
         self.br(&nb);
     }
