@@ -74,6 +74,10 @@ pub struct Parser<'s> {
     /// may bind across a newline.
     group_depth: usize,
     generator_type: Option<Annotation>,
+    /// Whether the innermost generator body's `yield`s hand out places
+    /// (`yield &e`) or values (`yield e`): `None` until its first `yield`
+    /// picks, and a later `yield` of the other kind is a compile error.
+    generator_place: Option<bool>,
     accessor_yield: bool,
     /// On while `±`'s tolerance parses, so a trailing `%` stays the percent marker
     /// (`x ± 10%`) instead of folding as postfix percent. Groups reset it -- inside
@@ -259,6 +263,7 @@ impl<'s> Parser<'s> {
             juxta: Juxta::Apply,
             group_depth: 0,
             generator_type: None,
+            generator_place: None,
             accessor_yield: false,
             pct_marker: false,
             assert_id: 0,
@@ -520,12 +525,64 @@ impl<'s> Parser<'s> {
                 if self.generator_type.is_some() && self.nth(1).starts_expr() =>
             {
                 self.advance();
-                let value = self.expr();
+                let mut value = self.expr();
+                while let ExprKind::Grouping(g) = value.kind() {
+                    value = g.inner.clone();
+                }
+                // `yield &e` hands out the place `e` names instead of its
+                // value: the `&` mints a place descriptor (`__yield_place`
+                // is `__borrow_place` minus `remove`), so a `for` over the
+                // iterator binds the slot itself.
+                // r[impl mimas.generator.place]
+                let place = matches!(value.kind(), ExprKind::Call(c) if c
+                    .left
+                    .as_ident()
+                    .is_some_and(|i| i.lexeme == "__borrow_place"));
+                match self.generator_place {
+                    None => self.generator_place = Some(place),
+                    Some(p) if p != place => {
+                        let (this, that) = if place {
+                            ("`yield &place`", "`yield value`")
+                        } else {
+                            ("`yield value`", "`yield &place`")
+                        };
+                        self.error_here(Misdirection {
+                            src: self.src(),
+                            at: self.location(start).into(),
+                            msg: format!("a generator can't mix {this} and {that}").into(),
+                            label: "every `yield` decides the pull type — pick one kind".into(),
+                        });
+                    }
+                    _ => {}
+                }
+                let annotation = if place {
+                    self.generator_type.clone().map(|element| {
+                        Annotation::Applied(
+                            vec![self.ident_at("__Place", start)],
+                            vec![element],
+                        )
+                    })
+                } else {
+                    self.generator_type.clone()
+                };
+                let value = if place {
+                    let ExprKind::Call(c) = value.into_kind() else {
+                        unreachable!("a place yield's value is the `&` call")
+                    };
+                    let values = c
+                        .arguments
+                        .into_iter()
+                        .map(|a| a.value)
+                        .collect();
+                    self.generator_call("__yield_place", values, start)
+                } else {
+                    value
+                };
                 let name = self.ident_at("__yield_value", start);
                 let bind = self.new_stmt(
                     Let {
                         left: name.clone().into(),
-                        annotation: self.generator_type.clone(),
+                        annotation,
                         right: value,
                         else_branch: None,
                     },
@@ -1882,8 +1939,19 @@ impl<'s> Parser<'s> {
         }
         let wheres = self.where_clause();
         let saved = self.generator_type.replace(element.clone());
+        let saved_place = self.generator_place.take();
         let body = self.block();
+        let place = self.generator_place == Some(true);
         self.generator_type = saved;
+        self.generator_place = saved_place;
+        // a body whose `yield`s were `yield &e` produces a `() -> __Place<T>?`
+        // pull iterator -- each pull hands out one element place.
+        // r[impl mimas.generator.place]
+        let element = if place {
+            Annotation::Applied(vec![self.ident_at("__Place", start)], vec![element])
+        } else {
+            element
+        };
         let mut parameter = Binding::new(self.ident_at("__generator_type", start));
         parameter.annotation = Some(element.clone());
         let closure = self.new_expr(
@@ -2357,8 +2425,10 @@ impl<'s> Parser<'s> {
     /// `fn __lit_x`).
     fn function_with(&mut self, prefix: Option<&str>) -> Function {
         let generator = self.generator_type.take();
+        let place = self.generator_place.take();
         let f = self.ordinary_function_with(prefix);
         self.generator_type = generator;
+        self.generator_place = place;
         f
     }
 
@@ -2415,8 +2485,10 @@ impl<'s> Parser<'s> {
 
     fn closure(&mut self) -> Expr {
         let generator = self.generator_type.take();
+        let place = self.generator_place.take();
         let closure = self.ordinary_closure();
         self.generator_type = generator;
+        self.generator_place = place;
         closure
     }
 

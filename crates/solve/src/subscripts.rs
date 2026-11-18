@@ -534,6 +534,86 @@ impl Solver {
         self.rewrites.insert(id, rewritten);
         Ok(Some(ty))
     }
+
+    /// `yield &e` inside a generator body hands out the place `e` names --
+    /// the same descriptor a `&` lend mints, minus `remove`: pulling a row
+    /// out from under a suspended walk is the length mutation the loop's
+    /// freeze forbids, so the yielded place is `__Place` only.
+    /// r[impl mimas.generator.place]
+    pub(crate) fn yield_place(
+        &mut self,
+        id: NodeId,
+        c: &Call,
+        at: Location,
+    ) -> Result<Option<Ty>> {
+        if !c
+            .left
+            .as_ident()
+            .is_some_and(|i| i.lexeme == "__yield_place")
+        {
+            return Ok(None);
+        }
+        let [argument] = c.arguments.as_slice() else {
+            return Err(self.accessor_error(at, "one place argument"));
+        };
+        // the `&` under a `yield` is claimed by the yield -- it lends
+        // nowhere else.
+        if !self.allowed_borrows.contains(&id) {
+            return Err(crate::errors::SubscriptUse {
+                src: self.src(at),
+                at: at.into(),
+                message: "`yield &` belongs to a generator body -- the `&` marks the place that `yield` hands out".into(),
+            }
+            .into());
+        }
+        self.check_place_write(&argument.value)?;
+        argument.value.query(self)?;
+        self.element_borrows.insert(id);
+        let rewritten = if let Some((raw, _)) = self.place_binding(&argument.value)? {
+            raw
+        } else if let Some(target) = self.subscript_target(&argument.value)? {
+            if !target.has("borrow") {
+                return Err(crate::errors::SubscriptUse {
+                    src: self.src(at),
+                    at: at.into(),
+                    message: "borrowing needs an inout arm ending with `yield place`".into(),
+                }
+                .into());
+            }
+            target.invocation("borrow", vec![])
+        } else {
+            self.builtin_place(id, &argument.value)?
+        };
+        let ty = rewritten.query(self)?;
+        // a removable place can't be yielded -- `remove` mid-walk would
+        // shift the very rows the generator is pulling over.
+        if matches!(self.place_element(&ty), Some((true, _))) {
+            return Err(crate::errors::SubscriptUse {
+                src: self.src(at),
+                at: at.into(),
+                message: "a place yield can't hand out a removable place -- `remove` mid-walk would shift the rows under it".into(),
+            }
+            .into());
+        }
+        // a place lent to this call (`inout` param or a re-lend of one)
+        // can't be yielded -- it would outlive the loan.
+        // r[impl mimas.inout.escape]
+        if let Some((root, _)) = crate::root_and_path(&argument.value)
+            && let Some(dec) = self.ribs.resolve(root)
+            && self.inout_decs.contains(&dec)
+        {
+            return Err(crate::errors::InoutEscape {
+                src: self.src(at),
+                at: at.into(),
+                name: root.lexeme.clone(),
+                via: "yielded by a generator".to_string(),
+            }
+            .into());
+        }
+        self.rewrites.insert(id, rewritten);
+        Ok(Some(ty))
+    }
+
     fn assignment_place_binding(&mut self, e: &Expr) -> Result<Option<(Expr, NodeId)>> {
         if let Some((raw, _)) = self.place_binding(e)? {
             return Ok(Some((raw, e.id())));
@@ -547,6 +627,17 @@ impl Solver {
     }
 
     fn place_assignment(&mut self, id: NodeId, a: &Assignment) -> Result<bool> {
+        // `v = x` where `v` is a place-bound `for` variable stays the
+        // loop-variable error: the binding is the loop's, and letting the
+        // place path swallow it would make `for v in s.live { v = m }` a
+        // write-through while `for m in xs { m = m2 }` stays rejected.
+        // r[impl mimas.for.elem-bind]
+        if let ExprKind::Ident(name) = a.left.kind()
+            && let Some(dec) = self.ribs.resolve(name)
+            && matches!(self.decs[dec].kind, DecKind::LoopVar)
+        {
+            return Ok(false);
+        }
         let Some((raw, root)) = self.assignment_place_binding(&a.left)? else {
             return Ok(false);
         };
@@ -783,7 +874,7 @@ impl Solver {
                     return Err(crate::errors::SubscriptUse {
                         src: self.src(at),
                         at: at.into(),
-                        message: "a `&` on a bare binding lends to an `inout` call only -- a kept place needs a field, a list slot, or a mutable accessor".into(),
+                        message: "a `&` on a bare binding lends to an `inout` call only -- a kept or yielded place needs a field, a list slot, or a mutable accessor".into(),
                     }
                     .into());
                 }
@@ -1026,6 +1117,41 @@ impl Solver {
                     .into(),
             }
             .into());
+        }
+        // `for v in &s.live` where `live` is a place generator: the pull
+        // iterator already hands out `__Place`s, so the `&` affirms the
+        // binding's place-ness rather than minting anything -- solve as
+        // the plain `for`, whose element binding then holds the yielded
+        // place itself. r[impl mimas.for.place-iter]
+        if let Ty::Fn(header) = &iter_ty
+            && header.parameters.is_empty()
+        {
+            let yields_place = matches!(
+                header.return_ty.as_ref(),
+                Ty::Option(element)
+                    if self
+                        .is_place_type(&element.clone().normalized(self))
+                        .is_some()
+            );
+            if !yields_place {
+                return Err(crate::errors::SubscriptUse {
+                    src: self.src(at),
+                    at: at.into(),
+                    message: "`for .. in &` on a pull iterator needs a place generator -- `yield &` in its body is what makes one".into(),
+                }
+                .into());
+            }
+            let rewritten = expr(
+                For {
+                    binding: for_expr.binding.clone(),
+                    iterator: operand.clone(),
+                    body: for_expr.body.clone(),
+                },
+                location,
+            );
+            let ty = rewritten.query(self)?;
+            self.rewrites.insert(id, rewritten);
+            return Ok(ty);
         }
         if !matches!(iter_ty, Ty::Array(..)) {
             return Err(crate::errors::InvalidIterTarget {

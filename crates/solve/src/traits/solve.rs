@@ -981,7 +981,22 @@ impl Solve for Call {
     fn solve(&self, id: NodeId, location: Location, solver: &mut Solver) -> Result<Ty> {
         if let Some(ty) = solver.validate_place_target(id, self, location)? { return Ok(ty); }
         if let Some(ty) = solver.borrow_place(id, self, location)? { return Ok(ty); }
+        if let Some(ty) = solver.yield_place(id, self, location)? { return Ok(ty); }
         if let Some(ty) = solver.subscript_removal(id, self, location)? { return Ok(ty); }
+
+        // `__generator_yield(__yield_value)` hands the pull its value as-is
+        // -- when the bound value is a place (`yield &e` bodies annotate
+        // `__yield_value: __Place<T>`) the descriptor IS the yielded value,
+        // so the ident must not place-read. r[impl mimas.generator.place]
+        if self
+            .left
+            .as_ident()
+            .is_some_and(|i| i.lexeme == "__generator_yield")
+        {
+            for argument in &self.arguments {
+                solver.raw_places.insert(argument.value.id());
+            }
+        }
 
         let adt = match self.left.kind() {
             ExprKind::Access(Access::DoubleColon { left, right }) => {
@@ -2204,6 +2219,24 @@ impl Solve for For {
         solver.ribs.push_block();
 
         let iter_ty = self.iterator.query(solver)?.normalized(solver);
+        // `for v in s.live` over a place generator binds the yielded
+        // `__Place` itself: `v.f =` writes through the pull's descriptor,
+        // `v =` stays the loop-variable error.
+        // r[impl mimas.for.place-iter]
+        let place_elem = match &iter_ty {
+            Ty::Fn(header)
+                if header.parameters.is_empty()
+                    && matches!(header.return_ty.as_ref(), Ty::Option(_)) =>
+            {
+                let Ty::Option(element) = header.return_ty.as_ref() else {
+                    unreachable!()
+                };
+                solver
+                    .is_place_type(&element.clone().normalized(solver))
+                    .is_some()
+            }
+            _ => false,
+        };
         match &iter_ty {
             Ty::Fn(header) if header.parameters.is_empty() => {
                 if let Ty::Option(element) = header.return_ty.as_ref() {
@@ -2256,6 +2289,10 @@ impl Solve for For {
         // is dead there too.
         let fresh = if matches!(iter_ty, Ty::Dict(_)) {
             Some(crate::FreshElem::DictPair(self.iterator.to_string()))
+        } else if place_elem {
+            // the element IS a place descriptor -- `v.f =` writes through it
+            // to the stored slot, the opposite of a dead copy.
+            None
         } else if crate::root_and_path(&self.iterator)
             .and_then(|(root, _)| solver.ribs.resolve(root))
             .is_none()
@@ -2285,10 +2322,46 @@ impl Solve for For {
                     })
                 })
             }
+            _ if place_elem => {
+                // a place pull's open descriptors resolve through the
+                // producer's store (`s.items` for `s.live`): freeze the
+                // receiver root for the loop's extent so `s.items.push`,
+                // `s.items = ` and `s = ` in the body can't stale them --
+                // the same loan `for r in &xs` takes on its iterated place.
+                // r[impl mimas.for.place-iter-freeze]
+                let produced_name = self
+                    .iterator
+                    .as_ident()
+                    .and_then(|i| solver.ribs.resolve(i))
+                    .and_then(|dec| solver.producer_roots.get(&dec))
+                    .map(|(_, _, name)| name.clone());
+                solver
+                    .place_iter_receiver(&self.iterator)
+                    .map(|(dec, path)| crate::IterGuard {
+                        dec,
+                        path,
+                        inplace: true,
+                        iterated_at: self.iterator.location(),
+                        name: produced_name
+                            .unwrap_or_else(|| self.iterator.to_string()),
+                    })
+            }
             _ => None,
         };
         let guarded = guard.is_some();
         if let Some(guard) = guard {
+            // a second place loan overlapping an in-place loan nests two
+            // live sets of places into it (`for v in s.live` under `for v
+            // in s.live`, or over `for r in &s.items`) -- refuse like a `&`
+            // lend would. A plain `for` snapshots values and never conflicts.
+            // r[impl mimas.inout.exclusive]
+            if guard.inplace {
+                solver.check_iter_lend(
+                    guard.dec,
+                    &guard.path,
+                    self.iterator.location(),
+                )?;
+            }
             solver.iter_guards.push(guard);
         }
         let run = solver.run_loop_body(&self.body);

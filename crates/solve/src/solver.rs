@@ -325,6 +325,13 @@ pub struct Solver {
     /// (r[mimas.for.elem-write]).
     pub(crate) ephemeral_elems: FxHashMap<DecId, FreshElem>,
 
+    /// Bindings holding a place-producing pull iterator (`let it = s.live`),
+    /// mapped to the root dec and path the pulls' places reach into, plus the
+    /// source expr's text for guard messages. `for v in it` pushes the same
+    /// freeze `for v in s.live` pushes inline.
+    /// r[impl mimas.for.place-iter-freeze]
+    pub(crate) producer_roots: FxHashMap<DecId, (DecId, Vec<GuardSeg>, String)>,
+
     /// In-scope declared type params (`fn map<T, U>`, `impl Pair` re-entering `Pair<A, B>`),
     /// innermost last. `Ty::from_annotation` resolves a bare `T` through these before ribs,
     /// units, or builtins. Entries persist only for the duration of one item's solve.
@@ -449,6 +456,7 @@ impl Solver {
             non_value: None,
             iter_guards: vec![],
             ephemeral_elems: FxHashMap::default(),
+            producer_roots: FxHashMap::default(),
             type_params: vec![],
             param_bounds: FxHashMap::default(),
             pact_groups: FxHashMap::default(),
@@ -535,10 +543,16 @@ impl Solver {
         path: &[GuardSeg],
         at: Location,
     ) -> Result<()> {
-        if let Some(guard) = self
-            .iter_guards
-            .iter()
-            .find(|g| g.dec == dec && g.path == *path)
+        // an in-place freeze covers the whole subtree of its root -- a
+        // place generator's root (`for v in s.live` freezes `s`) has the
+        // walked collection under it (`s.items`), so a mutating call or
+        // slot write anywhere below the root breaks the walk the same
+        // way `xs[i] =` does under `for r in &xs`.
+        // r[impl mimas.for.place-iter-freeze]
+        if let Some(guard) = self.iter_guards.iter().find(|g| {
+            g.dec == dec
+                && (g.path == *path || (g.inplace && path.starts_with(&g.path)))
+        })
         {
             Err(MutateWhileIterating {
                 src: self.src(at),
@@ -584,6 +598,33 @@ impl Solver {
             })?
         }
         Ok(())
+    }
+
+    /// The root dec and path a place-producing pull iterator's places reach
+    /// into: `s.live` and `s.live[k]` produce from `s`, `s.t.live` from
+    /// `s.t`, and a bound pull name (`let it = s.live`) inherits its
+    /// `producer_roots` entry. `None` for calls (`gen()`), whose producer
+    /// can't be named and so can't be frozen.
+    /// r[impl mimas.for.place-iter-freeze]
+    pub(crate) fn place_iter_receiver(&mut self, e: &Expr) -> Option<(DecId, Vec<GuardSeg>)> {
+        let mut recv = e;
+        while let ExprKind::Grouping(g) = recv.kind() {
+            recv = &g.inner;
+        }
+        while let ExprKind::Access(Access::Square { left, .. }) = recv.kind() {
+            recv = left;
+        }
+        match recv.kind() {
+            ExprKind::Access(Access::Dot { left, .. }) => {
+                let (root, path) = crate::root_and_path(left)?;
+                self.ribs.resolve(root).map(|dec| (dec, path))
+            }
+            ExprKind::Ident(name) => {
+                let dec = self.ribs.resolve(name)?;
+                self.producer_roots.get(&dec).map(|(d, p, _)| (*d, p.clone()))
+            }
+            _ => None,
+        }
     }
 
     /// Every field of a `space` is an axis: its type implements `Opp` (an `opp`,
@@ -3379,14 +3420,27 @@ impl Solver {
                 // loan, so reassigning it is the same refusal `xs.push`
                 // gets. Any write at-or-above the lent place (`xs[i] = v`
                 // under `for r in &xs[i]`, `xs = v` under `for r in &xs[i]`)
-                // replaces the slot the loan resolves through and stales it;
-                // writes strictly under it stay consistent writes to lent
-                // storage. A plain `for` snapshots its value and stays
-                // allowed. r[impl mimas.for.inplace-freeze]
+                // replaces the slot the loan resolves through and stales it.
+                // A place generator's freeze reaches the other way too: under
+                // `for v in s.live` the walked store sits under the root, so
+                // `s.items = v` or `s.count = v` rebinding a field the
+                // generator resolves through stales open pulls -- blocked,
+                // unless the write path dips under a slot (`s.items[i].f = v`
+                // is the same element member write `v.f = v` performs).
+                // Writes strictly under `for r in &xs`'s lent place stay
+                // consistent writes to lent storage. A plain `for` snapshots
+                // its value and stays allowed. r[impl mimas.for.inplace-freeze]
+                // r[impl mimas.for.place-iter-freeze]
                 if let Some(guard) = self.iter_guards.iter().find(|g| {
                     g.inplace
                         && g.dec == dec_id
-                        && crate::access_path(left).is_some_and(|p| g.path.starts_with(&p))
+                        && crate::access_path(left).is_some_and(|p| {
+                            g.path.starts_with(&p)
+                                || (p.starts_with(&g.path)
+                                    && !p[g.path.len()..]
+                                        .iter()
+                                        .any(|seg| matches!(seg, GuardSeg::Index)))
+                        })
                 }) {
                     Err(MutateWhileIterating {
                         src: self.src(left.location()),
@@ -3522,21 +3576,40 @@ impl Solver {
 
                 // `let p = &e` keeps the place: claim the `&` for this binding
                 // before it solves, since `&` is an error everywhere else.
-                // r[impl mimas.place.let]
+                // A `yield &e` lowers to the same claim on its `__yield_value`
+                // let. r[impl mimas.place.let] r[impl mimas.generator.place]
                 let mut rhs = right;
                 while let ExprKind::Grouping(g) = rhs.kind() {
                     rhs = &g.inner;
                 }
                 if let ExprKind::Call(c) = rhs.kind()
-                    && c.left
-                        .as_ident()
-                        .is_some_and(|i| i.lexeme == "__borrow_place")
+                    && c.left.as_ident().is_some_and(|i| {
+                        i.lexeme == "__borrow_place" || i.lexeme == "__yield_place"
+                    })
                 {
                     self.allowed_borrows.insert(rhs.id());
                     self.kept_borrows.insert(rhs.id());
                 }
 
                 right.fulfill_ty(ty.clone(), self)?;
+
+                // `let it = s.live` remembers which root the pull iterator
+                // produces places from, so `for v in it` can freeze `s`'s
+                // store like `for v in s.live` does inline. Recorded after
+                // `solve_pat` binds the name below.
+                // r[impl mimas.for.place-iter-freeze]
+                let produced = if let Ty::Fn(header) = ty.clone().normalized(self)
+                    && header.parameters.is_empty()
+                    && let Ty::Option(element) = header.return_ty.as_ref()
+                    && self
+                        .is_place_type(&element.clone().normalized(self))
+                        .is_some()
+                    && let Some((dec, path)) = self.place_iter_receiver(rhs)
+                {
+                    Some((dec, path, right.to_string()))
+                } else {
+                    None
+                };
 
                 if annotation.is_none() && ty.clone().normalized(self) == Ty::Null {
                     Err(BareNullBinding {
@@ -3576,6 +3649,12 @@ impl Solver {
                         }
                         self.solve_match_pat(left, ty, false)?;
                     }
+                }
+
+                if let Some(produced) = produced
+                    && let Some(&bound) = self.node_decs.get(&left.id())
+                {
+                    self.producer_roots.insert(bound, produced);
                 }
 
                 // `let p = &x` where `x` is an inout param re-lends the same
