@@ -403,6 +403,16 @@ fn pact_unary_dispatch(
 
 impl Solve for Access {
     fn solve(&self, id: NodeId, location: Location, solver: &mut Solver) -> Result<Ty> {
+        // `p.read`/`p.write`/`p.remove` are the descriptor's own calls:
+        // the receiver keeps its place type instead of reading through.
+        // r[impl mimas.place.field]
+        if let Access::Dot { left, right, .. } = self
+            && right
+                .as_ident()
+                .is_some_and(|i| matches!(i.lexeme.as_str(), "read" | "write" | "remove"))
+        {
+            solver.raw_places.insert(left.id());
+        }
         if let Some(ty) = solver.subscript_read(id, self, location)? { return Ok(ty); }
 
         fn handle_adt_access(
@@ -983,6 +993,36 @@ impl Solve for Call {
         if let Some(ty) = solver.borrow_place(id, self, location)? { return Ok(ty); }
         if let Some(ty) = solver.yield_place(id, self, location)? { return Ok(ty); }
         if let Some(ty) = solver.subscript_removal(id, self, location)? { return Ok(ty); }
+
+        // `__fn_writes(f)` is `sig!`'s placeholder for the derived write set:
+        // `[str]` now, rewritten to the literal once the grades fixpoint
+        // settles. r[impl mimas.fn.writes]
+        if self
+            .left
+            .as_ident()
+            .is_some_and(|i| i.lexeme == "__fn_writes")
+        {
+            let dec = self
+                .arguments
+                .first()
+                .and_then(|a| a.value.as_ident())
+                .and_then(|i| solver.ribs.resolve(i));
+            solver.fn_writes_asks.insert(id, (dec, location));
+            return Ok(Ty::Array(Box::new(Ty::Str), Len::Unknown));
+        }
+
+        // `p.read(..)`/`p.write(..)`/`p.remove(..)` are the descriptor's
+        // own calls: the receiver keeps its place type. `method_intercept`
+        // can reach the receiver without solving this access first, so the
+        // mark lives here, not only in `Access::solve`.
+        // r[impl mimas.place.field]
+        if let ExprKind::Access(Access::Dot { left, right, .. }) = self.left.kind()
+            && right
+                .as_ident()
+                .is_some_and(|i| matches!(i.lexeme.as_str(), "read" | "write" | "remove"))
+        {
+            solver.raw_places.insert(left.id());
+        }
 
         // `__generator_yield(__yield_value)` hands the pull its value as-is
         // -- when the bound value is a place (`yield &e` bodies annotate
@@ -3432,6 +3472,21 @@ fn struct_fields(
                 })
             })?;
         target.ty = solver.specialize(&target.ty, adt, &ctor_args);
+
+        // `p = &x` into a `__Place` field keeps the minted descriptor
+        // itself as the field's value -- the only spot `&` produces a
+        // stored place rather than a loan or a kept binding.
+        // r[impl mimas.place.field]
+        if matches!(
+            target.ty.clone().normalized(solver),
+            Ty::Adt(a, _)
+                if matches!(
+                    solver.adts[a].name.as_str(),
+                    "__Place" | "__RemovablePlace"
+                )
+        ) {
+            solver.allowed_borrows.insert(value.id());
+        }
 
         if let FieldKey::Ident(key) = field_name {
             solver.note(key, target.ty.clone(), Some(target.dec));

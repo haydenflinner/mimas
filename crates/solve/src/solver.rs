@@ -342,6 +342,10 @@ pub struct Solver {
     /// `[]` names the whole param's storage. Filled by `grades::check`.
     /// r[impl mimas.fn.writes]
     pub(crate) fn_writes: FxHashMap<DecId, Vec<(u32, Vec<GuardSeg>)>>,
+    /// `__fn_writes(f)` calls `sig!` emitted: call node → the arg's dec (if
+    /// it resolved) and where the literal lands. Filled after the writes
+    /// fixpoint. r[impl mimas.fn.writes]
+    pub(crate) fn_writes_asks: FxIndexMap<NodeId, (Option<DecId>, Location)>,
 
     /// `for`-element bindings whose first-level member writes can never reach a stored
     /// element: the iterator was computed (`f()`, `xs.enumerate()`) or yields fresh
@@ -484,6 +488,7 @@ impl Solver {
             guarded_calls: vec![],
             deferred_inout: vec![],
             fn_writes: FxHashMap::default(),
+            fn_writes_asks: FxIndexMap::default(),
             ephemeral_elems: FxHashMap::default(),
             producer_roots: FxHashMap::default(),
             type_params: vec![],

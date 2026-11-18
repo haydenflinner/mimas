@@ -57,7 +57,7 @@ use shared::{Fx, Located, Location};
 
 use crate::{
     GuardSeg, Solver,
-    components::{DecId, DecKind},
+    components::{DecId, DecKind, TyExt},
     errors::{
         ConsumeForbidden, DeadStore, LoopCall, MustUseResult, ParamWriteDies,
         ShadowedBuiltin, UnusedBinding, UnusedParam, UseAfterConsume,
@@ -659,6 +659,44 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> crate::errors::Result
         }
     }
     solver.fn_writes = writes;
+
+    // `__fn_writes(f)` placeholders `sig!` emitted become the literal
+    // write set: `sig!(f).writes` reads `["w.tour.step"]`, param names
+    // from the fn's own header; a whole-binding write is the bare name.
+    // r[impl mimas.fn.writes]
+    let asks = std::mem::take(&mut solver.fn_writes_asks);
+    for (call_id, (dec, at)) in asks {
+        let mut items = Vec::new();
+        if let Some(dec) = dec {
+            let names: Vec<Option<String>> =
+                match crate::components::Ty::Vid(solver.decs[dec].vid).normalized(solver) {
+                    crate::components::Ty::Fn(h) => {
+                        h.parameters.iter().map(|p| p.name.clone()).collect()
+                    }
+                    _ => Vec::new(),
+                };
+            for (p, segs) in solver.fn_writes.get(&dec).into_iter().flatten() {
+                let mut s = names
+                    .get(*p as usize)
+                    .and_then(|n| n.clone())
+                    .unwrap_or_else(|| format!("arg{p}"));
+                for seg in segs {
+                    match seg {
+                        GuardSeg::Field(f) => {
+                            s.push('.');
+                            s.push_str(f);
+                        }
+                        GuardSeg::Index => s.push_str("[]"),
+                    }
+                }
+                items.push(Expr::new(ExprKind::Literal(Literal::String(s)), at));
+            }
+        }
+        solver.rewrites.insert(
+            call_id,
+            Expr::new(ExprKind::Literal(Literal::Array(items)), at),
+        );
+    }
 
     // A call under a `for` freeze the body's own text never saw:
     // `poke()`'s closure or `f(xs)`'s body mutates the iterated
@@ -1628,8 +1666,12 @@ impl<'a> Pass<'a> {
                 match a.left.kind() {
                     ExprKind::Ident(ident) => {
                         // `x = v`: the ident is the target, not a read. `x += v` and friends
-                        // read the old value first.
-                        let dec = self.dec_of(ident);
+                        // read the old value first. A pure write target
+                        // (`n = 0` on an `inout`) never lands in `node_decs`
+                        // -- it is resolved, not read.
+                        let dec = self
+                            .dec_of(ident)
+                            .or_else(|| self.solver.ribs.resolve(ident));
                         if !matches!(a.op, AssignmentOp::Identity)
                             && let Some(dec) = dec
                         {
@@ -2007,6 +2049,24 @@ impl<'a> Pass<'a> {
                 {
                     self.write(root_dec, root.location, false);
                     self.member_write(root_dec, rpath);
+                }
+                // `n = 0` on an `inout` param solved into `n.write(0)`:
+                // a whole-slot store through the lent place, so the write
+                // set records the param's `[]` path. `p.remove()` counts
+                // the same for removable places. r[impl mimas.fn.writes]
+                if let ExprKind::Access(Access::Dot { left, right, .. }) = c.left.kind()
+                    && right
+                        .as_ident()
+                        .is_some_and(|i| matches!(i.lexeme.as_str(), "write" | "remove"))
+                    && let Some((root, _)) = crate::root_and_path(left)
+                    && let Some(root_dec) = self.dec_of(root).or_else(|| self.solver.ribs.resolve(root))
+                    && self.solver.inout_decs.contains(&root_dec)
+                    && let Some(&p) = self.param_pos.get(&root_dec)
+                {
+                    self.own_writes
+                        .entry(self.cur())
+                        .or_default()
+                        .push((p, Vec::new()));
                 }
                 if callee_name == "__cleanup_register"
                     && let Some(action) = c.arguments.first()

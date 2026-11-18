@@ -46,7 +46,9 @@ struct FnParam { name: str, ty: str, inout: bool }
 
 /// A function as data: its name, its parameters, its return type, its
 /// doc comment on one line, and the marks (`#[machine]`) it carries.
-struct FnSig { name: str, params: [FnParam], ret: str, doc: str, marks: [str] }
+/// `writes` is the derived write set: the param paths a call may
+/// mutate, like `w.tour.step` or `xs` for a whole binding.
+struct FnSig { name: str, params: [FnParam], ret: str, doc: str, marks: [str], writes: [str] }
 
 /// One field of a struct, or of an enum variant. A variant written
 /// `Num(float)` has the field names `0`, `1`, ….
