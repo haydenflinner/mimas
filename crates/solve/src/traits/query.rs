@@ -128,14 +128,28 @@ impl Query for Expr {
                     inner(self)
                         .solve(self.id(), self.location(), solver)
                         .and_then(|ty| {
-                            // a `__Place`-typed field (`c.p`) reads
-                            // through its descriptor in value position;
-                            // `.read`/`.write`/`.remove` receivers and
-                            // write targets stay raw. Subscripts are
-                            // skipped: `xs[i].remove()` already routes
-                            // element places through `subscript_removal`.
+                            // a `__Place`-typed field (`c.p`, `ps[i]`)
+                            // reads through its descriptor in value
+                            // position; `.read`/`.write`/`.remove`
+                            // receivers and write targets stay raw. An
+                            // accessor subscript (`w.a[i]`) is skipped:
+                            // its `inout`/`remove` invocations own the
+                            // place semantics, not the descriptor read.
                             // r[impl mimas.place.field]
-                            if let ExprKind::Access(access @ Access::Dot { .. }) = self.kind()
+                            let place_member = match self.kind() {
+                                ExprKind::Access(access @ Access::Dot { .. }) => Some(access),
+                                ExprKind::Access(access @ Access::Square { .. })
+                                    if solver
+                                        .subscript_target(self)
+                                        .ok()
+                                        .flatten()
+                                        .is_none() =>
+                                {
+                                    Some(access)
+                                }
+                                _ => None,
+                            };
+                            if let Some(access) = place_member
                                 && !solver.raw_places.contains(&self.id())
                                 && solver
                                     .is_place_type(&ty.clone().normalized(solver))

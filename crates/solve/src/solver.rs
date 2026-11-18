@@ -3741,6 +3741,25 @@ impl Solver {
                     self.kept_borrows.insert(rhs.id());
                 }
 
+                // `let ps: [__Place<T>] = [&xs[0], &xs[1]]` keeps a
+                // descriptor per element when the annotation asks for
+                // them. r[impl mimas.place.field]
+                if let ExprKind::Literal(Literal::Array(items)) = rhs.kind()
+                    && let Ty::Array(inner, _) = ty.clone().normalized(self)
+                    && self.is_place_type(&inner).is_some()
+                {
+                    for item in items {
+                        if let ExprKind::Call(c) = item.kind()
+                            && c.left.as_ident().is_some_and(|i| {
+                                i.lexeme == "__borrow_place" || i.lexeme == "__yield_place"
+                            })
+                        {
+                            self.allowed_borrows.insert(item.id());
+                            self.kept_borrows.insert(item.id());
+                        }
+                    }
+                }
+
                 right.fulfill_ty(ty.clone(), self)?;
 
                 // `let it = s.live` remembers which root the pull iterator
