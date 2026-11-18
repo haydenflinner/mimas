@@ -41,6 +41,21 @@ pub(crate) fn compile_ops(src: &str) -> Vec<crate::Op> {
     compiler.ops
 }
 
+/// The whole `Program` for `src` — chunks + bytes — for tests that
+/// assert on `content_hashes` or the op stream layout.
+#[cfg(test)]
+pub(crate) fn compile_program(src: &str) -> crate::Program {
+    let lexer = parse::lex::Lexer::new(src, 0, String::new());
+    let ast = parse::Parser::new(lexer).try_into_ast().unwrap();
+    let mut solver = solve::Solver::new();
+    solver.solve(&ast).unwrap();
+    let resolutions = solver.into();
+    let mut ir = crate::Ir::new(resolutions, Default::default());
+    ir.lower(&ast.unpack());
+    let mut compiler = crate::Compiler::new();
+    compiler.compile(&mut ir)
+}
+
 #[macro_export]
 macro_rules! test_compile {
     ($(#[$attr:meta])* $name:ident, files { $($file_name:ident => $source:expr),+ $(,)? }, $expected:expr) => {

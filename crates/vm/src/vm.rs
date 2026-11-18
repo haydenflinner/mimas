@@ -881,46 +881,30 @@ impl Vm {
     /// and binary-search `locs` (same rule as `Chunk::loc_at`) for its
     /// `(file, span)`.
     pub fn trace_map(&self) -> Vec<TraceMapChunk> {
-        let bytes = &self.code.bytes;
-        let mut ends: Vec<usize> = self.chunks.iter().map(|(_, c)| c.offset).collect();
-        ends.sort_unstable();
+        let hashes = compile::content_hashes(&self.chunks, &self.code.bytes);
         self.chunks
             .iter()
-            .map(|(body, chunk)| {
-                // The chunk's own code: offset .. the next chunk's
-                // start (or the end of the program). FNV-1a — the hash
-                // only has to discriminate, not defend.
-                let end = ends
+            .map(|(body, chunk)| TraceMapChunk {
+                body: body.index(),
+                name: self
+                    .chunk_names
+                    .get(&body)
+                    .cloned()
+                    .unwrap_or_else(|| format!("body#{}", body.index())),
+                offset: chunk.offset as u32,
+                hash: hashes[body.index()],
+                locs: chunk
+                    .locs
                     .iter()
-                    .find(|e| **e > chunk.offset)
-                    .copied()
-                    .unwrap_or(bytes.len());
-                let mut hash: u32 = 0x811c_9dc5;
-                for b in &bytes[chunk.offset..end] {
-                    hash = (hash ^ *b as u32).wrapping_mul(0x0100_0193);
-                }
-                TraceMapChunk {
-                    body: body.index(),
-                    name: self
-                        .chunk_names
-                        .get(&body)
-                        .cloned()
-                        .unwrap_or_else(|| format!("body#{}", body.index())),
-                    offset: chunk.offset as u32,
-                    hash,
-                    locs: chunk
-                        .locs
-                        .iter()
-                        .map(|(ip, loc)| {
-                            (
-                                *ip,
-                                loc.file_id as u32,
-                                loc.span.start as u32,
-                                loc.span.end as u32,
-                            )
-                        })
-                        .collect(),
-                }
+                    .map(|(ip, loc)| {
+                        (
+                            *ip,
+                            loc.file_id as u32,
+                            loc.span.start as u32,
+                            loc.span.end as u32,
+                        )
+                    })
+                    .collect(),
             })
             .collect()
     }
@@ -1003,13 +987,13 @@ pub struct TraceMapChunk {
     pub name: String,
     /// Byte offset of this body's code within the program's shared `bytes`.
     pub offset: u32,
-    /// FNV-1a of `bytes[offset .. next_chunk_offset]`: the code itself,
-    /// so a host can tell "same body, recompiled elsewhere" from
-    /// "different body that landed on the same `BodyId`" — the
-    /// sonifier voices anonymous `body#N` chunks by this, not the
-    /// index. Embedded operands (call targets, pool indices) make it
-    /// drift when a *callee's* index shifts; named chunks key on the
-    /// name instead, which is what scope/mute resolve by anyway.
+    /// Content hash of the body's code — see
+    /// [`compile::content_hashes`]. `BodyId` operands are folded as
+    /// callee *content*, not index, so a recompile that only reorders
+    /// bodies leaves this untouched; a host can tell "same body,
+    /// recompiled elsewhere" from "different body that landed on the
+    /// same index". The sonifier voices anonymous `body#N` chunks by
+    /// this; named chunks key on the name.
     pub hash: u32,
     /// `(chunk-relative ip, file_id, span start, span end)` — sparse
     /// ascending like `Chunk::locs`: an entry's loc applies until the next.
