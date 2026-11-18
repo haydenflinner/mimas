@@ -46,3 +46,34 @@ fn emits_func_per_chunk_and_body_table() {
     // braces balance
     assert_eq!(text.matches('{').count(), text.matches('}').count());
 }
+
+/// Thin emit leaves the ops out of the body text, so without the
+/// chunk-offset salt every thin body is byte-identical and content-hash
+/// dedup folds them into one canonical body — a `Call` to `g` then runs
+/// `f`'s ops (the `cold`/`absolve` miscompile). Each thin body must keep
+/// its own hash; the ops a thin body runs live only in its chunk, so
+/// text identity can never prove two thin bodies interchangeable.
+#[test]
+fn thin_bodies_do_not_dedup() {
+    let (program, _sources) = Vm::compile_parts(
+        &[(
+            "main",
+            "fn f() -> int { 1 }\nfn g() -> int { 2 }\nlet V = f() + g();",
+        )],
+        |api| library::codegen(api),
+    )
+    .expect("compiles");
+    assert!(program.chunks.len() >= 3, "expected main + f + g");
+    let (hashes, texts) = mimas_plgen::emit_bodies_t(
+        &program,
+        &vm::bc::jit::layout(),
+        false,
+        &|_| mimas_plgen::Tier::Thin,
+    );
+    let unique: std::collections::HashSet<_> = hashes.iter().collect();
+    assert_eq!(unique.len(), hashes.len(), "thin bodies must not dedup");
+    // thin bodies carry no op dispatch at all
+    for t in &texts {
+        assert!(!t.contains("llvm.switch"), "thin body must not dispatch");
+    }
+}

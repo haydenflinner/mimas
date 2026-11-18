@@ -1582,6 +1582,65 @@ pub mod jit {
         }
     }
 
+    /// [`step_at`] for bodies that loop back through the estep path.
+    /// Returns the caller's window base to continue dispatching, or null
+    /// when `out` should propagate — same null/propagate convention as
+    /// `call_body`/`call_dyn`. Two cases make the plain `Flow::Next`
+    /// check alone wrong:
+    ///
+    /// - `step` may have run a nested call that resized `thread.regs`,
+    ///   so the caller's saved window pointer can dangle — rebuild it
+    ///   from `frames.last().base` like `post_call` does.
+    /// - A callee that exits mid-call with `Flow::Next` (pause/fuel
+    ///   gate) leaves *its* frame on top. That's indistinguishable from
+    ///   an ordinary op's `Next` in `out`, but looping would steal the
+    ///   callee's dispatch — stepping its ops with our `nregs` and
+    ///   returning its `Flow::Return` to the wrong frame. The caller
+    ///   must propagate instead (exactly what `post_call`'s null branch
+    ///   does), so the driver re-enters the callee frame itself.
+    pub unsafe extern "C" fn step_at_w<'gc>(
+        thread: *mut ThreadState<'gc>,
+        regs: *mut Val<'gc>,
+        nregs: usize,
+        code: *mut Decoder,
+        ctx: Ctx<'gc>,
+        strs: *const StrInterner,
+        out: *mut RtResult<Flow<'gc>>,
+    ) -> *mut Val<'gc> {
+        unsafe {
+            let t = &mut *thread;
+            let depth = t.frames.len();
+            static DBG: std::sync::LazyLock<bool> =
+                std::sync::LazyLock::new(|| std::env::var_os("MIMAS_STEPDBG").is_some());
+            let dbg = *DBG;
+            let ip0 = (*code).ip;
+            let window = std::slice::from_raw_parts_mut(regs, nregs);
+            *out = step(window, &mut *code, ctx, &*strs, &t.frames);
+            if dbg {
+                let kind = match &*out {
+                    Ok(Flow::Next) => "next",
+                    Ok(Flow::Return(_)) => "ret",
+                    Ok(Flow::Call { .. }) => "call",
+                    Err(_) => "err",
+                };
+                eprintln!(
+                    "step_at_w ip={ip0:#x}->{:#x} depth={depth}->{} out={kind}",
+                    (*code).ip,
+                    t.frames.len()
+                );
+            }
+            // `Flow::Next` with our frame still alone on top: rebuilt
+            // window. Anything else — non-`Next`, or `Next` with a
+            // callee frame pushed — propagates `out` to the driver.
+            if matches!(&*out, Ok(Flow::Next)) && t.frames.len() == depth {
+                let base = t.frames.last().map(|f| f.base).unwrap_or(0);
+                t.regs.as_mut_ptr().add(base)
+            } else {
+                std::ptr::null_mut()
+            }
+        }
+    }
+
     // ---- ops worth a helper rather than full inlining ----
     //
     // Each mirrors its `step_one`/`cold_dispatch` arm verbatim, reading and
@@ -2545,6 +2604,23 @@ pub mod nat {
     ) -> u8 {
         MJ_ESTEP.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         unsafe { jit::step_at(thread, regs, nregs, code, ctx, strs, out) }
+    }
+
+    /// `jit::step_at_w` plus the estep counter — the window-returning
+    /// variant estep loops call so a nested call's `regs` resize can't
+    /// leave them dispatching through a stale pointer.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn mj_step_at_w<'gc>(
+        thread: *mut ThreadState<'gc>,
+        regs: *mut Val<'gc>,
+        nregs: usize,
+        code: *mut Decoder,
+        ctx: Ctx<'gc>,
+        strs: *const StrInterner,
+        out: *mut RtResult<Flow<'gc>>,
+    ) -> *mut Val<'gc> {
+        MJ_ESTEP.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        unsafe { jit::step_at_w(thread, regs, nregs, code, ctx, strs, out) }
     }
 
     #[unsafe(no_mangle)]
