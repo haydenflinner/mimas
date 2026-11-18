@@ -950,6 +950,21 @@ impl Vm {
             .mutate(|_, state| state.fixtures.get::<crate::fixtures::Trace>().path.borrow_mut().take())
     }
 
+    /// The `next[ip]` fallthrough table a host needs to expand a
+    /// [`trace_path_take`](Self::trace_path_take) payload — ops are
+    /// variable length, so the table travels with the trace map.
+    pub fn trace_path_next(&mut self) -> Vec<u32> {
+        self.arena.mutate(|_, state| {
+            state
+                .fixtures
+                .get::<crate::fixtures::Trace>()
+                .path
+                .borrow()
+                .next
+                .clone()
+        })
+    }
+
     /// A taken path expanded to one ip per op, in run order.
     pub fn trace_path_expand(&mut self, path: &[u32]) -> Vec<u32> {
         self.arena.mutate(|_, state| {
