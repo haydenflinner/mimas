@@ -40,6 +40,17 @@ mod op_count {
         CHUNKS[body.index().min(CHUNK_CAP)].fetch_add(1, Relaxed);
     }
 
+    /// Zero every counter — the statics accumulate across `Vm`s in the
+    /// process, so a host profiling per-program resets between runs.
+    pub fn reset() {
+        for c in &CHUNKS {
+            c.store(0, Relaxed);
+        }
+        for c in &COUNTS {
+            c.store(0, Relaxed);
+        }
+    }
+
     pub fn report() {
         let mut rows: Vec<(OpCode, u64)> = (0..OpCode::COUNT)
             // SAFETY: repr(u8) enum, i < COUNT, same as the decode transmute
@@ -740,6 +751,24 @@ impl Vm {
             let mut seen = std::collections::HashSet::new();
             Some(ctx.fetch(stashed).inspect(&struct_names, field_names, variant_ordinals, &mut seen))
         })
+    }
+
+    /// Per-chunk op tallies from the dispatch loop — `counts[i]` is how
+    /// many `step_one`s ran with chunk `i`'s frame on top. The counters
+    /// are process-global statics, so they accumulate across `Vm`s:
+    /// hosts profiling one program at a time call [`reset_op_counts`]
+    /// before the run. The interpreter's lane only — generated `bc`
+    /// bodies don't `note` (a native run contributes nothing).
+    #[cfg(feature = "op-count")]
+    pub fn chunk_op_counts() -> Vec<u64> {
+        use std::sync::atomic::Ordering::Relaxed;
+        op_count::CHUNKS.iter().map(|c| c.load(Relaxed)).collect()
+    }
+
+    /// Zero the [`chunk_op_counts`]/`op_histogram` tallies between runs.
+    #[cfg(feature = "op-count")]
+    pub fn reset_op_counts() {
+        op_count::reset();
     }
 
     /// The `op-count` feature's per-function tally: `(name, ops)` rows
