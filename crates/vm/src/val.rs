@@ -82,6 +82,9 @@ impl<'gc> PartialEq for Val<'gc> {
             (Val::Bool(a), Val::Bool(b)) => a == b,
             (Val::Int(a), Val::Int(b)) => a == b,
             (Val::Float(a), Val::Float(b)) => a == b,
+            // `0 == 0.0` — ordering ops already compare int/float through
+            // `float_bin`; equality answers the same question numerically
+            (Val::Int(a), Val::Float(b)) | (Val::Float(b), Val::Int(a)) => (*a as f64) == *b,
             // numeric: `1.0 == 1.00`, and a whole `dec` equals its `int`
             (Val::Dec(a), Val::Dec(b)) => a == b,
             (Val::Dec(a), Val::Int(b)) | (Val::Int(b), Val::Dec(a)) => {

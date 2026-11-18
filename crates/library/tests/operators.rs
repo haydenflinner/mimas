@@ -110,6 +110,20 @@ test_run!(
 );
 
 test_run!(
+    // `==`/`!=` answer numerically across int/float like `<`/`>` already did —
+    // bound operands force the runtime `Val` compare (literal pairs fold)
+    mixed_int_float_equality_is_numeric,
+    "let i = 5; let f = 5.0;",
+    "i == f" => "true",
+    "f == i" => "true",
+    "i != f" => "false",
+    "i == 5.0" => "true",
+    "5.0 == i" => "true",
+    "i - 1 == f" => "false",
+    "i != 4.5" => "true",
+);
+
+test_run!(
     nand_nor_dispatch_to_impl_methods,
     VEC,
     "(a nand b).x" => "2.0",
