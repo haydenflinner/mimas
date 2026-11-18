@@ -37,6 +37,11 @@ extern "Rust" fn __getrandom_v03_custom(
 
 unsafe extern "C" {
     fn mimas_pliron_init();
+    /// The `Library::fingerprint_install` of the install the module's
+    /// baked `NativeId`s were numbered against — checked before
+    /// `install_bc` so a shim/driver install drift fails loudly instead
+    /// of misdispatching every typed-arg native.
+    fn mimas_pliron_nsig() -> i64;
     /// First element of the `[usize]` body table — `&` gives the table
     /// base in linear memory. Elements step at `size_of::<usize>()`
     /// (4 on wasm32, matching plgen's `i32` entries); `BodyFn` on wasm
@@ -57,42 +62,12 @@ fn set_result(s: String) {
     RESULT.with(|r| *r.borrow_mut() = s);
 }
 
-/// The fixture natives `tools/pliron-mimas/src/natives.rs` installs —
-/// mirrored verbatim: `compile_parts` numbers natives by registration
-/// order, so the module-side and driver-side installs must match.
-fn install(api: &mut vm::api::Api<'_, '_>) {
-    library::std(api);
-    api.add_named("host_add", host_add);
-    api.add_named("keep", keep);
-    api.add_named("pause", pause);
-    api.add_named("print", print);
-}
-
-#[vm::native]
-fn host_add<'gc>(_ctx: vm::Ctx<'gc>, a: i64, b: i64) -> i64 {
-    a + b
-}
-
-fn keep<'gc>(ctx: vm::Ctx<'gc>, v: vm::Val<'gc>) {
-    ctx.fixture::<Kept>().0.borrow_mut().push(v.capture());
-}
-
-fn pause<'gc>(ctx: vm::Ctx<'gc>) {
-    ctx.state().paused.set(true);
-}
-
-fn print<'gc>(ctx: vm::Ctx<'gc>, v: vm::Val<'gc>) -> Result<(), vm::RtErr> {
-    let line = ctx.to_string(v)?;
-    ctx.fixture::<Kept>()
-        .0
-        .borrow_mut()
-        .push(Captured::Str(line));
-    Ok(())
-}
-
-/// Values `keep` captured — same fixture shape as the driver's `Kept`.
-#[derive(Default)]
-pub struct Kept(pub RefCell<Vec<Captured>>);
+/// The fixture native table — `mimas-fixture-natives::install`, the one
+/// copy the driver compiles against too. `compile_parts` numbers natives
+/// by registration order: a second copy of the list here drifts silently
+/// and every `CallNative` in generated code dispatches to the wrong fn
+/// (that broke this lane once — `expected array, received <T>`).
+use fixture_natives::install;
 
 /// `(source_ptr, source_len) -> status`: compile `source`, fill the body
 /// table, install the bodies, run the program. `0` when `TEST_VALUE`
@@ -110,6 +85,19 @@ pub unsafe extern "C" fn mimas_wasm_run(src: *const u8, src_len: usize) -> i32 {
         }
     };
     unsafe { mimas_pliron_init() };
+    let (want, debug) = {
+        let mut probe = Vm::new();
+        let lib = probe.install_library(install);
+        (lib.fingerprint_install(), move || lib.install_debug())
+    };
+    let got = unsafe { mimas_pliron_nsig() } as u64;
+    if got != want {
+        set_result(format!(
+            "ERR native-table drift: module nsig {got:#x} != install {want:#x}\n{}",
+            debug()
+        ));
+        return 1;
+    }
     let n = unsafe { mimas_pliron_nbodies } as usize;
     let tbl: *const usize = std::ptr::addr_of!(mimas_pliron_bodies);
     let bodies: Vec<Option<vm::bc::BodyFn>> = (0..n)

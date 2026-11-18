@@ -1,0 +1,17 @@
+[package]
+name = "mimas-fixture-natives"
+version = "0.2.0"
+edition = "2024"
+publish = false
+description = "The plgen/parity fixture native table (host_add/keep/pause/print + library::std), shared so the pliron-mimas driver, the mimas-plwasm shim and any future lane register identical natives in identical order — NativeIds are registration-order, so two copies of this list drift silently (that broke wasm parity once)."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "fixture_natives"
+
+[dependencies]
+vm = { package = "mimas-vm", path = "../vm", version = "0.2.0", default-features = false }
+library = { package = "mimas-library", path = "../library", version = "0.2.0", default-features = false }

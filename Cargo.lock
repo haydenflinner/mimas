@@ -5628,6 +5628,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "mimas-fixture-natives"
+version = "0.2.0"
+dependencies = [
+ "mimas-library",
+ "mimas-vm",
+]
+
+[[package]]
 name = "mimas-hash"
 version = "0.2.0"
 dependencies = [
@@ -5756,6 +5764,7 @@ version = "0.2.0"
 dependencies = [
  "getrandom 0.4.3",
  "mimas-compile",
+ "mimas-fixture-natives",
  "mimas-library",
  "mimas-vm",
 ]
