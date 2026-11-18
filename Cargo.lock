@@ -5747,6 +5747,7 @@ dependencies = [
  "mimas-compile",
  "mimas-library",
  "mimas-vm",
+ "rustc-hash 2.1.2",
 ]
 
 [[package]]

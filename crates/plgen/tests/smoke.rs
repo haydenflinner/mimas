@@ -14,12 +14,15 @@ fn emits_func_per_chunk_and_body_table() {
         |api| library::codegen(api),
     )
     .expect("compiles");
-    let text = mimas_plgen::emit_module(&program, &vm::bc::jit::layout(), false);
+    let (hashes, text) = mimas_plgen::emit_module(&program, &vm::bc::jit::layout(), false);
     assert!(text.starts_with("builtin.module @mimas_pliron {"));
-    // one llvm.func per chunk plus the exported globals
+    // one llvm.func per distinct chunk content plus the exported globals
     for (i, _) in program.chunks.iter() {
         assert!(
-            text.contains(&format!("llvm.func @{}", mimas_plgen::body_name(i.index()))),
+            text.contains(&format!(
+                "llvm.func @{}",
+                mimas_plgen::body_sym(hashes[i.index()])
+            )),
             "missing func for chunk {}",
             i.index()
         );

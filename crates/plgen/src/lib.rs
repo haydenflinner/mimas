@@ -46,9 +46,94 @@ pub const NBODIES_GLOBAL: &str = "mimas_pliron_nbodies";
 pub const INIT_FN: &str = "mimas_pliron_init";
 /// `mimas_pliron_init`'s single entry block.
 const INIT_ENTRY: &str = "init_entry";
-/// Emitted body functions are named `mimas_body_{index}`.
+/// `mimas_body_{index}` — the per-index entry trampoline. Raw emitted
+/// bodies also carry this name before [`emit_bodies`] renames them to
+/// content-hash symbols; in the assembled module the name belongs to
+/// the trampoline alone, and the table's slot `i` points at it.
 pub fn body_name(i: usize) -> String {
     format!("mimas_body_{i}")
+}
+
+/// `mimas_body_x{h:016x}` — the content-addressed body symbol a chunk
+/// declares and call sites name. The `mimas_body_off_x{h}` /
+/// `mimas_body_idx_x{h}` globals are hash-named too, defined once per
+/// unique body with the canonical index's values; `mimas_body_{i}`
+/// survives only as the per-index entry trampoline the init module
+/// emits (see `assemble_module_ex`).
+pub fn body_sym(h: u64) -> String {
+    format!("mimas_body_x{h:016x}")
+}
+
+/// Every `mimas_body_*` name normalized to one token, so hashing sees
+/// chunk content only — never a program-assigned index or another
+/// body's hash.
+fn normalize_names(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(p) = rest.find("mimas_body_") {
+        let (head, tail) = rest.split_at(p + "mimas_body_".len());
+        out.push_str(head);
+        let end = tail
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .unwrap_or(tail.len());
+        out.push('#');
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Content hash of an emitted body — same source, same hash, wherever
+/// `compile_parts` placed the chunk.
+pub fn body_hash(text: &str) -> u64 {
+    use rustc_hash::FxHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = FxHasher::default();
+    normalize_names(text).hash(&mut h);
+    h.finish()
+}
+
+/// `mimas_body_{i}` / `mimas_body_off_{i}` / `mimas_body_idx_{i}` →
+/// their content-hash names, one pass. Hash names carry an `x` prefix
+/// (`mimas_body_x{h:016x}`) so a hex tail can never re-parse as an
+/// index. Content-identical chunks alias to one canonical index — the
+/// `off`/`idx` globals are defined once per unique hash with that
+/// index's values, and `tbl[i]` fills every index with its entry
+/// trampoline's address.
+fn rename_body_names(text: &str, hashes: &[u64]) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(p) = rest.find("mimas_body_") {
+        out.push_str(&rest[..p]);
+        let tail = &rest[p + "mimas_body_".len()..];
+        let end = tail
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .unwrap_or(tail.len());
+        let tok = &tail[..end];
+        rest = &tail[end..];
+        let mapped = if let Some(d) = tok.strip_prefix("off_") {
+            d.parse::<usize>()
+                .ok()
+                .map(|i| format!("mimas_body_off_x{:016x}", hashes[i]))
+        } else if let Some(d) = tok.strip_prefix("idx_") {
+            d.parse::<usize>()
+                .ok()
+                .map(|i| format!("mimas_body_idx_x{:016x}", hashes[i]))
+        } else {
+            tok.parse::<usize>()
+                .ok()
+                .map(|i| body_sym(hashes[i]))
+        };
+        match mapped {
+            Some(m) => out.push_str(&m),
+            None => {
+                out.push_str("mimas_body_");
+                out.push_str(tok);
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 // ---- `vm::bc::jit` helper ABI table (the subset this emitter calls) ----
@@ -639,6 +724,16 @@ struct Em<'a> {
     slot_i: String,
     /// `reg_list` slots, deduplicated by index list: alloca `[i32 x n]`.
     rl: HashMap<Vec<u32>, String>,
+
+    /// This chunk's index and code offset — the two program-assigned
+    /// numbers the emitted text would otherwise bake in. Everything
+    /// index-derived goes through `goff`/`chunk_off`/`body_idx`, which
+    /// read the `@mimas_body_off_*` / `@mimas_body_idx_*` globals the
+    /// init module defines, so the body itself stays content-only.
+    self_i: usize,
+    chunk_off: usize,
+    /// Memoized `*@mimas_body_off_{self_i}` for `goff`.
+    v_offbase: String,
 }
 
 /// `(ret_ty, ptys)` for a helper signature — the shared spelling used by
@@ -672,13 +767,127 @@ fn sig(params: &[Pt], ret: Hr, wasm: bool) -> (String, String) {
     (ret_ty.to_string(), ptys)
 }
 
-/// Per-body `.pliron` texts, one entry per chunk — the raw material for
-/// `emit_module`/`assemble_module` and for drivers that emit bodies on
-/// worker threads and split a large program into group modules lowered
-/// in parallel.
-pub fn emit_bodies(prog: &Program, lyt: &Layout, wasm: bool) -> Vec<String> {
-    (0..prog.chunks.len())
+/// Per-body `.pliron` texts plus their content hashes, one entry per
+/// chunk. The returned texts are content-addressed: every
+/// `mimas_body_{index}` name — the body's own symbol and its direct
+/// call targets — is renamed to [`body_sym`] of the callee's hash, and
+/// every program-assigned number (code offsets, table indices) reads an
+/// `@mimas_body_off_{i}` / `@mimas_body_idx_{i}` global the init module
+/// defines. Identical chunks emit identical text, wherever
+/// `compile_parts` placed them — the raw material for `emit_module`,
+/// `assemble_module_ex`, and content-keyed object caches.
+/// Level-2 hash input: `mimas_body_{i}` self-refs, the `off`/`idx`
+/// globals and every non-name token collapse to `#`; `mimas_body_{j}`
+/// callee refs resolve to the callee's level-1 content name — what the
+/// body calls *content-wise*, never where `compile_parts` placed it.
+fn level2_key(text: &str, self_i: usize, lvl1: &[u64]) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(p) = rest.find("mimas_body_") {
+        out.push_str(&rest[..p]);
+        let tail = &rest[p + "mimas_body_".len()..];
+        let end = tail
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .unwrap_or(tail.len());
+        let tok = &tail[..end];
+        rest = &tail[end..];
+        let idx = tok
+            .strip_prefix("off_")
+            .or_else(|| tok.strip_prefix("idx_"))
+            .map(|_| None)
+            .unwrap_or_else(|| tok.parse::<usize>().ok().map(Some));
+        match idx {
+            Some(None) | None => out.push('#'),
+            Some(Some(j)) if j == self_i => out.push('#'),
+            Some(Some(j)) => out.push_str(&body_sym(lvl1[j])),
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Two-level content hash, Unison-style. `h'` hashes the text with all
+/// `mimas_body_*` names normalized — chunk content modulo call
+/// identities. `h` then hashes the text with every `mimas_body_{j}`
+/// callee ref resolved to `mimas_body_{h'_j}`: a body hashes by what it
+/// calls *content-wise*, not by where `compile_parts` placed the
+/// callee. Isomorphic cycles get equal `h`s; a level collision shows up
+/// as a renamed-text mismatch and panics, never a silent alias.
+pub fn emit_bodies(prog: &Program, lyt: &Layout, wasm: bool) -> (Vec<u64>, Vec<String>) {
+    let texts: Vec<String> = (0..prog.chunks.len())
         .map(|b| emit_body(prog, b, lyt, wasm))
+        .collect();
+    let lvl1: Vec<u64> = texts.iter().map(|t| body_hash(t)).collect();
+    // Level-2 keys carry callee identity in `mimas_body_x{lvl1}` names —
+    // hash them raw, not through `body_hash`'s name normalizer.
+    let hashes: Vec<u64> = {
+        use rustc_hash::FxHasher;
+        use std::hash::{Hash, Hasher};
+        texts
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                let mut h = FxHasher::default();
+                level2_key(t, i, &lvl1).hash(&mut h);
+                h.finish()
+            })
+            .collect()
+    };
+    let renamed: Vec<String> = texts
+        .iter()
+        .map(|t| rename_body_names(t, &hashes))
+        .collect();
+    // same hash + different renamed text is a real aliasing bug, not a
+    // content-identical dup — panic rather than merge under one symbol.
+    let mut seen: HashMap<u64, usize> = HashMap::new();
+    for (i, h) in hashes.iter().enumerate() {
+        if let Some(&j) = seen.get(h) {
+            if renamed[i] != renamed[j] {
+                let a = &renamed[j];
+                let b = &renamed[i];
+                let p = a
+                    .bytes()
+                    .zip(b.bytes())
+                    .position(|(x, y)| x != y)
+                    .unwrap_or(a.len().min(b.len()));
+                eprintln!("COLLIDE {j} vs {i} @{p}:\n...{}...\n...{}...",
+                    &a[p.saturating_sub(80)..(p + 160).min(a.len())],
+                    &b[p.saturating_sub(80)..(p + 160).min(b.len())]);
+            }
+            assert!(
+                renamed[i] == renamed[j],
+                "body_hash collision between chunks {j} and {i}"
+            );
+        } else {
+            seen.insert(*h, i);
+        }
+    }
+    (hashes, renamed)
+}
+
+/// Content hash for every chunk — re-emits the bodies. For hosts that
+/// only need the symbol names (`dlsym` fill on the link path).
+pub fn body_hashes(prog: &Program, lyt: &Layout, wasm: bool) -> Vec<u64> {
+    emit_bodies(prog, lyt, wasm).0
+}
+
+/// Per-chunk `(offset, end)` byte spans — all a module assembly reads
+/// from the `Program`. Plain data (`Send + Sync`), so hosts that
+/// assemble modules on worker threads fetch it once and pass the slice.
+pub fn chunk_spans(prog: &Program) -> Vec<(usize, usize)> {
+    let offs: Vec<usize> = (0..prog.chunks.len())
+        .map(|i| prog.chunks[compile::BodyId::from(i as u32)].offset)
+        .collect();
+    offs.iter()
+        .map(|&o| {
+            let end = offs
+                .iter()
+                .copied()
+                .filter(|&x| x > o)
+                .min()
+                .unwrap_or(prog.bytes.len());
+            (o, end)
+        })
         .collect()
 }
 
@@ -688,13 +897,16 @@ pub fn emit_bodies(prog: &Program, lyt: &Layout, wasm: bool) -> Vec<String> {
 ///
 /// Helper references are real `llvm.call @mj_*` symbols: link the object
 /// against a runtime that exports them (`mimas-natrt`'s `staticlib`/
-/// `cdylib`, or any artifact providing `vm::bc::nat`).
-pub fn emit_module(prog: &Program, lyt: &Layout, wasm: bool) -> String {
-    let bodies: Vec<(usize, String)> = emit_bodies(prog, lyt, wasm)
+/// `cdylib`, or any artifact providing `vm::bc::nat`). Returns the body
+/// content hashes alongside — the host resolves `mimas_body_{h}`.
+pub fn emit_module(prog: &Program, lyt: &Layout, wasm: bool) -> (Vec<u64>, String) {
+    let (hashes, bodies) = emit_bodies(prog, lyt, wasm);
+    let bodies: Vec<(usize, String)> = bodies
         .into_iter()
         .enumerate()
         .collect();
-    assemble_module(prog.chunks.len(), lyt, wasm, &bodies)
+    let text = assemble_module(&chunk_spans(prog), lyt, wasm, &bodies, &hashes);
+    (hashes, text)
 }
 
 /// Assemble one module from the shared members plus `bodies` as
@@ -707,12 +919,13 @@ pub fn emit_module(prog: &Program, lyt: &Layout, wasm: bool) -> String {
 /// listed slots, at their true indexes — so a merged link of the parts
 /// stays consistent.
 pub fn assemble_module(
-    nbodies: usize,
+    spans: &[(usize, usize)],
     lyt: &Layout,
     wasm: bool,
     bodies: &[(usize, String)],
+    hashes: &[u64],
 ) -> String {
-    assemble_module_ex(nbodies, lyt, wasm, bodies, true)
+    assemble_module_ex(spans, lyt, wasm, bodies, true, hashes, None)
 }
 
 /// `assemble_module` with the program-tail split out. `tail = false`
@@ -724,12 +937,15 @@ pub fn assemble_module(
 /// only in chunk count. The pair to it is `assemble_init_module`, which
 /// owns the real definitions and the initializer.
 pub fn assemble_module_ex(
-    nbodies: usize,
+    spans: &[(usize, usize)],
     lyt: &Layout,
     wasm: bool,
     bodies: &[(usize, String)],
     tail: bool,
+    hashes: &[u64],
+    init_fill: Option<&[usize]>,
 ) -> String {
+    let nbodies = spans.len();
     let mut present = vec![false; nbodies];
     for (i, _) in bodies {
         present[*i] = true;
@@ -781,6 +997,40 @@ pub fn assemble_module_ex(
             "llvm.global @{BODIES_GLOBAL} : {PTR}\n    [llvm_global_linkage: llvm.linkage ExternalLinkage, llvm_global_constant: builtin.bool false]"
         ));
     }
+    // Per-chunk index globals, hash-named: the one place
+    // program-assigned numbers live — `off_{h}` is the canonical
+    // index's code offset, `idx_{h}` its body-table index. Bodies read
+    // them through decls, so body text and objects stay content-only;
+    // only the init module defines them. Mutable plus an init store for
+    // wasm, where data-section initializers do not survive lowering.
+    // Content-identical chunks alias: every index i with hash h reads
+    // the same global and gets the canonical (lowest) index's values —
+    // safe because the code is literally identical, and `tbl[i]` still
+    // points at the shared body.
+    let mut canon: BTreeMap<u64, usize> = BTreeMap::new();
+    for i in 0..nbodies {
+        canon.entry(hashes[i]).or_insert(i);
+    }
+    for (h, i) in &canon {
+        let off = spans[*i].0;
+        let hn = format!("{h:016x}");
+        if tail {
+            members.push(format!(
+                "llvm.global @mimas_body_off_x{hn} : {I64}\n    [llvm_global_linkage: llvm.linkage ExternalLinkage, llvm_global_constant: builtin.bool false] = builtin.integer <{off}: i64>"
+            ));
+            members.push(format!(
+                "llvm.global @mimas_body_idx_x{hn} : {I64}\n    [llvm_global_linkage: llvm.linkage ExternalLinkage, llvm_global_constant: builtin.bool false] = builtin.integer <{i}: i64>"
+            ));
+        } else {
+            members.push(format!(
+                "llvm.global @mimas_body_off_x{hn} : {I64}\n    [llvm_global_linkage: llvm.linkage ExternalLinkage, llvm_global_constant: builtin.bool false]"
+            ));
+            members.push(format!(
+                "llvm.global @mimas_body_idx_x{hn} : {I64}\n    [llvm_global_linkage: llvm.linkage ExternalLinkage, llvm_global_constant: builtin.bool false]"
+            ));
+        }
+    }
+
     if tail {
         // the pair's scalar half — a standalone host reads this instead of
         // re-deriving the count from the Program. Mutable+zero like the
@@ -799,30 +1049,87 @@ pub fn assemble_module_ex(
         let mut init = format!(
             "llvm.func @{INIT_FN}: llvm.func <{VOID} () variadic = false>\n    [llvm_function_linkage: llvm.linkage ExternalLinkage]\n  {{\n^{INIT_ENTRY}():\n    a_tbl = llvm.addressof @{BODIES_GLOBAL} : {PTR};\n    a_nb = llvm.addressof @{NBODIES_GLOBAL} : {PTR};\n    v_nb = llvm.constant <builtin.integer <{nbodies}: i64>> : {I64};\n    llvm.store *a_nb <- v_nb [align : 8];\n"
         );
-        for (i, _) in bodies {
+        // `init_fill` defaults to the listed bodies; the init module
+        // passes all chunks, so wasm's table and index globals end up
+        // complete without a dlsym pass.
+        let fill: Vec<usize> = match init_fill {
+            Some(f) => f.to_vec(),
+            None => bodies.iter().map(|(i, _)| *i).collect(),
+        };
+        for &i in &fill {
             init.push_str(&format!(
-                "    a_f{i} = llvm.addressof @{} : {PTR};\n    v_f{i} = llvm.ptrtoint a_f{i} to {wt};\n    a_p{i} = llvm.gep <{I8}> (a_tbl)[Constant({off})] : {PTR};\n    llvm.store *a_p{i} <- v_f{i} [align : {w}];\n",
-                body_name(*i),
-                off = i * w
+                "    a_f{i} = llvm.addressof @mimas_body_{i} : {PTR};\n    v_f{i} = llvm.ptrtoint a_f{i} to {wt};\n    a_p{i} = llvm.gep <{I8}> (a_tbl)[Constant({ioff})] : {PTR};\n    llvm.store *a_p{i} <- v_f{i} [align : {w}];\n",
+                ioff = i * w
             ));
+            // off/idx globals: one store pair per unique hash, keyed on
+            // the canonical index's values.
+            if canon[&hashes[i]] == i {
+                let off = spans[i].0;
+                let hn = format!("{:016x}", hashes[i]);
+                init.push_str(&format!(
+                    "    a_o{i} = llvm.addressof @mimas_body_off_x{hn} : {PTR};\n    v_o{i} = llvm.constant <builtin.integer <{off}: i64>> : {I64};\n    llvm.store *a_o{i} <- v_o{i} [align : 8];\n    a_x{i} = llvm.addressof @mimas_body_idx_x{hn} : {PTR};\n    v_x{i} = llvm.constant <builtin.integer <{i}: i64>> : {I64};\n    llvm.store *a_x{i} <- v_x{i} [align : 8];\n"
+                ));
+            }
         }
         init.push_str("    llvm.return\n  }");
         members.push(init);
+
+        // Per-index entry trampolines: `tbl[i]` and `bc[frame.chunk]`
+        // dispatch to `mimas_body_{i}`, which may be an alias of a
+        // canonical `mimas_body_x{h}` whose `off`/`idx` globals hold the
+        // canonical chunk's numbers. An interp-pushed frame enters with
+        // `code.ip` in the *real* chunk's byte range, so the trampoline
+        // shifts it into the canonical range when — and only when — it
+        // points there. Reentries see an already-canonical `ip` (bodies
+        // write canonical offsets) and pass through. Ranges are
+        // disjoint across chunks, so the bounds check can't misfire.
+        let wty = if lyt.word_size == 4 { I32 } else { I64 };
+        for &i in &fill {
+            let (off_i, end_i) = spans[i];
+            let delta = spans[canon[&hashes[i]]].0 as i64 - off_i as i64;
+            let cw = std::mem::offset_of!(BodyEnv<'_>, code)
+                / std::mem::size_of::<usize>()
+                * lyt.word_size;
+            let adjust = if wasm {
+                format!(
+                    "    a_cp{i} = llvm.gep <{I8}> (a_env)[Constant({cw})] : {PTR};\n    v_c{i} = llvm.load a_cp{i} [align : 8] : {PTR};\n    a_ip{i} = llvm.gep <{I8}> (v_c{i})[Constant({cip})] : {PTR};\n    v_iw{i} = llvm.load a_ip{i} [align : 4] : {wty};\n    v_ip{i} = llvm.zext <nneg=false> v_iw{i} to {I64};\n    v_lo{i} = llvm.constant <builtin.integer <{off_i}: i64>> : {I64};\n    c_lo{i} = llvm.icmp v_ip{i} <UGE> v_lo{i} : {I1};\n    v_hi{i} = llvm.constant <builtin.integer <{end_i}: i64>> : {I64};\n    c_hi{i} = llvm.icmp v_ip{i} <ULT> v_hi{i} : {I1};\n    c_in{i} = llvm.and c_lo{i}, c_hi{i} : {I1};\n    v_d{i} = llvm.constant <builtin.integer <{delta}: i64>> : {I64};\n    v_adj{i} = llvm.add v_ip{i}, v_d{i} <{{nsw=false,nuw=false}}> : {I64};\n    v_n{i} = llvm.select c_in{i} ? v_adj{i} : v_ip{i} : {I64};\n    v_nw{i} = llvm.trunc v_n{i} to {wty};\n    llvm.store *a_ip{i} <- v_nw{i} [align : 4];\n",
+                    cw = cw,
+                    cip = lyt.code_ip,
+                )
+            } else {
+                format!(
+                    "    a_cp{i} = llvm.gep <{I8}> (a_env)[Constant({cw})] : {PTR};\n    v_c{i} = llvm.load a_cp{i} [align : 8] : {PTR};\n    a_ip{i} = llvm.gep <{I8}> (v_c{i})[Constant({cip})] : {PTR};\n    v_ip{i} = llvm.load a_ip{i} [align : 8] : {I64};\n    v_lo{i} = llvm.constant <builtin.integer <{off_i}: i64>> : {I64};\n    c_lo{i} = llvm.icmp v_ip{i} <UGE> v_lo{i} : {I1};\n    v_hi{i} = llvm.constant <builtin.integer <{end_i}: i64>> : {I64};\n    c_hi{i} = llvm.icmp v_ip{i} <ULT> v_hi{i} : {I1};\n    c_in{i} = llvm.and c_lo{i}, c_hi{i} : {I1};\n    v_d{i} = llvm.constant <builtin.integer <{delta}: i64>> : {I64};\n    v_adj{i} = llvm.add v_ip{i}, v_d{i} <{{nsw=false,nuw=false}}> : {I64};\n    v_n{i} = llvm.select c_in{i} ? v_adj{i} : v_ip{i} : {I64};\n    llvm.store *a_ip{i} <- v_n{i} [align : 8];\n",
+                    cw = cw,
+                    cip = lyt.code_ip,
+                )
+            };
+            members.push(format!(
+                "llvm.func @mimas_body_{i}: llvm.func <{VOID} ({PTR}) variadic = false>\n    [llvm_function_linkage: llvm.linkage ExternalLinkage]\n  {{\n^entry{i}(a_env: {PTR}):\n{adjust}    r{i} = llvm.call @{} (a_env) : llvm.func <{VOID} ({PTR}) variadic = false>;\n    llvm.return\n  }}",
+                body_sym(hashes[i])
+            ));
+        }
     }
 
+    // Content-identical chunks share a hash — one definition wins.
+    // Present bodies mark `seen` first: an absent chunk that happens to
+    // be content-identical to a present body must NOT shadow it with a
+    // bodiless decl.
+    let mut decl_seen: HashSet<u64> = HashSet::new();
+    for (i, text) in bodies {
+        if decl_seen.insert(hashes[*i]) {
+            members.push(text.clone());
+        }
+    }
     // Bodies outside this subset: bodiless decls so the present bodies'
     // direct `llvm.call @mimas_body_*`s resolve. They land as ordinary
     // undefined symbols in the object.
     for i in 0..nbodies {
-        if !present[i] {
+        if !present[i] && decl_seen.insert(hashes[i]) {
             members.push(format!(
                 "llvm.func @{}: llvm.func <{VOID} ({PTR}) variadic = false> []",
-                body_name(i)
+                body_sym(hashes[i])
             ));
         }
-    }
-    for (_, text) in bodies {
-        members.push(text.clone());
     }
 
     format!(
@@ -832,12 +1139,19 @@ pub fn assemble_module_ex(
     )
 }
 
-/// The program-tail module: helper decls, the real bodies-table and
-/// count globals, `mimas_pliron_init`, and bodiless decls for every
-/// `mimas_body_*`. Pairs with `assemble_module_ex(.., tail = false)`
-/// chunk modules — together they cover one whole program.
-pub fn assemble_init_module(nbodies: usize, lyt: &Layout, wasm: bool) -> String {
-    assemble_module_ex(nbodies, lyt, wasm, &[], true)
+/// The program-tail module: helper decls, the real bodies-table,
+/// count and per-chunk index globals, `mimas_pliron_init`, and bodiless
+/// decls for every `mimas_body_{h}`. Pairs with
+/// `assemble_module_ex(.., tail = false)` chunk modules — together they
+/// cover one whole program.
+pub fn assemble_init_module(
+    spans: &[(usize, usize)],
+    lyt: &Layout,
+    wasm: bool,
+    hashes: &[u64],
+) -> String {
+    let all: Vec<usize> = (0..spans.len()).collect();
+    assemble_module_ex(spans, lyt, wasm, &[], true, hashes, Some(&all))
 }
 
 /// `.pliron` text for one chunk — `emit_bodies`'s per-index form, for
@@ -887,6 +1201,9 @@ pub fn emit_body(prog: &Program, body: usize, lyt: &Layout, wasm: bool) -> Strin
         float: BTreeMap::new(),
         slot_i: String::new(),
         rl: HashMap::new(),
+        self_i: body,
+        chunk_off: chunk.offset,
+        v_offbase: String::new(),
     };
 
     // the alloca size operand (a single shared `i32 1` const)
@@ -1051,13 +1368,22 @@ pub fn emit_body(prog: &Program, body: usize, lyt: &Layout, wasm: bool) -> Strin
         em.br(&g);
     } else {
         let ip = em.ld_word(&em.env.ip_p.clone(), 0);
+        // dispatch on `code.ip - @off_{self}` so the case labels stay
+        // chunk-local constants — the body's only index-free form.
+        let base = em.off_base();
+        let rel = em.sub(&ip, &base);
         let mut cases = String::new();
         for (i, (off, _)) in ops.iter().enumerate() {
-            write!(cases, "\n      {{ <{off}: i64>: ^op{i}() }},").unwrap();
+            write!(
+                cases,
+                "\n      {{ <{}: i64>: ^op{i}() }},",
+                off - em.chunk_off
+            )
+            .unwrap();
         }
         cases.pop();
         let edef = em.ex.edef.clone();
-        em.ln(format!("llvm.switch {ip}, ^{edef}() [{cases}\n    ]"));
+        em.ln(format!("llvm.switch {rel}, ^{edef}() [{cases}\n    ]"));
         em.start_block(&em.ex.edef.clone());
         let a = em.v_curip.clone();
         em.st(&a, &ip);
@@ -1771,11 +2097,52 @@ impl Em<'_> {
     }
 
     /// `code.ip = next; *op_ip = off` — bcgen's pre-helper/pre-call idiom.
+    /// `off`/`next` are program code offsets; `goff` keeps them
+    /// index-free in the emitted text.
     fn mark_op(&mut self, off: usize, next: usize) {
-        let n = self.iconst(next as i64);
-        let o = self.iconst(off as i64);
+        let n = self.goff(next);
+        let o = self.goff(off);
         self.store_ip(&n);
         self.store_opip(&o);
+    }
+
+    /// Global code offset for one of this chunk's ops: `@off_{self}` +
+    /// `(off - chunk.offset)`. The `off` globals are defined in the init
+    /// module; a chunk module sees bodiless decls, so the emitted code
+    /// carries no program-assigned constant.
+    fn goff(&mut self, off: usize) -> String {
+        let b = self.off_base();
+        let l = self.iconst((off - self.chunk_off) as i64);
+        self.add(&b, &l)
+    }
+
+    /// `*@mimas_body_off_{self_i}`, loaded once.
+    fn off_base(&mut self) -> String {
+        if self.v_offbase.is_empty() {
+            let v = self.v();
+            self.ln(format!(
+                "{v} = llvm.addressof @mimas_body_off_{} : {PTR}",
+                self.self_i
+            ));
+            self.v_offbase = self.ld_word(&v, 0);
+        }
+        self.v_offbase.clone()
+    }
+
+    /// `*@mimas_body_off_{callee}` — a callee chunk's code offset
+    /// (`Chunk::offset`), read from the per-program global.
+    fn chunk_off(&mut self, callee: usize) -> String {
+        let v = self.v();
+        self.ln(format!("{v} = llvm.addressof @mimas_body_off_{callee} : {PTR}"));
+        self.ld_word(&v, 0)
+    }
+
+    /// `*@mimas_body_idx_{callee}` — a callee chunk's body-table index,
+    /// read from the per-program global.
+    fn body_idx(&mut self, callee: usize) -> String {
+        let v = self.v();
+        self.ln(format!("{v} = llvm.addressof @mimas_body_idx_{callee} : {PTR}"));
+        self.ld_word(&v, 0)
     }
 
     /// Route an `RtErr` kind to `eerr` through a trampoline that just sets
@@ -2050,7 +2417,7 @@ impl Em<'_> {
     /// One op's quota gate — see `jit/src/emit.rs::gate`. Returns the
     /// continuation block the op body emits into.
     fn gate(&mut self, i: usize, off: usize) -> (String, String) {
-        let o = self.iconst(off as i64);
+        let o = self.goff(off);
         let a = self.v_curip.clone();
         self.st(&a, &o);
         let cont = self.create_block();
@@ -2170,7 +2537,7 @@ impl Em<'_> {
                 }
                 self.mark_op(off, next);
                 let regs = self.regs();
-                let o = self.iconst(off as i64);
+                let o = self.goff(off);
                 let k = self
                     .hcall(
                         H::Format,
@@ -2282,7 +2649,8 @@ impl Em<'_> {
             Op::LoadBody { dst, body } => {
                 let regs = self.regs();
                 let a = self.vaddr(&regs, dst.index() as u32);
-                let b = self.iconst32(body.index() as i64);
+                let bw = self.body_idx(body.index());
+                let b = self.trunc_to(I32, &bw);
                 self.st_fn(&a, &b);
                 let nb = self.next_blk(i);
                 self.br(&nb);
@@ -2615,7 +2983,8 @@ impl Em<'_> {
                 let cp = self.reg_list_slot(captures);
                 let regs = self.regs();
                 let d = self.iconst(dst.index() as i64);
-                let b = self.iconst32(body.index() as i64);
+                let bw = self.body_idx(body.index());
+                let b = self.trunc_to(I32, &bw);
                 let n = self.iconst(captures.len() as i64);
                 self.helper_op_v(
                     i,
@@ -3626,7 +3995,7 @@ impl Em<'_> {
         // the callee draws fuel/ops_left through its own `bcn` — charge our
         // spent ops first so its reads are exact
         self.settle_seq();
-        let b = self.iconst(body.index() as i64);
+        let b = self.body_idx(body.index());
         let d = self.iconst(dst.index() as i64);
         let n = self.iconst(nargs as i64);
         let rp = self
@@ -3696,7 +4065,7 @@ impl Em<'_> {
         // ---- slow: the megashim handles Flow::Call-at-cap, grows, errors ----
         self.start_block(&slow);
         let ap = self.reg_list_slot(args);
-        let b = self.iconst(body.index() as i64);
+        let b = self.body_idx(body.index());
         let d = self.iconst(dst.index() as i64);
         let n = self.iconst(args.len() as i64);
         let rp = self
@@ -3761,14 +4130,15 @@ impl Em<'_> {
         let fszc = self.iconst(fsz as i64);
         let cfo = self.mul(&fm1, &fszc);
         let cf = self.gep_dyn(&fptr, &cfo);
-        let nxt = self.iconst(next as i64);
+        let nxt = self.goff(next);
         self.st_word(&cf, &nxt, self.lyt.frame_ip as u32);
         // push the callee frame
         let nfo = self.mul(&flen, &fszc);
         let nf = self.gep_dyn(&fptr, &nfo);
-        let bi = self.iconst32(body.index() as i64);
+        let biw = self.body_idx(body.index());
+        let bi = self.trunc_to(I32, &biw);
         self.st_off(&nf, &bi, self.lyt.frame_chunk as u32, 4);
-        let cip = self.iconst(cchunk.offset as i64);
+        let cip = self.chunk_off(body.index());
         self.st_word(&nf, &cip, self.lyt.frame_ip as u32);
         let rr = self.iconst32(dst.index() as i64);
         self.st_off(&nf, &rr, self.lyt.frame_ret as u32, 4);
