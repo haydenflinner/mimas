@@ -125,9 +125,19 @@ fn rename_body_names(text: &str, hashes: &[u64]) -> String {
                 .ok()
                 .map(|i| format!("mimas_body_idx_x{:016x}", hashes[i]))
         } else {
+            // `{i}` → callee ref; `{i}s{k}` → a segmented body's
+            // internal segment symbol — both resolve through the hash.
             tok.parse::<usize>()
                 .ok()
                 .map(|i| body_sym(hashes[i]))
+                .or_else(|| {
+                    tok.split_once('s').and_then(|(i, k)| {
+                        i.parse::<usize>()
+                            .ok()
+                            .and_then(|i| k.parse::<usize>().ok().map(|k| (i, k)))
+                            .map(|(i, k)| format!("{}s{k}", body_sym(hashes[i])))
+                    })
+                })
         };
         match mapped {
             Some(m) => out.push_str(&m),
@@ -690,6 +700,28 @@ struct Ex {
     eend: String,
 }
 
+/// Per-segment emitter state — present when this `Em` is emitting one
+/// op slice of a segmented body (`emit_body_seg`). A segment is a
+/// standalone `i8(env)` func: `0` = "edge left my range, `code.ip`
+/// holds the target — re-dispatch" (outer body loop), `1` = done (the
+/// body exits wrote `out`; propagate). `ret 0` edges keep the shadow
+/// contract for free: every terminator already flushes dirty shadows,
+/// so memory is authoritative at every block boundary and the next
+/// segment re-seeds shadows on entry like any first-touch.
+struct SegEmit {
+    /// Fallthrough target after the slice's last op: `Some(off)` =
+    /// the next segment's first op (an `xoff` trampoline), `None` =
+    /// body end (`eend`).
+    end_off: Option<usize>,
+    /// Whether the op before this slice may pause — the first op's
+    /// quota gate must check `paused` exactly as if it were mid-body,
+    /// not skip it the way an `i > 0` lookahead does for op 0.
+    prev_may_pause: bool,
+    /// Out-of-slice jump targets collected while emitting — each gets
+    /// an `xoff{off}` trampoline block appended after the op blocks.
+    cross: BTreeSet<usize>,
+}
+
 /// One arg value handed to [`Em::hcall`].
 enum A {
     /// An `i64` word value — `inttoptr`'d for a `P` param.
@@ -756,6 +788,9 @@ struct Em<'a> {
     chunk_off: usize,
     /// Memoized `*@mimas_body_off_{self_i}` for `goff`.
     v_offbase: String,
+    /// Segment mode — `Some` when this `Em` emits one slice of a
+    /// segmented body rather than a whole body function.
+    seg: Option<SegEmit>,
 }
 
 /// `(ret_ty, ptys)` for a helper signature — the shared spelling used by
@@ -857,9 +892,10 @@ pub fn emit_bodies_t(
     lyt: &Layout,
     wasm: bool,
     tier: &dyn Fn(usize) -> Tier,
+    seg_ops: usize,
 ) -> (Vec<u64>, Vec<String>) {
     let texts: Vec<String> = (0..prog.chunks.len())
-        .map(|b| emit_body_tier(prog, b, lyt, wasm, tier(b)))
+        .map(|b| emit_body_tier(prog, b, lyt, wasm, tier(b), seg_ops))
         .collect();
     let lvl1: Vec<u64> = texts.iter().map(|t| body_hash(t)).collect();
     // Level-2 keys carry callee identity in `mimas_body_x{lvl1}` names —
@@ -910,7 +946,7 @@ pub fn emit_bodies_t(
 }
 
 pub fn emit_bodies(prog: &Program, lyt: &Layout, wasm: bool) -> (Vec<u64>, Vec<String>) {
-    emit_bodies_t(prog, lyt, wasm, &|_| Tier::Thick)
+    emit_bodies_t(prog, lyt, wasm, &|_| Tier::Thick, 0)
 }
 
 /// Content hash for every chunk — re-emits the bodies. For hosts that
@@ -920,8 +956,8 @@ pub fn body_hashes(prog: &Program, lyt: &Layout, wasm: bool) -> Vec<u64> {
 }
 
 /// [`body_hashes`], with a per-chunk emit tier.
-pub fn body_hashes_t(prog: &Program, lyt: &Layout, wasm: bool, tier: &dyn Fn(usize) -> Tier) -> Vec<u64> {
-    emit_bodies_t(prog, lyt, wasm, tier).0
+pub fn body_hashes_t(prog: &Program, lyt: &Layout, wasm: bool, tier: &dyn Fn(usize) -> Tier, seg_ops: usize) -> Vec<u64> {
+    emit_bodies_t(prog, lyt, wasm, tier, seg_ops).0
 }
 
 /// Per-chunk `(offset, end)` byte spans — all a module assembly reads
@@ -953,18 +989,20 @@ pub fn chunk_spans(prog: &Program) -> Vec<(usize, usize)> {
 /// `cdylib`, or any artifact providing `vm::bc::nat`). Returns the body
 /// content hashes alongside — the host resolves `mimas_body_{h}`.
 pub fn emit_module(prog: &Program, lyt: &Layout, wasm: bool, nsig: u64) -> (Vec<u64>, String) {
-    emit_module_t(prog, lyt, wasm, nsig, &|_| Tier::Thick)
+    emit_module_t(prog, lyt, wasm, nsig, &|_| Tier::Thick, 0)
 }
 
-/// [`emit_module`], with a per-chunk emit tier.
+/// [`emit_module`], with a per-chunk emit tier and `seg_ops` — thick
+/// bodies over `seg_ops` ops emit as segment fns (`0` disables).
 pub fn emit_module_t(
     prog: &Program,
     lyt: &Layout,
     wasm: bool,
     nsig: u64,
     tier: &dyn Fn(usize) -> Tier,
+    seg_ops: usize,
 ) -> (Vec<u64>, String) {
-    let (hashes, bodies) = emit_bodies_t(prog, lyt, wasm, tier);
+    let (hashes, bodies) = emit_bodies_t(prog, lyt, wasm, tier, seg_ops);
     let bodies: Vec<(usize, String)> = bodies
         .into_iter()
         .enumerate()
@@ -1232,67 +1270,162 @@ pub fn assemble_init_module(
 /// `.pliron` text for one chunk — `emit_bodies`'s per-index form, for
 /// callers that parallelize emission themselves.
 pub fn emit_body(prog: &Program, body: usize, lyt: &Layout, wasm: bool) -> String {
-    emit_body_tier(prog, body, lyt, wasm, Tier::Thick)
+    emit_body_tier(prog, body, lyt, wasm, Tier::Thick, 0)
 }
 
 /// [`emit_body`], at the given [`Tier`]. `Tier::Thin` emits the shared
 /// exits plus a `dispatch` block that records `code.ip` into `cur_ip`
 /// and enters `estep_g` directly — the exact path a thick body's `edef`
 /// takes on a dispatch miss. No op blocks, no register shadows: the
-/// body's text is O(1) in op count.
-pub fn emit_body_tier(prog: &Program, body: usize, lyt: &Layout, wasm: bool, tier: Tier) -> String {
+/// body's text is O(1) in op count. `seg_ops` splits thick bodies over
+/// N ops into segment fns (see [`emit_body_seg`]); 0 disables.
+pub fn emit_body_tier(prog: &Program, body: usize, lyt: &Layout, wasm: bool, tier: Tier, seg_ops: usize) -> String {
     let thin = tier == Tier::Thin;
     let body_id = compile::BodyId::from(body as u32);
     let ops = prog.ops(body_id);
     let chunk = &prog.chunks[body_id];
+    if !thin && seg_ops > 0 && ops.len() > seg_ops {
+        return emit_body_seg(prog, body, lyt, wasm, &ops, chunk.offset, seg_ops);
+    }
     let sh = analyze(&ops, chunk.regs as u32);
+    let mut em = Em::for_body(prog, body, lyt, wasm, &ops, &sh, chunk.offset, None);
+    let nexts = op_nexts(&ops);
+    fill_body_fn(&mut em, thin, &nexts);
+    serialize_fn(&em, &body_name(body), VOID)
+}
 
-    let mut em = Em {
-        ops: &ops,
-        prog,
-        lyt,
-        sh: &sh,
-        wasm,
-        done: Vec::new(),
-        cur_name: String::new(),
-        cur: Vec::new(),
-        prelude: Vec::new(),
-        nv: 0,
-        nb: 0,
-        env: Env::default(),
-        ex: Ex {
-            dispatch: "dispatch".into(),
-            edef: "edef".into(),
-            enext: "enext".into(),
-            eoof: "eoof".into(),
-            estep: "estep".into(),
-            estep_g: "estep_g".into(),
-            eerr: "eerr".into(),
-            eret: "eret".into(),
-            eend: "eend".into(),
-        },
-        blocks: ops
-            .iter()
-            .enumerate()
-            .map(|(i, _)| format!("op{i}"))
-            .collect(),
-        off2idx: ops.iter().enumerate().map(|(i, (o, _))| (*o, i)).collect(),
-        v_regs: String::new(),
-        v_curip: String::new(),
-        v_ekind: String::new(),
-        v_bcn: String::new(),
-        v_bcn0: String::new(),
-        int: BTreeMap::new(),
-        float: BTreeMap::new(),
-        dirty_int: BTreeSet::new(),
-        dirty_float: BTreeSet::new(),
-        slot_i: String::new(),
-        rl: HashMap::new(),
-        self_i: body,
-        chunk_off: chunk.offset,
-        v_offbase: String::new(),
-    };
+/// `nexts[i]` = the byte offset of `ops[i]`'s fallthrough successor.
+fn op_nexts(ops: &[(usize, Op)]) -> Vec<usize> {
+    ops.iter()
+        .enumerate()
+        .map(|(i, _)| ops.get(i + 1).map(|(o, _)| *o).unwrap_or(usize::MAX))
+        .collect()
+}
 
+/// Emit one thick body as `ceil(ops/seg_ops)` standalone fns plus a tiny
+/// dispatcher — the big-chunk compile-time lever. A serial `llvm.func`
+/// is the unit clif-lower can't split: a 500-op body costs ~10 s alone
+/// while the other workers idle. Split at slice boundaries, each slice
+/// becomes `mimas_body_{i}s{k}` (`i8` return: 0 = re-dispatch, 1 = done),
+/// and clif-lower's per-function parallelism now applies *within* the
+/// body — one big chunk's tail shrinks roughly by the segment count.
+///
+/// Correctness rests on the dirty-shadow invariant: every terminator
+/// flushes dirty shadows, so memory is authoritative at every block
+/// boundary — a cross-segment edge just stores `code.ip` and returns 0;
+/// the next segment re-seeds its shadows from memory exactly like any
+/// other first touch. `estep`/exits are emitted per segment (they're
+/// small), so every path a thick body has, a segment has.
+fn emit_body_seg(
+    prog: &Program,
+    body: usize,
+    lyt: &Layout,
+    wasm: bool,
+    ops: &[(usize, Op)],
+    chunk_off: usize,
+    seg_ops: usize,
+) -> String {
+    let body_id = compile::BodyId::from(body as u32);
+    let chunk = &prog.chunks[body_id];
+    let nseg = ops.len().div_ceil(seg_ops);
+    let nexts = op_nexts(ops);
+    let mut out = emit_seg_outer(prog, body, lyt, wasm, ops, chunk_off, nseg, seg_ops);
+    for k in 0..nseg {
+        let (s0, s1) = (k * seg_ops, ((k + 1) * seg_ops).min(ops.len()));
+        let slice = &ops[s0..s1];
+        let sh = analyze(slice, chunk.regs as u32);
+        let seg = SegEmit {
+            // the last slice's fallthrough is the body end (`eend`);
+            // others cross into the next segment's first op.
+            end_off: (k + 1 < nseg).then(|| ops[s1].0),
+            prev_may_pause: s0 > 0 && may_pause(&ops[s0 - 1].1),
+            cross: BTreeSet::new(),
+        };
+        let mut em = Em::for_body(prog, body, lyt, wasm, slice, &sh, chunk_off, Some(seg));
+        fill_body_fn(&mut em, false, &nexts[s0..s1]);
+        // module members are `;`-separated — the segment fns are
+        // extra members inside this chunk's body blob.
+        out.push_str(";\n  ");
+        out.push_str(&serialize_fn(&em, &format!("mimas_body_{body}s{k}"), I8));
+    }
+    out
+}
+
+/// The dispatcher a segmented body exposes as `mimas_body_{i}`:
+/// `code.ip` → the segment owning it → `call seg(env)` → `0` loops
+/// back (the segment hit a cross-slice edge), anything else returns.
+/// The range chain is chunk-relative (`ip - @off_{self}`), the same
+/// index-free form the op dispatch's `llvm.switch` uses.
+fn emit_seg_outer(
+    prog: &Program,
+    body: usize,
+    lyt: &Layout,
+    wasm: bool,
+    ops: &[(usize, Op)],
+    chunk_off: usize,
+    nseg: usize,
+    seg_ops: usize,
+) -> String {
+    // segment k covers ops[k*seg_ops..]; its dispatch bound is the next
+    // segment's first op's chunk-relative offset.
+    let bounds: Vec<usize> = (1..nseg)
+        .map(|k| ops[k * seg_ops].0 - chunk_off)
+        .collect();
+    let empty_sh = analyze(&[], 0);
+    let mut em = Em::for_body(prog, body, lyt, wasm, &[], &empty_sh, chunk_off, None);
+    em.start_block("entry");
+    let env_p = "env".to_string();
+    let envoff = |off: usize| off / std::mem::size_of::<usize>() * lyt.word_size;
+    let code = em.envld(&env_p, envoff(std::mem::offset_of!(BodyEnv<'_>, code)));
+    let c = em.iconst(lyt.code_ip as i64);
+    let ip_p = em.gep_dyn(&code, &c);
+    let disp = "sdisp".to_string();
+    em.br(&disp);
+    em.start_block(&disp);
+    let ip = em.ld_word(&ip_p, 0);
+    let base = em.off_base();
+    let rel = em.sub(&ip, &base);
+    let mut next = em.create_block();
+    em.br(&next);
+    for (k, &bound) in bounds.iter().enumerate() {
+        em.start_block(&next);
+        let b = em.iconst(bound as i64);
+        let c = em.icmp(I64, "ULT", &rel, &b);
+        let call = format!("segcall{k}");
+        next = em.create_block();
+        em.cbr(&c, &call, &next);
+    }
+    em.start_block(&next);
+    em.br(&format!("segcall{}", nseg - 1));
+    let done = "sdone".to_string();
+    for k in 0..nseg {
+        em.start_block(&format!("segcall{k}"));
+        let rc = em.ev(format!(
+            "llvm.call @mimas_body_{body}s{k} (env) : llvm.func <{I8} ({PTR}) variadic = false>"
+        ));
+        let z = em.iconst8(0);
+        let isz = em.icmp(I8, "EQ", &rc, &z);
+        let d = disp.clone();
+        let dn = done.clone();
+        em.cbr(&isz, &d, &dn);
+    }
+    em.start_block(&done);
+    em.ret();
+    em.finish();
+    serialize_fn(&em, &body_name(body), VOID)
+}
+
+/// Shared one-function skeleton for [`emit_body_tier`]'s thick/thin
+/// bodies and [`emit_body_seg`]'s per-slice fns: prelude, allocas, env
+/// loads, shadow seeding, dispatch, exits, and `em.ops`' op blocks.
+/// `nexts[i]` is the op *after* `em.ops[i]` in the whole body (the next
+/// segment's first offset mid-slice; `usize::MAX` off the end).
+fn fill_body_fn(em: &mut Em, thin: bool, nexts: &[usize]) {
+    let ops = em.ops;
+    let lyt = em.lyt;
+    let sh = em.sh;
+    let wasm = em.wasm;
+    let chunk = &em.prog.chunks[compile::BodyId::from(em.self_i as u32)];
     // the alloca size operand (a single shared `i32 1` const)
     em.prelude.push(format!(
         "a_one = llvm.constant <builtin.integer <1: i32>> : {I32}"
@@ -1533,7 +1666,7 @@ pub fn emit_body_tier(prog: &Program, body: usize, lyt: &Layout, wasm: bool, tie
     let ip = em.cur_ip();
     em.store_ip(&ip);
     em.hcall(H::OutNext, &[A::P(em.env.out.clone())]);
-    em.ret();
+    em.done_ret();
 
     em.start_block(&em.ex.eoof.clone());
     em.settle_seq();
@@ -1542,7 +1675,7 @@ pub fn emit_body_tier(prog: &Program, body: usize, lyt: &Layout, wasm: bool, tie
     em.store_opip(&ip);
     let k = em.iconst8(ERR_OOF);
     em.hcall(H::OutErr, &[A::P(em.env.out.clone()), A::I8(k)]);
-    em.ret();
+    em.done_ret();
 
     em.start_block(&em.ex.estep.clone());
     em.settle_seq();
@@ -1579,9 +1712,16 @@ pub fn emit_body_tier(prog: &Program, body: usize, lyt: &Layout, wasm: bool, tie
     let cont = em.create_block();
     em.cbr(&isz, &er, &cont);
     em.start_block(&cont);
-    let a = em.v_regs.clone();
-    em.st(&a, &rp);
-    em.br(&dp);
+    if em.seg.is_some() {
+        // Keep stepping — but the next op may live in a different
+        // segment: hand `code.ip` back to the outer dispatcher. (`code.ip`
+        // is already advanced; `store_ip` above wrote the stepped ip.)
+        em.cross_ret();
+    } else {
+        let a = em.v_regs.clone();
+        em.st(&a, &rp);
+        em.br(&dp);
+    }
 
     em.start_block(&em.ex.eerr.clone());
     em.settle_seq();
@@ -1591,11 +1731,11 @@ pub fn emit_body_tier(prog: &Program, body: usize, lyt: &Layout, wasm: bool, tie
     let a = em.v_ekind.clone();
     let kk = em.ld(I8, &a, 0, 1);
     em.hcall(H::OutErr, &[A::P(em.env.out.clone()), A::I8(kk)]);
-    em.ret();
+    em.done_ret();
 
     em.start_block(&em.ex.eret.clone());
     em.settle_seq();
-    em.ret();
+    em.done_ret();
 
     if !thin {
         em.start_block(&em.ex.eend.clone());
@@ -1607,43 +1747,117 @@ pub fn emit_body_tier(prog: &Program, body: usize, lyt: &Layout, wasm: bool, tie
 
         // ---- op blocks ----
         for (i, (off, op)) in ops.iter().enumerate() {
-            let next = ops.get(i + 1).map(|(o, _)| *o).unwrap_or(usize::MAX);
-            em.emit_op(i, *off, next, op);
+            em.emit_op(i, *off, nexts[i], op);
         }
     }
 
-    // ---- serialize ----
+    // ---- segment exit trampolines (seg mode only) ----
+    // One `xoff{off}` per out-of-slice successor: `code.ip = off`, then
+    // `ret 0` — the outer dispatcher re-enters whichever segment owns it.
+    if let Some(seg) = &em.seg {
+        let cross: Vec<usize> = seg.cross.iter().copied().collect();
+        for off in cross {
+            em.start_block(&format!("xoff{off}"));
+            let o = em.goff(off);
+            em.store_ip(&o);
+            em.cross_ret();
+        }
+    }
+    em.finish();
+}
+
+/// `llvm.func @{name}: {ret_ty}(env) {em.done}` — one emitted
+/// function's text (a whole body, or one segment of a split body).
+fn serialize_fn(em: &Em, name: &str, ret_ty: &str) -> String {
+    
     // ops inside a block are `;`-separated (no trailing `;`); blocks and
     // module members are whitespace-separated.
-    em.finish();
-    let mut out = format!(
-        "llvm.func @{}: llvm.func <{VOID} ({PTR}) variadic = false>\n    [llvm_function_linkage: llvm.linkage ExternalLinkage]\n  {{",
-        body_name(body)
+        let mut out = format!(
+        "llvm.func @{}: llvm.func <{ret_ty} ({PTR}) variadic = false>\n    [llvm_function_linkage: llvm.linkage ExternalLinkage]\n  {{",
+        name
     );
     for (name, lines) in &em.done {
         if name == "entry" {
             write!(out, "\n  ^entry(env: {PTR}):").unwrap();
-            if !em.prelude.is_empty() || !lines.is_empty() {
-                write!(out, "\n    ").unwrap();
-                write!(out, "{}", em.prelude.join(";\n    ")).unwrap();
-                if !lines.is_empty() {
-                    write!(out, ";\n    ").unwrap();
-                }
+            let stmts: Vec<&str> = em
+                .prelude
+                .iter()
+                .chain(lines.iter())
+                .map(|s| s.as_str())
+                .collect();
+            if !stmts.is_empty() {
+                write!(out, "\n    {}", stmts.join(";\n    ")).unwrap();
             }
         } else {
             write!(out, "\n  ^{name}():").unwrap();
             if !lines.is_empty() {
-                write!(out, "\n    ").unwrap();
+                write!(out, "\n    {}", lines.join(";\n    ")).unwrap();
             }
         }
-        write!(out, "{}", lines.join(";\n    ")).unwrap();
         out.push('\n');
     }
     out.push_str("  }");
     out
 }
+impl<'a> Em<'a> {
+    /// The emitter's per-function state — whole bodies and segments
+    /// share it (`ops`/`blocks`/`off2idx`/`sh` are the emitted slice's;
+    /// `seg` marks segment mode).
+    #[allow(clippy::too_many_arguments)]
+    fn for_body(
+        prog: &'a Program,
+        self_i: usize,
+        lyt: &'a Layout,
+        wasm: bool,
+        ops: &'a [(usize, Op)],
+        sh: &'a Sh,
+        chunk_off: usize,
+        seg: Option<SegEmit>,
+    ) -> Self {
+        Em {
+            ops,
+            prog,
+            lyt,
+            sh,
+            wasm,
+            done: Vec::new(),
+            cur_name: String::new(),
+            cur: Vec::new(),
+            prelude: Vec::new(),
+            nv: 0,
+            nb: 0,
+            env: Env::default(),
+            ex: Ex {
+                dispatch: "dispatch".into(),
+                edef: "edef".into(),
+                enext: "enext".into(),
+                eoof: "eoof".into(),
+                estep: "estep".into(),
+                estep_g: "estep_g".into(),
+                eerr: "eerr".into(),
+                eret: "eret".into(),
+                eend: "eend".into(),
+            },
+            blocks: ops.iter().enumerate().map(|(i, _)| format!("op{i}")).collect(),
+            off2idx: ops.iter().enumerate().map(|(i, (o, _))| (*o, i)).collect(),
+            v_regs: String::new(),
+            v_curip: String::new(),
+            v_ekind: String::new(),
+            v_bcn: String::new(),
+            v_bcn0: String::new(),
+            int: BTreeMap::new(),
+            float: BTreeMap::new(),
+            dirty_int: BTreeSet::new(),
+            dirty_float: BTreeSet::new(),
+            slot_i: String::new(),
+            rl: HashMap::new(),
+            self_i,
+            chunk_off,
+            v_offbase: String::new(),
+            seg,
+        }
+    }
 
-impl Em<'_> {
     // ---- raw emission ----
 
     fn v(&mut self) -> String {
@@ -1907,6 +2121,27 @@ impl Em<'_> {
         self.ln("llvm.return".into());
     }
 
+    /// A body-finished exit (`eret`/`eerr`/`enext`/`eoof`): `out` is
+    /// written, propagate. In a segment the func returns `i8`, so this
+    /// is `return <1:i8>`; in a whole body it's `void`'s plain return.
+    fn done_ret(&mut self) {
+        if self.seg.is_some() {
+            self.flush_seq();
+            let one = self.iconst8(1);
+            self.ln(format!("llvm.return {one}"));
+        } else {
+            self.ret();
+        }
+    }
+
+    /// "Edge left my slice" — `code.ip` already holds the target; the
+    /// outer dispatcher re-enters the right segment.
+    fn cross_ret(&mut self) {
+        self.flush_seq();
+        let z = self.iconst8(0);
+        self.ln(format!("llvm.return {z}"));
+    }
+
     /// Call a `vm::bc::jit` helper as a direct `llvm.call @mj_*` symbol
     /// (resolved at link time against the companion runtime); returns the
     /// `u8` status or pointer result if the signature has one.
@@ -2146,20 +2381,34 @@ impl Em<'_> {
     }
 
     /// The block implementing the op at byte offset `t` — jump targets
-    /// always land on op starts, so the map is exact.
-    fn tgt_blk(&self, t: &BlockTarget) -> String {
+    /// always land on op starts, so the map is exact. In a segment, a
+    /// target outside the slice is an `xoff{off}` trampoline instead:
+    /// `code.ip = off; ret 0` — re-dispatch through the outer function.
+    fn tgt_blk(&mut self, t: &BlockTarget) -> String {
         let BlockTarget::ByteOffset(o) = t else {
             panic!("unresolved BlockTarget in compiled program")
         };
-        self.blocks[self.off2idx[o]].clone()
+        if let Some(&i) = self.off2idx.get(o) {
+            return self.blocks[i].clone();
+        }
+        assert!(self.seg.is_some(), "jump target {o} outside emitted ops");
+        let o = *o;
+        self.seg.as_mut().unwrap().cross.insert(o);
+        format!("xoff{o}")
     }
 
-    /// Successor block for fallthrough (`next` op, or `eend` off the end).
-    fn next_blk(&self, i: usize) -> String {
+    /// Successor block for fallthrough (`next` op, or `eend` off the
+    /// end — or the next segment's `xoff` trampoline mid-body).
+    fn next_blk(&mut self, i: usize) -> String {
         if i + 1 < self.ops.len() {
-            self.blocks[i + 1].clone()
-        } else {
-            self.ex.eend.clone()
+            return self.blocks[i + 1].clone();
+        }
+        match self.seg.as_mut().and_then(|s| s.end_off) {
+            Some(off) => {
+                self.seg.as_mut().unwrap().cross.insert(off);
+                format!("xoff{off}")
+            }
+            None => self.ex.eend.clone(),
         }
     }
 
@@ -2556,7 +2805,15 @@ impl Em<'_> {
         self.st(&a, &o);
         let cont = self.create_block();
         let tramp = self.create_block();
-        if i > 0 && may_pause(&self.ops[i - 1].1) {
+        let prev_may_pause = if i > 0 {
+            may_pause(&self.ops[i - 1].1)
+        } else {
+            // a segment's first op must honor the *body's* previous
+            // op — the emitter's `ops` is the slice, so the flag comes
+            // from the segment plan instead of lookahead.
+            self.seg.as_ref().is_some_and(|s| s.prev_may_pause)
+        };
+        if prev_may_pause {
             let p = self.ld(I8, &self.env.paused_p.clone(), 0, 1);
             let p1 = self.icmp_ne0(I8, &p);
             let g = self.create_block();
@@ -2698,7 +2955,7 @@ impl Em<'_> {
                 self.start_block(&do_ret);
                 self.settle_seq();
                 self.hcall(H::OutReturn, &[A::P(self.env.out.clone()), A::P(vp)]);
-                self.ret();
+                self.done_ret();
             }
             Op::Panic {} => {
                 let k = self.iconst8(ERR_PANIC);
