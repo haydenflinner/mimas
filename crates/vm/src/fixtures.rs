@@ -126,6 +126,156 @@ pub struct Trace {
     /// over the program. `u32::MAX` is the caller of the entry frame.
     /// Read by `Vm::op_tree`; reset with the program.
     pub edge_ops: RefCell<HashMap<u64, u64>>,
+    /// The ordered path recorder is running. Off by default: unlike
+    /// `hits` it grows with the run, so only a host that drains it
+    /// (`Vm::trace_path_take`) turns it on.
+    pub path_on: Cell<bool>,
+    /// The ordered path since the last take. See [`Path`].
+    pub path: RefCell<Path>,
+}
+
+/// The run as an ordered path, stored as taken jumps only. Execution is
+/// sequential until an op transfers control, so the list of `(from, to)`
+/// discontinuities rebuilds every op in order: start at `start`, follow
+/// `next` until `from`, continue at `to`, stop at `end`. Calls, returns,
+/// branches and loop back-edges are all the same record.
+///
+/// `out` is a flat stream of two-u32 records:
+/// - `from, to`: one taken jump.
+/// - `MARK + p, count`: the `p` records before this one ran `count`
+///   more times. Those records may hold markers of their own, so a
+///   loop nest folds level by level and a loop is one marker however
+///   long it runs.
+/// - `MARK, dropped`: the stream reached [`Path::LIMIT`] and `dropped`
+///   jumps are missing. Never silent.
+#[derive(Default)]
+pub struct Path {
+    /// `next[ip]` = byte offset of the op after the op at `ip`; what a
+    /// tick compares against to see a jump. Built on `load_program`.
+    pub next: Vec<u32>,
+    prev: u32,
+    start: u32,
+    out: Vec<[u32; 2]>,
+    dropped: u32,
+}
+
+impl Path {
+    const NONE: u32 = u32::MAX;
+    /// Longest repeating pattern folded, in records.
+    pub const MAX_PERIOD: usize = 32;
+    /// `from` values at or above this are markers; no ip gets this high.
+    pub const MARK: u32 = u32::MAX - 255;
+    /// Records `out` may hold (128 MB) before jumps count as dropped.
+    const LIMIT: usize = 1 << 24;
+
+    pub fn reset(&mut self, next: Vec<u32>) {
+        *self = Path { next, prev: Self::NONE, ..Path::default() };
+    }
+
+    #[inline]
+    fn step(&mut self, ip: u32) {
+        if self.prev == Self::NONE {
+            self.start = ip;
+        } else if self.next.get(self.prev as usize) != Some(&ip) {
+            self.jump(self.prev, ip);
+        }
+        self.prev = ip;
+    }
+
+    /// A pattern may repeat only if its markers point inside it.
+    fn closed(pat: &[[u32; 2]]) -> bool {
+        pat.iter()
+            .enumerate()
+            .all(|(j, r)| r[0] < Self::MARK || (r[0] - Self::MARK) as usize <= j)
+    }
+
+    fn jump(&mut self, from: u32, to: u32) {
+        if self.out.len() >= Self::LIMIT {
+            self.dropped = self.dropped.saturating_add(1);
+            return;
+        }
+        self.out.push([from, to]);
+        // Fold the tail until nothing folds: one fold can complete the
+        // pattern of the loop around it.
+        'fold: loop {
+            let len = self.out.len();
+            for p in 1..=Self::MAX_PERIOD {
+                // `pattern, marker(p), pattern` → count + 1
+                if len >= 2 * p + 1
+                    && self.out[len - p - 1][0] == Self::MARK + p as u32
+                    && self.out[len - p - 1][1] < u32::MAX
+                    && self.out[len - p..] == self.out[len - 2 * p - 1..len - p - 1]
+                {
+                    self.out.truncate(len - p);
+                    self.out[len - p - 1][1] += 1;
+                    continue 'fold;
+                }
+                // `pattern, pattern` → `pattern, marker(p) × 1`
+                if len >= 2 * p
+                    && self.out[len - p..] == self.out[len - 2 * p..len - p]
+                    && Self::closed(&self.out[len - p..])
+                {
+                    self.out.truncate(len - p);
+                    self.out.push([Self::MARK + p as u32, 1]);
+                    continue 'fold;
+                }
+            }
+            return;
+        }
+    }
+
+    /// `[start, end, records…]` since the last take, empty when nothing
+    /// ran. The next tick starts a new path.
+    pub fn take(&mut self) -> Vec<u32> {
+        if self.prev == Self::NONE {
+            return Vec::new();
+        }
+        let mut v = vec![self.start, self.prev];
+        v.extend(self.out.drain(..).flatten());
+        if self.dropped > 0 {
+            v.extend([Self::MARK, self.dropped]);
+        }
+        self.prev = Self::NONE;
+        self.dropped = 0;
+        v
+    }
+
+    /// A taken path back to every op's ip in run order: the inverse of
+    /// the recording, for tests and offline tools. `f` gets each ip.
+    pub fn expand(&self, path: &[u32], mut f: impl FnMut(u32)) {
+        let [start, end, records @ ..] = path else { return };
+        // markers unrolled to plain jumps first; `at[i]` is where
+        // record `i`'s jumps begin
+        let mut jumps: Vec<[u32; 2]> = Vec::new();
+        let mut at: Vec<usize> = Vec::new();
+        for r in records.chunks_exact(2) {
+            let here = jumps.len();
+            if r[0] > Self::MARK {
+                let p = (r[0] - Self::MARK) as usize;
+                let from = at[at.len() - p];
+                for _ in 0..r[1] {
+                    jumps.extend_from_within(from..here);
+                }
+            } else if r[0] < Self::MARK {
+                jumps.push([r[0], r[1]]);
+            }
+            at.push(here);
+        }
+        let mut ip = *start;
+        for [from, to] in jumps {
+            while ip != from {
+                f(ip);
+                ip = self.next[ip as usize];
+            }
+            f(ip);
+            ip = to;
+        }
+        while ip != *end {
+            f(ip);
+            ip = self.next[ip as usize];
+        }
+        f(ip);
+    }
 }
 
 impl Trace {
@@ -137,6 +287,9 @@ impl Trace {
         self.ops_total.set(self.ops_total.get() + 1);
         if let Some(h) = self.hits.borrow_mut().get_mut(ip) {
             *h = h.wrapping_add(1);
+        }
+        if self.path_on.get() {
+            self.path.borrow_mut().step(ip as u32);
         }
     }
 

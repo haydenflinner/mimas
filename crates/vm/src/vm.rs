@@ -395,6 +395,21 @@ impl Vm {
         self.field_dims = field_dims.into_values().collect();
         let chunks = &self.chunks;
         let code_len = self.code.bytes.len();
+        // `next[ip]` for the ordered path recorder: ops are variable
+        // length, so "the next op" needs one decode walk per program.
+        let mut next_op = vec![u32::MAX; code_len];
+        let mut starts: Vec<usize> = chunks.iter().map(|(_, c)| c.offset).collect();
+        starts.sort_unstable();
+        for (i, &start) in starts.iter().enumerate() {
+            let end = starts.get(i + 1).copied().unwrap_or(code_len);
+            self.code.ip = start;
+            while self.code.ip < end {
+                let at = self.code.ip;
+                compile::Op::decode(&mut self.code);
+                next_op[at] = self.code.ip as u32;
+            }
+        }
+        self.code.ip = 0;
         self.arena.mutate(|mc, state| {
             *state.struct_names.borrow_mut(mc) = struct_names.into_values().collect();
             *state.field_names.borrow_mut(mc) = field_names;
@@ -429,6 +444,7 @@ impl Vm {
             let trace = state.fixtures.get::<crate::fixtures::Trace>();
             *trace.hits.borrow_mut() = vec![0; code_len];
             trace.calls.borrow_mut().clear();
+            trace.path.borrow_mut().reset(next_op);
             trace.edge_ops.borrow_mut().clear();
             trace.reset_frames();
         });
@@ -910,6 +926,36 @@ impl Vm {
                 calls.push(n);
             }
             (hits, calls)
+        })
+    }
+
+    /// Start or stop the ordered path recorder (see
+    /// [`Path`](crate::fixtures::Path)). Off by default; a host that
+    /// turns it on must drain it with [`trace_path_take`](Self::trace_path_take).
+    pub fn trace_path_enable(&mut self, on: bool) {
+        self.arena.mutate(|_, state| {
+            let trace = state.fixtures.get::<crate::fixtures::Trace>();
+            trace.path_on.set(on);
+            if !on {
+                trace.path.borrow_mut().take();
+            }
+        })
+    }
+
+    /// Drain the ordered path: `[start, end, items…]`, every op since
+    /// the last take in run order, stored as taken jumps with loops
+    /// folded. Empty while nothing has run.
+    pub fn trace_path_take(&mut self) -> Vec<u32> {
+        self.arena
+            .mutate(|_, state| state.fixtures.get::<crate::fixtures::Trace>().path.borrow_mut().take())
+    }
+
+    /// A taken path expanded to one ip per op, in run order.
+    pub fn trace_path_expand(&mut self, path: &[u32]) -> Vec<u32> {
+        self.arena.mutate(|_, state| {
+            let mut out = Vec::new();
+            state.fixtures.get::<crate::fixtures::Trace>().path.borrow().expand(path, |ip| out.push(ip));
+            out
         })
     }
 }
