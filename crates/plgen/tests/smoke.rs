@@ -69,6 +69,7 @@ fn thin_bodies_do_not_dedup() {
         &vm::bc::jit::layout(),
         false,
         &|_| mimas_plgen::Tier::Thin,
+        0,
     );
     let unique: std::collections::HashSet<_> = hashes.iter().collect();
     assert_eq!(unique.len(), hashes.len(), "thin bodies must not dedup");
@@ -76,4 +77,55 @@ fn thin_bodies_do_not_dedup() {
     for t in &texts {
         assert!(!t.contains("llvm.switch"), "thin body must not dispatch");
     }
+}
+
+/// A thick body over `seg_ops` splits into a `void` outer dispatcher and
+/// `i8`-returning `mimas_body_x{h}s{k}` segment fns; an edge leaving a
+/// slice goes through an `xoff` trampoline (`code.ip = target; ret 0`),
+/// which the outer turns into the owning segment's call. Loop backedges
+/// out of a slice are what force the trampolines.
+#[test]
+fn segmented_body_emits_segments_and_trampolines() {
+    let (program, _sources) = Vm::compile_parts(
+        &[(
+            "main",
+            "fn sum(n: int) -> int { let s = 0; for i in n { s += i }; s }\nlet TEST_VALUE = sum(10);",
+        )],
+        |api| library::codegen(api),
+    )
+    .expect("compiles");
+    // find the biggest chunk and segment it finely so it must split
+    let big = (0..program.chunks.len())
+        .max_by_key(|&i| program.ops(compile::BodyId::from(i as u32)).len())
+        .unwrap();
+    let nops = program.ops(compile::BodyId::from(big as u32)).len();
+    assert!(nops > 3, "need a multi-op body, got {nops}");
+    let (hashes, texts) = mimas_plgen::emit_bodies_t(
+        &program,
+        &vm::bc::jit::layout(),
+        false,
+        &|_| mimas_plgen::Tier::Thick,
+        3,
+    );
+    let h = format!("{:016x}", hashes[big]);
+    let blob = &texts[big];
+    // outer dispatcher keeps the body's own symbol, void (env) signature
+    assert!(
+        blob.contains(&format!(
+            "llvm.func @mimas_body_x{h}: llvm.func <llvm.void"
+        )),
+        "missing outer dispatcher"
+    );
+    // at least two i8-returning segment fns under the body's hash
+    assert!(
+        blob.contains(&format!("llvm.func @mimas_body_x{h}s0:"))
+            && blob.contains(&format!("llvm.func @mimas_body_x{h}s1:")),
+        "missing segment fns"
+    );
+    assert!(
+        blob.contains("llvm.func <builtin.integer i8 (llvm.ptr (0)) variadic = false>"),
+        "segment fns must return i8"
+    );
+    // a cross-slice edge emits an xoff trampoline in this blob
+    assert!(blob.contains("^xoff"), "missing cross-segment trampoline");
 }
