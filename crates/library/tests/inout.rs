@@ -144,13 +144,26 @@ test_fail!(
      bump(&(xs[0] + 1));",
 );
 
-// r[verify mimas.inout.exclusive]
-test_fail!(
-    inout_rejects_aliased_loans,
+// disjoint field lends under one root are legal -- exclusivity compares
+// paths, not roots. r[verify mimas.inout.exclusive]
+test_run!(
+    inout_disjoint_field_loans_pass,
     "struct Box { a: int, b: int }
      fn swap(x: inout int, y: inout int) { let t = x; x = y; y = t; }
      let s = Box { a = 1, b = 2 };
-     swap(&s.a, &s.b);",
+     swap(&s.a, &s.b);
+     let got = s.a * 10 + s.b;",
+    "got" => "21",
+);
+
+// the same path lent twice still collides.
+// r[verify mimas.inout.exclusive]
+test_fail!(
+    inout_rejects_same_path_loans,
+    "struct Box { a: int, b: int }
+     fn swap(x: inout int, y: inout int) { let t = x; x = y; y = t; }
+     let s = Box { a = 1, b = 2 };
+     swap(&s.a, &s.a);",
 );
 
 // two `&` args that never share a root are fine even inside one call --
@@ -174,12 +187,25 @@ test_fail!(
      both(&xs[0], &xs[1]);",
 );
 
-// a sibling argument reading the lent root would see the loan mid-write.
+// a sibling argument is only dangerous where the callee writes: `other.n`
+// never touches the lent `s.xs[]` path, so the loan is safe.
 // r[verify mimas.inout.exclusive]
-test_fail!(
-    inout_rejects_value_alongside_loan,
+test_run!(
+    inout_disjoint_write_alongside_loan,
     "struct Box { xs: [int], n: int }
-     fn f(p: inout int, other: Box) { p += other.n; }
+     fn f(p: inout int, other: Box) { p += other.n; other.n = 0; }
+     let s = Box { xs = [1], n = 5 };
+     f(&s.xs[0], s);
+     let got = s.xs[0] * 10 + s.n;",
+    "got" => "60",
+);
+
+// when the callee writes a path that overlaps the lend, the sibling still
+// collides. r[verify mimas.inout.exclusive]
+test_fail!(
+    inout_rejects_overlapping_write_alongside_loan,
+    "struct Box { xs: [int], n: int }
+     fn f(p: inout int, other: Box) { other.xs.push(9); }
      let s = Box { xs = [1], n = 1 };
      f(&s.xs[0], s);",
 );

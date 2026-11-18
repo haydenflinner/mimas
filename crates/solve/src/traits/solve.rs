@@ -1,6 +1,6 @@
 use crate::FxHashMap;
 use crate::{
-    Error, FnRun, LoopRun, Result, Solver, Unification, array,
+    Error, FnRun, GuardSeg, LoopRun, Result, Solver, Unification, array,
     components::{
         Adt, AdtFlags, AdtId, DecId, DecKind, Field, Flow, FnHeader, FnParam, Len, Quantification,
         Ty, TyExt, Variant,
@@ -1411,21 +1411,24 @@ impl Solve for Call {
             let (closures, rest): (Vec<_>, Vec<_>) = args_by_slot
                 .iter()
                 .partition(|(_, arg)| matches!(arg.value.kind(), ExprKind::Closure(_)));
-            // `&` loans collect their root decs so exclusivity can check them
-            // pairwise and against the roots a sibling argument reads.
+            // `&` loans collect their root decs and access paths so
+            // exclusivity can check them pairwise -- `&w.tour` and
+            // `&w.other` share a root without sharing a slot -- and
+            // against the paths a sibling argument's derived writes reach.
             // r[impl mimas.inout.exclusive]
-            let mut lent: Vec<(DecId, String, Location)> = Vec::new();
-            let mut plain_roots: Vec<(DecId, String, Location)> = Vec::new();
+            let mut lent: Vec<(DecId, Vec<GuardSeg>, String, Location)> = Vec::new();
+            let mut plain_roots: Vec<(DecId, Vec<GuardSeg>, usize, String, Location)> =
+                Vec::new();
             let borrow_root = |solver: &Solver, arg: &parse::Argument| {
                 solver
                     .place_sources
                     .get(&arg.value.id())
                     .and_then(crate::root_and_path)
-                    .and_then(|(root, _)| {
+                    .and_then(|(root, path)| {
                         solver
                             .ribs
                             .resolve(root)
-                            .map(|dec| (dec, root.lexeme.clone(), root.location()))
+                            .map(|dec| (dec, path, root.lexeme.clone(), root.location()))
                     })
             };
             for &(slot, arg) in rest.iter().chain(&closures) {
@@ -1483,6 +1486,9 @@ impl Solve for Call {
                         if let Some(rooted) = borrow_root(solver, arg) {
                             lent.push(rooted);
                         }
+                        // a `&` under a `for` freeze names the place it
+                        // loans -- the freeze's path check rides the same
+                        // machinery, so nothing extra is recorded here.
                         solver.inout_calls.insert(id);
                         // a `&binding` loans through a cell: the call writes
                         // `__cell[0]` back into the binding when it returns.
@@ -1496,26 +1502,60 @@ impl Solve for Call {
                         // borrow errors inside `fulfill_ty` -- only plain args
                         // reach the roots below.
                         arg.value.fulfill_ty(params[slot].ty.clone(), solver)?;
-                        if let Some((root, _)) = crate::root_and_path(&arg.value)
+                        if let Some((root, path)) = crate::root_and_path(&arg.value)
                             && let Some(dec) = solver.ribs.resolve(root)
                         {
-                            plain_roots.push((dec, root.lexeme.clone(), root.location()));
+                            plain_roots.push((
+                                dec,
+                                path,
+                                slot,
+                                root.lexeme.clone(),
+                                root.location(),
+                            ));
                         }
                     }
                 }
             }
             // r[impl mimas.inout.exclusive]
-            for (i, (dec, name, at)) in lent.iter().enumerate() {
-                let overlap = lent[..i]
-                    .iter()
-                    .chain(&plain_roots)
-                    .find(|(d, ..)| d == dec);
-                if overlap.is_some() {
+            let callee_dec = solver.node_decs.get(&self.left.id()).copied();
+            for (i, (dec, path, name, at)) in lent.iter().enumerate() {
+                // two `&` loans must name disjoint places: `swap(&x, &x)`
+                // is out, `f(&w.tour, &w.other)` is in.
+                if lent[..i].iter().any(|(d, p, ..)| {
+                    d == dec
+                        && (p.starts_with(path.as_slice()) || path.starts_with(p.as_slice()))
+                }) {
                     Err(crate::errors::InoutAlias {
                         src: solver.src(*at),
                         at: (*at).into(),
                         root: name.clone(),
                     })?
+                }
+                // a plain sibling sharing the root is refused only when
+                // the callee might write it under the lent path -- the
+                // grades pass knows the callee's writes; an unresolvable
+                // callee can't prove it reads only, so it errors here.
+                for (d, ppath, slot, _pname, pat) in &plain_roots {
+                    if d != dec
+                        || !(ppath.starts_with(path.as_slice())
+                            || path.starts_with(ppath.as_slice()))
+                    {
+                        continue;
+                    }
+                    match callee_dec {
+                        Some(callee) => solver.deferred_inout.push(crate::DeferredInout {
+                            at: *pat,
+                            callee: Some(callee),
+                            slot: *slot,
+                            lent_path: path.clone(),
+                            lent_name: name.clone(),
+                        }),
+                        None => Err(crate::errors::InoutAlias {
+                            src: solver.src(*at),
+                            at: (*at).into(),
+                            root: name.clone(),
+                        })?,
+                    }
                 }
             }
             if params
@@ -1527,6 +1567,35 @@ impl Solve for Call {
                     src: solver.src(location),
                     at: location.into(),
                 })?;
+            }
+
+            // a call under a `for` freeze could write the iterated place
+            // through a body the freeze can't see -- the callee's derived
+            // writes judge it after the grades fixpoint.
+            // r[impl mimas.for.inplace-freeze]
+            if !solver.iter_guards.is_empty() {
+                let mut arg_roots: Vec<Option<(DecId, Vec<GuardSeg>)>> =
+                    vec![None; params.len()];
+                if fn_data.is_method
+                    && let ExprKind::Access(Access::Dot { left, .. }) = self.left.kind()
+                {
+                    arg_roots[0] = crate::root_and_path(left)
+                        .and_then(|(r, p)| solver.ribs.resolve(r).map(|d| (d, p)));
+                }
+                for (slot, arg) in &args_by_slot {
+                    let e = solver
+                        .place_sources
+                        .get(&arg.value.id())
+                        .unwrap_or(&arg.value);
+                    arg_roots[*slot] = crate::root_and_path(e)
+                        .and_then(|(r, p)| solver.ribs.resolve(r).map(|d| (d, p)));
+                }
+                solver.guarded_calls.push(crate::GuardedCall {
+                    at: location,
+                    callee: callee_dec,
+                    arg_roots,
+                    guards: solver.iter_guards.clone(),
+                });
             }
 
             // `where` predicates on the callee: prove what the call site's args can

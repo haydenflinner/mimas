@@ -1416,6 +1416,24 @@ pub struct DeadStore {
     pub name: String,
 }
 
+/// A store to a plain parameter's binding that dies at the body's end.
+/// The param is a local copy: `n = 0` inside `f(n: int)` never reaches
+/// the caller's value, which is the beginner trap this names.
+// r[impl mimas.lint.param-write]
+#[derive(Error, Debug, Diagnostic)]
+#[error("this write to `{name}` stays inside the call")]
+#[diagnostic(
+    severity(Warning),
+    help("`{name}` is the caller's value copied in -- to write back, take `inout` and pass with `&`; to write its innards (`{name}.f = `), no `&` is needed")
+)]
+pub struct ParamWriteDies {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("the caller's `{name}` never sees this store")]
+    pub at: SourceSpan,
+    pub name: String,
+}
+
 #[derive(Error, Debug, Diagnostic)]
 #[error("`{outer}` calls `{name}` inside a loop, and `{name}` iterates too")]
 #[diagnostic(

@@ -62,6 +62,7 @@ fn check(path: Option<PathBuf>, color: bool) -> i32 {
     let total_duration = timer.elapsed();
 
     emit_errors(&summary, color);
+    emit_warnings(&summary, color);
     report_meta_errors(&summary);
 
     let seperator = "-".repeat(50);
@@ -281,6 +282,7 @@ fn build(
         }
     };
     emit_errors(&summary, color);
+    emit_warnings(&summary, color);
     report_meta_errors(&summary);
     if summary.had_errors() {
         return 1;
@@ -403,6 +405,12 @@ fn emit_runtime_error(report: &miette::Report, color: bool) {
 fn emit_errors(summary: &build::SolveSummary, color: bool) {
     for error in &summary.errors {
         render::emit(error.as_ref(), color);
+    }
+}
+
+fn emit_warnings(summary: &build::SolveSummary, color: bool) {
+    for warning in &summary.warnings {
+        render::emit(warning.as_ref(), color);
     }
 }
 

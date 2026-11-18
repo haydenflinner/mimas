@@ -78,6 +78,7 @@ pub fn solve(path: &Path) -> (vm::Vm, SolveSummary) {
     let summary = SolveSummary {
         sources: loaded.sources,
         errors: loaded.errors,
+        warnings: loaded.warnings,
         io_errors,
         lines_parsed,
         stmts,
@@ -90,6 +91,9 @@ pub fn solve(path: &Path) -> (vm::Vm, SolveSummary) {
 pub struct SolveSummary {
     pub sources: vm::Sources,
     pub errors: Vec<SolveError>,
+    /// Non-fatal lint diagnostics from the grades pass -- the solve
+    /// succeeded, these render as warnings.
+    pub warnings: Vec<miette::Report>,
     pub io_errors: Vec<std::io::Error>,
     pub lines_parsed: usize,
     pub stmts: Vec<Stmt>,

@@ -69,6 +69,11 @@ pub struct Resolutions {
     pub pact_names: IdVec<PactId, String>,
     pub module_paths: FxHashMap<AdtId, Vec<String>>,
     pub closure_captures: FxIndexMap<NodeId, Vec<DecId>>,
+    /// The derived write sets: fn dec -> `(param position, path segments)`
+    /// pairs the body may write through, calls included. `[]` names the
+    /// param's whole storage; a path holds `Field` names and `Index`
+    /// wildcards rendered as segments. r[impl mimas.fn.writes]
+    pub fn_writes: FxHashMap<crate::components::DecId, Vec<(u32, Vec<String>)>>,
     /// Calls that lend a `&` argument to an `inout` parameter: emit scopes the
     /// borrow's pending cleanup to the call so the loan ends when it returns.
     pub inout_calls: rustc_hash::FxHashSet<NodeId>,
@@ -641,6 +646,28 @@ impl From<Solver> for Resolutions {
             pact_names,
             module_paths: paths,
             closure_captures,
+            fn_writes: solver
+                .fn_writes
+                .into_iter()
+                .map(|(d, ws)| {
+                    (
+                        d,
+                        ws.into_iter()
+                            .map(|(p, path)| {
+                                (
+                                    p,
+                                    path.into_iter()
+                                        .map(|s| match s {
+                                            crate::GuardSeg::Field(f) => f,
+                                            crate::GuardSeg::Index => "[]".to_string(),
+                                        })
+                                        .collect(),
+                                )
+                            })
+                            .collect(),
+                    )
+                })
+                .collect(),
             inout_calls: solver.inout_calls,
             inout_writebacks: solver.inout_writebacks,
             len_checks: solver.len_checks,

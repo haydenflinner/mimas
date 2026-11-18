@@ -1366,7 +1366,7 @@ impl Emit for For {
             };
         }
 
-        let (idx_local, start, frozen_bound, seq) = match self.iterator.kind() {
+        let (idx_local, start, frozen_bound, seq, check_len) = match self.iterator.kind() {
             ExprKind::Range(Range {
                 start,
                 end,
@@ -1384,7 +1384,7 @@ impl Emit for For {
                 } else {
                     end_v
                 };
-                (var, start_v, Some(bound), None)
+                (var, start_v, Some(bound), None, false)
             }
             _ => {
                 let int_iter = match self.iterator.kind() {
@@ -1399,15 +1399,25 @@ impl Emit for For {
                         Some(d) => ir.local_for(d),
                         None => ir.synthetic_local("$fidx"),
                     };
-                    (var, zero, Some(target), None)
+                    (var, zero, Some(target), None, false)
                 } else {
                     let dict_iter = matches!(
                         ir.resolutions.node_tys.get(&self.iterator.id()),
                         Some(Ty::Dict(_))
                     );
-                    let frozen = (!body_may_mutate_len(&self.body, dict_iter))
-                        .then(|| ir.current().len(target));
-                    (ir.synthetic_local("$fidx"), zero, frozen, Some(target))
+                    // the bound is always frozen at entry: a body that may
+                    // touch len (`ys.push`, `f(xs)`, a dict add) re-checks
+                    // it in the latch and faults instead of silently
+                    // growing the walk. r[impl mimas.for.iter-mutate]
+                    let may_mutate = body_may_mutate_len(&self.body, dict_iter);
+                    let frozen = ir.current().len(target);
+                    (
+                        ir.synthetic_local("$fidx"),
+                        zero,
+                        Some(frozen),
+                        Some(target),
+                        may_mutate,
+                    )
                 }
             }
         };
@@ -1449,6 +1459,22 @@ impl Emit for For {
         ir.target(latch);
         let i = ir.current().get_local(idx_local);
         let bound = frozen_bound.unwrap_or_else(|| ir.current().len(seq.unwrap()));
+        // the freeze the solver gives `for x in xs` covers only writes it
+        // can see -- an aliased binding (`let ys = xs`) or a call into a
+        // body that mutates len slips past it; catch the change here so
+        // the loop faults rather than walking a shifted or endless list.
+        // r[impl mimas.for.iter-mutate]
+        if check_len && let Some(seq) = seq {
+            let live = ir.current().len(seq);
+            let same = ir
+                .current()
+                .bin(BinOp::Identity, live, bound, OperandKind::Int);
+            ir.emit_contract_check(
+                same,
+                "the iterated collection's length changed mid-loop -- an alias or a call mutated it",
+                Some(live),
+            );
+        }
         ir.current().for_next(i, bound, header);
         ir.current().jump(exit);
 

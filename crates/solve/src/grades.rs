@@ -59,8 +59,8 @@ use crate::{
     GuardSeg, Solver,
     components::{DecId, DecKind},
     errors::{
-        ConsumeForbidden, DeadStore, LoopCall, MustUseResult, ShadowedBuiltin, UnusedBinding,
-        UnusedParam, UseAfterConsume,
+        ConsumeForbidden, DeadStore, LoopCall, MustUseResult, ParamWriteDies,
+        ShadowedBuiltin, UnusedBinding, UnusedParam, UseAfterConsume,
     },
 };
 
@@ -85,6 +85,13 @@ fn field_prefix(path: &[GuardSeg]) -> Vec<String> {
 /// A consumed mark and a later touch collide when one path is a prefix
 /// of the other: `r.id` dead kills `r` read whole and `r.id.x`, while
 /// `r.other` stays live. `[]` overlaps everything (whole-binding dead).
+/// `a` and `b` overlap when either reaches the other — `xs` loans
+/// `xs[i]` and vice versa, `w.tour` never meets `w.other`. Two `Index`
+/// hops can't be told apart, so `xs[i]` vs `xs[j]` counts as overlap.
+fn guard_paths_overlap(a: &[GuardSeg], b: &[GuardSeg]) -> bool {
+    a.starts_with(b) || b.starts_with(a)
+}
+
 fn paths_overlap(a: &[String], b: &[String]) -> bool {
     a.iter().zip(b).all(|(x, y)| x == y)
 }
@@ -337,6 +344,9 @@ struct Pass<'a> {
     /// is position 0 for methods). Flat: a dec names one binding ever,
     /// so an entry left by another fn's walk can never resolve wrongly.
     param_pos: FxHashMap<DecId, u32>,
+    /// by-value param decs that were re-stored (`n = 0`) -- the store
+    /// dies at the body's end and never reaches the caller.
+    param_stores: FxHashSet<DecId>,
     /// local dec -> the param positions its value derives from. `let
     /// bs = w.balls` stands `bs` for `w`, a `for` binding stands for
     /// its iterator's roots, and a fresh `f(w)` or `[]` roots at none.
@@ -350,6 +360,31 @@ struct Pass<'a> {
     /// fixpoint walks it backward — a callee scanning position p marks
     /// the caller scanning whatever roots its arg at p.
     call_args: Vec<(Caller, DecId, Vec<FxHashSet<u32>>)>,
+
+    /// Caller -> the param positions its own text writes through, with
+    /// the path suffix each write lands on: `w.tour.f = ` seeds `w`'s
+    /// position with `[tour, f]`; an `inout` param's `x = v` seeds `x`'s
+    /// with `[]` (the caller's slot); `xs.push(..)` on a param seeds
+    /// `[]` (its whole storage). A store to a plain param's binding
+    /// (`n = 0`, `p = P{..}`) is local-only and never lands here.
+    /// r[impl mimas.fn.writes]
+    own_writes: FxHashMap<Caller, Vec<(u32, Vec<GuardSeg>)>>,
+    /// Every resolved call, for the writes fixpoint: `(caller, callee,
+    /// per-arg (param position, access path))`. `f(w.tour)` records
+    /// `w`'s position under `[tour]`, so `f` writing `w.tour.step`
+    /// marks the caller writing `w.tour.step`. Arg positions line up
+    /// like `call_args`'s.
+    call_write_args: Vec<(Caller, DecId, Vec<Vec<(u32, Vec<GuardSeg>)>>)>,
+    /// Writes a `let`-bound closure makes to decs bound above its
+    /// floor, keyed by the binding's dec -- `poke()` inside a frozen
+    /// loop resolves `poke` to its dec and reads this set.
+    closure_writes: FxHashMap<DecId, Vec<(DecId, Vec<GuardSeg>)>>,
+    /// `let`-bound closure decs for each open closure body, innermost
+    /// last (`None` for a closure not directly bound by a `let`).
+    closure_stack: Vec<Option<DecId>>,
+    /// The dec the closure body about to be walked gets bound to --
+    /// set by the `let` arm when its right is a `Closure` expr.
+    pending_closure_dec: Option<DecId>,
 }
 
 /// The expensive-precision lints — `loop-call` today — run unless the
@@ -382,6 +417,9 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> crate::errors::Result
     let mut loop_calls: Vec<(Location, Caller, DecId, Vec<bool>)> = Vec::new();
     let mut own_loops: FxHashSet<Caller> = FxHashSet::default();
     let mut own_scans: FxHashMap<Caller, FxHashSet<u32>> = FxHashMap::default();
+    let mut own_writes: FxHashMap<Caller, Vec<(u32, Vec<GuardSeg>)>> = FxHashMap::default();
+    let mut call_write_args: Vec<(Caller, DecId, Vec<Vec<(u32, Vec<GuardSeg>)>>)> = Vec::new();
+    let mut closure_writes: FxHashMap<DecId, Vec<(DecId, Vec<GuardSeg>)>> = FxHashMap::default();
     let mut call_args: Vec<(Caller, DecId, Vec<FxHashSet<u32>>)> = Vec::new();
     let mut scan_marked: FxHashSet<DecId> = FxHashSet::default();
 
@@ -424,10 +462,16 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> crate::errors::Result
             loop_calls: Vec::new(),
             own_loops: FxHashSet::default(),
             param_pos: FxHashMap::default(),
+            param_stores: FxHashSet::default(),
             provenance: FxHashMap::default(),
             own_scans: FxHashMap::default(),
             call_args: Vec::new(),
             scan_marked: FxHashSet::default(),
+            own_writes: FxHashMap::default(),
+            call_write_args: Vec::new(),
+            closure_writes: FxHashMap::default(),
+            closure_stack: Vec::new(),
+            pending_closure_dec: None,
         };
         pass.push_scope();
         pass.run_top(ast.stmts());
@@ -464,6 +508,14 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> crate::errors::Result
         loop_calls.extend(pass.loop_calls.iter().cloned());
         own_loops.extend(pass.own_loops.iter().copied());
         call_args.extend(pass.call_args.iter().cloned());
+        call_write_args.extend(pass.call_write_args.iter().cloned());
+        closure_writes.extend(pass.closure_writes.iter().map(|(d, w)| (*d, w.clone())));
+        for (caller, ws) in pass.own_writes.iter() {
+            own_writes
+                .entry(*caller)
+                .or_insert_with(Vec::new)
+                .extend(ws.iter().cloned());
+        }
         for (caller, set) in pass.own_scans.iter() {
             own_scans
                 .entry(*caller)
@@ -562,6 +614,138 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> crate::errors::Result
         }
         for (f, add) in grown {
             scans.entry(f).or_default().extend(add);
+        }
+    }
+    // `writes[f]` — the (param position, path) pairs `f` may write
+    // through, directly or through calls. `[]` means "somewhere in the
+    // param's storage" — a write reached through a derived binding, a
+    // mutating native on the root, or an `inout` store all widen to it.
+    // The fixpoint walks `call_write_args` the way `scans`' walks
+    // `call_args`: `handle(w) → feed(w.balls)` makes `handle` write
+    // `w.balls`, recursion settles like `fn_fx`'s cycles.
+    // r[impl mimas.fn.writes]
+    let mut writes: FxHashMap<DecId, Vec<(u32, Vec<GuardSeg>)>> = FxHashMap::default();
+    for (caller, set) in &own_writes {
+        if let Caller::Fn(d) = caller {
+            writes.entry(*d).or_default().extend(set.iter().cloned());
+        }
+    }
+    loop {
+        let mut grown: Vec<(DecId, Vec<(u32, Vec<GuardSeg>)>)> = Vec::new();
+        for (caller, callee, args) in &call_write_args {
+            let Caller::Fn(f) = caller else { continue };
+            let Some(cw) = writes.get(callee) else { continue };
+            let mut add = Vec::new();
+            for (cp, cpath) in cw {
+                if let Some(argpaths) = args.get(*cp as usize) {
+                    for (ap, apath) in argpaths {
+                        let mut path = apath.clone();
+                        path.extend(cpath.iter().cloned());
+                        add.push((*ap, path));
+                    }
+                }
+            }
+            let have = writes.get(f).cloned().unwrap_or_default();
+            add.retain(|w| !have.contains(w));
+            if !add.is_empty() {
+                grown.push((*f, add));
+            }
+        }
+        if grown.is_empty() {
+            break;
+        }
+        for (f, add) in grown {
+            writes.entry(f).or_default().extend(add);
+        }
+    }
+    solver.fn_writes = writes;
+
+    // A call under a `for` freeze the body's own text never saw:
+    // `poke()`'s closure or `f(xs)`'s body mutates the iterated
+    // collection. Deferred from solve to here, where the callee's write
+    // set is finally known. r[impl mimas.for.inplace-freeze]
+    for gc in &solver.guarded_calls {
+        let call_writes: Vec<(DecId, Vec<GuardSeg>)> = match gc.callee {
+            // `None`: the callee is a value -- a param, a returned
+            // closure, a dispatch. Can't prove its writes; any argument
+            // reaching a frozen path is refused.
+            None => gc
+                .arg_roots
+                .iter()
+                .flatten()
+                .filter(|(dec, path)| {
+                    gc.guards.iter().any(|g| {
+                        g.dec == *dec
+                            && (g.path == *path || g.inplace && path.starts_with(&g.path))
+                    })
+                })
+                .map(|(dec, path)| (*dec, path.clone()))
+                .collect(),
+            Some(d) => {
+                if let Some(writes) = closure_writes.get(&d) {
+                    writes.clone()
+                } else if let Some(cw) = solver.fn_writes.get(&d) {
+                    cw.iter()
+                        .filter_map(|(cp, cpath)| {
+                            gc.arg_roots
+                                .get(*cp as usize)
+                                .and_then(|o| o.as_ref())
+                                .map(|(dec, apath)| {
+                                    let mut path = apath.clone();
+                                    path.extend(cpath.iter().cloned());
+                                    (*dec, path)
+                                })
+                        })
+                        .collect()
+                } else {
+                    // a native, pact member, or unresolvable dec: mutating
+                    // receivers and `&` lends were already refused at solve;
+                    // everything else can't reach the frozen place.
+                    Vec::new()
+                }
+            }
+        };
+        for (dec, wpath) in call_writes {
+            if let Some(guard) = gc.guards.iter().find(|g| {
+                g.dec == dec && (g.path == wpath || g.inplace && wpath.starts_with(&g.path))
+            }) {
+                errors.push(
+                    crate::errors::MutateWhileIterating {
+                        src: solver.src(gc.at),
+                        at: gc.at.into(),
+                        name: guard.name.clone(),
+                        iterating: vec![crate::errors::IteratingHere {
+                            src: solver.src(guard.iterated_at),
+                            at: guard.iterated_at.into(),
+                            name: guard.name.clone(),
+                        }],
+                    }
+                    .into(),
+                );
+                break;
+            }
+        }
+    }
+    // A plain argument sharing a lent root: refused at solve only when
+    // the callee couldn't be resolved -- a resolvable callee's verdict
+    // waits on whether it writes that slot's overlap with the lend.
+    // r[impl mimas.inout.exclusive]
+    for d in &solver.deferred_inout {
+        let Some(callee) = d.callee else { continue };
+        let Some(cw) = solver.fn_writes.get(&callee) else {
+            continue;
+        };
+        if cw.iter().any(|(cp, cpath)| {
+            *cp as usize == d.slot && guard_paths_overlap(cpath, &d.lent_path)
+        }) {
+            errors.push(
+                crate::errors::InoutAlias {
+                    src: solver.src(d.at),
+                    at: d.at.into(),
+                    root: d.lent_name.clone(),
+                }
+                .into(),
+            );
         }
     }
     let seeds: FxHashSet<DecId> = own_loops
@@ -1003,6 +1187,93 @@ impl<'a> Pass<'a> {
         self.flow.born.insert(at);
     }
 
+    /// A write landed inside `dec`'s storage at `path` -- `w.tour.f = `,
+    /// `xs[i] = `, `xs.push(..)`. Param decs seed `own_writes` with their
+    /// position; a derived binding (`let xs2 = w.list`) marks each param
+    /// it stands for at `[]`, the path under `w` lost to provenance.
+    /// r[impl mimas.fn.writes]
+    fn member_write(&mut self, dec: DecId, path: Vec<GuardSeg>) {
+        if let Some(&p) = self.param_pos.get(&dec) {
+            self.own_writes
+                .entry(self.cur())
+                .or_default()
+                .push((p, path.clone()));
+        } else if let Some(ps) = self.provenance.get(&dec).cloned() {
+            for p in ps {
+                self.own_writes
+                    .entry(self.cur())
+                    .or_default()
+                    .push((p, Vec::new()));
+            }
+        }
+        // a dec bound outside the innermost `let` closure is that
+        // closure's caller-visible write set -- `poke()` inside a
+        // frozen loop resolves `poke`'s dec to this list.
+        if self.outside_closure(dec) {
+            for frame in self.closure_stack.iter().flatten() {
+                self.closure_writes
+                    .entry(*frame)
+                    .or_default()
+                    .push((dec, path.clone()));
+            }
+        }
+    }
+
+    /// `x = v` / `x op= v` re-stored `dec`'s binding. Only an `inout`
+    /// param's store is caller-visible (it writes the lent slot); a
+    /// plain param's dies at the body's end -- the dead-store lint's
+    /// domain, not the write set's.
+    fn binding_write(&mut self, dec: DecId) {
+        if self.param_pos.contains_key(&dec) {
+            if self.solver.inout_decs.contains(&dec) {
+                self.own_writes
+                    .entry(self.cur())
+                    .or_default()
+                    .push((self.param_pos[&dec], Vec::new()));
+            } else {
+                // `n = 0` on a by-value param rebinds the local copy -- the
+                // caller's argument never sees it.
+                self.param_stores.insert(dec);
+            }
+        }
+        if self.outside_closure(dec) {
+            for frame in self.closure_stack.iter().flatten() {
+                self.closure_writes
+                    .entry(*frame)
+                    .or_default()
+                    .push((dec, Vec::new()));
+            }
+        }
+    }
+
+    /// `(param position, access path)` an argument contributes to a
+    /// call's write map: `w.tour` gives `w`'s position under `[tour]`; a
+    /// value with no nameable root contributes nothing; a binding that
+    /// only stands for a param through provenance gives `[]` -- the
+    /// precise field path is lost, so its writes widen to the param.
+    fn write_arg(&self, e: &Expr) -> Vec<(u32, Vec<GuardSeg>)> {
+        let roots = self.param_roots(e);
+        // a `&w.tour` lend records its pre-`&` expr in `place_sources` --
+        // the argument's own node is the minted `__borrow_place` call.
+        let e = self.solver.place_sources.get(&e.id()).unwrap_or(e);
+        let (root_dec, path) = crate::root_and_path(e)
+            .and_then(|(root, p)| self.dec_of(root).map(|d| (Some(d), p)))
+            .unwrap_or((None, Vec::new()));
+        roots
+            .iter()
+            .map(|&p| {
+                (
+                    p,
+                    if root_dec.is_some_and(|d| self.param_pos.get(&d) == Some(&p)) {
+                        path.clone()
+                    } else {
+                        Vec::new()
+                    },
+                )
+            })
+            .collect()
+    }
+
     fn push_scope(&mut self) {
         self.scope_decs.push(Vec::new());
     }
@@ -1104,6 +1375,16 @@ impl<'a> Pass<'a> {
             let at = d.location;
             let src = self.solver.src(at);
             let report: Report = match site {
+                // `fn bump(n: int) { n = 0 }` -- `n` was stored, not just
+                // ignored: say the store stays in the function rather than
+                // the weaker "never read".
+                // r[impl mimas.lint.param-write]
+                Site::Param if self.param_stores.contains(&dec) => ParamWriteDies {
+                    src,
+                    at: at.into(),
+                    name: d.name.clone(),
+                }
+                .into(),
                 Site::Param => UnusedParam {
                     src,
                     at: at.into(),
@@ -1131,6 +1412,23 @@ impl<'a> Pass<'a> {
                 continue;
             }
             let d = &self.solver.decs[dec];
+            // a param's binding is a local copy -- `n = 0` unread at the
+            // body's end never reached the caller, which is a different
+            // story than a dead local and worth saying differently.
+            // r[impl mimas.lint.param-write]
+            if self.param_pos.contains_key(&dec)
+                && !self.solver.inout_decs.contains(&dec)
+            {
+                self.warnings.push(
+                    ParamWriteDies {
+                        src: self.solver.src(at),
+                        at: at.into(),
+                        name: d.name.clone(),
+                    }
+                    .into(),
+                );
+                continue;
+            }
             self.warnings.push(
                 DeadStore {
                     src: self.solver.src(at),
@@ -1304,7 +1602,13 @@ impl<'a> Pass<'a> {
         match stmt.kind() {
             StmtKind::Let(l) => {
                 let roots = self.param_roots(&l.right);
+                // a `let f = || …` gives the closure body's captured
+                // writes a name to resolve at `f(..)` call sites
+                self.pending_closure_dec = matches!(l.right.kind(), ExprKind::Closure(_))
+                    .then(|| self.pat_decs(&l.left).first().copied())
+                    .flatten();
                 self.expr(&l.right);
+                self.pending_closure_dec = None;
                 if let Some(else_branch) = &l.else_branch {
                     // `else` always diverges, but its stores still die with this scope
                     let pre = self.flow.clone();
@@ -1335,6 +1639,7 @@ impl<'a> Pass<'a> {
                         self.expr(&a.right);
                         if let Some(dec) = dec {
                             self.write(dec, ident.location, true);
+                            self.binding_write(dec);
                             // `x = v` re-roots x to v's params (`x = []`
                             // clears them); `x += v` only adds.
                             match a.op {
@@ -1402,10 +1707,11 @@ impl<'a> Pass<'a> {
                         self.expr(&a.left);
                         self.in_lvalue = lv;
                         self.expr(&a.right);
-                        if let Some((root, _)) = crate::root_and_path(&a.left)
+                        if let Some((root, path)) = crate::root_and_path(&a.left)
                             && let Some(dec) = self.dec_of(root)
                         {
                             self.write(dec, root.location, false);
+                            self.member_write(dec, path);
                         }
                     }
                 }
@@ -1696,10 +2002,11 @@ impl<'a> Pass<'a> {
                 // `xs.push(..)` mutates its receiver -- the binding was both read and written
                 if let ExprKind::Access(Access::Dot { left, .. }) = c.left.kind()
                     && binding.is_some_and(|b| b.mutates_recv)
-                    && let Some((root, _)) = crate::root_and_path(left)
+                    && let Some((root, rpath)) = crate::root_and_path(left)
                     && let Some(root_dec) = self.dec_of(root)
                 {
                     self.write(root_dec, root.location, false);
+                    self.member_write(root_dec, rpath);
                 }
                 if callee_name == "__cleanup_register"
                     && let Some(action) = c.arguments.first()
@@ -1734,9 +2041,18 @@ impl<'a> Pass<'a> {
                             ambients.push(self.place_ambient(&arg.value));
                         }
                     }
+                    let mut wpositions = Vec::with_capacity(c.arguments.len() + 1);
+                    if let ExprKind::Access(Access::Dot { left, .. }) = c.left.kind() {
+                        wpositions.push(self.write_arg(left));
+                    }
+                    for arg in &c.arguments {
+                        wpositions.push(self.write_arg(&arg.value));
+                    }
                     if self.pact_members.contains(&d) {
                         for (m, _) in self.solver.member_impl_decs(d) {
                             self.call_args.push((self.cur(), m, positions.clone()));
+                            self.call_write_args
+                                .push((self.cur(), m, wpositions.clone()));
                             if !self.loop_reads.is_empty() {
                                 self.loop_calls.push((
                                     e.location(),
@@ -1748,6 +2064,7 @@ impl<'a> Pass<'a> {
                         }
                     } else {
                         self.call_args.push((self.cur(), d, positions));
+                        self.call_write_args.push((self.cur(), d, wpositions));
                         if !self.loop_reads.is_empty() {
                             self.loop_calls
                                 .push((e.location(), self.cur(), d, ambients));
@@ -1818,12 +2135,14 @@ impl<'a> Pass<'a> {
                 let saved_breaks = std::mem::take(&mut self.breaks);
                 let diverged = self.flow.diverged;
                 self.closure_floors.push(self.scope_decs.len());
+                self.closure_stack.push(self.pending_closure_dec.take());
                 self.push_scope();
                 for p in &c.parameters {
                     self.bind(&p.left, Site::Param, false);
                 }
                 self.expr(&c.body);
                 self.pop_scope();
+                self.closure_stack.pop();
                 self.closure_floors.pop();
                 self.flow.diverged = diverged;
                 self.retired = saved_retired;
