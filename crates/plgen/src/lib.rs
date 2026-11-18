@@ -170,6 +170,9 @@ enum Hr {
 #[derive(Clone, Copy, PartialEq)]
 enum H {
     StepAt,
+    /// `mj_step_at_w` — [`H::StepAt`] returning the rebuilt caller
+    /// window (null = propagate), so estep loops survive `regs` resizes.
+    StepAtW,
     OutNext,
     OutErr,
     OutReturn,
@@ -211,6 +214,12 @@ static SPECS: &[(H, &str, &[Pt], Hr)] = &[
         "mj_step_at",
         &[Pt::P, Pt::P, Pt::P, Pt::P, Ctx, Pt::P, Pt::P],
         Hr::U8,
+    ),
+    (
+        H::StepAtW,
+        "mj_step_at_w",
+        &[Pt::P, Pt::P, Pt::P, Pt::P, Ctx, Pt::P, Pt::P],
+        Hr::P,
     ),
     (H::OutNext, "mj_out_next", &[Pt::P], Hr::Void),
     (H::OutErr, "mj_out_err", &[Pt::P, Pt::I8], Hr::Void),
@@ -826,9 +835,31 @@ fn level2_key(text: &str, self_i: usize, lvl1: &[u64]) -> String {
 /// calls *content-wise*, not by where `compile_parts` placed the
 /// callee. Isomorphic cycles get equal `h`s; a level collision shows up
 /// as a renamed-text mismatch and panics, never a silent alias.
-pub fn emit_bodies(prog: &Program, lyt: &Layout, wasm: bool) -> (Vec<u64>, Vec<String>) {
+/// Emit tier per chunk. `Thick` inlines every op's semantics with
+/// register shadows. `Thin` bodies carry no op blocks or shadows at
+/// all: dispatch records the live `code.ip` and every op runs through
+/// the quota-gated `estep` fallback — the same interpreter loop a thick
+/// body enters on a dispatch miss, so semantics are identical but
+/// execution is interpreter-speed. Thin costs ~O(1) in body size to
+/// emit and lower: it exists for cold bodies (module init, one-shot
+/// setup) where the interp trip happens once.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Tier {
+    Thick,
+    Thin,
+}
+
+/// Like [`emit_bodies`], with a per-chunk emit tier. Chunk index `i`'s
+/// text changes with `tier(i)`, so the content hash separates tiers in
+/// the object cache automatically.
+pub fn emit_bodies_t(
+    prog: &Program,
+    lyt: &Layout,
+    wasm: bool,
+    tier: &dyn Fn(usize) -> Tier,
+) -> (Vec<u64>, Vec<String>) {
     let texts: Vec<String> = (0..prog.chunks.len())
-        .map(|b| emit_body(prog, b, lyt, wasm))
+        .map(|b| emit_body_tier(prog, b, lyt, wasm, tier(b)))
         .collect();
     let lvl1: Vec<u64> = texts.iter().map(|t| body_hash(t)).collect();
     // Level-2 keys carry callee identity in `mimas_body_x{lvl1}` names —
@@ -878,10 +909,19 @@ pub fn emit_bodies(prog: &Program, lyt: &Layout, wasm: bool) -> (Vec<u64>, Vec<S
     (hashes, renamed)
 }
 
+pub fn emit_bodies(prog: &Program, lyt: &Layout, wasm: bool) -> (Vec<u64>, Vec<String>) {
+    emit_bodies_t(prog, lyt, wasm, &|_| Tier::Thick)
+}
+
 /// Content hash for every chunk — re-emits the bodies. For hosts that
 /// only need the symbol names (`dlsym` fill on the link path).
 pub fn body_hashes(prog: &Program, lyt: &Layout, wasm: bool) -> Vec<u64> {
     emit_bodies(prog, lyt, wasm).0
+}
+
+/// [`body_hashes`], with a per-chunk emit tier.
+pub fn body_hashes_t(prog: &Program, lyt: &Layout, wasm: bool, tier: &dyn Fn(usize) -> Tier) -> Vec<u64> {
+    emit_bodies_t(prog, lyt, wasm, tier).0
 }
 
 /// Per-chunk `(offset, end)` byte spans — all a module assembly reads
@@ -913,7 +953,18 @@ pub fn chunk_spans(prog: &Program) -> Vec<(usize, usize)> {
 /// `cdylib`, or any artifact providing `vm::bc::nat`). Returns the body
 /// content hashes alongside — the host resolves `mimas_body_{h}`.
 pub fn emit_module(prog: &Program, lyt: &Layout, wasm: bool, nsig: u64) -> (Vec<u64>, String) {
-    let (hashes, bodies) = emit_bodies(prog, lyt, wasm);
+    emit_module_t(prog, lyt, wasm, nsig, &|_| Tier::Thick)
+}
+
+/// [`emit_module`], with a per-chunk emit tier.
+pub fn emit_module_t(
+    prog: &Program,
+    lyt: &Layout,
+    wasm: bool,
+    nsig: u64,
+    tier: &dyn Fn(usize) -> Tier,
+) -> (Vec<u64>, String) {
+    let (hashes, bodies) = emit_bodies_t(prog, lyt, wasm, tier);
     let bodies: Vec<(usize, String)> = bodies
         .into_iter()
         .enumerate()
@@ -1181,6 +1232,16 @@ pub fn assemble_init_module(
 /// `.pliron` text for one chunk — `emit_bodies`'s per-index form, for
 /// callers that parallelize emission themselves.
 pub fn emit_body(prog: &Program, body: usize, lyt: &Layout, wasm: bool) -> String {
+    emit_body_tier(prog, body, lyt, wasm, Tier::Thick)
+}
+
+/// [`emit_body`], at the given [`Tier`]. `Tier::Thin` emits the shared
+/// exits plus a `dispatch` block that records `code.ip` into `cur_ip`
+/// and enters `estep_g` directly — the exact path a thick body's `edef`
+/// takes on a dispatch miss. No op blocks, no register shadows: the
+/// body's text is O(1) in op count.
+pub fn emit_body_tier(prog: &Program, body: usize, lyt: &Layout, wasm: bool, tier: Tier) -> String {
+    let thin = tier == Tier::Thin;
     let body_id = compile::BodyId::from(body as u32);
     let ops = prog.ops(body_id);
     let chunk = &prog.chunks[body_id];
@@ -1236,6 +1297,17 @@ pub fn emit_body(prog: &Program, body: usize, lyt: &Layout, wasm: bool) -> Strin
     em.prelude.push(format!(
         "a_one = llvm.constant <builtin.integer <1: i32>> : {I32}"
     ));
+    if thin {
+        // Thin text carries no ops, so every thin body is otherwise
+        // byte-identical — and content-hash dedup would fold them all
+        // into one canonical body whose `off_x{h}` trampoline redirects
+        // `code.ip` to *its* chunk's ops. Salt the text with the chunk
+        // offset (a dead const) so each thin body stays its own hash.
+        em.prelude.push(format!(
+            "a_coff = llvm.constant <builtin.integer <{}: i64>> : {I64}",
+            em.chunk_off
+        ));
+    }
 
     // ---- allocas (entry prelude) ----
     em.v_regs = em.alloca(PTR, "regs");
@@ -1243,15 +1315,17 @@ pub fn emit_body(prog: &Program, body: usize, lyt: &Layout, wasm: bool) -> Strin
     em.v_ekind = em.alloca(I8, "ekind");
     em.v_bcn = em.alloca(I64, "bcn");
     em.v_bcn0 = em.alloca(I64, "bcn0");
-    for &r in &sh.int {
-        let sv = em.alloca(I64, &format!("isv{r}"));
-        let ok = em.alloca(I8, &format!("iok{r}"));
-        em.int.insert(r, (sv, ok));
-    }
-    for &r in &sh.float {
-        let sv = em.alloca(F64, &format!("fsv{r}"));
-        let ok = em.alloca(I8, &format!("fok{r}"));
-        em.float.insert(r, (sv, ok));
+    if !thin {
+        for &r in &sh.int {
+            let sv = em.alloca(I64, &format!("isv{r}"));
+            let ok = em.alloca(I8, &format!("iok{r}"));
+            em.int.insert(r, (sv, ok));
+        }
+        for &r in &sh.float {
+            let sv = em.alloca(F64, &format!("fsv{r}"));
+            let ok = em.alloca(I8, &format!("fok{r}"));
+            em.float.insert(r, (sv, ok));
+        }
     }
     em.slot_i = em.alloca(I64, "slot_i");
 
@@ -1347,18 +1421,20 @@ pub fn emit_body(prog: &Program, body: usize, lyt: &Layout, wasm: bool) -> Strin
         v.sort_unstable();
         v
     };
-    for r in int_regs {
-        let a = em.vaddr(&regs0, r);
-        let t = em.ld_tag(&a);
-        let want = em.tconst(em.lyt.t_int);
-        let ty = em.tag_ty();
-        let k = em.icmp(ty, "EQ", &t, &want);
-        let pv = em.ld(I64, &a, em.lyt.val_pay as u32, 8);
-        let sv0 = em.sel(I64, &k, &pv, &z64);
-        let (sv, ok) = em.int[&r].clone();
-        em.st(&sv, &sv0);
-        let k8 = em.i1_to_i8(&k);
-        em.st(&ok, &k8);
+    if !thin {
+        for r in int_regs {
+            let a = em.vaddr(&regs0, r);
+            let t = em.ld_tag(&a);
+            let want = em.tconst(em.lyt.t_int);
+            let ty = em.tag_ty();
+            let k = em.icmp(ty, "EQ", &t, &want);
+            let pv = em.ld(I64, &a, em.lyt.val_pay as u32, 8);
+            let sv0 = em.sel(I64, &k, &pv, &z64);
+            let (sv, ok) = em.int[&r].clone();
+            em.st(&sv, &sv0);
+            let k8 = em.i1_to_i8(&k);
+            em.st(&ok, &k8);
+        }
     }
     let float_regs: Vec<u32> = {
         let mut v: Vec<u32> = em.sh.float.iter().copied().collect();
@@ -1366,25 +1442,35 @@ pub fn emit_body(prog: &Program, body: usize, lyt: &Layout, wasm: bool) -> Strin
         v
     };
     let zf = em.f64const(0.0);
-    for r in float_regs {
-        let a = em.vaddr(&regs0, r);
-        let t = em.ld_tag(&a);
-        let want = em.tconst(em.lyt.t_float);
-        let ty = em.tag_ty();
-        let k = em.icmp(ty, "EQ", &t, &want);
-        let pv = em.ld(F64, &a, em.lyt.val_pay as u32, 8);
-        let sv0 = em.sel(F64, &k, &pv, &zf);
-        let (sv, ok) = em.float[&r].clone();
-        em.st(&sv, &sv0);
-        let k8 = em.i1_to_i8(&k);
-        em.st(&ok, &k8);
+    if !thin {
+        for r in float_regs {
+            let a = em.vaddr(&regs0, r);
+            let t = em.ld_tag(&a);
+            let want = em.tconst(em.lyt.t_float);
+            let ty = em.tag_ty();
+            let k = em.icmp(ty, "EQ", &t, &want);
+            let pv = em.ld(F64, &a, em.lyt.val_pay as u32, 8);
+            let sv0 = em.sel(F64, &k, &pv, &zf);
+            let (sv, ok) = em.float[&r].clone();
+            em.st(&sv, &sv0);
+            let k8 = em.i1_to_i8(&k);
+            em.st(&ok, &k8);
+        }
     }
     let d = em.ex.dispatch.clone();
     em.br(&d);
 
     // ---- dispatch: `llvm.switch` on `code.ip` (absolute byte offsets) ----
     em.start_block(&em.ex.dispatch.clone());
-    if ops.is_empty() {
+    if thin {
+        // Thin tier: the whole body is the `edef` estep path — record
+        // the live ip and enter the quota-gated interpreter loop.
+        let ip = em.ld_word(&em.env.ip_p.clone(), 0);
+        let a = em.v_curip.clone();
+        em.st(&a, &ip);
+        let g = em.ex.estep_g.clone();
+        em.br(&g);
+    } else if ops.is_empty() {
         let e = em.ex.edef.clone();
         em.br(&e);
         em.start_block(&em.ex.edef.clone());
@@ -1465,9 +1551,9 @@ pub fn emit_body(prog: &Program, body: usize, lyt: &Layout, wasm: bool) -> Strin
     em.store_ip(&ip);
     em.store_opip(&ip);
     let regs = em.regs();
-    let k = em
+    let rp = em
         .hcall(
-            H::StepAt,
+            H::StepAtW,
             &[
                 A::P(em.env.thread.clone()),
                 A::P(regs),
@@ -1480,9 +1566,22 @@ pub fn emit_body(prog: &Program, body: usize, lyt: &Layout, wasm: bool) -> Strin
             ],
         )
         .unwrap();
-    let k1 = em.icmp_ne0(I8, &k);
+    // `step` may have run a nested call that resized `thread.regs` —
+    // the returned pointer is the caller's rebuilt window (null =
+    // propagate `out` verbatim). Re-pin before looping, exactly like
+    // `post_call` does for inlined call sites.
+    let np = {
+        let z = em.iconst(0);
+        em.i2p(&z)
+    };
+    let isz = em.icmp(PTR, "EQ", &rp, &np);
     let (er, dp) = (em.ex.eret.clone(), em.ex.dispatch.clone());
-    em.cbr(&k1, &er, &dp);
+    let cont = em.create_block();
+    em.cbr(&isz, &er, &cont);
+    em.start_block(&cont);
+    let a = em.v_regs.clone();
+    em.st(&a, &rp);
+    em.br(&dp);
 
     em.start_block(&em.ex.eerr.clone());
     em.settle_seq();
@@ -1498,17 +1597,19 @@ pub fn emit_body(prog: &Program, body: usize, lyt: &Layout, wasm: bool) -> Strin
     em.settle_seq();
     em.ret();
 
-    em.start_block(&em.ex.eend.clone());
-    let max = em.iconst(-1); // usize::MAX — garbage decode, same as bcgen's `_ =>`
-    let a = em.v_curip.clone();
-    em.st(&a, &max);
-    let g = em.ex.estep_g.clone();
-    em.br(&g);
+    if !thin {
+        em.start_block(&em.ex.eend.clone());
+        let max = em.iconst(-1); // usize::MAX — garbage decode, same as bcgen's `_ =>`
+        let a = em.v_curip.clone();
+        em.st(&a, &max);
+        let g = em.ex.estep_g.clone();
+        em.br(&g);
 
-    // ---- op blocks ----
-    for (i, (off, op)) in ops.iter().enumerate() {
-        let next = ops.get(i + 1).map(|(o, _)| *o).unwrap_or(usize::MAX);
-        em.emit_op(i, *off, next, op);
+        // ---- op blocks ----
+        for (i, (off, op)) in ops.iter().enumerate() {
+            let next = ops.get(i + 1).map(|(o, _)| *o).unwrap_or(usize::MAX);
+            em.emit_op(i, *off, next, op);
+        }
     }
 
     // ---- serialize ----
