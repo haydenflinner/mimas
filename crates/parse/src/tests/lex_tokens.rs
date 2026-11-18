@@ -111,6 +111,10 @@ tok_test!(invalid_backslash: "\\" => Invalid("\\"));
 tok_test!(invalid_multibyte: "a § b" => Ident("a"), Invalid("§"), Ident("b"));
 
 tok_test!(line_comment: "1 // a comment\n2" => Int(1), Comment("// a comment"), Int(2));
+tok_test!(hash_comment: "# section\n1" => Comment("# section"), Int(1));
+tok_test!(hash_sub_comment: "## sub\n1" => Comment("## sub"), Int(1));
+tok_test!(hash_attr_stays: "#[test] fn f() {}" => Hash, LeftSquare, Ident("test"), RightSquare, Fn, Ident("f"), LeftParenthesis, RightParenthesis, LeftBrace, RightBrace);
+tok_test!(hash_no_space_stays: "#x" => Hash, Ident("x"));
 tok_test!(comment_only: "// nothing here" => Comment("// nothing here"));
 tok_test!(comment_trailing_eof: "1 // tail" => Int(1), Comment("// tail"));
 tok_test!(doc_comment: "/// docs" => DocComment("/// docs"));

@@ -751,7 +751,24 @@ impl<'s> Lex<'s, Tok<TokKind<'s>>, TokKind<'s>> for Lexer<'s> {
                 '[' => TokKind::LeftSquare,
                 ']' => TokKind::RightSquare,
                 '@' => TokKind::At,
-                '#' => TokKind::Hash,
+                '#' => {
+                    // A run of hashes + whitespace is a section-header
+                    // comment — the markdown habit in code, `## ` for a
+                    // sub-heading. `#[` keeps lexing as an attribute,
+                    // `//#` pragmas already matched inside `//`, and
+                    // `#name` stays Hash for whatever syntax claims it.
+                    let rest = &self.source[self.char_stream.position()..];
+                    let extra = rest.chars().take_while(|c| *c == '#').count();
+                    let after = rest.chars().nth(extra);
+                    if matches!(after, Some(' ') | Some('\t') | Some('\n') | Some('\r') | None) {
+                        let stream = &mut self.char_stream;
+                        while stream.match_chomp_with(|c| c == '#') {}
+                        while stream.match_chomp_with(|c| c != '\n' && c != '\r') {}
+                        TokKind::Comment(&self.source[start..self.char_stream.position()])
+                    } else {
+                        TokKind::Hash
+                    }
+                }
                 '$' => TokKind::Dollar,
                 '=' => {
                     if self.match_chomp('=') {
