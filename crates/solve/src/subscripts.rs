@@ -368,6 +368,14 @@ impl Solver {
                 && matches!(collection.query(self)?.normalized(self), Ty::Array(..))
             {
                 self.check_place_write(left)?;
+                // `xs[i].remove()` shifts the iterated collection -- the
+                // same freeze `xs.push` gets, at or above the lent place.
+                // r[impl mimas.for.inplace-freeze]
+                if let Some((root, path)) = crate::root_and_path(collection)
+                    && let Some(dec) = self.ribs.resolve(root)
+                {
+                    self.check_iter_lend(dec, &path, at)?;
+                }
                 if !c.arguments.is_empty() {
                     return Err(self.accessor_error(at, "zero-argument removal"));
                 }
@@ -542,6 +550,29 @@ impl Solver {
         let Some((raw, root)) = self.assignment_place_binding(&a.left)? else {
             return Ok(false);
         };
+        // a write through a place-typed lhs routes around the Assign
+        // solve's guard, but it stales an in-place `for` loan the same
+        // way: writing `g` or `g.xs` under `for r in &g`/`&g.xs` replaces
+        // the slot the element places resolve through.
+        // r[impl mimas.for.inplace-freeze]
+        if let Some((root_name, path)) = crate::root_and_path(&a.left)
+            && let Some(dec) = self.ribs.resolve(root_name)
+            && let Some(guard) = self.iter_guards.iter().find(|g| {
+                g.inplace && g.dec == dec && g.path.starts_with(&path)
+            })
+        {
+            return Err(crate::errors::MutateWhileIterating {
+                src: self.src(a.left.location()),
+                at: a.left.location().into(),
+                name: guard.name.clone(),
+                iterating: vec![crate::errors::IteratingHere {
+                    src: self.src(guard.iterated_at),
+                    at: guard.iterated_at.into(),
+                    name: guard.name.clone(),
+                }],
+            }
+            .into());
+        }
         let at = a.left.location();
         a.left.query(self)?;
         let mut body = vec![];
@@ -672,7 +703,7 @@ impl Solver {
                 if let Some((root, path)) = crate::root_and_path(left)
                     && let Some(dec) = self.ribs.resolve(root)
                 {
-                    self.check_iter_guard(dec, &path, at)?;
+                    self.check_iter_lend(dec, &path, at)?;
                 }
                 body.push(bind(&receiver, left.clone(), at));
                 body.push(bind(&key_name, key.clone(), at));
@@ -684,11 +715,22 @@ impl Solver {
                     },
                     at,
                 );
+                // `&` on the iterated place itself (`&xs[i]` inside
+                // `for x in xs[i]`) refuses the loan too -- the Square arm
+                // below keys on `left`, so check the whole path here.
+                if let Some((root, path)) = crate::root_and_path(e)
+                    && let Some(dec) = self.ribs.resolve(root)
+                {
+                    self.check_iter_lend(dec, &path, at)?;
+                }
                 let sized = matches!(
                     left.query(self)?.normalized(self),
                     Ty::Array(_, shared::Len::Const(_))
                 );
-                let removal = (!sized).then(|| {
+                // element places the `for r in &xs` desugar mints never get
+                // `remove` -- see `element_borrows`.
+                // r[impl mimas.for.inplace.use]
+                let removal = (!sized && !self.element_borrows.contains(&id)).then(|| {
                     call(
                         expr(
                             Access::Dot {
@@ -709,6 +751,13 @@ impl Solver {
                 right,
                 kind: AccessKind::Direct,
             }) => {
+                // `&s.f` lends `s.f` itself -- the same refusal `&xs[i]`
+                // gets when a `for` loop is iterating that exact place.
+                if let Some((root, path)) = crate::root_and_path(e)
+                    && let Some(dec) = self.ribs.resolve(root)
+                {
+                    self.check_iter_lend(dec, &path, at)?;
+                }
                 e.query(self)?;
                 body.push(bind(&receiver, left.clone(), at));
                 (
@@ -760,7 +809,7 @@ impl Solver {
                     }
                     .into());
                 }
-                self.check_iter_guard(dec, &[], at)?;
+                self.check_iter_lend(dec, &[], at)?;
                 let cell = Ident::new(&receiver, at);
                 body.push(Stmt::new(
                     Let {
@@ -921,6 +970,236 @@ fn rebase(e: &Expr, root: NodeId, name: &str) -> Expr {
 }
 
 impl Solver {
+    /// `for r in &xs` — in-place iteration. The `&` claims the iterator the
+    /// way an `inout` argument claims its place, but the loan is the loop
+    /// itself: each iteration binds `r` to the element's own place, so
+    /// `r = v`, `r.f = v` and `r[i] = v` write `xs[i]` directly while
+    /// `for r in xs` keeps copying.
+    ///
+    /// The desugar reuses `let p = &s[i]` wholesale:
+    ///
+    /// ```text
+    /// {
+    ///   let __forin_seq_N = <operand>            // evaluated once
+    ///   for __forin_i_N in 0..__forin_seq_N.len() {
+    ///     let r = &__forin_seq_N[__forin_i_N]    // fresh element place
+    ///     <body>
+    ///   }
+    /// }
+    /// ```
+    ///
+    /// The `&` node minted for the element goes into `element_borrows` so
+    /// `builtin_place` builds a `__Place` without `remove` -- pulling an
+    /// element out from under the loop is the same length mutation the
+    /// root freeze forbids.
+    /// r[impl mimas.for.inplace]
+    pub(crate) fn solve_for_in_place(
+        &mut self,
+        id: NodeId,
+        for_expr: &For,
+        iterator: &Expr,
+        location: Location,
+    ) -> Result<Ty> {
+        let ExprKind::Call(c) = iterator.kind() else {
+            unreachable!("for-in-place solve runs only on a `__borrow_place` iterator")
+        };
+        let at = iterator.location();
+        let [argument] = c.arguments.as_slice() else {
+            return Err(self.accessor_error(at, "one place to iterate"));
+        };
+        let operand = &argument.value;
+
+        // the operand names the place the elements live in: `&` on a const
+        // fails as its assignment does, and a place binding (`let p = &..`,
+        // an `inout` param) is refused below -- its elements would write
+        // through fine, but the loan's real root lives behind the place and
+        // the freeze can only hold names in this scope.
+        // r[impl mimas.for.inplace.operand]
+        self.check_place_write(operand)?;
+        let iter_ty = operand.query(self)?.normalized(self);
+        if self.is_place_type(&iter_ty).is_some() {
+            return Err(crate::errors::SubscriptUse {
+                src: self.src(at),
+                at: at.into(),
+                message: "`for .. in &` can't lend through a place binding -- the loop's freeze \
+                          can't name the slots behind it"
+                    .into(),
+            }
+            .into());
+        }
+        if !matches!(iter_ty, Ty::Array(..)) {
+            return Err(crate::errors::InvalidIterTarget {
+                src: self.src(at),
+                at: at.into(),
+                ty: iter_ty.to_string(),
+            }
+            .into());
+        }
+        // a computed subscript (`s.live`) yields its place through `inout`
+        // arms, whose elements aren't built-in slots -- the machinery for
+        // lending elements through a yielded place isn't there yet.
+        if self.subscript_target(operand)?.is_some() {
+            return Err(crate::errors::SubscriptUse {
+                src: self.src(at),
+                at: at.into(),
+                message: "`for .. in &` can't lend elements of a computed subscript's place".into(),
+            }
+            .into());
+        }
+        // one place per element: destructuring would read the place apart.
+        if !matches!(for_expr.binding.kind(), PatKind::Ident(_)) {
+            return Err(crate::errors::SubscriptUse {
+                src: self.src(for_expr.binding.location()),
+                at: for_expr.binding.location().into(),
+                message: "`for .. in &` binds a single name -- a pattern can't lend one place"
+                    .into(),
+            }
+            .into());
+        }
+
+        // the iterated root freezes for the loop's extent: same guard a
+        // plain `for` pushes (mutating calls, index writes, `&` lends) plus
+        // rebinding the name itself, since `r`'s places write through it.
+        // r[impl mimas.for.inplace-freeze]
+        let guard = crate::root_and_path(operand).and_then(|(root, path)| {
+            self.ribs.resolve(root).map(|dec| crate::IterGuard {
+                dec,
+                path,
+                inplace: true,
+                iterated_at: at,
+                name: operand.to_string(),
+            })
+        });
+        if let Some(g) = &guard {
+            // `for r in &p` / `&p.xs` on a *kept* place writes through
+            // fine, but the loan's real slots sit behind `p`'s own root,
+            // which stays writable and unguarded in this scope. An `inout`
+            // param is different: the caller's storage has no name here, so
+            // guarding `g` covers every path the loop's writes could take.
+            let dec_ty = Ty::Vid(self.decs[g.dec].vid).normalized(self);
+            if self.is_place_type(&dec_ty).is_some()
+                && !self.inout_decs.contains(&g.dec)
+            {
+                return Err(crate::errors::SubscriptUse {
+                    src: self.src(at),
+                    at: at.into(),
+                    message: "`for .. in &` can't lend through a place binding -- the loop's \
+                              freeze can't name the slots behind it"
+                        .into(),
+                }
+                .into());
+            }
+            // a second `for .. in &` overlapping this root nests two live
+            // loans of element places on it -- reject it like a `&` lend
+            // would, above or under the first loan's path alike.
+            // r[impl mimas.inout.exclusive]
+            self.check_iter_lend(g.dec, &g.path, at)?;
+        }
+
+        self.allowed_borrows.insert(iterator.id());
+        self.place_sources.insert(iterator.id(), operand.clone());
+
+        let seq_name = format!("__forin_seq_{}", id.index());
+        let idx_name = format!("__forin_i_{}", id.index());
+
+        let bind_seq = bind(&seq_name, operand.clone(), at);
+        let borrow = expr(
+            Call {
+                left: ident("__borrow_place", at),
+                arguments: vec![Argument {
+                    name: None,
+                    value: expr(
+                        Access::Square {
+                            left: ident(&seq_name, at),
+                            key: ident(&idx_name, at),
+                            kind: AccessKind::Direct,
+                        },
+                        at,
+                    ),
+                }],
+            },
+            at,
+        );
+        self.element_borrows.insert(borrow.id());
+        let bind_elem = Stmt::new(
+            Let {
+                left: for_expr.binding.clone(),
+                annotation: None,
+                right: borrow,
+                else_branch: None,
+            }
+            .into(),
+            NodeId::new(),
+            at,
+        );
+        let body = match for_expr.body.kind() {
+            ExprKind::Block(b) => {
+                let mut body = vec![bind_elem];
+                body.extend(b.body.iter().cloned());
+                expr(
+                    Block {
+                        body,
+                        yielded_expr: b.yielded_expr.clone(),
+                    },
+                    for_expr.body.location(),
+                )
+            }
+            _ => expr(
+                Block {
+                    body: vec![bind_elem],
+                    yielded_expr: Some(for_expr.body.clone()),
+                },
+                for_expr.body.location(),
+            ),
+        };
+        let len = call(
+            expr(
+                Access::Dot {
+                    left: ident(&seq_name, at),
+                    right: ident("len", at),
+                    kind: AccessKind::Direct,
+                },
+                at,
+            ),
+            vec![],
+            at,
+        );
+        let range = expr(
+            Range {
+                start: expr(Literal::Int(0), at),
+                end: len,
+                inclusive: false,
+            },
+            at,
+        );
+        let idx_pat = Pat::new(PatKind::Ident(Ident::new(&idx_name, at)), at);
+        let rewritten = expr(
+            Block {
+                body: vec![bind_seq],
+                yielded_expr: Some(expr(
+                    For {
+                        binding: idx_pat,
+                        iterator: range,
+                        body,
+                    },
+                    location,
+                )),
+            },
+            location,
+        );
+
+        let guarded = guard.is_some();
+        if let Some(guard) = guard {
+            self.iter_guards.push(guard);
+        }
+        let ty = rewritten.query(self)?;
+        if guarded {
+            self.iter_guards.pop();
+        }
+        self.rewrites.insert(id, rewritten);
+        Ok(ty)
+    }
+
     pub(crate) fn validate_place_target(
         &mut self,
         id: NodeId,
