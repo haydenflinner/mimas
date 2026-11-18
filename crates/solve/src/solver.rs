@@ -780,6 +780,12 @@ impl Solver {
         lap("resolve_pending_impls");
         self.check_subscript_names()?;
 
+        // member annotations settle before the const fixpoint so a `const`
+        // holding a generic literal meets `Ty::Param`s, not the placeholder
+        // vids it would otherwise pin for the decl's own annotation pass
+        run_phase(self, Self::settle_type_members, &mut saved_ribs)?;
+        lap("settle_type_members");
+
         // fixpoint: hoist_uses + solve_consts. each round may resolve more consts (e.g. a const
         // that references another module's const reduces only once that other const is bound).
         // re-run while the count of consts-with-known-values grows, capped as a safety net.
@@ -1007,6 +1013,116 @@ impl Solver {
             } else {
                 Ok(())
             }
+        })
+    }
+
+    /// Settle every adt's member types from their annotations ahead of
+    /// the early const fixpoint. Hoisting leaves each member a bare Vid
+    /// that `Struct::solve`/`Enum::solve` fulfills in `solve_types` — a
+    /// `const` holding a generic literal solves earlier and pins that
+    /// shared Vid (`const Q = Pair { a = 1.0, b = "x" }` froze `T` to
+    /// `float`, so the annotation pass then reported the bogus
+    /// "expected float but found T" on the struct decl). With the member
+    /// already `Ty::Param`, `specialize` instantiates it per use like
+    /// any post-`solve_types` site. Best-effort per member: an
+    /// annotation that cannot resolve yet (it names a still-pending
+    /// const) is left for the authoritative pass, which reports real
+    /// annotation errors as before.
+    fn settle_type_members(&mut self, ast: &Ast) -> Result<()> {
+        Self::for_each_item(ast, |item| {
+            let adt = match item.kind() {
+                ItemKind::Struct(st) => st.name.query(self)?.as_adt().copied(),
+                ItemKind::Enum(e) => e.head.query(self)?.as_adt().copied(),
+                _ => None,
+            };
+            let Some(adt) = adt else { return Ok(()) };
+
+            // the member's stored ty against its parsed annotation —
+            // collected first so `from_annotation`'s &mut borrows don't
+            // fight the adt reads
+            let members: Vec<(Ty, Annotation)> = match item.kind() {
+                ItemKind::Struct(st) => {
+                    let is_tuple = self.adts[adt].is_tuple_struct();
+                    st.fields
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, field)| {
+                            let ty = if is_tuple {
+                                self.adts[adt].as_tuple().members.get(i).cloned()?
+                            } else {
+                                self.adts[adt]
+                                    .as_struct()
+                                    .fields
+                                    .get(&field.name.to_string())?
+                                    .ty
+                                    .clone()
+                            };
+                            Some((ty, field.annotation.clone()))
+                        })
+                        .collect()
+                }
+                ItemKind::Enum(e) => e
+                    .members
+                    .iter()
+                    .flat_map(|(member_name, member)| match member {
+                        Member::Tuple(annotations) => annotations
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(i, annotation)| {
+                                self.adts[adt]
+                                    .variants
+                                    .get(&member_name.lexeme)?
+                                    .as_tuple()
+                                    .members
+                                    .get(i)
+                                    .cloned()
+                                    .map(|ty| (ty, annotation.clone()))
+                            })
+                            .collect::<Vec<_>>(),
+                        Member::Struct(fields) => fields
+                            .iter()
+                            .filter_map(|field| {
+                                self.adts[adt]
+                                    .variants
+                                    .get(&member_name.lexeme)?
+                                    .as_struct()
+                                    .ty(&field.name.to_string())
+                                    .map(|ty| (ty, field.annotation.clone()))
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+                _ => unreachable!(),
+            };
+
+            // same scope `Struct::solve`/`Enum::solve` use: the impl rib
+            // makes the adt self-referential, the param scope resolves
+            // `T` to its `Ty::Param`
+            self.ribs.push_impl(adt);
+            let generic = self.adts[adt].is_generic();
+            if generic {
+                self.push_adt_params(adt);
+            }
+            for (mut member_ty, annotation) in members {
+                let Ok(mut ty) = Ty::from_annotation(annotation, self) else {
+                    continue;
+                };
+                let _ = member_ty.fulfill_ty(&mut ty, self);
+            }
+            if generic {
+                self.pop_type_params();
+            }
+            self.ribs.pop();
+
+            // write the settled types back the way `Solve`'s
+            // `normalize_members` does — the stored member must BE
+            // `Ty::Param`, not a Vid bound to one, or `specialize`'s
+            // `contains_params` early-out skips the substitution and
+            // the use site meets the rigid param head-on
+            let mut normalized = self.adts[adt].clone();
+            normalized.normalize_members(self);
+            self.adts[adt] = normalized;
+            Ok(())
         })
     }
 
