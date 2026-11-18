@@ -14,7 +14,7 @@
 //! exporting the `vm::bc::nat` symbols (`mimas-natrt`'s staticlib/cdylib) —
 //! no baked addresses, a real symbol seam.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 
 use compile::{AccessKind, BlockTarget, Constant, Op, OpFormatPart, Program, Reg};
@@ -286,8 +286,8 @@ fn spec(h: H) -> (&'static str, &'static [Pt], Hr) {
 
 #[derive(Default)]
 struct Sh {
-    int: HashSet<u32>,
-    float: HashSet<u32>,
+    int: BTreeSet<u32>,
+    float: BTreeSet<u32>,
 }
 
 #[derive(Clone, Copy)]
@@ -485,8 +485,8 @@ fn analyze(ops: &[(usize, Op)], nregs: u32) -> Sh {
         }
     }
 
-    let mut int: HashSet<u32> = HashSet::new();
-    let mut float: HashSet<u32> = HashSet::new();
+    let mut int: BTreeSet<u32> = BTreeSet::new();
+    let mut float: BTreeSet<u32> = BTreeSet::new();
     for r in 0..nregs {
         if writes.contains_key(&r) {
             continue;
@@ -712,6 +712,24 @@ pub fn assemble_module(
     wasm: bool,
     bodies: &[(usize, String)],
 ) -> String {
+    assemble_module_ex(nbodies, lyt, wasm, bodies, true)
+}
+
+/// `assemble_module` with the program-tail split out. `tail = false`
+/// emits the bodies-table and count as bodiless `llvm.global` decls and
+/// drops `mimas_pliron_init`: the resulting object carries only the
+/// listed bodies' code plus undefined-symbol refs, so it depends on the
+/// body text and lowering config alone — not on `nbodies` — and a
+/// content-keyed cache can share kit chunks across programs that differ
+/// only in chunk count. The pair to it is `assemble_init_module`, which
+/// owns the real definitions and the initializer.
+pub fn assemble_module_ex(
+    nbodies: usize,
+    lyt: &Layout,
+    wasm: bool,
+    bodies: &[(usize, String)],
+    tail: bool,
+) -> String {
     let mut present = vec![false; nbodies];
     for (i, _) in bodies {
         present[*i] = true;
@@ -751,35 +769,46 @@ pub fn assemble_module(
     let w = lyt.word_size;
     let zeros = vec![format!("builtin.integer <0: i{w}>"); nbodies].join(", ");
     let zw = format!("llvm.array [{nbodies} x {wt}]");
-    members.push(format!(
-        "llvm.global @{BODIES_GLOBAL} : {zw}\n    [llvm_global_linkage: llvm.linkage ExternalLinkage, llvm_global_constant: builtin.bool false] = llvm.aggregate <[{zeros}] : {zw}>"
-    ));
-    // the pair's scalar half — a standalone host reads this instead of
-    // re-deriving the count from the Program. Mutable+zero like the
-    // table: the wasm object's data section can't carry the constant
-    // initializer, so `mimas_pliron_init` stores the count alongside
-    // the table fill (the shim reads it after calling init).
-    members.push(format!(
-        "llvm.global @{NBODIES_GLOBAL} : {I64}\n    [llvm_global_linkage: llvm.linkage ExternalLinkage, llvm_global_constant: builtin.bool false] = builtin.integer <0: i64>"
-    ));
-
-    // `mimas_pliron_init` fills the table from code: `llvm.addressof`
-    // yields the callee's address natively and its `GOT.func` table
-    // index on wasm (where symbol-initializer relocs can't come from the
-    // text path and there is no host `dlsym` to fill the table). The
-    // wasm shim calls it once before `install_bc`.
-    let mut init = format!(
-        "llvm.func @{INIT_FN}: llvm.func <{VOID} () variadic = false>\n    [llvm_function_linkage: llvm.linkage ExternalLinkage]\n  {{\n^{INIT_ENTRY}():\n    a_tbl = llvm.addressof @{BODIES_GLOBAL} : {PTR};\n    a_nb = llvm.addressof @{NBODIES_GLOBAL} : {PTR};\n    v_nb = llvm.constant <builtin.integer <{nbodies}: i64>> : {I64};\n    llvm.store *a_nb <- v_nb [align : 8];\n"
-    );
-    for (i, _) in bodies {
-        init.push_str(&format!(
-            "    a_f{i} = llvm.addressof @{} : {PTR};\n    v_f{i} = llvm.ptrtoint a_f{i} to {wt};\n    a_p{i} = llvm.gep <{I8}> (a_tbl)[Constant({off})] : {PTR};\n    llvm.store *a_p{i} <- v_f{i} [align : {w}];\n",
-            body_name(*i),
-            off = i * w
+    if tail {
+        members.push(format!(
+            "llvm.global @{BODIES_GLOBAL} : {zw}\n    [llvm_global_linkage: llvm.linkage ExternalLinkage, llvm_global_constant: builtin.bool false] = llvm.aggregate <[{zeros}] : {zw}>"
+        ));
+    } else {
+        // bodiless decl: the body only takes the table's address, so a
+        // `ptr`-typed global suffices and keeps the module — and its
+        // object — free of the chunk count.
+        members.push(format!(
+            "llvm.global @{BODIES_GLOBAL} : {PTR}\n    [llvm_global_linkage: llvm.linkage ExternalLinkage, llvm_global_constant: builtin.bool false]"
         ));
     }
-    init.push_str("    llvm.return\n  }");
-    members.push(init);
+    if tail {
+        // the pair's scalar half — a standalone host reads this instead of
+        // re-deriving the count from the Program. Mutable+zero like the
+        // table: the wasm object's data section can't carry the constant
+        // initializer, so `mimas_pliron_init` stores the count alongside
+        // the table fill (the shim reads it after calling init).
+        members.push(format!(
+            "llvm.global @{NBODIES_GLOBAL} : {I64}\n    [llvm_global_linkage: llvm.linkage ExternalLinkage, llvm_global_constant: builtin.bool false] = builtin.integer <0: i64>"
+        ));
+
+        // `mimas_pliron_init` fills the table from code: `llvm.addressof`
+        // yields the callee's address natively and its `GOT.func` table
+        // index on wasm (where symbol-initializer relocs can't come from the
+        // text path and there is no host `dlsym` to fill the table). The
+        // wasm shim calls it once before `install_bc`.
+        let mut init = format!(
+            "llvm.func @{INIT_FN}: llvm.func <{VOID} () variadic = false>\n    [llvm_function_linkage: llvm.linkage ExternalLinkage]\n  {{\n^{INIT_ENTRY}():\n    a_tbl = llvm.addressof @{BODIES_GLOBAL} : {PTR};\n    a_nb = llvm.addressof @{NBODIES_GLOBAL} : {PTR};\n    v_nb = llvm.constant <builtin.integer <{nbodies}: i64>> : {I64};\n    llvm.store *a_nb <- v_nb [align : 8];\n"
+        );
+        for (i, _) in bodies {
+            init.push_str(&format!(
+                "    a_f{i} = llvm.addressof @{} : {PTR};\n    v_f{i} = llvm.ptrtoint a_f{i} to {wt};\n    a_p{i} = llvm.gep <{I8}> (a_tbl)[Constant({off})] : {PTR};\n    llvm.store *a_p{i} <- v_f{i} [align : {w}];\n",
+                body_name(*i),
+                off = i * w
+            ));
+        }
+        init.push_str("    llvm.return\n  }");
+        members.push(init);
+    }
 
     // Bodies outside this subset: bodiless decls so the present bodies'
     // direct `llvm.call @mimas_body_*`s resolve. They land as ordinary
@@ -801,6 +830,14 @@ pub fn assemble_module(
         members.join(";\n  "),
         outlines.join("\n")
     )
+}
+
+/// The program-tail module: helper decls, the real bodies-table and
+/// count globals, `mimas_pliron_init`, and bodiless decls for every
+/// `mimas_body_*`. Pairs with `assemble_module_ex(.., tail = false)`
+/// chunk modules — together they cover one whole program.
+pub fn assemble_init_module(nbodies: usize, lyt: &Layout, wasm: bool) -> String {
+    assemble_module_ex(nbodies, lyt, wasm, &[], true)
 }
 
 /// `.pliron` text for one chunk — `emit_bodies`'s per-index form, for
