@@ -61,10 +61,11 @@ fn set_result(s: String) {
 /// mirrored verbatim: `compile_parts` numbers natives by registration
 /// order, so the module-side and driver-side installs must match.
 fn install(api: &mut vm::api::Api<'_, '_>) {
-    library::codegen(api);
+    library::std(api);
     api.add_named("host_add", host_add);
     api.add_named("keep", keep);
     api.add_named("pause", pause);
+    api.add_named("print", print);
 }
 
 #[vm::native]
@@ -78,6 +79,15 @@ fn keep<'gc>(ctx: vm::Ctx<'gc>, v: vm::Val<'gc>) {
 
 fn pause<'gc>(ctx: vm::Ctx<'gc>) {
     ctx.state().paused.set(true);
+}
+
+fn print<'gc>(ctx: vm::Ctx<'gc>, v: vm::Val<'gc>) -> Result<(), vm::RtErr> {
+    let line = ctx.to_string(v)?;
+    ctx.fixture::<Kept>()
+        .0
+        .borrow_mut()
+        .push(Captured::Str(line));
+    Ok(())
 }
 
 /// Values `keep` captured — same fixture shape as the driver's `Kept`.
@@ -113,8 +123,8 @@ pub unsafe extern "C" fn mimas_wasm_run(src: *const u8, src_len: usize) -> i32 {
     let err = vm.run().err().map(|e| e.to_string());
     let test = vm.resolve_name("TEST_VALUE").map(|c: Captured| format!("{c}"));
     let text = match (test, &err) {
-        (Some(v), _) => v,
-        (None, Some(e)) => format!("ERR {e}"),
+        (_, Some(e)) => format!("ERR {e}"),
+        (Some(v), None) => v,
         (None, None) => "MISSING".to_string(),
     };
     set_result(text);
