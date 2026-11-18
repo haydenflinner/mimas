@@ -1357,16 +1357,94 @@ impl Solve for Call {
                 && let ExprKind::Access(Access::Dot { left, kind, .. }) = self.left.kind()
                 && let Some(first) = params.first()
             {
-                // a `?.` receiver is option-typed; dispatch is on the unwrapped inner
-                // (method_intercept already vetted it), so expect Option(self) here
-                let expected = if *kind == AccessKind::Option {
-                    Ty::Option(Box::new(first.ty.clone()))
+                if solver.place_element(&first.ty).is_some() {
+                    // `fn reset(inout self)` -- the caller lends the receiver's
+                    // own slot: `obj.reset()` mints `&obj` the same way a `&`
+                    // argument would, so `self = next` inside writes back the
+                    // caller's variable or field. arg-0 at emit is the minted
+                    // descriptor instead of the receiver's value.
+                    // r[impl mimas.inout.self]
+                    if *kind == AccessKind::Option {
+                        Err(crate::errors::SubscriptUse {
+                            src: solver.src(left.location()),
+                            at: left.location().into(),
+                            message: "a `?.` call can't lend its receiver -- the \
+                                      method writes `self` back, and an optional \
+                                      has no slot to write"
+                                .into(),
+                        })?
+                    }
+                    let marker = Expr::new(
+                        ExprKind::Call(Call {
+                            left: Expr::new(
+                                Ident::new("__borrow_place".to_string(), left.location()).into(),
+                                left.location(),
+                            ),
+                            arguments: vec![Argument {
+                                name: None,
+                                value: left.clone(),
+                            }],
+                        }),
+                        left.location(),
+                    );
+                    solver.allowed_borrows.insert(marker.id());
+                    solver.implicit_self_borrows.insert(marker.id());
+                    let mut want = first.ty.clone();
+                    let got = marker.query(solver)?;
+                    let Some((removable, mut elem)) = solver.place_element(&want) else {
+                        unreachable!("place_element vetted param 0 above");
+                    };
+                    // the minted place lends like a `&` arg: a removable place
+                    // (`xs[i]`) still lends where removal is not on offer, and
+                    // the reverse would fabricate a `remove`.
+                    match solver.place_element(&got) {
+                        Some((arg_removable, _)) if removable && !arg_removable => {
+                            let mut arg_ty = got.clone();
+                            arg_ty
+                                .fulfill_ty(&mut want, solver)
+                                .map_err(|e| {
+                                    e.into_type_mismatch(solver, left.location())
+                                })?;
+                        }
+                        Some((_, mut arg_elem)) => {
+                            arg_elem
+                                .fulfill_ty(&mut elem, solver)
+                                .map_err(|e| {
+                                    e.into_type_mismatch(solver, left.location())
+                                })?;
+                        }
+                        None => {
+                            let mut arg_ty = got;
+                            arg_ty
+                                .fulfill_ty(&mut want, solver)
+                                .map_err(|e| {
+                                    e.into_type_mismatch(solver, left.location())
+                                })?;
+                        }
+                    }
+                    if let Some(&writeback) = solver.binding_borrows.get(&marker.id()) {
+                        solver
+                            .inout_writebacks
+                            .entry(id)
+                            .or_default()
+                            .push(writeback);
+                    }
+                    solver.self_place_mints.insert(id, marker);
+                    solver.inout_calls.insert(id);
+                    filled[0] = true;
+                    cursor = 1;
                 } else {
-                    first.ty.clone()
-                };
-                left.fulfill_ty(expected, solver)?;
-                filled[0] = true;
-                cursor = 1;
+                    // a `?.` receiver is option-typed; dispatch is on the unwrapped inner
+                    // (method_intercept already vetted it), so expect Option(self) here
+                    let expected = if *kind == AccessKind::Option {
+                        Ty::Option(Box::new(first.ty.clone()))
+                    } else {
+                        first.ty.clone()
+                    };
+                    left.fulfill_ty(expected, solver)?;
+                    filled[0] = true;
+                    cursor = 1;
+                }
             }
 
             // slot resolution + duplicate checks run in arg order first; the
@@ -1419,6 +1497,18 @@ impl Solve for Call {
             let mut lent: Vec<(DecId, Vec<GuardSeg>, String, Location)> = Vec::new();
             let mut plain_roots: Vec<(DecId, Vec<GuardSeg>, usize, String, Location)> =
                 Vec::new();
+            // a lent receiver (`obj.reset()` on `inout self`) counts as a `&`
+            // loan on its root: `obj.reset(&obj.f)` overlaps like any pair.
+            // r[impl mimas.inout.self]
+            if let Some(marker) = solver.self_place_mints.get(&id)
+                && let Some((root, path)) = solver
+                    .place_sources
+                    .get(&marker.id())
+                    .and_then(crate::root_and_path)
+                && let Some(dec) = solver.ribs.resolve(root)
+            {
+                lent.push((dec, path, root.lexeme.clone(), root.location()));
+            }
             let borrow_root = |solver: &Solver, arg: &parse::Argument| {
                 solver
                     .place_sources

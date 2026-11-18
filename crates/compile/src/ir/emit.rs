@@ -994,7 +994,13 @@ impl Emit for Call {
                 let native_id = native;
                 let body = (native_id.is_none()).then(|| ir.item_body_for(dec));
                 let defaults = dec_defaults(ir, Some(dec));
-                let receiver = left.lower(ir)?;
+                // `inout self` lends the receiver's slot: arg-0 is the place
+                // descriptor minted at solve, not the receiver's value.
+                // r[impl mimas.inout.self]
+                let receiver = match ir.resolutions.self_place_mints.get(&id).cloned() {
+                    Some(marker) => marker.lower(ir)?,
+                    None => left.lower(ir)?,
+                };
 
                 let do_call = |ir: &mut Ir, receiver: InstId| -> Option<InstId> {
                     let receiver = takes_self.then_some(receiver);

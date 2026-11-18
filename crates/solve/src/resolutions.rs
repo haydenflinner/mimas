@@ -81,6 +81,9 @@ pub struct Resolutions {
     /// node → `(binding, cell)` pairs whose `binding = cell[0]` write-backs
     /// emit after the call returns.
     pub inout_writebacks: FxIndexMap<NodeId, Vec<(DecId, DecId)>>,
+    /// `fn f(inout self)` call sites: call node → the `__borrow_place` marker
+    /// emit lowers as arg-0 instead of the receiver's value.
+    pub self_place_mints: FxIndexMap<NodeId, parse::Expr>,
     /// Exprs whose array lengths the solver couldn't prove against a `[T; n]`
     /// contract -- emit wraps each in a runtime dim check (see `lens.rs`).
     pub len_checks: FxIndexMap<NodeId, Vec<Option<usize>>>,
@@ -670,6 +673,7 @@ impl From<Solver> for Resolutions {
                 .collect(),
             inout_calls: solver.inout_calls,
             inout_writebacks: solver.inout_writebacks,
+            self_place_mints: solver.self_place_mints,
             len_checks: solver.len_checks,
             default_ctors: solver.default_ctors,
             contract_native,
