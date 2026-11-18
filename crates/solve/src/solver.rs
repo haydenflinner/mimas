@@ -319,6 +319,22 @@ pub struct Solver {
     /// Collections a `for` loop is iterating, pushed for the duration of each body's solve.
     pub(crate) iter_guards: Vec<IterGuard>,
 
+    /// Calls solved while `iter_guards` was non-empty: the callee's
+    /// derived writes (a grades-pass fixpoint) judge them after the
+    /// walk, so each record keeps the call's arg roots and the guards
+    /// that were live. r[impl mimas.for.inplace-freeze]
+    pub(crate) guarded_calls: Vec<GuardedCall>,
+    /// A plain argument sharing a lent root, deferred when the callee
+    /// resolves: the verdict is whether the callee's derived writes
+    /// reach the lent path -- `f(&w.tour, w)` is legal when `w`'s slot
+    /// only reads. r[impl mimas.inout.exclusive]
+    pub(crate) deferred_inout: Vec<DeferredInout>,
+    /// The grades pass's derived write sets: fn dec -> (param position,
+    /// access path) pairs the body may write through, calls included.
+    /// `[]` names the whole param's storage. Filled by `grades::check`.
+    /// r[impl mimas.fn.writes]
+    pub(crate) fn_writes: FxHashMap<DecId, Vec<(u32, Vec<GuardSeg>)>>,
+
     /// `for`-element bindings whose first-level member writes can never reach a stored
     /// element: the iterator was computed (`f()`, `xs.enumerate()`) or yields fresh
     /// values every pass (dict `(key, value)` pairs). The assignment path warns
@@ -455,6 +471,9 @@ impl Solver {
             prelude_types: FxHashSet::default(),
             non_value: None,
             iter_guards: vec![],
+            guarded_calls: vec![],
+            deferred_inout: vec![],
+            fn_writes: FxHashMap::default(),
             ephemeral_elems: FxHashMap::default(),
             producer_roots: FxHashMap::default(),
             type_params: vec![],
@@ -5437,6 +5456,43 @@ pub(crate) struct IterGuard {
 pub(crate) enum GuardSeg {
     Field(String),
     Index,
+}
+
+/// A call that solved while `for` freezes were live: everything the
+/// grades pass needs to ask "could this call write a frozen place".
+/// `arg_roots[i]` is the (root dec, access path) for param slot `i` --
+/// the receiver counts as slot 0 on `x.m(..)`, like `call_args`.
+/// r[impl mimas.for.inplace-freeze]
+#[derive(Clone)]
+pub(crate) struct GuardedCall {
+    pub at: Location,
+    /// The callee's dec when the call's left resolved to one -- a user
+    /// fn, a `let`-bound closure, a native. `None` for a callee that's a
+    /// plain value (a fn-typed param, an access result).
+    pub callee: Option<DecId>,
+    /// The (root dec, access path) of each argument, aligned to the
+    /// callee's parameter slots -- `None` for args that name no place.
+    pub arg_roots: Vec<Option<(DecId, Vec<GuardSeg>)>>,
+    pub guards: Vec<IterGuard>,
+}
+
+/// A plain `inout`-sibling argument the pairwise check couldn't settle:
+/// same root as a lend, so the grades pass's derived writes on its
+/// param slot decide whether the pair actually aliases.
+/// r[impl mimas.inout.exclusive]
+#[derive(Clone)]
+pub(crate) struct DeferredInout {
+    /// The plain argument's site -- where the error points when it fires.
+    pub at: Location,
+    /// The callee's fn dec -- `deferred_inout` only records calls that
+    /// resolved to one; unresolved callees errored at solve.
+    pub callee: Option<DecId>,
+    /// The plain argument's parameter position.
+    pub slot: usize,
+    /// The lent sibling's access path off the shared root.
+    pub lent_path: Vec<GuardSeg>,
+    /// The shared root's name, for the error.
+    pub lent_name: String,
 }
 
 /// Why a `for` loop's element binding holds a fresh value each pass -- the wording a

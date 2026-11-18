@@ -70,10 +70,35 @@ impl Project {
             Some(dec_id) => {
                 let dec = &resolutions.decs[dec_id];
                 let (owner, decl) = match (&dec.kind, ty) {
-                    (ResolvedDeclKind::Item { takes_self, .. }, Ty::Fn(header)) => (
-                        resolutions.owner_path(dec_id),
-                        header.signature(&dec.name, *takes_self, resolutions),
-                    ),
+                    (ResolvedDeclKind::Item { takes_self, .. }, Ty::Fn(header)) => {
+                        let mut decl =
+                            header.signature(&dec.name, *takes_self, resolutions);
+                        // the derived write set reads as part of the
+                        // signature: `fn tick(t) // writes t.flash`
+                        if let Some(ws) = resolutions.fn_writes.get(&dec_id) {
+                            let mut parts: Vec<String> = ws
+                                .iter()
+                                .map(|(pos, path)| {
+                                    let name = header
+                                        .parameters
+                                        .get(*pos as usize)
+                                        .and_then(|p| p.name.clone())
+                                        .unwrap_or_else(|| format!("arg{pos}"));
+                                    if path.is_empty() {
+                                        name
+                                    } else {
+                                        format!("{name}.{}", path.join("."))
+                                    }
+                                })
+                                .collect();
+                            parts.sort();
+                            parts.dedup();
+                            if !parts.is_empty() {
+                                decl.push_str(&format!("  // writes {}", parts.join(", ")));
+                            }
+                        }
+                        (resolutions.owner_path(dec_id), decl)
+                    }
                     (ResolvedDeclKind::Adt(aid), _) => (String::new(), resolutions.adt_path(*aid)),
                     (ResolvedDeclKind::Constant(_), _) => (
                         resolutions.owner_path(dec_id),

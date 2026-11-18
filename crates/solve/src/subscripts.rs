@@ -782,7 +782,9 @@ impl Solver {
         let at = e.location();
         let receiver = format!("__slot_{}_container", id.index());
         let key_name = format!("__slot_{}_key", id.index());
+        let gen_name = format!("__slot_{}_gen", id.index());
         let mut body = vec![];
+        let mut stamp_container: Option<Expr> = None;
         let (target, removal) = match e.kind() {
             ExprKind::Access(Access::Square {
                 left,
@@ -798,6 +800,27 @@ impl Solver {
                 }
                 body.push(bind(&receiver, left.clone(), at));
                 body.push(bind(&key_name, key.clone(), at));
+                // the slot's shape at the lend: a later grow/shrink or a
+                // wholesale swap of the container faults on the next use
+                // instead of writing a shifted or detached slot.
+                // r[impl mimas.place.stale]
+                body.push(bind(
+                    &gen_name,
+                    call(
+                        expr(
+                            Access::Dot {
+                                left: ident(&receiver, at),
+                                right: ident("len", at),
+                                kind: AccessKind::Direct,
+                            },
+                            at,
+                        ),
+                        vec![],
+                        at,
+                    ),
+                    at,
+                ));
+                stamp_container = Some(left.clone());
                 let target = expr(
                     Access::Square {
                         left: ident(&receiver, at),
@@ -953,11 +976,40 @@ impl Solver {
             };
             Expr::new(kind, e.location())
         }
+        // `&xs[i]` stamps the captured container's length at the lend: the
+        // closures re-check it per use so a grow/shrink of the very array
+        // the slot lives in faults instead of hitting a shifted slot. A
+        // rebound *binding* detaches the place by spec -- only the
+        // captured container's own shape is checked. Built fresh per
+        // closure: a cloned stmt shares NodeIds, and the second user's
+        // idents then miss the capture pass and read Null.
+        // r[impl mimas.place.stale]
+        let gen_check = || {
+            Stmt::new(
+                StmtKind::Expr(call(
+                    ident("__seq_fresh", at),
+                    vec![ident(&receiver, at), ident(&gen_name, at)],
+                    at,
+                )),
+                NodeId::new(),
+                at,
+            )
+        };
         let read = expr(
             Closure {
                 parameters: vec![],
                 return_type: None,
-                body: fresh(&target),
+                body: if stamp_container.is_some() {
+                    expr(
+                        Block {
+                            body: vec![gen_check()],
+                            yielded_expr: Some(fresh(&target)),
+                        },
+                        at,
+                    )
+                } else {
+                    fresh(&target)
+                },
             },
             at,
         );
@@ -982,7 +1034,12 @@ impl Solver {
                 return_type: None,
                 body: expr(
                     Block {
-                        body: vec![store],
+                        body: stamp_container
+                            .is_some()
+                            .then(gen_check)
+                            .into_iter()
+                            .chain(std::iter::once(store))
+                            .collect(),
                         yielded_expr: None,
                     },
                     at,
@@ -1005,7 +1062,12 @@ impl Solver {
                         return_type: None,
                         body: expr(
                             Block {
-                                body: vec![action],
+                                body: stamp_container
+                                    .is_some()
+                                    .then(gen_check)
+                                    .into_iter()
+                                    .chain(std::iter::once(action))
+                                    .collect(),
                                 yielded_expr: None,
                             },
                             at,
