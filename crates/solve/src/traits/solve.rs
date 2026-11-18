@@ -2183,7 +2183,23 @@ impl Solve for Evaluation {
 }
 
 impl Solve for For {
-    fn solve(&self, _id: NodeId, location: Location, solver: &mut Solver) -> Result<Ty> {
+    fn solve(&self, id: NodeId, location: Location, solver: &mut Solver) -> Result<Ty> {
+        // `for r in &xs` iterates element places, not element copies -- the
+        // `&` is the same marker an `inout` argument wears, scoped to a
+        // loop's own freeze instead of a call's loan.
+        // r[impl mimas.for.inplace]
+        let mut iterator = &self.iterator;
+        while let ExprKind::Grouping(g) = iterator.kind() {
+            iterator = &g.inner;
+        }
+        if let ExprKind::Call(c) = iterator.kind()
+            && c.left
+                .as_ident()
+                .is_some_and(|i| i.lexeme == "__borrow_place")
+        {
+            return solver.solve_for_in_place(id, self, iterator, location);
+        }
+
         // Run the loop
         solver.ribs.push_block();
 
@@ -2263,6 +2279,7 @@ impl Solve for For {
                     solver.ribs.resolve(root).map(|dec| crate::IterGuard {
                         dec,
                         path,
+                        inplace: false,
                         iterated_at: self.iterator.location(),
                         name: self.iterator.to_string(),
                     })

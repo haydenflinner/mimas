@@ -123,6 +123,12 @@ pub struct Solver {
     /// The `let`-claimed subset of `allowed_borrows`: a kept place writes
     /// through shared storage, which a whole-binding `&` can't promise.
     pub(crate) kept_borrows: FxHashSet<NodeId>,
+    /// `&` nodes the `for r in &xs` desugar minted for its element places:
+    /// they describe a slot of the iterated collection, so the descriptor
+    /// must not offer `remove` -- shrinking the list mid-loop is the
+    /// length mutation the root freeze forbids.
+    /// r[impl mimas.for.inplace]
+    pub(crate) element_borrows: FxHashSet<NodeId>,
     /// `&` on a bare binding (`&c`): the descriptor loans a one-slot cell
     /// instead, so the `&` node maps to the binding's dec and the cell
     /// binding's ident until the cell's dec exists.
@@ -381,6 +387,7 @@ impl Solver {
             inout_calls: FxHashSet::default(),
             allowed_borrows: FxHashSet::default(),
             kept_borrows: FxHashSet::default(),
+            element_borrows: FxHashSet::default(),
             binding_borrow_cells: FxIndexMap::default(),
             binding_borrows: FxIndexMap::default(),
             inout_writebacks: FxIndexMap::default(),
@@ -533,6 +540,38 @@ impl Solver {
             .iter()
             .find(|g| g.dec == dec && g.path == *path)
         {
+            Err(MutateWhileIterating {
+                src: self.src(at),
+                at: at.into(),
+                name: guard.name.clone(),
+                iterating: vec![IteratingHere {
+                    src: self.src(guard.iterated_at),
+                    at: guard.iterated_at.into(),
+                    name: guard.name.clone(),
+                }],
+            })?
+        }
+        Ok(())
+    }
+
+    /// Errors if `path` off `dec` names a place a `for` iteration freeze would
+    /// refuse to lend: for a plain `for` the iterated place exactly, for
+    /// `for r in &xs`'s in-place guard any `&` whose loan overlaps the
+    /// frozen one -- at or under it (`&s.f` while `&s` lends), or reaching
+    /// across it (`&xs` while `&xs[i]` lends). Either direction hands out a
+    /// second live place into slots the first loan's elements may replace.
+    /// r[impl mimas.for.inplace-freeze]
+    pub(crate) fn check_iter_lend(
+        &self,
+        dec: DecId,
+        path: &[GuardSeg],
+        at: Location,
+    ) -> Result<()> {
+        if let Some(guard) = self.iter_guards.iter().find(|g| {
+            g.dec == dec
+                && (g.path == *path
+                    || (g.inplace && (g.path.starts_with(path) || path.starts_with(&g.path))))
+        }) {
             Err(MutateWhileIterating {
                 src: self.src(at),
                 at: at.into(),
@@ -3335,6 +3374,32 @@ impl Solver {
                     _ => {}
                 }
 
+                // `xs = v` rebinds a name an in-place `for r in &xs` lent
+                // element places out of -- under that freeze the name IS the
+                // loan, so reassigning it is the same refusal `xs.push`
+                // gets. Any write at-or-above the lent place (`xs[i] = v`
+                // under `for r in &xs[i]`, `xs = v` under `for r in &xs[i]`)
+                // replaces the slot the loan resolves through and stales it;
+                // writes strictly under it stay consistent writes to lent
+                // storage. A plain `for` snapshots its value and stays
+                // allowed. r[impl mimas.for.inplace-freeze]
+                if let Some(guard) = self.iter_guards.iter().find(|g| {
+                    g.inplace
+                        && g.dec == dec_id
+                        && crate::access_path(left).is_some_and(|p| g.path.starts_with(&p))
+                }) {
+                    Err(MutateWhileIterating {
+                        src: self.src(left.location()),
+                        at: left.location().into(),
+                        name: guard.name.clone(),
+                        iterating: vec![IteratingHere {
+                            src: self.src(guard.iterated_at),
+                            at: guard.iterated_at.into(),
+                            name: guard.name.clone(),
+                        }],
+                    })?
+                }
+
                 // `xs[i] = v` writes through the collection itself; if a `for` loop is
                 // iterating that exact place the write can skip/double-visit elements or
                 // never terminate.
@@ -5161,6 +5226,12 @@ pub(crate) struct NativeBinding {
 pub(crate) struct IterGuard {
     pub dec: DecId,
     pub path: Vec<GuardSeg>,
+    /// `for r in &xs` holds live places into the collection, so its root
+    /// freeze covers rebinding the name too (`xs = other`): a plain `for`
+    /// snapshots the value and doesn't care. The mutating-call and index
+    /// checks apply to both kinds regardless.
+    /// r[impl mimas.for.inplace-freeze]
+    pub inplace: bool,
     /// The `for` iterator expr's location, for the `IteratingHere` sub-diagnostic.
     pub iterated_at: Location,
     /// The iterator expr rendered, for messages.
