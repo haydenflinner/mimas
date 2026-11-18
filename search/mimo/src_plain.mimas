@@ -518,7 +518,7 @@ pact Draw {
 //   · the frame loop at the bottom — `game_loop`/`time_loop` say it once
 //   · the palette — every page spelled the same hexes out by hand
 
-// ---- the loop -------------------------------------------------------
+# the loop
 //
 // A game is three pieces: `init` makes the starting world, `tick`
 // steps it on the frame's input and events, `draw` paints it. The
@@ -551,7 +551,7 @@ fn time_loop<W>(world: W, tick: (W, s) -> W, draw: (W) -> ()) {
     }
 }
 
-// ---- geometry -------------------------------------------------------
+# geometry
 //
 // `Rect<T>` is a plain positioned box, generic over the unit: `Rect<px>`
 // is a screen-space region (hit tests, layout), but `Rect<inch>` in a
@@ -585,7 +585,7 @@ impl Rect {
     }
 }
 
-// ---- the palette ----------------------------------------------------
+# the palette
 // The slate ramp for surfaces and text (deep → ink), then the accent
 // hues. `G_` keeps them out of the way of a game's own COLOR_* roles:
 // name the role in your page, point it at the shared hue —
