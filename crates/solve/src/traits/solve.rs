@@ -2223,9 +2223,35 @@ impl Solve for For {
             })?,
         }
 
-        if let Some(dec_id) = solver.node_decs.get(&self.binding.id()) {
-            let dec = &mut solver.decs[dec_id];
-            dec.kind = DecKind::LoopVar;
+        // every name a `for` pattern binds is a loop variable -- `x`, and each member
+        // of `for (i, v)` too: the member holds the pass's own copy, so `v = ...` /
+        // `v += ...` must hit AssignToLoopVar exactly like `x = ...` does.
+        // r[impl mimas.for.elem-bind]
+        for leaf in self.binding.bound_leaves() {
+            if let Some(&dec_id) = solver.node_decs.get(&leaf.id()) {
+                solver.decs[dec_id].kind = DecKind::LoopVar;
+            }
+        }
+
+        // `for x in <not a place>` binds a fresh value every pass, so `x.f =` /
+        // `x[i] =` writes on the element var die with it -- the assignment path
+        // warns (r[mimas.for.elem-write]). Dict iteration yields a fresh
+        // `(key, value)` pair even when the dict itself is a place, so `p.1 =`
+        // is dead there too.
+        let fresh = if matches!(iter_ty, Ty::Dict(_)) {
+            Some(crate::FreshElem::DictPair(self.iterator.to_string()))
+        } else if crate::root_and_path(&self.iterator)
+            .and_then(|(root, _)| solver.ribs.resolve(root))
+            .is_none()
+        {
+            Some(crate::FreshElem::Iterated(self.iterator.to_string()))
+        } else {
+            None
+        };
+        if let Some(fresh) = fresh
+            && let Some(&dec_id) = solver.node_decs.get(&self.binding.id())
+        {
+            solver.ephemeral_elems.insert(dec_id, fresh);
         }
 
         // guard the iterated place against in-loop mutation -- `for x in xs { xs.push(0) }`
