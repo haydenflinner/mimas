@@ -212,6 +212,17 @@ test_run!(
     "TEST_VALUE" => "2.5",
 );
 
+// r[verify mimas.place.field]
+test_run!(
+    place_list_elements_read_through,
+    "let xs = [10, 20]
+     let ps: [__RemovablePlace<int>] = [&xs[0], &xs[1]]
+     let seen = ps[0]
+     ps[0] = 77
+     let TEST_VALUE = (seen, xs[0]);",
+    "TEST_VALUE" => "[10, 77]",
+);
+
 test_fail!(
     a_place_field_stales_when_its_collection_grows,
     "struct Cur { p: __RemovablePlace<int> }
