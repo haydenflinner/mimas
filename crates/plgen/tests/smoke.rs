@@ -14,7 +14,8 @@ fn emits_func_per_chunk_and_body_table() {
         |api| library::codegen(api),
     )
     .expect("compiles");
-    let (hashes, text) = mimas_plgen::emit_module(&program, &vm::bc::jit::layout(), false);
+    let (hashes, text) =
+        mimas_plgen::emit_module(&program, &vm::bc::jit::layout(), false, 0);
     assert!(text.starts_with("builtin.module @mimas_pliron {"));
     // one llvm.func per distinct chunk content plus the exported globals
     for (i, _) in program.chunks.iter() {

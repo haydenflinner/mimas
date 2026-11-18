@@ -984,7 +984,10 @@ where
             (reg.register)(&mut api);
         }
     }
+    let (natives_before, adts_before) =
+        (api.library.natives().count(), api.library.adts().len());
     install_fn(&mut api);
+    api.library.mark_install_span(natives_before, adts_before);
     for reg in inventory::iter::<MimasReg> {
         if reg.phase != MimasReg::PHASE_ADT {
             (reg.register)(&mut api);

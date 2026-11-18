@@ -44,6 +44,11 @@ pub const NBODIES_GLOBAL: &str = "mimas_pliron_nbodies";
 /// — a real address natively, the `GOT.func` table index on wasm, where
 /// no host-side `dlsym` fill exists.
 pub const INIT_FN: &str = "mimas_pliron_init";
+/// Exported `() -> i64`: the `Library::fingerprint_install` of the
+/// install the emitted `NativeId`s were numbered against. A runtime
+/// whose own install fingerprints differently must refuse to run — the
+/// baked ids would index a shifted native table.
+pub const NSIG_FN: &str = "mimas_pliron_nsig";
 /// `mimas_pliron_init`'s single entry block.
 const INIT_ENTRY: &str = "init_entry";
 /// `mimas_body_{index}` — the per-index entry trampoline. Raw emitted
@@ -899,13 +904,13 @@ pub fn chunk_spans(prog: &Program) -> Vec<(usize, usize)> {
 /// against a runtime that exports them (`mimas-natrt`'s `staticlib`/
 /// `cdylib`, or any artifact providing `vm::bc::nat`). Returns the body
 /// content hashes alongside — the host resolves `mimas_body_{h}`.
-pub fn emit_module(prog: &Program, lyt: &Layout, wasm: bool) -> (Vec<u64>, String) {
+pub fn emit_module(prog: &Program, lyt: &Layout, wasm: bool, nsig: u64) -> (Vec<u64>, String) {
     let (hashes, bodies) = emit_bodies(prog, lyt, wasm);
     let bodies: Vec<(usize, String)> = bodies
         .into_iter()
         .enumerate()
         .collect();
-    let text = assemble_module(&chunk_spans(prog), lyt, wasm, &bodies, &hashes);
+    let text = assemble_module(&chunk_spans(prog), lyt, wasm, &bodies, &hashes, nsig);
     (hashes, text)
 }
 
@@ -924,8 +929,9 @@ pub fn assemble_module(
     wasm: bool,
     bodies: &[(usize, String)],
     hashes: &[u64],
+    nsig: u64,
 ) -> String {
-    assemble_module_ex(spans, lyt, wasm, bodies, true, hashes, None)
+    assemble_module_ex(spans, lyt, wasm, bodies, true, hashes, None, nsig)
 }
 
 /// `assemble_module` with the program-tail split out. `tail = false`
@@ -944,6 +950,7 @@ pub fn assemble_module_ex(
     tail: bool,
     hashes: &[u64],
     init_fill: Option<&[usize]>,
+    nsig: u64,
 ) -> String {
     let nbodies = spans.len();
     let mut present = vec![false; nbodies];
@@ -1074,6 +1081,14 @@ pub fn assemble_module_ex(
         init.push_str("    llvm.return\n  }");
         members.push(init);
 
+        // The native-table fingerprint of the compile-time install —
+        // `NativeId`s are registration-order, so a runtime built against
+        // a different install must refuse rather than misdispatch.
+        members.push(format!(
+            "llvm.func @{NSIG_FN}: llvm.func <{I64} () variadic = false>\n    [llvm_function_linkage: llvm.linkage ExternalLinkage]\n  {{\n^nsig_entry():\n    v_sig = llvm.constant <builtin.integer <{nsig}: i64>> : {I64};\n    llvm.return v_sig\n  }}",
+            nsig = nsig as i64
+        ));
+
         // Per-index entry trampolines: `tbl[i]` and `bc[frame.chunk]`
         // dispatch to `mimas_body_{i}`, which may be an alias of a
         // canonical `mimas_body_x{h}` whose `off`/`idx` globals hold the
@@ -1149,9 +1164,10 @@ pub fn assemble_init_module(
     lyt: &Layout,
     wasm: bool,
     hashes: &[u64],
+    nsig: u64,
 ) -> String {
     let all: Vec<usize> = (0..spans.len()).collect();
-    assemble_module_ex(spans, lyt, wasm, &[], true, hashes, Some(&all))
+    assemble_module_ex(spans, lyt, wasm, &[], true, hashes, Some(&all), nsig)
 }
 
 /// `.pliron` text for one chunk — `emit_bodies`'s per-index form, for

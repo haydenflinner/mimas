@@ -17,6 +17,9 @@ crate-type = ["cdylib"]
 vm = { package = "mimas-vm", path = "../vm", version = "0.2.0", default-features = false }
 compile = { package = "mimas-compile", path = "../compile", version = "0.2.0" }
 library = { package = "mimas-library", path = "../library", version = "0.2.0", default-features = false }
+# The shared fixture native table — the pliron-mimas driver registers
+# the same install; do not reintroduce a local copy.
+fixture_natives = { package = "mimas-fixture-natives", path = "../fixture-natives", version = "0.2.0" }
 # `register_custom_getrandom!` — the build passes
 # `--cfg getrandom_backend="custom"` so `rand` (via library) links on
 # wasm32-unknown-unknown without JS shims.
