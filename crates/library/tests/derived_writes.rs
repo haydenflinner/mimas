@@ -171,3 +171,53 @@ fn param_writes_that_reach_do_not_warn() {
         audit.warnings
     );
 }
+
+// r[verify mimas.fn.writes]
+test_run!(
+    sig_reports_derived_writes,
+    "struct W { tour: int, xs: [int] }
+     fn step(w: W) { w.tour += 1 }
+     fn outer(w: W) { step(w); w.xs.push(9) }
+     let TEST_VALUE = sig!(outer).writes;",
+    "TEST_VALUE" => r#"["w.xs", "w.tour"]"#,
+);
+
+test_run!(
+    sig_reports_inout_whole_writes,
+    "fn rebind(n: inout int) { n = 0 }
+     let TEST_VALUE = sig!(rebind).writes;",
+    "TEST_VALUE" => r#"["n"]"#,
+);
+
+// r[verify mimas.place.field]
+test_run!(
+    place_fields_write_through,
+    "struct Cur { p: __RemovablePlace<int> }
+     let xs = [10, 20, 30]
+     let c = Cur { p = &xs[0] }
+     let seen = c.p
+     c.p = 99
+     let TEST_VALUE = (seen, xs[0]);",
+    "TEST_VALUE" => "[10, 99]",
+);
+
+test_run!(
+    place_fields_member_write_through,
+    "struct Thing { id: int, speed: float }
+     struct Hand { gripped: __RemovablePlace<Thing> }
+     let things = [Thing { id = 1, speed = 0.0 }, Thing { id = 2, speed = 0.0 }]
+     let h = Hand { gripped = &things[1] }
+     h.gripped.speed = 2.5
+     let TEST_VALUE = things[1].speed;",
+    "TEST_VALUE" => "2.5",
+);
+
+test_fail!(
+    a_place_field_stales_when_its_collection_grows,
+    "struct Cur { p: __RemovablePlace<int> }
+     let xs = [10]
+     let c = Cur { p = &xs[0] }
+     xs.push(11)
+     print(c.p)",
+    "changed since it was lent"
+);

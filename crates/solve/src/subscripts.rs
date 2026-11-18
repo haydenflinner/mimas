@@ -418,6 +418,43 @@ impl Solver {
 }
 
 impl Solver {
+    /// A `__Place`-typed member (`c.p`, `ps[0]`) reads through its
+    /// descriptor in value position, the same as an `inout` param reads
+    /// the lent slot: `print(c.p)` sees the value, not `{read, write}`.
+    /// r[impl mimas.place.field]
+    pub(crate) fn place_field_read(
+        &mut self,
+        id: NodeId,
+        access: &Access,
+        ty: Ty,
+        at: Location,
+    ) -> Result<Ty> {
+        if self.raw_places.contains(&id)
+            || self
+                .is_place_type(&ty.clone().normalized(self))
+                .is_none()
+        {
+            return Ok(ty);
+        }
+        let raw = expr(access.clone(), at);
+        self.raw_places.insert(raw.id());
+        let read = call(
+            expr(
+                Access::Dot {
+                    left: raw,
+                    right: ident("read", at),
+                    kind: AccessKind::Direct,
+                },
+                at,
+            ),
+            vec![],
+            at,
+        );
+        let value = read.query(self)?;
+        self.rewrites.insert(id, read);
+        Ok(value)
+    }
+
     pub(crate) fn is_place_type(&self, ty: &Ty) -> Option<bool> {
         let (aid, _) = ty.applied()?;
         match self.adts[aid].name.as_str() {
@@ -619,11 +656,59 @@ impl Solver {
             return Ok(Some((raw, e.id())));
         }
         match e.kind() {
-            ExprKind::Access(Access::Dot { left, .. } | Access::Square { left, .. }) => {
-                self.assignment_place_binding(left)
+            ExprKind::Access(Access::Dot { .. } | Access::Square { .. }) => {
+                // `c.p = v` where `c.p` holds a `__Place` writes through
+                // the stored descriptor -- the member itself is the
+                // place, not a path into `c`. The check walks declared
+                // field types, so an `inout`-only accessor's element is
+                // never read. r[impl mimas.place.field]
+                if self.access_place_ty(e).is_some() {
+                    // the descriptor receiver gets a fresh node: `e`'s
+                    // own id still solves (and reads through) as the
+                    // assignment's LHS, while `.write` on the copy needs
+                    // the raw place.
+                    let raw = expr(e.kind().clone(), e.location());
+                    self.raw_places.insert(raw.id());
+                    return Ok(Some((raw, e.id())));
+                }
+                match e.kind() {
+                    ExprKind::Access(Access::Dot { left, .. } | Access::Square { left, .. }) => {
+                        self.assignment_place_binding(left)
+                    }
+                    _ => Ok(None),
+                }
             }
             _ => Ok(None),
         }
+    }
+
+    /// The declared type `e` names when it ends on a `__Place` field:
+    /// `h.gripped` on `gripped: __RemovablePlace<Thing>` gives the
+    /// descriptor type. Value reads aren't consulted -- an `inout`-only
+    /// accessor element has no read to force.
+    fn access_place_ty(&mut self, e: &Expr) -> Option<Ty> {
+        let (root, segs) = crate::root_and_path(e)?;
+        let dec = self.ribs.resolve(root)?;
+        let mut ty = Ty::Vid(self.decs[dec].vid).normalized(self);
+        for seg in segs {
+            match seg {
+                crate::GuardSeg::Field(f) => {
+                    if self.is_place_type(&ty).is_some() {
+                        return None;
+                    }
+                    let (aid, _) = ty.applied()?;
+                    let variant = self.adts[aid].try_as_struct()?;
+                    ty = variant.fields.get(&f)?.ty.clone().normalized(self);
+                }
+                crate::GuardSeg::Index => {
+                    ty = match ty {
+                        Ty::Array(inner, _) => *inner,
+                        _ => return None,
+                    };
+                }
+            }
+        }
+        self.is_place_type(&ty).map(|_| ty)
     }
 
     fn place_assignment(&mut self, id: NodeId, a: &Assignment) -> Result<bool> {

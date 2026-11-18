@@ -162,12 +162,13 @@ impl FnRec {
         let params: Vec<_> = self.params.iter().map(|p| field_value("FnParam", p)).collect();
         let marks: Vec<_> = self.marks.iter().map(|t| quote(t)).collect();
         format!(
-            "FnSig {{ name = {}, params = {}, ret = {}, doc = {}, marks = {} }}",
+            "FnSig {{ name = {}, params = {}, ret = {}, doc = {}, marks = {}, writes = __fn_writes({}) }}",
             quote(&self.name),
             list_value("FnParam", params),
             quote(&self.ret),
             quote(&self.doc),
             list_value("str", marks),
+            self.name,
         )
     }
 

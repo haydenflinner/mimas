@@ -128,6 +128,25 @@ impl Query for Expr {
                     inner(self)
                         .solve(self.id(), self.location(), solver)
                         .and_then(|ty| {
+                            // a `__Place`-typed field (`c.p`) reads
+                            // through its descriptor in value position;
+                            // `.read`/`.write`/`.remove` receivers and
+                            // write targets stay raw. Subscripts are
+                            // skipped: `xs[i].remove()` already routes
+                            // element places through `subscript_removal`.
+                            // r[impl mimas.place.field]
+                            if let ExprKind::Access(access @ Access::Dot { .. }) = self.kind()
+                                && !solver.raw_places.contains(&self.id())
+                                && solver
+                                    .is_place_type(&ty.clone().normalized(solver))
+                                    .is_some()
+                            {
+                                return solver
+                                    .place_field_read(self.id(), access, ty, self.location());
+                            }
+                            Ok(ty)
+                        })
+                        .and_then(|ty| {
                             let vid = solver.node_vid(self.id());
                             solver
                                 .register_sub(vid, ty)
