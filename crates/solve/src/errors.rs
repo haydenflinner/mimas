@@ -735,6 +735,20 @@ pub struct IteratingHere {
 }
 
 #[derive(Error, Debug, Diagnostic)]
+#[error("writes to `{name}`'s members die with each pass of this loop")]
+#[diagnostic(severity(Warning))]
+pub struct DeadElemWrite {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("`{iter}` produces `{name}` fresh every iteration")]
+    pub at: SourceSpan,
+    pub name: String,
+    pub iter: String,
+    #[help]
+    pub help: String,
+}
+
+#[derive(Error, Debug, Diagnostic)]
 #[error("a const is computed before the program runs, so it can't have effects")]
 pub struct ImpureConst {
     #[source_code]

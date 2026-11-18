@@ -980,3 +980,160 @@ fn spliced_include_beyond_its_grant_refuses() {
     let e = err("//# page: kit\nnet_get();\n//# page: \nuse \"kit\" granting { io };\n").unwrap();
     assert!(e.contains("`kit` needs"), "{e}");
 }
+
+// ---- for-element dead stores
+
+// r[verify mimas.for.elem-write]
+#[test]
+fn elem_member_write_warns_on_computed_iterator() {
+    let _t = TestResetter;
+    // `make()` hands each pass a fresh W -- `w.n =` writes that value and dies
+    let w = warns(
+        "struct W { n: int } fn make() -> [W] { [W { n = 0 }] } fn f() { for w in make() { w.n = 1; } }",
+    );
+    assert!(
+        w.iter().any(|m| m.contains("die with each pass")),
+        "{w:?}"
+    );
+}
+
+// r[verify mimas.for.elem-write]
+#[test]
+fn elem_member_write_silent_on_place_iterator() {
+    let _t = TestResetter;
+    // `for w in ws` binds the shared element -- `w.n =` lands in `ws`
+    let w = warns(
+        "struct W { n: int } fn f(ws: [W]) { for w in ws { w.n = 1; } }",
+    );
+    assert!(
+        w.iter().all(|m| !m.contains("die with each pass")),
+        "{w:?}"
+    );
+}
+
+// r[verify mimas.for.elem-write]
+#[test]
+fn elem_tuple_member_write_warns_on_call_iterator() {
+    let _t = TestResetter;
+    // the crushfield shape: `pr.1 =` writes the pair a call produced, never a list slot
+    let w = warns(
+        "struct W { n: int } fn pairs() -> [(int, W)] { [(0, W { n = 0 })] } fn f() { for pr in pairs() { pr.1 = W { n = 9 }; } }",
+    );
+    assert!(
+        w.iter().any(|m| m.contains("die with each pass")),
+        "{w:?}"
+    );
+}
+
+// r[verify mimas.for.elem-write]
+#[test]
+fn elem_member_write_warns_on_dict_pair() {
+    let _t = TestResetter;
+    // `for p in d` yields a fresh (key, value) pair -- `p.1 =` dies even though `d`
+    // is a place
+    let w = warns(
+        "struct W { n: int } fn f(d: {W}) { for p in d { p.1 = W { n = 9 }; } }",
+    );
+    assert!(
+        w.iter().any(|m| m.contains("die with each pass")),
+        "{w:?}"
+    );
+}
+
+// r[verify mimas.for.elem-write]
+#[test]
+fn elem_dict_value_write_through_stays_legal() {
+    let _t = TestResetter;
+    // `p.1.n` writes through the pair to the shared value -- observed, no flag
+    let w = warns(
+        "struct W { n: int } fn f(d: {W}) { for p in d { p.1.n = 9; } }",
+    );
+    assert!(
+        w.iter().all(|m| !m.contains("die with each pass")),
+        "{w:?}"
+    );
+}
+
+// r[verify mimas.for.elem-write]
+#[test]
+fn elem_read_and_deeper_write_are_fine() {
+    let _t = TestResetter;
+    // reads of the fresh element are fine, and `w.n.x` writes an object `w`
+    // only references -- only first-level member writes die with the pass
+    let w = warns(
+        "struct V { x: int } struct W { n: V } fn make() -> [W] { [W { n = V { x = 0 } }] } fn f() { for w in make() { w.n.x = 1; w.n; } }",
+    );
+    assert!(
+        w.iter().all(|m| !m.contains("die with each pass")),
+        "{w:?}"
+    );
+}
+
+// r[verify mimas.for.elem-write]
+#[test]
+fn elem_write_shadowed_let_is_fine() {
+    let _t = TestResetter;
+    // the shadowed `x` is a different dec -- the lint tracks bindings, not names
+    let w = warns(
+        "struct W { n: int } fn make() -> [W] { [W { n = 0 }] } fn f() { for x in make() { let x = W { n = 1 }; x.n = 2; x.n; } }",
+    );
+    assert!(
+        w.iter().all(|m| !m.contains("die with each pass")),
+        "{w:?}"
+    );
+}
+
+// r[verify mimas.for.elem-write]
+#[test]
+fn elem_member_write_nested_loops_are_independent() {
+    let _t = TestResetter;
+    // `w` shares `ws`'s element (live); `p` is fresh from `mk()` (dead)
+    let w = warns(
+        "struct W { n: int } fn mk() -> [W] { [W { n = 0 }] } fn f(ws: [W]) { for w in ws { for p in mk() { w.n = 1; p.n = 2; } } }",
+    );
+    assert_eq!(
+        w.iter()
+            .filter(|m| m.contains("die with each pass"))
+            .count(),
+        1,
+        "{w:?}"
+    );
+}
+
+// r[verify mimas.for.elem-bind]
+#[test]
+fn destructure_member_compound_assign_errors() {
+    let _t = TestResetter;
+    // `for (i, v)` members are loop variables too -- `v += 1` writes the pass's
+    // own int copy, dead exactly like `x = ...`
+    let e = err("fn f(pairs: [(int, int)]) { for (i, v) in pairs { v += 1; } }").unwrap();
+    assert!(e.contains("cannot assign to loop variable"), "{e}");
+}
+
+// r[verify mimas.for.elem-bind]
+#[test]
+fn destructure_member_rebind_errors() {
+    let _t = TestResetter;
+    let e = err(
+        "struct W { n: int } fn f(xs: [(int, W)]) { for (i, w) in xs { w = W { n = 9 }; } }",
+    )
+    .unwrap();
+    assert!(e.contains("cannot assign to loop variable"), "{e}");
+}
+
+// r[verify mimas.for.elem-bind]
+#[test]
+fn destructure_member_field_write_stays_legal() {
+    let _t = TestResetter;
+    // the member binds the shared element -- `w.n =` writes through, no flag
+    let w = warns(
+        "struct W { n: int } fn f(xs: [(int, W)]) { for (i, w) in xs { w.n = 1; } }",
+    );
+    assert!(
+        w.iter().all(|m| !m.contains("die with each pass")),
+        "{w:?}"
+    );
+    // and the member write is not AssignToLoopVar -- only `w =` / `w op=` are
+    let e = err("struct W { n: int } fn f(xs: [(int, W)]) { for (i, w) in xs { w.n = 1; } }");
+    assert!(e.is_none(), "{e:?}");
+}

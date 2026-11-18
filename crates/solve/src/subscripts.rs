@@ -20,6 +20,19 @@ fn expr(kind: impl Into<ExprKind>, at: Location) -> Expr {
 fn ident(name: &str, at: Location) -> Expr {
     expr(Ident::new(name, at), at)
 }
+/// The ident a first-level member write stores into: `x.f`, `x[i]` and `x.1` all
+/// yield `x`. `x` itself, `x.f.g` and `x[i].f` yield `None` -- those store into an
+/// object `x` only references, which can be shared even when `x` is fresh.
+fn member_write_root(e: &Expr) -> Option<&Ident> {
+    let ExprKind::Access(access) = e.kind() else {
+        return None;
+    };
+    match access {
+        Access::Dot { left, .. } | Access::Square { left, .. } => left.as_ident(),
+        _ => None,
+    }
+}
+
 fn call(left: Expr, values: Vec<Expr>, at: Location) -> Expr {
     expr(
         Call {
@@ -213,6 +226,7 @@ impl Solver {
     // r[impl mimas.sub.select]
     pub(crate) fn subscript_assignment(&mut self, id: NodeId, a: &Assignment) -> Result<bool> {
         self.check_place_write(&a.left)?;
+        self.check_dead_elem_write(a);
         if self.place_assignment(id, a)? {
             return Ok(true);
         }
@@ -599,6 +613,48 @@ impl Solver {
             .into());
         }
         Ok(())
+    }
+
+    /// `for x in <computed>` binds a fresh value each pass: a first-level member write
+    /// (`x.f`, `x[i]`, `x.1`) lands on it and dies with the iteration, so warn. Deeper
+    /// writes (`x.f.g`) reach objects the value only references and stay live, as does
+    /// every member write over a place iterator (`for x in xs` shares `xs`'s element).
+    /// r[impl mimas.for.elem-write]
+    fn check_dead_elem_write(&mut self, a: &Assignment) {
+        let Some(root) = member_write_root(&a.left) else {
+            return;
+        };
+        let Some(dec) = self.ribs.resolve(root) else {
+            return;
+        };
+        let Some(fresh) = self.ephemeral_elems.get(&dec) else {
+            return;
+        };
+        let (iter, help) = match fresh {
+            crate::FreshElem::DictPair(d) => (
+                d.clone(),
+                format!("write `{d}[{}.0]` to change the entry", root.lexeme),
+            ),
+            crate::FreshElem::Iterated(i) => (
+                i.clone(),
+                concat!(
+                    "write the source place instead: bind the iterator's result ",
+                    "(`let ys = ...`) and iterate it, or loop an index (`for i in 0 .. n` ",
+                    "writes `xs[i].f`); `for x in &xs` is planned for in-place iteration"
+                )
+                .to_string(),
+            ),
+        };
+        self.warnings.push(std::rc::Rc::new(
+            crate::errors::DeadElemWrite {
+                src: self.src(a.left.location()),
+                at: a.left.location().into(),
+                name: root.lexeme.clone(),
+                iter,
+                help,
+            }
+            .into(),
+        ));
     }
     fn builtin_place(&mut self, id: NodeId, e: &Expr) -> Result<Expr> {
         let at = e.location();

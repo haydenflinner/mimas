@@ -313,6 +313,12 @@ pub struct Solver {
     /// Collections a `for` loop is iterating, pushed for the duration of each body's solve.
     pub(crate) iter_guards: Vec<IterGuard>,
 
+    /// `for`-element bindings whose first-level member writes can never reach a stored
+    /// element: the iterator was computed (`f()`, `xs.enumerate()`) or yields fresh
+    /// values every pass (dict `(key, value)` pairs). The assignment path warns
+    /// (r[mimas.for.elem-write]).
+    pub(crate) ephemeral_elems: FxHashMap<DecId, FreshElem>,
+
     /// In-scope declared type params (`fn map<T, U>`, `impl Pair` re-entering `Pair<A, B>`),
     /// innermost last. `Ty::from_annotation` resolves a bare `T` through these before ribs,
     /// units, or builtins. Entries persist only for the duration of one item's solve.
@@ -435,6 +441,7 @@ impl Solver {
             prelude_types: FxHashSet::default(),
             non_value: None,
             iter_guards: vec![],
+            ephemeral_elems: FxHashMap::default(),
             type_params: vec![],
             param_bounds: FxHashMap::default(),
             pact_groups: FxHashMap::default(),
@@ -5164,6 +5171,16 @@ pub(crate) struct IterGuard {
 pub(crate) enum GuardSeg {
     Field(String),
     Index,
+}
+
+/// Why a `for` loop's element binding holds a fresh value each pass -- the wording a
+/// member-write warning uses to say *which* production made it fresh.
+#[derive(Debug, Clone)]
+pub(crate) enum FreshElem {
+    /// A non-place iterator (`f()`, `xs.enumerate()`) produced the element.
+    Iterated(String),
+    /// A dict yields a fresh `(key, value)` pair even when the dict itself is a place.
+    DictPair(String),
 }
 
 /// Walks `expr`'s access spine to its root ident, returning it plus the field/index hops from
