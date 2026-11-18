@@ -1105,3 +1105,63 @@ fn direct_bool_eq_lowers_to_specialized_bool_op() {
         "bool != should lower to BoolNe:\n{ops:#?}"
     );
 }
+
+// part 4: content_hashes — BodyId is an address, not content
+
+#[test]
+fn content_hashes_track_code_not_body_index() {
+    use super::compile_test_utils::compile_program;
+
+    // The same two functions, swapped declaration order — a/b land on
+    // different BodyIds, so `b`'s `call_direct` operand bytes differ;
+    // its *content* doesn't.
+    let a = compile_program("fn a() -> int { 1 }\nfn b() -> int { a() }\nlet _ = b();");
+    let b = compile_program("fn b() -> int { a() }\nlet _ = b();\nfn a() -> int { 1 }");
+    let ha = crate::content_hashes(&a.chunks, &a.bytes);
+    let hb = crate::content_hashes(&b.chunks, &b.bytes);
+
+    // Role-identify the named bodies without names: the leaf has no
+    // body-operand ops at all, the caller carries a call_direct.
+    let role = |p: &crate::Program| {
+        let mut leaf = None;
+        let mut caller = None;
+        for (body, _c) in p.chunks.iter() {
+            if body == p.entry {
+                continue;
+            }
+            let ops = p.ops(body);
+            let has_body_op = ops.iter().any(|(_, o)| {
+                matches!(
+                    o,
+                    Op::CallDirect { .. }
+                        | Op::LoadBody { .. }
+                        | Op::NewClosure { .. }
+                        | Op::TraceEdge { .. }
+                )
+            });
+            if !has_body_op {
+                leaf.get_or_insert(body.index());
+            }
+            // Inlined calls leave a `TraceEdge` carrying the callee's
+            // index — the edge marker is still an embedded address.
+            if ops
+                .iter()
+                .any(|(_, o)| matches!(o, Op::CallDirect { .. } | Op::TraceEdge { .. }))
+            {
+                caller.get_or_insert(body.index());
+            }
+        }
+        (leaf.unwrap(), caller.unwrap())
+    };
+    let (la, ca) = role(&a);
+    let (lb, cb) = role(&b);
+    // Sanity: they really did land on different indices — otherwise the
+    // test proves nothing.
+    assert_ne!((la, ca), (lb, cb), "expected swapped BodyIds");
+    assert_eq!(ha[la], hb[lb], "leaf body must hash by its code");
+    assert_eq!(
+        ha[ca], hb[cb],
+        "caller must resolve the callee by content, not index"
+    );
+}
+

@@ -144,6 +144,88 @@ impl Program {
     }
 }
 
+/// A `BodyId` operand is an *address*, not content: re-emitting a
+/// program in a different body order rewrites every `call_direct`,
+/// `new_closure`, `load_body` and `trace_edge` operand without changing
+/// what the code does. `content_hashes` gives each body a hash that is
+/// blind to that — every `BodyId` operand is re-encoded carrying the
+/// callee's own content hash instead of its index, iterated so the
+/// normalization propagates up the call graph. Acyclic graphs reach a
+/// fixpoint within `ROUNDS` passes; recursive cycles keep mutating but
+/// still deterministically — two compilations of the same program take
+/// the same trajectory and land on the same hashes regardless.
+///
+/// Residual addresses: `AdtId`/`StrId` operands are compile-order too
+/// but follow source order, not lambda emission order, so they survive
+/// the index shifts `BodyId` sees. `Reg`, `BlockTarget` (chunk-
+/// relative) and inline `Constant` values are already content.
+pub fn content_hashes(chunks: &IdVec<BodyId, Chunk>, bytes: &[u8]) -> Vec<u32> {
+    let mut ends: Vec<usize> = chunks.iter().map(|(_, c)| c.offset).collect();
+    ends.sort_unstable();
+    let ops_of: Vec<Vec<Op>> = chunks
+        .iter()
+        .map(|(_, c)| {
+            let end = ends
+                .iter()
+                .find(|e| **e > c.offset)
+                .copied()
+                .unwrap_or(bytes.len());
+            let mut d = Decoder {
+                bytes: bytes.to_vec(),
+                ip: c.offset,
+            };
+            let mut v = Vec::new();
+            while d.ip < end {
+                v.push(Op::decode(&mut d));
+            }
+            v
+        })
+        .collect();
+    // `BodyId::from(hash)` plants the callee's content hash where its
+    // index would encode — encode carries the u32, it never validates.
+    const ROUNDS: usize = 8;
+    let mut h = vec![0u32; ops_of.len()];
+    for _ in 0..ROUNDS {
+        let mut next = Vec::with_capacity(ops_of.len());
+        for ops in &ops_of {
+            let mut e = Encoder::new();
+            for op in ops {
+                let op = match op {
+                    Op::NewClosure { dst, body, captures } => Op::NewClosure {
+                        dst: *dst,
+                        body: BodyId::from(h[body.index()]),
+                        captures: captures.clone(),
+                    },
+                    Op::LoadBody { dst, body } => Op::LoadBody {
+                        dst: *dst,
+                        body: BodyId::from(h[body.index()]),
+                    },
+                    Op::CallDirect { dst, body, args } => Op::CallDirect {
+                        dst: *dst,
+                        body: BodyId::from(h[body.index()]),
+                        args: args.clone(),
+                    },
+                    Op::TraceEdge { callee } => Op::TraceEdge {
+                        callee: BodyId::from(h[callee.index()]),
+                    },
+                    _ => op.clone(),
+                };
+                op.encode(&mut e);
+            }
+            let mut hash: u32 = 0x811c_9dc5;
+            for b in e.finish() {
+                hash = (hash ^ b as u32).wrapping_mul(0x0100_0193);
+            }
+            next.push(hash);
+        }
+        if next == h {
+            break;
+        }
+        h = next;
+    }
+    h
+}
+
 /// A struct or enum the script declared with whatever its `impl` blocks put on it.
 #[derive(Debug, Clone, Default)]
 pub struct Type {
