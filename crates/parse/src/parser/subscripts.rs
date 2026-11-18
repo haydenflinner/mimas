@@ -239,8 +239,18 @@ impl Parser<'_> {
         }
         let wheres = self.where_clause();
         let saved = self.generator_type.replace(element.clone());
+        let saved_place = self.generator_place.take();
         let body = self.block();
+        let place = self.generator_place == Some(true);
         self.generator_type = saved;
+        self.generator_place = saved_place;
+        // `yield &e` bodies produce `() -> __Place<T>?` -- see the free
+        // form's `generator_subscript_item`. r[impl mimas.generator.place]
+        let element = if place {
+            Annotation::Applied(vec![self.ident_at("__Place", start)], vec![element])
+        } else {
+            element
+        };
         let mut parameter = Binding::new(self.ident_at("__generator_type", start));
         parameter.annotation = Some(element.clone());
         let closure = self.new_expr(
