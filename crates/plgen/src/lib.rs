@@ -672,6 +672,16 @@ fn sig(params: &[Pt], ret: Hr, wasm: bool) -> (String, String) {
     (ret_ty.to_string(), ptys)
 }
 
+/// Per-body `.pliron` texts, one entry per chunk — the raw material for
+/// `emit_module`/`assemble_module` and for drivers that emit bodies on
+/// worker threads and split a large program into group modules lowered
+/// in parallel.
+pub fn emit_bodies(prog: &Program, lyt: &Layout, wasm: bool) -> Vec<String> {
+    (0..prog.chunks.len())
+        .map(|b| emit_body(prog, b, lyt, wasm))
+        .collect()
+}
+
 /// Emit `.pliron` text for every chunk of `prog`, the bodiless `mj_*`
 /// extern declarations, and the
 /// `@mimas_pliron_bodies`/`@mimas_pliron_nbodies` globals.
@@ -680,7 +690,32 @@ fn sig(params: &[Pt], ret: Hr, wasm: bool) -> (String, String) {
 /// against a runtime that exports them (`mimas-natrt`'s `staticlib`/
 /// `cdylib`, or any artifact providing `vm::bc::nat`).
 pub fn emit_module(prog: &Program, lyt: &Layout, wasm: bool) -> String {
-    let nbodies = prog.chunks.len();
+    let bodies: Vec<(usize, String)> = emit_bodies(prog, lyt, wasm)
+        .into_iter()
+        .enumerate()
+        .collect();
+    assemble_module(prog.chunks.len(), lyt, wasm, &bodies)
+}
+
+/// Assemble one module from the shared members plus `bodies` as
+/// `(chunk index, emitted text)` pairs. `nbodies` is the whole program's
+/// chunk count: chunk indexes not listed get a bodiless decl so
+/// cross-body `llvm.call @mimas_body_*`s still resolve — a subset module
+/// scans and lowers standalone (the point of the split), and its object
+/// carries only real undefined-symbol references for the missing bodies.
+/// The table stays sized for the whole program and `init` fills only the
+/// listed slots, at their true indexes — so a merged link of the parts
+/// stays consistent.
+pub fn assemble_module(
+    nbodies: usize,
+    lyt: &Layout,
+    wasm: bool,
+    bodies: &[(usize, String)],
+) -> String {
+    let mut present = vec![false; nbodies];
+    for (i, _) in bodies {
+        present[*i] = true;
+    }
     let mut members: Vec<String> = Vec::new();
 
     // extern declarations for the helper surface — bodiless `llvm.func`s
@@ -736,18 +771,29 @@ pub fn emit_module(prog: &Program, lyt: &Layout, wasm: bool) -> String {
     let mut init = format!(
         "llvm.func @{INIT_FN}: llvm.func <{VOID} () variadic = false>\n    [llvm_function_linkage: llvm.linkage ExternalLinkage]\n  {{\n^{INIT_ENTRY}():\n    a_tbl = llvm.addressof @{BODIES_GLOBAL} : {PTR};\n    a_nb = llvm.addressof @{NBODIES_GLOBAL} : {PTR};\n    v_nb = llvm.constant <builtin.integer <{nbodies}: i64>> : {I64};\n    llvm.store *a_nb <- v_nb [align : 8];\n"
     );
-    for i in 0..nbodies {
+    for (i, _) in bodies {
         init.push_str(&format!(
             "    a_f{i} = llvm.addressof @{} : {PTR};\n    v_f{i} = llvm.ptrtoint a_f{i} to {wt};\n    a_p{i} = llvm.gep <{I8}> (a_tbl)[Constant({off})] : {PTR};\n    llvm.store *a_p{i} <- v_f{i} [align : {w}];\n",
-            body_name(i),
+            body_name(*i),
             off = i * w
         ));
     }
     init.push_str("    llvm.return\n  }");
     members.push(init);
 
-    for body in 0..nbodies {
-        members.push(emit_body(prog, body, lyt, wasm));
+    // Bodies outside this subset: bodiless decls so the present bodies'
+    // direct `llvm.call @mimas_body_*`s resolve. They land as ordinary
+    // undefined symbols in the object.
+    for i in 0..nbodies {
+        if !present[i] {
+            members.push(format!(
+                "llvm.func @{}: llvm.func <{VOID} ({PTR}) variadic = false> []",
+                body_name(i)
+            ));
+        }
+    }
+    for (_, text) in bodies {
+        members.push(text.clone());
     }
 
     format!(
@@ -757,7 +803,9 @@ pub fn emit_module(prog: &Program, lyt: &Layout, wasm: bool) -> String {
     )
 }
 
-fn emit_body(prog: &Program, body: usize, lyt: &Layout, wasm: bool) -> String {
+/// `.pliron` text for one chunk — `emit_bodies`'s per-index form, for
+/// callers that parallelize emission themselves.
+pub fn emit_body(prog: &Program, body: usize, lyt: &Layout, wasm: bool) -> String {
     let body_id = compile::BodyId::from(body as u32);
     let ops = prog.ops(body_id);
     let chunk = &prog.chunks[body_id];
