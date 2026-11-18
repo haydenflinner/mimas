@@ -71,3 +71,12 @@ struct FnGraph { name: str, ins: [str], outs: [str], nodes: [FnNode], rets: [int
 // Internal place descriptors. The solver reads and writes through these bindings.
 struct __Place<T> { read: () -> T, write: (T) -> () }
 struct __RemovablePlace<T> { read: () -> T, write: (T) -> (), remove: () -> () }
+
+// A nominal entity id: `Id<Thing>` and `Id<Hand>` are distinct types even
+// though both wrap an `int`, so a grip on one store can't index another.
+// `Id<T>?` is the empty handle. r[impl mimas.id.newtype]
+struct Id<T> { id: int }
+impl Id {
+    fn new(id: int) -> Id<T> { Id { id } }
+    fn raw(self) -> int { self.id }
+}

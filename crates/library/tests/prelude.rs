@@ -275,3 +275,39 @@ fn declared_units_win() {
         ["[4.4092452437, 1] lb", "5.4092452437 lb", "[0.90718474] usd/lb"]
     );
 }
+
+// the shipped `Id<T>` is a nominal entity key: `Id<Thing>` and
+// `Id<Hand>` are distinct types even though both wrap an `int`, and an
+// `Id`-taking member subscript is the idiomatic store lookup.
+// r[verify mimas.id.newtype]
+test_run!(
+    id_newtype_indexes_its_store,
+    "struct Thing { id: int, speed: float }
+     struct Entities<T> { slots: [T] }
+     impl Entities {
+         subscript(g: Id<T>) -> T {
+             get { self.slots[g.raw()] }
+         }
+     }
+     let e: Entities<Thing> = Entities { slots = [Thing { id = 0, speed = 1.0 }, Thing { id = 1, speed = 2.0 }] }
+     let g: Id<Thing> = Id::new(1)
+     let empty: Id<Thing>? = null
+     let TEST_VALUE = (e[g].speed, g.raw(), empty);",
+    "TEST_VALUE" => "[2.0, 1, null]",
+);
+
+// r[verify mimas.id.newtype]
+test_fail!(
+    a_wrong_tagged_id_cannot_index,
+    "struct Thing { id: int }
+     struct Entities<T> { slots: [T] }
+     impl Entities {
+         subscript(g: Id<T>) -> T {
+             get { self.slots[g.raw()] }
+         }
+     }
+     let e: Entities<Thing> = Entities { slots = [Thing { id = 0 }] }
+     let wrong: Id<int> = Id { id = 0 }
+     e[wrong]",
+    "expected Id<Thing> but found Id<int>",
+);
