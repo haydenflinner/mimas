@@ -361,3 +361,15 @@ test_run!(
      for_fields!(W, w, [_] => |f| { names.push(f.item_name); let row: f.item_type = f.value[0]; names.push(f\"{row[1]}\"); });",
     "names" => "[\"[int;2]\", \"2\"]",
 );
+
+// `sig!` reports a param's lend convention: `x: inout T` and `inout self`
+// read `inout = true`, a plain param `false`, and `ty` keeps the spelling.
+test_run!(
+    sig_reports_inout_params,
+    "fn bump(x: inout int) { x += 1 }
+     fn peek(x: int) -> int { x }
+     let s1 = sig!(bump); let s2 = sig!(peek);",
+    "s1.params[0].inout" => "true",
+    "s2.params[0].inout" => "false",
+    "s1.params[0].ty" => "\"inout int\"",
+);

@@ -58,6 +58,9 @@ use std::{cell::RefCell, collections::HashSet};
 struct Named {
     name: String,
     ty: String,
+    /// `x: inout T` -- the param's call convention lends the caller's slot.
+    /// Only `FnParam`s carry it; fields and variants always read `false`.
+    inout: bool,
 }
 
 #[derive(Clone)]
@@ -133,7 +136,16 @@ fn quote(text: &str) -> String {
 }
 
 fn field_value(kind: &str, f: &Named) -> String {
-    format!("{kind} {{ name = {}, ty = {} }}", quote(&f.name), quote(&f.ty))
+    if kind == "FnParam" {
+        format!(
+            "FnParam {{ name = {}, ty = {}, inout = {} }}",
+            quote(&f.name),
+            quote(&f.ty),
+            f.inout,
+        )
+    } else {
+        format!("{kind} {{ name = {}, ty = {} }}", quote(&f.name), quote(&f.ty))
+    }
 }
 
 fn list_value(elem: &str, items: Vec<String>) -> String {
@@ -200,6 +212,7 @@ impl<'s> Parser<'s> {
                             .map(|i| macros::unhygienic(i).lexeme)
                             .unwrap_or_else(|| "_".to_string()),
                         ty: b.annotation.as_ref().map(|a| a.to_string()).unwrap_or_default(),
+                        inout: matches!(b.annotation, Some(Annotation::Inout(..))),
                     })
                     .collect();
                 let doc = self
@@ -262,6 +275,7 @@ impl<'s> Parser<'s> {
                                     .map(|(i, t)| Named {
                                         name: i.to_string(),
                                         ty: t.to_string(),
+                                        inout: false,
                                     })
                                     .collect();
                                 let inside: Vec<_> = fields.iter().map(|f| f.ty.clone()).collect();
@@ -564,6 +578,7 @@ fn named_field(f: &StructField) -> Named {
             FieldKey::Int(i) => i.to_string(),
         },
         ty: f.annotation.to_string(),
+        inout: false,
     }
 }
 

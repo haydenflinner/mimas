@@ -2371,10 +2371,26 @@ impl<'s> Parser<'s> {
                 |p| {
                     // only the first parameter can be the receiver
                     let receiver = std::mem::replace(&mut first, false);
-                    if receiver && p.at(TokKind::SelfKeyword) {
-                        let location = p.next_location();
+                    // `fn f(inout self)` -- the receiver lent like a `&` arg, so
+                    // `self = next` inside writes back the caller's slot. The
+                    // parser sugar-expands it to `self: inout Self`.
+                    // r[impl mimas.inout.self]
+                    let inout = receiver
+                        && p.at(TokKind::Ident("inout"))
+                        && p.nth(1) == TokKind::SelfKeyword;
+                    if receiver && (p.at(TokKind::SelfKeyword) || inout) {
+                        let start = p.next_location();
+                        let kw = inout.then(|| p.require_ident());
                         p.bump(TokKind::SelfKeyword);
-                        return Binding::new(Ident::new("self", location));
+                        let mut binding = Binding::new(Ident::new("self", start));
+                        binding.annotation = kw.map(|kw| {
+                            let self_ty = Ident::new("Self".to_string(), kw.location);
+                            Annotation::Inout(
+                                kw,
+                                Box::new(Annotation::Ty(self_ty)),
+                            )
+                        });
+                        return binding;
                     }
                     let mut binding = p.binding();
                     binding.right = p.eat(TokKind::Equal).then(|| p.expr());

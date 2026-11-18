@@ -950,10 +950,19 @@ impl Solver {
                 )
             }
             _ => {
+                // an `inout self` call mints its receiver's `&` itself, so the
+                // user sees no `&` to point at: `get_box().reset()` fails here
+                // because a temporary has no slot to write back.
+                // r[impl mimas.inout.self]
+                let message = if self.implicit_self_borrows.contains(&id) {
+                    "`self` is lent to this method's `inout self` -- the receiver needs a field, a list slot, or a named variable to write back".into()
+                } else {
+                    "`&` needs a field, a list slot, or a mutable accessor".into()
+                };
                 return Err(crate::errors::SubscriptUse {
                     src: self.src(at),
                     at: at.into(),
-                    message: "`&` needs a field, a list slot, or a mutable accessor".into(),
+                    message,
                 }
                 .into());
             }

@@ -115,11 +115,19 @@ pub struct Solver {
     /// Calls that lend a `&` argument: emit scopes the borrow's pending
     /// cleanup to the call so the loan ends when the callee returns.
     pub(crate) inout_calls: FxHashSet<NodeId>,
+    /// `obj.reset()` on a `fn reset(inout self)` method: call node → the
+    /// minted `__borrow_place` marker whose descriptor emit lowers as arg-0
+    /// in place of the receiver's value.
+    /// r[impl mimas.inout.self]
+    pub(crate) self_place_mints: FxIndexMap<NodeId, Expr>,
     /// `&` call nodes a lending or keeping context claimed: an `inout`
     /// parameter's argument or a `let`'s value. Any other `&` is rejected
     /// where `borrow_place` runs.
     /// r[impl mimas.place.marker]
     pub(crate) allowed_borrows: FxHashSet<NodeId>,
+    /// `__borrow_place` markers an `inout self` call minted itself: errors
+    /// name the lent receiver, not a `&` the user never wrote.
+    pub(crate) implicit_self_borrows: FxHashSet<NodeId>,
     /// The `let`-claimed subset of `allowed_borrows`: a kept place writes
     /// through shared storage, which a whole-binding `&` can't promise.
     pub(crate) kept_borrows: FxHashSet<NodeId>,
@@ -408,7 +416,9 @@ impl Solver {
             inout_params: FxHashSet::default(),
             inout_decs: FxHashSet::default(),
             inout_calls: FxHashSet::default(),
+            self_place_mints: FxIndexMap::default(),
             allowed_borrows: FxHashSet::default(),
+            implicit_self_borrows: FxHashSet::default(),
             kept_borrows: FxHashSet::default(),
             element_borrows: FxHashSet::default(),
             binding_borrow_cells: FxIndexMap::default(),
@@ -3994,6 +4004,17 @@ impl Solver {
                 }
                 .into());
             }
+            // `fn m(inout self)` lends the receiver's own slot: `self` reads
+            // as the `__Place<Self>` descriptor it was declared with, not the
+            // impl target's plain value type. r[impl mimas.inout.self]
+            let ty = if ident.lexeme == "self"
+                && let Some(d) = dec
+                && self.inout_decs.contains(&d)
+            {
+                Ty::Vid(self.decs[d].vid).normalized(self)
+            } else {
+                ty
+            };
             (ty, dec)
         } else {
             match self.ribs.resolve(ident) {
@@ -5183,7 +5204,14 @@ impl Solver {
         // writing `self: Self` explicitly. outside an impl, the body-pass declare leaves it as a
         // vid and SelfOutOfContext fires at first use. `_self` counts too: it is the receiver
         // under a deliberately-unread name.
+        // `fn f(inout self)` lends the receiver's slot: the annotation arm
+        // below fixes `self` to `__Place<Self>`, so the `Self` fix would fight
+        // it. `Self` resolves to the impl target inside the annotation either
+        // way. r[impl mimas.inout.self]
+        let inout_self =
+            ident.is_receiver() && matches!(annotation, Some(Annotation::Inout(..)));
         if ident.is_receiver()
+            && !inout_self
             && let Some(mut target) = self.impl_target_ty()
         {
             ty.fulfill_ty(&mut target, self)
@@ -5196,10 +5224,24 @@ impl Solver {
         // reads and writes through it like any other place binding.
         // r[impl mimas.inout.param]
         let annotation = annotation.clone().map(|a| match a {
-            Annotation::Inout(_, inner) => {
+            Annotation::Inout(kw, inner) => {
                 self.inout_params.insert(left.id());
                 let place = Ident::new("__Place".to_string(), left.location());
-                Annotation::Applied(vec![place], vec![*inner])
+                // `inout self` synthesized `Self` as the inner type, but `Self`
+                // is not a resolvable name in an annotation -- the impl
+                // target's own name is, and inside its impl the bare name reads
+                // as `Self` already.
+                let inner = if ident.is_receiver()
+                    && let Some(aid) = self.impl_target()
+                {
+                    Annotation::Ty(Ident::new(
+                        self.adts[aid].name.clone(),
+                        kw.location,
+                    ))
+                } else {
+                    *inner
+                };
+                Annotation::Applied(vec![place], vec![inner])
             }
             a => a,
         });

@@ -469,3 +469,88 @@ test_fail!(
      let c = 0.0;
      f(&c);",
 );
+
+// `fn reset(inout self)` lends the caller's receiver slot: `b.reset()` is
+// `reset(&b)` -- `self = next` inside replaces the caller's variable.
+// r[verify mimas.inout.self]
+test_run!(
+    inout_self_rebinds_the_receiver,
+    "struct Box { v: int }
+     impl Box {
+         fn reset(inout self) { self = Box { v = 0 } }
+     }
+     let b = Box { v = 42 };
+     b.reset();
+     let got = b.v;",
+    "got" => "0",
+);
+
+// partial writes through `inout self` reach the caller's slot too --
+// `self` is the same `__Place` an `x: inout T` param holds.
+// r[verify mimas.inout.self]
+test_run!(
+    inout_self_member_writes_still_apply,
+    "struct Box { v: int }
+     impl Box {
+         fn bump(inout self) { self.v += 10 }
+     }
+     let b = Box { v = 1 };
+     b.bump();
+     let got = b.v;",
+    "got" => "11",
+);
+
+// the receiver lend is path-granular like a `&` argument: `p.a.merge(&p.b)`
+// loans two disjoint fields of one root.
+// r[verify mimas.inout.self]
+// r[verify mimas.inout.exclusive]
+test_run!(
+    inout_self_lends_disjoint_sibling_paths,
+    "struct Box { v: int }
+     impl Box {
+         fn merge(inout self, other: inout Box) { self = other }
+     }
+     struct Pair { a: Box, b: Box }
+     let p = Pair { a = Box { v = 1 }, b = Box { v = 2 } };
+     p.a.merge(&p.b);
+     let got = p.a.v;",
+    "got" => "2",
+);
+
+// the lent receiver overlaps a `&` argument from the same root.
+// r[verify mimas.inout.self]
+// r[verify mimas.inout.exclusive]
+test_fail!(
+    inout_self_overlaps_same_root_args,
+    "struct Box { v: int }
+     impl Box {
+         fn merge(inout self, other: inout Box) { self = other }
+     }
+     let b = Box { v = 1 };
+     b.merge(&b);",
+);
+
+// a temporary has no slot to write back.
+// r[verify mimas.inout.self]
+test_fail!(
+    inout_self_rejects_a_temporary_receiver,
+    "struct Box { v: int }
+     impl Box {
+         fn reset(inout self) { self = Box { v = 0 } }
+     }
+     fn mk() -> Box { Box { v = 9 } }
+     mk().reset();",
+);
+
+// `xs[0].reset()` lends the element place, which the iteration freeze
+// counts like any other write.
+// r[verify mimas.inout.self]
+test_fail!(
+    inout_self_element_lend_hits_the_loop_freeze,
+    "struct Box { v: int }
+     impl Box {
+         fn reset(inout self) { self = Box { v = 0 } }
+     }
+     let xs = [Box { v = 1 }];
+     for x in xs { xs[0].reset() }",
+);

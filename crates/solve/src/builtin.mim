@@ -42,7 +42,7 @@ opp StartEnd { Start "⇤", End "⇥" }
 // written in the declaration.
 
 /// One parameter of a function.
-struct FnParam { name: str, ty: str }
+struct FnParam { name: str, ty: str, inout: bool }
 
 /// A function as data: its name, its parameters, its return type, its
 /// doc comment on one line, and the marks (`#[machine]`) it carries.
