@@ -2078,8 +2078,10 @@ fn spaced_percent_is_infix_modulo() {
 // `÷` spells `~/` — integer division. `BinaryOp::of` folds Obelus to
 // `Div`, so the printed form is the tilde spelling.
 #[test]
-fn obelus_is_div() {
-    assert_eq!(parse_expr("a ÷ b"), "a ~/ b");
+fn obelus_is_quotient_remainder() {
+    // `÷` desugars to the pair — quotient, then remainder.
+    // r[verify mimas.index.div]
+    assert_eq!(parse_expr("a ÷ b"), "(a ~/ b, a mod b)");
 }
 
 // r[verify mimas.struct.update]
