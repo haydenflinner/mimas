@@ -1,0 +1,10 @@
+// The prelude — the part of the standard library written in Mimas itself.
+// These statements ride ahead of every file; later names win over
+// nothing here, so keep them few and unlikely to collide.
+// r[impl mimas.prelude]
+
+/// `a ÷ b` desugars to `quot_rem(a, b)` — quotient and remainder in
+/// one call, each operand evaluated exactly once. Both halves keep
+/// `index`, because `~/` and `mod` do.
+/// r[impl mimas.index.div]
+fn quot_rem(a, b) { (a ~/ b, a % b) }

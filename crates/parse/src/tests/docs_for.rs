@@ -14,7 +14,7 @@ fn doc_is_at_the_start_of_its_item() {
                   pub fn add() {}";
     let (ast, errors) = parse(source);
     assert!(errors.is_empty(), "{errors:?}");
-    let start = ast.stmts()[0].span().start;
+    let start = super::utils::file_stmts(&ast)[0].span().start;
     assert_eq!(ast.docs_for(start), Some("Adds."));
 }
 

@@ -281,8 +281,12 @@ impl<'s> Parser<'s> {
     /// Parses the whole source into an Ast, along with every error found. Anything that failed
     /// to parse is left in the Ast as [Poison], which later stages treat as unreachable, so only
     /// pass the Ast on when the errors are empty.
-    pub fn into_ast(mut self) -> (Ast, Vec<shared::Error>) {
-        let mut statements = vec![];
+    pub fn into_ast(self) -> (Ast, Vec<shared::Error>) {
+        self.into_ast_inner(true)
+    }
+
+    fn into_ast_inner(mut self, prelude: bool) -> (Ast, Vec<shared::Error>) {
+        let mut statements = if prelude { prelude_stmts() } else { vec![] };
         while !self.at(TokKind::Eof) {
             if self.peek().starts_stmt() {
                 statements.push(self.stmt());
@@ -2958,21 +2962,21 @@ impl<'s> Parser<'s> {
             BinaryOp::Equality(op) => self.new_expr(Equality::new(left, op, right), start),
             BinaryOp::In(condition) => self.new_expr(In::new(left, right, condition), start),
             BinaryOp::Eval(op) => {
-                // `a ÷ b` is the rich quotient — `(a ~/ b, a % b)`, quotient and
-                // remainder in one value. r[impl mimas.index.div]
-                // The operands are cloned through, so a side-effecting
-                // operand evaluates twice: keep them pure.
+                // `a ÷ b` is the rich quotient — `quot_rem(a, b)` from the
+                // prelude, quotient and remainder in one tuple, each operand
+                // evaluated exactly once. r[impl mimas.index.div]
                 if matches!(op, EvaluationOp::Obelus) {
-                    let (l2, r2) = (left.clone(), right.clone());
-                    let q = self.new_expr(
-                        Evaluation::new(left, EvaluationOp::Div, right),
+                    let f = self.new_expr(Ident::synthetic("quot_rem"), start);
+                    return self.new_expr(
+                        Call::new(
+                            f,
+                            vec![
+                                Argument { name: None, value: left },
+                                Argument { name: None, value: right },
+                            ],
+                        ),
                         start,
                     );
-                    let r = self.new_expr(
-                        Evaluation::new(l2, EvaluationOp::Modulo, r2),
-                        start,
-                    );
-                    return self.new_expr(Literal::Tuple(vec![q, r]), start);
                 }
                 self.new_expr(Evaluation::new(left, op, right), start)
             }
@@ -5724,6 +5728,18 @@ impl<'s> Parser<'s> {
 const FUEL: u32 = 4096;
 
 /// Operators and keywords from other languages, with what to say about them.
+/// The prelude — the stdlib written in Mimas, parsed ahead of every file.
+/// Its statements type-check and compile with the file's own, so anything
+/// the parser desugars to can live here as ordinary Mimas.
+/// r[impl mimas.prelude]
+pub(crate) fn prelude_stmts() -> Vec<Stmt> {
+    const SRC: &str = include_str!("prelude.mim");
+    let (ast, errors) =
+        Parser::new(Lexer::new(SRC, 0, "prelude".into())).into_ast_inner(false);
+    debug_assert!(errors.is_empty(), "the prelude must parse: {errors:?}");
+    ast.unpack()
+}
+
 fn foreign_spelling(name: &str) -> Option<(&'static str, &'static str)> {
     match name {
         "elif" => Some(("unknown keyword `elif`", "mimas spells this `else if`")),

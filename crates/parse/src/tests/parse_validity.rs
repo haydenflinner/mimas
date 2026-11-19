@@ -217,8 +217,8 @@ test_fail!(
 fn tests_list_keeps_expressions() {
     let lexer = crate::lex::Lexer::new("#[tests] [ 1 == 2, true ]", 0, "test".into());
     let ast = crate::Parser::new(lexer).try_into_ast().unwrap();
-    assert_eq!(ast.stmts().len(), 1);
-    let text = ast.stmts()[0].to_string();
+    assert_eq!(super::utils::file_stmts(&ast).len(), 1);
+    let text = super::utils::file_stmts(&ast)[0].to_string();
     assert!(text.contains("#[tests]"), "{text}");
     assert!(text.contains("1 == 2"), "{text}");
     assert!(text.contains("true"), "{text}");
@@ -271,7 +271,7 @@ test_fail!(
 fn check_item(source: &str) -> crate::Tests {
     let lexer = crate::lex::Lexer::new(source, 0, "test".into());
     let ast = crate::Parser::new(lexer).try_into_ast().unwrap();
-    let stmts = ast.stmts();
+    let stmts = super::utils::file_stmts(&ast);
     assert_eq!(stmts.len(), 1, "{source} should be one item");
     let crate::StmtKind::Item(item) = stmts[0].kind() else {
         panic!("{source} should be an item")
@@ -291,9 +291,9 @@ fn check_line_is_ordinary_equality() {
         "test".into(),
     );
     let ast = crate::Parser::new(lexer).try_into_ast().unwrap();
-    assert_eq!(ast.stmts().len(), 2);
+    assert_eq!(super::utils::file_stmts(&ast).len(), 2);
     for (i, want) in ["square(0) == 0", "square(4) == 16"].iter().enumerate() {
-        let crate::StmtKind::Item(item) = ast.stmts()[i].kind() else {
+        let crate::StmtKind::Item(item) = super::utils::file_stmts(&ast)[i].kind() else {
             panic!("check line should be an item")
         };
         let crate::ItemKind::Tests(tests) = item.kind() else {
@@ -346,9 +346,9 @@ fn check_lines_stand_alone() {
         "test".into(),
     );
     let ast = crate::Parser::new(lexer).try_into_ast().unwrap();
-    assert_eq!(ast.stmts().len(), 4);
+    assert_eq!(super::utils::file_stmts(&ast).len(), 4);
     for i in [1, 2] {
-        let crate::StmtKind::Item(item) = ast.stmts()[i].kind() else {
+        let crate::StmtKind::Item(item) = super::utils::file_stmts(&ast)[i].kind() else {
             panic!("check line should be an item")
         };
         assert!(matches!(item.kind(), crate::ItemKind::Tests(_)));
@@ -794,7 +794,7 @@ fn opp_is_an_enum_and_its_flip() {
     // Sky`, both at the declaration
     let lexer = crate::lex::Lexer::new("opp Sky { Sun, Moon }\nlet x = 1;", 0, "test".into());
     let ast = crate::Parser::new(lexer).try_into_ast().unwrap();
-    let kinds: Vec<String> = ast.stmts().iter().map(|s| s.to_string()).collect();
+    let kinds: Vec<String> = super::utils::file_stmts(&ast).iter().map(|s| s.to_string()).collect();
     assert_eq!(kinds.len(), 3, "{kinds:?}");
     assert!(kinds[0].starts_with("enum Sky"), "{kinds:?}");
     assert!(kinds[1].starts_with("impl Opp for Sky"), "{kinds:?}");
@@ -802,7 +802,7 @@ fn opp_is_an_enum_and_its_flip() {
     // glyphs on the ends add `fn glyph` to the impl; one glyph alone is an error
     let lexer = crate::lex::Lexer::new("opp Sky { Sun \"☀\", Moon \"☾\" }", 0, "test".into());
     let ast = crate::Parser::new(lexer).try_into_ast().unwrap();
-    let kinds: Vec<String> = ast.stmts().iter().map(|s| s.to_string()).collect();
+    let kinds: Vec<String> = super::utils::file_stmts(&ast).iter().map(|s| s.to_string()).collect();
     assert!(kinds[1].contains("fn glyph(self) -> str"), "{kinds:?}");
     let lexer = crate::lex::Lexer::new("opp Sky { Sun \"☀\", Moon }", 0, "test".into());
     assert!(crate::Parser::new(lexer).try_into_ast().is_err());
@@ -811,7 +811,7 @@ fn opp_is_an_enum_and_its_flip() {
     let lexer =
         crate::lex::Lexer::new("enum Suit { Spades \"♠\", Hearts \"♥\" }", 0, "test".into());
     let ast = crate::Parser::new(lexer).try_into_ast().unwrap();
-    let kinds: Vec<String> = ast.stmts().iter().map(|s| s.to_string()).collect();
+    let kinds: Vec<String> = super::utils::file_stmts(&ast).iter().map(|s| s.to_string()).collect();
     assert_eq!(kinds.len(), 2, "{kinds:?}");
     assert!(
         kinds[1].starts_with("impl Suit") && kinds[1].contains("fn glyph(self) -> str"),
@@ -832,7 +832,7 @@ fn opp_is_an_enum_and_its_flip() {
         "test".into(),
     );
     let ast = crate::Parser::new(lexer).try_into_ast().unwrap();
-    let kinds: Vec<String> = ast.stmts().iter().map(|s| s.to_string()).collect();
+    let kinds: Vec<String> = super::utils::file_stmts(&ast).iter().map(|s| s.to_string()).collect();
     assert!(
         kinds[0].starts_with("fn __lit_rpn(s: str) -> int"),
         "{kinds:?}"
