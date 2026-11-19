@@ -2957,7 +2957,25 @@ impl<'s> Parser<'s> {
             BinaryOp::Logical(op) => self.new_expr(Logical::new(left, op, right), start),
             BinaryOp::Equality(op) => self.new_expr(Equality::new(left, op, right), start),
             BinaryOp::In(condition) => self.new_expr(In::new(left, right, condition), start),
-            BinaryOp::Eval(op) => self.new_expr(Evaluation::new(left, op, right), start),
+            BinaryOp::Eval(op) => {
+                // `a ÷ b` is the rich quotient — `(a ~/ b, a % b)`, quotient and
+                // remainder in one value. r[impl mimas.index.div]
+                // The operands are cloned through, so a side-effecting
+                // operand evaluates twice: keep them pure.
+                if matches!(op, EvaluationOp::Obelus) {
+                    let (l2, r2) = (left.clone(), right.clone());
+                    let q = self.new_expr(
+                        Evaluation::new(left, EvaluationOp::Div, right),
+                        start,
+                    );
+                    let r = self.new_expr(
+                        Evaluation::new(l2, EvaluationOp::Modulo, r2),
+                        start,
+                    );
+                    return self.new_expr(Literal::Tuple(vec![q, r]), start);
+                }
+                self.new_expr(Evaluation::new(left, op, right), start)
+            }
             BinaryOp::PlusMinus => self.plus_minus(left, right, start),
         }
     }
@@ -5992,9 +6010,6 @@ impl BinaryOp {
             return Some((Self::Eval(op), 4));
         }
         let op = EvaluationOp::try_from(kind).ok()?;
-        // `÷` spells `~/` — normalize to `Div` so nothing downstream
-        // carries two names for integer division.
-        let op = if matches!(op, EvaluationOp::Obelus) { EvaluationOp::Div } else { op };
         // `a ≈ b` compares, so it binds like `==` (r[impl mimas.op.approx])
         if op == EvaluationOp::Approx {
             return Some((Self::Eval(op), 2));

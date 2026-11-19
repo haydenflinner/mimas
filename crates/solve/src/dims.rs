@@ -1483,21 +1483,6 @@ impl<'a> Pass<'a> {
                 }
             }
             EvaluationOp::Multiply | EvaluationOp::Divide | EvaluationOp::Div => {
-                // `index` division is a choice, not a default: `/` would
-                // silently float a count. `a ÷ b` is the quotient, `a % b`
-                // the remainder — the caller picks. r[impl mimas.index.div]
-                if op == EvaluationOp::Divide
-                    && (l.dim().is_some_and(|d| d.bare() == units::INDEX)
-                        || r.dim().is_some_and(|d| d.bare() == units::INDEX))
-                {
-                    self.fail(
-                        e.location(),
-                        "index division needs a choice".to_string(),
-                        "`a ÷ b` is the quotient, `a % b` the remainder".to_string(),
-                        "`/` floats — divide indexes with `÷` or `%`, or widen first (`(a * 1.0) / b`) for a float answer",
-                    );
-                    return D::Any;
-                }
                 // a signed factor reads at its positive end in a product:
                 // `40↓ · 2` is −80 in ↑-terms, `x↓ · y↓` composes +80
                 if let ExprKind::Evaluation(ev) = e.kind() {
@@ -1519,9 +1504,10 @@ impl<'a> Pass<'a> {
                         } else {
                             a.div(b)
                         };
-                        // `÷`/`~/` is integer division: a quotient of indexes
-                        // stays an `index` even though the dim algebra cancels
-                        // it to a plain number.
+                        // `~/` (and `÷`'s quotient half) is integer division:
+                        // a quotient of indexes stays an `index` even though
+                        // the dim algebra cancels it to a plain number.
+                        // r[impl mimas.index.div]
                         let d = if op == EvaluationOp::Div
                             && (a.bare() == units::INDEX || b.bare() == units::INDEX)
                         {
