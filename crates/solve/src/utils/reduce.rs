@@ -194,7 +194,7 @@ fn evaluate(
             Minus => Some(Int(a.wrapping_sub(b))),
             Divide => Some(Float(a as f64 / b as f64)),
             Multiply => Some(Int(a.wrapping_mul(b))),
-            Div => {
+            Div | Obelus => {
                 if b == 0 {
                     Err(ReduceError::DivideByZero(location))?
                 } else {

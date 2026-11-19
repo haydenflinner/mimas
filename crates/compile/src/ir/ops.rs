@@ -142,7 +142,7 @@ impl From<EvaluationOp> for BinOp {
             EvaluationOp::Minus => BinOp::Sub,
             EvaluationOp::Multiply => BinOp::Mult,
             EvaluationOp::Divide => BinOp::Div,
-            EvaluationOp::Div => BinOp::IDiv,
+            EvaluationOp::Div | EvaluationOp::Obelus => BinOp::IDiv,
             EvaluationOp::Modulo => BinOp::Mod,
             EvaluationOp::And => BinOp::BitAnd,
             EvaluationOp::Or => BinOp::BitOr,

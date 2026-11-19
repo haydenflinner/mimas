@@ -2065,12 +2065,21 @@ fn percent_postfix() {
 }
 
 #[test]
-fn spaced_percent_is_old_modulo() {
+fn spaced_percent_is_infix_modulo() {
+    // spacing tells them apart: `a % b` is `a mod b`, while `x%` hugs
+    // its operand and still spells percent.
     let lexer = crate::lex::Lexer::new("a % b", 0, "test".into());
     let mut parser = crate::Parser::new(lexer);
     let expr = parser.expr();
     assert_eq!(expr.to_string(), "a mod b");
-    assert_eq!(parser.errors().len(), 1);
+    assert!(parser.errors().is_empty());
+}
+
+// `÷` spells `~/` — integer division. `BinaryOp::of` folds Obelus to
+// `Div`, so the printed form is the tilde spelling.
+#[test]
+fn obelus_is_div() {
+    assert_eq!(parse_expr("a ÷ b"), "a ~/ b");
 }
 
 // r[verify mimas.struct.update]

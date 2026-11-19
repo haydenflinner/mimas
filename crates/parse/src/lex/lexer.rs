@@ -867,6 +867,9 @@ impl<'s> Lex<'s, Tok<TokKind<'s>>, TokKind<'s>> for Lexer<'s> {
                     }
                 }
                 '±' => TokKind::PlusMinus,
+                // `÷` — integer division: `a ÷ b` is `a ~/ b`, the quotient
+                // `/` can't give on `index` (remainder is `a % b`).
+                '÷' => TokKind::Obelus,
                 '?' => {
                     if self.match_chomp('?') {
                         if self.match_chomp('=') {

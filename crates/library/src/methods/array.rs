@@ -14,6 +14,7 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.mark_intrinsic(id, Intrinsic::Push);
     api.add_method(pop);
     api.add_method(remove);
+    api.add_method(insert);
     api.add_method(get);
     api.add_method(shuffle);
     // `xs + x`/`xs - x`/`xs + ys`/`xs - ys` — the Z-set surface of `+`/`-`
@@ -810,6 +811,24 @@ fn remove<'gc>(ctx: Ctx<'gc>, arr: anon::SeqOf<'gc, 0>, index: i64) -> Result<an
 // receiver mutation with `&mut`. Keep the solver's iteration guard explicit.
 vm::inventory::submit! {
     vm::api::NativeMutates { path: concat!(module_path!(), "::remove"), index: 0 }
+}
+
+/// Inserts `value` before slot `index` — `xs.insert(xs.len(), v)` is
+/// `xs.push(v)` — shifting the following elements right.
+// r[impl mimas.place.list-insert]
+#[native]
+fn insert<'gc>(
+    ctx: Ctx<'gc>,
+    arr: anon::SeqOf<'gc, 0>,
+    index: i64,
+    value: anon::T<'gc>,
+) -> Result<(), RtErr> {
+    let index = usize::try_from(index).map_err(|_| RtErr::IndexOutOfBounds)?;
+    arr.0.seq_insert(ctx, index, value.0)
+}
+
+vm::inventory::submit! {
+    vm::api::NativeMutates { path: concat!(module_path!(), "::insert"), index: 0 }
 }
 
 // r[impl mimas.list.get]

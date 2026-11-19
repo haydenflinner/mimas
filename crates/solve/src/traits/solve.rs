@@ -102,7 +102,7 @@ fn op_method_names(op: EvaluationOp) -> (&'static str, &'static str) {
         EvaluationOp::Minus => ("sub", "rsub"),
         EvaluationOp::Multiply => ("mul", "rmul"),
         EvaluationOp::Divide => ("div", "rdiv"),
-        EvaluationOp::Div => ("idiv", "ridiv"),
+        EvaluationOp::Div | EvaluationOp::Obelus => ("idiv", "ridiv"),
         EvaluationOp::Modulo => ("rem", "rrem"),
         EvaluationOp::And => ("band", "rband"),
         EvaluationOp::Or => ("bor", "rbor"),

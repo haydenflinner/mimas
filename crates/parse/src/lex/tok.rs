@@ -46,6 +46,8 @@ pub enum TokKind<'s> {
     TildeSlash,
     TildeSlashEqual,
     Slash,
+    /// `÷` — integer division, the quotient half of `/`. Binds like `*`.
+    Obelus,
     Star,
     True,
     False,
@@ -272,6 +274,7 @@ impl Display for TokKind<'_> {
             TokKind::CaretEqual => "^=",
             TokKind::CircledPlus => "⊕",
             TokKind::CircledPlusEqual => "⊕=",
+            TokKind::Obelus => "÷",
             TokKind::Nand => "⍲",
             TokKind::Nor => "⍱",
             TokKind::Wedge => "∧",
