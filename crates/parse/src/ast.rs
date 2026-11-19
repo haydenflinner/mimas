@@ -190,7 +190,10 @@ impl Ast {
     }
 
     pub fn module_name(&self) -> Result<Option<String>> {
-        let module_name = self.stmts.first().and_then(|stmt| match stmt.kind() {
+        // the prelude rides ahead of the file — a `module` decl is legal
+        // first among the file's own statements, not first overall.
+        let prelude = crate::parser::prelude_stmts().len();
+        let module_name = self.stmts.get(prelude).and_then(|stmt| match stmt.kind() {
             StmtKind::Module(module) => Some(if module.name.lexeme == "@" {
                 self.name.clone()
             } else {
@@ -199,7 +202,7 @@ impl Ast {
             _ => None,
         });
 
-        for stmt in self.stmts.iter().skip(usize::from(module_name.is_some())) {
+        for stmt in self.stmts.iter().skip(prelude + usize::from(module_name.is_some())) {
             if let StmtKind::Module(module) = stmt.kind() {
                 Err(AlreadyInsideModule {
                     src: self.src.clone(),

@@ -1224,7 +1224,7 @@ fn use_a_host_script_by_name() {
     let ast = crate::Parser::new(crate::lex::Lexer::new("use \"dcic-kit\";", 0, "t".into()))
         .try_into_ast()
         .unwrap();
-    assert_eq!(ast.stmts().len(), 1);
+    assert_eq!(super::utils::file_stmts(&ast).len(), 1);
 }
 
 // a struct literal straight after `match`/`if` needs parentheses; say so
@@ -1371,7 +1371,7 @@ fn use_a_pinned_page() {
     let h = "a".repeat(64);
     let (ast, errors) = crate::tests::utils::parse(&format!("use \"kit@{h}\";"));
     assert!(errors.is_empty(), "{errors:?}");
-    let StmtKind::Item(item) = ast.stmts()[0].kind() else {
+    let StmtKind::Item(item) = super::utils::file_stmts(&ast)[0].kind() else {
         panic!("expected an item")
     };
     let ItemKind::Use(Use::Host(host)) = item.kind() else {
@@ -1393,7 +1393,7 @@ fn use_a_pinned_page() {
 fn use_a_following_page() {
     let (ast, errors) = crate::tests::utils::parse("use \"kit@latest\";");
     assert!(errors.is_empty(), "{errors:?}");
-    let StmtKind::Item(item) = ast.stmts()[0].kind() else {
+    let StmtKind::Item(item) = super::utils::file_stmts(&ast)[0].kind() else {
         panic!("expected an item")
     };
     let ItemKind::Use(Use::Host(host)) = item.kind() else {
@@ -1407,7 +1407,7 @@ fn use_a_following_page() {
 fn use_page_granting() {
     let (ast, errors) = crate::tests::utils::parse("use \"kit\" granting { net, rng };");
     assert!(errors.is_empty(), "{errors:?}");
-    let StmtKind::Item(item) = ast.stmts()[0].kind() else {
+    let StmtKind::Item(item) = super::utils::file_stmts(&ast)[0].kind() else {
         panic!("expected an item")
     };
     let ItemKind::Use(Use::Host(host)) = item.kind() else {
@@ -1425,7 +1425,7 @@ fn use_page_granting() {
 fn use_page_granting_empty_is_a_purity_assertion() {
     let (ast, errors) = crate::tests::utils::parse("use \"kit\" granting {};");
     assert!(errors.is_empty(), "{errors:?}");
-    let StmtKind::Item(item) = ast.stmts()[0].kind() else {
+    let StmtKind::Item(item) = super::utils::file_stmts(&ast)[0].kind() else {
         panic!("expected an item")
     };
     let ItemKind::Use(Use::Host(host)) = item.kind() else {
@@ -1446,7 +1446,7 @@ fn use_page_granting_must_share_the_line() {
     // `granting` on the next line is no clause -- include lines are one
     // line each, so the use ends at the newline.
     let (ast, _) = crate::tests::utils::parse("use \"kit\"\ngranting { net };");
-    let StmtKind::Item(item) = ast.stmts()[0].kind() else {
+    let StmtKind::Item(item) = super::utils::file_stmts(&ast)[0].kind() else {
         panic!("expected an item")
     };
     let ItemKind::Use(Use::Host(host)) = item.kind() else {

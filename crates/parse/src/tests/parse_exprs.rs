@@ -2081,7 +2081,7 @@ fn spaced_percent_is_infix_modulo() {
 fn obelus_is_quotient_remainder() {
     // `÷` desugars to the pair — quotient, then remainder.
     // r[verify mimas.index.div]
-    assert_eq!(parse_expr("a ÷ b"), "(a ~/ b, a mod b)");
+    assert_eq!(parse_expr("a ÷ b"), "quot_rem(a, b)");
 }
 
 // r[verify mimas.struct.update]
