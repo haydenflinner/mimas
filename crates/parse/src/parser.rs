@@ -2874,11 +2874,17 @@ impl<'s> Parser<'s> {
         // only looser operators can follow an `in`, which doesn't chain
         let mut max_power = u8::MAX;
         loop {
-            // A spaced `%` reaching here is infix modulo — `a % b`, same as
-            // `a mod b`. Postfix `x%` hugs its operand and already folded as
-            // percent in `chain_accesses`, and a `±` tolerance's `%` is claimed
-            // by `plus_minus`, so the spacing is what tells them apart.
-            if self.at(TokKind::Percent) && !self.pct_marker && self.infix_binds() {
+            // A `%` reaching here is infix modulo — spaced `a % b` or glued
+            // `a%b`, the same `mod` the word spells, so it takes `mod`'s
+            // power: `a * b % c` is `(a * b) mod c` and `a % b % c` chains
+            // left. Postfix `x%` hugs its operand and already folded as
+            // percent in `chain_accesses`, and a `±` tolerance's `%` is
+            // claimed by `plus_minus`.
+            if self.at(TokKind::Percent)
+                && !self.pct_marker
+                && self.infix_binds()
+                && (min_power..max_power).contains(&7)
+            {
                 self.advance();
                 let right = self.binary(8);
                 left = self.op_expr(BinaryOp::Eval(EvaluationOp::Modulo), left, right, start);
@@ -3982,10 +3988,14 @@ impl<'s> Parser<'s> {
                 // rather than silently reading `(f?)(x)`.
                 TokKind::Hook if self.glued() => self.propagate(expr),
                 // `x%` hugs its operand and spells percent -- `50%` is `50 * 0.01`, the
-                // `pct` unit by another name. A spaced `%` is neither postfix nor modulo
-                // (`a mod b`); `binary` reports it. While a `±` tolerance parses the
-                // marker claim takes precedence (`x ± 10%`).
-                TokKind::Percent if !self.pct_marker && self.glued() => {
+                // `pct` unit by another name. A glued `%` with an operand hugging its
+                // right can't be postfix (nothing may follow it), so `2%8` stays for
+                // `binary`, which reads it as `mod`. A spaced `%` is infix `mod` there
+                // too. While a `±` tolerance parses the marker claim takes precedence
+                // (`x ± 10%`). r[impl mimas.num.percent]
+                TokKind::Percent
+                    if !self.pct_marker && self.glued() && !self.percent_is_infix() =>
+                {
                     let at = expr.span().start();
                     self.advance();
                     let scale = self.new_expr(Literal::Float(0.01), at);
@@ -5694,6 +5704,18 @@ impl<'s> Parser<'s> {
             && matches!(self.nth(1), TokKind::Int(_) | TokKind::Float(_) | TokKind::Quantity(..))
             && self.next + 1 < self.tokens.len()
             && self.meta_at(1).glued
+    }
+
+    /// Whether a `%` glued to the operand before it reads as infix `mod`
+    /// rather than postfix percent. That takes an operand hugging the
+    /// `%` on the right too (`2%8`, `x%y`, `n%(i+1)`) — a postfix can't
+    /// have an operand hanging off it. Anything else (`50% < 4`, `x%`,
+    /// `x% y`, `x%-1`) keeps the percent read; the spaced-on-the-left
+    /// spellings go to `binary` regardless.
+    fn percent_is_infix(&self) -> bool {
+        self.next + 1 < self.tokens.len()
+            && self.meta_at(1).glued
+            && self.nth(1).starts_juxta_arg()
     }
 
     /// In a comma-optional sequence, a `-` glued to a numeric literal

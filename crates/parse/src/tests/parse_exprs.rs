@@ -2049,8 +2049,9 @@ fn plus_minus_tolerance_may_be_complex() {
     );
 }
 
-// `x%` hugs its operand and spells percent — `50%` is `50 * 0.01`. A spaced `%`
-// isn't postfix or modulo — `binary` reports it and parses on as `mod`.
+// `x%` hugs its operand and spells percent — `50%` is `50 * 0.01`. A `%` with
+// an operand on each side is infix `mod`, spaced or glued.
+// r[verify mimas.num.percent]
 #[test]
 fn percent_postfix() {
     assert_eq!(parse_expr("50%"), "50 * 0.01");
@@ -2066,13 +2067,31 @@ fn percent_postfix() {
 
 #[test]
 fn spaced_percent_is_infix_modulo() {
-    // spacing tells them apart: `a % b` is `a mod b`, while `x%` hugs
-    // its operand and still spells percent.
+    // `a % b` is `a mod b`, while `x%` hugs its operand and still
+    // spells percent.
     let lexer = crate::lex::Lexer::new("a % b", 0, "test".into());
     let mut parser = crate::Parser::new(lexer);
     let expr = parser.expr();
     assert_eq!(expr.to_string(), "a mod b");
     assert!(parser.errors().is_empty());
+}
+
+// r[verify mimas.num.percent]
+#[test]
+fn glued_percent_between_operands_is_infix_modulo() {
+    // `a%b` can't be postfix — nothing may follow `x%` — so a `%` glued
+    // on both sides reads as `mod` no matter how it hugs.
+    assert_eq!(parse_expr("7%3"), "7 mod 3");
+    assert_eq!(parse_expr("(i+1)*2%8<4"), "(i + 1) * 2 mod 8 < 4");
+    assert_eq!(parse_expr("a%b"), "a mod b");
+    assert_eq!(parse_expr("n%(i+1)"), "n mod (i + 1)");
+    // `%` takes `mod`'s power: `a * b % c` chains left like `a * b mod c`
+    assert_eq!(parse_expr("a * b % c"), "a * b mod c");
+    assert_eq!(parse_expr("a % b % c"), "a mod b mod c");
+    // a postfix still can't give up its read to spaced or non-operand
+    // followers: `x% y` is `x%` then `y`, `x%-1` is `x% - 1`, and a
+    // comparison keeps `50%` the marker
+    assert_eq!(parse_expr("50% < 4"), "50 * 0.01 < 4");
 }
 
 // `÷` spells `~/` — integer division. `BinaryOp::of` folds Obelus to
