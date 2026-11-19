@@ -96,7 +96,7 @@ fn numeric_join(op: EvaluationOp, a: &Option<Ty>, b: &Option<Ty>) -> Option<Ty> 
     };
     match op {
         EvaluationOp::Divide => (numeric(a) || numeric(b)).then_some(Ty::Float),
-        EvaluationOp::Div | EvaluationOp::Modulo => match (a, b) {
+        EvaluationOp::Div | EvaluationOp::Obelus | EvaluationOp::Modulo => match (a, b) {
             (Ty::Int, Ty::Int) => Some(Ty::Int),
             _ if numeric(a) && numeric(b) => Some(Ty::Float),
             _ => None,

@@ -2870,16 +2870,11 @@ impl<'s> Parser<'s> {
         // only looser operators can follow an `in`, which doesn't chain
         let mut max_power = u8::MAX;
         loop {
-            // A spaced `%` reaching here can only be old-style modulo — postfix `x%` hugs
-            // its operand and already folded in `chain_accesses`, and a `±` tolerance's
-            // `%` is claimed by `plus_minus`. Teach `mod` and keep parsing as if written.
+            // A spaced `%` reaching here is infix modulo — `a % b`, same as
+            // `a mod b`. Postfix `x%` hugs its operand and already folded as
+            // percent in `chain_accesses`, and a `±` tolerance's `%` is claimed
+            // by `plus_minus`, so the spacing is what tells them apart.
             if self.at(TokKind::Percent) && !self.pct_marker && self.infix_binds() {
-                self.error_here(Misdirection {
-                    src: self.src(),
-                    at: self.next_location().into(),
-                    msg: "modulo is `a mod b` now — `%` spells percent, as in `50%`".into(),
-                    label: "write `mod` here".into(),
-                });
                 self.advance();
                 let right = self.binary(8);
                 left = self.op_expr(BinaryOp::Eval(EvaluationOp::Modulo), left, right, start);
@@ -5997,6 +5992,9 @@ impl BinaryOp {
             return Some((Self::Eval(op), 4));
         }
         let op = EvaluationOp::try_from(kind).ok()?;
+        // `÷` spells `~/` — normalize to `Div` so nothing downstream
+        // carries two names for integer division.
+        let op = if matches!(op, EvaluationOp::Obelus) { EvaluationOp::Div } else { op };
         // `a ≈ b` compares, so it binds like `==` (r[impl mimas.op.approx])
         if op == EvaluationOp::Approx {
             return Some((Self::Eval(op), 2));

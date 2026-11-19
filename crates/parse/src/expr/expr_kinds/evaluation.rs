@@ -31,6 +31,9 @@ op!(
         Slash => Divide,
         Star => Multiply,
         TildeSlash => Div,
+        // `÷` is the printed-friendly spelling of `~/` — `BinaryOp::of`
+        // folds it to `Div`, so downstream only ever sees `Div`.
+        Obelus => Obelus,
         Ident("mod") => Modulo,
         Ampersand => And,
         Pipe => Or,

@@ -241,6 +241,56 @@ impl<'gc> Val<'gc> {
         })
     }
 
+    /// Insert `value` at `index` without demoting primitive stores when the
+    /// value fits. A mismatched scalar demotes the store to `Vals`, the same
+    /// way any other heterogeneous write would. r[impl mimas.place.list-insert]
+    pub fn seq_insert(self, ctx: Ctx<'gc>, index: usize, value: Val<'gc>) -> RtResult<()> {
+        if index > self.seq_len().ok_or(RtErr::IndexOutOfBounds)? {
+            return Err(RtErr::IndexOutOfBounds);
+        }
+        match self {
+            Val::Array(a) => a
+                .0
+                .try_borrow_mut(&ctx)
+                .map_err(|_| RtErr::const_write())?
+                .insert(index, value),
+            Val::IntArray(a) | Val::FloatArray(a) => {
+                let mut store = a.0.try_borrow_mut(&ctx).map_err(|_| RtErr::const_write())?;
+                let demote = match (&mut *store, value) {
+                    (ArrayStore::Ints(v), Val::Int(i)) => {
+                        v.insert(index, i);
+                        false
+                    }
+                    (ArrayStore::Floats(v), Val::Float(f)) => {
+                        v.insert(index, f);
+                        false
+                    }
+                    (ArrayStore::Floats(v), Val::Int(i)) => {
+                        v.insert(index, i as f64);
+                        false
+                    }
+                    (ArrayStore::Vals(a), v) => {
+                        a.0
+                            .try_borrow_mut(&ctx)
+                            .map_err(|_| RtErr::const_write())?
+                            .insert(index, v);
+                        false
+                    }
+                    _ => true,
+                };
+                if demote {
+                    let arr = store.demote(ctx);
+                    arr.0
+                        .try_borrow_mut(&ctx)
+                        .map_err(|_| RtErr::const_write())?
+                        .insert(index, value);
+                }
+            }
+            _ => return Err(RtErr::IndexOutOfBounds),
+        }
+        Ok(())
+    }
+
     /// An `Array` handle on this sequence's contents, whatever the backing.
     /// For a typed array this *demotes in place*: the store becomes
     /// [`ArrayStore::Vals`] wrapping a fresh `Array`, and that inner handle is
