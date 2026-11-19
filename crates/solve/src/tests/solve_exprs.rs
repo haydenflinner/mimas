@@ -241,6 +241,13 @@ test_ty!(
     "1 / 1" => Float,
 );
 test_ty!(
+    // r[verify mimas.num.percent]
+    percent_spellings,
+    "7 % 3" => Int,
+    "7%3" => Int,
+    "50% < 4" => Bool,
+);
+test_ty!(
     // r[verify mimas.num.promotion]
     int_float_mixed_arithmetic,
     "1 + 0.1" => Float,
