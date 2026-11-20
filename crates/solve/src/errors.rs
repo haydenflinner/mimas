@@ -1439,7 +1439,7 @@ pub struct ParamWriteDies {
 #[diagnostic(
     code(loop_call),
     severity(Warning),
-    help("hoist `{name}` out of the loop, or pass it a cursor so its scan resumes where it stopped")
+    help("hoist `{name}` out of the loop, or pass it a cursor so its scan resumes where it stopped; if one walk per pass is the point (a lookup per item), mark `{name}` `#[scans]`")
 )]
 pub struct LoopCall {
     #[source_code]
