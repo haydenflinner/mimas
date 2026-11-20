@@ -287,6 +287,7 @@ impl<'s> Parser<'s> {
 
     fn into_ast_inner(mut self, prelude: bool) -> (Ast, Vec<shared::Error>) {
         let mut statements = if prelude { prelude_stmts() } else { vec![] };
+        let prelude_len = statements.len();
         while !self.at(TokKind::Eof) {
             if self.peek().starts_stmt() {
                 statements.push(self.stmt());
@@ -335,6 +336,7 @@ impl<'s> Parser<'s> {
                 self.file_name,
                 self.src,
                 statements,
+                prelude_len,
                 docs,
                 self.quantities,
                 self.quantity_units,

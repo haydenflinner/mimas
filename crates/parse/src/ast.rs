@@ -17,6 +17,9 @@ pub struct Ast {
     /// from post-parse checks (e.g. [`Self::module_name`]) so they render with snippets.
     src: NamedSource<Arc<str>>,
     stmts: Vec<Stmt>,
+    /// How many of `stmts` are the prelude's, which rides ahead of the
+    /// file's own. Their spans index `prelude.mim`, not this file.
+    prelude: usize,
     /// Doc comments without their slashes, keyed by where the token after each starts.
     docs: HashMap<usize, String>,
     /// Dimension of every unit-suffixed number literal (`25kW`), by node. The literal's value is
@@ -38,6 +41,7 @@ impl Ast {
         name: String,
         src: NamedSource<Arc<str>>,
         stmts: Vec<Stmt>,
+        prelude: usize,
         docs: HashMap<usize, String>,
         quantities: HashMap<NodeId, Dim>,
         quantity_units: HashMap<NodeId, String>,
@@ -48,6 +52,7 @@ impl Ast {
             name,
             src,
             stmts,
+            prelude,
             docs,
             quantities,
             quantity_units,
@@ -92,9 +97,17 @@ impl Ast {
         self.stmts
     }
 
-    /// Get a reference to the ast's statements.
+    /// Get a reference to the ast's statements, the prelude's first.
     pub fn stmts(&self) -> &[Stmt] {
         self.stmts.as_ref()
+    }
+
+    /// The file's own statements, past the prelude that rides ahead of
+    /// them. Use this to slice the file's source by a statement's span:
+    /// a prelude statement's span indexes `prelude.mim`, and slicing the
+    /// file with it panics or reads the wrong text.
+    pub fn own_stmts(&self) -> &[Stmt] {
+        &self.stmts[self.prelude.min(self.stmts.len())..]
     }
 
     /// Get a mutable reference to the ast's statements.
@@ -192,7 +205,7 @@ impl Ast {
     pub fn module_name(&self) -> Result<Option<String>> {
         // the prelude rides ahead of the file — a `module` decl is legal
         // first among the file's own statements, not first overall.
-        let prelude = crate::parser::prelude_stmts().len();
+        let prelude = self.prelude;
         let module_name = self.stmts.get(prelude).and_then(|stmt| match stmt.kind() {
             StmtKind::Module(module) => Some(if module.name.lexeme == "@" {
                 self.name.clone()
@@ -240,5 +253,31 @@ impl NodeId {
     /// ast node, so the checker derives ids from it (e.g. `ParamId` for `<T>` type params).
     pub fn index(self) -> u64 {
         self.0
+    }
+}
+
+#[cfg(test)]
+mod own_stmts_tests {
+    use crate::{lex::Lexer, parser::Parser};
+    use shared::Located;
+
+    // The prelude rides ahead of every file, and its spans index
+    // prelude.mim. `own_stmts` is the file's statements alone, so each
+    // span slices the file's own source.
+    #[test]
+    fn own_stmts_are_the_files_and_their_spans_slice_it() {
+        let src = "let a = 1\nfn f(b: int) -> int { b }\n";
+        let (ast, errors) = Parser::new(Lexer::new(src, 0, "t".into())).into_ast();
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(ast.stmts().len() > ast.own_stmts().len(), "the prelude rides ahead");
+        let texts: Vec<&str> = ast
+            .own_stmts()
+            .iter()
+            .map(|s| {
+                let sp = s.location().span;
+                src[sp.start()..sp.end()].trim()
+            })
+            .collect();
+        assert_eq!(texts, ["let a = 1", "fn f(b: int) -> int { b }"]);
     }
 }
