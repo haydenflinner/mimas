@@ -598,6 +598,17 @@ impl<'a> Lower<'a> {
             .map(|d| self.node_text(d).to_string())
             .unwrap_or_default();
         dname = unqual(&dname).to_string();
+        // A member `operator+` becomes the method mimas calls for `+`, so
+        // `a + b` on a class runs it (spec `mimas.op.method`).
+        if owner.is_some() {
+            let nparams = self
+                .f(decl, "parameters")
+                .map(|p| self.children(p).into_iter().filter(|c| c.kind() == "parameter_declaration").count())
+                .unwrap_or(0);
+            if let Some(m) = operator_method(&dname, nparams) {
+                dname = m.to_string();
+            }
+        }
         let sig = if let Some(owner) = owner {
             if self.structs.contains_key(owner) {
                 Some(self.sig_from(self.f(node, "type"), decl))
@@ -760,4 +771,34 @@ pub(crate) fn decl_parts<'n>(
         }
     }
     Some((base, out))
+}
+
+/// The mimas method a C++ member operator becomes: `operator+` with one
+/// parameter is `add`, with none it is the unary `pos`. Mimas dispatches
+/// `a + b` to `a.add(b)` (the solver's `op_method_names`), so the C++
+/// operator runs where the C++ program uses it. `==` stays out: mimas
+/// equality is structural and calls no method.
+fn operator_method(name: &str, nparams: usize) -> Option<&'static str> {
+    let op = name.strip_prefix("operator")?.trim();
+    Some(match (op, nparams) {
+        ("+", 0) => "pos",
+        ("+", _) => "add",
+        ("-", 0) => "neg",
+        ("-", _) => "sub",
+        ("*", _) => "mul",
+        ("/", _) => "div",
+        ("%", _) => "rem",
+        ("<", _) => "lt",
+        ("<=", _) => "le",
+        (">", _) => "gt",
+        (">=", _) => "ge",
+        ("!", _) => "inv",
+        ("~", _) => "bnot",
+        ("&", _) => "band",
+        ("|", _) => "bor",
+        ("^", _) => "bxor",
+        ("<<", _) => "shl",
+        (">>", _) => "shr",
+        _ => return None,
+    })
 }

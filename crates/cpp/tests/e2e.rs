@@ -210,3 +210,37 @@ int main() {
         &["2 8"],
     );
 }
+
+#[test]
+fn member_operators_become_mimas_operator_methods() {
+    assert_prints(
+        r#"
+#include <iostream>
+using namespace std;
+
+struct Vec {
+    double x, y;
+    Vec(double x0, double y0) : x(x0), y(y0) {}
+    Vec operator+(Vec o) { return Vec(x + o.x, y + o.y); }
+    Vec operator-(Vec o) { return Vec(x - o.x, y - o.y); }
+    Vec operator-() { return Vec(-x, -y); }
+    Vec operator*(double k) { return Vec(x * k, y * k); }
+    bool operator<(Vec o) { return x * x + y * y < o.x * o.x + o.y * o.y; }
+};
+
+int main() {
+    Vec a(1, 2);
+    Vec b(3, 6);
+    Vec m = (a + b) * 0.5;
+    Vec d = b - a;
+    Vec n = -a;
+    cout << m.x << " " << m.y << " " << d.x << " " << n.y << " " << (a < b) << endl;
+    return 0;
+}
+"#,
+        // C++ itself would print "2 4 2 -2 1": the transpiled `cout` prints a
+        // double as mimas does (2.0) and a bool as `true`. That gap is older
+        // than operator lowering and is not what this test pins.
+        &["2.0 4.0 2.0 -2.0 true"],
+    );
+}
