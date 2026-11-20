@@ -207,6 +207,11 @@ pub struct TestResult {
     /// expression that returned `false` (no assert rewrite records
     /// operands), and on faults outside an assert's operand list.
     pub operands: Vec<Inspect>,
+    /// Ops the check's own call consumed — the vm's deterministic
+    /// instruction count, the same on every run of the same program,
+    /// so a run's cost compares on work, not wall time. `0` for a check
+    /// that never ran. r[impl check.ops]
+    pub ops: u64,
 }
 
 impl TestResult {
@@ -3540,6 +3545,7 @@ impl Vm {
                     name,
                     error: Some(why.clone()),
                     operands: Vec::new(),
+                    ops: 0,
                 })
                 .collect();
         }
@@ -3548,7 +3554,11 @@ impl Vm {
         let _ = self.fixture::<crate::fixtures::Witnesses>().take();
         let mut results = Vec::with_capacity(names.len());
         for name in names {
+            // the check's own spend, armed `u64::MAX` or not: the diff
+            // across its call (r[impl check.ops])
+            let before = self.ops_left();
             let ran = self.call_fn_result(&name);
+            let ops = before.saturating_sub(self.ops_left());
             // the desugared assert records its operands just before the
             // panic unwinds; take whatever this call left, pass or fail
             let operands = self
@@ -3564,7 +3574,7 @@ impl Vm {
                 // anything else is a broken check, not a pass
                 Ok(other) => Some(format!("check produced {other:?}, expected a bool")),
             };
-            results.push(TestResult { name, error, operands });
+            results.push(TestResult { name, error, operands, ops });
         }
         self.reset_to_entry();
         results

@@ -328,7 +328,12 @@ fn build(
         let result = ice::catch("execution", move || {
             vm.load_program(program);
             vm.set_sources(sources);
-            vm.run().map(|()| vm.run_tests())
+            // the run's whole spend, top level + checks: no budget armed,
+            // so the count falls out of `ops_left` (r[impl check.ops])
+            vm.run().map(|()| {
+                let checks = vm.run_tests();
+                (u64::MAX - vm.ops_left(), checks)
+            })
         });
         match result {
             Err(report) => {
@@ -339,22 +344,25 @@ fn build(
                 emit_runtime_error(&report, color);
                 return 1;
             }
-            Ok(Ok(checks)) => {
+            Ok(Ok((ops, checks))) => {
                 let failed: Vec<_> = checks.iter().filter(|c| !c.passed()).collect();
                 for c in &failed {
                     eprintln!("{} {}: {}", "✕".red(), c.name, c.error.as_deref().unwrap_or("failed"));
                 }
                 if !failed.is_empty() {
                     eprintln!("{} of {} checks failed", failed.len(), checks.len());
-                    return 1;
                 }
-                if time {
-                    eprintln!(
-                        "{}",
-                        format!("ran in {}", format_duration(timer.elapsed()))
-                            .italic()
-                            .bright_black()
-                    );
+                // a run's report says what it cost in ops — deterministic,
+                // so cost reads as work, not wall time (check.ops); wall
+                // time rides along only when `--time` asks
+                let detail = if time {
+                    format!("ran in {} · {ops} ops", format_duration(timer.elapsed()))
+                } else {
+                    format!("{ops} ops")
+                };
+                eprintln!("{}", detail.italic().bright_black());
+                if !failed.is_empty() {
+                    return 1;
                 }
             }
         }
