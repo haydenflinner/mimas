@@ -2334,8 +2334,19 @@ impl<'s> Parser<'s> {
                         items.push(self.member_generator_item(public));
                     }
                 }
-                TokKind::Const | TokKind::Fn => {
+                // `#[scans]` may sit on a method: `item` reads the
+                // attributes and `validate_attrs` judges them. A test is
+                // a free fn, never a member.
+                TokKind::Const | TokKind::Fn | TokKind::Hash => {
                     let item = self.item();
+                    for attr in item.attrs() {
+                        if matches!(attr.name.lexeme.as_str(), "test" | "tests") {
+                            self.error(TestOnMethod {
+                                src: self.src(),
+                                at: attr.name.location.into(),
+                            });
+                        }
+                    }
                     self.end_item(&item);
                     items.push(item);
                 }

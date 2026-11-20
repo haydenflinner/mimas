@@ -935,3 +935,15 @@ fn for_fields_prefixes_recover_without_panicking() {
         assert!(std::panic::catch_unwind(|| crate::tests::utils::parse(&source[..end])).is_ok(), "for_fields prefix {end}: {:?}", &source[..end]);
     }
 }
+
+// `#[scans]` on a method: the loop-call lint flags methods too, so the
+// mark that answers it must be writable there
+test_ok!(
+    scans_on_an_impl_method,
+    "impl S {\n    #[scans]\n    fn f(self) -> int { self.a }\n}",
+    "impl S {\n    #[scans]\n    pub fn f(self) -> int { self.a }\n}"
+);
+test_fail!(
+    an_unknown_attribute_on_a_method_still_fails,
+    "impl S {\n    #[nope]\n    fn f(self) -> int { 1 }\n}"
+);
