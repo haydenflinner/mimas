@@ -1137,3 +1137,34 @@ fn destructure_member_field_write_stays_legal() {
     let e = err("struct W { n: int } fn f(xs: [(int, W)]) { for (i, w) in xs { w.n = 1; } }");
     assert!(e.is_none(), "{e:?}");
 }
+
+// r[verify mimas.lint.loop-call.literal]
+#[test]
+fn a_fresh_list_literal_is_not_a_scanned_collection() {
+    // pic-kit's shape: `square` -> `rectangle` -> `polygon([...])`. The
+    // literal has four points whatever `w` is, so a loop of shapes is linear.
+    let w = warns(
+        "fn poly(pts: [int]) -> int { let n = 0; for p in pts { n += p; } n }
+         fn rect(w: int, h: int) -> int { poly([0, w, w, h]) }
+         fn row(n: int, side: int) -> int {
+             let acc = 0;
+             for i in 0..n { acc += rect(side, side) + i; }
+             acc
+         }",
+    );
+    assert!(!w.iter().any(|m| m.contains("iterates too")), "{w:?}");
+}
+
+// r[verify mimas.lint.loop-call]
+#[test]
+fn handing_a_loop_an_outer_collection_still_warns() {
+    let w = warns(
+        "fn poly(pts: [int]) -> int { let n = 0; for p in pts { n += p; } n }
+         fn row(xs: [int]) -> int {
+             let acc = 0;
+             for x in xs { acc += poly(xs) + x; }
+             acc
+         }",
+    );
+    assert!(w.iter().any(|m| m.contains("poly") && m.contains("iterates too")), "{w:?}");
+}

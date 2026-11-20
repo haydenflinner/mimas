@@ -1027,6 +1027,17 @@ impl<'a> Pass<'a> {
     /// `f(w)`'s result is still recorded as `w`-scaled work, a safe
     /// over-read for the scans fixpoint.
     fn param_roots(&self, e: &Expr) -> FxHashSet<u32> {
+        // r[impl mimas.lint.loop-call.literal]
+        // A list literal's length is written in the source, so walking it
+        // costs O(1) in whatever its elements came from. Without this,
+        // `polygon([(0px, 0px), (w, 0px), (w, h), (0px, h)], c)` made
+        // `rectangle(w, h, c)` "scan" its scalars, and every shape call in a
+        // drawing loop warned (pic-kit's `square` in the art book). Known
+        // blind spot: a callee that walks *into* the elements (`f([w])` with
+        // `for x in ws { for b in x.balls }`) now goes unflagged.
+        if matches!(e.kind(), ExprKind::Literal(Literal::Array(_))) {
+            return FxHashSet::default();
+        }
         struct Roots<'p, 'a> {
             pass: &'p Pass<'a>,
             out: FxHashSet<u32>,
