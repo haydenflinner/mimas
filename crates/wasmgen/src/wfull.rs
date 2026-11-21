@@ -855,6 +855,24 @@ impl<'a> WFx<'a> {
     fn kf(&mut self, f: f64) -> Value {
         self.emit(WOp::F64Const { value: f.to_bits() }, &[], &[WTy::F64])
     }
+    /// A slotted field's address. A struct instance keeps its fields
+    /// inline after the [tag][adt] header; a tuple lowers to an array
+    /// (`NewArray` + pushes), which keeps its elements in a separate data
+    /// buffer behind [tag][data][len][cap]. The IR gives both a `GetField`
+    /// slot, so the tag picks the layout at run time. Reading an array at
+    /// the instance offset returned len|cap for `.0` and element 0 for `.1`.
+    fn field_addr(&mut self, hp: Value, slot: u32) -> Value {
+        let tag = self.load32(hp, 0);
+        let ta = self.k32(TAG_ARRAY as i32);
+        let is_arr = self.emit(WOp::I32Eq, &[tag, ta], &[WTy::I32]);
+        let data = self.load32(hp, 4);
+        let aoff = self.k32((slot * 8) as i32);
+        let arr_addr = self.emit(WOp::I32Add, &[data, aoff], &[WTy::I32]);
+        let ioff = self.k32((8 + slot * 8) as i32);
+        let inst_addr = self.emit(WOp::I32Add, &[hp, ioff], &[WTy::I32]);
+        self.emit(WOp::Select, &[arr_addr, inst_addr, is_arr], &[WTy::I32])
+    }
+
     fn load64(&mut self, addr: Value, off: u32) -> Value {
         self.emit(
             WOp::I64Load {
@@ -1407,7 +1425,8 @@ impl<'a> WFx<'a> {
                 self.direct(&kind)?;
                 let sw = self.get(src, K::Word)?;
                 let hp = self.wrap(sw);
-                let v = self.load64(hp, 8 + slot * 8);
+                let addr = self.field_addr(hp, slot);
+                let v = self.load64(addr, 0);
                 self.store_dst(iid, v, K::Word)?;
             }
             Inst::SetField {
@@ -1418,7 +1437,8 @@ impl<'a> WFx<'a> {
                 let rw = self.get(receiver, K::Word)?;
                 let hp = self.wrap(rw);
                 let vv = self.get(value, K::Word)?;
-                self.store64(hp, vv, 8 + slot * 8);
+                let addr = self.field_addr(hp, slot);
+                self.store64(addr, vv, 0);
             }
             Inst::IsInstance { src, adt } => {
                 // a primitive-kind test (`impl Num for float`'s arm) has no

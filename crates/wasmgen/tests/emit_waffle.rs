@@ -147,3 +147,78 @@ fn entry_ops_emit_valid_wasm() {
     );
     wasmparser::validate(&w.bytes).expect("invalid wasm");
 }
+
+/// Tuples lower to arrays (`NewArray` + pushes) but `t.0` / `t.1` lower to
+/// slotted `GetField`, which read the struct-instance layout: `.0` came back
+/// as the array's len|cap word and `.1` as element 0 (found baking the
+/// hear-the-zeros page, whose prime-power weights all read wrong). Run the
+/// module under wasmtime and read the echoed values back.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_tuple_reads_its_own_fields() {
+    use std::sync::{Arc, Mutex};
+    use wasmtime::{Engine, Global, Linker, Module, Store, Val, ValType};
+    let src = "fn pick(t: (float, float), i: int) -> float { if i == 0 { t.0 } else { t.1 } }\n\
+               let p = (2.5, 7.25)\n\
+               pick(p, 0)\n\
+               pick(p, 1)\n\
+               p.1\n";
+    let lib = Vm::new().install_library(mimas::library::std);
+    let echo_id = lib
+        .natives()
+        .find_map(|(id, e)| match e {
+            api::ApiEntry::Function(f) if f.module.is_empty() && f.name == "echo" => Some(id.index() as u32),
+            _ => None,
+        })
+        .expect("echo native");
+    let (program, ir, _s) = Vm::compile_parts_ir(&[("<t>", src)], mimas::library::std).expect("compile");
+    let w = emit_waffle_ir(&ir, &program.strs, &Opts::default(), None, None, 0, 0).expect("emit");
+    assert!(w.skipped.is_empty(), "{:?}", w.skipped);
+    let engine = Engine::default();
+    let module = Module::new(&engine, &w.bytes[..]).expect("wasm");
+    let mut linker: Linker<()> = Linker::new(&engine);
+    let mut store = Store::new(&engine, ());
+    let seen: Arc<Mutex<Vec<f64>>> = Arc::new(Mutex::new(Vec::new()));
+    for imp in module.imports() {
+        match imp.ty() {
+            wasmtime::ExternType::Func(ft) => {
+                let is_echo = imp.name().starts_with(&format!("n{echo_id}_"));
+                let cap = seen.clone();
+                let rets: Vec<ValType> = ft.results().collect();
+                linker
+                    .func_new(imp.module(), imp.name(), ft, move |_c, p, r| {
+                        if is_echo {
+                            let v = match &p[0] {
+                                Val::F64(b) => f64::from_bits(*b),
+                                Val::I64(i) => f64::from_bits(*i as u64),
+                                _ => f64::NAN,
+                            };
+                            cap.lock().unwrap().push(v);
+                        }
+                        for (i, out) in r.iter_mut().enumerate() {
+                            *out = match rets[i] {
+                                ValType::I32 => Val::I32(0),
+                                ValType::I64 => Val::I64(0),
+                                ValType::F64 => Val::F64(0),
+                                _ => Val::I32(0),
+                            };
+                        }
+                        Ok(())
+                    })
+                    .unwrap();
+            }
+            wasmtime::ExternType::Global(gt) => {
+                let g = Global::new(&mut store, gt, Val::I32(0)).unwrap();
+                linker.define(&mut store, imp.module(), imp.name(), g).unwrap();
+            }
+            _ => panic!("unexpected import {}", imp.name()),
+        }
+    }
+    let inst = linker.instantiate(&mut store, &module).expect("instantiate");
+    let b0 = inst.get_func(&mut store, "b0").expect("b0");
+    let mut res: Vec<Val> = b0.ty(&store).results().map(|_| Val::I32(0)).collect();
+    b0.call(&mut store, &[], &mut res).expect("run");
+    let got = seen.lock().unwrap().clone();
+    // the echoes end with pick(p, 0), pick(p, 1), p.1
+    assert_eq!(&got[got.len() - 3..], &[2.5, 7.25, 7.25], "{got:?}");
+}
