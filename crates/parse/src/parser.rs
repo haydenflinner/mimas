@@ -5766,11 +5766,30 @@ const FUEL: u32 = 4096;
 /// The prelude — the stdlib written in Mimas, parsed ahead of every file.
 /// Its statements type-check and compile with the file's own, so anything
 /// the parser desugars to can live here as ordinary Mimas.
+/// The prelude's source, kept here so a program's `sources` map can name
+/// it back — a span on a prelude statement indexes this text, not the
+/// file the statements rode into.
+pub const PRELUDE_SRC: &str = include_str!("prelude.mim");
+
 /// r[impl mimas.prelude]
 pub(crate) fn prelude_stmts() -> Vec<Stmt> {
-    const SRC: &str = include_str!("prelude.mim");
+    const SRC: &str = PRELUDE_SRC;
+    // The prelude rides ahead of the file's own statements but is not one
+    // of them. `Parser::new` clears the ambient tables — units, macros,
+    // reflected decls — and the parse registers `quot_rem` into them,
+    // both right for a fresh standalone scope and wrong here: the tables
+    // already hold what the file's `declare_units` pre-pass and earlier
+    // files declared. Snapshot them around the ride so an earlier part
+    // reaches a later parse and `fns!()` stays the program's alone.
+    let units = shared::units::snapshot();
+    let macs = macros::snapshot();
+    let decls = reflect::snapshot();
     let (ast, errors) =
-        Parser::new(Lexer::new(SRC, 0, "prelude".into())).into_ast_inner(false);
+        Parser::new(Lexer::new(SRC, shared::PRELUDE_FILE, "prelude".into()))
+            .into_ast_inner(false);
+    shared::units::install(&units);
+    macros::install(macs);
+    reflect::install(decls);
     debug_assert!(errors.is_empty(), "the prelude must parse: {errors:?}");
     ast.unpack()
 }

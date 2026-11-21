@@ -2,6 +2,11 @@ use std::ops::Range;
 
 pub type FileId = usize;
 
+/// The `file_id` the prelude parses under: a value no user, shipped, or
+/// generated file can take, so a decl's location says it came from the
+/// prelude rather than from file 0, whose id it used to share.
+pub const PRELUDE_FILE: FileId = usize::MAX;
+
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Span {
     pub start: usize,

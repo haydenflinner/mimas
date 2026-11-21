@@ -132,6 +132,12 @@ impl Compiler {
                 if crate::ir::is_generic_law(&name) {
                     continue;
                 }
+                // a prelude decl resolves in the root scope like the file's
+                // own but is not the program's to export: the host's `root`
+                // lists the file's items only.
+                if ir.resolutions.decs[dec].location.file_id == shared::PRELUDE_FILE {
+                    continue;
+                }
                 match ir.resolutions.decs[dec].kind.clone() {
                     ResolvedDeclKind::Item { .. } => {
                         let f = exported_fn(ir, signatures, dec)

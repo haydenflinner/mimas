@@ -132,6 +132,13 @@ impl Prepared {
             errors.extend(parse_errors);
             asts.push(ast);
         }
+        // the prelude rides inside every ast above but is its own text:
+        // a span on one of its statements slices `prelude.mim`, not the
+        // file it rode into.
+        sources.insert(
+            shared::PRELUDE_FILE,
+            NamedSource::new("prelude.mim", Arc::from(parse::PRELUDE_SRC)),
+        );
         if !errors.is_empty() {
             return Err(errors);
         }

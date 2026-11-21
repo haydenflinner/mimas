@@ -4671,6 +4671,10 @@ impl Vm {
                 miette::NamedSource::new(*name, std::sync::Arc::from(*source)),
             );
         }
+        sources.insert(
+            shared::PRELUDE_FILE,
+            miette::NamedSource::new("prelude.mim", std::sync::Arc::from(parse::PRELUDE_SRC)),
+        );
 
         // a pact's laws become checks on each impl, over the impl type's samples
         let laws = parse::expand_laws(&mut asts, &[]);

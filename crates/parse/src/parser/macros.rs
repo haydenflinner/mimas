@@ -47,6 +47,17 @@ pub fn clear() {
     MACROS.with(|m| m.borrow_mut().clear());
 }
 
+/// The macro table as it stands, for a subordinate parse (the prelude)
+/// to put back after running under its own scope.
+pub fn snapshot() -> StdMap<String, Rc<MacroDef>> {
+    MACROS.with(|m| m.borrow().clone())
+}
+
+/// Makes `map` the live table — see [`snapshot`].
+pub fn install(map: StdMap<String, Rc<MacroDef>>) {
+    MACROS.with(|m| *m.borrow_mut() = map);
+}
+
 /// The text, kept for the life of the thread. Each distinct text is kept once.
 pub(super) fn intern(text: &str) -> &'static str {
     TEXTS.with(|texts| {
@@ -93,7 +104,7 @@ pub(crate) struct Hygiene {
 }
 
 /// One declared macro.
-struct MacroDef {
+pub(crate) struct MacroDef {
     arms: Vec<Arm>,
 }
 

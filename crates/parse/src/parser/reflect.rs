@@ -83,8 +83,8 @@ struct VariantRec {
     text: String,
 }
 
-#[derive(Default)]
-struct Decls {
+#[derive(Clone, Default)]
+pub(super) struct Decls {
     /// In declaration order. A later declaration of a name replaces the
     /// earlier one in place.
     fns: Vec<FnRec>,
@@ -105,6 +105,17 @@ thread_local! {
 /// Forgets every declaration. A new program starts with none.
 pub(super) fn clear() {
     DECLS.with(|d| *d.borrow_mut() = Decls::default());
+}
+
+/// The declaration table as it stands, for a subordinate parse (the
+/// prelude) to put back — its own items are not the program's to reflect.
+pub(super) fn snapshot() -> Decls {
+    DECLS.with(|d| d.borrow().clone())
+}
+
+/// Makes `decls` the live table — see [`snapshot`].
+pub(super) fn install(decls: Decls) {
+    DECLS.with(|d| *d.borrow_mut() = decls);
 }
 
 /// Whether `name!(…)` is one of the reflection macros.
