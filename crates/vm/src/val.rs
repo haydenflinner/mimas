@@ -90,6 +90,11 @@ impl<'gc> PartialEq for Val<'gc> {
             (Val::Dec(a), Val::Int(b)) | (Val::Int(b), Val::Dec(a)) => {
                 shared::dec::Dec::from_int(*b).is_ok_and(|b| *a == b)
             }
+            // a `dec` with a `float` is a `float` (spec mimas.dec), so `==`
+            // asks it as floats: `2.5dec == 2.5`. Without this arm the pair
+            // fell through to `false`, and `dec == -2.68` (a negative literal
+            // stays a float) was false while `!=` was true.
+            (Val::Dec(a), Val::Float(b)) | (Val::Float(b), Val::Dec(a)) => a.to_f64() == *b,
             (Val::Fn(a), Val::Fn(b)) => a == b,
             (Val::Str(a), Val::Str(b)) => a == b,
             (Val::Array(a), Val::Array(b)) => {

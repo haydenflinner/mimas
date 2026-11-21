@@ -32,6 +32,18 @@ test_run!(
     "p < 0.31" => "true",
 );
 
+// `==` between a `dec` and a `float` is by value, as floats (mimas.dec):
+// it used to answer `false` even for `2.5 == 2.5`
+test_run!(
+    dec_equals_a_float_by_value,
+    "let v: dec = 2.5;\nlet f: float = 2.5;\nlet n: dec = -2.68;",
+    "v == f" => "true",
+    "f == v" => "true",
+    "n == -2.68" => "true",
+    "n != -2.68" => "false",
+    "v == 2.6" => "false",
+);
+
 test_run!(
     arithmetic_of_written_numbers_fills_a_dec_slot,
     "let subtotal: dec = 2.99 + 4.50 + 0.75;\nlet half: dec = (1 + 0.5) / 2;",
