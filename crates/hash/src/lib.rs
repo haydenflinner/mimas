@@ -354,7 +354,8 @@ fn extract_braces(source: &str) -> Vec<Item> {
 /// A `check <expr>` line is skipped whole — checks are one line each, so no
 /// block tracking is needed beyond the line boundary.
 fn skip_check_line(source: &str, i: &mut usize) -> bool {
-    let rest = &source[*i..];
+    // Byte-wise callers can land `i` inside a multibyte char.
+    let Some(rest) = source.get(*i..) else { return false };
     let trimmed = rest.trim_start();
     let is_check = trimmed.strip_prefix("check").is_some_and(|tail| {
         tail.is_empty() || tail.starts_with(|c: char| !c.is_alphanumeric() && c != '_')
@@ -380,7 +381,7 @@ fn skip_check_line(source: &str, i: &mut usize) -> bool {
 }
 
 fn is_fn_start(source: &str, i: usize) -> bool {
-    let rest = &source[i..];
+    let Some(rest) = source.get(i..) else { return false };
     if !rest.starts_with("fn") {
         return false;
     }
@@ -470,7 +471,7 @@ fn match_brace(source: &str, open: usize) -> Option<usize> {
 }
 
 fn skip_comment(source: &str, i: &mut usize) -> bool {
-    let rest = &source[*i..];
+    let Some(rest) = source.get(*i..) else { return false };
     if rest.starts_with("//") {
         if let Some(nl) = rest.find('\n') {
             *i += nl + 1;
@@ -491,7 +492,7 @@ fn skip_comment(source: &str, i: &mut usize) -> bool {
 }
 
 fn skip_string(source: &str, i: &mut usize) -> bool {
-    let rest = &source[*i..];
+    let Some(rest) = source.get(*i..) else { return false };
     let quote = match rest.as_bytes().first() {
         Some(b'"') | Some(b'\'') => rest.as_bytes()[0],
         _ => return false,
@@ -1125,6 +1126,15 @@ fn calls_it() -> int { square(3) }
         eprintln!("F: {:?}", canonical("fn f() { 1.0 }\n"));
         eprintln!("K: {:?}", canonical("fn x() { \"unterminated"));
     }
+    #[test]
+    fn extract_survives_multibyte_chars() {
+        // The brace-matcher fallback scans byte-wise; its skip helpers
+        // used to slice `source[i..]` at mid-char offsets and panic on
+        // emoji — evalworld's build-kit icons (👆) hit this in the app.
+        let src = "fn 👆 broken() { 1 }\nfn ok() { 2 }\n";
+        assert_eq!(names(&extract(src)), vec!["ok"]);
+    }
+
     #[test]
     fn canonical_hash_ignores_formatting_and_comments() {
         let a = "fn square(n: int) -> int {\n    n * n // comment\n}\n";
