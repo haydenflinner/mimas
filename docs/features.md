@@ -2,6 +2,44 @@
 
 Memorable additions to mimas beyond what the changelog tracks. Newest first.
 
+## `query z { }`: queries over Z-sets (`library/src/zset.rs`, spec `mimas.query.zset`)
+
+`query z { … }` takes the verbs of `query { … }`, but each frame is a
+Z-set: rows carry an integer weight in a `__w` column, and identical rows
+merge by adding their weights. The parser lowers the block to the same
+`__q_*` natives plus five `__z_*` ones, at the verbs that must see the
+weights:
+
+- The source table and each joined table go through `__z_in`: weight 1 per
+  row unless the frame has `__w` already, so a `query z` result feeds the
+  next `query z` with its weights.
+- `filter`, `derive` and `rename` lower as in plain mode. `select` adds
+  `__w` to its name list.
+- `join` is `__z_join`: the polars join, then `__w = __w * __w_right`. A
+  null weight (an unmatched side of a left, right or full join) counts as 1.
+- `group … { aggregate { … } }` runs `__z_expand` first: each row repeats
+  by its weight, rows of weight 0 or less drop, and `__w` goes. The plain
+  aggregate then counts weights without any rewrite of `count`/`sum`/`min`/
+  `max`/`mean`. Each output row weighs 1.
+- `distinct` is `__z_distinct`: consolidate, keep positive rows, weight 1.
+- `sort` and `take` see `__z_cons(t)`, the consolidated frame, and so does
+  the block's value. Consolidation is a stable group-by over every other
+  column, so a row stays where its first copy was and a sorted frame stays
+  sorted. `__w` ends up as the last column.
+
+`changes(new, old)` in `std::polars` is the delta: `new`'s rows at their
+weights, `old`'s at negated weights, consolidated. The frame-schema pass
+knows each `__z_*` native, so `.pull("__w")!` checks as `[int]`.
+
+The algebra lives in `library::zset` as plain polars transforms, and
+`host/eval`'s `pl.rs` calls the same functions for generated Rust. This is
+phase 1: each block recomputes from its inputs. Incremental upkeep across
+live passes is not here yet (see the parent repo's
+`docs/devlog/zset-query-2026-11-21.md`).
+
+Tests: `library/tests/dataframe.rs` (`zset_*`), one per verb rule plus
+`changes`; `cli/src/fmt.rs` `query_cells_keep_adjacency`.
+
 ## Canonical formatter `mimas fmt` (`cli/src/fmt.rs`, spec `mimas.fmt`)
 
 A token-stream respacer, not an AST reprint: comments are tokens, so every

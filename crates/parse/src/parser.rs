@@ -3402,7 +3402,8 @@ impl<'s> Parser<'s> {
             self.chain_accesses(expr)
         } else if self.struct_literals
             && self.peek() == TokKind::Ident("query")
-            && self.nth(1) == TokKind::LeftBrace
+            && (self.nth(1) == TokKind::LeftBrace
+                || (self.nth(1) == TokKind::Ident("z") && self.nth(2) == TokKind::LeftBrace))
         {
             let expr = self.query_literal();
             self.chain_accesses(expr)
@@ -3637,21 +3638,46 @@ impl<'s> Parser<'s> {
     // value from the surrounding scope -- a `let` or a parameter -- write it `$name`d: the `$`
     // splice evaluates its expression outside the column namespace (see `q_lower`).
     // It lowers to one `__q_*` native call per verb (see `library::std_lib::dataframe`).
+    //
+    // `query z { … }` takes the same verbs, but its frames are Z-sets: each row has an
+    // integer weight in a `__w` column (see `library::zset`). The source and each joined
+    // table enter through `__z_in` (weight 1 per row unless they have `__w`); `filter`,
+    // `derive` and `rename` lower as above and the weight rides along; `select` keeps
+    // `__w`; `join` multiplies weights (`__z_join`); `group` repeats each row by its weight
+    // before the plain aggregate (`__z_expand`) and weighs each output row 1; `distinct`
+    // is `__z_distinct`; `sort` and `take` consolidate first (`__z_cons`), and so does the
+    // block's result.
+    // r[impl mimas.query.zset]
     fn query_literal(&mut self) -> Expr {
         let start = self.next_start();
         self.advance(); // `query`
+        let zset = self.peek() == TokKind::Ident("z");
+        if zset {
+            self.advance();
+        }
         self.bump(TokKind::LeftBrace);
         // every verb's operands are whitespace-separated -- `join fees
         // delivery` must not read `fees(delivery)`; the block runs with
         // juxtaposition disarmed, like `table` cells
-        self.with_juxta(Juxta::Off, |p| p.query_body(start))
+        self.with_juxta(Juxta::Off, |p| p.query_body(start, zset))
     }
 
-    fn query_body(&mut self, start: usize) -> Expr {
+    fn query_body(&mut self, start: usize, zset: bool) -> Expr {
         if self.peek() == TokKind::Ident("from") {
             self.advance();
         }
         let mut table = self.struct_literals(true, Self::expr);
+        if zset {
+            table = self.q_call("__z_in", vec![table], start);
+        }
+        // `sort` and `take` see a consolidated Z-set: each distinct row once
+        let cons = |p: &Self, t: Expr, at: usize| {
+            if zset {
+                p.q_call("__z_cons", vec![t], at)
+            } else {
+                t
+            }
+        };
 
         while !self.at(TokKind::RightBrace) && !self.at(TokKind::Eof) {
             let verb_start = self.next_start();
@@ -3672,9 +3698,13 @@ impl<'s> Parser<'s> {
                     self.q_call("__q_mutate", vec![table, list], verb_start)
                 }
                 "select" => {
-                    let names = self.q_names(false);
-                    let list =
-                        self.q_str_list(names.iter().map(|(n, _)| n.clone()).collect(), verb_start);
+                    let mut names: Vec<String> =
+                        self.q_names(false).into_iter().map(|(n, _)| n).collect();
+                    // a Z-set keeps its weights through a projection
+                    if zset && !names.iter().any(|n| n == "__w") {
+                        names.push("__w".into());
+                    }
+                    let list = self.q_str_list(names, verb_start);
                     self.q_call("__q_select", vec![table, list], verb_start)
                 }
                 "sort" => {
@@ -3691,17 +3721,20 @@ impl<'s> Parser<'s> {
                         })
                         .collect();
                     let dirs = self.new_expr(Literal::Array(dirs), verb_start);
+                    let table = cons(self, table, verb_start);
                     self.q_call("__q_sort", vec![table, cols, dirs], verb_start)
                 }
                 "take" => {
                     let n = self.expr();
+                    let table = cons(self, table, verb_start);
                     self.q_call("__q_take", vec![table, n], verb_start)
                 }
                 "distinct" => {
                     let names = self.q_names(false);
                     let list =
                         self.q_str_list(names.into_iter().map(|(n, _)| n).collect(), verb_start);
-                    self.q_call("__q_distinct", vec![table, list], verb_start)
+                    let native = if zset { "__z_distinct" } else { "__q_distinct" };
+                    self.q_call(native, vec![table, list], verb_start)
                 }
                 "rename" => {
                     let names = self.q_names(false);
@@ -3722,6 +3755,12 @@ impl<'s> Parser<'s> {
                 "group" => {
                     let names = self.q_names_until_brace();
                     let list = self.q_str_list(names, verb_start);
+                    // a Z-set row of weight 3 counts as three rows to the aggregates
+                    let table = if zset {
+                        self.q_call("__z_expand", vec![table], verb_start)
+                    } else {
+                        table
+                    };
                     let grouped = self.q_call("__q_group", vec![table, list], verb_start);
                     self.expect(TokKind::LeftBrace);
                     if self.peek() == TokKind::Ident("aggregate") {
@@ -3732,7 +3771,13 @@ impl<'s> Parser<'s> {
                     let aggs = self.q_named_columns();
                     self.expect(TokKind::RightBrace);
                     let list = self.new_expr(Literal::Array(aggs), verb_start);
-                    self.q_call("__q_agg", vec![grouped, list], verb_start)
+                    let agg = self.q_call("__q_agg", vec![grouped, list], verb_start);
+                    if zset {
+                        // each group is one row of weight 1
+                        self.q_call("__z_in", vec![agg], verb_start)
+                    } else {
+                        agg
+                    }
                 }
                 "join" => {
                     // `join other key [key…] ["kind"]`
@@ -3760,7 +3805,12 @@ impl<'s> Parser<'s> {
                     }
                     let keys = self.q_str_list(keys, verb_start);
                     let kind = self.new_expr(Literal::String(kind), verb_start);
-                    self.q_call("__q_join", vec![table, other, keys, kind], verb_start)
+                    if zset {
+                        let other = self.q_call("__z_in", vec![other], verb_start);
+                        self.q_call("__z_join", vec![table, other, keys, kind], verb_start)
+                    } else {
+                        self.q_call("__q_join", vec![table, other, keys, kind], verb_start)
+                    }
                 }
                 _ => {
                     self.error(Misdirection {
@@ -3782,7 +3832,9 @@ impl<'s> Parser<'s> {
         }
         self.expect(TokKind::RightBrace);
         // keep the whole block's span on the result for error labels
-        let _ = start;
+        if zset {
+            return self.q_call("__z_cons", vec![table], start);
+        }
         table
     }
 

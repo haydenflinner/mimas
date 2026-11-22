@@ -839,9 +839,14 @@ impl<'s> Fmt<'s> {
     fn mark_regions(&mut self) {
         for i in 0..self.toks.len() {
             let k = self.kind(i);
-            // `table {`/`query {`: rows/cells, whitespace-separated
+            // `table {`/`query {`/`query z {`: rows/cells, whitespace-separated
             if let TokKind::Ident(name @ ("table" | "query")) = k
-                && let Some(open) = self.sig_next(i)
+                && let Some(next) = self.sig_next(i)
+                && let Some(open) = if name == "query" && self.kind(next) == TokKind::Ident("z") {
+                    self.sig_next(next)
+                } else {
+                    Some(next)
+                }
                 && self.kind(open) == TokKind::LeftBrace
                 && let Some(close) = self.match_of(open)
             {
@@ -1788,6 +1793,13 @@ mod tests {
         let want =
             "let s = table {\n    rider    clock    scorer\n    \"ada\"    36058    \"spot\"\n}\n";
         assert_eq!(fmt(src), want);
+    }
+
+    #[test]
+    fn query_cells_keep_adjacency() {
+        // `sort -elapsed` keeps its glued `-`, in both query modes
+        unchanged("let s = query {\n    t\n    sort -elapsed rider\n}\n");
+        unchanged("let s = query z {\n    t\n    sort -elapsed rider\n}\n");
     }
 
     #[test]

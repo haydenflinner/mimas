@@ -58,6 +58,13 @@ impl AscDesc {
     api.add(__q_distinct);
     api.add(__q_join);
     api.add(__q_splice);
+    // `query z { … }` lowers to the `__q_*` verbs plus these, where a verb
+    // must see the row weights (see `crate::zset`)
+    api.add(__z_in);
+    api.add(__z_cons);
+    api.add(__z_expand);
+    api.add(__z_distinct);
+    api.add(__z_join);
     api.add(__data);
     {
         let mut m = api.module("std::polars");
@@ -94,6 +101,7 @@ impl AscDesc {
         m.add(join);
         m.add(pivot);
         m.add(unpivot);
+        m.add(changes);
     }
     api.add_method(filter);
     api.add_method(select);
@@ -1964,6 +1972,77 @@ fn __q_distinct<'gc>(
         .unique_stable(subset, UniqueKeepStrategy::First, None)
         .map(|d| ctx.new_dataframe(d))
         .map_err(q_err)
+}
+
+/// `query z { … }` plumbing: the source table, and the right side of a
+/// `join`, get weight 1 on each row unless they carry `__w` already.
+#[native]
+fn __z_in<'gc>(ctx: Ctx<'gc>, df: vm::DataFrame<'gc>) -> Result<vm::DataFrame<'gc>, vm::RtErr> {
+    let out = crate::zset::weigh(&df.0.borrow().0).map_err(q_err)?;
+    Ok(ctx.new_dataframe(out))
+}
+
+/// `query z { … }` plumbing: identical rows merged, weights summed, zero
+/// weights dropped. Runs before `sort`/`take` and on the block's result.
+#[native]
+fn __z_cons<'gc>(ctx: Ctx<'gc>, df: vm::DataFrame<'gc>) -> Result<vm::DataFrame<'gc>, vm::RtErr> {
+    let out = crate::zset::consolidate(&df.0.borrow().0).map_err(q_err)?;
+    Ok(ctx.new_dataframe(out))
+}
+
+/// `query z { … }` plumbing: each row repeated by its weight before a
+/// `group … { aggregate { … } }`, so the aggregates count weights.
+#[native]
+fn __z_expand<'gc>(
+    ctx: Ctx<'gc>,
+    df: vm::DataFrame<'gc>,
+) -> Result<vm::DataFrame<'gc>, vm::RtErr> {
+    let out = crate::zset::expand(&df.0.borrow().0).map_err(q_err)?;
+    Ok(ctx.new_dataframe(out))
+}
+
+/// `query z { … }` plumbing: `distinct`, the positive rows at weight 1.
+#[native]
+fn __z_distinct<'gc>(
+    ctx: Ctx<'gc>,
+    df: vm::DataFrame<'gc>,
+    names: Vec<String>,
+) -> Result<vm::DataFrame<'gc>, vm::RtErr> {
+    let out = crate::zset::distinct(&df.0.borrow().0, &names).map_err(q_err)?;
+    Ok(ctx.new_dataframe(out))
+}
+
+/// `query z { … }` plumbing: `join`, each pair weighing the product of its
+/// two rows' weights.
+#[native]
+fn __z_join<'gc>(
+    ctx: Ctx<'gc>,
+    df: vm::DataFrame<'gc>,
+    other: vm::DataFrame<'gc>,
+    on: Vec<String>,
+    how: &str,
+) -> Result<vm::DataFrame<'gc>, vm::RtErr> {
+    let Some(how) = crate::zset::join_type(how) else {
+        return Err(q_err(format!("unknown join type {how:?}")));
+    };
+    let out = crate::zset::join(&df.0.borrow().0, &other.0.borrow().0, &on, how)
+        .map_err(q_err)?;
+    Ok(ctx.new_dataframe(out))
+}
+
+/// `changes(new, old)`: what changed from `old` to `new`, as a Z-set. The
+/// rows of `new` keep their weights, the rows of `old` count negated, and
+/// rows in both cancel. Each row has a `__w` weight: positive for a row
+/// that `new` added, negative for a row it took away.
+/// r[impl mimas.query.zset.changes]
+#[native]
+fn changes<'gc>(
+    ctx: Ctx<'gc>,
+    new: vm::DataFrame<'gc>,
+    old: vm::DataFrame<'gc>,
+) -> Result<vm::DataFrame<'gc>, vm::RtErr> {
+    let out = crate::zset::changes(&new.0.borrow().0, &old.0.borrow().0).map_err(q_err)?;
+    Ok(ctx.new_dataframe(out))
 }
 
 /// query-DSL plumbing — `df | join side=other (key)` lowers here.

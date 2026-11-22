@@ -44,6 +44,11 @@ mod std_lib {
 
 mod prelude;
 
+/// The Z-set algebra behind `query z { … }`, shared with hosts that run
+/// generated Rust.
+#[cfg(feature = "dataframe")]
+pub mod zset;
+
 /// The sum of `xs`, compensated as Python's `sum` is (Neumaier): each
 /// step keeps the low bits that rounding dropped and adds them back at the
 /// end, so ten `0.1`s make `1.0` and `1e16 + 1 - 1e16` makes `1.0`. It

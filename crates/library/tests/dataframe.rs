@@ -1351,3 +1351,192 @@ fn data_source_without_resolver_compiles_opaque() {
     // a bare `mimas check` on a page never fails for want of a host.
     assert!(vm::Vm::compile(r#"let df = data "trips";"#, library::std).is_ok());
 }
+
+// ---- `query z { … }`: the same verbs over Z-sets --------------------------------------------
+// Each row has an integer weight, `__w`. A plain table enters at weight 1 per row, identical
+// rows merge by summing their weights, and a row whose weights sum to zero drops out.
+
+const ZROWS: &str = r#"use std::polars::*;
+    let dup = table { k, v
+        "a", 1
+        "a", 1
+        "b", 2
+    };
+    let three = table { k, v
+        "a", 5
+        "a", 5
+        "a", 5
+        "b", 1
+    };
+    let tags = table { k, tag
+        "a", "x"
+        "a", "x"
+        "b", "y"
+    };"#;
+
+// r[verify mimas.query.zset.weight]
+// r[verify mimas.query.zset.consolidate]
+test_run!(
+    zset_duplicate_rows_merge_into_one_weight,
+    ZROWS,
+    r#"query z { dup }.pull("k")!"# => r#"["a", "b"]"#,
+    r#"query z { dup }.pull("__w")!"# => "[2, 1]",
+    // the weight is the last column, and it is an int
+    r#"query z { dup }.col_names()"# => r#"["k", "v", "__w"]"#,
+    // plain `query { }` keeps every row and adds no weight
+    r#"query { dup }.pull("k")!"# => r#"["a", "a", "b"]"#,
+    r#"query { dup }.col_names()"# => r#"["k", "v"]"#,
+);
+
+// r[verify mimas.query.zset.weight]
+test_run!(
+    zset_filter_derive_rename_select_keep_the_weight,
+    ZROWS,
+    r#"query z {
+        three
+        filter v > 1
+        derive v10 = v * 10
+        rename k key
+    }.col_names()"# => r#"["key", "v", "v10", "__w"]"#,
+    r#"query z {
+        three
+        filter v > 1
+    }.pull("__w")!"# => "[3]",
+    // a projection that makes rows equal merges them
+    r#"query z {
+        tags
+        select tag
+    }.pull("__w")!"# => "[2, 1]",
+    r#"query z {
+        tags
+        select tag
+    }.col_names()"# => r#"["tag", "__w"]"#,
+);
+
+// r[verify mimas.query.zset.join]
+test_run!(
+    zset_join_multiplies_weights,
+    ZROWS,
+    // a (weight 2) meets x (weight 2): one row of weight 4
+    r#"{ let dz = query z { dup };
+       let tz = query z { tags };
+       query z { dz join tz k }.pull("__w")! }"# => "[4, 1]",
+    r#"{ let dz = query z { dup };
+       let tz = query z { tags };
+       query z { dz join tz k }.col_names() }"# => r#"["k", "v", "tag", "__w"]"#,
+    // an unmatched row of a left join keeps its own weight
+    r#"{ let dz = query z { dup };
+       let who = table { k
+           "a"
+           "c"
+       };
+       query z { who join dz k "left" }.pull("__w")! }"# => "[2, 1]",
+);
+
+// r[verify mimas.query.zset.aggregate]
+test_run!(
+    zset_aggregate_counts_each_row_by_its_weight,
+    ZROWS,
+    r#"{ let z3 = query z { three };
+       query z {
+           z3
+           group k { aggregate { n = count(), s = sum(v) } }
+           sort k
+       }.pull("n")! }"# => "[3, 1]",
+    r#"{ let z3 = query z { three };
+       query z {
+           z3
+           group k { aggregate { n = count(), s = sum(v) } }
+           sort k
+       }.pull("s")! }"# => "[15, 1]",
+    // each group is one row of weight 1
+    r#"{ let z3 = query z { three };
+       query z {
+           z3
+           group k { aggregate { n = count() } }
+       }.pull("__w")! }"# => "[1, 1]",
+    // a row of negative weight counts as no rows
+    r#"{ let gone = changes(table { k
+           "a"
+       }, table { k
+           "a"
+           "b"
+       });
+       query z {
+           gone
+           group k { aggregate { n = count() } }
+       }.pull("n")!.len() }"# => "0",
+);
+
+// r[verify mimas.query.zset.distinct]
+test_run!(
+    zset_distinct_sets_each_weight_to_one,
+    ZROWS,
+    r#"query z {
+        three
+        distinct
+    }.pull("__w")!"# => "[1, 1]",
+    // a row of negative weight is not in the set
+    r#"{ let d = changes(table { k
+           "a"
+       }, table { k
+           "c"
+       });
+       query z {
+           d
+           distinct
+       }.pull("k")! }"# => r#"["a"]"#,
+);
+
+// r[verify mimas.query.zset.consolidate]
+test_run!(
+    zset_sort_and_take_see_consolidated_rows,
+    ZROWS,
+    // two copies of a are one row, so `take 2` reaches b
+    r#"query z {
+        dup
+        take 2
+    }.pull("k")!"# => r#"["a", "b"]"#,
+    r#"query {
+        dup
+        take 2
+    }.pull("k")!"# => r#"["a", "a"]"#,
+    r#"query z {
+        dup
+        sort -k
+    }.pull("__w")!"# => "[1, 2]",
+);
+
+// r[verify mimas.query.zset.changes]
+test_run!(
+    zset_changes_is_new_minus_old,
+    r#"use std::polars::*;
+       let old = table { k, n
+           "a", 1
+           "b", 2
+       };
+       let new = table { k, n
+           "a", 1
+           "b", 3
+           "c", 4
+       };"#,
+    r#"changes(new, old).pull("k")!"# => r#"["b", "c", "b"]"#,
+    r#"changes(new, old).pull("n")!"# => "[3, 4, 2]",
+    r#"changes(new, old).pull("__w")!"# => "[1, 1, -1]",
+    // nothing changed: no rows
+    r#"changes(new, new).pull("k")!.len()"# => "0",
+    // a Z-set's own weights carry: two copies gone is weight -2, and
+    // b, in both once, cancels
+    r#"{ let two = query z {
+           table { k, v
+               "a", 1
+               "a", 2
+               "b", 3
+           }
+           select k
+       };
+       let one_b = table { k
+           "b"
+       };
+       changes(one_b, two).pull("__w")! }"# => "[-2]",
+);

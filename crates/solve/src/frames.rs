@@ -985,6 +985,37 @@ impl Solver {
                     "__q_group" => self.q_group(id, call)?,
                     "__q_agg" => self.q_agg(id, call)?,
                     "__q_join" => self.q_join(id, call)?,
+                    // `query z { … }`: the same columns plus the `__w` weight
+                    "__z_in" => self.z_weighed(id, call, false),
+                    "__z_cons" | "changes" => self.z_weighed(id, call, true),
+                    "__z_distinct" => {
+                        if let (Some(schema), Some(names), Some(at)) = (
+                            arg(0).and_then(|a| self.frame_schema_of(a)),
+                            Self::str_list_arg(call, 1),
+                            arg(1),
+                        ) {
+                            for n in names {
+                                schema.col(self, at, n)?;
+                            }
+                        }
+                        self.z_weighed(id, call, true);
+                    }
+                    "__z_expand" => {
+                        if let Some(schema) = arg(0).and_then(|a| self.frame_schema_of(a)) {
+                            let mut out = schema.as_ref().clone();
+                            out.cols.shift_remove("__w");
+                            self.frame_schemas.insert(id, Rc::new(out));
+                        }
+                    }
+                    "__z_join" => {
+                        self.q_join(id, call)?;
+                        // the right weight folds into `__w`
+                        if let Some(schema) = self.frame_schemas.get(&id).cloned() {
+                            let mut out = schema.as_ref().clone();
+                            out.cols.shift_remove("__w_right");
+                            self.frame_schemas.insert(id, Rc::new(out));
+                        }
+                    }
                     _ => {}
                 }
                 Ok(ty)
@@ -1426,6 +1457,27 @@ impl Solver {
         )?;
         self.frame_schemas.insert(id, Rc::new(schema));
         Ok(())
+    }
+
+    /// A Z-set's schema: the first argument's columns and an `int` `__w`. With `last`
+    /// the weight moves to the end, where consolidation puts it at run time.
+    fn z_weighed(&mut self, id: NodeId, call: &Call, last: bool) {
+        let Some(schema) = call
+            .arguments
+            .first()
+            .and_then(|a| self.frame_schema_of(&a.value))
+        else {
+            return;
+        };
+        let mut out = schema.as_ref().clone();
+        if last || !out.cols.contains_key("__w") {
+            let w = out
+                .cols
+                .shift_remove("__w")
+                .unwrap_or_else(|| FrameCol::known(Ty::Int));
+            out.cols.insert("__w".into(), w);
+        }
+        self.frame_schemas.insert(id, Rc::new(out));
     }
 
     /// `__q_join(t, other, ["key"], "kind")` -- left cols + the right's non-key cols.
