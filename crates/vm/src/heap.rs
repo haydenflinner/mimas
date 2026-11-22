@@ -733,8 +733,9 @@ impl<'gc> Ctx<'gc> {
     /// Render a value being *shown* -- strings are quoted (`"x"`). Use this for anything
     /// inspection-shaped: dbg output, test harnesses, error reports.
     ///
-    /// Fails with [`RtErr::DisplayTooDeep`] if `value` nests (or cycles through arrays,
-    /// dicts, or instances) past [`MAX_DISPLAY_DEPTH`] -- see that constant's docs.
+    /// Fails with [`RtErr::DisplayTooDeep`] if `value` nests past
+    /// [`MAX_DISPLAY_DEPTH`] -- see that constant's docs. A cycle is not an error:
+    /// a revisited container prints a `Name #n ↺` back-reference (see [`Self::render_into`]).
     pub fn display(self, value: Val<'gc>) -> RtResult<String> {
         let mut out = String::new();
         self.render_into(&mut out, value, true, 0, &mut Vec::new())?;
@@ -755,8 +756,11 @@ impl<'gc> Ctx<'gc> {
     }
 
     /// `path` holds the containers being rendered around `value`: meeting one again is a
-    /// reference cycle, which fails at once rather than recursing to [`MAX_DISPLAY_DEPTH`]
-    /// (deep enough to overflow a small host stack -- a wasm tab hovering a `prev` link).
+    /// reference cycle. A cycle prints a short back-reference (`Node #1 ↺` -- the enclosing
+    /// ancestor's position on the path, 1-based) instead of descending or failing: a doubly
+    /// linked list's `prev` edge is a normal value, and `print(head)` should say something
+    /// useful about it. Sibling branches that alias the same *non-cyclic* value still render
+    /// it in full, since `path` is only the ancestor stack, not a seen-set.
     fn render_into(
         self,
         out: &mut String,
@@ -776,8 +780,24 @@ impl<'gc> Ctx<'gc> {
         let Some(ptr) = ptr else {
             return self.render_node(out, value, quote, depth, path);
         };
-        if path.contains(&ptr) {
-            return Err(RtErr::DisplayTooDeep);
+        // r[impl mimas.display.cycle]
+        if let Some(at) = path.iter().position(|&p| p == ptr) {
+            let kind = match value {
+                Val::Instance(i) => {
+                    let inst = i.0.borrow();
+                    self.state
+                        .struct_names
+                        .borrow()
+                        .get(inst.struct_id as usize)
+                        .cloned()
+                        .unwrap_or_else(|| format!("@{}", inst.struct_id))
+                }
+                Val::Dict(_) => "dict".to_string(),
+                Val::Raised(_) => "raised".to_string(),
+                _ => "list".to_string(),
+            };
+            let _ = write!(out, "{kind} #{} ↺", at + 1);
+            return Ok(());
         }
         path.push(ptr);
         let r = self.render_node(out, value, quote, depth, path);

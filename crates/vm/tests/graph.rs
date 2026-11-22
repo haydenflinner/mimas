@@ -1,7 +1,7 @@
 //! `Vm::locals_graph`: shared/cyclic references keep their referent, and `index` fields carry
 //! their unit -- what a host's boxes-and-arrows diagram needs that `Inspect` drops.
 
-use vm::{Obj, Slot, Vm};
+use vm::{Captured, Obj, Slot, Vm};
 
 fn obj(_g: &vm::HeapGraph, s: &Slot) -> usize {
     match s {
@@ -79,25 +79,28 @@ let alias = b;
     assert_eq!(g.objs.len(), 2);
 }
 
-/// Displaying a cyclic list fails fast instead of recursing to the depth limit.
+/// Displaying a cyclic list prints a short back-reference instead of recursing
+/// (or erroring): `a.next = a` renders the self-edge as `Node #1 ↺`.
+// r[verify mimas.display.cycle]
 #[test]
-fn displaying_a_cycle_errors_without_deep_recursion() {
+fn displaying_a_cycle_shows_a_back_reference() {
     let src = r#"
 struct Node { val: int, next: Node? }
 let a = Node { val = 1, next = null };
 a.next = a;
 let s = f"{a}";
 "#;
-    // 1 MiB: the old depth-1000 recursion overflowed this; fail-fast needs a few frames
+    // 1 MiB: the old depth-1000 recursion overflowed this; the marker needs no stack at all
     let handle = std::thread::Builder::new()
         .stack_size(1024 * 1024)
         .spawn(move || {
             let mut vm = Vm::compile(src, |_| {}).expect("compile");
-            format!("{:?}", vm.run().err())
+            vm.run().expect("run");
+            vm.resolve_name("s")
         })
         .unwrap();
-    let err = handle.join().expect("no stack overflow");
-    assert!(err.contains("too deep") || err.contains("Display"), "{err}");
+    let s = handle.join().expect("no stack overflow").expect("s bound");
+    assert_eq!(s, Captured::Str("Node { 1, Node #1 ↺ }".to_string()));
 }
 
 #[test]

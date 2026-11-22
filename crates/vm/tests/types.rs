@@ -71,16 +71,18 @@ test_vm!(
 );
 
 // a self-referential instance (`a.next = b; b.prev = a;`) used to blow the native stack --
-// `render_into` recurses through instance fields with no cycle detection, so `print`/`display`
-// would recurse forever. It must now surface as a normal, located runtime error instead of
-// crashing the process.
-test_fail!(
-    displaying_a_reference_cycle_errors_instead_of_crashing,
+// `render_into` recursed through instance fields with no cycle detection. A revisited
+// ancestor now prints a short back-reference (`Node #1 ↺` -- `a` is position 1 on the
+// render path) instead of descending or failing, so `print`/`display` say something
+// useful about a doubly linked list.
+test_vm!(
+    // r[verify mimas.display.cycle]
+    displaying_a_reference_cycle_shows_a_back_reference,
     "struct Node { next: Node?, prev: Node?, val: int }
      let a = Node { next = null, prev = null, val = 1 };
      let b = Node { next = null, prev = a, val = 2 };
-     a.next = b;
-     print(a);"
+     a.next = b;",
+    r#"f"{a}""# => str!("Node { Node { null, Node #1 ↺, 2 }, null, 1 }"),
 );
 
 // `S::default()` -- the implicit memberwise-default ctor every struct carries:

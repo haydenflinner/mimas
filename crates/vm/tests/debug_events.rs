@@ -65,7 +65,7 @@ fn debug_step_events_report_calls_locals_and_returns() {
 
 // A `frames()`/`debug_step_events` regression: a doubly-linked list (`a.next = b; b.prev = a;
 // b.next = c; c.prev = b;`) used to blow the native stack, the same failure mode `Ctx::display`
-// was fixed against (see `types.rs`'s `displaying_a_reference_cycle_errors_instead_of_crashing`)
+// was fixed against (see `types.rs`'s `displaying_a_reference_cycle_shows_a_back_reference`)
 // -- but `Val::capture` had no equivalent guard, since nothing read live cyclic data through it
 // before the debugger did.
 //
