@@ -1341,33 +1341,33 @@ pub struct NoSuchColumn {
     pub columns: String,
 }
 
-/// `query z { t }` where `t` has a `w` column that isn't whole numbers. `query z`
-/// keeps the weights in `w`, so an int `w` is read as the weights and any other `w`
-/// can't be.
+/// `query z { t }` where `t` has a `w` column that isn't numbers. `query z`
+/// keeps the weights in `w`, so an int or float `w` is read as the weights and
+/// any other `w` can't be.
 #[derive(Error, Debug, Diagnostic)]
 #[error(
     "query z keeps the weights in a column named `w`, and this table's `w` is {ty}: \
-     rename it before the query (`.rename(\"w\", \"width\")!`) or make it whole numbers"
+     rename it before the query (`.rename(\"w\", \"width\")!`) or make it numbers"
 )]
 pub struct ZsetWeightNotInt {
     #[source_code]
     pub src: NamedSource<Arc<str>>,
-    #[label("this table's `w` is {ty}, not int")]
+    #[label("this table's `w` is {ty}, not a number")]
     pub at: SourceSpan,
     pub ty: String,
 }
 
-/// `k * z` where `z` is a table and `k` is not a whole number. Scaling a Z-set
-/// applies a change `k` times, so `k` must be an int.
+/// `k * z` where `z` is a table and `k` is not an `int` or a `float`. Scaling
+/// multiplies each weight by `k`.
 #[derive(Error, Debug, Diagnostic)]
 #[error(
-    "scaling a Z-set applies a change a whole number of times, and this factor is {ty}: \
-     write an int (`2 * z`), or round it first (`x.round() * z`)"
+    "scaling a Z-set multiplies its weights by a number, and this factor is {ty}: \
+     write an int (`2 * z`) or a float (`0.5 * z`)"
 )]
 pub struct ZsetScaleNotInt {
     #[source_code]
     pub src: NamedSource<Arc<str>>,
-    #[label("this factor is {ty}, not int")]
+    #[label("this factor is {ty}, not a number")]
     pub at: SourceSpan,
     pub ty: String,
 }
@@ -1383,6 +1383,23 @@ pub struct ZsetColumnsDiffer {
     pub at: SourceSpan,
     pub op: String,
     pub detail: String,
+}
+
+/// `t.item()` where the checker knows `t` has some number of columns other than
+/// one (not counting `w`). `item` takes the one value of a one-row, one-column
+/// table.
+#[derive(Error, Debug, Diagnostic)]
+#[error(
+    "item() takes one value out of a table with one column, and this table has {count}: \
+     {columns}; `select` the one you want first"
+)]
+pub struct FrameItemColumns {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("this table has {count} columns")]
+    pub at: SourceSpan,
+    pub count: usize,
+    pub columns: String,
 }
 
 /// `data "name"` where the host's schema resolver has no such source -- a

@@ -1171,12 +1171,43 @@ pub enum Captured {
 /// `dropped`).
 pub const INSPECT_TABLE_ROWS: usize = 40;
 
+/// The frame as a display shows it: a numeric `w` column whose every weight
+/// is 1 is left out, since a Z-set of plain rows reads better without it.
+/// Any other weight shows the column. The data and `==` do not change; only
+/// the print, the card's table and `show_*` tables read this. The CLI's
+/// print (`heap.rs`), [`Inspect::Table`] and [`crate::table_data`] share it.
+/// r[impl mimas.query.zset.display]
+#[cfg(feature = "dataframe")]
+pub fn shown_frame(df: &polars::frame::DataFrame) -> std::borrow::Cow<'_, polars::frame::DataFrame> {
+    use std::borrow::Cow;
+    let Ok(w) = df.column("w") else {
+        return Cow::Borrowed(df);
+    };
+    let dt = w.dtype();
+    if !(dt.is_integer() || dt.is_float()) || df.width() < 2 {
+        return Cow::Borrowed(df);
+    }
+    let Ok(f) = w.as_materialized_series().cast(&polars::prelude::DataType::Float64) else {
+        return Cow::Borrowed(df);
+    };
+    let Ok(ca) = f.f64() else {
+        return Cow::Borrowed(df);
+    };
+    if (0..ca.len()).all(|i| ca.get(i) == Some(1.0)) {
+        if let Ok(out) = df.drop("w") {
+            return Cow::Owned(out);
+        }
+    }
+    Cow::Borrowed(df)
+}
+
 /// [`Inspect::Table`] for one frame: scalars keep their kind, everything
 /// else (dates, nested lists, …) falls back to `AnyValue`'s display
 /// text — the same fallback [`crate::table_data`] uses.
 #[cfg(feature = "dataframe")]
 fn inspect_frame(df: &polars::frame::DataFrame) -> Inspect {
     use polars::prelude::AnyValue;
+    let df = &*shown_frame(df);
     let cols: Vec<String> = df
         .get_column_names()
         .iter()

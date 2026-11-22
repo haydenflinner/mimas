@@ -4,8 +4,15 @@
 //! A row with weight 2 stands for two copies of that row, and a row with
 //! weight -1 stands for one copy taken away. A plain frame enters with
 //! weight 1 on each row. A frame that arrives with an integer `w` column is
-//! a Z-set already, and that column holds its weights. A `w` column of any
-//! other type is an error, because it cannot hold weights. The parser
+//! a Z-set already, and that column holds its weights.
+//!
+//! A `w` column of floats makes a weighted table: the same algebra over the
+//! reals (an R-module), so a weight can be a rank, a share or a probability.
+//! The reals are a group under `+` too, so negation, undo and the laws hold,
+//! apart from float rounding: `0.1 + 0.2 - 0.3` is about 5.6e-17, not 0, so
+//! that row stays. Consolidation drops a row only when its weight is exactly
+//! 0. An int-weighted and a float-weighted table combine as floats. A `w`
+//! column of any other type is an error, because it cannot hold weights. The parser
 //! lowers each `query z` verb to the `__q_*` native it uses in plain mode,
 //! or to one of these, when the verb must see the weights (see
 //! `Parser::query_body`).
@@ -41,33 +48,74 @@ fn one() -> Expr {
     lit(1i64).cast(DataType::Int64)
 }
 
-fn weight() -> Expr {
-    col(W).cast(DataType::Int64)
+/// Whether `df`'s weights are real numbers: its `w` column holds floats.
+/// r[impl mimas.query.zset.real]
+pub fn is_real(df: &DataFrame) -> bool {
+    df.column(W).is_ok_and(|c| c.dtype().is_float())
 }
 
-/// The error for a frame whose `w` column is not whole numbers. The solver
+/// The cells of `s` as `f64`s, `None` for a null.
+fn floats(s: &Series) -> PolarsResult<Vec<Option<f64>>> {
+    let s = s.cast(&DataType::Float64)?;
+    let ca = s.f64()?;
+    Ok((0..ca.len()).map(|i| ca.get(i)).collect())
+}
+
+/// The type weights take: `i64` for a Z-set, `f64` for a weighted table.
+fn weight_type(real: bool) -> DataType {
+    if real { DataType::Float64 } else { DataType::Int64 }
+}
+
+/// The weight column as `i64`, or as `f64` when `real`.
+fn weight_as(real: bool) -> Expr {
+    col(W).cast(weight_type(real))
+}
+
+/// The zero weight, typed to match.
+fn zero(real: bool) -> Expr {
+    if real { lit(0.0f64) } else { lit(0i64) }
+}
+
+/// A weight, as `size` and `item` give it back: whole for a Z-set, real for
+/// a weighted table.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Weight {
+    Int(i64),
+    Float(f64),
+}
+
+impl Weight {
+    pub fn as_f64(self) -> f64 {
+        match self {
+            Weight::Int(i) => i as f64,
+            Weight::Float(f) => f,
+        }
+    }
+}
+
+/// The error for a frame whose `w` column is not numbers. The solver
 /// rejects the same frame at check time when it knows the column's type.
 pub fn not_int_message(ty: &str) -> String {
     format!(
         "query z keeps the weights in a column named `w`, and this table's `w` is {ty}: \
-         rename it before the query (`.rename(\"w\", \"width\")!`) or make it whole numbers"
+         rename it before the query (`.rename(\"w\", \"width\")!`) or make it numbers"
     )
 }
 
-/// `df` with a weight column. A frame that has an integer `w` already keeps
-/// it as its weights, and any other frame gets weight 1 on each row. A `w`
-/// of another type is an error.
+/// `df` with a weight column. A frame that has an integer or float `w`
+/// already keeps it as its weights, and any other frame gets weight 1 on
+/// each row. A `w` of another type is an error.
 /// r[impl mimas.query.zset.weight]
 /// r[impl mimas.query.zset.adopt]
 /// r[impl mimas.query.zset.reject]
+/// r[impl mimas.query.zset.real]
 pub fn weigh(df: &DataFrame) -> PolarsResult<DataFrame> {
     if let Ok(c) = df.column(W) {
         let dt = c.dtype();
-        if !dt.is_integer() {
+        if !dt.is_integer() && !dt.is_float() {
             let ty = match dt {
                 DataType::String => "str".to_string(),
                 DataType::Boolean => "bool".to_string(),
-                dt if dt.is_float() => "float".to_string(),
                 dt => dt.to_string(),
             };
             return Err(PolarsError::ComputeError(not_int_message(&ty).into()));
@@ -78,12 +126,13 @@ pub fn weigh(df: &DataFrame) -> PolarsResult<DataFrame> {
 }
 
 /// Identical rows merged into one row whose weight is the sum of theirs.
-/// Rows whose weights sum to zero drop out. A row keeps the position where
-/// it first appears, so a sorted frame stays sorted. The weight column
-/// moves to the end.
+/// Rows whose weights sum to zero drop out; for real weights only an exact
+/// 0 does. A row keeps the position where it first appears, so a sorted
+/// frame stays sorted. The weight column moves to the end.
 /// r[impl mimas.query.zset.consolidate]
 pub fn consolidate(df: &DataFrame) -> PolarsResult<DataFrame> {
     let df = weigh(df)?;
+    let real = is_real(&df);
     let keys: Vec<Expr> = df
         .get_column_names()
         .into_iter()
@@ -92,11 +141,11 @@ pub fn consolidate(df: &DataFrame) -> PolarsResult<DataFrame> {
         .collect();
     let summed = if keys.is_empty() {
         // a frame of weights alone: one row that holds their sum
-        df.lazy().select([weight().sum()])
+        df.lazy().select([weight_as(real).sum()])
     } else {
-        df.lazy().group_by_stable(keys).agg([weight().sum()])
+        df.lazy().group_by_stable(keys).agg([weight_as(real).sum()])
     };
-    run(summed.filter(col(W).neq(lit(0i64))))
+    run(summed.filter(col(W).neq(zero(real))))
 }
 
 /// The `query z` name of the aggregate filter: the parser lowers a
@@ -121,37 +170,119 @@ pub fn positive(e: Expr) -> Expr {
 /// runtimes answer it with [`weighted_median`].
 pub const MEDIAN: &str = "__z_median";
 
-/// The median of `e` with each row counted `w` times: the median of the
-/// copies the rows stand for. It reads only the rows of positive weight
-/// whose value is not null. A negative weight takes a copy away, and a
-/// median of copies that are not there has no meaning, so those rows are
-/// not values.
+/// The median of `e` with each row counted `w` times: the point `m` that
+/// makes `Σ w·|x − m|` least. It reads every row whose value is not null.
 ///
-/// Sort the values, add up the weights in that order, and let `total` be
-/// the sum of all of them. The lower middle is the first value where twice
-/// the running weight reaches `total`, and the upper middle is the first
-/// value where it passes `total`. The median is the mean of the two. When
-/// the copies are an odd count, or a value's copies span the middle, the
-/// two are the same value. When the copies are an even count and the
-/// middle falls between two values, the median is halfway between them,
-/// as the plain `median` does for an even count of rows. So weights of 1
-/// on every row give the plain `median`. An aggregate over no rows is null.
+/// When every weight is positive this is the median of the copies the rows
+/// stand for. Sort the values, add up the weights in that order, and let
+/// `total` be the sum of all of them. The lower middle is the first value
+/// where twice the running weight reaches `total`, and the upper middle is
+/// the first value where it passes `total`. The median is the mean of the
+/// two. When the copies are an odd count, or a value's copies span the
+/// middle, the two are the same value. When the copies are an even count
+/// and the middle falls between two values, the median is halfway between
+/// them, as the plain `median` does for an even count of rows. So weights of
+/// 1 on every row give the plain `median`.
+///
+/// A negative weight takes copies away, and the same sum still has a least
+/// point when the weights add up to more than 0. When they add up to less
+/// than 0, removals outweigh additions, the sum falls without limit as `m`
+/// moves past the values, and the median is an error that says so. When they
+/// add up to exactly 0, or when the least sum holds at two places with more
+/// between them, there is no single middle, and that is an error too. An
+/// aggregate over no rows is null.
 /// r[impl mimas.query.zset.aggregate.median]
+/// r[impl mimas.query.zset.median.signed]
 pub fn weighted_median(e: Expr) -> Expr {
-    let keep = col(W).gt(lit(0i64)).and(e.clone().is_not_null());
-    let x = e.filter(keep.clone());
-    let wt = weight().filter(keep);
-    // a stable sort, so the weights stay paired with their values
-    let order = SortMultipleOptions::default().with_maintain_order(true);
-    let xs = x.clone().sort_by([x.clone()], order.clone());
-    let twice_run = wt.clone().sort_by([x], order).cum_sum(false) * lit(2i64);
-    let total = wt.sum();
-    let lower = xs
-        .clone()
-        .filter(twice_run.clone().gt_eq(total.clone()))
-        .first();
-    let upper = xs.filter(twice_run.gt(total)).first();
-    (lower.cast(DataType::Float64) + upper.cast(DataType::Float64)) / lit(2.0f64)
+    as_struct(vec![e.alias("x"), col(W).cast(DataType::Float64).alias(W)]).agg_with_fmt_str(
+        |c: Column| {
+            let s = c.as_materialized_series();
+            let parts = s.struct_()?.fields_as_series();
+            let pairs: Vec<(f64, f64)> = floats(&parts[0])?
+                .into_iter()
+                .zip(floats(&parts[1])?)
+                .filter_map(|(x, w)| Some((x?, w.unwrap_or(1.0))))
+                .collect();
+            let m = median_of(pairs)?;
+            Ok(Column::new(c.name().clone(), [m]))
+        },
+        |_, f| Ok(Field::new(f.name().clone(), DataType::Float64)),
+        MEDIAN,
+    )
+}
+
+/// The weighted median of `(value, weight)` pairs, as [`weighted_median`]
+/// describes it. `None` when no pair has a weight other than 0.
+pub fn median_of(mut pairs: Vec<(f64, f64)>) -> PolarsResult<Option<f64>> {
+    pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
+    // equal values merge, and a value whose weights cancel is not there
+    let mut v: Vec<(f64, f64)> = Vec::with_capacity(pairs.len());
+    for (x, w) in pairs {
+        match v.last_mut() {
+            Some(last) if last.0 == x => last.1 += w,
+            _ => v.push((x, w)),
+        }
+    }
+    v.retain(|p| p.1 != 0.0);
+    if v.is_empty() {
+        return Ok(None);
+    }
+    let total: f64 = v.iter().map(|p| p.1).sum();
+    if v.iter().all(|p| p.1 > 0.0) {
+        let mut run = 0.0;
+        let (mut lower, mut upper) = (None, None);
+        for &(x, w) in &v {
+            run += w;
+            if lower.is_none() && 2.0 * run >= total {
+                lower = Some(x);
+            }
+            if upper.is_none() && 2.0 * run > total {
+                upper = Some(x);
+            }
+        }
+        let lower = lower.unwrap_or(v[v.len() - 1].0);
+        let upper = upper.unwrap_or(lower);
+        return Ok(Some((lower + upper) / 2.0));
+    }
+    let err = |msg: String| PolarsError::ComputeError(msg.into());
+    if total < 0.0 {
+        return Err(err(format!(
+            "median: the weights add up to {total}, so removals outweigh additions: \
+             Σ w·|x − m| falls without limit as m moves past the values, and no middle exists"
+        )));
+    }
+    // Σ w·|x − m| at each value, from running sums of the weights and of w·x
+    let s: f64 = v.iter().map(|p| p.0 * p.1).sum();
+    let (mut c, mut p) = (0.0, 0.0);
+    let f: Vec<f64> = v
+        .iter()
+        .map(|&(x, w)| {
+            c += w;
+            p += w * x;
+            x * c - p + (s - p) - x * (total - c)
+        })
+        .collect();
+    let least = f.iter().cloned().fold(f64::INFINITY, f64::min);
+    let scale: f64 = v.iter().map(|p| p.1.abs()).sum::<f64>() * (v[v.len() - 1].0 - v[0].0);
+    let near = |y: f64| (y - least).abs() <= 1e-12 * scale.max(least.abs()).max(1e-300);
+    let at: Vec<usize> = (0..f.len()).filter(|&k| near(f[k])).collect();
+    let (lo, hi) = (at[0], at[at.len() - 1]);
+    if total == 0.0 && (lo == 0 || hi == v.len() - 1) {
+        let edge = if lo == 0 { v[0].0 } else { v[v.len() - 1].0 };
+        return Err(err(format!(
+            "median: the weights add up to 0, so Σ w·|x − m| is least on a whole half-line \
+             from {edge}, and there is no single middle"
+        )));
+    }
+    if hi - lo + 1 != at.len() {
+        let gap = (lo..=hi).find(|k| !at.contains(k)).unwrap_or(lo);
+        return Err(err(format!(
+            "median: Σ w·|x − m| is least at {} and at {}, with more at {} between them: \
+             the removals split the middle, and there is no single middle",
+            v[lo].0, v[hi].0, v[gap].0
+        )));
+    }
+    Ok(Some((v[lo].0 + v[hi].0) / 2.0))
 }
 
 /// The polars join kind a query names.
@@ -168,7 +299,7 @@ pub fn join_type(how: &str) -> Option<JoinType> {
 /// The join of two Z-sets: each output row weighs the product of the two
 /// rows it pairs. A side with no match (a left join's unmatched row) has a
 /// null weight, which counts as 1, so the matched side's weight carries
-/// through unchanged.
+/// through unchanged. The product is real when either side's weights are.
 /// r[impl mimas.query.zset.join]
 pub fn join(
     left: &DataFrame,
@@ -176,15 +307,40 @@ pub fn join(
     on: &[String],
     how: JoinType,
 ) -> PolarsResult<DataFrame> {
+    join_on(left, right, on, on, how)
+}
+
+/// [`join`] on key columns that may have other names on the right:
+/// `join links (node == src)` pairs a left row with a right row when the
+/// left's `node` equals the right's `src`. The right's key columns drop out,
+/// since on every matched row they hold what the left's key columns hold.
+/// r[impl mimas.query.zset.join]
+/// r[impl mimas.query.join-on]
+pub fn join_on(
+    left: &DataFrame,
+    right: &DataFrame,
+    left_on: &[String],
+    right_on: &[String],
+    how: JoinType,
+) -> PolarsResult<DataFrame> {
     let right_w = format!("{W}_right");
-    let keys: Vec<Expr> = on.iter().map(|n| col(n.as_str())).collect();
-    let joined =
-        weigh(left)?
-            .lazy()
-            .join(weigh(right)?.lazy(), keys.clone(), keys, JoinArgs::new(how))?;
-    let product =
-        weight().fill_null(one()) * col(right_w.as_str()).cast(DataType::Int64).fill_null(one());
+    let (left, right) = (weigh(left)?, weigh(right)?);
+    let real = is_real(&left) || is_real(&right);
+    let lk: Vec<Expr> = left_on.iter().map(|n| col(n.as_str())).collect();
+    let rk: Vec<Expr> = right_on.iter().map(|n| col(n.as_str())).collect();
+    let joined = left.lazy().join(right.lazy(), lk, rk, JoinArgs::new(how))?;
+    let one = || lit(1i64).cast(weight_type(real));
+    let product = weight_as(real).fill_null(one())
+        * col(right_w.as_str()).cast(weight_type(real)).fill_null(one());
     run(joined.with_column(product.alias(W)))?.drop(&right_w)
+}
+
+/// The error for a `join` whose two key lists differ in length.
+pub fn join_keys_message(left: usize, right: usize) -> String {
+    format!(
+        "this join names {left} key column(s) on the left and {right} on the right: \
+         pair each left key with one right key, `join t (a == x && b == y)`"
+    )
 }
 
 /// Which row of a key `distinct a b` keeps when several rows share it.
@@ -265,14 +421,21 @@ pub fn as_set(df: &DataFrame) -> PolarsResult<DataFrame> {
 /// The result is consolidated.
 /// r[impl mimas.query.zset.negate]
 pub fn negate(df: &DataFrame) -> PolarsResult<DataFrame> {
+    if is_real(df) {
+        return scale_real(df, -1.0);
+    }
     scale(df, -1)
 }
 
 /// `k * z`: every weight times `k`, the change applied `k` times. `k = 0`
 /// gives the empty Z-set, which keeps the columns. The result is
-/// consolidated. A weight that overflows an `i64` is an error.
+/// consolidated. A weight that overflows an `i64` is an error. A weighted
+/// table with real weights scales as reals.
 /// r[impl mimas.query.zset.scale]
 pub fn scale(df: &DataFrame, k: i64) -> PolarsResult<DataFrame> {
+    if is_real(df) {
+        return scale_real(df, k as f64);
+    }
     let z = consolidate(df)?;
     if k == 0 {
         return Ok(z.clear());
@@ -290,6 +453,16 @@ pub fn scale(df: &DataFrame, k: i64) -> PolarsResult<DataFrame> {
     let mut z = z;
     z.with_column(Column::new(W.into(), out))?;
     Ok(z)
+}
+
+/// `k * z` with a real `k`: every weight times `k`, as floats, so the result
+/// is a weighted table even when `z` was a Z-set. A product that comes to
+/// exactly 0 drops its row, so `0.0 * z` is empty with `z`'s columns.
+/// r[impl mimas.query.zset.real]
+pub fn scale_real(df: &DataFrame, k: f64) -> PolarsResult<DataFrame> {
+    let z = consolidate(df)?;
+    let scaled = z.lazy().with_column((weight_as(true) * lit(k)).alias(W));
+    run(scaled.filter(col(W).neq(zero(true))))
 }
 
 /// The error for `k * z` where `k` is not a whole number.
@@ -312,16 +485,23 @@ pub fn added(df: &DataFrame) -> PolarsResult<DataFrame> {
 /// `z == z.added() - z.removed()`.
 /// r[impl mimas.query.zset.parts]
 pub fn removed(df: &DataFrame) -> PolarsResult<DataFrame> {
-    let gone = run(consolidate(df)?.lazy().filter(col(W).lt(lit(0i64))))?;
-    run(gone.lazy().with_column((lit(0i64) - weight()).alias(W)))
+    let real = is_real(df);
+    let gone = run(consolidate(df)?.lazy().filter(col(W).lt(zero(real))))?;
+    run(gone.lazy().with_column((zero(real) - weight_as(real)).alias(W)))
 }
 
 /// `z.size()`: ‖Z‖, the sum of the absolute weights of the consolidated
 /// rows. It counts the copies a change adds and takes away, so
 /// `z.size() == z.added().size() + z.removed().size()`, and a Z-set is
-/// empty exactly when its size is 0.
+/// empty exactly when its size is 0. A weighted table's size is the real
+/// sum, its ℓ¹ norm, which [`norm`] gives.
 /// r[impl mimas.query.zset.size]
 pub fn size(df: &DataFrame) -> PolarsResult<i64> {
+    if is_real(df) {
+        return Err(PolarsError::ComputeError(
+            "this table's weights are real numbers, so its size is a float, not an int".into(),
+        ));
+    }
     let z = consolidate(df)?;
     let w = z.column(W)?.as_materialized_series().i64()?.clone();
     let mut total: i64 = 0;
@@ -334,6 +514,202 @@ pub fn size(df: &DataFrame) -> PolarsResult<i64> {
             })?;
     }
     Ok(total)
+}
+
+/// ‖Z‖ for either kind of weight: [`size`] as a whole number for a Z-set,
+/// and the sum of the absolute real weights for a weighted table.
+/// r[impl mimas.query.zset.size]
+/// r[impl mimas.query.zset.real]
+pub fn norm(df: &DataFrame) -> PolarsResult<Weight> {
+    if !is_real(df) {
+        return size(df).map(Weight::Int);
+    }
+    let z = consolidate(df)?;
+    let w = floats(z.column(W)?.as_materialized_series())?;
+    // a fold from +0.0: an empty `sum()` of floats is -0.0
+    Ok(Weight::Float(w.into_iter().flatten().map(f64::abs).fold(0.0, |t, a| t + a)))
+}
+
+/// `t.item()`: the one value of a table with one row and one column. A
+/// `w` column is not a value: a Z-set's one row must weigh exactly 1, since
+/// a row of weight 2 is two copies and a row of weight 0.5 is half of one.
+/// Any other shape is an error that says what the table holds. The value
+/// comes back as its column holds it.
+/// r[impl mimas.query.item]
+pub fn item(df: &DataFrame) -> PolarsResult<AnyValue<'static>> {
+    let err = |msg: String| PolarsError::ComputeError(msg.into());
+    let names: Vec<String> = df
+        .get_column_names()
+        .iter()
+        .map(|n| n.to_string())
+        .filter(|n| n != W)
+        .collect();
+    if names.len() != 1 {
+        let list = names.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", ");
+        return Err(err(format!(
+            "item() takes one value out of a table with one column, and this table has {}: {}; \
+             `select` the one you want first",
+            names.len(),
+            if list.is_empty() { "none".to_string() } else { list }
+        )));
+    }
+    if df.height() != 1 {
+        return Err(err(format!(
+            "item() takes one value out of a table with one row, and this table has {} rows",
+            df.height()
+        )));
+    }
+    if let Ok(w) = df.column(W) {
+        let w = w.as_materialized_series().cast(&DataType::Float64)?;
+        let w = w.f64()?.get(0).unwrap_or(1.0);
+        if w != 1.0 {
+            return Err(err(format!(
+                "item() takes one value, and this table's one row weighs {w}, not 1: \
+                 it stands for that many copies of its value"
+            )));
+        }
+    }
+    Ok(df.column(&names[0])?.as_materialized_series().get(0)?.into_static())
+}
+
+/// The error for `∪` or `∩` on a Z-set with removals in it.
+fn bag_negative_message(op: &str) -> String {
+    format!(
+        "`{op}` is a bag operation, and this Z-set has rows of negative weight: a row taken \
+         away has no count to take the larger or smaller of. Use `z⁺` for the rows present, or \
+         `+`/`⊎` to apply a change"
+    )
+}
+
+/// `a ∪ b` (`larger`) or `a ∩ b` (not `larger`): one row for each row of
+/// either side, weighing the larger or the smaller of its two weights, a
+/// side without the row counting 0. A row whose result is 0 drops out.
+fn bag_op(a: &DataFrame, b: &DataFrame, larger: bool, op: &str) -> PolarsResult<DataFrame> {
+    let a = consolidate(a)?;
+    let b = consolidate(b)?;
+    for side in [&a, &b] {
+        let real = is_real(side);
+        let neg = run(side.clone().lazy().filter(col(W).lt(zero(real))))?;
+        if neg.height() > 0 {
+            return Err(PolarsError::ComputeError(bag_negative_message(op).into()));
+        }
+    }
+    let names = |df: &DataFrame| {
+        df.get_column_names()
+            .into_iter()
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+    };
+    let (left_only, right_only) = column_difference(&names(&a), &names(&b));
+    if !left_only.is_empty() || !right_only.is_empty() {
+        return Err(PolarsError::ComputeError(
+            columns_differ_message(op, &left_only, &right_only).into(),
+        ));
+    }
+    let real = is_real(&a) || is_real(&b);
+    const SIDE: &str = "__zset_left";
+    let keys: Vec<String> = names(&a).into_iter().filter(|n| n != W).collect();
+    let cols: Vec<Expr> = a
+        .columns()
+        .iter()
+        .map(|c| {
+            if c.name().as_str() == W {
+                weight_as(real)
+            } else {
+                col(c.name().clone()).cast(c.dtype().clone())
+            }
+        })
+        .collect();
+    let tag = |df: DataFrame, left: bool| {
+        run(df.lazy().select(cols.clone()).with_column(lit(left).alias(SIDE)))
+    };
+    let both = tag(a, true)?.vstack(&tag(b, false)?)?;
+    let part = |left: bool| {
+        when(col(SIDE).eq(lit(left)))
+            .then(col(W))
+            .otherwise(zero(real))
+            .sum()
+    };
+    let (wa, wb) = ("__zset_wa", "__zset_wb");
+    let aggs = [part(true).alias(wa), part(false).alias(wb)];
+    let grouped = if keys.is_empty() {
+        both.lazy().select(aggs)
+    } else {
+        both.lazy()
+            .group_by_stable(keys.iter().map(|k| col(k.as_str())).collect::<Vec<_>>())
+            .agg(aggs)
+    };
+    let pick = if larger {
+        when(col(wa).gt_eq(col(wb))).then(col(wa)).otherwise(col(wb))
+    } else {
+        when(col(wa).lt_eq(col(wb))).then(col(wa)).otherwise(col(wb))
+    };
+    let out = grouped
+        .with_column(pick.alias(W))
+        .filter(col(W).neq(zero(real)));
+    run(out)?.drop(wa)?.drop(wb)
+}
+
+/// `a ∪ b`, `a.union(b)`: the bag union. Each row weighs the larger of its
+/// weights in `a` and in `b`, so on two sets (weights 1) it is the set union.
+/// It is the multiset union of mathematics; SQL's `UNION` (without `ALL`) is
+/// its set case. A row of negative weight on either side is an error.
+/// `∪` is not linear, so it has no incremental shortcut: `(a ∪ b)^Δ` needs the
+/// states, not only the changes.
+/// r[impl mimas.query.zset.bag-ops]
+pub fn union(a: &DataFrame, b: &DataFrame) -> PolarsResult<DataFrame> {
+    bag_op(a, b, true, "∪")
+}
+
+/// `a ∩ b`, `a.intersect(b)`: the bag intersection, SQL's `INTERSECT ALL`.
+/// Each row weighs the smaller of its weights in `a` and in `b`, so on two
+/// sets it is the set intersection. A row of negative weight on either side
+/// is an error. `∩` is not linear either.
+/// r[impl mimas.query.zset.bag-ops]
+pub fn intersect(a: &DataFrame, b: &DataFrame) -> PolarsResult<DataFrame> {
+    bag_op(a, b, false, "∩")
+}
+
+/// `a ≈ b` on two weighted tables: the same rows, each weight equal to its
+/// partner's within float rounding (the `Approx` rule for `float`: a
+/// trillionth of the larger, or 1e-15 near zero). A row only one side has
+/// must weigh about 0. Tables whose column names differ are not equal.
+/// r[impl mimas.query.zset.approx]
+pub fn approx_equal(a: &DataFrame, b: &DataFrame) -> PolarsResult<bool> {
+    let names = |df: &DataFrame| {
+        let mut n: Vec<String> = df.get_column_names().iter().map(|n| n.to_string()).collect();
+        n.retain(|n| n != W);
+        n.sort();
+        n
+    };
+    if names(a) != names(b) {
+        return Ok(false);
+    }
+    let a = consolidate(a)?;
+    let b = consolidate(b)?;
+    let keys: Vec<String> = names(&a);
+    let wb = "__zset_wb";
+    let right = run(b.lazy().rename([W], [wb], true))?;
+    let k: Vec<Expr> = keys.iter().map(|n| col(n.as_str())).collect();
+    let mut args = JoinArgs::new(JoinType::Full).with_coalesce(JoinCoalesce::CoalesceColumns);
+    args.nulls_equal = true;
+    let joined = if keys.is_empty() {
+        let mut left = run(a.lazy().select([weight_as(true).sum()]))?;
+        let right = run(right.lazy().select([col(wb).cast(DataType::Float64).sum()]))?;
+        left.with_column(right.column(wb)?.clone())?;
+        left
+    } else {
+        run(a.lazy().join(right.lazy(), k.clone(), k, args)?)?
+    };
+    let x = floats(joined.column(W)?.as_materialized_series())?;
+    let y = floats(joined.column(wb)?.as_materialized_series())?;
+    let close = |p: f64, q: f64| {
+        let d = (p - q).abs();
+        p == q || d <= 1e-15 || d <= 1e-12 * p.abs().max(q.abs())
+    };
+    Ok(x.into_iter()
+        .zip(y)
+        .all(|(p, q)| close(p.unwrap_or(0.0), q.unwrap_or(0.0))))
 }
 
 /// `z.unweighted()`: the weights dropped. A plain frame of the consolidated
@@ -434,6 +810,13 @@ pub fn column_difference(left: &[String], right: &[String]) -> (Vec<String>, Vec
 fn combine(a: &DataFrame, b: &DataFrame, negate: bool, op: &str) -> PolarsResult<DataFrame> {
     let a = weigh(a)?;
     let b = weigh(b)?;
+    // an int-weighted and a float-weighted table combine as floats
+    let real = is_real(&a) || is_real(&b);
+    let a = if real && !is_real(&a) {
+        run(a.lazy().with_column(weight_as(true)))?
+    } else {
+        a
+    };
     let names = |df: &DataFrame| {
         df.get_column_names()
             .into_iter()
@@ -452,7 +835,7 @@ fn combine(a: &DataFrame, b: &DataFrame, negate: bool, op: &str) -> PolarsResult
         .map(|c| {
             let e = col(c.name().clone()).cast(c.dtype().clone());
             if negate && c.name().as_str() == W {
-                (lit(0i64) - e).alias(W)
+                (zero(real) - e).alias(W)
             } else {
                 e
             }
@@ -476,14 +859,16 @@ pub fn sub(a: &DataFrame, b: &DataFrame) -> PolarsResult<DataFrame> {
     combine(a, b, true, "-")
 }
 
-/// Whether `df` is a Z-set frame: it has a `w` column of whole numbers.
+/// Whether `df` is a Z-set frame or a weighted table: it has a `w` column
+/// of whole or real numbers.
 pub fn is_zset(df: &DataFrame) -> bool {
-    df.column(W).is_ok_and(|c| c.dtype().is_integer())
+    df.column(W).is_ok_and(|c| c.dtype().is_integer() || c.dtype().is_float())
 }
 
 /// `a == b` on two Z-set frames: the same Z-set, whatever order the rows
 /// come in and however the equal rows are split. It holds exactly when
 /// `(a - b).size() == 0`. Frames whose column names differ are not equal.
+/// Real weights compare exactly; `≈` ([`approx_equal`]) allows for rounding.
 /// r[impl mimas.query.zset.equal]
 pub fn equal(a: &DataFrame, b: &DataFrame) -> bool {
     let names = |df: &DataFrame| {
@@ -491,7 +876,7 @@ pub fn equal(a: &DataFrame, b: &DataFrame) -> bool {
         n.sort();
         n
     };
-    names(a) == names(b) && sub(a, b).and_then(|d| size(&d)).is_ok_and(|n| n == 0)
+    names(a) == names(b) && sub(a, b).is_ok_and(|d| d.height() == 0)
 }
 
 /// `a ⋈ b`, `a.natural_join(b)`: the inner join of two Z-sets on every

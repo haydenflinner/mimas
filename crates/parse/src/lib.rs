@@ -166,4 +166,5 @@ mod tests {
     mod parse_stmts;
     mod parse_validity;
     mod zset_notation;
+    mod query_papercuts;
 }

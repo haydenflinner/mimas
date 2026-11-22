@@ -57,6 +57,7 @@ impl AscDesc {
     api.add(__q_rename);
     api.add(__q_distinct);
     api.add(__q_join);
+    api.add(__q_join_on);
     api.add(__q_splice);
     // `query z { … }` lowers to the `__q_*` verbs plus these, where a verb
     // must see the row weights (see `crate::zset`)
@@ -64,6 +65,8 @@ impl AscDesc {
     api.add(__z_cons);
     api.add(__z_distinct);
     api.add(__z_join);
+    api.add(__z_join_on);
+    api.add(__z_approx);
     // `z1 + z2`, `z1 - z2`, `k * z` and `-z`: the abelian group (and
     // Z-module) operations on Z-sets
     api.add_frame_bin_op(frame_bin);
@@ -120,7 +123,15 @@ impl AscDesc {
         m.add(differentiate);
         m.add(delay);
         m.add(natural_join);
+        m.add(union);
+        m.add(intersect);
+        m.add(uplus);
+        m.add(item);
     }
+    api.add_method(union);
+    api.add_method(intersect);
+    api.add_method(uplus);
+    api.add_method(item);
     api.add_method(added);
     api.add_method(removed);
     api.add_method(size);
@@ -2052,10 +2063,12 @@ fn __z_join<'gc>(
 
 /// `a + b` and `a - b` on two frames: the Z-set sum and difference (see
 /// `crate::zset::add`). `k * z` and `z * k` with an int `k`: the Z-set
-/// scaled by `k` (`crate::zset::scale`). A float factor is an error that
-/// says to use a whole number. Any other operator, or a frame against
-/// another kind of value, is the usual operator error.
+/// scaled by `k` (`crate::zset::scale`). A float `k` scales the weights as
+/// reals, so the result is a weighted table (`crate::zset::scale_real`).
+/// Any other operator, or a frame against another kind of value, is the
+/// usual operator error.
 /// r[impl mimas.query.zset.scale]
+/// r[impl mimas.query.zset.real]
 fn frame_bin<'gc>(
     ctx: Ctx<'gc>,
     a: Val<'gc>,
@@ -2073,9 +2086,9 @@ fn frame_bin<'gc>(
         | (Val::DataFrame(z), Val::Int(k), vm::BinOp::Mult) => {
             crate::zset::scale(&z.0.borrow().0, k)
         }
-        (Val::Float(_), Val::DataFrame(_), vm::BinOp::Mult)
-        | (Val::DataFrame(_), Val::Float(_), vm::BinOp::Mult) => {
-            return Err(vm::RtErr::Custom(crate::zset::scale_not_int_message("float")));
+        (Val::Float(k), Val::DataFrame(z), vm::BinOp::Mult)
+        | (Val::DataFrame(z), Val::Float(k), vm::BinOp::Mult) => {
+            crate::zset::scale_real(&z.0.borrow().0, k)
         }
         _ => return Err(vm::RtErr::invalid_bin(a, op, b)),
     };
@@ -2114,11 +2127,92 @@ fn removed<'gc>(ctx: Ctx<'gc>, z: vm::DataFrame<'gc>) -> Result<vm::DataFrame<'g
     Ok(ctx.new_dataframe(out))
 }
 
-/// `z.size()`: the sum of the absolute weights, the size of a change.
+/// A weight as a value: an `int` for a Z-set, a `float` for a weighted table.
+fn weight_val<'gc>(w: crate::zset::Weight) -> vm::anon::Anon<'gc, 0> {
+    vm::anon::Anon(match w {
+        crate::zset::Weight::Int(i) => Val::Int(i),
+        crate::zset::Weight::Float(f) => Val::Float(f),
+    })
+}
+
+/// `z.size()`, `‖z‖`: the sum of the absolute weights, the size of a change.
+/// An `int` for a Z-set and a `float` for a weighted table: the checker
+/// reads which from the table's `w` when it knows it.
 /// r[impl mimas.query.zset.size]
 #[native]
-fn size<'gc>(_ctx: Ctx<'gc>, z: vm::DataFrame<'gc>) -> Result<i64, vm::RtErr> {
-    crate::zset::size(&z.0.borrow().0).map_err(q_err)
+fn size<'gc>(_ctx: Ctx<'gc>, z: vm::DataFrame<'gc>) -> Result<vm::anon::Anon<'gc, 0>, vm::RtErr> {
+    crate::zset::norm(&z.0.borrow().0).map(weight_val).map_err(q_err)
+}
+
+/// `t.item()`: the one value of a one-row, one-column table. Any other
+/// shape faults with what the table holds (`crate::zset::item`).
+/// r[impl mimas.query.item]
+#[native]
+fn item<'gc>(ctx: Ctx<'gc>, t: vm::DataFrame<'gc>) -> Result<vm::anon::Anon<'gc, 0>, vm::RtErr> {
+    let (v, name) = {
+        let d = t.0.borrow();
+        let v = crate::zset::item(&d.0).map_err(q_err)?;
+        let name = d
+            .0
+            .get_column_names()
+            .iter()
+            .map(|n| n.to_string())
+            .find(|n| n != crate::zset::W)
+            .unwrap_or_default();
+        (v, name)
+    };
+    cell_val(ctx, v, "item", &name)
+        .map(vm::anon::Anon)
+        .map_err(vm::RtErr::Custom)
+}
+
+/// `a ∪ b`, `a.union(b)`: the bag union, the larger weight of each row.
+/// r[impl mimas.query.zset.bag-ops]
+#[native]
+fn union<'gc>(
+    ctx: Ctx<'gc>,
+    a: vm::DataFrame<'gc>,
+    b: vm::DataFrame<'gc>,
+) -> Result<vm::DataFrame<'gc>, vm::RtErr> {
+    let out = crate::zset::union(&a.0.borrow().0, &b.0.borrow().0).map_err(q_err)?;
+    Ok(ctx.new_dataframe(out))
+}
+
+/// `a ∩ b`, `a.intersect(b)`: the bag intersection, the smaller weight of
+/// each row.
+/// r[impl mimas.query.zset.bag-ops]
+#[native]
+fn intersect<'gc>(
+    ctx: Ctx<'gc>,
+    a: vm::DataFrame<'gc>,
+    b: vm::DataFrame<'gc>,
+) -> Result<vm::DataFrame<'gc>, vm::RtErr> {
+    let out = crate::zset::intersect(&a.0.borrow().0, &b.0.borrow().0).map_err(q_err)?;
+    Ok(ctx.new_dataframe(out))
+}
+
+/// `a ⊎ b`, `a.uplus(b)`: the additive union, `a + b`.
+/// r[impl mimas.query.zset.bag-ops]
+#[native]
+fn uplus<'gc>(
+    ctx: Ctx<'gc>,
+    a: vm::DataFrame<'gc>,
+    b: vm::DataFrame<'gc>,
+) -> Result<vm::DataFrame<'gc>, vm::RtErr> {
+    let out = crate::zset::add(&a.0.borrow().0, &b.0.borrow().0).map_err(q_err)?;
+    Ok(ctx.new_dataframe(out))
+}
+
+/// `a ≈ b` on two weighted tables (`zset.mim`'s `Approx` impl): the same
+/// rows at weights equal within float rounding.
+/// r[impl mimas.query.zset.approx]
+#[native]
+fn __z_approx<'gc>(
+    _ctx: Ctx<'gc>,
+    a: vm::DataFrame<'gc>,
+    b: vm::DataFrame<'gc>,
+) -> Result<bool, vm::RtErr> {
+    crate::zset::approx_equal(&a.0.borrow().0, &b.0.borrow().0).map_err(q_err)
 }
 
 /// `z.unweighted()`: the rows of positive weight, each once, with no `w`.
@@ -2201,23 +2295,36 @@ fn natural_join<'gc>(
     Ok(ctx.new_dataframe(out))
 }
 
-/// `z ⋅ k`: the named-operator spelling of `z * k`, the Z-set scaled by
-/// the int `k`.
-/// r[impl mimas.query.zset.cdot]
-#[native]
-fn dot<'gc>(ctx: Ctx<'gc>, z: vm::DataFrame<'gc>, k: i64) -> Result<vm::DataFrame<'gc>, vm::RtErr> {
-    let out = crate::zset::scale(&z.0.borrow().0, k).map_err(q_err)?;
-    Ok(ctx.new_dataframe(out))
+/// `k * z` for `⋅`: an `int` scales as a Z-set, a `float` as a weighted
+/// table, and anything else is the scale error.
+fn scale_by<'gc>(
+    ctx: Ctx<'gc>,
+    z: vm::DataFrame<'gc>,
+    k: Val<'gc>,
+) -> Result<vm::DataFrame<'gc>, vm::RtErr> {
+    let out = match k {
+        Val::Int(k) => crate::zset::scale(&z.0.borrow().0, k),
+        Val::Float(k) => crate::zset::scale_real(&z.0.borrow().0, k),
+        _ => return Err(vm::RtErr::Custom(crate::zset::scale_not_int_message("not a number"))),
+    };
+    Ok(ctx.new_dataframe(out.map_err(q_err)?))
 }
 
-/// `k ⋅ z` (also typed `k · z`): `k * z`, the Z-set scaled by the int `k`.
-/// `⋅` is a named operator, so an int on its left reaches this reflected
-/// method on the frame.
+/// `z ⋅ k`: the named-operator spelling of `z * k`, the Z-set scaled by
+/// `k`, an `int` or a `float`.
 /// r[impl mimas.query.zset.cdot]
 #[native]
-fn rdot<'gc>(ctx: Ctx<'gc>, z: vm::DataFrame<'gc>, k: i64) -> Result<vm::DataFrame<'gc>, vm::RtErr> {
-    let out = crate::zset::scale(&z.0.borrow().0, k).map_err(q_err)?;
-    Ok(ctx.new_dataframe(out))
+fn dot<'gc>(ctx: Ctx<'gc>, z: vm::DataFrame<'gc>, k: Val<'gc>) -> Result<vm::DataFrame<'gc>, vm::RtErr> {
+    scale_by(ctx, z, k)
+}
+
+/// `k ⋅ z` (also typed `k · z`): `k * z`, the Z-set scaled by `k`, an
+/// `int` or a `float`. `⋅` is a named operator, so a number on its left
+/// reaches this reflected method on the frame.
+/// r[impl mimas.query.zset.cdot]
+#[native]
+fn rdot<'gc>(ctx: Ctx<'gc>, z: vm::DataFrame<'gc>, k: Val<'gc>) -> Result<vm::DataFrame<'gc>, vm::RtErr> {
+    scale_by(ctx, z, k)
 }
 
 /// `changes(new, old)`: what changed from `old` to `new`, as a Z-set. The
@@ -2232,6 +2339,56 @@ fn changes<'gc>(
     old: vm::DataFrame<'gc>,
 ) -> Result<vm::DataFrame<'gc>, vm::RtErr> {
     let out = crate::zset::changes(&new.0.borrow().0, &old.0.borrow().0).map_err(q_err)?;
+    Ok(ctx.new_dataframe(out))
+}
+
+/// query-DSL plumbing — `join other (a == x)`: keys named differently on
+/// the two sides. The right's key columns drop out.
+/// r[impl mimas.query.join-on]
+#[native]
+fn __q_join_on<'gc>(
+    ctx: Ctx<'gc>,
+    df: vm::DataFrame<'gc>,
+    other: vm::DataFrame<'gc>,
+    left_on: Vec<String>,
+    right_on: Vec<String>,
+    how: &str,
+) -> Result<vm::DataFrame<'gc>, vm::RtErr> {
+    use polars::prelude::{IntoLazy, JoinArgs, col};
+    let Some(join_type) = crate::zset::join_type(how) else {
+        return Err(q_err(format!("unknown join type {how:?}")));
+    };
+    if left_on.len() != right_on.len() {
+        return Err(q_err(crate::zset::join_keys_message(left_on.len(), right_on.len())));
+    }
+    let lk: Vec<_> = left_on.iter().map(|n| col(n.as_str())).collect();
+    let rk: Vec<_> = right_on.iter().map(|n| col(n.as_str())).collect();
+    let left = df.0.borrow().0.clone().lazy();
+    let right = other.0.borrow().0.clone().lazy();
+    let joined = left.join(right, lk, rk, JoinArgs::new(join_type));
+    q_run(ctx, joined.map_err(q_err)?)
+}
+
+/// `query z { … }` plumbing: `join other (a == x)`, keys named differently
+/// on the two sides, each pair weighing the product of its rows' weights.
+/// r[impl mimas.query.join-on]
+#[native]
+fn __z_join_on<'gc>(
+    ctx: Ctx<'gc>,
+    df: vm::DataFrame<'gc>,
+    other: vm::DataFrame<'gc>,
+    left_on: Vec<String>,
+    right_on: Vec<String>,
+    how: &str,
+) -> Result<vm::DataFrame<'gc>, vm::RtErr> {
+    let Some(how) = crate::zset::join_type(how) else {
+        return Err(q_err(format!("unknown join type {how:?}")));
+    };
+    if left_on.len() != right_on.len() {
+        return Err(q_err(crate::zset::join_keys_message(left_on.len(), right_on.len())));
+    }
+    let out = crate::zset::join_on(&df.0.borrow().0, &other.0.borrow().0, &left_on, &right_on, how)
+        .map_err(q_err)?;
     Ok(ctx.new_dataframe(out))
 }
 

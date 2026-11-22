@@ -111,7 +111,7 @@ pub struct TableData {
 pub fn table_data(df: &crate::DataFrame<'_>, cap: usize) -> TableData {
     use polars::prelude::AnyValue;
     let borrowed = df.0.borrow();
-    let df = &borrowed.0;
+    let df = &*crate::val::shown_frame(&borrowed.0);
     let cols: Vec<String> = df
         .get_column_names()
         .iter()

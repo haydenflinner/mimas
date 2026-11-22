@@ -1586,8 +1586,6 @@ test_run!(
     r#"med(skew)"# => "[1.0]",
     // the copies are 1, 2, 10, 10: the middle falls between 2 and 10
     r#"med(even)"# => "[6.0]",
-    // the row of weight -4 is not a value: the copies are 1, 5, 9
-    r#"med(gone)"# => "[5.0]",
     // weight 1 on every row gives the plain median
     r#"med(plain)"# => "[2.5]",
     r#"query {
@@ -1791,24 +1789,36 @@ test_run!(
 
 // r[verify mimas.query.zset.reject]
 #[test]
-fn zset_float_w_column_is_a_check_error() {
+fn zset_str_w_column_is_a_check_error() {
     let err = compile_err(
         r#"use std::polars::*;
            let boxes = table { k, w
-               "a", 1.5
+               "a", "wide"
            };
            let z = query z { boxes };"#,
     );
-    assert!(err.contains("this table's `w` is float"), "{err}");
+    assert!(err.contains("this table's `w` is str"), "{err}");
     assert!(err.contains(r#".rename("w", "width")!"#), "{err}");
     // plain `query { }` takes the same table
     assert!(
         vm::Vm::compile(
             r#"use std::polars::*;
                let boxes = table { k, w
-                   "a", 1.5
+                   "a", "wide"
                };
                let q = query { boxes };"#,
+            library::std
+        )
+        .is_ok()
+    );
+    // a float `w` is a weighted table, not an error
+    assert!(
+        vm::Vm::compile(
+            r#"use std::polars::*;
+               let boxes = table { k, w
+                   "a", 1.5
+               };
+               let z = query z { boxes };"#,
             library::std
         )
         .is_ok()
@@ -1817,18 +1827,18 @@ fn zset_float_w_column_is_a_check_error() {
 
 // r[verify mimas.query.zset.reject]
 #[test]
-fn zset_float_w_column_faults_at_run_time() {
+fn zset_str_w_column_faults_at_run_time() {
     // a csv frame's columns are unknown to the checker; the runtime catches it
     let src = r#"use std::polars::*;
-        let boxes = from_csv("k,w\na,1.5")!;
+        let boxes = from_csv("k,w\na,wide")!;
         let z = query z { boxes };"#;
     let err = match test_runner::try_execute(src) {
-        Ok(_) => panic!("expected a float `w` to fault"),
+        Ok(_) => panic!("expected a str `w` to fault"),
         Err(e) => format!("{e}"),
     };
     // the report wraps its lines, so check short pieces
-    assert!(err.contains("is float"), "{err}");
-    assert!(err.contains("whole numbers"), "{err}");
+    assert!(err.contains("is str"), "{err}");
+    assert!(err.contains("numbers"), "{err}");
 }
 
 // ---- Z-sets: abelian group operations on weighted tables -------------------------------------
@@ -1899,24 +1909,16 @@ test_run!(
 
 // r[verify mimas.query.zset.scale]
 #[test]
-fn zset_scale_by_a_float_is_an_error() {
+fn zset_scale_by_a_str_is_an_error() {
     let err = compile_err(
         r#"use std::polars::*;
            let a = table { item
                "apple"
            };
-           let z = 1.5 * a;"#,
+           let z = "x" * a;"#,
     );
-    assert!(err.contains("whole number"), "{err}");
-    assert!(err.contains("float"), "{err}");
-    let err = compile_err(
-        r#"use std::polars::*;
-           let a = table { item
-               "apple"
-           };
-           let z = a * 2.0;"#,
-    );
-    assert!(err.contains("whole number"), "{err}");
+    assert!(err.contains("multiplies its weights by a number"), "{err}");
+    assert!(err.contains("str"), "{err}");
 }
 
 // r[verify mimas.query.zset.parts]
@@ -2323,4 +2325,365 @@ test_fail!(
        let _j = a ⋈ b;"#,
     // a stream glyph on a number
     r#"let _d = ∇ 3;"#,
+);
+
+// ---- Weighted tables, set symbols, joins on other names, item, display ------------------------
+// The papercuts PageRank found (2026-11-22): real weights, `join t (a == x)`, one number out of a
+// query, the `w` column in every print, `derive … select …` on one line. Plus `∪ ∩ ⊎` on Z-sets and
+// the median of a signed Z-set.
+
+const ZREAL: &str = r#"use std::polars::*;
+    let a = table { item, w
+        "apple", 2
+        "bread", -1
+        "fig", 3
+    };
+    let b = table { item, w
+        "apple", 1
+        "bread", 1
+        "pear", -2
+    };
+    let half = table { item, w
+        "apple", 0.5
+    };
+    let x = table { item
+        "apple"
+    };
+    let prices = table { item, price
+        "apple", 3
+        "fig", 5
+    };
+    let r = table { node, w
+        "A", 0.5
+        "B", 0.25
+    };
+    let links = table { src, dst
+        "A", "B"
+        "B", "A"
+        "B", "C"
+    };
+    fn same(p: DataFrame, q: DataFrame) -> bool { p == q }"#;
+
+// r[verify mimas.query.zset.real]
+test_run!(
+    zset_real_weights_are_a_group,
+    ZREAL,
+    r#"(0.5 * a).pull("w")!"# => "[1.0, -0.5, 1.5]",
+    r#"(a * 0.5).pull("w")!"# => "[1.0, -0.5, 1.5]",
+    r#"(0.5 · a).pull("w")!"# => "[1.0, -0.5, 1.5]",
+    // an int-weighted and a float-weighted table combine as floats
+    r#"(a + half).pull("w")!"# => "[2.5, -1.0, 3.0]",
+    r#"(half - a).pull("w")!"# => "[-1.5, 1.0, -3.0]",
+    // negation and undo
+    r#"‖half + -half‖"# => "0.0",
+    r#"same(-(-half), half)"# => "true",
+    // ‖z‖ is an int for a Z-set and a float for a weighted table
+    r#"‖half‖"# => "0.5",
+    r#"‖a‖"# => "6",
+    r#"{ let n: int = ‖a‖; n + 1 }"# => "7",
+    r#"{ let f: float = ‖0.5 * a‖; f }"# => "3.0",
+    // the module laws hold where floats are exact
+    r#"same(0.5 * (a + b), 0.5 * a + 0.5 * b)"# => "true",
+    r#"same((0.25 + 0.5) * a, 0.25 * a + 0.5 * a)"# => "true",
+    // a join multiplies real weights
+    r#"(half ⋈ prices).pull("w")!"# => "[0.5]",
+    r#"query z { half join prices item }.pull("w")!"# => "[0.5]",
+    // the weighted aggregates read real weights
+    r#"query z { 0.5 * a aggregate { n = count(), s = sum(1) } }.pull("n")!"# => "[2.0]",
+    // a weighted table enters `query z` with its weights
+    r#"query z { half }.pull("w")!"# => "[0.5]",
+);
+
+// r[verify mimas.query.zset.real]
+// r[verify mimas.query.zset.approx]
+// r[verify mimas.query.zset.equal]
+test_run!(
+    zset_real_weights_round,
+    ZREAL,
+    // 0.1 + 0.2 - 0.3 is not 0 in floats, so the row stays
+    r#"(0.1 * x + 0.2 * x - 0.3 * x).pull("w")!"# => "[5.551115123125783e-17]",
+    // `==` compares weights exactly, `≈` within float rounding
+    r#"0.1 * x + 0.2 * x == 0.3 * x"# => "false",
+    r#"0.1 * x + 0.2 * x ≈ 0.3 * x"# => "true",
+    r#"half ≈ half"# => "true",
+    r#"half ≈ 0.6 * x"# => "false",
+    // a row on one side only must weigh about 0
+    r#"half ≈ half + 0.0000000000000001 * prices.select_names(["item"])!"# => "true",
+    r#"half ≈ a"# => "false",
+    // an exact 0 drops the row
+    r#"‖0.0 * a‖"# => "0.0",
+);
+
+// r[verify mimas.query.join-on]
+test_run!(
+    query_join_on_other_names,
+    ZREAL,
+    r#"query z { r join links (node == src) }.col_names()"# => r#"["node", "dst", "w"]"#,
+    r#"query z { r join links (node == src) sort node dst }.pull("w")!"# => "[0.5, 0.25, 0.25]",
+    // the same in a plain query, and the old form still works
+    r#"query { r join links (node == src) }.col_names()"# => r#"["node", "w", "dst"]"#,
+    r#"query { r join links (node == src) "left" sort node dst }.pull("dst")!"# => r#"["B", "A", "C"]"#,
+    r#"query z { a join prices item }.pull("w")!"# => "[2, 3]",
+    // several key pairs, joined with `&&`
+    r#"{ let t = table { p, q
+           "A", "B"
+       };
+       query z { links join t (src == p && dst == q) }.col_names() }"# => r#"["src", "dst", "w"]"#,
+    // PageRank's walk term: rank along each link, onto the target, summed by consolidation
+    r#"{ let walk = query z { r join links (node == src) select dst };
+       walk.pull("w")! }"# => "[0.5, 0.25, 0.25]",
+    r#"{ let into = table { src, dst
+           "A", "C"
+           "B", "C"
+       };
+       query z { r join into (node == src) select dst }.pull("w")! }"# => "[0.75]",
+);
+
+// r[verify mimas.query.join-on]
+test_fail!(
+    query_join_on_refusals,
+    // a condition that is not `==` pairs
+    r#"use std::polars::*;
+       let a = table { k
+           1
+       };
+       let _j = query { a join a (k > k) };"#,
+    // a right key the right table does not have
+    r#"use std::polars::*;
+       let a = table { k
+           1
+       };
+       let b = table { j
+           1
+       };
+       let _j = query { a join b (k == nope) };"#,
+);
+
+// r[verify mimas.query.item]
+// r[verify mimas.query.aggregate-verb]
+test_run!(
+    query_item_takes_one_value,
+    ZREAL,
+    r#"query z { a aggregate { n = count() } }.item()"# => "4",
+    r#"query { prices aggregate { t = sum(price) } }.item() + 1"# => "9",
+    r#"query { prices filter item == "fig" select price }.item()"# => "5",
+    r#"query z { 0.5 * a aggregate { t = sum(1) } }.item()"# => "2.0",
+    // `aggregate` alone is `group { aggregate }`
+    r#"query z { a aggregate { n = count() } } == query z { a group { aggregate { n = count() } } }"# => "true",
+);
+
+// r[verify mimas.query.item]
+#[test]
+fn query_item_fails_loudly() {
+    // two columns is a check error when the checker knows the columns
+    let err = compile_err(
+        r#"use std::polars::*;
+           let t = table { a, b
+               1, 2
+           };
+           let _v = t.item();"#,
+    );
+    assert!(err.contains("one column"), "{err}");
+    assert!(err.contains("`a`, `b`"), "{err}");
+    let fault = |src: &str| match test_runner::try_execute(src) {
+        Ok(_) => panic!("expected item() to fault:\n{src}"),
+        Err(e) => format!("{e}"),
+    };
+    // two rows
+    let err = fault(
+        r#"use std::polars::*;
+           let t = table { a
+               1
+               2
+           };
+           let _v = t.item();"#,
+    );
+    assert!(err.contains("2 rows"), "{err}");
+    // one row standing for two copies
+    let err = fault(
+        r#"use std::polars::*;
+           let t = table { a, w
+               1, 2
+           };
+           let _v = t.item();"#,
+    );
+    assert!(err.contains("weighs 2"), "{err}");
+    // no rows
+    let err = fault(
+        r#"use std::polars::*;
+           let t = from_csv("a\n1")!;
+           let _v = query { t filter a > 5 }.item();"#,
+    );
+    assert!(err.contains("0 rows"), "{err}");
+}
+
+// r[verify mimas.query.verb-ends-derive]
+test_run!(
+    query_derive_then_a_verb_on_one_line,
+    ZREAL,
+    r#"query { prices derive n = price * 2 select item n }.col_names()"# => r#"["item", "n"]"#,
+    r#"query { prices derive n = 1, m = 2 select n m }.col_names()"# => r#"["n", "m"]"#,
+    r#"query { prices derive n = price filter n > 3 select item }.pull("item")!"# => r#"["fig"]"#,
+    // a column named like a verb, with `=` after it, is still a column
+    r#"query { prices derive n = 1, take = 2 }.col_names()"# => r#"["item", "price", "n", "take"]"#,
+);
+
+// r[verify mimas.query.zset.bag-ops]
+test_run!(
+    zset_set_symbols,
+    ZREAL,
+    r#"{ let p = table { item, w
+           "apple", 2
+           "pear", 1
+       };
+       let q = table { item, w
+           "apple", 1
+           "fig", 3
+       };
+       [(p ∪ q).pull("w")!, (p ∩ q).pull("w")!, (p ⊎ q).pull("w")!] }"# => "[[2, 1, 3], [1], [3, 1, 3]]",
+    // on sets the usual union and intersection
+    r#"{ let p = table { k
+           1
+           2
+       };
+       let q = table { k
+           2
+           3
+       };
+       [(p ∪ q).pull("k")!, (p ∩ q).pull("k")!] }"# => "[[1, 2, 3], [2]]",
+    r#"x ⊎ prices.select_names(["item"])! == x + prices.select_names(["item"])!"# => "true",
+    r#"x.union(x) == query z { x }"# => "true",
+    r#"(half ∪ x).pull("w")!"# => "[1.0]",
+    r#"(half ∩ x).pull("w")!"# => "[0.5]",
+    // ∪ is not linear: the union of two changes is not the change of the unions
+    r#"{ let p = table { k
+           1
+       };
+       (p ∪ p) + (p ∪ p) == (p + p) ∪ (p + p) }"# => "true",
+    r#"{ let p = table { k
+           1
+       };
+       let q = table { k
+           2
+       };
+       (p ∪ q) + (q ∪ p) == (p + q) ∪ (q + p) }"# => "false",
+    // step by step on streams
+    r#"{ let s = stream([x, half]); (s ⊎ s)[1] == 2 * half }"# => "true",
+    r#"{ let s = stream([x, half]); (s ∪ s)[1] == half }"# => "true",
+    r#"{ let s = stream([x, half]); (s ∩ stream([half, x]))[0] == half }"# => "true",
+);
+
+// r[verify mimas.query.zset.bag-ops]
+#[test]
+fn zset_set_symbols_refuse_removals() {
+    let err = match test_runner::try_execute(
+        r#"use std::polars::*;
+           let a = table { item, w
+               "apple", -1
+           };
+           let _u = a ∪ a;"#,
+    ) {
+        Ok(_) => panic!("expected ∪ on a removal to fault"),
+        Err(e) => format!("{e}"),
+    };
+    assert!(err.contains("negative weight"), "{err}");
+    assert!(err.contains("z⁺"), "{err}");
+}
+
+const ZSIGNED: &str = r#"use std::polars::*;
+    let shifted = table { v, w
+        1, 2
+        5, 1
+        9, 2
+        10, -1
+    };
+    let kept = table { v, w
+        1, 1
+        5, 2
+        7, -1
+        9, 1
+    };
+    let fz = table { v, w
+        1.0, 0.5
+        3.0, 0.25
+        4.0, 0.5
+    };
+    fn med(t: DataFrame) -> float {
+        query z {
+            t
+            aggregate { m = median(v) }
+        }.item()
+    }"#;
+
+// r[verify mimas.query.zset.median.signed]
+// r[verify mimas.query.zset.aggregate.median]
+test_run!(
+    zset_median_of_a_signed_zset,
+    ZSIGNED,
+    // Σ w·|x − m| is 11 at 1 and at 5 and flat between: the middle is 3
+    r#"med(shifted)"# => "3.0",
+    // the removal at 7 does not move the least point at 5
+    r#"med(kept)"# => "5.0",
+    // real weights: 0.5 of 1, 0.25 of 3, 0.5 of 4
+    r#"med(fz)"# => "3.0",
+);
+
+// r[verify mimas.query.zset.median.signed]
+#[test]
+fn zset_median_without_a_middle_is_an_error() {
+    let fault = |rows: &str| {
+        let src = format!(
+            "use std::polars::*;
+             let t = table {{ v, w
+             {rows}
+             }};
+             let _m = query z {{ t aggregate {{ m = median(v) }} }}.pull(\"m\")!;"
+        );
+        match test_runner::try_execute(&src) {
+            Ok(_) => panic!("expected the median to fault:\n{src}"),
+            Err(e) => format!("{e}").replace('\n', " "),
+        }
+    };
+    // the weights add up to less than 0
+    let err = fault("1, 1\n5, 1\n7, -4\n9, 1");
+    assert!(err.contains("removals outweigh additions"), "{err}");
+    // to exactly 0: the least sum holds on a half-line
+    let err = fault("1, 1\n5, -1");
+    assert!(err.contains("half-line"), "{err}");
+    // least at 5 and at 9 with more at 7 between
+    let err = fault("1, 1\n5, 1\n7, -1\n9, 1\n20, 1");
+    assert!(err.contains("no single middle"), "{err}");
+}
+
+// r[verify mimas.query.zset.display]
+test_run_display!(
+    zset_print_hides_unit_weights,
+    ZREAL,
+    "query z { prices select item }" => r#"shape: (2, 1)
+┌───────┐
+│ item  │
+│ ---   │
+│ str   │
+╞═══════╡
+│ apple │
+│ fig   │
+└───────┘"#,
+    "query z { prices select item } + x" => r#"shape: (2, 2)
+┌───────┬─────┐
+│ item  ┆ w   │
+│ ---   ┆ --- │
+│ str   ┆ i64 │
+╞═══════╪═════╡
+│ apple ┆ 2   │
+│ fig   ┆ 1   │
+└───────┴─────┘"#,
+);
+
+// r[verify mimas.query.zset.display]
+test_run!(
+    zset_display_keeps_the_data,
+    ZREAL,
+    // only the print leaves `w` out: the table still has it, and `==` reads it
+    r#"query z { prices select item }.col_names()"# => r#"["item", "w"]"#,
+    r#"query z { prices select item } == query z { prices.select_names(["item"])! }"# => "true",
 );

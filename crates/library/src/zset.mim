@@ -92,14 +92,44 @@ impl Stream {
     /// `s * k`: every step scaled by `k`.
     fn mul(self, k: int) -> Stream { Stream { items: self.items.map(|x| k * x) } }
 
+    /// `s * k` with a real `k`: every step a weighted table.
+    fn mul(self, k: float) -> Stream { Stream { items: self.items.map(|x| k * x) } }
+
     /// `k * s`: every step scaled by `k`.
     fn rmul(self, k: int) -> Stream { Stream { items: self.items.map(|x| k * x) } }
+
+    /// `k * s` with a real `k`.
+    fn rmul(self, k: float) -> Stream { Stream { items: self.items.map(|x| k * x) } }
 
     /// `s ⋅ k`: `s * k`.
     fn dot(self, k: int) -> Stream { Stream { items: self.items.map(|x| k * x) } }
 
+    /// `s ⋅ k` with a real `k`.
+    fn dot(self, k: float) -> Stream { Stream { items: self.items.map(|x| k * x) } }
+
     /// `k ⋅ s`: `k * s`.
     fn rdot(self, k: int) -> Stream { Stream { items: self.items.map(|x| k * x) } }
+
+    /// `k ⋅ s` with a real `k`.
+    fn rdot(self, k: float) -> Stream { Stream { items: self.items.map(|x| k * x) } }
+
+    /// `a ⊎ b`: `a + b`, step by step. Linear, like `+`.
+    /// r[impl mimas.query.zset.bag-ops]
+    fn uplus(self, o: Stream) -> Stream { self.add(o) }
+
+    /// `a ∪ b`: the bag union step by step, over the steps both have.
+    fn union(self, o: Stream) -> Stream {
+        let out: [DataFrame] = [];
+        for i in 0..self.items.len().min(o.items.len()) { out.push(self.items[i] ∪ o.items[i]); }
+        Stream { items: out }
+    }
+
+    /// `a ∩ b`: the bag intersection step by step, over the steps both have.
+    fn intersect(self, o: Stream) -> Stream {
+        let out: [DataFrame] = [];
+        for i in 0..self.items.len().min(o.items.len()) { out.push(self.items[i] ∩ o.items[i]); }
+        Stream { items: out }
+    }
 
     /// `a ⋈ b`: the natural join step by step, over the steps both have.
     /// r[impl mimas.query.zset.join-op]
@@ -154,4 +184,12 @@ impl Stream {
         for c in self.items { posts.push(posts[posts.len() - 1] + c); }
         Stream { items: posts }
     }
+}
+
+/// `a ≈ b` on two weighted tables: the same rows, each weight equal to its
+/// partner's within float rounding, the rule `float`'s `≈` uses. `==` on
+/// weighted tables compares the weights exactly.
+/// r[impl mimas.query.zset.approx]
+impl Approx for DataFrame {
+    fn approx(self, o: DataFrame) -> bool { __z_approx(self, o) }
 }

@@ -24,7 +24,7 @@ use crate::{
     components::{AdtId, TyExt},
     errors::{
         BadLiteralArg, BadSchemaSpec, DimensionMismatch, NoSuchColumn, UnknownDataSource,
-        ZsetColumnsDiffer, ZsetScaleNotInt, ZsetWeightNotInt,
+        FrameItemColumns, ZsetColumnsDiffer, ZsetScaleNotInt, ZsetWeightNotInt,
     },
     traits::Query,
 };
@@ -90,10 +90,11 @@ impl FrameSchema {
 /// The weight column of a `query z { … }` frame (`library::zset::W`).
 const ZSET_W: &str = "w";
 
-/// A column type that can't hold Z-set weights: a concrete non-integer scalar. An
+/// A column type that can't hold weights: a concrete scalar that is not a
+/// number. Ints are a Z-set's weights and floats a weighted table's. An
 /// untracked or generic type passes, and the runtime checks it.
 fn not_whole(ty: &Ty) -> bool {
-    let scalar = |t: &Ty| matches!(t, Ty::Float | Ty::Str | Ty::Bool);
+    let scalar = |t: &Ty| matches!(t, Ty::Str | Ty::Bool);
     match ty {
         Ty::Option(inner) => scalar(inner),
         t => scalar(t),
@@ -1036,6 +1037,7 @@ impl Solver {
                     "__q_group" => self.q_group(id, call)?,
                     "__q_agg" => self.q_agg(id, call)?,
                     "__q_join" => self.q_join(id, call)?,
+                    "__q_join_on" => self.join_on_schemas(id, call)?,
                     // `query z { … }`: the same columns plus the `w` weight
                     "__z_in" => self.z_weighed(id, call, false)?,
                     "__z_cons" | "changes" => self.z_weighed(id, call, true)?,
@@ -1051,12 +1053,21 @@ impl Solver {
                         }
                         self.z_weighed(id, call, true)?;
                     }
-                    "__z_join" => {
-                        self.q_join(id, call)?;
-                        // the right weight folds into `w`
+                    "__z_join" | "__z_join_on" => {
+                        if callee.lexeme == "__z_join" {
+                            self.q_join(id, call)?;
+                        } else {
+                            self.join_on_schemas(id, call)?;
+                        }
+                        // the right weight folds into `w`, real when either side's is
                         if let Some(schema) = self.frame_schemas.get(&id).cloned() {
                             let mut out = schema.as_ref().clone();
-                            out.cols.shift_remove("w_right");
+                            let right = out.cols.shift_remove("w_right");
+                            if right.and_then(|c| c.ty).is_some_and(|t| t == Ty::Float) {
+                                if let Some(w) = out.cols.get_mut(ZSET_W) {
+                                    w.ty = Some(Ty::Float);
+                                }
+                            }
                             self.frame_schemas.insert(id, Rc::new(out));
                         }
                     }
@@ -1141,6 +1152,56 @@ impl Solver {
             // r[impl mimas.query.zset.parts] r[impl mimas.query.zset.as_set]
             "added" | "removed" | "as_set" => {
                 self.z_result(id, recv, false)?;
+                Ok(ty)
+            }
+            // `‖z‖`: an `int` for a Z-set, a `float` for a weighted table
+            // r[impl mimas.query.zset.size] r[impl mimas.query.zset.real]
+            "size" => {
+                let Some(schema) = self.frame_schema_of(recv) else {
+                    return Ok(ty);
+                };
+                Ok(match schema.cols.get(ZSET_W).and_then(|c| c.ty.clone()) {
+                    Some(Ty::Float) => Ty::Float,
+                    Some(Ty::Int) | None => Ty::Int,
+                    Some(_) => ty,
+                })
+            }
+            // `t.item()`: the type of the one column that is not `w`
+            // r[impl mimas.query.item]
+            "item" => {
+                let Some(schema) = self.frame_schema_of(recv) else {
+                    return Ok(ty);
+                };
+                let cols: Vec<(&String, &FrameCol)> =
+                    schema.cols.iter().filter(|(n, _)| n.as_str() != ZSET_W).collect();
+                if cols.len() != 1 && schema.closed {
+                    let names = cols.iter().map(|(n, _)| format!("`{n}`")).collect::<Vec<_>>();
+                    Err(FrameItemColumns {
+                        src: self.src(recv.location()),
+                        at: recv.location().into(),
+                        count: cols.len(),
+                        columns: if names.is_empty() { "none".into() } else { names.join(", ") },
+                    })?;
+                }
+                Ok(match cols.as_slice() {
+                    [(_, FrameCol { ty: Some(t), .. })] => t.clone(),
+                    _ => ty,
+                })
+            }
+            // `a ∪ b`, `a ∩ b`, `a ⊎ b`, `k ⋅ z`: the receiver's columns with `w` last
+            // r[impl mimas.query.zset.bag-ops] r[impl mimas.query.zset.cdot]
+            "union" | "intersect" | "uplus" | "dot" | "rdot" => {
+                self.z_result(id, recv, false)?;
+                let real_arg = call.arguments.first().is_some_and(|a| {
+                    self.expr_ty_is_float(&a.value)
+                        || self
+                            .frame_schema_of(&a.value)
+                            .and_then(|s| s.cols.get(ZSET_W).and_then(|c| c.ty.clone()))
+                            .is_some_and(|t| t == Ty::Float)
+                });
+                if real_arg {
+                    self.mark_real(id);
+                }
                 Ok(ty)
             }
             // the weights dropped: the receiver's columns without `w`
@@ -1620,8 +1681,8 @@ impl Solver {
                 (&ev.right, lhs, rhs)
             };
             match factor {
-                Ty::Int => {}
-                Ty::Float | Ty::Option(_) | Ty::Str | Ty::Bool => Err(ZsetScaleNotInt {
+                Ty::Int | Ty::Float => {}
+                Ty::Option(_) | Ty::Str | Ty::Bool => Err(ZsetScaleNotInt {
                     src: self.src(location),
                     at: location.into(),
                     ty: factor.to_string(),
@@ -1634,7 +1695,11 @@ impl Solver {
                 _ => return Ok(None),
             }
             let frame = frame.clone();
+            let real = *factor == Ty::Float;
             self.z_result(id, &frame, false)?;
+            if real {
+                self.mark_real(id);
+            }
             return Ok(Some(frame_ty.clone()));
         }
         if !matches!(ev.op, EvaluationOp::Plus | EvaluationOp::Minus)
@@ -1671,16 +1736,83 @@ impl Solver {
                 })?;
             }
         }
+        let real = [&left, &right].into_iter().flatten().any(|s| {
+            s.cols.get(ZSET_W).and_then(|c| c.ty.clone()).is_some_and(|t| t == Ty::Float)
+        });
         if let Some(l) = left {
             let mut out = l.as_ref().clone();
-            let w = out
+            let mut w = out
                 .cols
                 .shift_remove(ZSET_W)
                 .unwrap_or_else(|| FrameCol::known(Ty::Int));
+            // an int-weighted and a float-weighted table add as floats
+            if real {
+                w.ty = Some(Ty::Float);
+            }
             out.cols.insert(ZSET_W.into(), w);
             self.frame_schemas.insert(id, Rc::new(out));
         }
         Ok(Some(lhs.clone()))
+    }
+
+    /// The schema at `id` with its `w` made `float`: a weighted table.
+    fn mark_real(&mut self, id: NodeId) {
+        if let Some(schema) = self.frame_schemas.get(&id).cloned() {
+            let mut out = schema.as_ref().clone();
+            if let Some(w) = out.cols.get_mut(ZSET_W) {
+                w.ty = Some(Ty::Float);
+            }
+            self.frame_schemas.insert(id, Rc::new(out));
+        }
+    }
+
+    /// Whether the checker has typed `e` as a `float`.
+    fn expr_ty_is_float(&self, e: &Expr) -> bool {
+        self.node_ty(e.id()).is_some_and(|t| t == Ty::Float)
+    }
+
+    /// `__q_join_on(t, other, ["a"], ["x"], "kind")`: `join other (a == x)`. Each
+    /// left key must be a column of `t` and each right key a column of `other`.
+    /// The output is the left schema plus the right's columns other than its keys.
+    // r[impl mimas.query.join-on]
+    fn join_on_schemas(&mut self, id: NodeId, call: &Call) -> Result<()> {
+        let arg = |n: usize| call.arguments.get(n).map(|a| &a.value);
+        let (Some(l), Some(r)) = (arg(0), arg(1)) else {
+            return Ok(());
+        };
+        let (Some(a), Some(b)) = (self.frame_schema_of(l), self.frame_schema_of(r)) else {
+            return Ok(());
+        };
+        let (Some(lk), Some(rk), Some(at)) =
+            (Self::str_list_arg(call, 2), Self::str_list_arg(call, 3), arg(2))
+        else {
+            return Ok(());
+        };
+        for k in &lk {
+            a.col(self, at, k)?;
+        }
+        for k in &rk {
+            b.col(self, at, k)?;
+        }
+        let mut cols = a.cols.clone();
+        for (name, col) in &b.cols {
+            if rk.contains(&name.as_str()) {
+                continue;
+            }
+            if cols.contains_key(name) {
+                cols.insert(format!("{name}_right"), col.clone());
+            } else {
+                cols.insert(name.clone(), col.clone());
+            }
+        }
+        self.frame_schemas.insert(
+            id,
+            Rc::new(FrameSchema {
+                cols,
+                closed: a.closed && b.closed,
+            }),
+        );
+        Ok(())
     }
 
     /// `__q_join(t, other, ["key"], "kind")` -- left cols + the right's non-key cols.

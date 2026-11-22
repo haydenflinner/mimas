@@ -116,6 +116,10 @@ pub struct Parser<'s> {
     meta: Vec<TokMeta>,
     /// Macro hygiene and expansion state (`parser/macros.rs`).
     hygiene: macros::Hygiene,
+    /// On while a query `join` reads its table, so a spaced `(` ends it:
+    /// `join links (node == src)` is the table `links` and a key pairing,
+    /// not a call of `links`.
+    spaced_paren_ends: bool,
 }
 
 /// How a token sits in the stream (see [`Parser::meta`]).
@@ -275,6 +279,7 @@ impl<'s> Parser<'s> {
             quantity_units: HashMap::new(),
             meta,
             hygiene: macros::Hygiene::default(),
+            spaced_paren_ends: false,
         }
     }
 
@@ -3730,7 +3735,7 @@ impl<'s> Parser<'s> {
         while !self.at(TokKind::RightBrace) && !self.at(TokKind::Eof) {
             let verb_start = self.next_start();
             let TokKind::Ident(verb) = self.peek() else {
-                self.expected("a query verb (filter, derive, select, sort, take, group, rename, distinct, join)");
+                self.expected("a query verb (filter, derive, select, sort, take, group, aggregate, rename, distinct, join)");
                 self.advance();
                 continue;
             };
@@ -3831,19 +3836,47 @@ impl<'s> Parser<'s> {
                     }
                 }
                 "join" => {
-                    // `join other key [key…] ["kind"]`
+                    // `join other key [key…] ["kind"]`, or PRQL's
+                    // `join other (a == x && b == y) ["kind"]` for keys the two
+                    // sides name differently
+                    // r[impl mimas.query.join-on]
+                    let saved = std::mem::replace(&mut self.spaced_paren_ends, true);
                     let other = self.unary();
+                    self.spaced_paren_ends = saved;
                     let mut keys = vec![];
+                    let mut right_keys: Option<Vec<String>> = None;
                     let mut kind = "inner".to_string();
                     while !self.at_line_start()
                         && !self.at(TokKind::RightBrace)
                         && !self.at(TokKind::Eof)
                     {
                         match self.peek() {
-                            TokKind::Ident(n) => {
+                            TokKind::LeftParenthesis if keys.is_empty() && right_keys.is_none() => {
+                                let at = self.next_start();
+                                self.advance();
+                                let cond = self.in_group(Self::expr);
+                                self.expect(TokKind::RightParenthesis);
+                                let mut pairs = vec![];
+                                if Self::q_join_pairs(&cond, &mut pairs) {
+                                    let (l, r): (Vec<String>, Vec<String>) = pairs.into_iter().unzip();
+                                    keys = l;
+                                    right_keys = Some(r);
+                                } else {
+                                    self.error(Misdirection {
+                                        src: self.src(),
+                                        at: self.location(at).into(),
+                                        msg: "a join condition pairs a left column with a right one".into(),
+                                        label: "write `(left == right)`, and join more pairs with `&&`".into(),
+                                    });
+                                }
+                            }
+                            TokKind::Ident(n) if right_keys.is_none() => {
                                 keys.push(n.to_string());
                                 self.advance();
                             }
+                            // after `(a == x)` no key can follow, so a verb
+                            // starts the next step on the same line
+                            TokKind::Ident(v) if Self::Q_VERBS.contains(&v) => break,
                             TokKind::String(s) => {
                                 kind = s.trim_matches('"').to_string();
                                 self.advance();
@@ -3856,19 +3889,47 @@ impl<'s> Parser<'s> {
                     }
                     let keys = self.q_str_list(keys, verb_start);
                     let kind = self.new_expr(Literal::String(kind), verb_start);
-                    if zset {
-                        let other = self.q_call("__z_in", vec![other], verb_start);
-                        self.q_call("__z_join", vec![table, other, keys, kind], verb_start)
-                    } else {
-                        self.q_call("__q_join", vec![table, other, keys, kind], verb_start)
+                    let other =
+                        if zset { self.q_call("__z_in", vec![other], verb_start) } else { other };
+                    match (right_keys, zset) {
+                        (Some(r), _) => {
+                            let r = self.q_str_list(r, verb_start);
+                            let native = if zset { "__z_join_on" } else { "__q_join_on" };
+                            self.q_call(native, vec![table, other, keys, r, kind], verb_start)
+                        }
+                        (None, true) => {
+                            self.q_call("__z_join", vec![table, other, keys, kind], verb_start)
+                        }
+                        (None, false) => {
+                            self.q_call("__q_join", vec![table, other, keys, kind], verb_start)
+                        }
                     }
+                }
+                // PRQL's `aggregate { … }` with no `group`: one row over the
+                // whole table, the same as `group { aggregate { … } }`
+                // r[impl mimas.query.aggregate-verb]
+                "aggregate" => {
+                    let empty = self.q_str_list(vec![], verb_start);
+                    let table = if zset {
+                        self.q_call("__z_cons", vec![table], verb_start)
+                    } else {
+                        table
+                    };
+                    let grouped = self.q_call("__q_group", vec![table, empty], verb_start);
+                    let mut aggs = self.q_named_columns();
+                    if zset {
+                        aggs = aggs.iter().map(|a| self.z_weigh_agg(a)).collect();
+                    }
+                    let list = self.new_expr(Literal::Array(aggs), verb_start);
+                    let agg = self.q_call("__q_agg", vec![grouped, list], verb_start);
+                    if zset { self.q_call("__z_in", vec![agg], verb_start) } else { agg }
                 }
                 _ => {
                     self.error(Misdirection {
                         src: self.src(),
                         at: self.location(verb_start).into(),
                         msg: format!("`{verb}` isn't a query verb"),
-                        label: "try filter, derive, select, sort, take, group, rename, distinct or join".into(),
+                        label: "try filter, derive, select, sort, take, group, aggregate, rename, distinct or join".into(),
                     });
                     // skip the rest of this line
                     while !self.at_line_start()
@@ -3994,6 +4055,34 @@ impl<'s> Parser<'s> {
                 }
             }
             _ => e.clone(),
+        }
+    }
+
+    /// The query verbs. A `derive` on one line ends at one of these when no
+    /// `=` follows it, so `derive r = 1.0 / 3.0 select node r` is two steps.
+    const Q_VERBS: [&'static str; 10] = [
+        "filter", "derive", "select", "sort", "take", "group", "aggregate", "rename", "distinct",
+        "join",
+    ];
+
+    /// The `(a == x && b == y)` of a `join`: each `==` pairs a left column
+    /// with a right one. False when the condition is anything else.
+    fn q_join_pairs(e: &Expr, out: &mut Vec<(String, String)>) -> bool {
+        match e.kind() {
+            ExprKind::Grouping(g) => Self::q_join_pairs(&g.inner, out),
+            ExprKind::Logical(l) if matches!(l.op, LogicalOp::And) => {
+                Self::q_join_pairs(&l.left, out) && Self::q_join_pairs(&l.right, out)
+            }
+            ExprKind::Equality(eq) if matches!(eq.op, EqualityOp::Equal) => {
+                match (eq.left.as_ident(), eq.right.as_ident()) {
+                    (Some(a), Some(b)) => {
+                        out.push((a.lexeme.clone(), b.lexeme.clone()));
+                        true
+                    }
+                    _ => false,
+                }
+            }
+            _ => false,
         }
     }
 
@@ -4129,6 +4218,14 @@ impl<'s> Parser<'s> {
             self.eat(TokKind::Comma);
             if !braced
                 && (self.at_line_start() || self.at(TokKind::RightBrace) || self.at(TokKind::Eof))
+            {
+                break;
+            }
+            // r[impl mimas.query.verb-ends-derive]
+            // a verb with no `=` after it starts the next step on the same line
+            if !braced
+                && matches!(self.peek(), TokKind::Ident(v) if Self::Q_VERBS.contains(&v))
+                && self.nth(1) != TokKind::Equal
             {
                 break;
             }
@@ -4333,6 +4430,7 @@ impl<'s> Parser<'s> {
                 TokKind::LeftParenthesis | TokKind::LeftSquare | TokKind::Bang if fresh_line => {
                     break expr;
                 }
+                TokKind::LeftParenthesis if self.spaced_paren_ends && !self.glued() => break expr,
                 TokKind::LeftParenthesis => self.call(expr),
                 // r[impl mimas.query.zset.notation]
                 // `z⁺`, `z⁻`: the positive and negative parts, glued after
@@ -5131,6 +5229,10 @@ impl<'s> Parser<'s> {
         if self.peek() != TokKind::LeftBrace {
             return false;
         }
+        // `{:}`: the empty dict
+        if self.nth(1) == TokKind::Colon && self.nth(2) == TokKind::RightBrace {
+            return true;
+        }
         let key = self.nth(1);
         let named = key.is_ident();
         if !named && !matches!(key, TokKind::String(_)) {
@@ -5176,6 +5278,15 @@ impl<'s> Parser<'s> {
     fn record_literal(&mut self) -> Expr {
         let start = self.next_start();
         self.bump(TokKind::LeftBrace);
+        // r[impl mimas.dict.empty-literal]
+        // `{:}` is the empty dict, the shape Python and Swift give it (`{}`
+        // is an empty block here); its value type comes from where it goes
+        if self.at(TokKind::Colon) && self.nth(1) == TokKind::RightBrace {
+            self.advance();
+            self.advance();
+            let expr = self.new_expr(Literal::Record(vec![]), start);
+            return self.chain_accesses(expr);
+        }
         let elements = self.with_juxta(Juxta::Comma, |p| {
             p.list(
                 TokKind::RightBrace,

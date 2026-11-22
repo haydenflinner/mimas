@@ -1489,6 +1489,18 @@ impl<'s> Fmt<'s> {
         if tight_after(pk) {
             return String::new();
         }
+        // `{:}`, the empty dict, stays glued
+        let kind_at = |j: usize| self.toks.get(j).map(|t| t.kind);
+        if (pk == TokKind::LeftBrace
+            && ck == TokKind::Colon
+            && kind_at(i + 1) == Some(TokKind::RightBrace))
+            || (pk == TokKind::Colon
+                && ck == TokKind::RightBrace
+                && i >= 2
+                && kind_at(i - 2) == Some(TokKind::LeftBrace))
+        {
+            return String::new();
+        }
         // `{`'s interior: `{ a }` but `{int}` and `::{a, b}` tight
         if pk == TokKind::LeftBrace {
             return if self.tight_brace[i - 1] { "" } else { " " }.into();
@@ -1703,6 +1715,14 @@ mod tests {
 
     fn unchanged(src: &str) {
         assert_eq!(fmt(src), src, "expected {src:?} to be canonical");
+    }
+
+    // r[verify mimas.dict.empty-literal]
+    #[test]
+    fn empty_dict_stays_glued() {
+        unchanged("let d: {int} = {:}\n");
+        assert_eq!(fmt("let d: {int} = { : }\n"), "let d: {int} = {:}\n");
+        unchanged("let u = a ∪ b ∩ c ⊎ d\n");
     }
 
     #[test]

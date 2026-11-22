@@ -299,3 +299,21 @@ test_run!(
      for p in d { n += p.1; }",
     "n" => "3",
 );
+
+// `{:}` is the empty dict; its value type comes from where it goes
+// r[verify mimas.dict.empty-literal]
+test_run!(
+    empty_dict_literal,
+    r#"let d: {int} = {:};
+       let names: {[str]} = {:};
+       names["forth"] = ["dup", "drop"];
+       fn count(words: [str]) -> {int} {
+           let seen: {int} = {:};
+           for w in words { seen[w] = (seen[w] ?? 0) + 1; }
+           seen
+       }"#,
+    "d.len()" => "0",
+    r#"names["forth"]!.len()"# => "2",
+    r#"count(["a", "b", "a"])["a"]!"# => "2",
+    "{ let e: {str} = {:}; e.len() }" => "0",
+);

@@ -911,7 +911,8 @@ impl<'gc> Ctx<'gc> {
             Val::DataFrame(d) => {
                 // polars' own Display (the "fmt" feature) -- a real formatted table, not just a
                 // shape summary.
-                let _ = write!(out, "{}", d.0.borrow().0);
+                // a Z-set whose weights are all 1 prints without `w`
+                let _ = write!(out, "{}", crate::val::shown_frame(&d.0.borrow().0));
             }
             #[cfg(feature = "dataframe")]
             Val::PlExpr(e) => {
