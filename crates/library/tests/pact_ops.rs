@@ -177,3 +177,31 @@ test_fail!(
     "pact P { fn m(self) -> int { 1 } }
      [P]",
 );
+
+const SIGNED: &str = "
+pact Signed {
+    fn neg(self) -> Self;
+    fn add(self, o: Self) -> Self;
+    fn zero(self) -> Self;
+    fn twice_neg(self) -> Self { -(-self) + -self + self }
+    check |a| a + -a == a.zero()
+}
+struct Money { c: int }
+impl Money { fn samples() -> [Money] { [Money { c: 0 }, Money { c: 5 }, Money { c: -3 }] } }
+impl Signed for Money {
+    fn neg(self) -> Money { Money { c: -self.c } }
+    fn add(self, o: Money) -> Money { Money { c: self.c + o.c } }
+    fn zero(self) -> Money { Money { c: 0 } }
+}
+fn flip<T: Signed>(x: T) -> T { -x }
+fn flip_pact(x: Signed) -> Signed { -x }";
+
+test_run!(
+    // r[verify mimas.pact.unary]
+    unary_operators_dispatch_through_a_bound,
+    SIGNED,
+    // `-x` on a bounded param, on a pact-typed value, and on a pact's `Self`
+    "flip(Money { c: 4 }).c" => "-4",
+    "flip_pact(Money { c: 4 }) == Money { c: -4 }" => "true",
+    "Money { c: 2 }.twice_neg().c" => "2",
+);

@@ -24,7 +24,7 @@ use crate::{
     components::{AdtId, TyExt},
     errors::{
         BadLiteralArg, BadSchemaSpec, DimensionMismatch, NoSuchColumn, UnknownDataSource,
-        FrameItemColumns, ZsetColumnsDiffer, ZsetScaleNotInt, ZsetWeightNotInt,
+        FrameItemColumns, ZsetColumnsDiffer, ZsetKindMix, ZsetScaleNotInt, ZsetWeightNotInt,
     },
     traits::Query,
 };
@@ -87,8 +87,37 @@ impl FrameSchema {
     }
 }
 
-/// The weight column of a `query z { … }` frame (`library::zset::W`).
-const ZSET_W: &str = "w";
+/// The weight column of a frame (`shared::weights::WEIGHT_COL`).
+const ZSET_W: &str = shared::weights::WEIGHT_COL;
+
+use shared::weights::{Kind, USER_W};
+
+/// The weight kind a schema shows: from its weight column's type, or a
+/// plain table when a closed schema has none. `None` when the checker
+/// cannot tell, and the runtime checks instead.
+/// r[impl mimas.query.zset.kinds]
+fn schema_kind(schema: &FrameSchema) -> Option<Kind> {
+    match schema.cols.get(ZSET_W) {
+        Some(c) => match c.ty.as_ref()? {
+            Ty::Bool => Some(Kind::Set),
+            Ty::Int => Some(Kind::ZSet),
+            Ty::Float => Some(Kind::Weighted),
+            _ => None,
+        },
+        None if schema.closed => Some(Kind::Plain),
+        None => None,
+    }
+}
+
+/// The weight column's type for a kind.
+fn kind_ty(kind: Kind) -> Option<Ty> {
+    match kind {
+        Kind::Plain => None,
+        Kind::Set => Some(Ty::Bool),
+        Kind::ZSet => Some(Ty::Int),
+        Kind::Weighted => Some(Ty::Float),
+    }
+}
 
 /// A column type that can't hold weights: a concrete scalar that is not a
 /// number. Ints are a Z-set's weights and floats a weighted table's. An
@@ -399,10 +428,33 @@ impl Solver {
     }
 
     pub(crate) fn schema_columns(schema: &FrameSchema) -> String {
-        schema.cols.keys().cloned().collect::<Vec<_>>().join(", ")
+        // the weight column shows as `w`, the name a page writes for it
+        schema
+            .cols
+            .keys()
+            .map(|k| if k == ZSET_W { "w (the weights)".to_string() } else { k.clone() })
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 
     pub(crate) fn no_such_column(&self, at: &Expr, name: &str, schema: &FrameSchema) -> Error {
+        // `w` outside `query z` on a table with weights: the weights are not a
+        // column there
+        if name == USER_W && schema.cols.contains_key(ZSET_W) {
+            let kind = schema_kind(schema).unwrap_or(Kind::ZSet);
+            return ZsetKindMix {
+                src: self.src(at.location()),
+                at: at.location().into(),
+                msg: format!(
+                    "this {} keeps its weights apart from its columns, so a plain query has no \
+                     column `w`: read them inside `query z {{ … }}`, or make them a column \
+                     with `.weights_as(\"w\")`",
+                    kind.name()
+                ),
+                label: "the weights are not a column here".into(),
+            }
+            .into();
+        }
         NoSuchColumn {
             src: self.src(at.location()),
             at: at.location().into(),
@@ -1036,8 +1088,25 @@ impl Solver {
                     "__q_mutate" => self.q_mutate(id, call)?,
                     "__q_group" => self.q_group(id, call)?,
                     "__q_agg" => self.q_agg(id, call)?,
-                    "__q_join" => self.q_join(id, call)?,
-                    "__q_join_on" => self.join_on_schemas(id, call)?,
+                    "__q_join" | "__q_join_on" => {
+                        // a plain query joins plain tables (r[impl mimas.query.zset.kind-mix])
+                        if let Some(other) = arg(1)
+                            && let Some(kind) = self.frame_kind(other)
+                            && kind != Kind::Plain
+                        {
+                            Err(ZsetKindMix {
+                                src: self.src(other.location()),
+                                at: other.location().into(),
+                                msg: shared::weights::plain_join_message(kind),
+                                label: format!("a {}", kind.name()),
+                            })?;
+                        }
+                        if callee.lexeme == "__q_join" {
+                            self.q_join(id, call)?;
+                        } else {
+                            self.join_on_schemas(id, call)?;
+                        }
+                    }
                     // `query z { … }`: the same columns plus the `w` weight
                     "__z_in" => self.z_weighed(id, call, false)?,
                     "__z_cons" | "changes" => self.z_weighed(id, call, true)?,
@@ -1095,6 +1164,15 @@ impl Solver {
                 else {
                     return Ok(ty);
                 };
+                // `pull("w")` reads the weights (r[impl mimas.query.zset.pull-w])
+                let name = if name == USER_W
+                    && !schema.cols.contains_key(USER_W)
+                    && schema.cols.contains_key(ZSET_W)
+                {
+                    ZSET_W
+                } else {
+                    name
+                };
                 match schema.col(self, &call.arguments[0].value, name)? {
                     FrameCol { ty: Some(t), .. } => Ok(Ty::Result(Box::new(Ty::array(t)))),
                     _ => Ok(ty),
@@ -1148,21 +1226,76 @@ impl Solver {
                 self.frame_schemas.insert(id, schema);
                 Ok(ty)
             }
-            // Z-set parts and sets: the receiver's columns with an `int` `w` last
-            // r[impl mimas.query.zset.parts] r[impl mimas.query.zset.as_set]
-            "added" | "removed" | "as_set" => {
-                self.z_result(id, recv, false)?;
+            // Z-set parts: the receiver's columns with its weights last
+            // r[impl mimas.query.zset.parts]
+            "added" | "removed" => {
+                self.check_has_weights("taking a part of", recv)?;
+                let kind = self.frame_kind(recv).map(|k| shared::weights::joined(k, k));
+                self.z_kind_result(id, recv, kind);
+                Ok(ty)
+            }
+            // presence: the receiver's columns with `bool` weights
+            // r[impl mimas.query.zset.as_set]
+            "as_set" => {
+                self.z_kind_result(id, recv, Some(Kind::Set));
+                Ok(ty)
+            }
+            // up to real weights, and down to counts
+            // r[impl mimas.query.zset.weighted] r[impl mimas.query.zset.counts]
+            "weighted" | "counts" => {
+                self.check_has_weights(
+                    if method == "weighted" { "`.weighted()` on" } else { "`.counts()` on" },
+                    recv,
+                )?;
+                let kind = if method == "weighted" { Kind::Weighted } else { Kind::ZSet };
+                self.z_kind_result(id, recv, Some(kind));
+                Ok(ty)
+            }
+            // a plain table again: each row by its count
+            // r[impl mimas.query.zset.expand]
+            "expand" => {
+                self.z_kind_result(id, recv, Some(Kind::Plain));
+                Ok(ty)
+            }
+            // the weights as an ordinary column called `name`
+            // r[impl mimas.query.zset.weights-as]
+            "weights_as" => {
+                self.check_has_weights("`.weights_as()` on", recv)?;
+                let (Some(schema), Some(name)) =
+                    (self.frame_schema_of(recv), Self::str_arg(call, 0))
+                else {
+                    return Ok(ty);
+                };
+                let mut out = schema.as_ref().clone();
+                let mut w = out.cols.shift_remove(ZSET_W).unwrap_or_else(FrameCol::unknown);
+                if let Some(k) = schema_kind(&schema) {
+                    w.ty = kind_ty(shared::weights::joined(k, k)).or(w.ty);
+                    if k == Kind::Set {
+                        w.ty = Some(Ty::Bool);
+                    }
+                }
+                out.cols.insert(name.to_string(), w);
+                self.frame_schemas.insert(id, Rc::new(out));
+                Ok(ty)
+            }
+            // `a ⋈ b`: weights on both sides, of kinds that meet
+            // r[impl mimas.query.zset.join-op]
+            "natural_join" => {
+                if let Some(arg) = call.arguments.first() {
+                    self.check_kind_mix("⋈", recv, &arg.value, call.left.location())?;
+                }
                 Ok(ty)
             }
             // `‖z‖`: an `int` for a Z-set, a `float` for a weighted table
             // r[impl mimas.query.zset.size] r[impl mimas.query.zset.real]
             "size" => {
+                self.check_has_weights("the size of", recv)?;
                 let Some(schema) = self.frame_schema_of(recv) else {
                     return Ok(ty);
                 };
                 Ok(match schema.cols.get(ZSET_W).and_then(|c| c.ty.clone()) {
                     Some(Ty::Float) => Ty::Float,
-                    Some(Ty::Int) | None => Ty::Int,
+                    Some(Ty::Int | Ty::Bool) | None => Ty::Int,
                     Some(_) => ty,
                 })
             }
@@ -1191,7 +1324,33 @@ impl Solver {
             // `a ∪ b`, `a ∩ b`, `a ⊎ b`, `k ⋅ z`: the receiver's columns with `w` last
             // r[impl mimas.query.zset.bag-ops] r[impl mimas.query.zset.cdot]
             "union" | "intersect" | "uplus" | "dot" | "rdot" => {
+                let arg = call.arguments.first().map(|a| a.value.clone());
+                if let Some(arg) = &arg {
+                    if matches!(method, "dot" | "rdot") {
+                        self.check_scale(recv, self.expr_ty_is_float(arg), call.left.location())?;
+                    } else {
+                        let op = match method {
+                            "union" => "∪",
+                            "intersect" => "∩",
+                            _ => "⊎",
+                        };
+                        self.check_kind_mix(op, recv, arg, call.left.location())?;
+                    }
+                }
+                // two sets give a set under ∪ and ∩
+                let sets = matches!(method, "union" | "intersect")
+                    && self.frame_kind(recv) == Some(Kind::Set)
+                    && arg.as_ref().and_then(|a| self.frame_kind(a)) == Some(Kind::Set);
                 self.z_result(id, recv, false)?;
+                if sets {
+                    self.z_kind_result(id, recv, Some(Kind::Set));
+                    return Ok(ty);
+                }
+                if let Some(s) = self.frame_schemas.get(&id).cloned()
+                    && s.cols.get(ZSET_W).and_then(|c| c.ty.clone()) == Some(Ty::Bool)
+                {
+                    self.z_kind_result(id, recv, Some(Kind::ZSet));
+                }
                 let real_arg = call.arguments.first().is_some_and(|a| {
                     self.expr_ty_is_float(&a.value)
                         || self
@@ -1586,7 +1745,12 @@ impl Solver {
             let Some(schema) = self.frame_schema_of(&arg.value) else {
                 continue;
             };
-            let ty = schema.cols.get(ZSET_W).and_then(|c| c.ty.clone());
+            // a plain table's own `w` becomes the weights when `query z` lifts it
+            let ty = if schema.cols.contains_key(ZSET_W) {
+                None
+            } else {
+                schema.cols.get(USER_W).and_then(|c| c.ty.clone())
+            };
             if let Some(ty) = ty.filter(not_whole) {
                 Err(ZsetWeightNotInt {
                     src: self.src(arg.value.location()),
@@ -1603,15 +1767,93 @@ impl Solver {
             return Ok(());
         };
         let mut out = schema.as_ref().clone();
+        let lifted = !out.cols.contains_key(ZSET_W);
+        if lifted && let Some(idx) = out.cols.get_index_of(USER_W) {
+            let c = out.cols.shift_remove(USER_W).unwrap_or_else(FrameCol::unknown);
+            out.cols.insert_before(idx.min(out.cols.len()), ZSET_W.into(), c);
+        }
         if last || !out.cols.contains_key(ZSET_W) {
-            let w = out
+            let mut w = out
                 .cols
                 .shift_remove(ZSET_W)
                 .unwrap_or_else(|| FrameCol::known(Ty::Int));
+            // a set's presence counts 1
+            if w.ty == Some(Ty::Bool) {
+                w.ty = Some(Ty::Int);
+            }
             out.cols.insert(ZSET_W.into(), w);
         }
         self.frame_schemas.insert(id, Rc::new(out));
         Ok(())
+    }
+
+    /// The kind of the frame `e` evaluates to, when the checker knows it.
+    pub(crate) fn frame_kind(&self, e: &Expr) -> Option<Kind> {
+        self.frame_schema_of(e).and_then(|s| schema_kind(&s))
+    }
+
+    /// An error when the frames `a` and `b` have weight kinds that `op`
+    /// cannot mix without a written conversion. Silent when the checker does
+    /// not know both kinds: the runtime checks them then.
+    /// r[impl mimas.query.zset.kind-mix]
+    pub(crate) fn check_kind_mix(
+        &self,
+        op: &str,
+        a: &Expr,
+        b: &Expr,
+        location: Location,
+    ) -> Result<()> {
+        let (Some(ka), Some(kb)) = (self.frame_kind(a), self.frame_kind(b)) else {
+            return Ok(());
+        };
+        if op == "==" && ka == Kind::Plain && kb == Kind::Plain {
+            return Ok(());
+        }
+        if shared::weights::compatible(ka, kb) {
+            return Ok(());
+        }
+        Err(ZsetKindMix {
+            src: self.src(location),
+            at: location.into(),
+            msg: shared::weights::mix_message(op, ka, kb),
+            label: format!("a {} and a {}", ka.name(), kb.name()),
+        })?
+    }
+
+    /// An error when `e` is known to be a plain table, for an operation that
+    /// reads weights (`what`: "negating", "scaling", …).
+    fn check_has_weights(&self, what: &str, e: &Expr) -> Result<()> {
+        if self.frame_kind(e) == Some(Kind::Plain) {
+            Err(ZsetKindMix {
+                src: self.src(e.location()),
+                at: e.location().into(),
+                msg: shared::weights::plain_message(what),
+                label: "a plain table".into(),
+            })?
+        }
+        Ok(())
+    }
+
+    /// The schema at `id`: `src`'s columns with the weight column of `kind`
+    /// last, or without one for a plain table.
+    fn z_kind_result(&mut self, id: NodeId, src: &Expr, kind: Option<Kind>) {
+        let Some(schema) = self.frame_schema_of(src) else {
+            return;
+        };
+        let mut out = schema.as_ref().clone();
+        let w = out.cols.shift_remove(ZSET_W);
+        match kind {
+            Some(Kind::Plain) => {}
+            Some(k) => {
+                let mut w = w.unwrap_or_else(FrameCol::unknown);
+                w.ty = kind_ty(k);
+                out.cols.insert(ZSET_W.into(), w);
+            }
+            None => {
+                out.cols.insert(ZSET_W.into(), w.unwrap_or_else(FrameCol::unknown));
+            }
+        }
+        self.frame_schemas.insert(id, Rc::new(out));
     }
 
     /// The schema of a Z-set operation on `src`: its columns with an `int` `w` last,
@@ -1621,7 +1863,7 @@ impl Solver {
         let Some(schema) = self.frame_schema_of(src) else {
             return Ok(());
         };
-        if let Some(ty) = schema.cols.get(ZSET_W).and_then(|c| c.ty.clone()).filter(not_whole) {
+        if let Some(ty) = schema.cols.get(ZSET_W).and_then(|c| c.ty.clone()).filter(|t| *t == Ty::Str) {
             Err(ZsetWeightNotInt {
                 src: self.src(src.location()),
                 at: src.location().into(),
@@ -1629,10 +1871,14 @@ impl Solver {
             })?;
         }
         let mut out = schema.as_ref().clone();
-        let w = out
+        let mut w = out
             .cols
             .shift_remove(ZSET_W)
             .unwrap_or_else(|| FrameCol::known(Ty::Int));
+        // a set's presence counts 1 once weights are read
+        if w.ty == Some(Ty::Bool) {
+            w.ty = Some(Ty::Int);
+        }
         if !drop_w {
             out.cols.insert(ZSET_W.into(), w);
         }
@@ -1654,7 +1900,9 @@ impl Solver {
         if !is_frame || !matches!(op, UnaryOp::Negative | UnaryOp::Positive) {
             return Ok(None);
         }
-        self.z_result(id, operand, false)?;
+        self.check_has_weights("negating", operand)?;
+        let kind = self.frame_kind(operand).map(|k| shared::weights::joined(k, k));
+        self.z_kind_result(id, operand, kind);
         Ok(Some(ty.clone()))
     }
 
@@ -1672,6 +1920,44 @@ impl Solver {
         location: Location,
     ) -> Result<Option<Ty>> {
         let is_frame = |t: &Ty| matches!(t, Ty::Adt(a, _) if self.adts[*a].name == "DataFrame");
+        // the named operators on frames dispatch to their methods (`op_dispatch`);
+        // here they get the kind checks and the result's schema first
+        // r[impl mimas.query.zset.kind-mix]
+        let named = match ev.op {
+            EvaluationOp::Union => Some("∪"),
+            EvaluationOp::Intersect => Some("∩"),
+            EvaluationOp::Uplus => Some("⊎"),
+            EvaluationOp::Approx => Some("≈"),
+            _ => None,
+        };
+        if let Some(op) = named
+            && is_frame(lhs)
+            && is_frame(rhs)
+        {
+            self.check_kind_mix(op, &ev.left, &ev.right, location)?;
+            if op != "≈" {
+                let (ka, kb) = (self.frame_kind(&ev.left), self.frame_kind(&ev.right));
+                let kind = match (ka, kb) {
+                    (Some(Kind::Set), Some(Kind::Set)) if op != "⊎" => Some(Kind::Set),
+                    (Some(a), Some(b)) => Some(shared::weights::joined(a, b)),
+                    _ => None,
+                };
+                let left = ev.left.clone();
+                self.z_kind_result(id, &left, kind);
+            }
+            return Ok(None);
+        }
+        if matches!(ev.op, EvaluationOp::Dot) && (is_frame(lhs) != is_frame(rhs)) {
+            let (frame, factor) = if is_frame(lhs) { (&ev.left, rhs) } else { (&ev.right, lhs) };
+            let real = *factor == Ty::Float;
+            let frame = frame.clone();
+            self.check_scale(&frame, real, location)?;
+            let kind = self.frame_kind(&frame).map(|k| {
+                if real { Kind::Weighted } else { shared::weights::joined(k, k) }
+            });
+            self.z_kind_result(id, &frame, kind);
+            return Ok(None);
+        }
         // `k * z` and `z * k`: the Z-set scaled by a whole number
         // r[impl mimas.query.zset.scale]
         if matches!(ev.op, EvaluationOp::Multiply) && (is_frame(lhs) != is_frame(rhs)) {
@@ -1696,6 +1982,7 @@ impl Solver {
             }
             let frame = frame.clone();
             let real = *factor == Ty::Float;
+            self.check_scale(&frame, real, location)?;
             self.z_result(id, &frame, false)?;
             if real {
                 self.mark_real(id);
@@ -1708,6 +1995,7 @@ impl Solver {
         {
             return Ok(None);
         }
+        self.check_kind_mix(&ev.op.to_string(), &ev.left, &ev.right, location)?;
         let left = self.frame_schema_of(&ev.left);
         let right = self.frame_schema_of(&ev.right);
         if let (Some(l), Some(r)) = (&left, &right) {
@@ -1727,7 +2015,7 @@ impl Solver {
                 .cols
                 .get(ZSET_W)
                 .and_then(|c| c.ty.clone())
-                .filter(not_whole)
+                .filter(|t| *t == Ty::Str)
             {
                 Err(ZsetWeightNotInt {
                     src: self.src(location),
@@ -1745,14 +2033,31 @@ impl Solver {
                 .cols
                 .shift_remove(ZSET_W)
                 .unwrap_or_else(|| FrameCol::known(Ty::Int));
-            // an int-weighted and a float-weighted table add as floats
+            // a set beside weights counts 1, and two sets add as counts
             if real {
                 w.ty = Some(Ty::Float);
+            } else if w.ty == Some(Ty::Bool) {
+                w.ty = Some(Ty::Int);
             }
             out.cols.insert(ZSET_W.into(), w);
             self.frame_schemas.insert(id, Rc::new(out));
         }
         Ok(Some(lhs.clone()))
+    }
+
+    /// `k * z`: an error on a plain table, and on a Z-set when `k` is real.
+    /// r[impl mimas.query.zset.scale-real]
+    fn check_scale(&self, frame: &Expr, real: bool, location: Location) -> Result<()> {
+        self.check_has_weights("scaling", frame)?;
+        if real && self.frame_kind(frame) == Some(Kind::ZSet) {
+            Err(ZsetKindMix {
+                src: self.src(location),
+                at: location.into(),
+                msg: shared::weights::float_scale_message(),
+                label: "a Z-set times a float".into(),
+            })?
+        }
+        Ok(())
     }
 
     /// The schema at `id` with its `w` made `float`: a weighted table.

@@ -1651,9 +1651,17 @@ impl Emit for If {
 }
 
 impl Emit for In {
-    fn emit(&self, _id: NodeId, ir: &mut Ir) -> Option<InstId> {
+    fn emit(&self, id: NodeId, ir: &mut Ir) -> Option<InstId> {
         let needle = self.left.lower(ir)?;
         let target = self.right.lower(ir)?;
+        // `x ∈ t` through `t.contains(x)` (r[impl mimas.query.zset.member])
+        if let Some(&d) = ir.resolutions.op_decs.get(&id) {
+            let hit = emit_op_call(ir, d, vec![target, needle])?;
+            if self.condition {
+                return Some(hit);
+            }
+            return Some(ir.current().unary(UnaryOp::Not, hit));
+        }
         Some(ir.current().check_in(needle, target, self.condition))
     }
 }

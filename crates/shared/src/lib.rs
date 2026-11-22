@@ -8,6 +8,7 @@ mod num;
 pub mod schema;
 mod ty;
 pub mod units;
+pub mod weights;
 
 pub use fx::*;
 pub use id::*;

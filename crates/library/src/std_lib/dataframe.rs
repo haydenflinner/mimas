@@ -127,7 +127,16 @@ impl AscDesc {
         m.add(intersect);
         m.add(uplus);
         m.add(item);
+        m.add(weighted);
+        m.add(counts);
+        m.add(expand);
+        m.add(weights_as);
     }
+    api.add_method(weighted);
+    api.add_method(counts);
+    api.add_method(expand);
+    api.add_method(weights_as);
+    api.add_method(contains);
     api.add_method(union);
     api.add_method(intersect);
     api.add_method(uplus);
@@ -437,9 +446,13 @@ fn rename<'gc>(
 fn col_names<'gc>(ctx: Ctx<'gc>, df: vm::DataFrame<'gc>) -> vm::Array<'gc> {
     let names: Vec<Val<'gc>> = {
         let d = df.0.borrow();
+        // the weights read as `w`, as the display shows them
         d.0.get_column_names()
             .iter()
-            .map(|n| Val::Str(ctx.intern(n.as_str())))
+            .map(|n| {
+                let n = if n.as_str() == crate::zset::W { crate::zset::USER_W } else { n.as_str() };
+                Val::Str(ctx.intern(n))
+            })
             .collect()
     };
     ctx.new_array(names)
@@ -451,6 +464,13 @@ fn col_names<'gc>(ctx: Ctx<'gc>, df: vm::DataFrame<'gc>) -> vm::Array<'gc> {
 fn pull<'gc>(ctx: Ctx<'gc>, df: vm::DataFrame<'gc>, name: &str) -> Raisable<vm::Array<'gc>> {
     let col = {
         let d = df.0.borrow();
+        // `pull("w")` on a table with weights reads the weights, the column a
+        // page names `w` (r[impl mimas.query.zset.pull-w])
+        let name = if name == crate::zset::USER_W && d.0.column(name).is_err() {
+            crate::zset::W
+        } else {
+            name
+        };
         match d.0.column(name) {
             Ok(c) => c.clone(),
             Err(e) => return Raisable::Raised(format!("pull: {e}")),
@@ -1687,7 +1707,16 @@ fn __table_col<'gc>(
 // problem as a runtime error (not a result), so a whole query is one plain `DataFrame`.
 
 fn q_err(e: impl std::fmt::Display) -> vm::RtErr {
-    vm::RtErr::Custom(format!("query: {e}"))
+    let msg = e.to_string();
+    // a plain query that reads `w` on a table with weights: the weights are
+    // not a column there (`shared::weights::WEIGHT_COL`)
+    if msg.contains("\"w\" not found") {
+        return vm::RtErr::Custom(format!(
+            "query: {msg}. If this table has weights, read them inside `query z {{ … }}`, \
+             or make them a column with `.weights_as(\"w\")`"
+        ));
+    }
+    vm::RtErr::Custom(format!("query: {msg}"))
 }
 
 /// A scalar or an expression, as an expression (`lit` for scalars).
@@ -2278,8 +2307,73 @@ fn differentiate<'gc>(
 /// Z-sets (`crate::zset::equal`). `None` for any other pair, which keeps
 /// the row-by-row comparison.
 /// r[impl mimas.query.zset.equal]
-fn frame_eq(a: &polars::frame::DataFrame, b: &polars::frame::DataFrame) -> Option<bool> {
-    (crate::zset::is_zset(a) && crate::zset::is_zset(b)).then(|| crate::zset::equal(a, b))
+fn frame_eq(
+    a: &polars::frame::DataFrame,
+    b: &polars::frame::DataFrame,
+) -> Result<Option<bool>, String> {
+    crate::zset::frame_eq(a, b)
+}
+
+/// `z.weighted()`: real weights; a Z-set's counts become floats.
+/// r[impl mimas.query.zset.weighted]
+#[native]
+fn weighted<'gc>(ctx: Ctx<'gc>, z: vm::DataFrame<'gc>) -> Result<vm::DataFrame<'gc>, vm::RtErr> {
+    let out = crate::zset::weighted(&z.0.borrow().0).map_err(q_err)?;
+    Ok(ctx.new_dataframe(out))
+}
+
+/// `w.counts()`: whole-number weights; a weight that is not whole faults.
+/// r[impl mimas.query.zset.counts]
+#[native]
+fn counts<'gc>(ctx: Ctx<'gc>, z: vm::DataFrame<'gc>) -> Result<vm::DataFrame<'gc>, vm::RtErr> {
+    let out = crate::zset::counts(&z.0.borrow().0).map_err(q_err)?;
+    Ok(ctx.new_dataframe(out))
+}
+
+/// `z.expand()`: a plain table, each row repeated by its count.
+/// r[impl mimas.query.zset.expand]
+#[native]
+fn expand<'gc>(ctx: Ctx<'gc>, z: vm::DataFrame<'gc>) -> Result<vm::DataFrame<'gc>, vm::RtErr> {
+    let out = crate::zset::expand(&z.0.borrow().0).map_err(q_err)?;
+    Ok(ctx.new_dataframe(out))
+}
+
+/// `z.weights_as("rank")`: a plain table with the weights in a column.
+/// r[impl mimas.query.zset.weights-as]
+#[native]
+fn weights_as<'gc>(
+    ctx: Ctx<'gc>,
+    z: vm::DataFrame<'gc>,
+    name: &str,
+) -> Result<vm::DataFrame<'gc>, vm::RtErr> {
+    let out = crate::zset::weights_as(&z.0.borrow().0, name).map_err(q_err)?;
+    Ok(ctx.new_dataframe(out))
+}
+
+/// `x ∈ t`, `t.contains(x)`: whether the row `x` is present, with weight
+/// above 0. A record gives a value for each column by field name; a plain
+/// value asks about a table of one column.
+/// r[impl mimas.query.zset.member]
+#[native]
+fn contains<'gc>(ctx: Ctx<'gc>, t: vm::DataFrame<'gc>, x: Val<'gc>) -> Result<bool, vm::RtErr> {
+    let cell = |name: &str, v: Val<'gc>| -> Result<polars::prelude::AnyValue<'static>, vm::RtErr> {
+        let c = column_from_vals(name, &[v]).map_err(vm::RtErr::Custom)?;
+        c.as_materialized_series().get(0).map(|a| a.into_static()).map_err(q_err)
+    };
+    if let Some(inst) = x.as_instance() {
+        let data = inst.0.borrow();
+        let names = {
+            let all = ctx.state().field_names.borrow();
+            all.get(data.struct_id as usize).cloned().unwrap_or_default()
+        };
+        let mut row = vec![];
+        for (name, &v) in names.iter().zip(data.fields.iter()) {
+            row.push((name.to_string(), cell(name, v)?));
+        }
+        return crate::zset::contains(&t.0.borrow().0, &row).map_err(q_err);
+    }
+    let v = cell("x", x)?;
+    crate::zset::contains_value(&t.0.borrow().0, v).map_err(q_err)
 }
 
 /// `a ⋈ b`, `a.natural_join(b)`: the Z-set join on every column both
@@ -2361,6 +2455,7 @@ fn __q_join_on<'gc>(
     if left_on.len() != right_on.len() {
         return Err(q_err(crate::zset::join_keys_message(left_on.len(), right_on.len())));
     }
+    plain_join_side(&other.0.borrow().0)?;
     let lk: Vec<_> = left_on.iter().map(|n| col(n.as_str())).collect();
     let rk: Vec<_> = right_on.iter().map(|n| col(n.as_str())).collect();
     let left = df.0.borrow().0.clone().lazy();
@@ -2409,9 +2504,22 @@ fn __q_join<'gc>(
         "full" | "outer" => JoinType::Full,
         other => return Err(q_err(format!("unknown join type {other:?}"))),
     };
+    plain_join_side(&other.0.borrow().0)?;
     let on: Vec<_> = on.iter().map(|n| col(n.as_str())).collect();
     let left = df.0.borrow().0.clone().lazy();
     let right = other.0.borrow().0.clone().lazy();
     let joined = left.join(right, on.clone(), on, JoinArgs::new(join_type));
     q_run(ctx, joined.map_err(q_err)?)
+}
+
+/// A plain query's `join` partner must be a plain table: a partner with
+/// weights would bring them into a result that reads none. The solver
+/// gives the same error at check time (`frames::plain_join_message`).
+/// r[impl mimas.query.zset.kind-mix]
+fn plain_join_side(other: &polars::frame::DataFrame) -> Result<(), vm::RtErr> {
+    let kind = crate::zset::kind_of(other);
+    if kind == crate::zset::Kind::Plain {
+        return Ok(());
+    }
+    Err(q_err(shared::weights::plain_join_message(kind)))
 }

@@ -78,12 +78,14 @@ pub enum Val<'gc> {
 /// `==` on two frames, set by the library (`std::polars`) at install:
 /// `Some(answer)` when it has its own rule for the pair (two Z-sets compare
 /// as Z-sets, whatever their row order), `None` to fall back to comparing
-/// the rows in order. `PartialEq` has no `Ctx`, so this is a static hook
+/// the rows in order, and an error for two weight kinds that do not meet
+/// (a Z-set and a plain table). `bin` raises that error; `PartialEq`, which
+/// cannot, answers `false`. `PartialEq` has no `Ctx`, so this is a static hook
 /// rather than an `InstanceOps` fixture.
 /// r[impl mimas.query.zset.equal]
 #[cfg(feature = "dataframe")]
 pub static FRAME_EQ: std::sync::OnceLock<
-    fn(&polars::frame::DataFrame, &polars::frame::DataFrame) -> Option<bool>,
+    fn(&polars::frame::DataFrame, &polars::frame::DataFrame) -> Result<Option<bool>, String>,
 > = std::sync::OnceLock::new();
 
 impl<'gc> PartialEq for Val<'gc> {
@@ -143,9 +145,10 @@ impl<'gc> PartialEq for Val<'gc> {
                 // (nulls equal nulls)
                 Gc::ptr_eq(a.0, b.0) || {
                     let (a, b) = (&a.0.borrow().0, &b.0.borrow().0);
-                    match FRAME_EQ.get().and_then(|eq| eq(a, b)) {
-                        Some(same) => same,
-                        None => a.equals_missing(b),
+                    match FRAME_EQ.get().map(|eq| eq(a, b)) {
+                        Some(Ok(Some(same))) => same,
+                        Some(Err(_)) => false,
+                        _ => a.equals_missing(b),
                     }
                 }
             }
@@ -1171,30 +1174,38 @@ pub enum Captured {
 /// `dropped`).
 pub const INSPECT_TABLE_ROWS: usize = 40;
 
-/// The frame as a display shows it: a numeric `w` column whose every weight
-/// is 1 is left out, since a Z-set of plain rows reads better without it.
-/// Any other weight shows the column. The data and `==` do not change; only
-/// the print, the card's table and `show_*` tables read this. The CLI's
-/// print (`heap.rs`), [`Inspect::Table`] and [`crate::table_data`] share it.
+/// The frame as a display shows it. The weight column
+/// (`shared::weights::WEIGHT_COL`) shows as `w`, and it is left out when
+/// every weight is 1 or the frame is a set, since a Z-set of plain rows
+/// reads better without it. A plain table's own `w` column is data and
+/// always shows. The data and `==` do not change; only the print, the
+/// card's table and `show_*` tables read this. The CLI's print
+/// (`heap.rs`), [`Inspect::Table`] and [`crate::table_data`] share it.
 /// r[impl mimas.query.zset.display]
 #[cfg(feature = "dataframe")]
 pub fn shown_frame(df: &polars::frame::DataFrame) -> std::borrow::Cow<'_, polars::frame::DataFrame> {
+    use shared::weights::{USER_W, WEIGHT_COL};
     use std::borrow::Cow;
-    let Ok(w) = df.column("w") else {
+    let Ok(w) = df.column(WEIGHT_COL) else {
         return Cow::Borrowed(df);
     };
     let dt = w.dtype();
-    if !(dt.is_integer() || dt.is_float()) || df.width() < 2 {
-        return Cow::Borrowed(df);
+    let hide = df.width() >= 2
+        && (dt == &polars::prelude::DataType::Boolean
+            || w
+                .as_materialized_series()
+                .cast(&polars::prelude::DataType::Float64)
+                .ok()
+                .and_then(|f| f.f64().ok().map(|ca| (0..ca.len()).all(|i| ca.get(i) == Some(1.0))))
+                .unwrap_or(false));
+    if hide {
+        if let Ok(out) = df.drop(WEIGHT_COL) {
+            return Cow::Owned(out);
+        }
     }
-    let Ok(f) = w.as_materialized_series().cast(&polars::prelude::DataType::Float64) else {
-        return Cow::Borrowed(df);
-    };
-    let Ok(ca) = f.f64() else {
-        return Cow::Borrowed(df);
-    };
-    if (0..ca.len()).all(|i| ca.get(i) == Some(1.0)) {
-        if let Ok(out) = df.drop("w") {
+    if df.column(USER_W).is_err() {
+        let mut out = df.clone();
+        if out.rename(WEIGHT_COL, USER_W.into()).is_ok() {
             return Cow::Owned(out);
         }
     }
@@ -1992,6 +2003,21 @@ pub fn bin<'gc>(this: Val<'gc>, ctx: Ctx<'gc>, other: Val<'gc>, op: BinOp) -> Rt
                 out.push(bin(s, ctx, a.seq_get(i).unwrap(), op)?);
             }
             ctx.array_val(out)
+        }
+        // two frames of weight kinds that do not meet (a Z-set and a plain
+        // table) are an error that names the conversion, not a quiet `false`
+        // r[impl mimas.query.zset.kind-mix]
+        #[cfg(feature = "dataframe")]
+        (op @ (BinOp::Identity | BinOp::NotEqual), Val::DataFrame(a), Val::DataFrame(b)) => {
+            let same = Gc::ptr_eq(a.0, b.0) || {
+                let (x, y) = (&a.0.borrow().0, &b.0.borrow().0);
+                match FRAME_EQ.get().map(|eq| eq(x, y)) {
+                    Some(Ok(Some(same))) => same,
+                    Some(Err(msg)) => Err(RtErr::Custom(msg))?,
+                    _ => x.equals_missing(y),
+                }
+            };
+            Val::Bool(same == (op == BinOp::Identity))
         }
         // `==` is structural on every other non-tensor type, lists against lists included.
         // Ordering and arithmetic still broadcast.

@@ -1477,14 +1477,14 @@ test_run!(
 // The grocery basket: an aggregate reads the weights directly, so a change of
 // -1 bread takes a bread's price off the total.
 const BASKET: &str = r#"use std::polars::*;
-    let basket = table { item, w
+    let basket = query z { table { item, w
         "apple", 2
         "bread", 1
-    };
-    let change = table { item, w
+    } };
+    let change = query z { table { item, w
         "apple", 1
         "bread", -1
-    };
+    } };
     let prices = table { item, price
         "apple", 0.50
         "bread", 2.00
@@ -1537,28 +1537,28 @@ test_run!(
 // `median` in `query z` is the median of the copies the weights stand for,
 // and `unweighted_median` counts each row of positive weight once.
 const ZMEDIAN: &str = r#"use std::polars::*;
-    let skew = table { v, w
+    let skew = query z { table { v, w
         1, 3
         10, 1
-    };
-    let even = table { v, w
+    } };
+    let even = query z { table { v, w
         1, 1
         2, 1
         10, 2
-    };
-    let gone = table { v, w
+    } };
+    let gone = query z { table { v, w
         1, 1
         5, 1
         7, -4
         9, 1
-    };
-    let grouped = table { k, v, w
+    } };
+    let grouped = query z { table { k, v, w
         "a", 1, 3
         "a", 10, 1
         "b", 2, 1
         "b", 4, 1
         "b", 6, 5
-    };
+    } };
     let plain = table { v
         1
         2
@@ -1624,15 +1624,15 @@ test_run!(
 test_run!(
     zset_tables_add_and_subtract,
     r#"use std::polars::*;
-       let z1 = table { item, w
+       let z1 = query z { table { item, w
            "apple", 2
            "pear", 1
-       };
-       let z2 = table { item, w
+       } };
+       let z2 = query z { table { item, w
            "apple", 1
            "pear", -1
            "fig", 1
-       };
+       } };
        let plain = table { item
            "apple"
            "fig"
@@ -1646,10 +1646,10 @@ test_run!(
     r#"(z1 - z2).pull("w")! == changes(z1, z2).pull("w")!"# => "true",
     r#"(z1 - z2).pull("item")!"# => r#"["apple", "pear", "fig"]"#,
     r#"(z1 - z2).pull("w")!"# => "[1, 2, -1]",
-    // a plain frame counts each row at weight 1
-    r#"(z1 + plain).pull("w")!"# => "[3, 1, 1]",
-    r#"(plain + plain).pull("w")!"# => "[2, 2]",
-    r#"(plain + plain).col_names()"# => r#"["item", "w"]"#,
+    // a plain table counts each row at weight 1 once `query z` lifts it
+    r#"(z1 + query z { plain }).pull("w")!"# => "[3, 1, 1]",
+    r#"(query z { plain } + query z { plain }).pull("w")!"# => "[2, 2]",
+    r#"(query z { plain } + query z { plain }).col_names()"# => r#"["item", "w"]"#,
     // column order does not matter
     r#"{ let a = table { k, v
            "x", 1
@@ -1657,19 +1657,19 @@ test_run!(
        let b = table { v, k
            1, "x"
        };
-       (a + b).pull("w")! }"# => "[2]",
+       (query z { a } + query z { b }).pull("w")! }"# => "[2]",
 );
 
 // r[verify mimas.query.zset.add]
 #[test]
 fn zset_add_with_different_columns_is_an_error() {
     let src = r#"use std::polars::*;
-        let a = table { item, w
+        let a = query z { table { item, w
             "apple", 2
-        };
-        let b = table { name, w
+        } };
+        let b = query z { table { name, w
             "apple", 1
-        };
+        } };
         let c = a + b;"#;
     let err = compile_err(src);
     // the report wraps its lines, so check short pieces
@@ -1678,8 +1678,8 @@ fn zset_add_with_different_columns_is_an_error() {
     assert!(err.contains("has `name`"), "{err}");
     // frames whose columns the checker cannot see fault at run time
     let src = r#"use std::polars::*;
-        let a = from_csv("item,w\napple,2")!;
-        let b = from_csv("name,w\napple,1")!;
+        let a = query z { from_csv("item,w\napple,2")! };
+        let b = query z { from_csv("name,w\napple,1")! };
         let c = a - b;"#;
     let err = match test_runner::try_execute(src) {
         Ok(_) => panic!("expected different columns to fault"),
@@ -1756,9 +1756,9 @@ test_run!(
            }
            select k
        };
-       let one_b = table { k
+       let one_b = query z { table { k
            "b"
-       };
+       } };
        changes(one_b, two).pull("w")! }"# => "[-2]",
 );
 
@@ -1771,20 +1771,22 @@ test_run!(
            "b", 1
            "a", 3
        };"#,
-    // a table with an int `w` is a Z-set already: consolidation sums its weights
+    // `query z` lifts a table with an int `w`: that column is the weights,
+    // and consolidation sums them
     r#"query z { weighed }.pull("w")!"# => "[5, 1]",
     r#"query z { weighed }.col_names()"# => r#"["k", "w"]"#,
     // a join multiplies the two `w`s and keeps no `w_right`
-    r#"{ let other = table { k, w
+    r#"{ let other = query z { table { k, w
            "a", 10
-       };
+       } };
        query z { weighed join other k }.col_names() }"# => r#"["k", "w"]"#,
-    r#"{ let other = table { k, w
+    r#"{ let other = query z { table { k, w
            "a", 10
-       };
+       } };
        query z { weighed join other k }.pull("w")! }"# => "[50]",
-    // plain `query { }` leaves `w` an ordinary column
+    // until it is lifted, the table is plain: `w` is an ordinary column
     r#"query { weighed }.pull("w")!"# => "[2, 1, 3]",
+    r#"weighed.col_names()"# => r#"["k", "w"]"#,
 );
 
 // r[verify mimas.query.zset.reject]
@@ -1847,21 +1849,22 @@ fn zset_str_w_column_faults_at_run_time() {
 // their difference is empty, `(a - b).size() == 0`, whatever order their rows come in.
 
 const ZGROUP: &str = r#"use std::polars::*;
-    let a = table { item, w
+    let a = query z { table { item, w
         "apple", 2
         "bread", -1
         "fig", 3
-    };
-    let b = table { item, w
+    } };
+    let b = query z { table { item, w
         "apple", 1
         "bread", 1
         "pear", -2
-    };
+    } };
     let plain = table { item
         "apple"
         "apple"
         "fig"
     };
+    let pz = query z { plain };
     fn same(x: DataFrame, y: DataFrame) -> bool { (x - y).size() == 0 }
     fn all_same(xs: [DataFrame], ys: [DataFrame]) -> bool {
         if xs.len() != ys.len() { return false; }
@@ -1881,10 +1884,10 @@ test_run!(
     r#"(a + -a).size()"# => "0",
     r#"(a + -a).pull("item")!.len()"# => "0",
     r#"same(-(-a), a)"# => "true",
-    // a plain table counts each row at weight 1, consolidated first
-    r#"(-plain).pull("w")!"# => "[-2, -1]",
+    // a lifted plain table counts each row at weight 1, consolidated first
+    r#"(-pz).pull("w")!"# => "[-2, -1]",
     // `+z` is `z` consolidated
-    r#"(+plain).pull("w")!"# => "[2, 1]",
+    r#"(+pz).pull("w")!"# => "[2, 1]",
 );
 
 // r[verify mimas.query.zset.scale]
@@ -1904,7 +1907,7 @@ test_run!(
     r#"same(-2 * (a + b), -2 * a + -2 * b)"# => "true",
     // (j + k) * a == j * a + k * a
     r#"same((2 + 5) * a, 2 * a + 5 * a)"# => "true",
-    r#"{ let k = 4; (k * plain).pull("w")! }"# => "[8, 4]",
+    r#"{ let k = 4; (k * pz).pull("w")! }"# => "[8, 4]",
 );
 
 // r[verify mimas.query.zset.scale]
@@ -1934,9 +1937,9 @@ test_run!(
     // a == a.added() - a.removed()
     r#"same(a, a.added() - a.removed())"# => "true",
     r#"same(b, b.added() - b.removed())"# => "true",
-    // a plain table has no removed part
-    r#"plain.removed().size()"# => "0",
-    r#"plain.added().pull("w")!"# => "[2, 1]",
+    // a lifted plain table has no removed part
+    r#"pz.removed().size()"# => "0",
+    r#"pz.added().pull("w")!"# => "[2, 1]",
     // the free-function spelling
     r#"added(a).pull("w")!"# => "[2, 3]",
 );
@@ -1947,7 +1950,7 @@ test_run!(
     ZGROUP,
     r#"a.size()"# => "6",
     r#"b.size()"# => "4",
-    r#"plain.size()"# => "3",
+    r#"pz.size()"# => "3",
     // size(a) == size(a.added()) + size(a.removed())
     r#"a.size() == a.added().size() + a.removed().size()"# => "true",
     r#"b.size() == b.added().size() + b.removed().size()"# => "true",
@@ -1963,7 +1966,9 @@ test_run!(
     r#"a.unweighted().col_names()"# => r#"["item"]"#,
     // the rows of positive weight, each once
     r#"a.unweighted().pull("item")!"# => r#"["apple", "fig"]"#,
-    r#"plain.unweighted().pull("item")!"# => r#"["apple", "fig"]"#,
+    r#"pz.unweighted().pull("item")!"# => r#"["apple", "fig"]"#,
+    // a plain table stays as it is
+    r#"plain.unweighted().pull("item")!"# => r#"["apple", "apple", "fig"]"#,
     // the checker knows `w` is gone
     r#"{ let u = a.unweighted(); u.col_names().len() }"# => "1",
 );
@@ -1973,9 +1978,9 @@ test_run!(
 fn zset_unweighted_has_no_w_at_check_time() {
     let err = compile_err(
         r#"use std::polars::*;
-           let a = table { item, w
+           let a = query z { table { item, w
                "apple", 2
-           };
+           } };
            let ws = a.unweighted().pull("w")!;"#,
     );
     assert!(err.contains("`w`"), "{err}");
@@ -1986,9 +1991,11 @@ test_run!(
     zset_as_set_is_distinct,
     ZGROUP,
     r#"a.as_set().pull("item")!"# => r#"["apple", "fig"]"#,
-    r#"a.as_set().pull("w")!"# => "[1, 1]",
+    // a set's weights are presence
+    r#"a.as_set().pull("w")!"# => "[true, true]",
     r#"same(a.as_set(), query z { a distinct })"# => "true",
     r#"same(plain.as_set(), query z { plain distinct })"# => "true",
+    r#"plain.as_set().pull("item")!"# => r#"["apple", "fig"]"#,
 );
 
 const ZKEEP: &str = r#"use std::polars::*;
@@ -1999,11 +2006,11 @@ const ZKEEP: &str = r#"use std::polars::*;
         "apple", 3
         "bread", 5
     };
-    let gone = table { item, qty, w
+    let gone = query z { table { item, qty, w
         "apple", 1, -1
         "apple", 2, 1
         "apple", 3, 1
-    };"#;
+    } };"#;
 
 // r[verify mimas.query.zset.coalesce]
 test_run!(
@@ -2052,21 +2059,21 @@ test_run!(
     r#"[a, b].integrate().len()"# => "2",
     r#"[a, b].integrate()[1].pull("item")!"# => r#"["apple", "fig", "pear"]"#,
     r#"[a, b].integrate()[1].pull("w")!"# => "[3, 3, -2]",
-    r#"same([a, b, plain].integrate()[2], a + b + plain)"# => "true",
+    r#"same([a, b, pz].integrate()[2], a + b + pz)"# => "true",
     r#"[a, b].differentiate()[1].pull("w")! == (b - a).pull("w")!"# => "true",
     r#"same([a, b].differentiate()[0], a)"# => "true",
     // D undoes I, and I undoes D
-    r#"{ let zs = [a, b, plain, -a]; all_same(zs.integrate().differentiate(), zs) }"# => "true",
-    r#"{ let zs = [a, b, plain, -a]; all_same(zs.differentiate().integrate(), zs) }"# => "true",
+    r#"{ let zs = [a, b, pz, -a]; all_same(zs.integrate().differentiate(), zs) }"# => "true",
+    r#"{ let zs = [a, b, pz, -a]; all_same(zs.differentiate().integrate(), zs) }"# => "true",
     r#"{ let zs: [DataFrame] = []; zs.integrate().len() }"# => "0",
     // z⁻¹: the stream one step late, from the empty Z-set
-    r#"[a, b, plain].delay().len()"# => "3",
-    r#"[a, b, plain].delay()[0].size()"# => "0",
-    r#"[a, b, plain].delay()[0].col_names()"# => r#"["item", "w"]"#,
-    r#"same([a, b, plain].delay()[2], b)"# => "true",
+    r#"[a, b, pz].delay().len()"# => "3",
+    r#"[a, b, pz].delay()[0].size()"# => "0",
+    r#"[a, b, pz].delay()[0].col_names()"# => r#"["item", "w"]"#,
+    r#"same([a, b, pz].delay()[2], b)"# => "true",
     r#"{ let zs: [DataFrame] = []; zs.delay().len() }"# => "0",
     // D = 1 - z⁻¹, item by item (a list minus a list is not elementwise, so loop)
-    r#"{ let zs = [a, b, plain, -a];
+    r#"{ let zs = [a, b, pz, -a];
        let d = zs.differentiate();
        let late = zs.delay();
        let ok = true;
@@ -2080,28 +2087,28 @@ test_run!(
 // The laws of the group, and two uses of them. A sum aggregate is linear, so it
 // distributes over `+`; a join is bilinear, so its change follows the product rule.
 const ZLAWS: &str = r#"use std::polars::*;
-    let a = table { item, w
+    let a = query z { table { item, w
         "apple", 2
         "bread", -1
-    };
-    let b = table { item, w
+    } };
+    let b = query z { table { item, w
         "apple", 1
         "fig", 4
-    };
+    } };
     let prices = table { item, price
         "apple", 1
         "bread", 3
         "fig", 5
     };
-    let stock = table { item, shelf, w
+    let stock = query z { table { item, shelf, w
         "apple", "A", 1
         "fig", "B", 2
-    };
-    let dstock = table { item, shelf, w
+    } };
+    let dstock = query z { table { item, shelf, w
         "apple", "A", 1
         "bread", "C", 1
         "fig", "B", -1
-    };
+    } };
     fn same(x: DataFrame, y: DataFrame) -> bool { (x - y).size() == 0 }
     fn total(z: DataFrame) -> int {
         let t: [int] = query z {
@@ -2126,7 +2133,7 @@ test_run!(
     // zero, inverse, commutative, associative
     r#"(a + -a).size()"# => "0",
     r#"same(a + b, b + a)"# => "true",
-    r#"same((a + b) + stock.unweighted().select_names(["item"])!, a + (b + stock.unweighted().select_names(["item"])!))"# => "true",
+    r#"same((a + b) + query z { stock.unweighted().select_names(["item"])! }, a + (b + query z { stock.unweighted().select_names(["item"])! }))"# => "true",
     r#"same(a - b, a + -b)"# => "true",
     // k * (a + b) == k * a + k * b
     r#"same(5 * (a + b), 5 * a + 5 * b)"# => "true",
@@ -2150,23 +2157,23 @@ test_run!(
 // order, and the glyphs (`∫ ∇ Δ Δ⁻¹ z⁻¹ ⋈ ⋅ ⁺ ⁻ ‖ ‖ ∘ ^Δ`) are their ASCII methods.
 
 const ZSTREAM: &str = r#"use std::polars::*;
-    let a = table { item, w
+    let a = query z { table { item, w
         "apple", 2
         "bread", -1
-    };
-    let b = table { item, w
+    } };
+    let b = query z { table { item, w
         "bread", 1
         "fig", 4
-    };
-    let c = table { item, w
+    } };
+    let c = query z { table { item, w
         "apple", -1
         "fig", 1
-    };
-    let prices = table { item, price
+    } };
+    let prices = query z { table { item, price
         "apple", 1
         "bread", 3
         "fig", 5
-    };
+    } };
     let zs = stream([a, b, c]);
     fn inc(x: int) -> int { x + 1 }
     fn dbl(x: int) -> int { x * 2 }
@@ -2183,15 +2190,15 @@ test_run!(
     zset_equality_ignores_row_order,
     ZSTREAM,
     // the same Z-set with its rows in another order, and split differently
-    r#"a == table { item, w
+    r#"a == query z { table { item, w
         "bread", -1
         "apple", 2
-    }"# => "true",
-    r#"a == table { item, w
+    } }"# => "true",
+    r#"a == query z { table { item, w
         "apple", 1
         "bread", -1
         "apple", 1
-    }"# => "true",
+    } }"# => "true",
     r#"a == b"# => "false",
     r#"a + b == b + a"# => "true",
     // a plain frame keeps row-by-row equality
@@ -2316,9 +2323,9 @@ test_fail!(
     r#"struct P { x: int } let p = P { x: 1 }; let _a = p[0];"#,
     // two tables with no column in common
     r#"use std::polars::*;
-       let a = table { item, w
+       let a = query z { table { item, w
            "apple", 1
-       };
+       } };
        let b = table { price
            3
        };
@@ -2333,19 +2340,19 @@ test_fail!(
 // the median of a signed Z-set.
 
 const ZREAL: &str = r#"use std::polars::*;
-    let a = table { item, w
+    let a = query z { table { item, w
         "apple", 2
         "bread", -1
         "fig", 3
-    };
-    let b = table { item, w
+    } };
+    let b = query z { table { item, w
         "apple", 1
         "bread", 1
         "pear", -2
-    };
-    let half = table { item, w
+    } };
+    let half = query z { table { item, w
         "apple", 0.5
-    };
+    } };
     let x = table { item
         "apple"
     };
@@ -2353,27 +2360,36 @@ const ZREAL: &str = r#"use std::polars::*;
         "apple", 3
         "fig", 5
     };
-    let r = table { node, w
+    let r = query z { table { node, w
         "A", 0.5
         "B", 0.25
-    };
+    } };
     let links = table { src, dst
         "A", "B"
         "B", "A"
         "B", "C"
     };
+    // `.weighted()` lifts a Z-set to real weights
+    let af = a.weighted();
+    let bf = b.weighted();
+    let xf = query z { x }.weighted();
     fn same(p: DataFrame, q: DataFrame) -> bool { p == q }"#;
 
 // r[verify mimas.query.zset.real]
 test_run!(
     zset_real_weights_are_a_group,
     ZREAL,
-    r#"(0.5 * a).pull("w")!"# => "[1.0, -0.5, 1.5]",
-    r#"(a * 0.5).pull("w")!"# => "[1.0, -0.5, 1.5]",
-    r#"(0.5 · a).pull("w")!"# => "[1.0, -0.5, 1.5]",
-    // an int-weighted and a float-weighted table combine as floats
-    r#"(a + half).pull("w")!"# => "[2.5, -1.0, 3.0]",
-    r#"(half - a).pull("w")!"# => "[-1.5, 1.0, -3.0]",
+    r#"(0.5 * af).pull("w")!"# => "[1.0, -0.5, 1.5]",
+    r#"(af * 0.5).pull("w")!"# => "[1.0, -0.5, 1.5]",
+    r#"(0.5 · af).pull("w")!"# => "[1.0, -0.5, 1.5]",
+    // a set scales as weight 1
+    r#"(0.5 · a.as_set()).pull("w")!"# => "[0.5, 0.5]",
+    // two weighted tables add as reals
+    r#"(af + half).pull("w")!"# => "[2.5, -1.0, 3.0]",
+    r#"(half - af).pull("w")!"# => "[-1.5, 1.0, -3.0]",
+    // `.weighted()` loses nothing, and `.counts()` comes back
+    r#"af.counts() == a"# => "true",
+    r#"af.pull("w")!"# => "[2.0, -1.0, 3.0]",
     // negation and undo
     r#"‖half + -half‖"# => "0.0",
     r#"same(-(-half), half)"# => "true",
@@ -2381,15 +2397,15 @@ test_run!(
     r#"‖half‖"# => "0.5",
     r#"‖a‖"# => "6",
     r#"{ let n: int = ‖a‖; n + 1 }"# => "7",
-    r#"{ let f: float = ‖0.5 * a‖; f }"# => "3.0",
+    r#"{ let f: float = ‖0.5 * af‖; f }"# => "3.0",
     // the module laws hold where floats are exact
-    r#"same(0.5 * (a + b), 0.5 * a + 0.5 * b)"# => "true",
-    r#"same((0.25 + 0.5) * a, 0.25 * a + 0.5 * a)"# => "true",
+    r#"same(0.5 * (af + bf), 0.5 * af + 0.5 * bf)"# => "true",
+    r#"same((0.25 + 0.5) * af, 0.25 * af + 0.5 * af)"# => "true",
     // a join multiplies real weights
-    r#"(half ⋈ prices).pull("w")!"# => "[0.5]",
+    r#"(half ⋈ prices.as_set()).pull("w")!"# => "[0.5]",
     r#"query z { half join prices item }.pull("w")!"# => "[0.5]",
     // the weighted aggregates read real weights
-    r#"query z { 0.5 * a aggregate { n = count(), s = sum(1) } }.pull("n")!"# => "[2.0]",
+    r#"query z { 0.5 * af aggregate { n = count(), s = sum(1) } }.pull("n")!"# => "[2.0]",
     // a weighted table enters `query z` with its weights
     r#"query z { half }.pull("w")!"# => "[0.5]",
 );
@@ -2401,17 +2417,17 @@ test_run!(
     zset_real_weights_round,
     ZREAL,
     // 0.1 + 0.2 - 0.3 is not 0 in floats, so the row stays
-    r#"(0.1 * x + 0.2 * x - 0.3 * x).pull("w")!"# => "[5.551115123125783e-17]",
+    r#"(0.1 * xf + 0.2 * xf - 0.3 * xf).pull("w")!"# => "[5.551115123125783e-17]",
     // `==` compares weights exactly, `≈` within float rounding
-    r#"0.1 * x + 0.2 * x == 0.3 * x"# => "false",
-    r#"0.1 * x + 0.2 * x ≈ 0.3 * x"# => "true",
+    r#"0.1 * xf + 0.2 * xf == 0.3 * xf"# => "false",
+    r#"0.1 * xf + 0.2 * xf ≈ 0.3 * xf"# => "true",
     r#"half ≈ half"# => "true",
-    r#"half ≈ 0.6 * x"# => "false",
+    r#"half ≈ 0.6 * xf"# => "false",
     // a row on one side only must weigh about 0
-    r#"half ≈ half + 0.0000000000000001 * prices.select_names(["item"])!"# => "true",
-    r#"half ≈ a"# => "false",
+    r#"half ≈ half + 0.0000000000000001 * query z { prices.select_names(["item"])! }.weighted()"# => "true",
+    r#"half ≈ af"# => "false",
     // an exact 0 drops the row
-    r#"‖0.0 * a‖"# => "0.0",
+    r#"‖0.0 * af‖"# => "0.0",
 );
 
 // r[verify mimas.query.join-on]
@@ -2467,7 +2483,7 @@ test_run!(
     r#"query z { a aggregate { n = count() } }.item()"# => "4",
     r#"query { prices aggregate { t = sum(price) } }.item() + 1"# => "9",
     r#"query { prices filter item == "fig" select price }.item()"# => "5",
-    r#"query z { 0.5 * a aggregate { t = sum(1) } }.item()"# => "2.0",
+    r#"query z { 0.5 * af aggregate { t = sum(1) } }.item()"# => "2.0",
     // `aggregate` alone is `group { aggregate }`
     r#"query z { a aggregate { n = count() } } == query z { a group { aggregate { n = count() } } }"# => "true",
 );
@@ -2502,9 +2518,9 @@ fn query_item_fails_loudly() {
     // one row standing for two copies
     let err = fault(
         r#"use std::polars::*;
-           let t = table { a, w
+           let t = query z { table { a, w
                1, 2
-           };
+           } };
            let _v = t.item();"#,
     );
     assert!(err.contains("weighs 2"), "{err}");
@@ -2532,45 +2548,53 @@ test_run!(
 test_run!(
     zset_set_symbols,
     ZREAL,
-    r#"{ let p = table { item, w
+    r#"{ let p = query z { table { item, w
            "apple", 2
            "pear", 1
-       };
-       let q = table { item, w
+       } };
+       let q = query z { table { item, w
            "apple", 1
            "fig", 3
-       };
+       } };
        [(p ∪ q).pull("w")!, (p ∩ q).pull("w")!, (p ⊎ q).pull("w")!] }"# => "[[2, 1, 3], [1], [3, 1, 3]]",
     // on sets the usual union and intersection
     r#"{ let p = table { k
            1
            2
-       };
+       }.as_set();
        let q = table { k
            2
            3
-       };
+       }.as_set();
        [(p ∪ q).pull("k")!, (p ∩ q).pull("k")!] }"# => "[[1, 2, 3], [2]]",
-    r#"x ⊎ prices.select_names(["item"])! == x + prices.select_names(["item"])!"# => "true",
-    r#"x.union(x) == query z { x }"# => "true",
-    r#"(half ∪ x).pull("w")!"# => "[1.0]",
-    r#"(half ∩ x).pull("w")!"# => "[0.5]",
+    // two sets give a set
+    r#"{ let p = table { k
+           1
+       }.as_set();
+       (p ∪ p).pull("w")! }"# => "[true]",
+    r#"{ let xz = query z { x };
+       let pz = query z { prices.select_names(["item"])! };
+       xz ⊎ pz == xz + pz }"# => "true",
+    r#"x.as_set().union(x.as_set()) == x.as_set()"# => "true",
+    // a set beside weights counts 1
+    r#"(half ∪ x.as_set()).pull("w")!"# => "[1.0]",
+    r#"(half ∩ x.as_set()).pull("w")!"# => "[0.5]",
     // ∪ is not linear: the union of two changes is not the change of the unions
-    r#"{ let p = table { k
+    r#"{ let p = query z { table { k
            1
-       };
+       } };
        (p ∪ p) + (p ∪ p) == (p + p) ∪ (p + p) }"# => "true",
-    r#"{ let p = table { k
+    r#"{ let p = query z { table { k
            1
-       };
-       let q = table { k
+       } };
+       let q = query z { table { k
            2
-       };
+       } };
        (p ∪ q) + (q ∪ p) == (p + q) ∪ (q + p) }"# => "false",
     // step by step on streams
-    r#"{ let s = stream([x, half]); (s ⊎ s)[1] == 2 * half }"# => "true",
-    r#"{ let s = stream([x, half]); (s ∪ s)[1] == half }"# => "true",
-    r#"{ let s = stream([x, half]); (s ∩ stream([half, x]))[0] == half }"# => "true",
+    r#"{ let s = stream([xf, half]); (s ⊎ s)[1] == 2 * half }"# => "true",
+    r#"{ let s = stream([xf, half]); (s ∪ s)[1] == half }"# => "true",
+    r#"{ let s = stream([xf, half]); (s ∩ stream([half, xf]))[0] == half }"# => "true",
 );
 
 // r[verify mimas.query.zset.bag-ops]
@@ -2578,9 +2602,9 @@ test_run!(
 fn zset_set_symbols_refuse_removals() {
     let err = match test_runner::try_execute(
         r#"use std::polars::*;
-           let a = table { item, w
+           let a = query z { table { item, w
                "apple", -1
-           };
+           } };
            let _u = a ∪ a;"#,
     ) {
         Ok(_) => panic!("expected ∪ on a removal to fault"),
@@ -2591,23 +2615,23 @@ fn zset_set_symbols_refuse_removals() {
 }
 
 const ZSIGNED: &str = r#"use std::polars::*;
-    let shifted = table { v, w
+    let shifted = query z { table { v, w
         1, 2
         5, 1
         9, 2
         10, -1
-    };
-    let kept = table { v, w
+    } };
+    let kept = query z { table { v, w
         1, 1
         5, 2
         7, -1
         9, 1
-    };
-    let fz = table { v, w
+    } };
+    let fz = query z { table { v, w
         1.0, 0.5
         3.0, 0.25
         4.0, 0.5
-    };
+    } };
     fn med(t: DataFrame) -> float {
         query z {
             t
@@ -2668,7 +2692,7 @@ test_run_display!(
 │ apple │
 │ fig   │
 └───────┘"#,
-    "query z { prices select item } + x" => r#"shape: (2, 2)
+    "query z { prices select item } + query z { x }" => r#"shape: (2, 2)
 ┌───────┬─────┐
 │ item  ┆ w   │
 │ ---   ┆ --- │
@@ -2687,3 +2711,164 @@ test_run!(
     r#"query z { prices select item }.col_names()"# => r#"["item", "w"]"#,
     r#"query z { prices select item } == query z { prices.select_names(["item"])! }"# => "true",
 );
+
+// ---- Weight kinds: plain table, set, Z-set, weighted table -----------------------------------
+// The kinds do not cross on their own (2026-11-22). `query z { t }` lifts a plain table and
+// `.weighted()` a Z-set; `.counts()`, `.unweighted()`, `.as_set()` and `.expand()` go down. A set
+// is presence and meets any weights. A mix of kinds is a check error when the checker sees both
+// kinds, and a run-time fault with the same text when it does not.
+
+const ZKINDS: &str = r#"use std::polars::*;
+    let t = table { item, w
+        "apple", 2
+        "bread", 1
+    };
+    let z = query z { t };
+    let r = z.weighted();
+    let s = z.as_set();
+    struct Item { item: str }
+    fn hide(x: DataFrame) -> DataFrame { x }"#;
+
+// r[verify mimas.query.zset.kinds]
+// r[verify mimas.query.zset.lift]
+// r[verify mimas.query.zset.weighted]
+// r[verify mimas.query.zset.counts]
+// r[verify mimas.query.zset.expand]
+// r[verify mimas.query.zset.weights-as]
+// r[verify mimas.query.zset.pull-w]
+// r[verify mimas.query.zset.block-lifts]
+test_run!(
+    zset_kinds_convert_only_when_written,
+    ZKINDS,
+    // a plain table's own `w` is data until `query z` lifts it
+    r#"t.pull("w")!"# => "[2, 1]",
+    r#"query { t filter w > 1 }.pull("item")!"# => r#"["apple"]"#,
+    r#"‖z‖"# => "3",
+    // up: lossless
+    r#"r.pull("w")!"# => "[2.0, 1.0]",
+    r#"r.counts() == z"# => "true",
+    r#"s.weighted().pull("w")!"# => "[1.0, 1.0]",
+    // down: each says what it drops
+    r#"s.pull("w")!"# => "[true, true]",
+    r#"z.unweighted().col_names()"# => r#"["item"]"#,
+    r#"z.expand().pull("item")!"# => r#"["apple", "apple", "bread"]"#,
+    r#"z.weights_as("n").col_names()"# => r#"["item", "n"]"#,
+    r#"z.weights_as("n").pull("n")!"# => "[2, 1]",
+    // a set is presence: it meets any weights without a conversion
+    r#"(z + s).pull("w")!"# => "[3, 2]",
+    r#"(r ⋈ s).pull("w")!"# => "[2.0, 1.0]",
+    r#"(0.5 · s).pull("w")!"# => "[0.5, 0.5]",
+    r#"s + s == 2 · s"# => "true",
+    // a query z block lifts what it reads, a weighted table beside a plain one too
+    r#"query z { r join t item }.pull("w")!"# => "[4.0, 1.0]",
+    // integer scaling keeps a Z-set, real scaling a weighted table
+    r#"(2 · z).pull("w")!"# => "[4, 2]",
+    r#"(0.5 · r).pull("w")!"# => "[1.0, 0.5]",
+    // two plain tables still compare row by row
+    r#"t == t"# => "true",
+);
+
+// r[verify mimas.query.zset.member]
+test_run!(
+    zset_membership_asks_about_presence,
+    ZKINDS,
+    r#"Item { item = "apple" } ∈ z"# => "true",
+    r#"Item { item = "fig" } ∈ z"# => "false",
+    r#"Item { item = "fig" } ∉ z"# => "true",
+    r#""bread" ∈ r"# => "true",
+    r#""bread" ∈ s"# => "true",
+    // weight above 0: a removed row is not present
+    r#"{ let gone = z - query z { table { item, w
+           "bread", 3
+       } };
+       "bread" ∈ gone }"# => "false",
+    // a plain table holds a row when it has it at all
+    r#""apple" ∈ query { t select item }"# => "true",
+    r#"z.contains("apple")"# => "true",
+);
+
+/// A report as one line: miette wraps long messages and draws a `│` margin.
+fn flat(report: &str) -> String {
+    report.replace('│', " ").split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+// r[verify mimas.query.zset.kind-mix]
+// r[verify mimas.query.zset.scale-real]
+#[test]
+fn zset_kind_mix_is_a_check_error() {
+    let err = |expr: &str| {
+        flat(&compile_err(&format!("{ZKINDS}\n let _x = {expr};")))
+    };
+    let e = err("z == t");
+    assert!(e.contains("comparing a Z-set with a plain table"), "{e}");
+    assert!(e.contains("query z { t }"), "{e}");
+    assert!(e.contains(".unweighted()"), "{e}");
+    let e = err("z + r");
+    assert!(e.contains("adding a Z-set and a weighted table"), "{e}");
+    assert!(e.contains(".weighted()"), "{e}");
+    assert!(e.contains(".counts()"), "{e}");
+    let e = err("t + t");
+    assert!(e.contains("plain table has no weights"), "{e}");
+    let e = err("z - t");
+    assert!(e.contains("subtracting a plain table from a Z-set"), "{e}");
+    let e = err("z ⋈ t");
+    assert!(e.contains("joining a Z-set with a plain table"), "{e}");
+    let e = err("z ∪ r");
+    assert!(e.contains("the union of a Z-set and a weighted table"), "{e}");
+    let e = err("z ∩ t");
+    assert!(e.contains("intersection"), "{e}");
+    let e = err("z ⊎ r");
+    assert!(e.contains("adding a Z-set and a weighted table"), "{e}");
+    let e = err("r ≈ z");
+    assert!(e.contains("comparing a weighted table with a Z-set"), "{e}");
+    let e = err("0.5 · z");
+    assert!(e.contains("scaling a Z-set by a float"), "{e}");
+    assert!(e.contains("k · z.weighted()"), "{e}");
+    let e = err("0.5 * z");
+    assert!(e.contains("scaling a Z-set by a float"), "{e}");
+    let e = err("-t");
+    assert!(e.contains("negating a plain table"), "{e}");
+    let e = err("‖t‖");
+    assert!(e.contains("the size of a plain table"), "{e}");
+    let e = err("t.weighted()");
+    assert!(e.contains("plain table"), "{e}");
+    let e = err("query { z sort -w }");
+    assert!(e.contains("weights_as"), "{e}");
+    let e = err("query { t join z item }");
+    assert!(e.contains("a plain query joins plain tables"), "{e}");
+}
+
+// r[verify mimas.query.zset.kind-mix]
+#[test]
+fn zset_kind_mix_faults_at_run_time() {
+    // `hide` keeps the kinds from the checker; the runtime gives the same text
+    let fault = |expr: &str| match test_runner::try_execute(&format!("{ZKINDS}\n let _x = {expr};"))
+    {
+        Ok(_) => panic!("expected a fault: {expr}"),
+        Err(e) => flat(&format!("{e}")),
+    };
+    let e = fault("hide(z) == hide(t)");
+    assert!(e.contains("comparing a Z-set with a plain table"), "{e}");
+    let e = fault("hide(z) + hide(r)");
+    assert!(e.contains(".counts()"), "{e}");
+    let e = fault("hide(t) + hide(t)");
+    assert!(e.contains("plain table has no weights"), "{e}");
+    let e = fault("0.5 · hide(z)");
+    assert!(e.contains("k · z.weighted()"), "{e}");
+    let e = fault("hide(z) ⋈ hide(t)");
+    assert!(e.contains("joining a Z-set with a plain table"), "{e}");
+    let e = fault("stream([hide(z), hide(r)]).integrate()");
+    assert!(e.contains("adding a Z-set and a weighted table"), "{e}");
+    let e = fault("changes(hide(z), hide(t))");
+    assert!(e.contains("the changes from a plain table to a Z-set"), "{e}");
+    let e = fault("(0.5 · hide(r)).counts()");
+    assert!(e.contains("not a whole number"), "{e}");
+    let e = fault("(-hide(z)).expand()");
+    assert!(e.contains("no copies to repeat"), "{e}");
+    let e = fault("hide(r).expand()");
+    assert!(e.contains(".counts()"), "{e}");
+    let e = fault("query { hide(z) sort -w }");
+    assert!(e.contains("weights_as"), "{e}");
+    let e = fault("query { t join hide(z) item }");
+    assert!(e.contains("a plain query joins plain tables"), "{e}");
+}

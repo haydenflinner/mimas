@@ -120,6 +120,9 @@ pub struct Parser<'s> {
     /// `join links (node == src)` is the table `links` and a key pairing,
     /// not a call of `links`.
     spaced_paren_ends: bool,
+    /// Inside a `query z` block: a column named `w` is the weight column
+    /// (`shared::weights::WEIGHT_COL`), see [`Self::q_name`].
+    q_zset: bool,
 }
 
 /// How a token sits in the stream (see [`Parser::meta`]).
@@ -280,6 +283,7 @@ impl<'s> Parser<'s> {
             meta,
             hygiene: macros::Hygiene::default(),
             spaced_paren_ends: false,
+            q_zset: false,
         }
     }
 
@@ -3716,6 +3720,24 @@ impl<'s> Parser<'s> {
     }
 
     fn query_body(&mut self, start: usize, zset: bool) -> Expr {
+        let outer = std::mem::replace(&mut self.q_zset, zset);
+        let out = self.query_steps(start, zset);
+        self.q_zset = outer;
+        out
+    }
+
+    /// The column a query names `n`: inside `query z`, `w` is the weight
+    /// column, which no page can name itself. Elsewhere a name is itself.
+    /// r[impl mimas.query.zset.kinds]
+    fn q_name(&self, n: &str) -> String {
+        if self.q_zset && n == shared::weights::USER_W {
+            shared::weights::WEIGHT_COL.to_string()
+        } else {
+            n.to_string()
+        }
+    }
+
+    fn query_steps(&mut self, start: usize, zset: bool) -> Expr {
         if self.peek() == TokKind::Ident("from") {
             self.advance();
         }
@@ -3754,8 +3776,9 @@ impl<'s> Parser<'s> {
                     let mut names: Vec<String> =
                         self.q_names(false).into_iter().map(|(n, _)| n).collect();
                     // a Z-set keeps its weights through a projection
-                    if zset && !names.iter().any(|n| n == "w") {
-                        names.push("w".into());
+                    let w = shared::weights::WEIGHT_COL;
+                    if zset && !names.iter().any(|n| n == w) {
+                        names.push(w.into());
                     }
                     let list = self.q_str_list(names, verb_start);
                     self.q_call("__q_select", vec![table, list], verb_start)
@@ -3858,7 +3881,10 @@ impl<'s> Parser<'s> {
                                 self.expect(TokKind::RightParenthesis);
                                 let mut pairs = vec![];
                                 if Self::q_join_pairs(&cond, &mut pairs) {
-                                    let (l, r): (Vec<String>, Vec<String>) = pairs.into_iter().unzip();
+                                    let (l, r): (Vec<String>, Vec<String>) = pairs
+                                        .into_iter()
+                                        .map(|(a, b)| (self.q_name(&a), self.q_name(&b)))
+                                        .unzip();
                                     keys = l;
                                     right_keys = Some(r);
                                 } else {
@@ -3871,7 +3897,7 @@ impl<'s> Parser<'s> {
                                 }
                             }
                             TokKind::Ident(n) if right_keys.is_none() => {
-                                keys.push(n.to_string());
+                                keys.push(self.q_name(n));
                                 self.advance();
                             }
                             // after `(a == x)` no key can follow, so a verb
@@ -3965,7 +3991,8 @@ impl<'s> Parser<'s> {
     fn z_weigh_agg(&self, e: &Expr) -> Expr {
         let start = e.span().start();
         let w = || {
-            let name = self.new_expr(Literal::String("w".into()), start);
+            let name =
+                self.new_expr(Literal::String(shared::weights::WEIGHT_COL.into()), start);
             self.q_call("__q_col", vec![name], start)
         };
         let text = |s: &str| self.new_expr(Literal::String(s.into()), start);
@@ -4120,11 +4147,11 @@ impl<'s> Parser<'s> {
             }
             match self.peek() {
                 TokKind::Ident(n) => {
-                    out.push((n.to_string(), down));
+                    out.push((self.q_name(n), down));
                     self.advance();
                 }
                 TokKind::String(s) => {
-                    out.push((s.trim_matches('"').to_string(), down));
+                    out.push((self.q_name(s.trim_matches('"')), down));
                     self.advance();
                 }
                 _ => {
@@ -4170,7 +4197,7 @@ impl<'s> Parser<'s> {
                 }
             }
         }
-        (out.into_iter().map(|(n, _)| n).collect(), keep)
+        (out.into_iter().map(|(n, _)| self.q_name(&n)).collect(), keep)
     }
 
     /// Names up to a `{` (the `group` verb's keys).
@@ -4179,11 +4206,11 @@ impl<'s> Parser<'s> {
         while !self.at(TokKind::LeftBrace) && !self.at(TokKind::Eof) && !self.at_line_start() {
             match self.peek() {
                 TokKind::Ident(n) => {
-                    out.push(n.to_string());
+                    out.push(self.q_name(n));
                     self.advance();
                 }
                 TokKind::String(s) => {
-                    out.push(s.trim_matches('"').to_string());
+                    out.push(self.q_name(s.trim_matches('"')));
                     self.advance();
                 }
                 _ => {
@@ -4213,7 +4240,7 @@ impl<'s> Parser<'s> {
             self.advance();
             self.expect(TokKind::Equal);
             let value = self.q_column_expr();
-            let title = self.new_expr(Literal::String(name.to_string()), start);
+            let title = self.new_expr(Literal::String(self.q_name(name)), start);
             out.push(self.q_call("__q_named", vec![value, title], start));
             self.eat(TokKind::Comma);
             if !braced
@@ -4244,7 +4271,7 @@ impl<'s> Parser<'s> {
         let start = e.span().start();
         match e.kind() {
             ExprKind::Ident(id) => {
-                let name = self.new_expr(Literal::String(id.lexeme.clone()), start);
+                let name = self.new_expr(Literal::String(self.q_name(&id.lexeme)), start);
                 self.q_call("__q_col", vec![name], start)
             }
             ExprKind::Grouping(g) => self.new_expr(Grouping::new(self.q_lower(&g.inner)), start),

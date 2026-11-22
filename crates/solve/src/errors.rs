@@ -1357,6 +1357,21 @@ pub struct ZsetWeightNotInt {
     pub ty: String,
 }
 
+/// An operation on two tables whose weight kinds do not meet, such as a
+/// Z-set and a plain table, or a Z-set scaled by a float. The message names
+/// the written conversion (`shared::weights::mix_message`).
+/// r[impl mimas.query.zset.kind-mix]
+#[derive(Error, Debug, Diagnostic)]
+#[error("{msg}")]
+pub struct ZsetKindMix {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("{label}")]
+    pub at: SourceSpan,
+    pub msg: String,
+    pub label: String,
+}
+
 /// `k * z` where `z` is a table and `k` is not an `int` or a `float`. Scaling
 /// multiplies each weight by `k`.
 #[derive(Error, Debug, Diagnostic)]

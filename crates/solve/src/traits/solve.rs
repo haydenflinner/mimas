@@ -365,8 +365,14 @@ fn unary_dispatch(
     ty: &Ty,
     location: Location,
 ) -> Result<Option<Ty>> {
-    if let Ty::Pacts(pids) = ty {
-        return Ok(pact_unary_dispatch(solver, id, name, ty, pids));
+    // a pact-typed value, a bounded type param or a pact's `Self` (`-x` on
+    // `x: T`, a law's `__Law`): the pact's `neg` owns the operator, as for
+    // binary ops
+    // r[impl mimas.pact.unary]
+    if !is_primitive(ty)
+        && let Some(pids) = solver.pacts_of(ty)
+    {
+        return Ok(pact_unary_dispatch(solver, id, name, ty, &pids));
     }
     // a primitive's operators are built in -- `impl Opp for bool` gives `bool`
     // an `inv`, but `!b` stays the bool op (and `!self` inside that `inv`
@@ -2144,6 +2150,15 @@ impl Solve for Equality {
         {
             return Ok(ty);
         }
+        // `a == b` on two frames whose weight kinds do not meet (a Z-set and a
+        // plain table) names the conversion (r[impl mimas.query.zset.kind-mix])
+        let is_frame = |t: &Ty| matches!(t, Ty::Adt(a, _) if solver.adts[*a].name == "DataFrame");
+        if matches!(self.op, EqualityOp::Equal | EqualityOp::NotEqual)
+            && is_frame(&lhs_n)
+            && is_frame(&rhs_n)
+        {
+            solver.check_kind_mix("==", &self.left, &self.right, location)?;
+        }
         // a `dec` compares with a `dec`, an `int` or a `float` by value (r[impl mimas.dec])
         if dec_overload_ty(&lhs_n, &rhs_n, solver).is_some() {
             return Ok(Ty::Bool);
@@ -3227,8 +3242,33 @@ impl Solve for Impl {
 }
 
 impl Solve for In {
-    fn solve(&self, _id: NodeId, location: Location, solver: &mut Solver) -> Result<Ty> {
+    fn solve(&self, id: NodeId, location: Location, solver: &mut Solver) -> Result<Ty> {
         let rhs = self.right.query(solver)?;
+        let rhs = match rhs.clone().normalized(solver) {
+            n @ Ty::Adt(..) => n,
+            _ => rhs,
+        };
+        // `x ∈ t` on a table or a type with a `contains(x)` method: a call of
+        // that method, so a Z-set, a weighted table and a struct (a light
+        // Z-set) each say what membership means
+        // r[impl mimas.query.zset.member]
+        if let Ty::Adt(..) = rhs {
+            let lhs = self.left.query(solver)?.normalized(solver);
+            if let Some(t) = op_dispatch(
+                solver,
+                id,
+                ("__in_left", "contains"),
+                &self.left,
+                &self.right,
+                &lhs,
+                &rhs,
+                location,
+            )? {
+                if t.normalized(solver) == Ty::Bool {
+                    return Ok(Ty::Bool);
+                }
+            }
+        }
         match rhs {
             Ty::Array(ref inner, _) => {
                 self.left.fulfill_ty(*inner.clone(), solver)?;
