@@ -1216,3 +1216,15 @@ test_recover!(
     errors: ["`&&` is an infix operator and cannot start a line; keep it on the line above or wrap the expression in parens"],
     stmts: ["let a = true;", "let x = 1;"],
 );
+
+// a leading `+`/`-` after an expression gets the infix diagnostic too --
+// it used to pass `starts_stmt` as a unary and silently drop the line above
+// r[verify mimas.line.plusminus]
+test_recover!(
+    plus_minus_operator_starts_line,
+    "let a = 1
+     + 2
+     let x = 1;",
+    errors: ["`+` is an infix operator and cannot start a line; keep it on the line above or wrap the expression in parens"],
+    stmts: ["let a = 1;", "let x = 1;"],
+);

@@ -106,6 +106,17 @@ test_vm!(
 );
 
 test_vm!(
+    // A closure parameter may be a pattern: `|(i, r)| …` desugars to a
+    // synthetic `__p1` plus `let (i, r) = __p1` (r[verify
+    // mimas.closure.pattern-param]) — the tuple binds its leaves.
+    closure_tuple_pattern_param,
+    "let split = |(i, r)| i + r;
+     let pairs = [(0, 10), (1, 20), (2, 30)];",
+    "split((1, 2))" => Int(3),
+    "for p in pairs collect split(p)" => array!(Int(10), Int(21), Int(32)),
+);
+
+test_vm!(
     closure_returned_from_fn,
     "fn make_adder(n: int) -> (int) -> int { |x: int| -> int { x + n } }
      let add5 = make_adder(5);",

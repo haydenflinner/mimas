@@ -289,7 +289,9 @@ impl<'s> Parser<'s> {
         let mut statements = if prelude { prelude_stmts() } else { vec![] };
         let prelude_len = statements.len();
         while !self.at(TokKind::Eof) {
-            if self.peek().starts_stmt() {
+            if let Some(err) = self.line_start_plusminus() {
+                self.reject_stmt(err);
+            } else if self.peek().starts_stmt() {
                 statements.push(self.stmt());
                 statements.append(&mut self.pending);
             } else {
@@ -2540,9 +2542,59 @@ impl<'s> Parser<'s> {
             );
         }
         self.bump(TokKind::Pipe);
-        let parameters = self.list(TokKind::Pipe, TokKind::is_ident, Self::binding);
+        // A parameter may be a pattern, as `let (i, r) = p` and
+        // `for (i, r) in` already allow. `|(i, r)| body` desugars to a
+        // synthetic `__pN` parameter plus a `let (i, r) = __pN` prologue,
+        // so lowering only ever sees ident parameters. The param parses
+        // one pattern atom: a top-level `|` is the closing delimiter, so
+        // an or-pattern param needs its own parens (`|(A | B)|`).
+        // r[impl mimas.closure.pattern-param]
+        let params = self.list(
+            TokKind::Pipe,
+            |k| matches!(k, TokKind::Ident(_) | TokKind::LeftParenthesis),
+            |p| {
+                let pat = p.match_pat_atom();
+                let annotation = p.eat(TokKind::Colon).then(|| p.annotation());
+                (pat, annotation)
+            },
+        );
         let return_type = self.eat(TokKind::Arrow).then(|| self.annotation());
-        let body = self.expr();
+        let mut body = self.expr();
+        let mut parameters = vec![];
+        let mut prologue = vec![];
+        for (i, (pat, annotation)) in params.into_iter().enumerate() {
+            if pat.as_ident().is_some() {
+                parameters.push(Binding { left: pat, right: None, annotation });
+                continue;
+            }
+            let tmp = self.ident_at(format!("__p{}", i + 1), start);
+            parameters.push(Binding {
+                left: Pat::new(PatKind::Ident(tmp.clone()), pat.location()),
+                right: None,
+                annotation,
+            });
+            let loc = pat.location();
+            prologue.push(Stmt::new(
+                Let {
+                    left: pat,
+                    annotation: None,
+                    right: self.new_expr(tmp, start),
+                    else_branch: None,
+                }
+                .into(),
+                NodeId::new(),
+                loc,
+            ));
+        }
+        if !prologue.is_empty() {
+            body = self.new_expr(
+                Block {
+                    body: prologue,
+                    yielded_expr: Some(body),
+                },
+                start,
+            );
+        }
         self.new_expr(
             Closure {
                 parameters,
@@ -3957,6 +4009,25 @@ impl<'s> Parser<'s> {
             }
             return lit;
         }
+        // A keyword expression is an operand too: `a + if c { 1 } else { 0 }`
+        // reads the `if` as the right side, like `let x = if …` already does.
+        // What follows keeps the caller's power — `a * if…+ b` stays
+        // `a * (if…) + b` because the construct's own parse ends at its `}`.
+        // r[impl mimas.expr.operand-kw]
+        match self.peek() {
+            TokKind::Pipe | TokKind::DoublePipe => return self.closure(),
+            TokKind::Loop => return self.loop_expr(),
+            TokKind::While => return self.while_expr(),
+            TokKind::For => return self.for_in(),
+            TokKind::If => return self.if_expr(),
+            TokKind::Match => return self.match_expr(),
+            TokKind::Return => return self.return_expr(),
+            TokKind::Raise => return self.raise_expr(),
+            TokKind::Break => return self.break_stmt(),
+            TokKind::Collect => return self.collect(),
+            TokKind::Continue => return self.continue_expr(),
+            _ => {}
+        }
         self.parentheticals()
     }
 
@@ -4809,6 +4880,10 @@ impl<'s> Parser<'s> {
                     p.expect(TokKind::RightBrace);
                     break None;
                 }
+                if let Some(err) = p.line_start_plusminus() {
+                    p.reject_stmt(err);
+                    continue;
+                }
                 if !p.peek().starts_stmt() {
                     p.reject_stmt(p.stray_stmt_token());
                     continue;
@@ -5423,6 +5498,39 @@ impl<'s> Parser<'s> {
             .into();
         }
         self.unexpected_token().into()
+    }
+
+    /// The error for a `+`/`-` opening a line at statement depth right
+    /// after a token that can close an expression. `a\n+b` is the
+    /// continuation the writer meant, but `infix_binds` refuses an infix
+    /// at a line start, so the `+` used to parse as unary and the line
+    /// above was silently dropped (`a\n+b\n+c` yielded `c`). The
+    /// ambiguous read is refused with the same diagnostic the other
+    /// leading infixes get; a `+`/`-` after `;`, `{` or a keyword stays
+    /// a unary statement, and `||` keeps its line-start continuation.
+    // r[impl mimas.line.plusminus]
+    fn line_start_plusminus(&self) -> Option<shared::Error> {
+        if self.group_depth != 0
+            || !self.at_line_start()
+            || !matches!(self.peek(), TokKind::Plus | TokKind::Minus)
+            || self.next == 0
+            || !self.tokens[self.next - 1].kind().ends_expr()
+        {
+            return None;
+        }
+        let kind = self.peek();
+        Some(
+            Misdirection {
+                src: self.src(),
+                at: self.next_location().into(),
+                msg: format!(
+                    "`{kind}` is an infix operator and cannot start a line; \
+                     keep it on the line above or wrap the expression in parens"
+                ),
+                label: "the expression above ended at the newline".into(),
+            }
+            .into(),
+        )
     }
 
     /// Records an error about the next token, or the end of input if that's where we are.

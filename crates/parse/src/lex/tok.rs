@@ -531,6 +531,25 @@ impl TokKind<'_> {
         ) || self.is_stmt_keyword()
     }
 
+    /// Whether this can close an expression — a literal, a name, `self`,
+    /// a closing bracket, a postfix `!`/`?`. Used to tell a line-start
+    /// `+`/`-` that continues `a` from one that starts a fresh unary
+    /// statement after `{` or `;`.
+    pub(crate) fn ends_expr(self) -> bool {
+        Literal::try_from(self).is_ok()
+            || matches!(
+                self,
+                TokKind::Ident(_)
+                    | TokKind::SelfKeyword
+                    | TokKind::RightParenthesis
+                    | TokKind::RightSquare
+                    | TokKind::Bang
+                    | TokKind::Hook
+                    | TokKind::FString(_)
+                    | TokKind::Tagged(..)
+            )
+    }
+
     /// Whether this can appear in a `unit` decl's spec — `= 3mi`, `= 1852 m/h`,
     /// `= 12`, `= 1 m/s^2`. Used to bound the same-line token collection;
     /// `unit_spec` decides whether the collected tokens are a valid quantity.

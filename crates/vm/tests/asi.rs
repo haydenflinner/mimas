@@ -92,27 +92,37 @@ test_vm!(
 );
 
 test_vm!(
+    // The `;` is what keeps `-b` a fresh unary: without it the line-start
+    // `-` after `a` is the ambiguous continuation and is refused.
     semicolon_consequences,
     "let a = 1
      let b = 2
      let c: int? = null
      let block = {
-        c = a
+        c = a;
         -b
      }",
      "c" => Int(1),
      "block" => Int(-2),
 );
 
-test_vm!(
-    // Leading infix on the next line does not continue -- that's Go's rule, and what makes
-    // `semicolon_consequences` parse as assignment-then-unary rather than `c = a - b`.
+test_fail!(
+    // A leading `+`/`-` on the next line used to split `a\n+b` into two
+    // statements and silently drop `a` (`total` was 1). That read is now
+    // refused with the same diagnostic the other leading infixes get --
+    // r[verify mimas.line.plusminus]. Inside `()` the continuation still
+    // binds, as `infix_continues_inside_parentheses` proves.
     infix_does_not_continue_after_newline,
     "let first = 1
      let second = 2
      let total = first
         + second",
-    "total" => Int(1),
+    "let a = 1
+     let b = 2
+     let c = 3
+     let total = a
+        + b
+        + c",
 );
 
 test_vm!(

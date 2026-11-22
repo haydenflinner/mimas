@@ -580,9 +580,11 @@ expr_test!(
 );
 
 expr_test!(
+    // `;` keeps `-b` a fresh unary tail — a bare `a\n-b` is refused
+    // (r[verify mimas.line.plusminus]).
     semicolon_consequences_block,
     "{
-        c = a
+        c = a;
         -b
     }",
     Block::new_with_yield(

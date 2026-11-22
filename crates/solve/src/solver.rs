@@ -3254,6 +3254,26 @@ impl Solver {
                     .zip(tys.iter())
                     .try_for_each(|(pat, ty)| self.solve_pat(pat, ty.clone())),
             },
+            // Destructuring a still-unresolved type: the pattern pins the
+            // vid's shape — `let (i, r) = x` makes `x` a pair, and `x`'s
+            // own inference unifies with it when it lands. A desugared
+            // closure pattern param (`|(i, r)| …` → `let (i, r) = __p1`)
+            // hits exactly this.
+            (PatKind::Tuple(idents), Ty::Vid(vid)) => {
+                let members = idents.iter().map(|_| Ty::Vid(self.vid())).collect();
+                let mut tuple = Ty::Tuple(members);
+                let mut vid_ty = Ty::Vid(vid);
+                vid_ty
+                    .fulfill_ty(&mut tuple, self)
+                    .map_err(|e| e.into_type_mismatch(self, pat.location()))?;
+                let Ty::Tuple(tys) = tuple else {
+                    unreachable!("just unified with a tuple")
+                };
+                idents
+                    .iter()
+                    .zip(tys.iter())
+                    .try_for_each(|(pat, ty)| self.solve_pat(pat, ty.clone()))
+            }
             (a, b) => Err(InvalidPattern {
                 src: self.src(pat.location()),
                 at: pat.location().into(),

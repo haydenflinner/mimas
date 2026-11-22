@@ -501,3 +501,14 @@ test_vm!(
     "use \"some-page\";\nfn f() -> int { 3 }",
     "f()" => Int(3)
 );
+
+// `if` is an operand too: `a + if c { 1 } else { 0 }` reads the `if` as the
+// right side of the `+`, like `let x = if …` already did -- the old parse
+// refused it with "expected expression" (r[verify mimas.expr.operand-kw]).
+test_vm!(
+    if_as_infix_operand,
+    "let a = 1
+     let c = true
+     let total = a + if c { 1 } else { 0 }",
+    "total" => Int(2),
+);
