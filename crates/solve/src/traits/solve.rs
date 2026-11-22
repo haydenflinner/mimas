@@ -2287,6 +2287,18 @@ impl Solve for Evaluation {
                     Ok(rhs.clone())
                 }
 
+                // an option operand: the operator wants the value inside.
+                // Name the unwrap (and the `x?` arm binding) rather than
+                // "cannot use `+` with `int?` and `int`".
+                // r[impl mimas.option.operand]
+                (opt @ Ty::Option(_), _) | (_, opt @ Ty::Option(_)) => Err(OptionOperand {
+                    src: solver.src(location),
+                    at: location.into(),
+                    ty: opt.to_string(),
+                    op: op.to_string(),
+                }
+                .into()),
+
                 (lhs, rhs) => Err(InvalidEvaluation {
                     src: solver.src(location),
                     at: location.into(),

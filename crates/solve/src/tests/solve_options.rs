@@ -256,6 +256,31 @@ fn option_used_as_settled_names_the_unwrap() {
     assert!(rendered.contains("unwrap it with `!` or `?`"), "{rendered}");
 }
 
+// an operator on a `T?` (a bare arm binding after `null`) names the unwrap
+// and the `x?` arm, not "cannot use `+` with types `int?` and `int`"
+// r[verify mimas.option.operand]
+#[test]
+fn option_operand_names_the_unwrap_and_the_arm() {
+    let _t = TestResetter;
+    let e = TEST_SESSION
+        .with(|s| {
+            s.borrow_mut().run(
+                "fn bump(o: int?) -> int {\n    match o {\n        null => 0,\n        i => i + 1,\n    }\n}",
+                "test",
+            )
+        })
+        .unwrap_err();
+    let rendered = format!("{e:?}");
+    assert!(rendered.contains("this is an option (int?)"), "{rendered}");
+    assert!(rendered.contains("`x? =>`"), "{rendered}");
+}
+
+// control: the `i?` arm binds the value inside, so the same body checks.
+test_success!(
+    option_operand_after_some_arm_ok,
+    "fn bump(o: int?) -> int {\n    match o {\n        null => 0,\n        i? => i + 1,\n    }\n}"
+);
+
 // controls: `?` access still unwraps, and option-to-option binds fine.
 test_success!(
     option_member_after_unwrap_ok,

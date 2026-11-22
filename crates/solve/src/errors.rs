@@ -93,6 +93,21 @@ pub struct OptionMismatch {
     pub found: String,
 }
 
+/// An operator on a `T?` operand: the operator needs the value inside.
+/// A bare binding after a `null` arm (`null => 0, i => i + 1`) is the
+/// usual way in: `i` still holds the whole option; `i?` binds the value.
+#[derive(Error, Debug, Diagnostic)]
+#[error("this is an option ({ty}): unwrap it with `!` or `?`")]
+#[diagnostic(help("in a `match`, bind the value inside with `x? =>`; a bare `x =>` binds the whole option, even after a `null` arm"))]
+pub struct OptionOperand {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("`{op}` needs the value inside `{ty}`")]
+    pub at: SourceSpan,
+    pub ty: String,
+    pub op: String,
+}
+
 /// `null` where a settled non-optional type was required: the `?` in
 /// the declaration is what's missing, not a different value.
 #[derive(Error, Debug, Diagnostic)]
