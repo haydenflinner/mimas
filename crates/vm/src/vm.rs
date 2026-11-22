@@ -671,6 +671,7 @@ impl Vm {
                 // No frame host to hand control to — a pause native (a
                 // `use game` program run to completion) is a no-op here.
                 state.paused.set(false);
+                state.retry_call.set(false);
                 Ok::<bool, Error>(done)
             })?;
             if done {
@@ -694,6 +695,7 @@ impl Vm {
     pub fn run_frame(&mut self) -> Result<bool, Error> {
         shared::units::install(&self.units);
         self.mem_boundary();
+        self.arena.mutate(|_, state| state.retry_call.set(false));
         self.arena.mutate(|_, state| state.paused.set(false));
         loop {
             let Vm {
@@ -1588,6 +1590,21 @@ fn run_dispatch_inner<'gc>(
             // mid-turn — the window pointer may dangle, so refresh it unconditionally
             // before the next dispatch, whichever lane it lands in
             Ok(Flow::Next) => {
+                // r[impl app.console.ws]
+                // A native may ask to be called again after a pause (`ws` ops
+                // fetch a receipt the host can only answer between frames):
+                // rewind to this op so the resumed dispatch re-executes the
+                // whole call — args read fresh from untouched registers — and
+                // the second pass writes `dst` for real. Same rewind the
+                // generator `resume` retry does below.
+                if ctx.state().retry_call.replace(false) {
+                    code.ip = op_ip;
+                    if let Some(top) = thread.frames.last_mut() {
+                        top.ip = op_ip;
+                    }
+                    ctx.state().paused.set(true);
+                    return Ok(false);
+                }
                 (regs_ptr, regs_len) = window(thread, chunks);
             }
             Ok(Flow::Call { target, dst, args }) => {

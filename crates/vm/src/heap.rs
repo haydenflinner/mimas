@@ -171,6 +171,13 @@ pub struct State<'gc> {
     /// run -- a native writing thread state mid-op would double-borrow and panic. The
     /// dispatch loop reads it per op like a second fuel line.
     pub paused: Cell<bool>,
+    /// Pause-and-retry, set by a native that needs the host to run an errand before the
+    /// call can answer (a `ws` op whose receipt arrives next frame): the dispatch loop
+    /// rewinds to the call op and exits paused, so the resumed native runs again and
+    /// returns the real value. Read alongside `paused` the way the generator `resume`
+    /// retry is, not instead of it.
+    #[collect(require_static)]
+    pub retry_call: Cell<bool>,
     #[collect(require_static)]
     pub unwinding_cleanup: Cell<bool>,
     /// The memory budget and the nested-call count — see [`crate::mem`].
@@ -212,6 +219,7 @@ impl<'gc> State<'gc> {
             variant_ordinals,
             roots: Gc::new(mc, Lock::new(DynamicRootSet::new(mc))),
             paused: Cell::new(false),
+            retry_call: Cell::new(false),
             unwinding_cleanup: Cell::new(false),
             mem: crate::mem::MemBudget::default(),
         }
