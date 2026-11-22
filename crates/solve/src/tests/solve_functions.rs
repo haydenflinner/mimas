@@ -519,3 +519,20 @@ test_ty!(
     "add" => func!((Int, Int) -> Int)
 );
 test_fail!(tests_list_requires_bool, "#[tests] [ 1 ]");
+
+// a second `fn g` in one scope is an error, not a silent replace
+// r[verify mimas.fn.no-shadow]
+#[test]
+fn duplicate_fn_names_the_first_definition() {
+    use super::solve_test_utils::*;
+    let _t = TestResetter;
+    let err = TEST_SESSION
+        .with(|s| {
+            s.borrow_mut().run(
+                "fn g() -> int { 1 }\nfn g() -> int { 2 }\ncheck g() == 2",
+                "test",
+            )
+        })
+        .expect_err("a second `fn g` should be an error");
+    assert_eq!(err.to_string(), "`fn g` is already defined at line 1");
+}

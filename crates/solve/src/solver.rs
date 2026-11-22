@@ -5,6 +5,7 @@ use crate::{
         AssignToConst, AssignToLoopVar, AssignToStringIndex, BareNullBinding, BoundNotSatisfied,
         CheckIsNotCallable, ExtraTupleMembers, FieldNotFound, InvalidAssignTarget, InvalidPattern,
         InvalidUseTarget, IteratingHere, MissingTupleMembers, MultipleConstDeclarations,
+        MultipleFnDeclarations,
         MutateWhileIterating, NonConstantValue, NotAPact, NotFound, PactRequires, SelfOutOfContext,
         ViaRequiresImpl, ViaSignatureMismatch,
     },
@@ -319,6 +320,12 @@ pub struct Solver {
     pub(crate) in_prelude: bool,
     pub(crate) prelude_types: FxHashSet<String>,
 
+    /// Decs minted before the current `solve_all`. A `fn` redeclare only
+    /// errors when the dec it would replace was hoisted in this same solve:
+    /// a session that re-solves into one solver keeps the old silent replace,
+    /// and so does a user `fn` shadowing an import or prelude name.
+    pub(crate) declare_floor: usize,
+
     pub(crate) control_flow: ControlFlow,
     pub(crate) ribs: Ribs,
     pub(crate) loop_stack: Vec<LoopRun>,
@@ -483,6 +490,7 @@ impl Solver {
             resolved_uses: FxHashMap::default(),
             in_prelude: false,
             prelude_types: FxHashSet::default(),
+            declare_floor: 0,
             non_value: None,
             iter_guards: vec![],
             guarded_calls: vec![],
@@ -764,6 +772,9 @@ impl Solver {
             self.root_modules
                 .insert(segments[0].clone(), self.library[&segments[0]]);
         }
+
+        // a `fn` redeclare errors only against decs this solve mints -- see `declare_floor`
+        self.declare_floor = self.decs.len();
 
         // each ast's module rib accumulates across phases -- saved between visits
         let mut saved_ribs: Vec<Option<Rib>> = vec![None; asts.len()];
@@ -5335,14 +5346,47 @@ impl Solver {
         #[cfg(feature = "logging")]
         println!("{}", crate::utils::Printer::declare(ident, &ty));
 
-        if constant && let Some(prev_id) = self.ribs.module_lookup(ident) {
+        if let Some(prev_id) = self.ribs.module_lookup(ident) {
             let prev = &self.decs[prev_id];
-            if prev.kind.is_constant() {
-                let prev_location = prev.location;
+            let prev_location = prev.location;
+            if constant && prev.kind.is_constant() {
                 Err(MultipleConstDeclarations {
                     src: self.src(ident.location),
                     name: ident.lexeme.clone(),
                     at: ident.location.into(),
+                    original: vec![crate::errors::ConstDefinedHere {
+                        src: self.src(prev_location),
+                        at: prev_location.into(),
+                        name: ident.lexeme.clone(),
+                    }],
+                })?;
+            }
+            // a second `fn` in one scope reads like an overload but is a
+            // silent replace -- name it. a user `fn map` still shadows the
+            // shipped `map`: the replaced dec carries the prelude's file id,
+            // or was minted by an earlier `solve` into this same solver, so
+            // only a same-solve user-vs-user redeclare trips. (papercuts:
+            // "fn g is already defined at line N")
+            if !constant
+                && matches!(prev.kind, DecKind::Item { .. })
+                && !self.in_prelude
+                && prev.location.file_id() != shared::PRELUDE_FILE
+                && prev_id.index() >= self.declare_floor
+            {
+                let line = {
+                    let src = self.src(prev_location);
+                    let start: usize = prev_location.span().start();
+                    src.inner().as_bytes()[..start.min(src.inner().len())]
+                        .iter()
+                        .filter(|b| **b == b'\n')
+                        .count()
+                        + 1
+                };
+                Err(MultipleFnDeclarations {
+                    src: self.src(ident.location),
+                    name: ident.lexeme.clone(),
+                    at: ident.location.into(),
+                    line,
                     original: vec![crate::errors::ConstDefinedHere {
                         src: self.src(prev_location),
                         at: prev_location.into(),

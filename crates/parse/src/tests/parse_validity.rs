@@ -686,6 +686,29 @@ test_ok!(
 test_fail!(misdirect_as, "let y = x as float;");
 test_fail!(misdirect_if_assign, "if x = 5 {}");
 
+// a pattern renames a field with `=`, never the literal's `:`
+// r[verify mimas.struct.pattern-eq]
+test_fail!(
+    struct_pattern_colon_is_misdirect,
+    "let P { x: a } = q;",
+    "match q { P { x: a, y } => a }",
+    "match q { Tree::Br { v: _, l, r } => l }"
+);
+
+#[test]
+fn struct_pattern_colon_teaches_eq() {
+    let (_, errors) = crate::tests::utils::parse("let P { x: a } = q;");
+    let rendered = format!("{:?}", errors[0]);
+    assert!(
+        rendered.contains("a pattern renames a field with `=`"),
+        "the `:` hint should teach the `=` spelling: {rendered}"
+    );
+    assert!(
+        rendered.contains("P { x = a }"),
+        "the label should show the corrected pattern: {rendered}"
+    );
+}
+
 // generics: decls take params, annotations take applications, impls take neither
 test_ok!(
     generic_declarations_parse,

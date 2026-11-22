@@ -5501,12 +5501,42 @@ impl<'s> Parser<'s> {
                         // matches any field it doesn't mention, so it binds
                         // nothing; it just reads as the omission it is
                         let starts = |k: TokKind<'s>| k.is_ident() || k == TokKind::DoubleDot;
+                        let head_span = head_expr.span();
                         let fields = self.list(TokKind::RightBrace, starts, |p| {
                             if p.eat(TokKind::DoubleDot) {
                                 return None;
                             }
                             let name = p.require_ident();
                             let sub = if p.eat(TokKind::Equal) {
+                                p.pattern()
+                            } else if p.at(TokKind::Colon) {
+                                // r[impl mimas.struct.pattern-eq]
+                                // `P { x: a }` is the literal's spelling; a
+                                // pattern renames a field with `=`. Teach the
+                                // spelling, then parse the pattern anyway so
+                                // the rest of the file still checks.
+                                let colon = p.next_location();
+                                p.advance();
+                                let binding = match p.peek() {
+                                    TokKind::Ident(b) => b.to_string(),
+                                    _ => "…".into(),
+                                };
+                                let head = {
+                                    let src = p.src();
+                                    src.inner()
+                                        .get(head_span.start()..head_span.end())
+                                        .unwrap_or("_")
+                                        .to_string()
+                                };
+                                p.error(Misdirection {
+                                    src: p.src(),
+                                    at: colon.into(),
+                                    msg: "a pattern renames a field with `=`".into(),
+                                    label: format!(
+                                        "write `{head} {{ {name} = {binding} }}`",
+                                        name = name.lexeme
+                                    ),
+                                });
                                 p.pattern()
                             } else {
                                 // r[impl mimas.struct.shorthand]
