@@ -651,6 +651,20 @@ pub struct MultipleConstDeclarations {
 }
 
 #[derive(Error, Debug, Diagnostic)]
+#[error("`fn {name}` is already defined at line {line}")]
+pub struct MultipleFnDeclarations {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("this `fn` replaces the earlier one — rename one of them, or write a `pact`/`multi fn` to choose by type")]
+    pub at: SourceSpan,
+    pub name: String,
+    pub line: usize,
+    // the original may live in another file, so it gets its own sub-diagnostic
+    #[related]
+    pub original: Vec<ConstDefinedHere>,
+}
+
+#[derive(Error, Debug, Diagnostic)]
 #[error("type declared multiple times")]
 pub struct MultipleTypeDeclarations {
     #[source_code]
