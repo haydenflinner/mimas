@@ -4192,6 +4192,13 @@ impl<'s> Parser<'s> {
             TokKind::Continue => return self.continue_expr(),
             _ => {}
         }
+        // `@owner/page` — a page path value, `@` glued to its owner and
+        // each `/` glued both sides (`x @ a / b` with the slash spaced
+        // stays direction-suffix plus a divide).
+        // r[impl mimas.path-literal]
+        if self.at_path_literal() {
+            return self.path_literal();
+        }
         self.parentheticals()
     }
 
@@ -4265,14 +4272,18 @@ impl<'s> Parser<'s> {
                 {
                     self.direction_suffix(expr)
                 }
-                TokKind::At if !fresh_line => self.at_suffix(expr),
+                // `x @up` is the direction word; `x @a/b` — a *spaced*
+                // `@`, the path form hugs only itself — is x applied to
+                // a path literal. `x@a/b` (glued) stays direction+divide.
+                TokKind::At if !fresh_line && !self.spaced_path_ahead() => self.at_suffix(expr),
                 // `x y` — juxtaposition applies: `f x` is `f(x)`, the same
                 // call `f (x)` already was. Same-line only (the `(`/`[`/`!`
                 // rule), atoms only (`f - x` stays subtraction), and never
                 // inside a whitespace-separated region like `table {}`.
                 tok if !fresh_line
                     && self.juxta == Juxta::Apply
-                    && tok.starts_juxta_arg()
+                    && (tok.starts_juxta_arg()
+                        || (tok == TokKind::At && self.spaced_path_ahead()))
                     // `1 b => 2`: an atom right before `=>` is the next
                     // match arm's pattern (a missing `,`), not an argument
                     && self.nth(1) != TokKind::FatArrow
@@ -4368,6 +4379,50 @@ impl<'s> Parser<'s> {
             label: "an `axis` decl names its two directions: `axis y (down, up)`".into(),
         });
         operand
+    }
+
+    /// `@owner/page` ahead, with space before the `@` — the operand's
+    /// argument, not its suffix. `x@a/b` (the `@` hugging `x`) is the
+    /// direction spelling and stays direction+divide.
+    // r[impl mimas.path-literal]
+    fn spaced_path_ahead(&self) -> bool {
+        !self.glued() && self.at_path_literal()
+    }
+
+    /// `@owner/page` ahead? The whole form hugs: `@` touches its
+    /// owner and each `/` touches both sides. `x @ a / b` — a slash
+    /// with space before it — stays direction-suffix plus a divide.
+    // r[impl mimas.path-literal]
+    fn at_path_literal(&self) -> bool {
+        self.peek() == TokKind::At
+            && matches!(self.nth(1), TokKind::Ident(_))
+            && self.meta_at(1).glued
+            && self.nth(2) == TokKind::Slash
+            && self.meta_at(2).glued
+            && matches!(self.nth(3), TokKind::Ident(_))
+            && self.meta_at(3).glued
+    }
+
+    /// `@owner/page` — a page path: a str of its own text, so a page
+    /// name an op takes (`goto "@owner/page"`) writes without quotes.
+    /// More `/name` segments keep hugging (`@a/b/c`); a bare `@owner`
+    /// is not a path and stays the "expected expression" it was.
+    // r[impl mimas.path-literal]
+    fn path_literal(&mut self) -> Expr {
+        let start = self.next_start();
+        self.advance(); // `@`
+        let owner = self.require_ident();
+        let mut path = format!("@{}", owner.lexeme);
+        while self.peek() == TokKind::Slash
+            && self.glued()
+            && matches!(self.nth(1), TokKind::Ident(_))
+            && self.meta_at(1).glued
+        {
+            self.advance(); // `/`
+            path.push('/');
+            path.push_str(&self.require_ident().lexeme);
+        }
+        self.new_expr(Literal::String(path), start)
     }
 
     /// Postfix chaining for block expressions. `(` and `[` directly after a block are ambiguous

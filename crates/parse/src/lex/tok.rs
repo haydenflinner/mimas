@@ -388,6 +388,7 @@ impl TokKind<'_> {
                 self,
                 TokKind::Ident(_)
                     | TokKind::Ampersand
+                    | TokKind::At
                     | TokKind::NotWord
                     | TokKind::Sum
                     | TokKind::Prod

@@ -2294,3 +2294,61 @@ expr_test!(
     "a ⋅ b",
     Evaluation::new(ident_expr!("a"), EvaluationOp::Dot, ident_expr!("b"))
 );
+
+// `@owner/page` is a str value of its own text — page ops that take
+// `"@owner/name"` spell it without quotes. r[verify mimas.path-literal]
+expr_test!(
+    page_path_literal,
+    "@devon/market",
+    Literal::String("@devon/market".to_string())
+);
+
+expr_test!(
+    page_path_literal_longer,
+    "@devon/market/old",
+    Literal::String("@devon/market/old".to_string())
+);
+
+// `open @devon/market` — juxtaposition applies `open` to the path.
+// r[verify mimas.path-literal]
+expr_test!(
+    page_path_is_a_juxta_arg,
+    "open @devon/market",
+    Call::new(
+        ident_expr!("open"),
+        vec![Argument::new(
+            Literal::String("@devon/market".to_string()).into_expr()
+        )]
+    )
+);
+
+// A glued `@` stays the direction spelling: `x@y/2` is `(x@y)/2` —
+// the axis tag then a divide — never `x` applied to `@y/2`.
+// r[verify mimas.path-literal]
+expr_test!(
+    glued_at_stays_a_direction_then_divide,
+    "x@y/2",
+    Evaluation::new(
+        Unary::new(UnaryOp::Positive, ident_expr!("x")).into_expr(),
+        EvaluationOp::Divide,
+        int!(2)
+    )
+);
+
+// `x @ a / b` — space before the slash keeps direction+divide too.
+expr_test!(
+    spaced_slash_stays_a_divide,
+    "x @y / 2",
+    Evaluation::new(
+        Unary::new(UnaryOp::Positive, ident_expr!("x")).into_expr(),
+        EvaluationOp::Divide,
+        int!(2)
+    )
+);
+
+// `@owner` alone is no path — the literal wants owner *and* page.
+#[test]
+fn owner_alone_is_not_a_path() {
+    let (_, errors) = crate::tests::utils::parse("let p = @devon;");
+    assert!(!errors.is_empty(), "@devon alone should not parse as a value");
+}
