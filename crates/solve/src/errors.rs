@@ -54,6 +54,19 @@ pub struct TypeMismatch {
     pub found: String,
 }
 
+/// a `()`-expected block whose last line yields a value: the fix is a
+/// `;` on that line, so the span lands there, not on the whole block.
+#[derive(Error, Debug, Diagnostic)]
+#[error("the block ends in a value, not `()`")]
+#[diagnostic(help("end it with `;` to drop the value"))]
+pub struct ExpectedUnitValue {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("this line yields {ty}")]
+    pub at: SourceSpan,
+    pub ty: String,
+}
+
 /// `.member` on a `T?` — the member belongs to the value inside, which
 /// the writer has to unwrap first.
 #[derive(Error, Debug, Diagnostic)]

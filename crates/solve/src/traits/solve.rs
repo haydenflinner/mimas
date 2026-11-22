@@ -2679,6 +2679,13 @@ impl Solve for Function {
         let flow = solver.control_flow.exit();
 
         if body_ty != Ty::Unit {
+            // a `-> ()` body whose tail yields a settled value is a
+            // missing `;`, not a type mismatch on the whole block
+            let norm = body_ty.normalized(solver);
+            let settled = !matches!(norm, Ty::Vid(_) | Ty::Never);
+            if settled && expected_ty.clone().normalized(solver) == Ty::Unit {
+                return Err(solver.unit_block_error(&self.body, norm));
+            }
             self.body.fulfill_ty(expected_ty.clone(), solver)?;
         } else {
             let expected = expected_ty.clone().normalized(solver);

@@ -1179,3 +1179,40 @@ test_recover!(
     errors: ["`{str: V}` isn't a type -- a dict type is `{V}` (keys are always `str`)"],
     stmts: ["fn f(d: <poison>) -> int {0 }", "let x = 1;"],
 );
+
+// `fn(..) -> T`, `Fn(..)`, `impl Fn` in a type slot name the bare spelling
+// r[verify mimas.fn.type-spelling]
+test_recover!(
+    rust_fn_type_habit,
+    "fn apply(f: fn(int) -> bool, x: int) -> bool { f(x) }
+     let x = 1;",
+    errors: ["a function type is written `(int) -> bool`"],
+    stmts: ["fn apply(f: <poison>, x: int) -> bool {f(x) }", "let x = 1;"],
+);
+
+test_recover!(
+    rust_fn_trait_habit,
+    "fn apply(f: Fn(int) -> bool, x: int) -> bool { f(x) }
+     let x = 1;",
+    errors: ["a function type is written `(int) -> bool`"],
+    stmts: ["fn apply(f: <poison>, x: int) -> bool {f(x) }", "let x = 1;"],
+);
+
+test_recover!(
+    rust_impl_fn_habit,
+    "fn apply(f: impl Fn, x: int) -> bool { f(x) }
+     let x = 1;",
+    errors: ["a function type is written `(int) -> bool`"],
+    stmts: ["fn apply(f: <poison>, Fn, x: int) -> bool {f(x) }", "let x = 1;"],
+);
+
+// an infix operator leading a line names the two repairs
+// r[verify mimas.line.infix]
+test_recover!(
+    infix_operator_starts_line,
+    "let a = true
+     && false
+     let x = 1;",
+    errors: ["`&&` is an infix operator and cannot start a line; keep it on the line above or wrap the expression in parens"],
+    stmts: ["let a = true;", "let x = 1;"],
+);

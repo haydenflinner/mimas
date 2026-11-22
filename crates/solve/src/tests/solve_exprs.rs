@@ -1,3 +1,4 @@
+use super::solve_test_utils::*;
 use crate::components::Ty::*;
 
 // Sets and access
@@ -578,3 +579,37 @@ test_fail!(
 );
 // r[verify mimas.str.index]
 test_fail!(string_index_assign, "let s = \"abc\"; s[0] = \"x\";");
+
+// a `()`-expected block whose tail yields a value names the missing `;`
+// and points at the tail line, not the whole block
+// r[verify mimas.block.semicolon]
+#[test]
+fn loop_body_tail_value_names_the_semicolon() {
+    let _t = TestResetter;
+    let e = TEST_SESSION
+        .with(|s| {
+            s.borrow_mut().run(
+                "let d = { a : 1 };\nfor i in 0..3 {\n    i + 1\n}",
+                "test",
+            )
+        })
+        .unwrap_err();
+    let rendered = format!("{e:?}");
+    assert!(rendered.contains("the block ends in a value, not `()`"), "{rendered}");
+    assert!(rendered.contains("end it with `;`"), "{rendered}");
+}
+
+// a `-> ()` fn body gets the same tail-line wording
+#[test]
+fn unit_fn_tail_value_names_the_semicolon() {
+    let _t = TestResetter;
+    let e = TEST_SESSION
+        .with(|s| s.borrow_mut().run("fn f() -> () { 1 + 2 }", "test"))
+        .unwrap_err();
+    let rendered = format!("{e:?}");
+    assert!(rendered.contains("the block ends in a value, not `()`"), "{rendered}");
+}
+
+// controls: statement bodies and `!`-diverging loops still solve
+test_success!(loop_body_statements_ok, "for i in 0..3 { let x = i * 2; }");
+test_success!(loop_body_diverges_ok, "for i in 0..3 { continue }");

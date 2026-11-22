@@ -7,7 +7,7 @@ use crate::{
         InvalidUseTarget, IteratingHere, MissingTupleMembers, MultipleConstDeclarations,
         MultipleFnDeclarations,
         MutateWhileIterating, NonConstantValue, NotAPact, NotFound, PactRequires, SelfOutOfContext,
-        ViaRequiresImpl, ViaSignatureMismatch,
+        ViaRequiresImpl, ViaSignatureMismatch, ExpectedUnitValue,
     },
     traits::*,
 };
@@ -5418,12 +5418,40 @@ impl Solver {
         Ok(ty)
     }
 
+    /// The "ends in a value, not `()`" error, aimed at the block's last
+    /// line — that is where the missing `;` goes.
+    // r[impl mimas.block.semicolon]
+    pub(crate) fn unit_block_error(&self, body: &Expr, ty: Ty) -> Error {
+        let tail = match body.kind() {
+            ExprKind::Block(blk) => blk.yielded_expr.as_ref().unwrap_or(body),
+            _ => body,
+        };
+        ExpectedUnitValue {
+            src: self.src(tail.location()),
+            at: tail.location().into(),
+            ty: ty.to_string(),
+        }
+        .into()
+    }
+
+    /// A `()`-expected body whose tail yields a settled value is almost
+    /// always a missing `;` — name it, and point at that line. `()`,
+    /// `!` and still-open types fulfill `()` the usual way.
+    pub(crate) fn fulfill_unit_block(&mut self, body: &Expr) -> Result<()> {
+        let ty = body.query(self)?.normalized(self);
+        if matches!(ty, Ty::Unit | Ty::Never | Ty::Vid(_)) {
+            body.fulfill_ty(Ty::Unit, self)
+        } else {
+            Err(self.unit_block_error(body, ty))
+        }
+    }
+
     pub(crate) fn run_loop_body(&mut self, body: &Expr) -> Result<LoopRun> {
         self.loop_stack.push(LoopRun {
             collect_ty: None,
             break_ty: None,
         });
-        body.fulfill_ty(Ty::Unit, self)?;
+        self.fulfill_unit_block(body)?;
         Ok(self
             .loop_stack
             .pop()

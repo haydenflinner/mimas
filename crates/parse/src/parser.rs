@@ -293,7 +293,7 @@ impl<'s> Parser<'s> {
                 statements.push(self.stmt());
                 statements.append(&mut self.pending);
             } else {
-                self.reject_stmt(self.unexpected_token());
+                self.reject_stmt(self.stray_stmt_token());
             }
         }
         self.unread_marks();
@@ -4810,7 +4810,7 @@ impl<'s> Parser<'s> {
                     break None;
                 }
                 if !p.peek().starts_stmt() {
-                    p.reject_stmt(p.unexpected_token());
+                    p.reject_stmt(p.stray_stmt_token());
                     continue;
                 }
                 let node_start = p.next_start();
@@ -5009,7 +5009,14 @@ impl<'s> Parser<'s> {
         // type alone goes in the braces. `reject` skips the whole brace group.
         // `str` lexes as a type keyword, not a name -- any token then `:` is the habit
         let key_colon = self.at(TokKind::LeftBrace) && self.nth(2) == TokKind::Colon;
-        if key_colon || !self.peek().starts_annotation() {
+        // `fn(int) -> bool`, `Fn(int)`, `impl Fn`: the function-type
+        // habits from other languages -- Mimas writes `(params) -> ret`
+        // bare, and `fn` belongs to declarations.
+        // r[impl mimas.fn.type-spelling]
+        let fn_type_habit = self.at(TokKind::Fn)
+            || self.at(TokKind::Impl)
+            || (self.at(TokKind::Ident("Fn")) && self.nth(1) == TokKind::LeftParenthesis);
+        if key_colon || fn_type_habit || !self.peek().starts_annotation() {
             if key_colon {
                 self.reject(Misdirection {
                     src: self.src(),
@@ -5017,6 +5024,13 @@ impl<'s> Parser<'s> {
                     msg: "`{str: V}` isn't a type -- a dict type is `{V}` (keys are always `str`)"
                         .into(),
                     label: "not a type -- write `{V}`".into(),
+                });
+            } else if fn_type_habit {
+                self.reject(Misdirection {
+                    src: self.src(),
+                    at: self.next_location().into(),
+                    msg: "a function type is written `(int) -> bool`".into(),
+                    label: "`fn` is for declaring functions".into(),
                 });
             } else {
                 self.expected("type");
@@ -5385,6 +5399,30 @@ impl<'s> Parser<'s> {
             at: self.next_location().into(),
             tok: self.peek().to_string(),
         }
+    }
+
+    /// The error for a token that can't lead a statement. An infix
+    /// operator at a line start is almost always a continued expression
+    /// the newline cut in two — `a` ended, `&&` opens the next line —
+    /// so the message names the two repairs.
+    // r[impl mimas.line.infix]
+    fn stray_stmt_token(&self) -> shared::Error {
+        let kind = self.peek();
+        let infix = BinaryOp::of(kind).is_some()
+            || matches!(kind, TokKind::Percent | TokKind::DoubleHook | TokKind::Absolve);
+        if infix && self.at_line_start() {
+            return Misdirection {
+                src: self.src(),
+                at: self.next_location().into(),
+                msg: format!(
+                    "`{kind}` is an infix operator and cannot start a line; \
+                     keep it on the line above or wrap the expression in parens"
+                ),
+                label: "the expression above ended at the newline".into(),
+            }
+            .into();
+        }
+        self.unexpected_token().into()
     }
 
     /// Records an error about the next token, or the end of input if that's where we are.
