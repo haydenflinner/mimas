@@ -411,6 +411,17 @@ impl<'a, 'gc> Api<'a, 'gc> {
         *self.ctx.fixture::<InstanceOps>().frame.borrow_mut() = Some(Rc::new(f));
     }
 
+    /// `-a`/`+a` where `a` is a `DataFrame`; `f` declines the ops it doesn't
+    /// handle via `RtErr::InvalidUnaryOperand`. The solver types these
+    /// itself (`solve/src/frames.rs`).
+    #[cfg(feature = "dataframe")]
+    pub fn add_frame_unary_op<F>(&mut self, f: F)
+    where
+        F: for<'g> Fn(Ctx<'g>, Val<'g>, UnaryOp) -> RtResult<Val<'g>> + 'static,
+    {
+        *self.ctx.fixture::<InstanceOps>().frame_unary.borrow_mut() = Some(Rc::new(f));
+    }
+
     /// `-a`/`+a`/`!a`/`~a` for `T` instances — see [`Self::add_bin_op`];
     /// decline via `RtErr::InvalidUnaryOperand`.
     ///

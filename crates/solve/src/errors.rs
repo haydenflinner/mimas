@@ -1357,6 +1357,21 @@ pub struct ZsetWeightNotInt {
     pub ty: String,
 }
 
+/// `k * z` where `z` is a table and `k` is not a whole number. Scaling a Z-set
+/// applies a change `k` times, so `k` must be an int.
+#[derive(Error, Debug, Diagnostic)]
+#[error(
+    "scaling a Z-set applies a change a whole number of times, and this factor is {ty}: \
+     write an int (`2 * z`), or round it first (`x.round() * z`)"
+)]
+pub struct ZsetScaleNotInt {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("this factor is {ty}, not int")]
+    pub at: SourceSpan,
+    pub ty: String,
+}
+
 /// `a + b` or `a - b` on two tables whose column names differ. The Z-set sum
 /// matches rows by every column but `w`, so both sides need the same names.
 #[derive(Error, Debug, Diagnostic)]

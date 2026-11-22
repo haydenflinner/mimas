@@ -1719,6 +1719,9 @@ pub struct InstanceOps {
     /// `a <op> b` where either side is a `DataFrame`, set through
     /// [`crate::api::Api::add_frame_bin_op`] (`z1 + z2` on Z-sets).
     pub frame: RefCell<Option<Rc<InstanceBin>>>,
+    /// `-a` where `a` is a `DataFrame`, set through
+    /// [`crate::api::Api::add_frame_unary_op`] (`-z` on Z-sets).
+    pub frame_unary: RefCell<Option<Rc<InstanceUnary>>>,
 }
 
 /// Infix dispatch for `Val::Instance` operands — the impl registered on the
@@ -2035,6 +2038,14 @@ pub fn unary<'gc>(this: Val<'gc>, ctx: Ctx<'gc>, op: UnaryOp) -> RtResult<Val<'g
                     .borrow()
                     .get(&id)
                     .cloned();
+                match f {
+                    Some(f) => f(ctx, this, op)?,
+                    None => Err(RtErr::InvalidUnaryOperand)?,
+                }
+            }
+            #[cfg(feature = "dataframe")]
+            Val::DataFrame(_) => {
+                let f = ctx.fixture::<InstanceOps>().frame_unary.borrow().clone();
                 match f {
                     Some(f) => f(ctx, this, op)?,
                     None => Err(RtErr::InvalidUnaryOperand)?,

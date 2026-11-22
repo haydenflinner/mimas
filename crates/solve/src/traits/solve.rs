@@ -3794,6 +3794,10 @@ impl Solve for Unary {
             self.right.fulfill_ty(pin.clone(), solver)?;
             return Ok(pin);
         }
+        // `-z`: a frame negates as a Z-set (frames.rs)
+        if let Some(t) = solver.frame_unary(id, self.op, &self.right, &ty)? {
+            return Ok(t);
+        }
         if let Some(name) = un_method_name(self.op)
             && let Some(t) = unary_dispatch(solver, id, name, &self.right, &ty, location)?
         {

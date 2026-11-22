@@ -1830,3 +1830,315 @@ fn zset_float_w_column_faults_at_run_time() {
     assert!(err.contains("is float"), "{err}");
     assert!(err.contains("whole numbers"), "{err}");
 }
+
+// ---- Z-sets: abelian group operations on weighted tables -------------------------------------
+// `-z`, `k * z`, `z.added()`, `z.removed()`, `z.size()`, `z.unweighted()`, `z.as_set()`, the
+// `distinct` keep policy, and `integrate`/`differentiate` over a list. Two Z-sets are equal when
+// their difference is empty, `(a - b).size() == 0`, whatever order their rows come in.
+
+const ZGROUP: &str = r#"use std::polars::*;
+    let a = table { item, w
+        "apple", 2
+        "bread", -1
+        "fig", 3
+    };
+    let b = table { item, w
+        "apple", 1
+        "bread", 1
+        "pear", -2
+    };
+    let plain = table { item
+        "apple"
+        "apple"
+        "fig"
+    };
+    fn same(x: DataFrame, y: DataFrame) -> bool { (x - y).size() == 0 }
+    fn all_same(xs: [DataFrame], ys: [DataFrame]) -> bool {
+        if xs.len() != ys.len() { return false; }
+        for i in 0..xs.len() {
+            if !same(xs[i], ys[i]) { return false; }
+        }
+        true
+    }"#;
+
+// r[verify mimas.query.zset.negate]
+test_run!(
+    zset_negate_undoes_a_change,
+    ZGROUP,
+    r#"(-a).pull("w")!"# => "[-2, 1, -3]",
+    r#"(-a).col_names()"# => r#"["item", "w"]"#,
+    // z + (-z) is the empty Z-set
+    r#"(a + -a).size()"# => "0",
+    r#"(a + -a).pull("item")!.len()"# => "0",
+    r#"same(-(-a), a)"# => "true",
+    // a plain table counts each row at weight 1, consolidated first
+    r#"(-plain).pull("w")!"# => "[-2, -1]",
+    // `+z` is `z` consolidated
+    r#"(+plain).pull("w")!"# => "[2, 1]",
+);
+
+// r[verify mimas.query.zset.scale]
+test_run!(
+    zset_scale_applies_a_change_k_times,
+    ZGROUP,
+    r#"(3 * a).pull("w")!"# => "[6, -3, 9]",
+    r#"(a * 3).pull("w")!"# => "[6, -3, 9]",
+    r#"(-2 * a).pull("w")!"# => "[-4, 2, -6]",
+    // k = 0 is the empty Z-set, with the same columns
+    r#"(0 * a).size()"# => "0",
+    r#"(0 * a).col_names()"# => r#"["item", "w"]"#,
+    r#"same(2 * a, a + a)"# => "true",
+    r#"same(-1 * a, -a)"# => "true",
+    // k * (a + b) == k * a + k * b
+    r#"same(3 * (a + b), 3 * a + 3 * b)"# => "true",
+    r#"same(-2 * (a + b), -2 * a + -2 * b)"# => "true",
+    // (j + k) * a == j * a + k * a
+    r#"same((2 + 5) * a, 2 * a + 5 * a)"# => "true",
+    r#"{ let k = 4; (k * plain).pull("w")! }"# => "[8, 4]",
+);
+
+// r[verify mimas.query.zset.scale]
+#[test]
+fn zset_scale_by_a_float_is_an_error() {
+    let err = compile_err(
+        r#"use std::polars::*;
+           let a = table { item
+               "apple"
+           };
+           let z = 1.5 * a;"#,
+    );
+    assert!(err.contains("whole number"), "{err}");
+    assert!(err.contains("float"), "{err}");
+    let err = compile_err(
+        r#"use std::polars::*;
+           let a = table { item
+               "apple"
+           };
+           let z = a * 2.0;"#,
+    );
+    assert!(err.contains("whole number"), "{err}");
+}
+
+// r[verify mimas.query.zset.parts]
+test_run!(
+    zset_added_and_removed_are_the_two_parts,
+    ZGROUP,
+    r#"a.added().pull("item")!"# => r#"["apple", "fig"]"#,
+    r#"a.added().pull("w")!"# => "[2, 3]",
+    r#"a.removed().pull("item")!"# => r#"["bread"]"#,
+    // Z⁻ holds positive weights
+    r#"a.removed().pull("w")!"# => "[1]",
+    r#"a.removed().col_names()"# => r#"["item", "w"]"#,
+    // a == a.added() - a.removed()
+    r#"same(a, a.added() - a.removed())"# => "true",
+    r#"same(b, b.added() - b.removed())"# => "true",
+    // a plain table has no removed part
+    r#"plain.removed().size()"# => "0",
+    r#"plain.added().pull("w")!"# => "[2, 1]",
+    // the free-function spelling
+    r#"added(a).pull("w")!"# => "[2, 3]",
+);
+
+// r[verify mimas.query.zset.size]
+test_run!(
+    zset_size_is_the_sum_of_absolute_weights,
+    ZGROUP,
+    r#"a.size()"# => "6",
+    r#"b.size()"# => "4",
+    r#"plain.size()"# => "3",
+    // size(a) == size(a.added()) + size(a.removed())
+    r#"a.size() == a.added().size() + a.removed().size()"# => "true",
+    r#"b.size() == b.added().size() + b.removed().size()"# => "true",
+    // weights that cancel are not part of the size
+    r#"(a + b).size()"# => "8",
+    r#"{ let s: int = size(a); s }"# => "6",
+);
+
+// r[verify mimas.query.zset.unweighted]
+test_run!(
+    zset_unweighted_drops_the_weights,
+    ZGROUP,
+    r#"a.unweighted().col_names()"# => r#"["item"]"#,
+    // the rows of positive weight, each once
+    r#"a.unweighted().pull("item")!"# => r#"["apple", "fig"]"#,
+    r#"plain.unweighted().pull("item")!"# => r#"["apple", "fig"]"#,
+    // the checker knows `w` is gone
+    r#"{ let u = a.unweighted(); u.col_names().len() }"# => "1",
+);
+
+// r[verify mimas.query.zset.unweighted]
+#[test]
+fn zset_unweighted_has_no_w_at_check_time() {
+    let err = compile_err(
+        r#"use std::polars::*;
+           let a = table { item, w
+               "apple", 2
+           };
+           let ws = a.unweighted().pull("w")!;"#,
+    );
+    assert!(err.contains("`w`"), "{err}");
+}
+
+// r[verify mimas.query.zset.as_set]
+test_run!(
+    zset_as_set_is_distinct,
+    ZGROUP,
+    r#"a.as_set().pull("item")!"# => r#"["apple", "fig"]"#,
+    r#"a.as_set().pull("w")!"# => "[1, 1]",
+    r#"same(a.as_set(), query z { a distinct })"# => "true",
+    r#"same(plain.as_set(), query z { plain distinct })"# => "true",
+);
+
+const ZKEEP: &str = r#"use std::polars::*;
+    let orders = table { item, qty
+        "apple", 1
+        "bread", 4
+        "apple", 2
+        "apple", 3
+        "bread", 5
+    };
+    let gone = table { item, qty, w
+        "apple", 1, -1
+        "apple", 2, 1
+        "apple", 3, 1
+    };"#;
+
+// r[verify mimas.query.zset.coalesce]
+test_run!(
+    zset_distinct_keeps_the_row_its_policy_names,
+    ZKEEP,
+    // the default is `first`
+    r#"query z { orders distinct item }.pull("qty")!"# => "[1, 4]",
+    r#"query z { orders distinct item first }.pull("qty")!"# => "[1, 4]",
+    r#"query z { orders distinct item last }.pull("qty")!"# => "[3, 5]",
+    r#"query z { orders distinct item last }.pull("w")!"# => "[1, 1]",
+    // `any` keeps one row of each key, in no set order
+    r#"query z { orders distinct item any }.pull("item")!.len()"# => "2",
+    r#"query z { orders distinct item any }.pull("w")!"# => "[1, 1]",
+    r#"query z {
+        orders
+        distinct item any
+        sort item
+    }.pull("item")!"# => r#"["apple", "bread"]"#,
+    // a row of negative weight is not a candidate
+    r#"query z { gone distinct item first }.pull("qty")!"# => "[2]",
+    r#"query z { gone distinct item last }.pull("qty")!"# => "[3]",
+    // plain `query { }` takes the same policy
+    r#"query { orders distinct item last }.pull("qty")!"# => "[3, 5]",
+    r#"query { orders distinct item }.pull("qty")!"# => "[1, 4]",
+    // a key named like a policy is quoted: `"last"` is a second key here
+    r#"{ let t = table { k, last
+           "a", 1
+           "a", 2
+           "b", 1
+       };
+       query { t distinct k "last" }.pull("k")! }"# => r#"["a", "a", "b"]"#,
+    r#"{ let t = table { k, last
+           "a", 1
+           "a", 2
+           "b", 1
+       };
+       query { t distinct k last }.pull("last")! }"# => "[2, 1]",
+);
+
+// r[verify mimas.query.zset.integrate]
+// r[verify mimas.query.zset.differentiate]
+// r[verify mimas.query.zset.delay]
+test_run!(
+    zset_integrate_and_differentiate_a_stream,
+    ZGROUP,
+    r#"[a, b].integrate().len()"# => "2",
+    r#"[a, b].integrate()[1].pull("item")!"# => r#"["apple", "fig", "pear"]"#,
+    r#"[a, b].integrate()[1].pull("w")!"# => "[3, 3, -2]",
+    r#"same([a, b, plain].integrate()[2], a + b + plain)"# => "true",
+    r#"[a, b].differentiate()[1].pull("w")! == (b - a).pull("w")!"# => "true",
+    r#"same([a, b].differentiate()[0], a)"# => "true",
+    // D undoes I, and I undoes D
+    r#"{ let zs = [a, b, plain, -a]; all_same(zs.integrate().differentiate(), zs) }"# => "true",
+    r#"{ let zs = [a, b, plain, -a]; all_same(zs.differentiate().integrate(), zs) }"# => "true",
+    r#"{ let zs: [DataFrame] = []; zs.integrate().len() }"# => "0",
+    // z⁻¹: the stream one step late, from the empty Z-set
+    r#"[a, b, plain].delay().len()"# => "3",
+    r#"[a, b, plain].delay()[0].size()"# => "0",
+    r#"[a, b, plain].delay()[0].col_names()"# => r#"["item", "w"]"#,
+    r#"same([a, b, plain].delay()[2], b)"# => "true",
+    r#"{ let zs: [DataFrame] = []; zs.delay().len() }"# => "0",
+    // D = 1 - z⁻¹, item by item (a list minus a list is not elementwise, so loop)
+    r#"{ let zs = [a, b, plain, -a];
+       let d = zs.differentiate();
+       let late = zs.delay();
+       let ok = true;
+       for i in 0..zs.len() {
+           if !same(d[i], zs[i] - late[i]) { ok = false; }
+       }
+       ok }"# => "true",
+    r#"integrate([a]).len()"# => "1",
+);
+
+// The laws of the group, and two uses of them. A sum aggregate is linear, so it
+// distributes over `+`; a join is bilinear, so its change follows the product rule.
+const ZLAWS: &str = r#"use std::polars::*;
+    let a = table { item, w
+        "apple", 2
+        "bread", -1
+    };
+    let b = table { item, w
+        "apple", 1
+        "fig", 4
+    };
+    let prices = table { item, price
+        "apple", 1
+        "bread", 3
+        "fig", 5
+    };
+    let stock = table { item, shelf, w
+        "apple", "A", 1
+        "fig", "B", 2
+    };
+    let dstock = table { item, shelf, w
+        "apple", "A", 1
+        "bread", "C", 1
+        "fig", "B", -1
+    };
+    fn same(x: DataFrame, y: DataFrame) -> bool { (x - y).size() == 0 }
+    fn total(z: DataFrame) -> int {
+        let t: [int] = query z {
+            z
+            join prices item
+            group { aggregate { t = sum(price) } }
+        }.pull("t")!;
+        t[0]
+    }
+    fn j(x: DataFrame, y: DataFrame) -> DataFrame {
+        query z { x join y item }
+    }"#;
+
+// r[verify mimas.query.zset.negate]
+// r[verify mimas.query.zset.scale]
+// r[verify mimas.query.zset.parts]
+// r[verify mimas.query.zset.size]
+// r[verify mimas.query.zset.add]
+test_run!(
+    zset_abelian_group_laws,
+    ZLAWS,
+    // zero, inverse, commutative, associative
+    r#"(a + -a).size()"# => "0",
+    r#"same(a + b, b + a)"# => "true",
+    r#"same((a + b) + stock.unweighted().select_names(["item"])!, a + (b + stock.unweighted().select_names(["item"])!))"# => "true",
+    r#"same(a - b, a + -b)"# => "true",
+    // k * (a + b) == k * a + k * b
+    r#"same(5 * (a + b), 5 * a + 5 * b)"# => "true",
+    r#"same(a, a.added() - a.removed())"# => "true",
+    r#"a.size() == a.added().size() + a.removed().size()"# => "true",
+    // linearity: a weighted sum over a + b is the sum over a plus the sum over b
+    r#"total(a + b) == total(a) + total(b)"# => "true",
+    // apple 3 at 1, bread -1 at 3, fig 4 at 5
+    r#"total(a + b)"# => "20",
+    r#"total(3 * a) == 3 * total(a)"# => "true",
+    r#"total(-a) == -total(a)"# => "true",
+    // the product rule: Δ(A ⋈ B) = ΔA ⋈ B + A ⋈ ΔB + ΔA ⋈ ΔB
+    r#"same(
+        j(a + b, stock + dstock) - j(a, stock),
+        j(b, stock) + j(a, dstock) + j(b, dstock)
+    )"# => "true",
+);

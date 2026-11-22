@@ -64,8 +64,10 @@ impl AscDesc {
     api.add(__z_cons);
     api.add(__z_distinct);
     api.add(__z_join);
-    // `z1 + z2` and `z1 - z2`: two frames add as Z-sets
+    // `z1 + z2`, `z1 - z2`, `k * z` and `-z`: the abelian group (and
+    // Z-module) operations on Z-sets
     api.add_frame_bin_op(frame_bin);
+    api.add_frame_unary_op(frame_unary);
     api.add(__data);
     {
         let mut m = api.module("std::polars");
@@ -103,7 +105,24 @@ impl AscDesc {
         m.add(pivot);
         m.add(unpivot);
         m.add(changes);
+        // Z-sets: abelian group operations on weighted tables (see `crate::zset`)
+        m.add(added);
+        m.add(removed);
+        m.add(size);
+        m.add(unweighted);
+        m.add(as_set);
+        m.add(integrate);
+        m.add(differentiate);
+        m.add(delay);
     }
+    api.add_method(added);
+    api.add_method(removed);
+    api.add_method(size);
+    api.add_method(unweighted);
+    api.add_method(as_set);
+    api.add_method(integrate);
+    api.add_method(differentiate);
+    api.add_method(delay);
     api.add_method(filter);
     api.add_method(select);
     api.add_method(select_names);
@@ -1958,22 +1977,17 @@ fn __q_rename<'gc>(
     Ok(ctx.new_dataframe(out))
 }
 
-/// query-DSL plumbing — `df | distinct a` lowers here.
+/// query-DSL plumbing — `df | distinct a last` lowers here. `keep` is
+/// `first`, `last` or `any` (see `crate::zset::Keep`).
 #[native]
 fn __q_distinct<'gc>(
     ctx: Ctx<'gc>,
     df: vm::DataFrame<'gc>,
     names: Vec<String>,
+    keep: &str,
 ) -> Result<vm::DataFrame<'gc>, vm::RtErr> {
-    use polars::prelude::UniqueKeepStrategy;
-    let subset = if names.is_empty() {
-        None
-    } else {
-        Some(names.as_slice())
-    };
-    df.0.borrow()
-        .0
-        .unique_stable(subset, UniqueKeepStrategy::First, None)
+    let keep = crate::zset::Keep::of_arg(keep).map_err(q_err)?;
+    crate::zset::unique_by(&df.0.borrow().0, &names, keep)
         .map(|d| ctx.new_dataframe(d))
         .map_err(q_err)
 }
@@ -1995,14 +2009,17 @@ fn __z_cons<'gc>(ctx: Ctx<'gc>, df: vm::DataFrame<'gc>) -> Result<vm::DataFrame<
     Ok(ctx.new_dataframe(out))
 }
 
-/// `query z { … }` plumbing: `distinct`, the positive rows at weight 1.
+/// `query z { … }` plumbing: `distinct`, the positive rows at weight 1,
+/// one row per key chosen by `keep`.
 #[native]
 fn __z_distinct<'gc>(
     ctx: Ctx<'gc>,
     df: vm::DataFrame<'gc>,
     names: Vec<String>,
+    keep: &str,
 ) -> Result<vm::DataFrame<'gc>, vm::RtErr> {
-    let out = crate::zset::distinct(&df.0.borrow().0, &names).map_err(q_err)?;
+    let keep = crate::zset::Keep::of_arg(keep).map_err(q_err)?;
+    let out = crate::zset::distinct(&df.0.borrow().0, &names, keep).map_err(q_err)?;
     Ok(ctx.new_dataframe(out))
 }
 
@@ -2025,24 +2042,133 @@ fn __z_join<'gc>(
 }
 
 /// `a + b` and `a - b` on two frames: the Z-set sum and difference (see
-/// `crate::zset::add`). Any other operator, or a frame against another
-/// kind of value, is the usual operator error.
+/// `crate::zset::add`). `k * z` and `z * k` with an int `k`: the Z-set
+/// scaled by `k` (`crate::zset::scale`). A float factor is an error that
+/// says to use a whole number. Any other operator, or a frame against
+/// another kind of value, is the usual operator error.
+/// r[impl mimas.query.zset.scale]
 fn frame_bin<'gc>(
     ctx: Ctx<'gc>,
     a: Val<'gc>,
     b: Val<'gc>,
     op: vm::BinOp,
 ) -> Result<Val<'gc>, vm::RtErr> {
-    let (Val::DataFrame(x), Val::DataFrame(y)) = (a, b) else {
-        return Err(vm::RtErr::invalid_bin(a, op, b));
-    };
-    let (x, y) = (&x.0.borrow().0, &y.0.borrow().0);
-    let out = match op {
-        vm::BinOp::Add => crate::zset::add(x, y),
-        vm::BinOp::Sub => crate::zset::sub(x, y),
+    let out = match (a, b, op) {
+        (Val::DataFrame(x), Val::DataFrame(y), vm::BinOp::Add) => {
+            crate::zset::add(&x.0.borrow().0, &y.0.borrow().0)
+        }
+        (Val::DataFrame(x), Val::DataFrame(y), vm::BinOp::Sub) => {
+            crate::zset::sub(&x.0.borrow().0, &y.0.borrow().0)
+        }
+        (Val::Int(k), Val::DataFrame(z), vm::BinOp::Mult)
+        | (Val::DataFrame(z), Val::Int(k), vm::BinOp::Mult) => {
+            crate::zset::scale(&z.0.borrow().0, k)
+        }
+        (Val::Float(_), Val::DataFrame(_), vm::BinOp::Mult)
+        | (Val::DataFrame(_), Val::Float(_), vm::BinOp::Mult) => {
+            return Err(vm::RtErr::Custom(crate::zset::scale_not_int_message("float")));
+        }
         _ => return Err(vm::RtErr::invalid_bin(a, op, b)),
     };
     Ok(Val::DataFrame(ctx.new_dataframe(out.map_err(q_err)?)))
+}
+
+/// `-z` on a frame: every weight negated (`crate::zset::negate`). `+z` is
+/// `z` as a Z-set, consolidated. Other unary operators are the usual error.
+/// r[impl mimas.query.zset.negate]
+fn frame_unary<'gc>(ctx: Ctx<'gc>, a: Val<'gc>, op: vm::UnaryOp) -> Result<Val<'gc>, vm::RtErr> {
+    let Val::DataFrame(z) = a else {
+        return Err(vm::RtErr::InvalidUnaryOperand);
+    };
+    let out = match op {
+        vm::UnaryOp::Negative => crate::zset::negate(&z.0.borrow().0),
+        vm::UnaryOp::Positive => crate::zset::consolidate(&z.0.borrow().0),
+        _ => return Err(vm::RtErr::InvalidUnaryOperand),
+    };
+    Ok(Val::DataFrame(ctx.new_dataframe(out.map_err(q_err)?)))
+}
+
+/// `z.added()`: the positive part of a Z-set, Z⁺, at its weights.
+/// r[impl mimas.query.zset.parts]
+#[native]
+fn added<'gc>(ctx: Ctx<'gc>, z: vm::DataFrame<'gc>) -> Result<vm::DataFrame<'gc>, vm::RtErr> {
+    let out = crate::zset::added(&z.0.borrow().0).map_err(q_err)?;
+    Ok(ctx.new_dataframe(out))
+}
+
+/// `z.removed()`: the negative part of a Z-set, Z⁻, at positive weights,
+/// so `z == z.added() - z.removed()`.
+/// r[impl mimas.query.zset.parts]
+#[native]
+fn removed<'gc>(ctx: Ctx<'gc>, z: vm::DataFrame<'gc>) -> Result<vm::DataFrame<'gc>, vm::RtErr> {
+    let out = crate::zset::removed(&z.0.borrow().0).map_err(q_err)?;
+    Ok(ctx.new_dataframe(out))
+}
+
+/// `z.size()`: the sum of the absolute weights, the size of a change.
+/// r[impl mimas.query.zset.size]
+#[native]
+fn size<'gc>(_ctx: Ctx<'gc>, z: vm::DataFrame<'gc>) -> Result<i64, vm::RtErr> {
+    crate::zset::size(&z.0.borrow().0).map_err(q_err)
+}
+
+/// `z.unweighted()`: the rows of positive weight, each once, with no `w`.
+/// r[impl mimas.query.zset.unweighted]
+#[native]
+fn unweighted<'gc>(
+    ctx: Ctx<'gc>,
+    z: vm::DataFrame<'gc>,
+) -> Result<vm::DataFrame<'gc>, vm::RtErr> {
+    let out = crate::zset::unweighted(&z.0.borrow().0).map_err(q_err)?;
+    Ok(ctx.new_dataframe(out))
+}
+
+/// `z.as_set()`: the rows of positive weight at weight 1, the method
+/// spelling of the `query z` verb `distinct`.
+/// r[impl mimas.query.zset.as_set]
+#[native]
+fn as_set<'gc>(ctx: Ctx<'gc>, z: vm::DataFrame<'gc>) -> Result<vm::DataFrame<'gc>, vm::RtErr> {
+    let out = crate::zset::as_set(&z.0.borrow().0).map_err(q_err)?;
+    Ok(ctx.new_dataframe(out))
+}
+
+fn frames_of(zs: &[vm::DataFrame<'_>]) -> Vec<polars::frame::DataFrame> {
+    zs.iter().map(|z| z.0.borrow().0.clone()).collect()
+}
+
+/// `zs.integrate()`: the running sums of a list of Z-sets, DBSP's I.
+/// r[impl mimas.query.zset.integrate]
+#[native]
+fn integrate<'gc>(
+    ctx: Ctx<'gc>,
+    zs: Vec<vm::DataFrame<'gc>>,
+) -> Result<Vec<vm::DataFrame<'gc>>, vm::RtErr> {
+    let out = crate::zset::integrate(&frames_of(&zs)).map_err(q_err)?;
+    Ok(out.into_iter().map(|d| ctx.new_dataframe(d)).collect())
+}
+
+/// `zs.delay()`: the list one step late, starting with the empty Z-set,
+/// DBSP's z⁻¹.
+/// r[impl mimas.query.zset.delay]
+#[native]
+fn delay<'gc>(
+    ctx: Ctx<'gc>,
+    zs: Vec<vm::DataFrame<'gc>>,
+) -> Result<Vec<vm::DataFrame<'gc>>, vm::RtErr> {
+    let out = crate::zset::delay(&frames_of(&zs)).map_err(q_err)?;
+    Ok(out.into_iter().map(|d| ctx.new_dataframe(d)).collect())
+}
+
+/// `zs.differentiate()`: the differences of a list of Z-sets, each item
+/// minus the one before it, DBSP's D.
+/// r[impl mimas.query.zset.differentiate]
+#[native]
+fn differentiate<'gc>(
+    ctx: Ctx<'gc>,
+    zs: Vec<vm::DataFrame<'gc>>,
+) -> Result<Vec<vm::DataFrame<'gc>>, vm::RtErr> {
+    let out = crate::zset::differentiate(&frames_of(&zs)).map_err(q_err)?;
+    Ok(out.into_iter().map(|d| ctx.new_dataframe(d)).collect())
 }
 
 /// `changes(new, old)`: what changed from `old` to `new`, as a Z-set. The

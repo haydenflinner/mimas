@@ -3730,11 +3730,11 @@ impl<'s> Parser<'s> {
                     self.q_call("__q_take", vec![table, n], verb_start)
                 }
                 "distinct" => {
-                    let names = self.q_names(false);
-                    let list =
-                        self.q_str_list(names.into_iter().map(|(n, _)| n).collect(), verb_start);
+                    let (names, keep) = self.q_distinct_keys();
+                    let list = self.q_str_list(names, verb_start);
+                    let keep = self.new_expr(Literal::String(keep.into()), verb_start);
                     let native = if zset { "__z_distinct" } else { "__q_distinct" };
-                    self.q_call(native, vec![table, list], verb_start)
+                    self.q_call(native, vec![table, list, keep], verb_start)
                 }
                 "rename" => {
                     let names = self.q_names(false);
@@ -3998,6 +3998,42 @@ impl<'s> Parser<'s> {
             self.eat(TokKind::Comma);
         }
         out
+    }
+
+    /// The `distinct` verb's key names and its keep policy: `distinct item last`
+    /// keeps the last row of each `item`. A last bare word `first`, `last` or
+    /// `any` after at least one key is the policy, and the default is `first`.
+    /// Quote a key column named like a policy: `distinct item "last"`.
+    /// r[impl mimas.query.zset.coalesce]
+    fn q_distinct_keys(&mut self) -> (Vec<String>, &'static str) {
+        let mut out: Vec<(String, bool)> = vec![];
+        while !self.at_line_start() && !self.at(TokKind::RightBrace) && !self.at(TokKind::Eof) {
+            match self.peek() {
+                TokKind::Ident(n) => {
+                    out.push((n.to_string(), true));
+                    self.advance();
+                }
+                TokKind::String(s) => {
+                    out.push((s.trim_matches('"').to_string(), false));
+                    self.advance();
+                }
+                _ => {
+                    self.expected("a column name, or `first`, `last` or `any`");
+                    self.advance();
+                }
+            }
+            self.eat(TokKind::Comma);
+        }
+        let mut keep = "first";
+        if out.len() >= 2 {
+            if let Some((word, true)) = out.last() {
+                if let Some(k) = ["first", "last", "any"].into_iter().find(|k| k == word) {
+                    keep = k;
+                    out.pop();
+                }
+            }
+        }
+        (out.into_iter().map(|(n, _)| n).collect(), keep)
     }
 
     /// Names up to a `{` (the `group` verb's keys).

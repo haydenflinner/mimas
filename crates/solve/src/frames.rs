@@ -24,7 +24,7 @@ use crate::{
     components::{AdtId, TyExt},
     errors::{
         BadLiteralArg, BadSchemaSpec, DimensionMismatch, NoSuchColumn, UnknownDataSource,
-        ZsetColumnsDiffer, ZsetWeightNotInt,
+        ZsetColumnsDiffer, ZsetScaleNotInt, ZsetWeightNotInt,
     },
     traits::Query,
 };
@@ -1137,6 +1137,18 @@ impl Solver {
                 self.frame_schemas.insert(id, schema);
                 Ok(ty)
             }
+            // Z-set parts and sets: the receiver's columns with an `int` `w` last
+            // r[impl mimas.query.zset.parts] r[impl mimas.query.zset.as_set]
+            "added" | "removed" | "as_set" => {
+                self.z_result(id, recv, false)?;
+                Ok(ty)
+            }
+            // the weights dropped: the receiver's columns without `w`
+            // r[impl mimas.query.zset.unweighted]
+            "unweighted" => {
+                self.z_result(id, recv, true)?;
+                Ok(ty)
+            }
             "head" | "tail" | "slice" | "take" | "sample" => {
                 if let Some(s) = self.frame_schema_of(recv) {
                     self.frame_schemas.insert(id, s);
@@ -1541,6 +1553,50 @@ impl Solver {
         Ok(())
     }
 
+    /// The schema of a Z-set operation on `src`: its columns with an `int` `w` last,
+    /// or without `w` when `drop_w`. A `w` known to hold something other than whole
+    /// numbers is an error, as at `query z`.
+    fn z_result(&mut self, id: NodeId, src: &Expr, drop_w: bool) -> Result<()> {
+        let Some(schema) = self.frame_schema_of(src) else {
+            return Ok(());
+        };
+        if let Some(ty) = schema.cols.get(ZSET_W).and_then(|c| c.ty.clone()).filter(not_whole) {
+            Err(ZsetWeightNotInt {
+                src: self.src(src.location()),
+                at: src.location().into(),
+                ty: ty.to_string(),
+            })?;
+        }
+        let mut out = schema.as_ref().clone();
+        let w = out
+            .cols
+            .shift_remove(ZSET_W)
+            .unwrap_or_else(|| FrameCol::known(Ty::Int));
+        if !drop_w {
+            out.cols.insert(ZSET_W.into(), w);
+        }
+        self.frame_schemas.insert(id, Rc::new(out));
+        Ok(())
+    }
+
+    /// `-z` or `+z` on a `DataFrame`: the Z-set negated, or consolidated. The result
+    /// has `z`'s columns with an `int` `w` last. `None` when the operand is not a frame.
+    // r[impl mimas.query.zset.negate]
+    pub(crate) fn frame_unary(
+        &mut self,
+        id: NodeId,
+        op: UnaryOp,
+        operand: &Expr,
+        ty: &Ty,
+    ) -> Result<Option<Ty>> {
+        let is_frame = matches!(ty, Ty::Adt(a, _) if self.adts[*a].name == "DataFrame");
+        if !is_frame || !matches!(op, UnaryOp::Negative | UnaryOp::Positive) {
+            return Ok(None);
+        }
+        self.z_result(id, operand, false)?;
+        Ok(Some(ty.clone()))
+    }
+
     /// `a + b` or `a - b` with a `DataFrame` on both sides: the Z-set sum or difference
     /// (`library::zset::add`). The result has the left side's columns and an `int` `w`
     /// last, and both sides must have the same column names when their schemas are
@@ -1555,6 +1611,32 @@ impl Solver {
         location: Location,
     ) -> Result<Option<Ty>> {
         let is_frame = |t: &Ty| matches!(t, Ty::Adt(a, _) if self.adts[*a].name == "DataFrame");
+        // `k * z` and `z * k`: the Z-set scaled by a whole number
+        // r[impl mimas.query.zset.scale]
+        if matches!(ev.op, EvaluationOp::Multiply) && (is_frame(lhs) != is_frame(rhs)) {
+            let (frame, factor, frame_ty) = if is_frame(lhs) {
+                (&ev.left, rhs, lhs)
+            } else {
+                (&ev.right, lhs, rhs)
+            };
+            match factor {
+                Ty::Int => {}
+                Ty::Float | Ty::Option(_) | Ty::Str | Ty::Bool => Err(ZsetScaleNotInt {
+                    src: self.src(location),
+                    at: location.into(),
+                    ty: factor.to_string(),
+                })?,
+                Ty::Adt(a, _) if self.adts[*a].name == "dec" => Err(ZsetScaleNotInt {
+                    src: self.src(location),
+                    at: location.into(),
+                    ty: factor.to_string(),
+                })?,
+                _ => return Ok(None),
+            }
+            let frame = frame.clone();
+            self.z_result(id, &frame, false)?;
+            return Ok(Some(frame_ty.clone()));
+        }
         if !matches!(ev.op, EvaluationOp::Plus | EvaluationOp::Minus)
             || !is_frame(lhs)
             || !is_frame(rhs)

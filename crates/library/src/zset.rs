@@ -10,6 +10,14 @@
 //! or to one of these, when the verb must see the weights (see
 //! `Parser::query_body`).
 //!
+//! Z-sets form an abelian group under `+`: `-z` undoes a change, and the
+//! empty Z-set is zero. With `k * z` for an integer `k` they form a
+//! Z-module, so a Z-set is a weighted multiset (a bag) that may also hold
+//! negative copies. `added`/`removed` split a Z-set into its positive and
+//! negative parts, `size` is the sum of the absolute weights, and
+//! `integrate`, `differentiate` and `delay` are DBSP's I, D and z⁻¹ over a
+//! list of Z-sets.
+//!
 //! These are pure frame transforms, so the VM natives
 //! (`std_lib::dataframe`) and the generated-Rust runtime (`host/eval`'s
 //! `pl.rs`) share one implementation.
@@ -179,17 +187,210 @@ pub fn join(
     run(joined.with_column(product.alias(W)))?.drop(&right_w)
 }
 
+/// Which row of a key `distinct a b` keeps when several rows share it.
+/// `First` and `Last` go by input order. `Any` leaves the choice open, so
+/// the run may take the cheapest one, and the rows may come out in any
+/// order. The query verb defaults to `First`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Keep {
+    First,
+    Last,
+    Any,
+}
+
+impl Keep {
+    /// The policy a `distinct` line names: `first`, `last` or `any`.
+    pub fn parse(word: &str) -> Option<Keep> {
+        Some(match word {
+            "first" => Keep::First,
+            "last" => Keep::Last,
+            "any" => Keep::Any,
+            _ => return None,
+        })
+    }
+
+    /// The policy a `distinct` native receives as a string. The parser
+    /// passes only the three words, so anything else is a fault.
+    pub fn of_arg(word: &str) -> PolarsResult<Keep> {
+        Keep::parse(word).ok_or_else(|| {
+            PolarsError::ComputeError(
+                format!("distinct keeps `first`, `last` or `any` row of a key, not {word:?}")
+                    .into(),
+            )
+        })
+    }
+}
+
+/// One row for each distinct value of the `names` columns, chosen by
+/// `keep`. With no names, every distinct row once, in input order. This is
+/// plain `distinct`: it reads no weights.
+/// r[impl mimas.query.zset.coalesce]
+pub fn unique_by(df: &DataFrame, names: &[String], keep: Keep) -> PolarsResult<DataFrame> {
+    let subset = if names.is_empty() { None } else { Some(names) };
+    match keep {
+        Keep::First => df.unique_stable(subset, UniqueKeepStrategy::First, None),
+        Keep::Last => df.unique_stable(subset, UniqueKeepStrategy::Last, None),
+        Keep::Any => df.unique_impl(
+            false,
+            subset.map(|v| v.iter().map(|n| PlSmallStr::from_str(n)).collect()),
+            UniqueKeepStrategy::Any,
+            None,
+        ),
+    }
+}
+
 /// The set of rows with positive weight, each at weight 1. With `names`,
-/// one row for each distinct value of those columns, the first one seen.
+/// one row for each distinct value of those columns, chosen by `keep`
+/// from the consolidated rows of positive weight.
 /// r[impl mimas.query.zset.distinct]
-pub fn distinct(df: &DataFrame, names: &[String]) -> PolarsResult<DataFrame> {
-    let present = run(consolidate(df)?.lazy().filter(col(W).gt(lit(0i64))))?;
+/// r[impl mimas.query.zset.coalesce]
+pub fn distinct(df: &DataFrame, names: &[String], keep: Keep) -> PolarsResult<DataFrame> {
+    let present = added(df)?;
     let present = if names.is_empty() {
         present
     } else {
-        present.unique_stable(Some(names), UniqueKeepStrategy::First, None)?
+        unique_by(&present, names, keep)?
     };
     run(present.lazy().with_column(one().alias(W)))
+}
+
+/// `z.as_set()`: the method spelling of the `distinct` verb with no keys.
+/// The rows of positive weight, each at weight 1.
+/// r[impl mimas.query.zset.as_set]
+pub fn as_set(df: &DataFrame) -> PolarsResult<DataFrame> {
+    distinct(df, &[], Keep::First)
+}
+
+/// `-z`: every weight negated, so `z + -z` is empty. It undoes a change.
+/// The result is consolidated.
+/// r[impl mimas.query.zset.negate]
+pub fn negate(df: &DataFrame) -> PolarsResult<DataFrame> {
+    scale(df, -1)
+}
+
+/// `k * z`: every weight times `k`, the change applied `k` times. `k = 0`
+/// gives the empty Z-set, which keeps the columns. The result is
+/// consolidated. A weight that overflows an `i64` is an error.
+/// r[impl mimas.query.zset.scale]
+pub fn scale(df: &DataFrame, k: i64) -> PolarsResult<DataFrame> {
+    let z = consolidate(df)?;
+    if k == 0 {
+        return Ok(z.clear());
+    }
+    let w = z.column(W)?.as_materialized_series().i64()?.clone();
+    let mut out = Vec::with_capacity(w.len());
+    for i in 0..w.len() {
+        let v = w.get(i).unwrap_or(0);
+        out.push(v.checked_mul(k).ok_or_else(|| {
+            PolarsError::ComputeError(
+                format!("{k} * a Z-set: the weight {v} times {k} is too large for an int").into(),
+            )
+        })?);
+    }
+    let mut z = z;
+    z.with_column(Column::new(W.into(), out))?;
+    Ok(z)
+}
+
+/// The error for `k * z` where `k` is not a whole number.
+pub fn scale_not_int_message(ty: &str) -> String {
+    format!(
+        "scaling a Z-set applies a change a whole number of times, and this factor is {ty}: \
+         write an int (`2 * z`), or round it first (`x.round() * z`)"
+    )
+}
+
+/// `z.added()`: the positive part, Z⁺. The consolidated rows of positive
+/// weight, at their weights.
+/// r[impl mimas.query.zset.parts]
+pub fn added(df: &DataFrame) -> PolarsResult<DataFrame> {
+    run(consolidate(df)?.lazy().filter(col(W).gt(lit(0i64))))
+}
+
+/// `z.removed()`: the negative part, Z⁻, at positive weights. The
+/// consolidated rows of negative weight, each weight negated. So
+/// `z == z.added() - z.removed()`.
+/// r[impl mimas.query.zset.parts]
+pub fn removed(df: &DataFrame) -> PolarsResult<DataFrame> {
+    let gone = run(consolidate(df)?.lazy().filter(col(W).lt(lit(0i64))))?;
+    run(gone.lazy().with_column((lit(0i64) - weight()).alias(W)))
+}
+
+/// `z.size()`: ‖Z‖, the sum of the absolute weights of the consolidated
+/// rows. It counts the copies a change adds and takes away, so
+/// `z.size() == z.added().size() + z.removed().size()`, and a Z-set is
+/// empty exactly when its size is 0.
+/// r[impl mimas.query.zset.size]
+pub fn size(df: &DataFrame) -> PolarsResult<i64> {
+    let z = consolidate(df)?;
+    let w = z.column(W)?.as_materialized_series().i64()?.clone();
+    let mut total: i64 = 0;
+    for v in (0..w.len()).filter_map(|i| w.get(i)) {
+        total = v
+            .checked_abs()
+            .and_then(|a| total.checked_add(a))
+            .ok_or_else(|| {
+                PolarsError::ComputeError("the size of this Z-set is too large for an int".into())
+            })?;
+    }
+    Ok(total)
+}
+
+/// `z.unweighted()`: the weights dropped. A plain frame of the consolidated
+/// rows of positive weight, each once, with no `w` column.
+/// r[impl mimas.query.zset.unweighted]
+pub fn unweighted(df: &DataFrame) -> PolarsResult<DataFrame> {
+    added(df)?.drop(W)
+}
+
+/// `zs.integrate()`: DBSP's I over a stream of Z-sets. Item `i` is the sum
+/// of items `0..=i`, so the list keeps its length. Each item is
+/// consolidated. All the items need the same column names.
+/// r[impl mimas.query.zset.integrate]
+pub fn integrate(zs: &[DataFrame]) -> PolarsResult<Vec<DataFrame>> {
+    let mut out: Vec<DataFrame> = Vec::with_capacity(zs.len());
+    for z in zs {
+        let next = match out.last() {
+            Some(sum) => add(sum, z)?,
+            None => consolidate(z)?,
+        };
+        out.push(next);
+    }
+    Ok(out)
+}
+
+/// `zs.delay()`: DBSP's z⁻¹ over a stream of Z-sets, the stream one step
+/// late. Item 0 is the empty Z-set with item 0's columns, and item `i` is
+/// input item `i - 1`, so the list keeps its length and drops its last
+/// item. Each item is consolidated. Item by item,
+/// `zs.differentiate()` is `zs` minus `zs.delay()` (D = 1 − z⁻¹).
+/// r[impl mimas.query.zset.delay]
+pub fn delay(zs: &[DataFrame]) -> PolarsResult<Vec<DataFrame>> {
+    let Some(first) = zs.first() else {
+        return Ok(vec![]);
+    };
+    let mut out = Vec::with_capacity(zs.len());
+    out.push(consolidate(first)?.clear());
+    for z in &zs[..zs.len() - 1] {
+        out.push(consolidate(z)?);
+    }
+    Ok(out)
+}
+
+/// `zs.differentiate()`: DBSP's D over a stream of Z-sets. Item 0 stays,
+/// and item `i` is item `i` minus item `i - 1` (the stream minus its
+/// delay, z⁻¹). Each item is consolidated, so
+/// `zs.integrate().differentiate()` equals `zs` item by item as Z-sets.
+/// r[impl mimas.query.zset.differentiate]
+pub fn differentiate(zs: &[DataFrame]) -> PolarsResult<Vec<DataFrame>> {
+    let mut out = Vec::with_capacity(zs.len());
+    for (i, z) in zs.iter().enumerate() {
+        out.push(match i {
+            0 => consolidate(z)?,
+            _ => sub(z, &zs[i - 1])?,
+        });
+    }
+    Ok(out)
 }
 
 /// The error for `+` or `-` between two frames whose column names differ.
