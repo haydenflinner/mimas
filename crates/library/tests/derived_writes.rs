@@ -232,3 +232,17 @@ test_fail!(
      print(c.p)",
     "changed since it was lent"
 );
+
+// a fn that recurses into a part of its own param grows its derived
+// write path one step per fixpoint round. The path stops at a fixed
+// depth, so the solve ends (man-kit's `warp_m` shape hung the page).
+// r[verify mimas.fn.writes]
+test_run!(
+    recursive_part_writes_settle,
+    "struct N { v: int, kids: [N] }
+     fn bump(n: N) { n.v += 1; if n.kids.len() > 0 { bump(n.kids[0]) } }
+     let t = N { v = 1, kids = [N { v = 2, kids = [] }] }
+     bump(t);
+     let TEST_VALUE = t.v * 10 + t.kids[0].v;",
+    "TEST_VALUE" => "23",
+);

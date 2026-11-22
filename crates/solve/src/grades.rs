@@ -622,8 +622,13 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> crate::errors::Result
     // mutating native on the root, or an `inout` store all widen to it.
     // The fixpoint walks `call_write_args` the way `scans`' walks
     // `call_args`: `handle(w) → feed(w.balls)` makes `handle` write
-    // `w.balls`, recursion settles like `fn_fx`'s cycles.
+    // `w.balls`. A call that recurses into a part of its own param
+    // (`bump(n.kids[0])`) would grow the path by one step each round
+    // and never settle, so a derived path stops at `MAX_WRITE_DEPTH`
+    // steps. The cut path is a prefix of the real one, so it still
+    // names the storage the write lands in, only less exactly.
     // r[impl mimas.fn.writes]
+    const MAX_WRITE_DEPTH: usize = 8;
     let mut writes: FxHashMap<DecId, Vec<(u32, Vec<GuardSeg>)>> = FxHashMap::default();
     for (caller, set) in &own_writes {
         if let Caller::Fn(d) = caller {
@@ -641,7 +646,10 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> crate::errors::Result
                     for (ap, apath) in argpaths {
                         let mut path = apath.clone();
                         path.extend(cpath.iter().cloned());
-                        add.push((*ap, path));
+                        path.truncate(MAX_WRITE_DEPTH);
+                        if !add.contains(&(*ap, path.clone())) {
+                            add.push((*ap, path));
+                        }
                     }
                 }
             }
