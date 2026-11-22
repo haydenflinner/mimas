@@ -439,6 +439,19 @@ test_vm!(
     "[1, 2] != [1, 2]" => Bool(false)
 );
 
+// an arm (or else branch) that is already `T?` after a plain `T` one widens the join to `T?`,
+// as a literal `null` arm does (docs/nina-papercuts.md)
+test_vm!(
+    option_branch_after_plain_branch_widens,
+    "fn f(b: bool, o: int?) -> int? { match b { true => 1, false => o } }\nfn g(b: bool, o: int?) -> int? { if b { 1 } else { o } }\nfn h(b: bool, o: int?) -> int? { match b { false => o, true => 1 } }",
+    "f(true, null)" => Int(1),
+    "f(false, null)" => Null,
+    "f(false, 7)" => Int(7),
+    "g(false, null)" => Null,
+    "g(true, null)" => Int(1),
+    "h(true, null)" => Int(1)
+);
+
 // a type error inside a later match arm nested in another match arm is reported, not swallowed
 // into an emitter panic
 test_fail!(

@@ -68,7 +68,23 @@ impl TyExt for Ty {
                     None
                 }
             }
-            _ => None,
+            // one branch is `T?` and the other a plain `T`: the join is `T?`, the same
+            // widening a literal `null` branch gets. Without it `match b { true => 1,
+            // false => o }` with `o: int?` was refused in a fn returning `int?`, while
+            // `false => null` passed.
+            (a, b) => {
+                let (a, b) = (a.normalized(solver), b.normalized(solver));
+                let (inner, plain) = match (&a, &b) {
+                    (Ty::Option(_), Ty::Option(_)) => return None,
+                    (Ty::Option(inner), plain) | (plain, Ty::Option(inner)) => {
+                        ((**inner).clone(), plain.clone())
+                    }
+                    _ => return None,
+                };
+                let (mut want, mut got) = (inner.clone(), plain);
+                got.fulfill_ty(&mut want, solver).ok()?;
+                Some(Ty::Option(Box::new(inner)))
+            }
         }
     }
 
