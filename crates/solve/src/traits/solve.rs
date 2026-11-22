@@ -303,6 +303,34 @@ pub(crate) fn seq_op_dispatch(
     Ok(Some(Ty::array(inner.as_ref().clone())))
 }
 
+/// `f ∘ g` with a function on each side: a call of the prelude's
+/// `compose(f, g)`, recorded in `op_decs` so codegen calls it with the two
+/// operands in source order. `None` when no `compose` is in scope.
+// r[impl mimas.op.compose-fn]
+fn compose_fns(
+    solver: &mut Solver,
+    id: NodeId,
+    left: &Expr,
+    right: &Expr,
+    location: Location,
+) -> Result<Option<Ty>> {
+    let name = Ident::new("compose", location);
+    let Some(dec) = solver.ribs.resolve(&name) else {
+        return Ok(None);
+    };
+    let Ty::Fn(f) = solver.resolve_name(&name, location)?.normalized(solver) else {
+        return Ok(None);
+    };
+    let [outer, inner] = f.parameters.as_slice() else {
+        return Ok(None);
+    };
+    let (outer, inner) = (outer.ty.clone(), inner.ty.clone());
+    left.fulfill_ty(outer, solver)?;
+    right.fulfill_ty(inner, solver)?;
+    solver.op_decs.insert(id, OpDispatch { dec, swap: false });
+    Ok(Some(f.return_ty.as_ref().clone().normalized(solver)))
+}
+
 /// `int`/`float`/`str`/`bool`: their operators are built in, never dispatched
 /// to a method, even when a pact impl gives them one of those names.
 /// Whether `name` is the method of a named operator (`∧ ⋅ × … ≈`).
@@ -564,6 +592,27 @@ impl Solve for Access {
                         .into());
                     }
                     return Ok(if optional { option!(Ty::Str) } else { Ty::Str });
+                }
+
+                // r[impl mimas.op.index]
+                // `s[i]` on a type that declares an operator-shaped `index` method
+                // (`fn index(self, i: int) -> T`) calls it: a stream of Z-sets reads
+                // its steps this way
+                if let Ty::Adt(aid, args) | Ty::Identity(aid, args) = &receiver
+                    && !optional
+                    && let Some((dec, f)) =
+                        op_method_sig(solver, *aid, "index", &receiver, args, location)?
+                {
+                    let operand = match f.parameters.as_slice() {
+                        [_, operand] if f.is_method => Some(operand.ty.clone()),
+                        [operand] if !f.is_method => Some(operand.ty.clone()),
+                        _ => None,
+                    };
+                    if let Some(operand) = operand {
+                        key.fulfill_ty(operand, solver)?;
+                        solver.op_decs.insert(id, OpDispatch { dec, swap: false });
+                        return Ok(f.return_ty.as_ref().clone());
+                    }
                 }
 
                 // `xs[idxs]` -- a list of ints gathers: `b[[0, 4, 8]]` is `[b[0], b[4], b[8]]`,
@@ -2406,6 +2455,15 @@ impl Solve for Evaluation {
                 }
                 _ => break,
             }
+        }
+        // r[impl mimas.op.compose-fn]
+        // `f ∘ g` on two functions: the prelude's `compose(f, g)`
+        if self.op == EvaluationOp::Compose
+            && matches!(lhs_n, Ty::Fn(_))
+            && matches!(rhs_n, Ty::Fn(_))
+            && let Some(ty) = compose_fns(solver, id, &self.left, &self.right, location)?
+        {
+            return Ok(ty);
         }
         if let Some(ty) = op_dispatch(
             solver,

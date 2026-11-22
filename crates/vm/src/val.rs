@@ -75,6 +75,17 @@ pub enum Val<'gc> {
     Tensor(Tensor<'gc>),
 }
 
+/// `==` on two frames, set by the library (`std::polars`) at install:
+/// `Some(answer)` when it has its own rule for the pair (two Z-sets compare
+/// as Z-sets, whatever their row order), `None` to fall back to comparing
+/// the rows in order. `PartialEq` has no `Ctx`, so this is a static hook
+/// rather than an `InstanceOps` fixture.
+/// r[impl mimas.query.zset.equal]
+#[cfg(feature = "dataframe")]
+pub static FRAME_EQ: std::sync::OnceLock<
+    fn(&polars::frame::DataFrame, &polars::frame::DataFrame) -> Option<bool>,
+> = std::sync::OnceLock::new();
+
 impl<'gc> PartialEq for Val<'gc> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
@@ -127,8 +138,16 @@ impl<'gc> PartialEq for Val<'gc> {
             // Closure. (A DataFrame compares by content, below.)
             #[cfg(feature = "dataframe")]
             (Val::DataFrame(a), Val::DataFrame(b)) => {
-                // same columns, in order, holding the same cells (nulls equal nulls)
-                Gc::ptr_eq(a.0, b.0) || a.0.borrow().0.equals_missing(&b.0.borrow().0)
+                // two Z-set frames compare as Z-sets (`FRAME_EQ`); any other
+                // pair has the same columns, in order, holding the same cells
+                // (nulls equal nulls)
+                Gc::ptr_eq(a.0, b.0) || {
+                    let (a, b) = (&a.0.borrow().0, &b.0.borrow().0);
+                    match FRAME_EQ.get().and_then(|eq| eq(a, b)) {
+                        Some(same) => same,
+                        None => a.equals_missing(b),
+                    }
+                }
             }
             #[cfg(feature = "dataframe")]
             (Val::PlExpr(a), Val::PlExpr(b)) => Gc::ptr_eq(a.0, b.0),

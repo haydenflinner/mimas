@@ -277,6 +277,10 @@ fn is_ender(k: TokKind) -> bool {
             | TokKind::RightBrace
             | TokKind::Bang
             | TokKind::Hook
+            // `z⁺ - y`, `q^Δ (s)`: the Z-set postfix glyphs end an operand
+            | TokKind::SupPlus
+            | TokKind::SupMinus
+            | TokKind::Incremental
             | TokKind::Percent
     )
 }
@@ -353,6 +357,7 @@ fn is_continuation(k: TokKind) -> bool {
             | TokKind::SqMinus
             | TokKind::Approx
             | TokKind::PlusMinus
+            | TokKind::Bowtie
             | TokKind::Percent
             | TokKind::Dot
             | TokKind::HookDot
@@ -395,6 +400,10 @@ fn tight_before(k: TokKind) -> bool {
             | TokKind::HookDot
             | TokKind::DoubleColon
             | TokKind::HookLeftSquare
+            // `z⁺`, `z⁻`, `q^Δ`: postfix, only ever glued
+            | TokKind::SupPlus
+            | TokKind::SupMinus
+            | TokKind::Incremental
     )
 }
 
@@ -472,6 +481,7 @@ fn spaced(k: TokKind) -> bool {
             | TokKind::SqMinus
             | TokKind::Approx
             | TokKind::PlusMinus
+            | TokKind::Bowtie
             | TokKind::In
             | TokKind::NotIn
     )
@@ -1470,6 +1480,11 @@ impl<'s> Fmt<'s> {
             }
             .into();
         }
+        // `‖z‖`: the bars keep the written adjacency on both sides (a
+        // token formatter can't tell an opening bar from a closing one)
+        if pk == TokKind::Norm || ck == TokKind::Norm {
+            return if self.gap_bytes(i) == 0 { "" } else { " " }.into();
+        }
         // tight-after ( `(`, `[`, `.`, `::`, `..`, `$`, `#`, `@`, `?[` )
         if tight_after(pk) {
             return String::new();
@@ -1715,6 +1730,21 @@ mod tests {
         // normalizes it)
         unchanged("x! + y\n");
         unchanged("x?(1) + 50%\n");
+    }
+
+    #[test]
+    fn zset_glyphs_kept() {
+        // the notation keeps its glyphs: prefix glyphs space before their
+        // operand, the postfix ones and the norm bars stay glued
+        unchanged("check ∇ (∫ zs) == zs\n");
+        unchanged("check Δ⁻¹ (Δ s) == s - z⁻¹ s\n");
+        unchanged("check z == z⁺ - z⁻\n");
+        unchanged("check ‖z⁺‖ + ‖z⁻‖ == ‖z‖\n");
+        unchanged("let j = a ⋈ b\n");
+        unchanged("let i = (q1 ∘ q2)^Δ(s)\n");
+        assert_eq!(fmt("let j = a⋈b\n"), "let j = a ⋈ b\n");
+        assert_eq!(fmt("let k = 2 · z\n"), "let k = 2 ⋅ z\n");
+        assert_eq!(fmt("let d = ∇  s\n"), "let d = ∇ s\n");
     }
 
     #[test]

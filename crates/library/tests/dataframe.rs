@@ -2142,3 +2142,185 @@ test_run!(
         j(b, stock) + j(a, dstock) + j(b, dstock)
     )"# => "true",
 );
+
+// ---- Z-set notation and streams -------------------------------------------------------------
+// `stream(zs)` makes a stream whose arithmetic goes step by step, `==` on two Z-sets ignores row
+// order, and the glyphs (`∫ ∇ Δ Δ⁻¹ z⁻¹ ⋈ ⋅ ⁺ ⁻ ‖ ‖ ∘ ^Δ`) are their ASCII methods.
+
+const ZSTREAM: &str = r#"use std::polars::*;
+    let a = table { item, w
+        "apple", 2
+        "bread", -1
+    };
+    let b = table { item, w
+        "bread", 1
+        "fig", 4
+    };
+    let c = table { item, w
+        "apple", -1
+        "fig", 1
+    };
+    let prices = table { item, price
+        "apple", 1
+        "bread", 3
+        "fig", 5
+    };
+    let zs = stream([a, b, c]);
+    fn inc(x: int) -> int { x + 1 }
+    fn dbl(x: int) -> int { x * 2 }
+    fn lines(z: DataFrame) -> DataFrame { z ⋈ prices }
+    fn totals(z: DataFrame) -> DataFrame {
+        query z {
+            z
+            group { aggregate { t = sum(price) } }
+        }
+    }"#;
+
+// r[verify mimas.query.zset.equal]
+test_run!(
+    zset_equality_ignores_row_order,
+    ZSTREAM,
+    // the same Z-set with its rows in another order, and split differently
+    r#"a == table { item, w
+        "bread", -1
+        "apple", 2
+    }"# => "true",
+    r#"a == table { item, w
+        "apple", 1
+        "bread", -1
+        "apple", 1
+    }"# => "true",
+    r#"a == b"# => "false",
+    r#"a + b == b + a"# => "true",
+    // a plain frame keeps row-by-row equality
+    r#"table { item
+        "apple"
+        "fig"
+    } == table { item
+        "fig"
+        "apple"
+    }"# => "false",
+    // different columns are never equal
+    r#"a == prices"# => "false",
+);
+
+// r[verify mimas.query.zset.stream]
+// r[verify mimas.query.zset.stream.arith]
+// r[verify mimas.query.zset.stream.equal]
+// r[verify mimas.op.index]
+test_run!(
+    zset_stream_steps,
+    ZSTREAM,
+    r#"zs.len()"# => "3",
+    r#"zs[1] == b"# => "true",
+    r#"zs.list().len()"# => "3",
+    r#"(zs + zs)[2] == 2 * c"# => "true",
+    r#"(zs - zs)[0].size()"# => "0",
+    r#"(-zs)[0] == -a"# => "true",
+    r#"(3 * zs)[1] == 3 * b"# => "true",
+    r#"(zs * 3)[1] == 3 * b"# => "true",
+    r#"(zs + a)[1] == b + a"# => "true",
+    r#"(zs - a)[0].size()"# => "0",
+    // step by step over the steps both have
+    r#"(zs + zs.shift()).len()"# => "2",
+    r#"zs == stream([a, b, c])"# => "true",
+    r#"zs == stream([a, b])"# => "false",
+    r#"zs == stream([a, c, b])"# => "false",
+    // `-` on two lists is still the list difference
+    r#"([a, b] - [b]).len()"# => "1",
+);
+
+// r[verify mimas.query.zset.stream-ops]
+// r[verify mimas.query.zset.forward-difference]
+// r[verify mimas.query.zset.sum-before]
+// r[verify mimas.query.zset.shift]
+test_run!(
+    zset_stream_glyphs,
+    ZSTREAM,
+    r#"∫ zs == zs.integrate()"# => "true",
+    r#"∇⁻¹ zs == zs.integrate()"# => "true",
+    r#"∇ zs == zs.differentiate()"# => "true",
+    r#"z⁻¹ zs == zs.delay()"# => "true",
+    r#"E⁻¹ zs == zs.delay()"# => "true",
+    r#"(Δ zs).len()"# => "2",
+    r#"(Δ zs)[0] == b - a"# => "true",
+    r#"(Δ⁻¹ zs).len()"# => "4",
+    r#"(Δ⁻¹ zs)[0].size()"# => "0",
+    r#"(Δ⁻¹ zs)[3] == a + b + c"# => "true",
+    r#"zs.shift() == stream([b, c])"# => "true",
+    r#"stream([a]).forward_difference().len()"# => "0",
+    // the laws
+    r#"∇ (∫ zs) == zs"# => "true",
+    r#"∫ (∇ zs) == zs"# => "true",
+    r#"Δ (Δ⁻¹ zs) == zs"# => "true",
+    r#"Δ⁻¹ (Δ zs) == zs - zs[0]"# => "true",
+    r#"∇ zs == zs - z⁻¹ zs"# => "true",
+    r#"Δ zs == (∇ zs).shift()"# => "true",
+    r#"Δ zs - ∇ zs == Δ ∇ zs"# => "true",
+    r#"∑ (Δ zs).slice(0, 2) == zs[2] - zs[0]"# => "true",
+    // a glyph alone is a function
+    r#"(Δ⁻¹ ∘ Δ)(zs) == zs - zs[0]"# => "true",
+    r#"{ let d = ∇; d(zs) == ∇ zs }"# => "true",
+);
+
+// r[verify mimas.query.zset.notation]
+// r[verify mimas.query.zset.cdot]
+// r[verify mimas.query.zset.join-op]
+test_run!(
+    zset_notation_parts_size_join,
+    ZSTREAM,
+    r#"a == a⁺ - a⁻"# => "true",
+    r#"‖a⁺‖ + ‖a⁻‖ == ‖a‖"# => "true",
+    r#"‖a‖"# => "3",
+    r#"‖a - a‖"# => "0",
+    r#"2 · a == 2 * a"# => "true",
+    r#"a ⋅ 2 == 2 * a"# => "true",
+    r#"(2 · zs)[1] == 2 * b"# => "true",
+    r#"(zs⁺)[0] == a⁺"# => "true",
+    r#"(a ⋈ prices).col_names()"# => r#"["item", "price", "w"]"#,
+    r#"(a ⋈ prices).pull("w")!"# => "[2, -1]",
+    r#"a ⋈ prices == a.natural_join(prices)"# => "true",
+    r#"natural_join(a, prices) == a ⋈ prices"# => "true",
+    // the forward product rule, step by step on two streams
+    r#"{ let p = stream([prices, prices, prices]);
+       Δ (zs ⋈ p) == Δ zs ⋈ p + zs ⋈ Δ p + Δ zs ⋈ Δ p }"# => "true",
+);
+
+// r[verify mimas.query.zset.incremental]
+// r[verify mimas.op.compose-fn]
+test_run!(
+    zset_incremental_and_compose,
+    ZSTREAM,
+    r#"(inc ∘ dbl)(3)"# => "7",
+    r#"(dbl ∘ inc)(3)"# => "8",
+    r#"compose(inc, inc)(1)"# => "3",
+    r#"lines^Δ(zs) == ∇ (∫ zs).map(lines)"# => "true",
+    r#"incremental(lines)(zs) == lines^Δ(zs)"# => "true",
+    // the chain rule
+    r#"(totals ∘ lines)^Δ(zs) == (totals^Δ ∘ lines^Δ)(zs)"# => "true",
+    // a linear query's incremental version is itself, step by step
+    r#"lines^Δ(zs) == zs.map(lines)"# => "true",
+);
+
+// the checker still refuses what the notation does not cover
+// r[verify mimas.op.compose-fn]
+// r[verify mimas.op.index]
+// r[verify mimas.query.zset.join-op]
+test_fail!(
+    zset_notation_refusals,
+    // `∘` between functions whose types do not line up
+    r#"fn f(x: str) -> str { x } fn g(x: int) -> int { x } let _h = f ∘ g;"#,
+    // a struct with no `index` method cannot be indexed
+    r#"struct P { x: int } let p = P { x: 1 }; let _a = p[0];"#,
+    // two tables with no column in common
+    r#"use std::polars::*;
+       let a = table { item, w
+           "apple", 1
+       };
+       let b = table { price
+           3
+       };
+       let _j = a ⋈ b;"#,
+    // a stream glyph on a number
+    r#"let _d = ∇ 3;"#,
+);

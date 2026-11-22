@@ -445,6 +445,13 @@ impl Emit for Access {
                 }
             }
             Access::Square { left, key, kind } => {
+                // `s[i]` on a struct that declares `fn index(self, i)`: that method
+                // r[impl mimas.op.index]
+                if let Some(&d) = ir.resolutions.op_decs.get(&id) {
+                    let left = left.lower(ir)?;
+                    let key = key.lower(ir)?;
+                    return emit_op_call(ir, d, vec![left, key]);
+                }
                 // tainted plain accesses ride an upstream `?`, so they must null-check at runtime
                 // just like an explicit `?[i]` -- else a mid-chain null faults instead of flowing
                 // through. same effective-kind rule the solver types against.

@@ -5,7 +5,7 @@ use chompy::{
     utils::*,
 };
 
-use crate::lex::{TokKind, TyKw};
+use crate::lex::{STREAM_OPS, TokKind, TyKw};
 
 /// Lexing error for a `/*` that never meets its `*/`.
 pub struct UnterminatedBlockComment(pub Location);
@@ -581,12 +581,21 @@ impl<'s> Lex<'s, Tok<TokKind<'s>>, TokKind<'s>> for Lexer<'s> {
     /// points at `⊕`/`xor`/`.pow`).
     fn construct_ident(&mut self) -> Option<&'s str> {
         let is_continue = |c: char| c.is_alphanumeric() || c == '_' || is_symbol_ident(c);
+        let src = self.source;
         let stream = self.char_stream();
         let start = stream.position();
         loop {
             while stream.match_peek_with(is_continue) {}
             stream.chomp_peeks();
             let can_extend = stream.position() > start;
+            // `q^Δ` is `q` then the incremental-version postfix, not one name:
+            // a `^Δ` that ends the name stays out of it
+            // r[impl mimas.query.zset.incremental]
+            let at = stream.position();
+            if can_extend && ends_incremental(&src[at..]) {
+                stream.reset_peeks();
+                break;
+            }
             if can_extend
                 && stream.match_peek_with(|c: char| c == '-' || c == '^')
                 && stream.match_peek_with(is_continue)
@@ -666,6 +675,13 @@ impl<'s> Lex<'s, Tok<TokKind<'s>>, TokKind<'s>> for Lexer<'s> {
             // a line whose content opens with ``` starts a prose island:
             // the lines up to its closing ``` are swallowed verbatim
             TokKind::ProseIsland(self.construct_prose_island(start))
+        } else if let Some(glyph) = stream_glyph(rest) {
+            // r[impl mimas.query.zset.stream-ops]
+            // `∫ s`, `∇ s`, `Δ s`, `z⁻¹ s`: a prefix stream operator (see `STREAM_OPS`)
+            for _ in glyph.chars() {
+                self.char_stream.match_chomp_with(|_| true);
+            }
+            TokKind::StreamOp(glyph)
         } else if let Some(ident) = self.construct_ident() {
             let kind = match ident {
                 "self" => TokKind::SelfKeyword,
@@ -885,6 +901,11 @@ impl<'s> Lex<'s, Tok<TokKind<'s>>, TokKind<'s>> for Lexer<'s> {
                         TokKind::Hook
                     }
                 }
+                // `(f ∘ g)^Δ`: the incremental-version postfix after a closer
+                '^' if ends_incremental(&self.source[start..]) => {
+                    self.match_chomp('Δ');
+                    TokKind::Incremental
+                }
                 '^' => {
                     if self.match_chomp('=') {
                         TokKind::CaretEqual
@@ -924,6 +945,12 @@ impl<'s> Lex<'s, Tok<TokKind<'s>>, TokKind<'s>> for Lexer<'s> {
                 '∪' => TokKind::Union,
                 '⊖' => TokKind::Ominus,
                 '⊎' => TokKind::Uplus,
+                // r[impl mimas.query.zset.notation]
+                // the Z-set notation: `z⁺`, `z⁻`, `‖z‖`, `a ⋈ b`
+                '⁺' => TokKind::SupPlus,
+                '⁻' => TokKind::SupMinus,
+                '‖' => TokKind::Norm,
+                '⋈' => TokKind::Bowtie,
                 // r[impl mimas.op.approx]
                 '≈' => TokKind::Approx,
                 // r[impl mimas.op.cmp-glyphs]
@@ -1026,6 +1053,28 @@ impl<'s> Lex<'s, Tok<TokKind<'s>>, TokKind<'s>> for Lexer<'s> {
 /// symbols stay operators: `±` (Latin-1), `⊕`/`⊻` (Mathematical
 /// Operators) and `⍲`/`⍱` (the APL slice of Miscellaneous Technical,
 /// cut out of that block below) are not in any of these ranges.
+/// Whether `rest` opens with `^Δ` and no name character follows the `Δ`:
+/// the incremental-version postfix (`q^Δ`), which a name never swallows.
+/// `x^Δt` stays one name.
+fn ends_incremental(rest: &str) -> bool {
+    rest.strip_prefix("^Δ").is_some_and(|after| {
+        !after.starts_with(|c: char| c.is_alphanumeric() || c == '_' || is_symbol_ident(c))
+    })
+}
+
+/// The prefix stream glyph `rest` opens with, if any (see `STREAM_OPS`). A
+/// glyph that starts like a name (`z⁻¹`) counts only when no name character
+/// follows it, so `z⁻¹x` is not the operator.
+fn stream_glyph(rest: &str) -> Option<&'static str> {
+    let name_char = |c: char| c.is_alphanumeric() || c == '_' || is_symbol_ident(c);
+    STREAM_OPS.iter().map(|(g, _)| *g).find(|g| {
+        let Some(after) = rest.strip_prefix(g) else {
+            return false;
+        };
+        !g.starts_with(name_char) || !after.starts_with(name_char)
+    })
+}
+
 pub fn is_symbol_ident(c: char) -> bool {
     // the direction and axis glyphs are operators, not name parts —
     // `px↕` is `px` then `↕`, and a name must not swallow a direction

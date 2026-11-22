@@ -165,4 +165,5 @@ mod tests {
     mod parse_poison;
     mod parse_stmts;
     mod parse_validity;
+    mod zset_notation;
 }

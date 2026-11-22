@@ -983,6 +983,8 @@ impl<'s> Parser<'s> {
             | TokKind::NotWord => true,
             // `check ∑ xs == 6` -- a prefix reduction opens one like a name does
             TokKind::Sum | TokKind::Prod | TokKind::Inf | TokKind::Sup => true,
+            // `check ∫ zs == …`, `check ‖z‖ == 3`
+            TokKind::StreamOp(_) | TokKind::Norm => true,
             TokKind::RightArrow | TokKind::LeftArrow | TokKind::UpArrow | TokKind::DownArrow
             | TokKind::CircledDot | TokKind::CircledTimes
             | TokKind::Rewind | TokKind::FastForward => true,
@@ -3052,6 +3054,22 @@ impl<'s> Parser<'s> {
                 self.new_expr(Evaluation::new(left, op, right), start)
             }
             BinaryOp::PlusMinus => self.plus_minus(left, right, start),
+            // r[impl mimas.query.zset.join-op]
+            // `a ⋈ b` is `a.natural_join(b)`: the natural join of two Z-sets
+            // (or of two streams, step by step). `join(df, other, on, how)` was
+            // taken by `std::polars`, so the method has a name of its own.
+            BinaryOp::Join => {
+                let at = self.location(start);
+                let callee = self.new_expr(
+                    Access::Dot {
+                        left,
+                        right: self.new_expr(Ident::new("natural_join", at), start),
+                        kind: AccessKind::Direct,
+                    },
+                    start,
+                );
+                self.new_expr(Call::new(callee, vec![Argument { name: None, value: right }]), start)
+            }
         }
     }
 
@@ -3178,6 +3196,36 @@ impl<'s> Parser<'s> {
                 start,
             );
             return self.new_expr(Call::new(callee, args), start);
+        }
+        // r[impl mimas.query.zset.stream-ops]
+        // `∫ s`, `∇ s`, `Δ s`, `z⁻¹ s`: a prefix stream operator calls the
+        // stream method its glyph names (`lex::STREAM_OPS`) and binds like a
+        // unary minus, so `∫ s.map(q)` integrates the mapped stream. With no
+        // operand after it (`Δ⁻¹ ∘ Δ`, `(∇)`, the end of a line) the glyph is
+        // that method as a function value, `|s: Stream| s.integrate()`.
+        if let TokKind::StreamOp(glyph) = self.peek() {
+            let method = crate::lex::stream_op_method(glyph).unwrap_or("integrate");
+            self.advance();
+            let at = self.location(start);
+            if !self.peek().starts_expr() || !self.infix_binds() {
+                let param = Ident::new("__s", at);
+                let recv = self.new_expr(param.clone(), start);
+                let body = self.method_call(recv, method, start);
+                let mut binding = Binding::new(param);
+                binding.annotation = Some(Annotation::Ty(Ident::new("Stream", at)));
+                return self.new_expr(
+                    Closure {
+                        parameters: vec![binding],
+                        body,
+                        return_type: None,
+                    },
+                    start,
+                );
+            }
+            let operand = self
+                .nested(Self::unary)
+                .unwrap_or_else(|| self.poison_expr(self.cursor()));
+            return self.method_call(operand, method, start);
         }
         // `↑ x` — the old prefix spelling. Directions follow their
         // operand now (`x↑`), so a direction glyph here is a mistake to
@@ -4235,7 +4283,36 @@ impl<'s> Parser<'s> {
         if self.at_path_literal() {
             return self.path_literal();
         }
+        // r[impl mimas.query.zset.notation]
+        // `‖z‖` is `z.size()`: the bars group like parentheses
+        if self.eat(TokKind::Norm) {
+            let inner = self.in_group(|p| p.with_juxta(Juxta::Apply, Self::expr));
+            self.expect(TokKind::Norm);
+            let inner = self.new_expr(Grouping::new(inner), start);
+            return self.method_call(inner, "size", start);
+        }
         self.parentheticals()
+    }
+
+    /// `recv.name()`: the call a piece of notation stands for (`∫ s`, `z⁺`, `‖z‖`).
+    fn method_call(&mut self, recv: Expr, name: &str, start: usize) -> Expr {
+        let at = self.location(start);
+        let callee = self.new_expr(
+            Access::Dot {
+                left: recv,
+                right: self.new_expr(Ident::new(name, at), start),
+                kind: AccessKind::Direct,
+            },
+            start,
+        );
+        self.new_expr(Call::new(callee, vec![]), start)
+    }
+
+    /// `name(args…)`: the call a piece of notation stands for (`q^Δ`).
+    fn free_call(&mut self, name: &str, args: Vec<Expr>, start: usize) -> Expr {
+        let f = self.new_expr(Ident::synthetic(name), start);
+        let args = args.into_iter().map(|value| Argument { name: None, value }).collect();
+        self.new_expr(Call::new(f, args), start)
     }
 
     /// Chains any trailing access expressions (`.field`, `[key]`, `::member`,
@@ -4257,6 +4334,22 @@ impl<'s> Parser<'s> {
                     break expr;
                 }
                 TokKind::LeftParenthesis => self.call(expr),
+                // r[impl mimas.query.zset.notation]
+                // `z⁺`, `z⁻`: the positive and negative parts, glued after
+                // the operand and tighter than any other operator
+                TokKind::SupPlus | TokKind::SupMinus if self.glued() => {
+                    let at = expr.span().start();
+                    let name = if self.at(TokKind::SupPlus) { "added" } else { "removed" };
+                    self.advance();
+                    self.method_call(expr, name, at)
+                }
+                // r[impl mimas.query.zset.incremental]
+                // `q^Δ` is `incremental(q)`
+                TokKind::Incremental => {
+                    let at = expr.span().start();
+                    self.advance();
+                    self.free_call("incremental", vec![expr], at)
+                }
                 TokKind::LeftSquare | TokKind::HookLeftSquare => self.square_access(expr),
                 TokKind::DoubleColon => self.colon_access(expr),
                 TokKind::Dot | TokKind::HookDot => self.dot_access(expr),
@@ -6481,6 +6574,8 @@ enum BinaryOp {
     Eval(EvaluationOp),
     /// `±` — binds like `+`/`-`; desugars to an `Interval::` constructor call.
     PlusMinus,
+    /// `⋈` — binds like `*`; desugars to `a.natural_join(b)`.
+    Join,
 }
 
 impl BinaryOp {
@@ -6488,6 +6583,10 @@ impl BinaryOp {
     fn of(kind: TokKind) -> Option<(Self, u8)> {
         if kind == TokKind::PlusMinus {
             return Some((Self::PlusMinus, 6));
+        }
+        // r[impl mimas.query.zset.join-op]
+        if kind == TokKind::Bowtie {
+            return Some((Self::Join, 7));
         }
         if let Ok(op) = LogicalOp::try_from(kind) {
             return Some((Self::Logical(op), 1));

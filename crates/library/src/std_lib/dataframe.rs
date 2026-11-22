@@ -68,6 +68,11 @@ impl AscDesc {
     // Z-module) operations on Z-sets
     api.add_frame_bin_op(frame_bin);
     api.add_frame_unary_op(frame_unary);
+    // `z1 == z2` on two Z-sets: the same Z-set, whatever the row order
+    let _ = vm::FRAME_EQ.set(frame_eq);
+    // streams of Z-sets, the stream glyphs' methods, `incremental` (`q^Δ`)
+    // and the `⋈` method on streams, written in mimas (`zset.mim`)
+    api.library.add_source("<std::zset>", crate::ZSET_SRC);
     api.add(__data);
     {
         let mut m = api.module("std::polars");
@@ -114,6 +119,7 @@ impl AscDesc {
         m.add(integrate);
         m.add(differentiate);
         m.add(delay);
+        m.add(natural_join);
     }
     api.add_method(added);
     api.add_method(removed);
@@ -123,6 +129,9 @@ impl AscDesc {
     api.add_method(integrate);
     api.add_method(differentiate);
     api.add_method(delay);
+    api.add_method(natural_join);
+    api.add_method(dot);
+    api.add_method(rdot);
     api.add_method(filter);
     api.add_method(select);
     api.add_method(select_names);
@@ -2169,6 +2178,46 @@ fn differentiate<'gc>(
 ) -> Result<Vec<vm::DataFrame<'gc>>, vm::RtErr> {
     let out = crate::zset::differentiate(&frames_of(&zs)).map_err(q_err)?;
     Ok(out.into_iter().map(|d| ctx.new_dataframe(d)).collect())
+}
+
+/// `==` on two frames that are both Z-sets (an int `w` each): equal as
+/// Z-sets (`crate::zset::equal`). `None` for any other pair, which keeps
+/// the row-by-row comparison.
+/// r[impl mimas.query.zset.equal]
+fn frame_eq(a: &polars::frame::DataFrame, b: &polars::frame::DataFrame) -> Option<bool> {
+    (crate::zset::is_zset(a) && crate::zset::is_zset(b)).then(|| crate::zset::equal(a, b))
+}
+
+/// `a ⋈ b`, `a.natural_join(b)`: the Z-set join on every column both
+/// tables have except `w`, weights multiplied.
+/// r[impl mimas.query.zset.join-op]
+#[native]
+fn natural_join<'gc>(
+    ctx: Ctx<'gc>,
+    a: vm::DataFrame<'gc>,
+    b: vm::DataFrame<'gc>,
+) -> Result<vm::DataFrame<'gc>, vm::RtErr> {
+    let out = crate::zset::natural_join(&a.0.borrow().0, &b.0.borrow().0).map_err(q_err)?;
+    Ok(ctx.new_dataframe(out))
+}
+
+/// `z ⋅ k`: the named-operator spelling of `z * k`, the Z-set scaled by
+/// the int `k`.
+/// r[impl mimas.query.zset.cdot]
+#[native]
+fn dot<'gc>(ctx: Ctx<'gc>, z: vm::DataFrame<'gc>, k: i64) -> Result<vm::DataFrame<'gc>, vm::RtErr> {
+    let out = crate::zset::scale(&z.0.borrow().0, k).map_err(q_err)?;
+    Ok(ctx.new_dataframe(out))
+}
+
+/// `k ⋅ z` (also typed `k · z`): `k * z`, the Z-set scaled by the int `k`.
+/// `⋅` is a named operator, so an int on its left reaches this reflected
+/// method on the frame.
+/// r[impl mimas.query.zset.cdot]
+#[native]
+fn rdot<'gc>(ctx: Ctx<'gc>, z: vm::DataFrame<'gc>, k: i64) -> Result<vm::DataFrame<'gc>, vm::RtErr> {
+    let out = crate::zset::scale(&z.0.borrow().0, k).map_err(q_err)?;
+    Ok(ctx.new_dataframe(out))
 }
 
 /// `changes(new, old)`: what changed from `old` to `new`, as a Z-set. The

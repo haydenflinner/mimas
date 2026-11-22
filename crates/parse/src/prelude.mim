@@ -8,3 +8,8 @@
 /// `index`, because `~/` and `mod` do.
 /// r[impl mimas.index.div]
 fn quot_rem(a, b) { (a ~/ b, a % b) }
+
+/// `f ∘ g` on two functions desugars to `compose(f, g)`: the function that
+/// runs `g`, then `f` on its result, so `(f ∘ g)(x) == f(g(x))`.
+/// r[impl mimas.op.compose-fn]
+fn compose<A, B, C>(f: (B) -> C, g: (A) -> B) -> (A) -> C { |x: A| f(g(x)) }

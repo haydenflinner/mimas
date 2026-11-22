@@ -1,0 +1,157 @@
+// Streams of Z-sets (library::ZSET_SRC, shipped with std::polars). A
+// stream is a list of Z-sets in time order: the state or the change at
+// each step. `stream(zs)` wraps a list, and the stream operators work on
+// whole streams: `+`, `-`, unary `-`, `k * s`, `k ⋅ s` and `a ⋈ b` go
+// step by step, and `==` compares step by step as Z-sets. The prefix
+// glyphs call the methods here (parse's `STREAM_OPS` table):
+//
+//   ∫ s, ∇⁻¹ s   s.integrate()           inclusive running total
+//   ∇ s          s.differentiate()       backward difference (DBSP's D)
+//   Δ s          s.forward_difference()  forward difference, one shorter
+//   Δ⁻¹ c        c.sum_before()          exclusive running total, one longer
+//   z⁻¹ s, E⁻¹ s s.delay()               the stream one step late
+//   (E s)        s.shift()               the stream one step early
+//
+// `q^Δ` is `incremental(q)`. The difference glyphs follow the
+// finite-difference calculus (Boole; Graham, Knuth and Patashnik's
+// Concrete Mathematics; Box and Jenkins): Δ forward, ∇ backward, E the
+// shift.
+// r[impl mimas.query.zset.stream]
+
+use std::polars::DataFrame;
+
+/// A stream of Z-sets: one Z-set per step, in time order. Build one with
+/// `stream(zs)`, read step `i` with `s[i]`, and get the list back with
+/// `s.list()`.
+struct Stream { items: [DataFrame] }
+
+/// The list `zs` as a stream: arithmetic on the result goes step by step.
+fn stream(zs: [DataFrame]) -> Stream { Stream { items: zs } }
+
+/// The incremental version of `q`, `q^Δ` in the notation: the function on
+/// streams of changes that gives the changes of `q`'s result. It is
+/// `∇ ∘ q ∘ ∫`: integrate the changes into states, run `q` on each state,
+/// and take the backward difference of the results. When `q` maps the
+/// empty Z-set to the empty Z-set and reads one step at a time, it equals
+/// `Δ ∘ q ∘ Δ⁻¹` on the overlap.
+/// r[impl mimas.query.zset.incremental]
+fn incremental(q: (DataFrame) -> DataFrame) -> (Stream) -> Stream {
+    |s: Stream| s.integrate().map(q).differentiate()
+}
+
+impl Stream {
+    /// The steps as a list.
+    fn list(self) -> [DataFrame] { self.items }
+
+    /// The count of steps.
+    fn len(self) -> int { self.items.len() }
+
+    /// Step `i`: `s[i]`.
+    fn index(self, i: int) -> DataFrame { self.items[i] }
+
+    /// Steps `a` up to but not including `b`.
+    fn slice(self, a: int, b: int) -> Stream { Stream { items: self.items[a..b] } }
+
+    /// `q` run on each step.
+    fn map(self, q: (DataFrame) -> DataFrame) -> Stream { Stream { items: self.items.map(q) } }
+
+    /// The sum of all the steps, `∑ s`. A stream with no steps has no
+    /// columns to give the empty Z-set, so it is an error.
+    fn sum(self) -> DataFrame {
+        let total = self.items[0];
+        for i in 1..self.items.len() { total = total + self.items[i]; }
+        total
+    }
+
+    /// `s + o`: step by step, over the steps both streams have.
+    fn add(self, o: Stream) -> Stream {
+        let out: [DataFrame] = [];
+        for i in 0..self.items.len().min(o.items.len()) { out.push(self.items[i] + o.items[i]); }
+        Stream { items: out }
+    }
+
+    /// `s + z`: `z` added to every step.
+    fn add(self, z: DataFrame) -> Stream { Stream { items: self.items.map(|x| x + z) } }
+
+    /// `s - o`: step by step, over the steps both streams have.
+    fn sub(self, o: Stream) -> Stream {
+        let out: [DataFrame] = [];
+        for i in 0..self.items.len().min(o.items.len()) { out.push(self.items[i] - o.items[i]); }
+        Stream { items: out }
+    }
+
+    /// `s - z`: `z` taken from every step.
+    fn sub(self, z: DataFrame) -> Stream { Stream { items: self.items.map(|x| x - z) } }
+
+    /// `-s`: every step negated.
+    fn neg(self) -> Stream { Stream { items: self.items.map(|x| -x) } }
+
+    /// `+s`: every step consolidated.
+    fn pos(self) -> Stream { Stream { items: self.items.map(|x| +x) } }
+
+    /// `s * k`: every step scaled by `k`.
+    fn mul(self, k: int) -> Stream { Stream { items: self.items.map(|x| k * x) } }
+
+    /// `k * s`: every step scaled by `k`.
+    fn rmul(self, k: int) -> Stream { Stream { items: self.items.map(|x| k * x) } }
+
+    /// `s ⋅ k`: `s * k`.
+    fn dot(self, k: int) -> Stream { Stream { items: self.items.map(|x| k * x) } }
+
+    /// `k ⋅ s`: `k * s`.
+    fn rdot(self, k: int) -> Stream { Stream { items: self.items.map(|x| k * x) } }
+
+    /// `a ⋈ b`: the natural join step by step, over the steps both have.
+    /// r[impl mimas.query.zset.join-op]
+    fn natural_join(self, o: Stream) -> Stream {
+        let out: [DataFrame] = [];
+        for i in 0..self.items.len().min(o.items.len()) {
+            out.push(self.items[i].natural_join(o.items[i]));
+        }
+        Stream { items: out }
+    }
+
+    /// `s⁺`: the positive part of every step.
+    fn added(self) -> Stream { Stream { items: self.items.map(|x| x.added()) } }
+
+    /// `s⁻`: the negative part of every step, at positive weights.
+    fn removed(self) -> Stream { Stream { items: self.items.map(|x| x.removed()) } }
+
+    /// `∫ s`, `∇⁻¹ s`: the inclusive running total. Step `t` is the sum of
+    /// steps `0..=t`, so the stream keeps its length.
+    fn integrate(self) -> Stream { Stream { items: self.items.integrate() } }
+
+    /// `∇ s`: the backward difference, DBSP's D. Step `t` is `s[t] - s[t - 1]`,
+    /// and step 0 is `s[0]` (the step before it is the empty Z-set), so the
+    /// stream keeps its length and `∇ (∫ c) == c`.
+    fn differentiate(self) -> Stream { Stream { items: self.items.differentiate() } }
+
+    /// `z⁻¹ s`, `E⁻¹ s`: the stream one step late. Step 0 is the empty Z-set,
+    /// and the last step drops out.
+    fn delay(self) -> Stream { Stream { items: self.items.delay() } }
+
+    /// `s.shift()`, E in the notation: the stream one step early. The first
+    /// step drops out, so the stream is one shorter.
+    fn shift(self) -> Stream { Stream { items: self.items[1..] } }
+
+    /// `Δ s`: the forward difference. Step `t` is `s[t + 1] - s[t]`, the
+    /// change from one state to the next, so `n` states give `n - 1`
+    /// changes: the panels between fence posts.
+    fn forward_difference(self) -> Stream {
+        let out: [DataFrame] = [];
+        for t in 1..self.items.len() { out.push(self.items[t] - self.items[t - 1]); }
+        Stream { items: out }
+    }
+
+    /// `Δ⁻¹ c`: the exclusive running total. Step `t` is the sum of steps
+    /// `0..t`, from the empty Z-set up to the sum of them all, so `n`
+    /// changes give `n + 1` states: the fence posts around the panels.
+    /// `Δ (Δ⁻¹ c) == c`, and `Δ⁻¹ (Δ s) == s - s[0]`.
+    fn sum_before(self) -> Stream {
+        if self.items.len() == 0 { return self; }
+        let zero = self.items[0] - self.items[0];
+        let posts = [zero];
+        for c in self.items { posts.push(posts[posts.len() - 1] + c); }
+        Stream { items: posts }
+    }
+}

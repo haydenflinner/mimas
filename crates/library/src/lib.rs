@@ -85,6 +85,12 @@ pub const OPP_SRC: &str = include_str!("opp.mim");
 /// (`approx.mim`) and shipped with std.
 pub const APPROX_SRC: &str = include_str!("approx.mim");
 
+/// Streams of Z-sets (`stream(zs)`), the stream glyphs' methods
+/// (`∫ ∇ Δ Δ⁻¹ z⁻¹`) and `incremental` (`q^Δ`), written in mimas
+/// (`zset.mim`) and shipped with `std::polars`.
+#[cfg(feature = "dataframe")]
+pub const ZSET_SRC: &str = include_str!("zset.mim");
+
 /// `Arbitrary`, the pact a law's expansion uses to draw and shrink sample
 /// values (`arb.mim`), shipped with std.
 pub const ARB_SRC: &str = include_str!("arb.mim");

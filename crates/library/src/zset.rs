@@ -476,6 +476,48 @@ pub fn sub(a: &DataFrame, b: &DataFrame) -> PolarsResult<DataFrame> {
     combine(a, b, true, "-")
 }
 
+/// Whether `df` is a Z-set frame: it has a `w` column of whole numbers.
+pub fn is_zset(df: &DataFrame) -> bool {
+    df.column(W).is_ok_and(|c| c.dtype().is_integer())
+}
+
+/// `a == b` on two Z-set frames: the same Z-set, whatever order the rows
+/// come in and however the equal rows are split. It holds exactly when
+/// `(a - b).size() == 0`. Frames whose column names differ are not equal.
+/// r[impl mimas.query.zset.equal]
+pub fn equal(a: &DataFrame, b: &DataFrame) -> bool {
+    let names = |df: &DataFrame| {
+        let mut n: Vec<String> = df.get_column_names().iter().map(|n| n.to_string()).collect();
+        n.sort();
+        n
+    };
+    names(a) == names(b) && sub(a, b).and_then(|d| size(&d)).is_ok_and(|n| n == 0)
+}
+
+/// `a ⋈ b`, `a.natural_join(b)`: the inner join of two Z-sets on every
+/// column both have except `w`. Each output row weighs the product of the
+/// two rows it pairs. The result is consolidated, `w` last. Two tables with
+/// no column in common are an error, since a join on nothing pairs every
+/// row with every row.
+/// r[impl mimas.query.zset.join-op]
+pub fn natural_join(a: &DataFrame, b: &DataFrame) -> PolarsResult<DataFrame> {
+    let right: Vec<String> = b.get_column_names().iter().map(|n| n.to_string()).collect();
+    let on: Vec<String> = a
+        .get_column_names()
+        .iter()
+        .map(|n| n.to_string())
+        .filter(|n| n != W && right.contains(n))
+        .collect();
+    if on.is_empty() {
+        return Err(PolarsError::ComputeError(
+            "a ⋈ b joins on the columns both tables have, and these two have none in common: \
+             rename a column so they share one, or join with `query z { a join b key }`"
+                .into(),
+        ));
+    }
+    consolidate(&join(a, b, &on, JoinType::Inner)?)
+}
+
 /// What changed from `old` to `new`, as a Z-set: the rows of `new` at their
 /// weights and the rows of `old` at negated weights, consolidated. A row in
 /// both cancels; a row only in `new` has a positive weight; a row only in

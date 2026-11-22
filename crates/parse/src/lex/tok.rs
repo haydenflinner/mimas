@@ -150,6 +150,22 @@ pub enum TokKind<'s> {
     CircledTimes,
     Rewind,
     FastForward,
+    // r[impl mimas.query.zset.stream-ops]
+    /// A prefix stream operator, `∫ s`, `∇ s`, `Δ s` or `z⁻¹ s`: the glyph
+    /// as written.
+    /// [`STREAM_OPS`] names the stream method each glyph calls.
+    StreamOp(&'static str),
+    /// `^Δ`, glued after an operand: `q^Δ` is `incremental(q)`, the
+    /// incremental version of a function on Z-sets.
+    Incremental,
+    /// `⁺`, glued after an operand: `z⁺` is `z.added()`.
+    SupPlus,
+    /// `⁻`, glued after an operand: `z⁻` is `z.removed()`.
+    SupMinus,
+    /// `‖`, on both sides of an operand: `‖z‖` is `z.size()`.
+    Norm,
+    /// `⋈`, the natural join: `a ⋈ b` is `a.natural_join(b)`. Binds like `*`.
+    Bowtie,
     Tilde,
     Dollar,
     DoubleLeftCaret,
@@ -305,6 +321,12 @@ impl Display for TokKind<'_> {
             TokKind::CircledTimes => "⊗",
             TokKind::Rewind => "⏪",
             TokKind::FastForward => "⏩",
+            TokKind::StreamOp(glyph) => glyph,
+            TokKind::Incremental => "^Δ",
+            TokKind::SupPlus => "⁺",
+            TokKind::SupMinus => "⁻",
+            TokKind::Norm => "‖",
+            TokKind::Bowtie => "⋈",
             TokKind::Tilde => "~",
             TokKind::Dollar => "$",
             TokKind::DoubleLeftCaret => "<<",
@@ -336,6 +358,38 @@ impl Display for TokKind<'_> {
 }
 
 impl TokenKind for TokKind<'_> {}
+
+// r[impl mimas.query.zset.stream-ops]
+/// The prefix stream operators: each glyph and the stream method it calls.
+/// The lexer reads each glyph as one [`TokKind::StreamOp`] token, and the
+/// parser turns `glyph s` into `s.method()`. A glyph alone, with no operand
+/// after it (`∫ ∘ q`, `(∇)`), is that method as a function value. This
+/// table is the one place a glyph gets its meaning: binding a glyph is one
+/// row here and one in the editor's completion table
+/// (`host/web/src/texglyphs.ts`). A glyph whose first character could start
+/// a name (`Δ`, `z⁻¹`) is the operator only when no name character follows
+/// it, so `Δt` stays a name. A glyph that starts with another row's glyph
+/// comes before that row.
+///
+/// The names follow the finite-difference calculus (Boole, Knuth's Concrete
+/// Mathematics, Box–Jenkins): `Δ` is the forward difference and `∇` the
+/// backward one, which DBSP writes D. `E` is the shift, `E⁻¹` (DBSP's
+/// `z⁻¹`) the delay. `E` alone stays a name, since pages use it as one
+/// (`let E = …`, `Result<T, E>`), so the shift is spelled `s.shift()`.
+pub const STREAM_OPS: &[(&str, &str)] = &[
+    ("Δ⁻¹", "sum_before"),
+    ("Δ", "forward_difference"),
+    ("∇⁻¹", "integrate"),
+    ("∇", "differentiate"),
+    ("∫", "integrate"),
+    ("z⁻¹", "delay"),
+    ("E⁻¹", "delay"),
+];
+
+/// The stream method a prefix stream glyph calls (see [`STREAM_OPS`]).
+pub fn stream_op_method(glyph: &str) -> Option<&'static str> {
+    STREAM_OPS.iter().find(|(g, _)| *g == glyph).map(|(_, m)| *m)
+}
 
 #[derive(Debug, Copy, PartialEq, Clone)]
 pub enum TyKw {
@@ -394,6 +448,8 @@ impl TokKind<'_> {
                     | TokKind::Prod
                     | TokKind::Inf
                     | TokKind::Sup
+                    | TokKind::StreamOp(_)
+                    | TokKind::Norm
                     | TokKind::RightArrow
                     | TokKind::LeftArrow
                     | TokKind::UpArrow
