@@ -72,9 +72,9 @@ test_vm!(
 
 // a self-referential instance (`a.next = b; b.prev = a;`) used to blow the native stack --
 // `render_into` recursed through instance fields with no cycle detection. A revisited
-// ancestor now prints a short back-reference (`Node #1 ↺` -- `a` is position 1 on the
-// render path) instead of descending or failing, so `print`/`display` say something
-// useful about a doubly linked list.
+// ancestor now prints a short back-reference named by content (`Node 1 ↺`, the node
+// whose first scalar field is 1) instead of descending or failing, so `print`/`display`
+// say something useful about a doubly linked list.
 test_vm!(
     // r[verify mimas.display.cycle]
     displaying_a_reference_cycle_shows_a_back_reference,
@@ -82,7 +82,7 @@ test_vm!(
      let a = Node { next = null, prev = null, val = 1 };
      let b = Node { next = null, prev = a, val = 2 };
      a.next = b;",
-    r#"f"{a}""# => str!("Node { Node { null, Node #1 ↺, 2 }, null, 1 }"),
+    r#"f"{a}""# => str!("Node { Node { null, Node 1 ↺, 2 }, null, 1 }"),
 );
 
 // `S::default()` -- the implicit memberwise-default ctor every struct carries:

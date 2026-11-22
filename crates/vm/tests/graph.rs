@@ -80,7 +80,7 @@ let alias = b;
 }
 
 /// Displaying a cyclic list prints a short back-reference instead of recursing
-/// (or erroring): `a.next = a` renders the self-edge as `Node #1 ↺`.
+/// (or erroring): `a.next = a` renders the self-edge as `Node 1 ↺`.
 // r[verify mimas.display.cycle]
 #[test]
 fn displaying_a_cycle_shows_a_back_reference() {
@@ -100,7 +100,7 @@ let s = f"{a}";
         })
         .unwrap();
     let s = handle.join().expect("no stack overflow").expect("s bound");
-    assert_eq!(s, Captured::Str("Node { 1, Node #1 ↺ }".to_string()));
+    assert_eq!(s, Captured::Str("Node { 1, Node 1 ↺ }".to_string()));
 }
 
 #[test]
@@ -158,4 +158,43 @@ fn value_types_are_flagged_on_the_graph() {
     assert!(flags.contains(&("V2".into(), true)), "{flags:?}");
     assert!(flags.contains(&("Acc".into(), false)), "{flags:?}");
     assert!(flags.contains(&("Seg".into(), true)), "{flags:?}");
+}
+
+/// A doubly linked list prints its chain once: `prev` edges back up the chain and the
+/// list's `tail` (an alias of a node already printed) are references named by content,
+/// `Node 2 ↺`, not a second copy of the chain. A shared plain value (`Point`) and a
+/// repeated unit variant still print in full.
+// r[verify mimas.display.cycle] r[verify mimas.display.cycle.full]
+#[test]
+fn display_names_revisited_nodes_by_content() {
+    let src = r#"
+struct Node { val: int, prev: Node?, next: Node? }
+struct List { head: Node?, tail: Node?, len: int }
+let a = Node { val = 1, prev = null, next = null };
+let b = Node { val = 2, prev = a, next = null };
+let c = Node { val = 3, prev = b, next = null };
+a.next = b;
+b.next = c;
+let l = List { head = a, tail = c, len = 3 };
+struct Point { x: int, y: int }
+let p = Point { x = 1, y = 2 };
+enum Sky { Sun, Moon }
+let s_list = f"{l}";
+let s_b = f"{b}";
+let s_pts = f"{[p, p]}";
+let s_sky = f"{[Sky::Moon, Sky::Moon]}";
+"#;
+    let mut vm = Vm::compile(src, |_| {}).expect("compile");
+    vm.run().expect("run");
+    let get = |vm: &mut Vm, n: &str| match vm.resolve_name(n) {
+        Some(Captured::Str(s)) => s,
+        other => panic!("{n}: {other:?}"),
+    };
+    assert_eq!(
+        get(&mut vm, "s_list"),
+        "List { Node { 1, null, Node { 2, Node 1 ↺, Node { 3, Node 2 ↺, null } } }, Node 3 ↺, 3 }"
+    );
+    assert_eq!(get(&mut vm, "s_b"), "Node { 2, Node { 1, null, Node 2 ↺ }, Node { 3, Node 2 ↺, null } }");
+    assert_eq!(get(&mut vm, "s_pts"), "[Point { 1, 2 }, Point { 1, 2 }]");
+    assert_eq!(get(&mut vm, "s_sky"), "[Sky::Moon, Sky::Moon]");
 }

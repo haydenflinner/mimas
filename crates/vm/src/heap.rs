@@ -25,6 +25,15 @@ use crate::{
 
 const MAX_DISPLAY_DEPTH: usize = 1000;
 
+/// The state of one display walk: `path` is the stack of containers around the value
+/// being printed (a cycle revisits one of them), `seen` every struct instance printed so
+/// far (an alias revisits one of those).
+#[derive(Default)]
+struct Walk {
+    path: Vec<*const ()>,
+    seen: Vec<*const ()>,
+}
+
 #[derive(Default, Debug)]
 pub struct MimasBindings(pub FxHashMap<TypeId, AdtBinding>);
 
@@ -735,10 +744,10 @@ impl<'gc> Ctx<'gc> {
     ///
     /// Fails with [`RtErr::DisplayTooDeep`] if `value` nests past
     /// [`MAX_DISPLAY_DEPTH`] -- see that constant's docs. A cycle is not an error:
-    /// a revisited container prints a `Name #n ↺` back-reference (see [`Self::render_into`]).
+    /// a revisited container prints a `Node 1 ↺` back-reference (see [`Self::render_into`]).
     pub fn display(self, value: Val<'gc>) -> RtResult<String> {
         let mut out = String::new();
-        self.render_into(&mut out, value, true, 0, &mut Vec::new())?;
+        self.render_into(&mut out, value, true, 0, &mut Walk::default())?;
         Ok(out)
     }
 
@@ -746,28 +755,33 @@ impl<'gc> Ctx<'gc> {
     /// f-strings and `print` use; every non-string renders the same as [Ctx::display].
     pub fn to_string(self, value: Val<'gc>) -> RtResult<String> {
         let mut out = String::new();
-        self.render_into(&mut out, value, false, 0, &mut Vec::new())?;
+        self.render_into(&mut out, value, false, 0, &mut Walk::default())?;
         Ok(out)
     }
 
     /// [Ctx::to_string], appending into an existing buffer (the f-string builder).
     pub fn to_string_into(self, out: &mut String, value: Val<'gc>) -> RtResult<()> {
-        self.render_into(out, value, false, 0, &mut Vec::new())
+        self.render_into(out, value, false, 0, &mut Walk::default())
     }
 
-    /// `path` holds the containers being rendered around `value`: meeting one again is a
-    /// reference cycle. A cycle prints a short back-reference (`Node #1 ↺` -- the enclosing
-    /// ancestor's position on the path, 1-based) instead of descending or failing: a doubly
-    /// linked list's `prev` edge is a normal value, and `print(head)` should say something
-    /// useful about it. Sibling branches that alias the same *non-cyclic* value still render
-    /// it in full, since `path` is only the ancestor stack, not a seen-set.
+    /// `path.path` holds the containers being rendered around `value`; `path.seen` holds
+    /// every node-shaped instance (one with a field holding another instance) already
+    /// printed in this walk. A struct instance met again --
+    /// an ancestor (a cycle: a doubly linked list's `prev`) or one printed earlier in a
+    /// sibling field (an alias: a list's `tail`) -- prints a short reference named by its
+    /// content, `Node 1 ↺` (the struct name and its first scalar field), instead of
+    /// descending, failing, or printing the same chain twice. A shared instance with no
+    /// instance fields (`Point { 1, 2 }`, a unit variant) is not a node and prints in full
+    /// each time it is met outside a cycle. A list or dict met again
+    /// prints a reference only on a cycle (`list ↺`); shared lists and dicts that do not
+    /// contain themselves still print in full, so `[xs, xs]` reads as two lists.
     fn render_into(
         self,
         out: &mut String,
         value: Val<'gc>,
         quote: bool,
         depth: usize,
-        path: &mut Vec<*const ()>,
+        path: &mut Walk,
     ) -> RtResult<()> {
         let ptr = match value {
             Val::Array(a) => Some(Gc::as_ptr(a.0) as *const ()),
@@ -781,27 +795,49 @@ impl<'gc> Ctx<'gc> {
             return self.render_node(out, value, quote, depth, path);
         };
         // r[impl mimas.display.cycle]
-        if let Some(at) = path.iter().position(|&p| p == ptr) {
-            let kind = match value {
+        // r[impl mimas.display.cycle.full]
+        // only node-shaped instances (a field that holds another instance) count as
+        // aliases: a shared `Point { 1, 2 }` or a unit variant still prints in full
+        let is_node = match value {
+            Val::Instance(i) => i.0.borrow().fields.iter().any(|v| matches!(v, Val::Instance(_))),
+            _ => false,
+        };
+        let again = path.path.contains(&ptr) || (is_node && path.seen.contains(&ptr));
+        if again {
+            match value {
                 Val::Instance(i) => {
                     let inst = i.0.borrow();
-                    self.state
+                    let name = self
+                        .state
                         .struct_names
                         .borrow()
                         .get(inst.struct_id as usize)
                         .cloned()
-                        .unwrap_or_else(|| format!("@{}", inst.struct_id))
+                        .unwrap_or_else(|| format!("@{}", inst.struct_id));
+                    out.push_str(&name);
+                    // named by content: the first scalar field (`Node 1`), so the reader
+                    // can find the node it means without counting positions
+                    let label = inst.fields.iter().find(|v| {
+                        matches!(v, Val::Int(_) | Val::Float(_) | Val::Dec(_) | Val::Str(_) | Val::Bool(_))
+                    });
+                    if let Some(&v) = label {
+                        out.push(' ');
+                        self.render_node(out, v, true, depth + 1, path)?;
+                    }
+                    out.push_str(" ↺");
                 }
-                Val::Dict(_) => "dict".to_string(),
-                Val::Raised(_) => "raised".to_string(),
-                _ => "list".to_string(),
-            };
-            let _ = write!(out, "{kind} #{} ↺", at + 1);
+                Val::Dict(_) => out.push_str("dict ↺"),
+                Val::Raised(_) => out.push_str("raised ↺"),
+                _ => out.push_str("list ↺"),
+            }
             return Ok(());
         }
-        path.push(ptr);
+        path.path.push(ptr);
+        if is_node {
+            path.seen.push(ptr);
+        }
         let r = self.render_node(out, value, quote, depth, path);
-        path.pop();
+        path.path.pop();
         r
     }
 
@@ -811,7 +847,7 @@ impl<'gc> Ctx<'gc> {
         value: Val<'gc>,
         quote: bool,
         depth: usize,
-        path: &mut Vec<*const ()>,
+        path: &mut Walk,
     ) -> RtResult<()> {
         if depth > MAX_DISPLAY_DEPTH {
             return Err(RtErr::DisplayTooDeep);
