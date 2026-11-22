@@ -1,7 +1,7 @@
 use crate::{
     Error, Solver,
     components::{Len, Ty, Vid},
-    errors::{NullMismatch, TypeMismatch},
+    errors::{NullMismatch, OptionMismatch, TypeMismatch},
 };
 use shared::Location;
 
@@ -15,6 +15,19 @@ fn never_null(nullish: &Ty, other: &Ty) -> Option<String> {
             Ty::Option(_) | Ty::Null | Ty::Any | Ty::Never | Ty::Vid(_)
         ))
     .then(|| other.to_string())
+}
+
+/// `T?` found where a settled non-optional type was required — the
+/// writer has an option they never unwrapped, so the mismatch names
+/// the `!`/`?` spellings instead of only the two types.
+// r[impl mimas.option.access]
+fn unwrapped_option(found: &Ty, expected: &Ty) -> Option<String> {
+    (matches!(found, Ty::Option(_))
+        && !matches!(
+            expected,
+            Ty::Option(_) | Ty::Null | Ty::Any | Ty::Never | Ty::Vid(_)
+        ))
+    .then(|| found.to_string())
 }
 
 pub(crate) struct Unification;
@@ -37,6 +50,7 @@ impl Unification {
                 found: ty.to_string(),
                 expected: rule.to_string(),
                 never_null: never_null(ty, rule).or_else(|| never_null(rule, ty)),
+                option: unwrapped_option(ty, rule),
             }),
         }
     }
@@ -235,6 +249,9 @@ pub struct UnificationError {
     /// The never-null type when a bare `null` met a settled
     /// non-optional — gets the `?`-advice `NullMismatch` wording.
     never_null: Option<String>,
+    /// The `T?` when the found type was an option a settled
+    /// non-optional wouldn't take — gets `OptionMismatch` wording.
+    option: Option<String>,
 }
 impl UnificationError {
     pub(crate) fn recursive(vid: Vid, ty: &Ty) -> Self {
@@ -245,10 +262,20 @@ impl UnificationError {
                 crate::utils::Printer::vid(&vid)
             ),
             never_null: None,
+            option: None,
         }
     }
 
     pub(crate) fn into_type_mismatch(self, solver: &Solver, location: Location) -> Error {
+        if let Some(found) = self.option {
+            return OptionMismatch {
+                src: solver.src(location),
+                at: location.into(),
+                expected: crate::errors::elide(self.expected),
+                found: crate::errors::elide(found),
+            }
+            .into();
+        }
         if let Some(ty) = self.never_null {
             return NullMismatch {
                 src: solver.src(location),

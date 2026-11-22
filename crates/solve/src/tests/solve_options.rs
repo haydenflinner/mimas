@@ -222,3 +222,43 @@ test_fail!(null_mismatch_argument, "fn f(a: int) {} f(null);");
 // controls: options still compare to `null`, and `null == null` is fine.
 test_success!(null_eq_option_ok, "let a: int? = null; let c = a == null;");
 test_success!(null_eq_null_ok, "let c = null == null;");
+
+// a `.member` on a `T?` names the unwrap spellings, not "has no fields"
+// r[verify mimas.option.access]
+#[test]
+fn option_member_access_names_the_unwrap() {
+    let _t = TestResetter;
+    let e = TEST_SESSION
+        .with(|s| {
+            s.borrow_mut().run(
+                "fn find_all(xs: [str]) -> [[str]]? { [] }\nlet m = find_all([\"a\"]).flatten();",
+                "test",
+            )
+        })
+        .unwrap_err();
+    let rendered = format!("{e:?}");
+    assert!(rendered.contains("this is an option"), "{rendered}");
+    assert!(rendered.contains("unwrap it with `!` or `?`"), "{rendered}");
+}
+
+// a `T?` where a settled type is wanted names the unwrap spellings
+#[test]
+fn option_used_as_settled_names_the_unwrap() {
+    let _t = TestResetter;
+    let e = TEST_SESSION
+        .with(|s| {
+            s.borrow_mut()
+                .run("let d = { a : 1 };\nlet x: int = d[\"a\"];", "test")
+        })
+        .unwrap_err();
+    let rendered = format!("{e:?}");
+    assert!(rendered.contains("this is an option"), "{rendered}");
+    assert!(rendered.contains("unwrap it with `!` or `?`"), "{rendered}");
+}
+
+// controls: `?` access still unwraps, and option-to-option binds fine.
+test_success!(
+    option_member_after_unwrap_ok,
+    "let d = { a : [1] };\nlet x = d[\"a\"]?[0];"
+);
+test_success!(option_into_option_ok, "let a: int? = 1; let b: int? = a;");

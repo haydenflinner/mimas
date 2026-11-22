@@ -789,6 +789,26 @@ impl Solve for Access {
                                 }
                                 .into());
                             }
+                            // an option's members live on the value inside --
+                            // `.x` on `T?` names the unwrap spellings. (a `?`
+                            // access already unwrapped `lhs` above.)
+                            // r[impl mimas.option.access]
+                            Ty::Option(_) => {
+                                let member = match right.as_ident() {
+                                    Some(id) => id.lexeme.clone(),
+                                    None => match right.kind() {
+                                        ExprKind::Literal(Literal::Int(i)) => i.to_string(),
+                                        _ => String::new(),
+                                    },
+                                };
+                                return Err(crate::errors::OptionAccess {
+                                    src: solver.src(left.location()),
+                                    at: left.location().into(),
+                                    ty: other.to_string(),
+                                    member,
+                                }
+                                .into());
+                            }
                             l => (
                                 solver.builtin_adt(l).ok_or_else(|| {
                                     Error::from(TypeHasNoFields {

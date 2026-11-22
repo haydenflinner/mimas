@@ -54,6 +54,32 @@ pub struct TypeMismatch {
     pub found: String,
 }
 
+/// `.member` on a `T?` — the member belongs to the value inside, which
+/// the writer has to unwrap first.
+#[derive(Error, Debug, Diagnostic)]
+#[error("this is an option ({ty}): unwrap it with `!` or `?`")]
+pub struct OptionAccess {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("'{member}' belongs to the value inside")]
+    pub at: SourceSpan,
+    pub ty: String,
+    pub member: String,
+}
+
+/// a `T?` where a settled non-optional type was required: the found
+/// side holds an option the writer has to unwrap.
+#[derive(Error, Debug, Diagnostic)]
+#[error("this is an option ({found}): unwrap it with `!` or `?`")]
+pub struct OptionMismatch {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("expected {expected} but found {found}")]
+    pub at: SourceSpan,
+    pub expected: String,
+    pub found: String,
+}
+
 /// `null` where a settled non-optional type was required: the `?` in
 /// the declaration is what's missing, not a different value.
 #[derive(Error, Debug, Diagnostic)]
