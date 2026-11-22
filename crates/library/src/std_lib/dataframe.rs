@@ -1716,7 +1716,7 @@ fn __q_apply<'gc>(
     let out = match func {
         "sum" => e.sum(),
         "mean" | "average" => e.mean(),
-        "median" => e.median(),
+        "median" | "unweighted_median" => e.median(),
         "min" => e.min(),
         "max" => e.max(),
         "count" => e.count(),
@@ -1725,6 +1725,7 @@ fn __q_apply<'gc>(
         "last" => e.last(),
         // `query z`: a non-linear aggregate reads only the rows of positive weight
         crate::zset::POSITIVE => crate::zset::positive(e),
+        crate::zset::MEDIAN => crate::zset::weighted_median(e),
         "is_null" => e.is_null(),
         "is_not_null" => e.is_not_null(),
         "to_upper" => e.str().to_uppercase(),

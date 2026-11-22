@@ -47,6 +47,8 @@ polars = { git = "https://github.com/haydenflinner/polars.git", rev = "4c06e6bea
     # `col("x").floor()`/`.ceil()`/`.abs()` and the same-named `query` functions
     "round_series",
     "abs",
+    # `Expr::cum_sum` for the `query z` weighted `median` (`zset::weighted_median`)
+    "cum_agg",
 ] }
 # depended on directly (not via `polars`'s own `csv` feature) for `CsvReadOptions`/`CsvReader`,
 # used by `std_lib::dataframe::from_csv` to read an in-memory CSV string into a `DataFrame`.

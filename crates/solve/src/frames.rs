@@ -286,10 +286,13 @@ fn apply_result_col(f: &str, base: FrameCol) -> FrameCol {
             ty: Some(Ty::Int),
             dim: base.dim,
         },
-        "mean" | "average" | "median" | "quantile" | "std" | "var" | "cast_float" => FrameCol {
+        // `__z_median` is `median` in a `query z` aggregate, the weighted median
+        "mean" | "average" | "median" | "unweighted_median" | "__z_median" | "quantile" | "std"
+        | "var" | "cast_float" => FrameCol {
             ty: Some(Ty::Float),
             dim: match f {
-                "mean" | "average" | "median" | "quantile" | "std" | "cast_float" => base.dim,
+                "mean" | "average" | "median" | "unweighted_median" | "__z_median" | "quantile"
+                | "std" | "cast_float" => base.dim,
                 "var" => base.dim.map(|d| d.mul(d)),
                 _ => None,
             },

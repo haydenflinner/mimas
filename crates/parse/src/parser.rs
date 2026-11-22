@@ -3845,12 +3845,14 @@ impl<'s> Parser<'s> {
     /// counting rows: `count()` is the sum of `w`, `sum(x)` the sum of `x * w`,
     /// `count(x)` the sum of `w` over the rows where `x` is not null, and `mean(x)`
     /// the sum of `x * w` over the sum of `w`. A negative weight counts against the
-    /// total, so a delta Z-set aggregates to the change in the total. The other
-    /// aggregates (`min`, `max`, `median`, `first`, `last`, `n_unique`) read only
-    /// the rows of positive weight, through the `__z_positive` filter
+    /// total, so a delta Z-set aggregates to the change in the total. `median(x)` is
+    /// the weighted median, `__z_median` (`library::zset::weighted_median`). The other
+    /// aggregates (`min`, `max`, `unweighted_median`, `first`, `last`, `n_unique`) read
+    /// only the rows of positive weight, through the `__z_positive` filter
     /// (`library::zset::POSITIVE`). `e` is already lowered by `q_lower`.
     // r[impl mimas.query.zset.aggregate]
     // r[impl mimas.query.zset.aggregate.other]
+    // r[impl mimas.query.zset.aggregate.median]
     fn z_weigh_agg(&self, e: &Expr) -> Expr {
         let start = e.span().start();
         let w = || {
@@ -3922,7 +3924,11 @@ impl<'s> Parser<'s> {
                                     start,
                                 )
                             }
-                            "min" | "max" | "median" | "first" | "last" | "n_unique" => {
+                            "median" => {
+                                self.q_call("__q_apply", vec![x, text("__z_median"), null()], start)
+                            }
+                            "min" | "max" | "unweighted_median" | "first" | "last"
+                            | "n_unique" => {
                                 let rest: Vec<Expr> = c
                                     .arguments
                                     .iter()
@@ -4111,8 +4117,9 @@ impl<'s> Parser<'s> {
                 match c.left.as_ident().map(|i| i.lexeme.as_str()) {
                     Some("count") if args.is_empty() => self.q_call("__q_n", vec![], start),
                     Some(
-                        f @ ("sum" | "mean" | "average" | "median" | "min" | "max" | "count"
-                        | "n_unique" | "first" | "last" | "is_null" | "is_not_null"
+                        f @ ("sum" | "mean" | "average" | "median" | "unweighted_median"
+                        | "min" | "max" | "count" | "n_unique" | "first" | "last" | "is_null"
+                        | "is_not_null"
                         | "to_upper" | "to_lower" | "len" | "contains" | "starts_with"
                         | "ends_with" | "fill_null" | "is_in" | "eq" | "neq" | "cast_int"
                         | "cast_float" | "cast_str" | "lag" | "lead" | "difference" | "abs"

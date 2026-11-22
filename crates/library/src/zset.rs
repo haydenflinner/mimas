@@ -93,18 +93,57 @@ pub fn consolidate(df: &DataFrame) -> PolarsResult<DataFrame> {
 
 /// The `query z` name of the aggregate filter: the parser lowers a
 /// non-linear aggregate in `group … { aggregate { … } }` (`min`, `max`,
-/// `median`, `first`, `last`, `n_unique`) to `__q_apply(x, POSITIVE, null)`
-/// under the aggregate, and both runtimes answer it with [`positive`].
+/// `unweighted_median`, `first`, `last`, `n_unique`) to
+/// `__q_apply(x, POSITIVE, null)` under the aggregate, and both runtimes
+/// answer it with [`positive`].
 pub const POSITIVE: &str = "__z_positive";
 
 /// `e` on the rows of positive weight only. A non-linear aggregate reads
 /// its column through this, so a row taken away (weight 0 or less) is not
 /// a value. Each row counts once, whatever its weight: `min`, `max`,
-/// `first`, `last` and `n_unique` do not change with copies, and `median`
-/// counts each distinct row once.
+/// `first`, `last` and `n_unique` do not change with copies, and
+/// `unweighted_median` counts each distinct row once.
 /// r[impl mimas.query.zset.aggregate.other]
 pub fn positive(e: Expr) -> Expr {
     e.filter(col(W).gt(lit(0i64)))
+}
+
+/// The `query z` name of the weighted median: the parser lowers `median(x)`
+/// in a `query z` aggregate to `__q_apply(x, MEDIAN, null)`, and both
+/// runtimes answer it with [`weighted_median`].
+pub const MEDIAN: &str = "__z_median";
+
+/// The median of `e` with each row counted `w` times: the median of the
+/// copies the rows stand for. It reads only the rows of positive weight
+/// whose value is not null. A negative weight takes a copy away, and a
+/// median of copies that are not there has no meaning, so those rows are
+/// not values.
+///
+/// Sort the values, add up the weights in that order, and let `total` be
+/// the sum of all of them. The lower middle is the first value where twice
+/// the running weight reaches `total`, and the upper middle is the first
+/// value where it passes `total`. The median is the mean of the two. When
+/// the copies are an odd count, or a value's copies span the middle, the
+/// two are the same value. When the copies are an even count and the
+/// middle falls between two values, the median is halfway between them,
+/// as the plain `median` does for an even count of rows. So weights of 1
+/// on every row give the plain `median`. An aggregate over no rows is null.
+/// r[impl mimas.query.zset.aggregate.median]
+pub fn weighted_median(e: Expr) -> Expr {
+    let keep = col(W).gt(lit(0i64)).and(e.clone().is_not_null());
+    let x = e.filter(keep.clone());
+    let wt = weight().filter(keep);
+    // a stable sort, so the weights stay paired with their values
+    let order = SortMultipleOptions::default().with_maintain_order(true);
+    let xs = x.clone().sort_by([x.clone()], order.clone());
+    let twice_run = wt.clone().sort_by([x], order).cum_sum(false) * lit(2i64);
+    let total = wt.sum();
+    let lower = xs
+        .clone()
+        .filter(twice_run.clone().gt_eq(total.clone()))
+        .first();
+    let upper = xs.filter(twice_run.gt(total)).first();
+    (lower.cast(DataType::Float64) + upper.cast(DataType::Float64)) / lit(2.0f64)
 }
 
 /// The polars join kind a query names.

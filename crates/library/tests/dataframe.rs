@@ -1534,6 +1534,94 @@ test_run!(
     }.pull("hi")!"# => "[2.0]",
 );
 
+// `median` in `query z` is the median of the copies the weights stand for,
+// and `unweighted_median` counts each row of positive weight once.
+const ZMEDIAN: &str = r#"use std::polars::*;
+    let skew = table { v, w
+        1, 3
+        10, 1
+    };
+    let even = table { v, w
+        1, 1
+        2, 1
+        10, 2
+    };
+    let gone = table { v, w
+        1, 1
+        5, 1
+        7, -4
+        9, 1
+    };
+    let grouped = table { k, v, w
+        "a", 1, 3
+        "a", 10, 1
+        "b", 2, 1
+        "b", 4, 1
+        "b", 6, 5
+    };
+    let plain = table { v
+        1
+        2
+        3
+        4
+    };
+    fn med(t: DataFrame) -> [float] {
+        query z {
+            t
+            group { aggregate { m = median(v) } }
+        }.pull("m")!
+    }
+    fn umed(t: DataFrame) -> [float] {
+        query z {
+            t
+            group { aggregate { m = unweighted_median(v) } }
+        }.pull("m")!
+    }"#;
+
+// r[verify mimas.query.zset.aggregate.median]
+test_run!(
+    zset_median_weighs_each_row,
+    ZMEDIAN,
+    // the copies are 1, 1, 1, 10: the middle two are both 1
+    r#"med(skew)"# => "[1.0]",
+    // the copies are 1, 2, 10, 10: the middle falls between 2 and 10
+    r#"med(even)"# => "[6.0]",
+    // the row of weight -4 is not a value: the copies are 1, 5, 9
+    r#"med(gone)"# => "[5.0]",
+    // weight 1 on every row gives the plain median
+    r#"med(plain)"# => "[2.5]",
+    r#"query {
+        plain
+        group { aggregate { m = median(v) } }
+    }.pull("m")!"# => "[2.5]",
+    // one median per group: a is 1, 1, 1, 10 and b is 2, 4, 6, 6, 6, 6, 6
+    r#"query z {
+        grouped
+        group k { aggregate { m = median(v) } }
+        sort k
+    }.pull("m")!"# => "[1.0, 6.0]",
+);
+
+// r[verify mimas.query.zset.aggregate.other]
+test_run!(
+    zset_unweighted_median_counts_each_row_once,
+    ZMEDIAN,
+    r#"umed(skew)"# => "[5.5]",
+    r#"umed(even)"# => "[2.0]",
+    // the row of weight -4 is still not a value
+    r#"umed(gone)"# => "[5.0]",
+    r#"query z {
+        grouped
+        group k { aggregate { m = unweighted_median(v) } }
+        sort k
+    }.pull("m")!"# => "[5.5, 4.0]",
+    // outside `query z`, `unweighted_median` is `median`
+    r#"query {
+        plain
+        group { aggregate { m = unweighted_median(v) } }
+    }.pull("m")!"# => "[2.5]",
+);
+
 // r[verify mimas.query.zset.add]
 test_run!(
     zset_tables_add_and_subtract,
