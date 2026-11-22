@@ -5,31 +5,46 @@ Memorable additions to mimas beyond what the changelog tracks. Newest first.
 ## `query z { }`: queries over Z-sets (`library/src/zset.rs`, spec `mimas.query.zset`)
 
 `query z { … }` takes the verbs of `query { … }`, but each frame is a
-Z-set: rows carry an integer weight in a `__w` column, and identical rows
+Z-set: rows carry an integer weight in a `w` column, and identical rows
 merge by adding their weights. The parser lowers the block to the same
 `__q_*` natives plus five `__z_*` ones, at the verbs that must see the
 weights:
 
 - The source table and each joined table go through `__z_in`: weight 1 per
-  row unless the frame has `__w` already, so a `query z` result feeds the
-  next `query z` with its weights.
+  row unless the frame has an integer `w` already, so a `query z` result
+  feeds the next `query z` with its weights, and so does any table with an
+  int `w` column. A `w` of another type is an error: the frame-schema pass
+  reports it when it knows the column's type (`ZsetWeightNotInt`), and
+  `zset::weigh` faults on it at run time. Both messages name the fix,
+  `.rename("w", "width")!`.
 - `filter`, `derive` and `rename` lower as in plain mode. `select` adds
-  `__w` to its name list.
-- `join` is `__z_join`: the polars join, then `__w = __w * __w_right`. A
+  `w` to its name list.
+- `join` is `__z_join`: the polars join, then `w = w * w_right`, and
+  `w_right` goes. A
   null weight (an unmatched side of a left, right or full join) counts as 1.
-- `group … { aggregate { … } }` runs `__z_expand` first: each row repeats
-  by its weight, rows of weight 0 or less drop, and `__w` goes. The plain
-  aggregate then counts weights without any rewrite of `count`/`sum`/`min`/
-  `max`/`mean`. Each output row weighs 1.
+- `group … { aggregate { … } }` consolidates first (`__z_cons`), and the
+  parser rewrites each aggregate to read `w` (`Parser::z_weigh_agg`):
+  `count()` is `sum(w)`, `sum(x)` is `sum(x * w)`, `count(x)` sums `w`
+  where `x` is not null, and `mean(x)` is `sum(x * w)` over `sum(w)`. A
+  negative weight counts against the total, so a delta Z-set aggregates
+  to the change. `min`, `max`, `median`, `first`, `last` and `n_unique`
+  read their column through `zset::positive`, the rows of positive
+  weight (the `__z_positive` apply). Each output row weighs 1.
 - `distinct` is `__z_distinct`: consolidate, keep positive rows, weight 1.
 - `sort` and `take` see `__z_cons(t)`, the consolidated frame, and so does
   the block's value. Consolidation is a stable group-by over every other
   column, so a row stays where its first copy was and a sorted frame stays
-  sorted. `__w` ends up as the last column.
+  sorted. `w` ends up as the last column.
 
 `changes(new, old)` in `std::polars` is the delta: `new`'s rows at their
-weights, `old`'s at negated weights, consolidated. The frame-schema pass
-knows each `__z_*` native, so `.pull("__w")!` checks as `[int]`.
+weights, `old`'s at negated weights, consolidated. `z1 + z2` and
+`z1 - z2` on two frames are `zset::add` and `zset::sub`, and `changes`
+is `sub`. The VM reaches them through `Api::add_frame_bin_op`, a hook in
+`instance_bin` for `DataFrame` operands. `pl.rs` implements `Add`/`Sub`
+for `DataFrame`. The frame-schema pass types them
+(`Solver::frame_evaluation`): the left side's columns and `w` last, and
+`ZsetColumnsDiffer` when the two sides' column names differ. The frame-schema pass
+knows each `__z_*` native, so `.pull("w")!` checks as `[int]`.
 
 The algebra lives in `library::zset` as plain polars transforms, and
 `host/eval`'s `pl.rs` calls the same functions for generated Rust. This is
@@ -38,7 +53,10 @@ live passes is not here yet (see the parent repo's
 `docs/devlog/zset-query-2026-11-21.md`).
 
 Tests: `library/tests/dataframe.rs` (`zset_*`), one per verb rule plus
-`changes`; `cli/src/fmt.rs` `query_cells_keep_adjacency`.
+`changes`, the int `w` rule (`zset_int_w_column_is_the_weights`,
+`zset_float_w_column_*`), the weighted aggregates
+(`zset_aggregate_sums_by_weight`, `zset_min_max_*`) and `+`/`-`
+(`zset_tables_add_and_subtract`, `zset_add_with_different_columns_*`); `cli/src/fmt.rs` `query_cells_keep_adjacency`.
 
 ## Canonical formatter `mimas fmt` (`cli/src/fmt.rs`, spec `mimas.fmt`)
 

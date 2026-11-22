@@ -1716,6 +1716,9 @@ pub type InstanceUnary = dyn for<'gc> Fn(Ctx<'gc>, Val<'gc>, UnaryOp) -> RtResul
 pub struct InstanceOps {
     pub bin: RefCell<HashMap<u32, Rc<InstanceBin>>>,
     pub unary: RefCell<HashMap<u32, Rc<InstanceUnary>>>,
+    /// `a <op> b` where either side is a `DataFrame`, set through
+    /// [`crate::api::Api::add_frame_bin_op`] (`z1 + z2` on Z-sets).
+    pub frame: RefCell<Option<Rc<InstanceBin>>>,
 }
 
 /// Infix dispatch for `Val::Instance` operands — the impl registered on the
@@ -1732,9 +1735,16 @@ fn instance_bin<'gc>(
         Val::Instance(i) => Some(i.0.borrow().struct_id),
         _ => None,
     };
-    let ops = &ctx.fixture::<InstanceOps>().bin;
+    let ops = ctx.fixture::<InstanceOps>();
     for v in [a, b] {
-        let f = sid(v).and_then(|id| ops.borrow().get(&id).cloned());
+        let f = sid(v).and_then(|id| ops.bin.borrow().get(&id).cloned());
+        if let Some(f) = f {
+            return Some(f(ctx, a, b, op));
+        }
+    }
+    #[cfg(feature = "dataframe")]
+    if matches!(a, Val::DataFrame(_)) || matches!(b, Val::DataFrame(_)) {
+        let f = ops.frame.borrow().clone();
         if let Some(f) = f {
             return Some(f(ctx, a, b, op));
         }

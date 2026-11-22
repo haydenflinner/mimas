@@ -1353,7 +1353,7 @@ fn data_source_without_resolver_compiles_opaque() {
 }
 
 // ---- `query z { … }`: the same verbs over Z-sets --------------------------------------------
-// Each row has an integer weight, `__w`. A plain table enters at weight 1 per row, identical
+// Each row has an integer weight, `w`. A plain table enters at weight 1 per row, identical
 // rows merge by summing their weights, and a row whose weights sum to zero drops out.
 
 const ZROWS: &str = r#"use std::polars::*;
@@ -1380,9 +1380,9 @@ test_run!(
     zset_duplicate_rows_merge_into_one_weight,
     ZROWS,
     r#"query z { dup }.pull("k")!"# => r#"["a", "b"]"#,
-    r#"query z { dup }.pull("__w")!"# => "[2, 1]",
+    r#"query z { dup }.pull("w")!"# => "[2, 1]",
     // the weight is the last column, and it is an int
-    r#"query z { dup }.col_names()"# => r#"["k", "v", "__w"]"#,
+    r#"query z { dup }.col_names()"# => r#"["k", "v", "w"]"#,
     // plain `query { }` keeps every row and adds no weight
     r#"query { dup }.pull("k")!"# => r#"["a", "a", "b"]"#,
     r#"query { dup }.col_names()"# => r#"["k", "v"]"#,
@@ -1397,20 +1397,20 @@ test_run!(
         filter v > 1
         derive v10 = v * 10
         rename k key
-    }.col_names()"# => r#"["key", "v", "v10", "__w"]"#,
+    }.col_names()"# => r#"["key", "v", "v10", "w"]"#,
     r#"query z {
         three
         filter v > 1
-    }.pull("__w")!"# => "[3]",
+    }.pull("w")!"# => "[3]",
     // a projection that makes rows equal merges them
     r#"query z {
         tags
         select tag
-    }.pull("__w")!"# => "[2, 1]",
+    }.pull("w")!"# => "[2, 1]",
     r#"query z {
         tags
         select tag
-    }.col_names()"# => r#"["tag", "__w"]"#,
+    }.col_names()"# => r#"["tag", "w"]"#,
 );
 
 // r[verify mimas.query.zset.join]
@@ -1420,17 +1420,17 @@ test_run!(
     // a (weight 2) meets x (weight 2): one row of weight 4
     r#"{ let dz = query z { dup };
        let tz = query z { tags };
-       query z { dz join tz k }.pull("__w")! }"# => "[4, 1]",
+       query z { dz join tz k }.pull("w")! }"# => "[4, 1]",
     r#"{ let dz = query z { dup };
        let tz = query z { tags };
-       query z { dz join tz k }.col_names() }"# => r#"["k", "v", "tag", "__w"]"#,
+       query z { dz join tz k }.col_names() }"# => r#"["k", "v", "tag", "w"]"#,
     // an unmatched row of a left join keeps its own weight
     r#"{ let dz = query z { dup };
        let who = table { k
            "a"
            "c"
        };
-       query z { who join dz k "left" }.pull("__w")! }"# => "[2, 1]",
+       query z { who join dz k "left" }.pull("w")! }"# => "[2, 1]",
 );
 
 // r[verify mimas.query.zset.aggregate]
@@ -1454,8 +1454,8 @@ test_run!(
        query z {
            z3
            group k { aggregate { n = count() } }
-       }.pull("__w")! }"# => "[1, 1]",
-    // a row of negative weight counts as no rows
+       }.pull("w")! }"# => "[1, 1]",
+    // a row of negative weight counts against the total
     r#"{ let gone = changes(table { k
            "a"
        }, table { k
@@ -1465,8 +1465,143 @@ test_run!(
        query z {
            gone
            group k { aggregate { n = count() } }
-       }.pull("n")!.len() }"# => "0",
+       }.pull("n")! }"# => "[-1]",
+    // `mean` is the weighted mean: (5 * 3 + 1) / 4
+    r#"{ let z3 = query z { three };
+       query z {
+           z3
+           group { aggregate { m = mean(v) } }
+       }.pull("m")! }"# => "[4.0]",
 );
+
+// The grocery basket: an aggregate reads the weights directly, so a change of
+// -1 bread takes a bread's price off the total.
+const BASKET: &str = r#"use std::polars::*;
+    let basket = table { item, w
+        "apple", 2
+        "bread", 1
+    };
+    let change = table { item, w
+        "apple", 1
+        "bread", -1
+    };
+    let prices = table { item, price
+        "apple", 0.50
+        "bread", 2.00
+    };
+    fn total(b: DataFrame) -> str {
+        let t: [float] = query z {
+            b
+            join prices item
+            group { aggregate { t = sum(price) } }
+        }.pull("t")!;
+        t[0].format(2)
+    }"#;
+
+// r[verify mimas.query.zset.aggregate]
+test_run!(
+    zset_aggregate_sums_by_weight,
+    BASKET,
+    r#"total(basket)"# => r#""3.00""#,
+    // a delta Z-set totals the change: +0.50 for an apple, -2.00 for a bread
+    r#"total(change)"# => r#""-1.50""#,
+    r#"total(basket + change)"# => r#""1.50""#,
+    // a delta of one bread taken away
+    r#"total(table { item, w
+        "bread", -1
+    })"# => r#""-2.00""#,
+    // `count()` adds the weights
+    r#"query z {
+        basket
+        group { aggregate { n = count() } }
+    }.pull("n")!"# => "[3]",
+);
+
+// r[verify mimas.query.zset.aggregate.other]
+test_run!(
+    zset_min_max_read_only_rows_of_positive_weight,
+    BASKET,
+    // bread has weight -1 in `change`, so it is not a value for `max`
+    r#"query z {
+        change
+        join prices item
+        group { aggregate { hi = max(price), lo = min(price) } }
+    }.pull("hi")!"# => "[0.5]",
+    r#"query z {
+        basket
+        join prices item
+        group { aggregate { hi = max(price), lo = min(price) } }
+    }.pull("hi")!"# => "[2.0]",
+);
+
+// r[verify mimas.query.zset.add]
+test_run!(
+    zset_tables_add_and_subtract,
+    r#"use std::polars::*;
+       let z1 = table { item, w
+           "apple", 2
+           "pear", 1
+       };
+       let z2 = table { item, w
+           "apple", 1
+           "pear", -1
+           "fig", 1
+       };
+       let plain = table { item
+           "apple"
+           "fig"
+       };"#,
+    // equal rows add their weights, and pear comes to 0 and drops out
+    r#"(z1 + z2).pull("item")!"# => r#"["apple", "fig"]"#,
+    r#"(z1 + z2).pull("w")!"# => "[3, 1]",
+    // a Z-set minus itself is empty
+    r#"(z1 - z1).pull("item")!.len()"# => "0",
+    // `-` is `changes`
+    r#"(z1 - z2).pull("w")! == changes(z1, z2).pull("w")!"# => "true",
+    r#"(z1 - z2).pull("item")!"# => r#"["apple", "pear", "fig"]"#,
+    r#"(z1 - z2).pull("w")!"# => "[1, 2, -1]",
+    // a plain frame counts each row at weight 1
+    r#"(z1 + plain).pull("w")!"# => "[3, 1, 1]",
+    r#"(plain + plain).pull("w")!"# => "[2, 2]",
+    r#"(plain + plain).col_names()"# => r#"["item", "w"]"#,
+    // column order does not matter
+    r#"{ let a = table { k, v
+           "x", 1
+       };
+       let b = table { v, k
+           1, "x"
+       };
+       (a + b).pull("w")! }"# => "[2]",
+);
+
+// r[verify mimas.query.zset.add]
+#[test]
+fn zset_add_with_different_columns_is_an_error() {
+    let src = r#"use std::polars::*;
+        let a = table { item, w
+            "apple", 2
+        };
+        let b = table { name, w
+            "apple", 1
+        };
+        let c = a + b;"#;
+    let err = compile_err(src);
+    // the report wraps its lines, so check short pieces
+    assert!(err.contains("same column names"), "{err}");
+    assert!(err.contains("has `item`"), "{err}");
+    assert!(err.contains("has `name`"), "{err}");
+    // frames whose columns the checker cannot see fault at run time
+    let src = r#"use std::polars::*;
+        let a = from_csv("item,w\napple,2")!;
+        let b = from_csv("name,w\napple,1")!;
+        let c = a - b;"#;
+    let err = match test_runner::try_execute(src) {
+        Ok(_) => panic!("expected different columns to fault"),
+        Err(e) => format!("{e}"),
+    };
+    assert!(err.contains("same column names"), "{err}");
+    assert!(err.contains("`item`"), "{err}");
+}
 
 // r[verify mimas.query.zset.distinct]
 test_run!(
@@ -1475,7 +1610,7 @@ test_run!(
     r#"query z {
         three
         distinct
-    }.pull("__w")!"# => "[1, 1]",
+    }.pull("w")!"# => "[1, 1]",
     // a row of negative weight is not in the set
     r#"{ let d = changes(table { k
            "a"
@@ -1504,7 +1639,7 @@ test_run!(
     r#"query z {
         dup
         sort -k
-    }.pull("__w")!"# => "[1, 2]",
+    }.pull("w")!"# => "[1, 2]",
 );
 
 // r[verify mimas.query.zset.changes]
@@ -1522,7 +1657,7 @@ test_run!(
        };"#,
     r#"changes(new, old).pull("k")!"# => r#"["b", "c", "b"]"#,
     r#"changes(new, old).pull("n")!"# => "[3, 4, 2]",
-    r#"changes(new, old).pull("__w")!"# => "[1, 1, -1]",
+    r#"changes(new, old).pull("w")!"# => "[1, 1, -1]",
     // nothing changed: no rows
     r#"changes(new, new).pull("k")!.len()"# => "0",
     // a Z-set's own weights carry: two copies gone is weight -2, and
@@ -1538,5 +1673,72 @@ test_run!(
        let one_b = table { k
            "b"
        };
-       changes(one_b, two).pull("__w")! }"# => "[-2]",
+       changes(one_b, two).pull("w")! }"# => "[-2]",
 );
+
+// r[verify mimas.query.zset.adopt]
+test_run!(
+    zset_int_w_column_is_the_weights,
+    r#"use std::polars::*;
+       let weighed = table { k, w
+           "a", 2
+           "b", 1
+           "a", 3
+       };"#,
+    // a table with an int `w` is a Z-set already: consolidation sums its weights
+    r#"query z { weighed }.pull("w")!"# => "[5, 1]",
+    r#"query z { weighed }.col_names()"# => r#"["k", "w"]"#,
+    // a join multiplies the two `w`s and keeps no `w_right`
+    r#"{ let other = table { k, w
+           "a", 10
+       };
+       query z { weighed join other k }.col_names() }"# => r#"["k", "w"]"#,
+    r#"{ let other = table { k, w
+           "a", 10
+       };
+       query z { weighed join other k }.pull("w")! }"# => "[50]",
+    // plain `query { }` leaves `w` an ordinary column
+    r#"query { weighed }.pull("w")!"# => "[2, 1, 3]",
+);
+
+// r[verify mimas.query.zset.reject]
+#[test]
+fn zset_float_w_column_is_a_check_error() {
+    let err = compile_err(
+        r#"use std::polars::*;
+           let boxes = table { k, w
+               "a", 1.5
+           };
+           let z = query z { boxes };"#,
+    );
+    assert!(err.contains("this table's `w` is float"), "{err}");
+    assert!(err.contains(r#".rename("w", "width")!"#), "{err}");
+    // plain `query { }` takes the same table
+    assert!(
+        vm::Vm::compile(
+            r#"use std::polars::*;
+               let boxes = table { k, w
+                   "a", 1.5
+               };
+               let q = query { boxes };"#,
+            library::std
+        )
+        .is_ok()
+    );
+}
+
+// r[verify mimas.query.zset.reject]
+#[test]
+fn zset_float_w_column_faults_at_run_time() {
+    // a csv frame's columns are unknown to the checker; the runtime catches it
+    let src = r#"use std::polars::*;
+        let boxes = from_csv("k,w\na,1.5")!;
+        let z = query z { boxes };"#;
+    let err = match test_runner::try_execute(src) {
+        Ok(_) => panic!("expected a float `w` to fault"),
+        Err(e) => format!("{e}"),
+    };
+    // the report wraps its lines, so check short pieces
+    assert!(err.contains("is float"), "{err}");
+    assert!(err.contains("whole numbers"), "{err}");
+}

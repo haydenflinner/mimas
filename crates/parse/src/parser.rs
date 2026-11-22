@@ -3640,11 +3640,11 @@ impl<'s> Parser<'s> {
     // It lowers to one `__q_*` native call per verb (see `library::std_lib::dataframe`).
     //
     // `query z { … }` takes the same verbs, but its frames are Z-sets: each row has an
-    // integer weight in a `__w` column (see `library::zset`). The source and each joined
-    // table enter through `__z_in` (weight 1 per row unless they have `__w`); `filter`,
+    // integer weight in a `w` column (see `library::zset`). The source and each joined
+    // table enter through `__z_in` (weight 1 per row unless they have an int `w`); `filter`,
     // `derive` and `rename` lower as above and the weight rides along; `select` keeps
-    // `__w`; `join` multiplies weights (`__z_join`); `group` repeats each row by its weight
-    // before the plain aggregate (`__z_expand`) and weighs each output row 1; `distinct`
+    // `w`; `join` multiplies weights (`__z_join`); `group` consolidates, rewrites each
+    // aggregate to read the weights (`z_weigh_agg`) and weighs each output row 1; `distinct`
     // is `__z_distinct`; `sort` and `take` consolidate first (`__z_cons`), and so does the
     // block's result.
     // r[impl mimas.query.zset]
@@ -3701,8 +3701,8 @@ impl<'s> Parser<'s> {
                     let mut names: Vec<String> =
                         self.q_names(false).into_iter().map(|(n, _)| n).collect();
                     // a Z-set keeps its weights through a projection
-                    if zset && !names.iter().any(|n| n == "__w") {
-                        names.push("__w".into());
+                    if zset && !names.iter().any(|n| n == "w") {
+                        names.push("w".into());
                     }
                     let list = self.q_str_list(names, verb_start);
                     self.q_call("__q_select", vec![table, list], verb_start)
@@ -3755,9 +3755,9 @@ impl<'s> Parser<'s> {
                 "group" => {
                     let names = self.q_names_until_brace();
                     let list = self.q_str_list(names, verb_start);
-                    // a Z-set row of weight 3 counts as three rows to the aggregates
+                    // the aggregates read the weights of the consolidated rows
                     let table = if zset {
-                        self.q_call("__z_expand", vec![table], verb_start)
+                        self.q_call("__z_cons", vec![table], verb_start)
                     } else {
                         table
                     };
@@ -3768,7 +3768,10 @@ impl<'s> Parser<'s> {
                     } else {
                         self.expected("`aggregate { … }` inside `group`");
                     }
-                    let aggs = self.q_named_columns();
+                    let mut aggs = self.q_named_columns();
+                    if zset {
+                        aggs = aggs.iter().map(|a| self.z_weigh_agg(a)).collect();
+                    }
                     self.expect(TokKind::RightBrace);
                     let list = self.new_expr(Literal::Array(aggs), verb_start);
                     let agg = self.q_call("__q_agg", vec![grouped, list], verb_start);
@@ -3836,6 +3839,108 @@ impl<'s> Parser<'s> {
             return self.q_call("__z_cons", vec![table], start);
         }
         table
+    }
+
+    /// A `query z` aggregate, rewritten to read the row weights in `w` instead of
+    /// counting rows: `count()` is the sum of `w`, `sum(x)` the sum of `x * w`,
+    /// `count(x)` the sum of `w` over the rows where `x` is not null, and `mean(x)`
+    /// the sum of `x * w` over the sum of `w`. A negative weight counts against the
+    /// total, so a delta Z-set aggregates to the change in the total. The other
+    /// aggregates (`min`, `max`, `median`, `first`, `last`, `n_unique`) read only
+    /// the rows of positive weight, through the `__z_positive` filter
+    /// (`library::zset::POSITIVE`). `e` is already lowered by `q_lower`.
+    // r[impl mimas.query.zset.aggregate]
+    // r[impl mimas.query.zset.aggregate.other]
+    fn z_weigh_agg(&self, e: &Expr) -> Expr {
+        let start = e.span().start();
+        let w = || {
+            let name = self.new_expr(Literal::String("w".into()), start);
+            self.q_call("__q_col", vec![name], start)
+        };
+        let text = |s: &str| self.new_expr(Literal::String(s.into()), start);
+        let null = || self.new_expr(Literal::Null, start);
+        let apply = |x: Expr, f: &str| self.q_call("__q_apply", vec![x, text(f), null()], start);
+        let times_w = |x: Expr| {
+            let x = self.new_expr(Grouping::new(x), start);
+            self.new_expr(Evaluation::new(x, EvaluationOp::Multiply, w()), start)
+        };
+        match e.kind() {
+            ExprKind::Grouping(g) => {
+                self.new_expr(Grouping::new(self.z_weigh_agg(&g.inner)), start)
+            }
+            ExprKind::Evaluation(ev) => self.new_expr(
+                Evaluation::new(
+                    self.z_weigh_agg(&ev.left),
+                    ev.op,
+                    self.z_weigh_agg(&ev.right),
+                ),
+                start,
+            ),
+            ExprKind::Equality(eq) => self.new_expr(
+                Equality::new(
+                    self.z_weigh_agg(&eq.left),
+                    eq.op,
+                    self.z_weigh_agg(&eq.right),
+                ),
+                start,
+            ),
+            ExprKind::Unary(u) => {
+                self.new_expr(Unary::new(u.op, self.z_weigh_agg(&u.right)), start)
+            }
+            ExprKind::Call(c) => {
+                let arg = |n: usize| c.arguments.get(n).map(|a| a.value.clone());
+                match c.left.as_ident().map(|i| i.lexeme.as_str()) {
+                    Some("__q_named") => {
+                        let mut args: Vec<Expr> =
+                            c.arguments.iter().map(|a| a.value.clone()).collect();
+                        if let Some(v) = args.first_mut() {
+                            *v = self.z_weigh_agg(v);
+                        }
+                        self.q_call("__q_named", args, start)
+                    }
+                    Some("__q_n") => apply(w(), "sum"),
+                    Some("__q_apply") => {
+                        let f = match arg(1).as_ref().map(|f| f.kind()) {
+                            Some(ExprKind::Literal(Literal::String(f))) => f.clone(),
+                            _ => return e.clone(),
+                        };
+                        let Some(x) = arg(0) else {
+                            return e.clone();
+                        };
+                        match f.as_str() {
+                            "sum" => apply(times_w(x), "sum"),
+                            "count" => {
+                                let present = apply(x, "is_not_null");
+                                let zero = self.new_expr(Literal::Int(0), start);
+                                let ws = self.q_call("__q_when", vec![present, w(), zero], start);
+                                apply(ws, "sum")
+                            }
+                            "mean" | "average" => {
+                                let total = apply(apply(times_w(x), "sum"), "cast_float");
+                                self.new_expr(
+                                    Evaluation::new(total, EvaluationOp::Divide, apply(w(), "sum")),
+                                    start,
+                                )
+                            }
+                            "min" | "max" | "median" | "first" | "last" | "n_unique" => {
+                                let rest: Vec<Expr> = c
+                                    .arguments
+                                    .iter()
+                                    .skip(2)
+                                    .map(|a| a.value.clone())
+                                    .collect();
+                                let mut args = vec![apply(x, "__z_positive"), text(&f)];
+                                args.extend(rest);
+                                self.q_call("__q_apply", args, start)
+                            }
+                            _ => e.clone(),
+                        }
+                    }
+                    _ => e.clone(),
+                }
+            }
+            _ => e.clone(),
+        }
     }
 
     fn q_call(&self, name: &str, args: Vec<Expr>, start: usize) -> Expr {

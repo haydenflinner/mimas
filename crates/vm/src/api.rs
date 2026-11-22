@@ -399,6 +399,18 @@ impl<'a, 'gc> Api<'a, 'gc> {
         self.mark_op_overloads::<T>();
     }
 
+    /// `a <op> b` where either operand is a `DataFrame`. `f` declines the
+    /// shapes and ops it doesn't handle via `RtErr::invalid_bin`, as with
+    /// [`Self::add_bin_op`]. The solver types these operators itself
+    /// (`solve/src/frames.rs`), so the adt is not flagged.
+    #[cfg(feature = "dataframe")]
+    pub fn add_frame_bin_op<F>(&mut self, f: F)
+    where
+        F: for<'g> Fn(Ctx<'g>, Val<'g>, Val<'g>, BinOp) -> RtResult<Val<'g>> + 'static,
+    {
+        *self.ctx.fixture::<InstanceOps>().frame.borrow_mut() = Some(Rc::new(f));
+    }
+
     /// `-a`/`+a`/`!a`/`~a` for `T` instances — see [`Self::add_bin_op`];
     /// decline via `RtErr::InvalidUnaryOperand`.
     ///

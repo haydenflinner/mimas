@@ -13,16 +13,19 @@ use std::rc::Rc;
 
 use crate::FxIndexMap;
 use parse::{
-    Access, Call, Expr, ExprKind, Literal, NodeId,
+    Access, Call, Evaluation, Expr, ExprKind, Literal, NodeId,
     components::{Pat, PatKind},
     expr::{EqualityOp, EvaluationOp, UnaryOp},
 };
-use shared::{Located, Ty, units::Dim};
+use shared::{Located, Location, Ty, units::Dim};
 
 use crate::{
     Error, Result, Solver,
     components::{AdtId, TyExt},
-    errors::{BadLiteralArg, BadSchemaSpec, DimensionMismatch, NoSuchColumn, UnknownDataSource},
+    errors::{
+        BadLiteralArg, BadSchemaSpec, DimensionMismatch, NoSuchColumn, UnknownDataSource,
+        ZsetColumnsDiffer, ZsetWeightNotInt,
+    },
     traits::Query,
 };
 
@@ -82,6 +85,51 @@ impl FrameSchema {
             None => Err(solver.no_such_column(at, name, self)),
         }
     }
+}
+
+/// The weight column of a `query z { … }` frame (`library::zset::W`).
+const ZSET_W: &str = "w";
+
+/// A column type that can't hold Z-set weights: a concrete non-integer scalar. An
+/// untracked or generic type passes, and the runtime checks it.
+fn not_whole(ty: &Ty) -> bool {
+    let scalar = |t: &Ty| matches!(t, Ty::Float | Ty::Str | Ty::Bool);
+    match ty {
+        Ty::Option(inner) => scalar(inner),
+        t => scalar(t),
+    }
+}
+
+/// The column names other than `w` that only one side has, as `(left, right)`
+/// (`library::zset::column_difference`).
+fn zset_column_difference(left: &[String], right: &[String]) -> (Vec<String>, Vec<String>) {
+    let only = |a: &[String], b: &[String]| {
+        a.iter()
+            .filter(|n| n.as_str() != ZSET_W && !b.contains(n))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    (only(left, right), only(right, left))
+}
+
+/// "only the left side has `a`, and only the right side has `b`"
+/// (`library::zset::columns_differ_message`).
+fn zset_difference_text(left_only: &[String], right_only: &[String]) -> String {
+    let list = |names: &[String]| {
+        names
+            .iter()
+            .map(|n| format!("`{n}`"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut parts = vec![];
+    if !left_only.is_empty() {
+        parts.push(format!("only the left side has {}", list(left_only)));
+    }
+    if !right_only.is_empty() {
+        parts.push(format!("only the right side has {}", list(right_only)));
+    }
+    parts.join(", and ")
 }
 
 fn numeric(ty: &Ty) -> bool {
@@ -985,9 +1033,9 @@ impl Solver {
                     "__q_group" => self.q_group(id, call)?,
                     "__q_agg" => self.q_agg(id, call)?,
                     "__q_join" => self.q_join(id, call)?,
-                    // `query z { … }`: the same columns plus the `__w` weight
-                    "__z_in" => self.z_weighed(id, call, false),
-                    "__z_cons" | "changes" => self.z_weighed(id, call, true),
+                    // `query z { … }`: the same columns plus the `w` weight
+                    "__z_in" => self.z_weighed(id, call, false)?,
+                    "__z_cons" | "changes" => self.z_weighed(id, call, true)?,
                     "__z_distinct" => {
                         if let (Some(schema), Some(names), Some(at)) = (
                             arg(0).and_then(|a| self.frame_schema_of(a)),
@@ -998,21 +1046,14 @@ impl Solver {
                                 schema.col(self, at, n)?;
                             }
                         }
-                        self.z_weighed(id, call, true);
-                    }
-                    "__z_expand" => {
-                        if let Some(schema) = arg(0).and_then(|a| self.frame_schema_of(a)) {
-                            let mut out = schema.as_ref().clone();
-                            out.cols.shift_remove("__w");
-                            self.frame_schemas.insert(id, Rc::new(out));
-                        }
+                        self.z_weighed(id, call, true)?;
                     }
                     "__z_join" => {
                         self.q_join(id, call)?;
-                        // the right weight folds into `__w`
+                        // the right weight folds into `w`
                         if let Some(schema) = self.frame_schemas.get(&id).cloned() {
                             let mut out = schema.as_ref().clone();
-                            out.cols.shift_remove("__w_right");
+                            out.cols.shift_remove("w_right");
                             self.frame_schemas.insert(id, Rc::new(out));
                         }
                     }
@@ -1459,25 +1500,102 @@ impl Solver {
         Ok(())
     }
 
-    /// A Z-set's schema: the first argument's columns and an `int` `__w`. With `last`
-    /// the weight moves to the end, where consolidation puts it at run time.
-    fn z_weighed(&mut self, id: NodeId, call: &Call, last: bool) {
+    /// A Z-set's schema: the first argument's columns and an `int` `w`. With `last`
+    /// the weight moves to the end, where consolidation puts it at run time. A frame
+    /// argument whose `w` is known to hold something other than whole numbers can't
+    /// carry weights, so it is an error here (the runtime faults on it too).
+    // r[impl mimas.query.zset.reject]
+    fn z_weighed(&mut self, id: NodeId, call: &Call, last: bool) -> Result<()> {
+        for arg in &call.arguments {
+            let Some(schema) = self.frame_schema_of(&arg.value) else {
+                continue;
+            };
+            let ty = schema.cols.get(ZSET_W).and_then(|c| c.ty.clone());
+            if let Some(ty) = ty.filter(not_whole) {
+                Err(ZsetWeightNotInt {
+                    src: self.src(arg.value.location()),
+                    at: arg.value.location().into(),
+                    ty: ty.to_string(),
+                })?;
+            }
+        }
         let Some(schema) = call
             .arguments
             .first()
             .and_then(|a| self.frame_schema_of(&a.value))
         else {
-            return;
+            return Ok(());
         };
         let mut out = schema.as_ref().clone();
-        if last || !out.cols.contains_key("__w") {
+        if last || !out.cols.contains_key(ZSET_W) {
             let w = out
                 .cols
-                .shift_remove("__w")
+                .shift_remove(ZSET_W)
                 .unwrap_or_else(|| FrameCol::known(Ty::Int));
-            out.cols.insert("__w".into(), w);
+            out.cols.insert(ZSET_W.into(), w);
         }
         self.frame_schemas.insert(id, Rc::new(out));
+        Ok(())
+    }
+
+    /// `a + b` or `a - b` with a `DataFrame` on both sides: the Z-set sum or difference
+    /// (`library::zset::add`). The result has the left side's columns and an `int` `w`
+    /// last, and both sides must have the same column names when their schemas are
+    /// known. `None` when this is not such an expression.
+    // r[impl mimas.query.zset.add]
+    pub(crate) fn frame_evaluation(
+        &mut self,
+        id: NodeId,
+        ev: &Evaluation,
+        lhs: &Ty,
+        rhs: &Ty,
+        location: Location,
+    ) -> Result<Option<Ty>> {
+        let is_frame = |t: &Ty| matches!(t, Ty::Adt(a, _) if self.adts[*a].name == "DataFrame");
+        if !matches!(ev.op, EvaluationOp::Plus | EvaluationOp::Minus)
+            || !is_frame(lhs)
+            || !is_frame(rhs)
+        {
+            return Ok(None);
+        }
+        let left = self.frame_schema_of(&ev.left);
+        let right = self.frame_schema_of(&ev.right);
+        if let (Some(l), Some(r)) = (&left, &right) {
+            let names = |s: &FrameSchema| s.cols.keys().cloned().collect::<Vec<String>>();
+            let (left_only, right_only) = zset_column_difference(&names(l), &names(r));
+            if !left_only.is_empty() || !right_only.is_empty() {
+                Err(ZsetColumnsDiffer {
+                    src: self.src(location),
+                    at: location.into(),
+                    op: ev.op.to_string(),
+                    detail: zset_difference_text(&left_only, &right_only),
+                })?;
+            }
+        }
+        for side in [&left, &right].into_iter().flatten() {
+            if let Some(ty) = side
+                .cols
+                .get(ZSET_W)
+                .and_then(|c| c.ty.clone())
+                .filter(not_whole)
+            {
+                Err(ZsetWeightNotInt {
+                    src: self.src(location),
+                    at: location.into(),
+                    ty: ty.to_string(),
+                })?;
+            }
+        }
+        if let Some(l) = left {
+            let mut out = l.as_ref().clone();
+            let w = out
+                .cols
+                .shift_remove(ZSET_W)
+                .unwrap_or_else(|| FrameCol::known(Ty::Int));
+            out.cols.insert(ZSET_W.into(), w);
+            self.frame_schemas.insert(id, Rc::new(out));
+        }
+        Ok(Some(lhs.clone()))
     }
 
     /// `__q_join(t, other, ["key"], "kind")` -- left cols + the right's non-key cols.

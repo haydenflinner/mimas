@@ -2314,6 +2314,10 @@ impl Solve for Evaluation {
         let rhs = self.right.query(solver)?;
         let mut lhs_n = lhs.clone().normalized(solver);
         let mut rhs_n = rhs.clone().normalized(solver);
+        // `z1 + z2`, `z1 - z2`: two frames add as Z-sets (frames.rs)
+        if let Some(ty) = solver.frame_evaluation(id, self, &lhs_n, &rhs_n, location)? {
+            return Ok(ty);
+        }
         // an operand typed by a pact (`x: Num`, or `x: T` under `<T: Num>`):
         // the operator is the pact's method, dispatched at runtime
         if let Some(ty) = pact_binary_dispatch(

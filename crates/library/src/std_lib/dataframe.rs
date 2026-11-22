@@ -62,9 +62,10 @@ impl AscDesc {
     // must see the row weights (see `crate::zset`)
     api.add(__z_in);
     api.add(__z_cons);
-    api.add(__z_expand);
     api.add(__z_distinct);
     api.add(__z_join);
+    // `z1 + z2` and `z1 - z2`: two frames add as Z-sets
+    api.add_frame_bin_op(frame_bin);
     api.add(__data);
     {
         let mut m = api.module("std::polars");
@@ -1722,6 +1723,8 @@ fn __q_apply<'gc>(
         "n_unique" => e.n_unique(),
         "first" => e.first(),
         "last" => e.last(),
+        // `query z`: a non-linear aggregate reads only the rows of positive weight
+        crate::zset::POSITIVE => crate::zset::positive(e),
         "is_null" => e.is_null(),
         "is_not_null" => e.is_not_null(),
         "to_upper" => e.str().to_uppercase(),
@@ -1975,7 +1978,8 @@ fn __q_distinct<'gc>(
 }
 
 /// `query z { … }` plumbing: the source table, and the right side of a
-/// `join`, get weight 1 on each row unless they carry `__w` already.
+/// `join`, get weight 1 on each row unless they carry an integer `w`
+/// already. A `w` of another type faults.
 #[native]
 fn __z_in<'gc>(ctx: Ctx<'gc>, df: vm::DataFrame<'gc>) -> Result<vm::DataFrame<'gc>, vm::RtErr> {
     let out = crate::zset::weigh(&df.0.borrow().0).map_err(q_err)?;
@@ -1987,17 +1991,6 @@ fn __z_in<'gc>(ctx: Ctx<'gc>, df: vm::DataFrame<'gc>) -> Result<vm::DataFrame<'g
 #[native]
 fn __z_cons<'gc>(ctx: Ctx<'gc>, df: vm::DataFrame<'gc>) -> Result<vm::DataFrame<'gc>, vm::RtErr> {
     let out = crate::zset::consolidate(&df.0.borrow().0).map_err(q_err)?;
-    Ok(ctx.new_dataframe(out))
-}
-
-/// `query z { … }` plumbing: each row repeated by its weight before a
-/// `group … { aggregate { … } }`, so the aggregates count weights.
-#[native]
-fn __z_expand<'gc>(
-    ctx: Ctx<'gc>,
-    df: vm::DataFrame<'gc>,
-) -> Result<vm::DataFrame<'gc>, vm::RtErr> {
-    let out = crate::zset::expand(&df.0.borrow().0).map_err(q_err)?;
     Ok(ctx.new_dataframe(out))
 }
 
@@ -2030,9 +2023,30 @@ fn __z_join<'gc>(
     Ok(ctx.new_dataframe(out))
 }
 
+/// `a + b` and `a - b` on two frames: the Z-set sum and difference (see
+/// `crate::zset::add`). Any other operator, or a frame against another
+/// kind of value, is the usual operator error.
+fn frame_bin<'gc>(
+    ctx: Ctx<'gc>,
+    a: Val<'gc>,
+    b: Val<'gc>,
+    op: vm::BinOp,
+) -> Result<Val<'gc>, vm::RtErr> {
+    let (Val::DataFrame(x), Val::DataFrame(y)) = (a, b) else {
+        return Err(vm::RtErr::invalid_bin(a, op, b));
+    };
+    let (x, y) = (&x.0.borrow().0, &y.0.borrow().0);
+    let out = match op {
+        vm::BinOp::Add => crate::zset::add(x, y),
+        vm::BinOp::Sub => crate::zset::sub(x, y),
+        _ => return Err(vm::RtErr::invalid_bin(a, op, b)),
+    };
+    Ok(Val::DataFrame(ctx.new_dataframe(out.map_err(q_err)?)))
+}
+
 /// `changes(new, old)`: what changed from `old` to `new`, as a Z-set. The
 /// rows of `new` keep their weights, the rows of `old` count negated, and
-/// rows in both cancel. Each row has a `__w` weight: positive for a row
+/// rows in both cancel. Each row has a `w` weight: positive for a row
 /// that `new` added, negative for a row it took away.
 /// r[impl mimas.query.zset.changes]
 #[native]

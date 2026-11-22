@@ -1341,6 +1341,35 @@ pub struct NoSuchColumn {
     pub columns: String,
 }
 
+/// `query z { t }` where `t` has a `w` column that isn't whole numbers. `query z`
+/// keeps the weights in `w`, so an int `w` is read as the weights and any other `w`
+/// can't be.
+#[derive(Error, Debug, Diagnostic)]
+#[error(
+    "query z keeps the weights in a column named `w`, and this table's `w` is {ty}: \
+     rename it before the query (`.rename(\"w\", \"width\")!`) or make it whole numbers"
+)]
+pub struct ZsetWeightNotInt {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("this table's `w` is {ty}, not int")]
+    pub at: SourceSpan,
+    pub ty: String,
+}
+
+/// `a + b` or `a - b` on two tables whose column names differ. The Z-set sum
+/// matches rows by every column but `w`, so both sides need the same names.
+#[derive(Error, Debug, Diagnostic)]
+#[error("`{op}` on two tables needs the same column names on both sides: {detail}")]
+pub struct ZsetColumnsDiffer {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("these tables have different columns")]
+    pub at: SourceSpan,
+    pub op: String,
+    pub detail: String,
+}
+
 /// `data "name"` where the host's schema resolver has no such source -- a
 /// mistyped card name, or a URL whose schema was never fetched. With no
 /// resolver installed the name isn't checked at all (the `use "…"` kind
