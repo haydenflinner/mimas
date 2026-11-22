@@ -275,3 +275,21 @@ fn a_dissolved_struct_local_keeps_a_shadow_per_field() {
         );
     }
 }
+
+// r[verify mimas.opt.linear]
+#[test]
+fn struct_phi_split_scans_a_body_once_not_once_per_phi() {
+    // 400 `if`s, each a phi of a float: none is a struct, so none splits,
+    // and the pass must not rebuild its whole-body use map for each one
+    // (it did: 10.6 s of a 10.8 s compile on wost-kit)
+    let mut src = String::from("fn f(k: float) -> float {\n    let s = 0.0\n");
+    for i in 0..400 {
+        src.push_str(&format!("    if k > {i}.0 {{ s = s + {i}.0 }}\n"));
+    }
+    src.push_str("    s\n}\n");
+    crate::codegen::opt::SPLIT_PHI_SCANS.with(|c| c.set(0));
+    let ir = optimized_ir(&src);
+    assert!(ir.contains("phi"), "the ifs should leave phis");
+    let scans = crate::codegen::opt::SPLIT_PHI_SCANS.with(|c| c.get());
+    assert!(scans <= 8, "split_struct_phis rescanned the body {scans} times for 400 phis");
+}

@@ -4457,15 +4457,20 @@ impl Vm {
     where
         F: for<'gc> FnOnce(&mut crate::api::Api<'_, 'gc>),
     {
+        // `MIMAS_COMPILE_TIMING=1`: the compile's phases, to stderr.
+        let mut lap = compile_lap();
         let mut vm = Self::new();
         let library = vm.install_library(install_lib);
+        lap("install library");
         let built = Self::build_program(files, &library, allowed, debug)?;
+        lap("build program");
 
         vm.warnings = built.warnings;
         vm.script_fx = built.script_fx;
         vm.script_segments = built.script_segments;
         vm.field_hints = built.field_hints;
         vm.load_program(built.program);
+        lap("load program");
         vm.set_sources(built.sources);
         vm.registry = library.into_registry();
         Ok(vm)
@@ -4580,7 +4585,9 @@ impl Vm {
     ) -> std::result::Result<BuiltProgram, ExecuteError> {
         use solve::Resolutions;
 
+        let mut lap = compile_lap();
         let mut loaded = solve::load_files(files.iter().copied(), library);
+        lap("  parse + solve");
         // todo: only the first error makes it out
         if !loaded.errors.is_empty() {
             return Err(loaded.errors.swap_remove(0).into());
@@ -4618,6 +4625,7 @@ impl Vm {
         }
         // todo: there's zero reason to clone this here, im just trying to get a working version --
         // there's probably a much smoother way to get the intrinsics over here
+        lap("  resolutions");
         let mut ir = compile::Ir::new(
             resolutions,
             library.intrinsics().iter().map(|(a, b)| (*a, *b)).collect(),
@@ -4639,11 +4647,13 @@ impl Vm {
             ::api::ApiEntry::Method(m) if m.mutates_recv => Some(id),
             _ => None,
         });
+        lap("  ir");
         let program = compile::Compiler::new()
             .with_frame_natives(frame_natives)
             .with_mutating_natives(mutating_natives)
             .with_shadows(debug)
             .compile(&mut ir);
+        lap("  codegen");
         Ok(BuiltProgram {
             program,
             ir,
@@ -4763,3 +4773,17 @@ impl std::fmt::Display for FunctionDataflowError {
 }
 
 pub use crate::val::Captured;
+
+/// A lap timer for `MIMAS_COMPILE_TIMING=1`: each call prints the time
+/// since the last one, to stderr. A no-op when the variable is unset, and
+/// it never reads the clock then (`Instant::now` panics on wasm32).
+pub(crate) fn compile_lap() -> impl FnMut(&str) {
+    let mut last = std::env::var_os("MIMAS_COMPILE_TIMING").map(|_| std::time::Instant::now());
+    move |step: &str| {
+        if let Some(prev) = last {
+            let now = std::time::Instant::now();
+            eprintln!("COMPILE {step}: {:?}", now - prev);
+            last = Some(now);
+        }
+    }
+}

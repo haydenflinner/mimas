@@ -45,23 +45,40 @@ pub(crate) fn optimize(
     mutating_natives: &HashSet<NativeId>,
     shadows: bool,
 ) -> HashSet<AdtId> {
+    // `MIMAS_COMPILE_TIMING=1`: each pass's time, to stderr (never reads
+    // the clock otherwise: `Instant::now` panics on wasm32)
+    let timing = std::env::var_os("MIMAS_COMPILE_TIMING").is_some();
+    let now = || timing.then(std::time::Instant::now);
+    let since = |t: Option<std::time::Instant>| t.map(|t| t.elapsed()).unwrap_or_default();
+    let t = now();
     self_tail_calls(ir);
+    let t_tail = since(t);
+    let t = now();
     inline_small_calls(ir, frame_natives);
+    let t_inline = since(t);
+    let t = now();
     let values = value_adts(ir, mutating_natives);
+    let t_values = since(t);
     let entry_locals: Vec<DecId> = ir.bodies[BodyId::ZERO].locals.values().copied().collect();
     let res = &ir.resolutions;
+    let (mut t_fwd, mut t_scalar, mut t_promote, mut t_split) = Default::default();
+    let mut timed = |acc: &mut std::time::Duration, t: Option<std::time::Instant>| *acc += since(t);
     for (bid, body) in ir.bodies.iter_mut() {
         if bid == BodyId::ZERO {
             continue;
         }
+        let t = now();
         forward_value_fields(body, &values);
+        timed(&mut t_fwd, t);
         // a round can expose the next: a field that held a struct becomes a
         // local holding a struct
+        let t = now();
         for _ in 0..4 {
             if !scalar_replace(body) {
                 break;
             }
         }
+        timed(&mut t_scalar, t);
         // locals to SSA, then structs chosen by control flow to field phis;
         // a split can expose a local whose only writes are now structs.
         // `MIMAS_SSA=0` keeps the slot form (an A/B for the lanes' cost model)
@@ -69,13 +86,24 @@ pub(crate) fn optimize(
             continue;
         }
         for _ in 0..3 {
+            let t = now();
             let a = promote_locals(body, res, &entry_locals, shadows);
+            timed(&mut t_promote, t);
+            let t = now();
             let b = split_struct_phis(body, &values, res, &entry_locals);
+            timed(&mut t_split, t);
+            let t = now();
             let c = forward_value_fields(body, &values);
+            timed(&mut t_fwd, t);
             if !a && !b && !c {
                 break;
             }
         }
+    }
+    if timing {
+        eprintln!(
+            "OPT tail calls {t_tail:?} | inline {t_inline:?} | value adts {t_values:?} | forward fields {t_fwd:?} | scalar replace {t_scalar:?} | promote locals {t_promote:?} | split phis {t_split:?}"
+        );
     }
     values
 }
@@ -1426,6 +1454,13 @@ fn map_operands(inst: &mut Inst, f: &dyn Fn(InstId) -> InstId) {
 /// another member phi -- no `set_field` (a write through one alias would
 /// have to reach the others), nothing stored, passed or compared. Returns
 /// whether anything changed.
+// How many times `split_struct_phis` rebuilt its whole-body scans: the
+// scale test reads it (tests/opt_tests.rs).
+#[cfg(test)]
+thread_local! {
+    pub(crate) static SPLIT_PHI_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn split_struct_phis(
     body: &mut Body,
     values: &HashSet<AdtId>,
@@ -1452,14 +1487,33 @@ fn split_struct_phis(
         .filter(|(_, i)| matches!(i, Inst::Phi(_)))
         .map(|(id, _)| id)
         .collect();
+    // The use map, the in-stream set and the volatile reads are whole-body
+    // scans. A class rewrite changes them, so they are rebuilt after one;
+    // a root that does not qualify (most of them) changes nothing, and the
+    // next root reuses them. Rebuilding them for every phi made this pass
+    // O(phis × instructions): 10.6 s of a 10.8 s compile on wost-kit.
+    // r[impl mimas.opt.linear]
+    let mut scans: Option<(HashMap<InstId, Vec<InstId>>, HashSet<InstId>)> = None;
+    let mut volatile_scan: Option<HashSet<InstId>> = None;
+    let mut dirty = false;
     'phi: for &root in &phis {
         // a class rewrite changes the uses the next class sees: recount
-        let users = users_of(body);
-        let in_stream: HashSet<InstId> = body
-            .blocks
-            .values()
-            .flat_map(|b| b.stream.iter().copied())
-            .collect();
+        if dirty {
+            scans = None;
+            volatile_scan = None;
+            dirty = false;
+        }
+        let (users, in_stream) = scans.get_or_insert_with(|| {
+            #[cfg(test)]
+            SPLIT_PHI_SCANS.with(|c| c.set(c.get() + 1));
+            let in_stream: HashSet<InstId> = body
+                .blocks
+                .values()
+                .flat_map(|b| b.stream.iter().copied())
+                .collect();
+            (users_of(body), in_stream)
+        });
+        let (users, in_stream) = (&*users, &*in_stream);
         if !in_stream.contains(&root) {
             continue;
         }
@@ -1519,7 +1573,7 @@ fn split_struct_phis(
         }
         let Some(nf) = nfields else { continue };
         // a field that is a read of a slot written later cannot be forwarded
-        let volatile = volatile_reads(body);
+        let volatile = volatile_scan.get_or_insert_with(|| volatile_reads(body));
         if class.iter().any(|&m| matches!(&body.instructions[m], Inst::NewInstance { fields, .. } if fields.iter().any(|f| volatile.contains(f)))) {
             continue 'phi;
         }
@@ -1606,6 +1660,8 @@ fn split_struct_phis(
             }
         }
         let pos = positions(body);
+        // from here the class is rewritten: the next root rescans
+        dirty = true;
         let mut rewrites: Vec<(InstId, InstId)> = Vec::new();
         for &m in &class {
             for &u in users.get(&m).map(|v| v.as_slice()).unwrap_or(&[]) {
