@@ -267,6 +267,12 @@ impl TyExt for Ty {
                 }
                 Ok(Ty::Float)
             }
+            // `atom`: the built-in type of every bare atom, an open set (r[impl mimas.atom.type])
+            Annotation::Ty(ident)
+                if ident.lexeme == "atom" && solver.ribs.resolve(&ident).is_none() =>
+            {
+                Ok(Ty::adt(solver.atom_adt()))
+            }
             Annotation::Ty(ident) => {
                 let mut ty = ident.query(solver)?;
                 // `-> LL` inside `impl LL` reads as `Self` -- the adt applied to

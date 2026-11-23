@@ -783,6 +783,8 @@ fn expr_refs(expr: &parse::Expr, out: &mut RefSet) {
             }
         }
         ExprKind::Raise(r) => expr_refs(&r.value, out),
+        // an atom names no declaration: only its payload refers to anything
+        ExprKind::Atom(a) => a.payload.values().into_iter().for_each(|v| expr_refs(v, out)),
         ExprKind::Range(r) => {
             expr_refs(&r.start, out);
             expr_refs(&r.end, out);

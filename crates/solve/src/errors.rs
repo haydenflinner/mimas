@@ -1889,3 +1889,61 @@ pub struct AffineMisuse {
     #[help]
     pub help: String,
 }
+
+/// `#Wedd` where a declared enum is expected and has no such variant
+/// (r[impl mimas.atom.enum.missing]).
+#[derive(Error, Debug, Diagnostic)]
+#[error("`{atom}` is not a variant of `{enum_name}`")]
+pub struct AtomNotInEnum {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("`{enum_name}` has {variants}")]
+    pub at: SourceSpan,
+    pub atom: String,
+    pub enum_name: String,
+    pub variants: String,
+    #[help]
+    pub help: Option<String>,
+}
+
+/// `#Num("x")` where the enum's `Num` takes other values, or an atom made
+/// with a payload its other sites don't give it.
+#[derive(Error, Debug, Diagnostic)]
+#[error("`{atom}` takes another payload")]
+pub struct AtomPayloadMismatch {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("{why}")]
+    pub at: SourceSpan,
+    pub atom: String,
+    pub why: String,
+}
+
+/// An atom arm naming an atom that no code in the program makes
+/// (r[impl mimas.atom.match.unknown]).
+#[derive(Error, Debug, Diagnostic)]
+#[error("no code makes `{atom}`")]
+pub struct UnknownAtom {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("this arm can never match")]
+    pub at: SourceSpan,
+    pub atom: String,
+    #[help]
+    pub help: Option<String>,
+}
+
+/// An atom arm naming an atom outside the scrutinee's inferred set
+/// (r[impl mimas.atom.match.unknown]).
+#[derive(Error, Debug, Diagnostic)]
+#[error("`{atom}` can't reach this match")]
+pub struct AtomOutsideSet {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("this value is one of {set}")]
+    pub at: SourceSpan,
+    pub atom: String,
+    pub set: String,
+    #[help]
+    pub help: Option<String>,
+}

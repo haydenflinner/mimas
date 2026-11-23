@@ -1298,6 +1298,33 @@ impl Lower for Expr {
             ExprKind::Loop(loop_expr) => loop_expr.emit(id, ir),
             ExprKind::Match(m) => m.emit(id, ir),
             ExprKind::Raise(raise) => raise.emit(id, ir),
+            // r[impl mimas.atom.literal] an instance of the variant the
+            // checker picked: the `atom` one, or the declared enum's it fits
+            ExprKind::Atom(atom) => {
+                let layout = *ir
+                    .resolutions
+                    .atom_layouts
+                    .get(&id)
+                    .expect("the checker gives every atom literal a layout");
+                let values: Option<Vec<InstId>> = match &atom.payload {
+                    parse::AtomPayload::None => Some(vec![]),
+                    parse::AtomPayload::Positional(values) => {
+                        values.iter().map(|v| v.lower(ir)).collect()
+                    }
+                    parse::AtomPayload::Named(fields) => {
+                        let supplied: Vec<(String, Option<InstId>)> = fields
+                            .iter()
+                            .map(|(k, v)| (k.lexeme.clone(), v.lower(ir)))
+                            .collect();
+                        let names = ir.resolutions.adts[layout].fields.clone();
+                        names
+                            .iter()
+                            .map(|n| supplied.iter().find(|(k, _)| k == n).and_then(|(_, v)| *v))
+                            .collect()
+                    }
+                };
+                Some(ir.current().new_instance(layout, values?))
+            }
             ExprKind::Range(_) => {
                 unreachable!("ranges aren't currently supported as independent exprs")
             }

@@ -2334,6 +2334,11 @@ impl<'a> Pass<'a> {
                 self.retired.push(self.flow.clone());
                 self.flow.diverged = true;
             }
+            ExprKind::Atom(a) => {
+                for v in a.payload.values() {
+                    self.expr(v);
+                }
+            }
             ExprKind::Break(b) => {
                 if let Some(v) = &b.value {
                     self.expr(v);

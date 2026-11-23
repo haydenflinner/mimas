@@ -504,7 +504,8 @@ impl TokKind<'_> {
         Literal::try_from(self).is_ok()
             || matches!(
                 self,
-                TokKind::Ident(_) | TokKind::LeftParenthesis | TokKind::Minus
+                // `#` opens an atom arm (`#EmptyList =>`)
+                TokKind::Ident(_) | TokKind::LeftParenthesis | TokKind::Minus | TokKind::Hash
             )
     }
 

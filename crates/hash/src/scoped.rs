@@ -911,6 +911,11 @@ impl<'s> Scoped<'s> {
             ExprKind::Loop(l) => self.expr(&l.body),
             ExprKind::Collect(c) => self.expr(&c.value),
             ExprKind::Raise(r) => self.expr(&r.value),
+            ExprKind::Atom(a) => {
+                for v in a.payload.values() {
+                    self.expr(v);
+                }
+            }
             ExprKind::Break(b) => {
                 if let Some(value) = &b.value {
                     self.expr(value);

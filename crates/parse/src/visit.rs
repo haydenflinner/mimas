@@ -307,6 +307,12 @@ pub fn walk_expr(expr: &Expr, visitor: &mut impl Visitor) {
             walk_expr(&coalescence.right, visitor);
         }
         ExprKind::Raise(raise) => walk_expr(&raise.value, visitor),
+        // an atom's name refers to no declaration, so it is not an ident
+        ExprKind::Atom(atom) => {
+            for value in atom.payload.values() {
+                walk_expr(value, visitor);
+            }
+        }
         ExprKind::Range(range) => {
             walk_expr(&range.start, visitor);
             walk_expr(&range.end, visitor);

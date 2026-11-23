@@ -37,6 +37,7 @@ pub mod expr {
     mod expr_kinds {
         mod absolve;
         mod access;
+        mod atom;
         mod block;
         mod r#break;
         mod call;
@@ -65,6 +66,7 @@ pub mod expr {
         mod r#while;
         pub use absolve::*;
         pub use access::*;
+        pub use atom::*;
         pub use block::*;
         pub use r#break::*;
         pub use call::*;
@@ -158,6 +160,7 @@ mod tests {
     mod utils;
 
     mod autogen_tok_tests;
+    mod parse_atoms;
     mod docs_for;
     mod lex_tokens;
     mod node_at;

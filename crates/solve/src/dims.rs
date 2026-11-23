@@ -1248,6 +1248,12 @@ impl<'a> Pass<'a> {
                 self.expr(&r.value);
                 D::Any
             }
+            ExprKind::Atom(a) => {
+                for v in a.payload.values() {
+                    self.expr(v);
+                }
+                D::Any
+            }
             ExprKind::Range(r) => {
                 self.expr(&r.start);
                 self.expr(&r.end);

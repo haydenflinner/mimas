@@ -126,6 +126,9 @@ pub struct Resolutions {
     /// field each argument fills, so the emitter builds the instance in field
     /// order after evaluating the arguments in source order.
     pub ctor_slots: FxHashMap<NodeId, Vec<usize>>,
+    /// Each atom literal's layout (`mimas.atom.literal`): the `atom` variant,
+    /// or the declared enum's variant it fits. Emit builds an instance of it.
+    pub atom_layouts: FxIndexMap<NodeId, AdtId>,
     /// `const` items computed before the program runs (`mimas.const.computed`),
     /// in source order: the emitter lowers each value at the top of the entry.
     pub computed_consts: rustc_hash::FxHashSet<NodeId>,
@@ -694,6 +697,7 @@ impl From<Solver> for Resolutions {
                 .collect(),
             field_hints: solver.field_hints,
             ctor_slots: solver.ctor_slots,
+            atom_layouts: solver.atoms.layouts,
             pact_ops: solver.pact_ops,
             multis,
             multi_calls: solver.multi_calls,

@@ -31,6 +31,7 @@ declare_expr_kinds!(
     ExprKind {
         Absolve,
         Access,
+        Atom,
         Block,
         Break,
         Call,

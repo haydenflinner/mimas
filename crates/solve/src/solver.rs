@@ -225,6 +225,9 @@ pub struct Solver {
     /// hint makes it that struct, anything else leaves it a dict.
     /// r[impl mimas.record.context]
     pub(crate) record_hints: FxHashMap<NodeId, Ty>,
+    /// Atoms (`#EmptyList`): the built-in `atom` enum, each literal's layout, the
+    /// arms and matches the inferred-set checks wait on. r[impl mimas.atom.type]
+    pub(crate) atoms: crate::atoms::AtomState,
     /// The annotation of each field of a non-generic struct, by the field's dec:
     /// a literal solved before `solve_types` (a `const`'s) reads its field types
     /// from here (r[impl mimas.record.const]).
@@ -470,6 +473,7 @@ impl Solver {
             check_texts: FxHashMap::default(),
             dec_scales: FxHashMap::default(),
             record_hints: FxHashMap::default(),
+            atoms: Default::default(),
             field_annotations: FxHashMap::default(),
             int_as_float: FxHashSet::default(),
             dec_literals: FxHashSet::default(),
@@ -780,6 +784,8 @@ impl Solver {
 
         // a `fn` redeclare errors only against decs this solve mints -- see `declare_floor`
         self.declare_floor = self.decs.len();
+        // every atom a literal writes gets its variant before any body solves
+        self.prescan_atoms(&asts)?;
 
         // each ast's module rib accumulates across phases -- saved between visits
         let mut saved_ribs: Vec<Option<Rib>> = vec![None; asts.len()];
@@ -899,6 +905,9 @@ impl Solver {
         // unreachable r[impl mimas.multi.coverage]
         self.check_multis()?;
         lap("check_multis");
+        // the inferred atom sets need every body: arms and matches over atoms
+        crate::atoms::check(self, &asts)?;
+        lap("atoms");
         // last, once every node has its type: do the units add up?
         crate::dims::check(self, &asts)?;
         lap("dims");
@@ -1249,7 +1258,7 @@ impl Solver {
             // a call to a Mimas fn can't fold until `solve_bodies` records the
             // callee — defer to the retry pass instead of erroring early
             // (r[mimas.const.eval])
-            if self.defer_call_consts && self.calls_unsolved_fn(right) {
+            if self.defer_call_consts && (self.calls_unsolved_fn(right) || has_atom(right)) {
                 return Ok(ty);
             }
             // r[impl mimas.const.computed]
@@ -1258,7 +1267,11 @@ impl Solver {
             // before the program runs, and must be pure (`check_computed_consts`)
             if !self.defer_call_consts
                 && left.as_ident().is_some()
-                && (self.calls_unsolved_fn(right) || self.refers_to_computed(right))
+                // an atom has no folded literal form: a const holding one is
+                // computed (r[impl mimas.atom.const])
+                && (self.calls_unsolved_fn(right)
+                    || self.refers_to_computed(right)
+                    || has_atom(right))
                 && let Some(dec) = self.node_decs.get(&id).copied()
             {
                 if !self.computed_consts.iter().any(|(_, d, _)| *d == dec) {
@@ -3443,6 +3456,12 @@ impl Solver {
                     _ => unreachable!(),
                 };
                 let (adt, variant_name) = match path.kind() {
+                    // `#Name`: the scrutinee's enum's variant, or the `atom` one
+                    // r[impl mimas.atom.pattern]
+                    ExprKind::Atom(atom) => {
+                        let (adt, name) = self.atom_arm(&atom.name, &ty)?;
+                        (adt, Some(name))
+                    }
                     ExprKind::Ident(ident) => {
                         let ty = self.resolve_name(ident, ident.location())?;
                         let Some(adt) = ty.as_adt().copied() else {
@@ -4329,7 +4348,8 @@ impl Solver {
             return;
         }
         match expr.kind() {
-            ExprKind::Literal(Literal::Record(_) | Literal::Tuple(_)) => {
+            // an atom fits the enum its slot expects (r[impl mimas.atom.enum])
+            ExprKind::Literal(Literal::Record(_) | Literal::Tuple(_)) | ExprKind::Atom(_) => {
                 self.record_hints
                     .entry(expr.id())
                     .or_insert_with(|| ty.clone());
@@ -5876,4 +5896,17 @@ fn direction_help(name: &str) -> Option<String> {
             None => format!("directions follow their operand — write `x@{name}`, not `{name} x`"),
         }
     })
+}
+
+/// Whether an expression writes an atom literal anywhere (`#Fixed`, `[#A, #B]`).
+fn has_atom(expr: &Expr) -> bool {
+    struct Find(bool);
+    impl parse::Visitor for Find {
+        fn expr(&mut self, e: &Expr) {
+            self.0 |= matches!(e.kind(), ExprKind::Atom(_));
+        }
+    }
+    let mut find = Find(false);
+    parse::walk_expr(expr, &mut find);
+    find.0
 }

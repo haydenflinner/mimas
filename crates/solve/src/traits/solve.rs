@@ -2148,8 +2148,21 @@ fn seq_cmp_overload_ty(lhs: &Ty, rhs: &Ty, solver: &mut Solver) -> Option<Ty> {
 impl Solve for Equality {
     fn solve(&self, id: NodeId, location: Location, solver: &mut Solver) -> Result<Ty> {
         solver.dec_literal_beside(&self.left, &self.right)?;
-        let lhs = self.left.query(solver)?;
-        let rhs = self.right.query(solver)?;
+        // `d == #Wed` with `d: Day`: the atom fits the other side's enum
+        // (r[impl mimas.atom.enum])
+        let (lhs, rhs) = match (self.left.kind(), self.right.kind()) {
+            (l, ExprKind::Atom(_)) if !matches!(l, ExprKind::Atom(_)) => {
+                let lhs = self.left.query(solver)?;
+                solver.hint_records(&self.right, &lhs);
+                (lhs, self.right.query(solver)?)
+            }
+            (ExprKind::Atom(_), r) if !matches!(r, ExprKind::Atom(_)) => {
+                let rhs = self.right.query(solver)?;
+                solver.hint_records(&self.left, &rhs);
+                (self.left.query(solver)?, rhs)
+            }
+            _ => (self.left.query(solver)?, self.right.query(solver)?),
+        };
         let lhs_n = lhs.clone().normalized(solver);
         let rhs_n = rhs.clone().normalized(solver);
         if let Some(ty) = plexpr_overload_ty(&lhs_n, &rhs_n, solver)
@@ -3615,8 +3628,9 @@ impl Solve for Literal {
 }
 
 /// A struct literal's fields checked against `adt`'s declaration — shared by
-/// `Foo { … }` and a bare `{ … }` whose slot expects `Foo`.
-fn struct_fields(
+/// `Foo { … }`, a bare `{ … }` whose slot expects `Foo`, and an atom that
+/// fits a struct variant.
+pub(crate) fn struct_fields(
     solver: &mut Solver,
     adt: AdtId,
     variant: &crate::components::StructVariant,
@@ -3762,6 +3776,18 @@ impl Solve for Match {
         }
 
         let body_ty = result.unwrap_or(Ty::Unit);
+        // a match over atoms waits for the inferred sets: a closed one is
+        // checked arm by arm after every body (r[impl mimas.atom.match.exhaustive])
+        let scrut_now = self.identity.query(solver)?.normalized(solver);
+        let over_atoms = match &scrut_now {
+            Ty::Adt(a, _) => solver.is_atom_adt(*a),
+            Ty::Any => self.cases.iter().any(|c| pat_names_atom(c.pat())),
+            _ => false,
+        };
+        if over_atoms {
+            solver.atoms.matches.insert(_id);
+            return Ok(body_ty);
+        }
         if !self.panic_terminator
             && let Some(report) =
                 crate::exhaustion::missing_witnesses(&self.cases, &scrut_ty, solver)
@@ -3779,6 +3805,18 @@ impl Solve for Match {
             })?
         }
         Ok(body_ty)
+    }
+}
+
+/// Whether a pattern reads an atom at its head (`#A`, `#A(x) | _`).
+fn pat_names_atom(pat: &parse::components::Pat) -> bool {
+    use parse::components::PatKind;
+    match pat.kind() {
+        PatKind::Or(alts) => alts.iter().any(pat_names_atom),
+        PatKind::Variant(p) | PatKind::TupleVariant(p, _) | PatKind::Struct(p, _) => {
+            matches!(p.kind(), ExprKind::Atom(_))
+        }
+        _ => false,
     }
 }
 

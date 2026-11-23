@@ -61,6 +61,7 @@ impl Query for Expr {
             match expr.kind() {
                 ExprKind::Absolve(v) => v,
                 ExprKind::Access(v) => v,
+                ExprKind::Atom(v) => v,
                 ExprKind::Block(v) => v,
                 ExprKind::Break(v) => v,
                 ExprKind::Call(v) => v,

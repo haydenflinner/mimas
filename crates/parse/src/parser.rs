@@ -724,7 +724,7 @@ impl<'s> Parser<'s> {
                 self.end_item(&item);
                 BlockElement::Stmt(self.new_stmt(item, start))
             }
-            kind if kind.starts_item() && !self.at_exact_literal() => {
+            kind if kind.starts_item() && !self.at_exact_literal() && !self.at_atom() => {
                 let first = self.next;
                 let item = self.item();
                 self.record_decl(&item, first);
@@ -4398,6 +4398,11 @@ impl<'s> Parser<'s> {
             }
             return self.new_expr(Ident::new(ty.to_string(), self.location(start)), start);
         }
+        // `#EmptyList`: an atom, a name no declaration introduces
+        // (r[impl mimas.atom.literal])
+        if self.at_atom() {
+            return self.atom_expr();
+        }
         // `#1.10`: an exact decimal, a `dec` wherever it stands. The `#`
         // hugs the number, as Scheme's `#e0.3` does (r[impl mimas.dec.exact-literal])
         if self.at_exact_literal() {
@@ -6129,12 +6134,22 @@ impl<'s> Parser<'s> {
                 self.advance();
                 self.new_pat(PatKind::Literal(literal), start)
             }
-            TokKind::Ident(_) => {
-                // walk path: ident (:: ident)*
-                let first = self.require_ident();
-                let mut head_expr = self.new_expr(first.clone(), start);
-                let mut is_path = false;
-                while self.eat(TokKind::DoubleColon) {
+            TokKind::Ident(_) | TokKind::Hash => {
+                // `#Name`: an atom arm, the payload in the same shapes a
+                // variant's (r[impl mimas.atom.pattern])
+                let atom = kind == TokKind::Hash;
+                let (first, mut head_expr) = if atom {
+                    let name = self.atom_name();
+                    let head = self.new_expr(Atom::new(name.clone(), AtomPayload::None), start);
+                    (name, head)
+                } else {
+                    // walk path: ident (:: ident)*
+                    let first = self.require_ident();
+                    let head = self.new_expr(first.clone(), start);
+                    (first, head)
+                };
+                let mut is_path = atom;
+                while !atom && self.eat(TokKind::DoubleColon) {
                     let right = self.require_member_name();
                     let left = head_expr;
                     head_expr = self.new_expr(Access::DoubleColon { left, right }, start);
@@ -6398,6 +6413,68 @@ impl<'s> Parser<'s> {
     /// The [`TokMeta`] of the token `n` past the next one.
     fn meta_at(&self, n: usize) -> TokMeta {
         self.meta[(self.next + n).min(self.meta.len() - 1)]
+    }
+
+    /// `#EmptyList`: a `#` glued to a name opens an atom, not an
+    /// attribute (`#[`) or a section comment (`# `) (r[impl mimas.atom.literal]).
+    fn at_atom(&self) -> bool {
+        self.peek() == TokKind::Hash
+            && matches!(self.nth(1), TokKind::Ident(_))
+            && self.next + 1 < self.tokens.len()
+            && self.meta_at(1).glued
+    }
+
+    /// The `#Name` head of an atom, its ident located over the `#` too.
+    fn atom_name(&mut self) -> Ident {
+        let start = self.next_start();
+        self.bump(TokKind::Hash);
+        let name = self.require_ident();
+        Ident {
+            location: self.location(start),
+            ..name
+        }
+    }
+
+    /// `#EmptyList`, `#EmptyList("the list was empty")`, `#ParseError(line: 3)`.
+    /// The payload's `(` hugs the name; its entries are all positional or
+    /// all named, a name taking `:` or `=` like a record entry
+    /// (r[impl mimas.atom.payload]).
+    fn atom_expr(&mut self) -> Expr {
+        let start = self.next_start();
+        let name = self.atom_name();
+        let mut payload = AtomPayload::None;
+        if self.at(TokKind::LeftParenthesis) && self.glued() {
+            self.advance();
+            let open = self.next_location();
+            let entries = self.list(TokKind::RightParenthesis, TokKind::starts_expr, |p| {
+                let named = matches!(p.peek(), TokKind::Ident(_))
+                    && matches!(p.nth(1), TokKind::Colon | TokKind::Equal);
+                if named {
+                    let key = p.require_ident();
+                    p.advance();
+                    (Some(key), p.expr())
+                } else {
+                    (None, p.expr())
+                }
+            });
+            let named = entries.iter().filter(|(k, _)| k.is_some()).count();
+            if named > 0 && named < entries.len() {
+                self.error(Misdirection {
+                    src: self.src(),
+                    at: open.into(),
+                    msg: "an atom's payload is all positional or all named".into(),
+                    label: "name every entry, or none".into(),
+                });
+            }
+            payload = if entries.is_empty() {
+                AtomPayload::None
+            } else if named == entries.len() {
+                AtomPayload::Named(entries.into_iter().map(|(k, v)| (k.unwrap(), v)).collect())
+            } else {
+                AtomPayload::Positional(entries.into_iter().map(|(_, v)| v).collect())
+            };
+        }
+        self.new_expr(Atom::new(name, payload), start)
     }
 
     /// `#1.10`: a `#` glued to a number opens an exact literal, not an
@@ -6998,6 +7075,7 @@ fn with_expr_escape(expr: &Expr, in_loop: bool, in_fn: bool) -> Option<(Location
         ExprKind::Propagate(p) => scan(&p.expr),
         ExprKind::Break(b) => scan_opt(&b.value),
         ExprKind::Continue(_) | ExprKind::Ident(_) | ExprKind::Poison(_) => None,
+        ExprKind::Atom(a) => a.payload.values().into_iter().find_map(scan),
         // a closure binds its own exits — a `return`/`?` inside one leaves
         // the closure, not this region; parameter defaults likewise
         ExprKind::Closure(c) => c

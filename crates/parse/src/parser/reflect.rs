@@ -650,6 +650,7 @@ fn kind_word(kind: &ExprKind) -> &'static str {
     match kind {
         ExprKind::Absolve(_) => "absolve",
         ExprKind::Access(_) => "access",
+        ExprKind::Atom(_) => "atom",
         ExprKind::Block(_) => "block",
         ExprKind::Break(_) => "break",
         ExprKind::Call(_) => "call",

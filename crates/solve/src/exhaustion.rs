@@ -345,7 +345,12 @@ impl Ctor {
             Ty::Tuple(members) => Some(vec![Ctor::Tuple(members.len())]),
             Ty::Adt(adt, _) | Ty::Identity(adt, _) => {
                 let flags = solver.adts[adt].flags;
-                if flags.contains(AdtFlags::IS_ENUM) {
+                // `atom` grows with every name a program writes: like `int`,
+                // only a wildcard exhausts it here (a closed set is checked
+                // in `atoms::check`)
+                if solver.is_atom_adt(*adt) {
+                    None
+                } else if flags.contains(AdtFlags::IS_ENUM) {
                     Some(
                         solver.adts[adt]
                             .variants
@@ -422,6 +427,12 @@ impl Ctor {
                     && solver.adts[adt].variants.contains_key(&right.lexeme) =>
             {
                 Some(Ctor::Variant(adt, right.lexeme.clone()))
+            }
+            parse::ExprKind::Atom(atom)
+                if solver.adts[adt].flags.contains(AdtFlags::IS_ENUM)
+                    && solver.adts[adt].variants.contains_key(&atom.name.lexeme) =>
+            {
+                Some(Ctor::Variant(adt, atom.name.lexeme.clone()))
             }
             parse::ExprKind::Ident(_) => Some(Ctor::Single(adt)),
             _ => None,
