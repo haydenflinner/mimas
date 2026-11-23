@@ -69,7 +69,7 @@ impl std::fmt::Display for Access {
 }
 
 #[repr(u8)]
-#[derive(Debug, PartialEq, Copy, Clone, Eq)]
+#[derive(Debug, PartialEq, Copy, Clone, Eq, Hash)]
 pub enum AccessKind {
     Direct,
     Option,

@@ -25,6 +25,7 @@ pub use ir::*;
 
 #[macro_use]
 mod codegen {
+    mod bodycache;
     mod clean;
     mod compiler;
     pub(crate) mod opt;
@@ -32,6 +33,7 @@ mod codegen {
     mod op;
     mod program;
     mod render;
+    pub use bodycache::body_cache_stats;
     pub use compiler::*;
     pub use op::*;
     pub use program::*;

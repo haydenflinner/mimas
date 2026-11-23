@@ -15,7 +15,9 @@ use crate::{
     BinOp, BlockId, BlockTarget, BodyId, Constant, Function, Inst, InstId, Ir, Local, Module, Op,
     OperandKind, UnaryOp,
     codegen::{
+        bodycache,
         clean::{self, uses},
+        opt,
         program::{Chunk, Encoder, Program},
     },
     ir::Body,
@@ -254,28 +256,79 @@ impl Compiler {
         // need it to turn a global's `Local` into its absolute (base-0) entry-frame register.
         let mut entry_to_reg: IdVec<Local, Reg> = IdVec::new();
 
-        let value_adts = if super::opt::enabled() {
-            let values = super::opt::optimize(
-                ir,
-                &self.frame_natives,
-                &self.mutating_natives,
-                self.shadows,
-            );
-            if std::env::var("MIMAS_DUMP_OPT").is_ok_and(|v| v == "1") {
-                eprintln!("{ir}");
-            }
-            values
+        // the optimizer's whole-program half here; its per-body half runs
+        // body by body in the loop below, where `bodycache` can skip it
+        let optimizing = opt::enabled();
+        let mut opt_times = opt::OptTimes::new();
+        let global = if optimizing {
+            opt::optimize_global(ir, &self.frame_natives, &self.mutating_natives, &mut opt_times)
         } else {
-            super::opt::value_adts(ir, &self.mutating_natives)
+            opt::Global {
+                values: opt::value_adts(ir, &self.mutating_natives),
+                entry_locals: ir.bodies[BodyId::ZERO].locals.values().copied().collect(),
+            }
         };
+        // a dump of the optimized IR wants every body optimized before any
+        // is compiled, and the disasm dump wants every body compiled
+        let dump_opt = std::env::var("MIMAS_DUMP_OPT").is_ok_and(|v| v == "1");
+        let cache = match bodycache::mode() {
+            _ if dump_opt || self.disasm => bodycache::Mode::Off,
+            m => m,
+        };
+        if dump_opt {
+            if optimizing {
+                for (bid, body) in ir.bodies.iter_mut() {
+                    if bid != BodyId::ZERO {
+                        opt::optimize_body(body, &global, &ir.resolutions, self.shadows, &mut opt_times);
+                    }
+                }
+            }
+            eprintln!("{ir}");
+        }
+        let per_body_opt = optimizing && !dump_opt;
+        // what changes the passes, for the cache key
+        let config = u8::from(optimizing) | u8::from(opt::ssa_enabled()) << 1 | u8::from(self.shadows) << 2;
+        let (mut hits, mut misses) = (0usize, 0usize);
+        if cache != bodycache::Mode::Off {
+            bodycache::begin();
+        }
         let value_adts: IdVec<AdtId, bool> = ir
             .resolutions
             .adts
             .iter()
-            .map(|(id, _)| value_adts.contains(&id))
+            .map(|(id, _)| global.values.contains(&id))
             .collect::<Vec<_>>()
             .into();
         for (body_id, body) in ir.bodies.iter_mut() {
+            // the entry body changes with nearly every edit, and its
+            // registers are every other body's globals: always compiled
+            let key = (cache != bodycache::Mode::Off && body_id != BodyId::ZERO)
+                .then(|| bodycache::key(body, &ir.resolutions, &global, config));
+            let cached = key.as_ref().and_then(bodycache::get);
+            if let Some(hit) = &cached {
+                hits += 1;
+                if cache == bodycache::Mode::On {
+                    let (ops, chunk) = hit.at(bytes.len());
+                    self.chunks.push(chunk);
+                    for op in ops.iter().cloned() {
+                        op.encode(&mut bytes);
+                    }
+                    self.ops.extend(ops);
+                    continue;
+                }
+            } else if key.is_some() {
+                misses += 1;
+                if let Ok(dir) = std::env::var("MIMAS_BODYCACHE_DUMP") {
+                    let (_, text) = bodycache::key_text(body, &ir.resolutions, &global, config, true);
+                    let _ = std::fs::write(
+                        format!("{dir}/miss{}.g{}.key", body_id.index(), bodycache::generation()),
+                        text,
+                    );
+                }
+            }
+            if per_body_opt && body_id != BodyId::ZERO {
+                opt::optimize_body(body, &global, &ir.resolutions, self.shadows, &mut opt_times);
+            }
             clean::clean(body);
 
             let local_kinds = local_kinds(&body, &ir.resolutions);
@@ -777,7 +830,7 @@ impl Compiler {
                 }
             }
 
-            self.chunks.push(Chunk {
+            let chunk = Chunk {
                 offset: chunk_offset,
                 args,
                 regs,
@@ -787,12 +840,39 @@ impl Compiler {
                 shadows,
                 locs,
                 kinds: reg_kinds,
-            });
+            };
+            if let Some(k) = key {
+                let fresh = bodycache::Entry::new(&body_ops, &chunk);
+                match &cached {
+                    Some(hit) if !hit.same(&fresh) => {
+                        if let Ok(dir) = std::env::var("MIMAS_BODYCACHE_DUMP") {
+                            hit.dump(&format!("{dir}/body{}.cached", body_id.index()));
+                            fresh.dump(&format!("{dir}/body{}.fresh", body_id.index()));
+                        }
+                        panic!(
+                        "MIMAS_BODYCACHE=check: body {} compiled differently than its cached form \
+                         (a read the key misses)",
+                        body_id.index()
+                    )
+                    }
+                    Some(_) => {}
+                    None => bodycache::put(k, fresh),
+                }
+            }
+            self.chunks.push(chunk);
 
             for op in body_ops.iter().cloned() {
                 op.encode(&mut bytes);
             }
             self.ops.extend(body_ops);
+        }
+        opt_times.report();
+        bodycache::record(hits, misses);
+        if cache != bodycache::Mode::Off {
+            bodycache::end();
+            if std::env::var_os("MIMAS_COMPILE_TIMING").is_some() {
+                eprintln!("BODYCACHE hits {hits} misses {misses}");
+            }
         }
 
         let struct_names: IdVec<_, String> = ir

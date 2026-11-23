@@ -32,80 +32,134 @@ pub(crate) fn enabled() -> bool {
     std::env::var("MIMAS_OPT").map_or(true, |v| v != "0")
 }
 
+/// Time per pass, for `MIMAS_COMPILE_TIMING=1` (stderr). Never reads the
+/// clock otherwise: `Instant::now` panics on wasm32.
+#[derive(Default)]
+pub(crate) struct OptTimes {
+    on: bool,
+    tail: std::time::Duration,
+    inline: std::time::Duration,
+    values: std::time::Duration,
+    fwd: std::time::Duration,
+    scalar: std::time::Duration,
+    promote: std::time::Duration,
+    split: std::time::Duration,
+}
+
+impl OptTimes {
+    pub(crate) fn new() -> Self {
+        OptTimes {
+            on: std::env::var_os("MIMAS_COMPILE_TIMING").is_some(),
+            ..Default::default()
+        }
+    }
+    fn now(&self) -> Option<std::time::Instant> {
+        self.on.then(std::time::Instant::now)
+    }
+    fn add(acc: &mut std::time::Duration, t: Option<std::time::Instant>) {
+        if let Some(t) = t {
+            *acc += t.elapsed();
+        }
+    }
+    pub(crate) fn report(&self) {
+        if self.on {
+            eprintln!(
+                "OPT tail calls {:?} | inline {:?} | value adts {:?} | forward fields {:?} | scalar replace {:?} | promote locals {:?} | split phis {:?}",
+                self.tail, self.inline, self.values, self.fwd, self.scalar, self.promote, self.split
+            );
+        }
+    }
+}
+
+/// What the per-body passes read besides the body: the value-type adts and
+/// the entry body's local decs (a `GetEntry`'s type).
+pub(crate) struct Global {
+    pub(crate) values: HashSet<AdtId>,
+    pub(crate) entry_locals: Vec<DecId>,
+}
+
+/// `MIMAS_SSA=0` keeps the slot form (an A/B for the lanes' cost model).
+pub(crate) fn ssa_enabled() -> bool {
+    !std::env::var("MIMAS_SSA").is_ok_and(|v| v == "0")
+}
+
+/// The whole-program half of the optimizer: self tail calls, inlining
+/// (callers in postorder, so a body is inlined with its own calls already
+/// inlined) and the value-type analysis. After this each body is optimized
+/// on its own by `optimize_body`, reading only itself and `Global`.
+///
 /// `frame_natives` are natives that read the live call stack
 /// (`std::debug::caller_line` and kin): a body that calls one keeps its
 /// frame, so what they report stays true.
 /// `mutating_natives` are natives that mutate their receiver
 /// (`mutates_recv`): an adt that reaches one is not a value type.
-/// `shadows` keeps the debugger's copies of dissolved struct locals (see
-/// the shadows section below) -- a cost only a VM a debugger reads pays.
-pub(crate) fn optimize(
+pub(crate) fn optimize_global(
     ir: &mut Ir,
     frame_natives: &HashSet<NativeId>,
     mutating_natives: &HashSet<NativeId>,
-    shadows: bool,
-) -> HashSet<AdtId> {
-    // `MIMAS_COMPILE_TIMING=1`: each pass's time, to stderr (never reads
-    // the clock otherwise: `Instant::now` panics on wasm32)
-    let timing = std::env::var_os("MIMAS_COMPILE_TIMING").is_some();
-    let now = || timing.then(std::time::Instant::now);
-    let since = |t: Option<std::time::Instant>| t.map(|t| t.elapsed()).unwrap_or_default();
-    let t = now();
+    times: &mut OptTimes,
+) -> Global {
+    let t = times.now();
     self_tail_calls(ir);
-    let t_tail = since(t);
-    let t = now();
+    OptTimes::add(&mut times.tail, t);
+    let t = times.now();
     inline_small_calls(ir, frame_natives);
-    let t_inline = since(t);
-    let t = now();
+    OptTimes::add(&mut times.inline, t);
+    let t = times.now();
     let values = value_adts(ir, mutating_natives);
-    let t_values = since(t);
+    OptTimes::add(&mut times.values, t);
     let entry_locals: Vec<DecId> = ir.bodies[BodyId::ZERO].locals.values().copied().collect();
-    let res = &ir.resolutions;
-    let (mut t_fwd, mut t_scalar, mut t_promote, mut t_split) = Default::default();
-    let mut timed = |acc: &mut std::time::Duration, t: Option<std::time::Instant>| *acc += since(t);
-    for (bid, body) in ir.bodies.iter_mut() {
-        if bid == BodyId::ZERO {
-            continue;
-        }
-        let t = now();
-        forward_value_fields(body, &values);
-        timed(&mut t_fwd, t);
-        // a round can expose the next: a field that held a struct becomes a
-        // local holding a struct
-        let t = now();
-        for _ in 0..4 {
-            if !scalar_replace(body) {
-                break;
-            }
-        }
-        timed(&mut t_scalar, t);
-        // locals to SSA, then structs chosen by control flow to field phis;
-        // a split can expose a local whose only writes are now structs.
-        // `MIMAS_SSA=0` keeps the slot form (an A/B for the lanes' cost model)
-        if std::env::var("MIMAS_SSA").is_ok_and(|v| v == "0") {
-            continue;
-        }
-        for _ in 0..3 {
-            let t = now();
-            let a = promote_locals(body, res, &entry_locals, shadows);
-            timed(&mut t_promote, t);
-            let t = now();
-            let b = split_struct_phis(body, &values, res, &entry_locals);
-            timed(&mut t_split, t);
-            let t = now();
-            let c = forward_value_fields(body, &values);
-            timed(&mut t_fwd, t);
-            if !a && !b && !c {
-                break;
-            }
+    Global {
+        values,
+        entry_locals,
+    }
+}
+
+/// The per-body half: field forwarding, scalar replacement, locals to SSA
+/// and struct phi splitting, to a fixpoint. Reads `body`, `g`, `res` (decl
+/// types, adt member types and dispatch ids) and `shadows`, and writes only
+/// `body`, which is what lets `bodycache` key a body's compiled form on
+/// exactly those. The entry body is never optimized (see the module doc).
+/// `shadows` keeps the debugger's copies of dissolved struct locals (see
+/// the shadows section below) -- a cost only a VM a debugger reads pays.
+pub(crate) fn optimize_body(
+    body: &mut Body,
+    g: &Global,
+    res: &Resolutions,
+    shadows: bool,
+    times: &mut OptTimes,
+) {
+    let t = times.now();
+    forward_value_fields(body, &g.values);
+    OptTimes::add(&mut times.fwd, t);
+    // a round can expose the next: a field that held a struct becomes a
+    // local holding a struct
+    let t = times.now();
+    for _ in 0..4 {
+        if !scalar_replace(body) {
+            break;
         }
     }
-    if timing {
-        eprintln!(
-            "OPT tail calls {t_tail:?} | inline {t_inline:?} | value adts {t_values:?} | forward fields {t_fwd:?} | scalar replace {t_scalar:?} | promote locals {t_promote:?} | split phis {t_split:?}"
-        );
+    OptTimes::add(&mut times.scalar, t);
+    // locals to SSA, then structs chosen by control flow to field phis;
+    // a split can expose a local whose only writes are now structs.
+    if !ssa_enabled() {
+        return;
     }
-    values
+    for _ in 0..3 {
+        let t = times.now();
+        let a = promote_locals(body, res, &g.entry_locals, shadows);
+        OptTimes::add(&mut times.promote, t);
+        let t = times.now();
+        let b = split_struct_phis(body, &g.values, res, &g.entry_locals);
+        OptTimes::add(&mut times.split, t);
+        let t = times.now();
+        let c = forward_value_fields(body, &g.values);
+        OptTimes::add(&mut times.fwd, t);
+        if !a && !b && !c {
+            break;
+        }
+    }
 }
 
 // ------------------------------------------------------------ debugger shadows

@@ -35,7 +35,7 @@ pub enum Scalar {
     Float(f64),
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum BinFault {
     Overflow,
     DivByZero,

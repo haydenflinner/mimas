@@ -70,7 +70,7 @@ impl Body {
 /// Where a dissolved struct local lives for the debugger: `T` is a `Local`
 /// in the IR and a `Reg` in a chunk. A frame view reads the leaves and
 /// rebuilds every `Struct` on the way up -- see `Vm::frames`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Hash)]
 pub enum Shadow<T> {
     Slot(T),
     Struct { adt: AdtId, fields: Vec<Shadow<T>> },

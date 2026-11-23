@@ -11,7 +11,7 @@ use crate::ir::{BodyId, Local, UnaryOp};
 
 use super::{BinOp, BlockId, Constant, InstId, Ir, Lower};
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Hash)]
 pub enum Inst {
     Constant(Constant),
     SetLocal(Local, InstId),
@@ -269,7 +269,7 @@ impl Inst {
     }
 }
 
-#[derive(Debug, PartialEq, Clone, Copy)]
+#[derive(Debug, PartialEq, Clone, Copy, Hash)]
 pub enum FormatPart {
     Literal(StrId),
     Value(InstId),
@@ -788,7 +788,7 @@ impl BlockWriter<'_> {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq, Hash)]
 pub enum OperandKind {
     Bool,
     Int,

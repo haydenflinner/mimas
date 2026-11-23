@@ -19,6 +19,22 @@ pub enum Constant {
     Dec(i64) = 6,
 }
 
+/// By value, a float by its bits (for `bodycache`'s keys: two constants
+/// that hash alike must compile alike, and `0.0`/`-0.0` do not).
+impl std::hash::Hash for Constant {
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        std::mem::discriminant(self).hash(h);
+        match self {
+            Constant::Bool(b) => b.hash(h),
+            Constant::Int(i) | Constant::Dec(i) => i.hash(h),
+            Constant::Float(f) => f.to_bits().hash(h),
+            Constant::Str(s) => s.hash(h),
+            Constant::Array(a) => a.hash(h),
+            Constant::Null => {}
+        }
+    }
+}
+
 #[repr(u8)]
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum ConstantCode {
