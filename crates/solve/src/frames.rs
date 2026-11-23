@@ -1896,7 +1896,7 @@ impl Solver {
         operand: &Expr,
         ty: &Ty,
     ) -> Result<Option<Ty>> {
-        let is_frame = matches!(ty, Ty::Adt(a, _) if self.adts[*a].name == "DataFrame");
+        let is_frame = matches!(ty, Ty::Adt(a, _) | Ty::Identity(a, _) if self.adts[*a].name == "DataFrame");
         if !is_frame || !matches!(op, UnaryOp::Negative | UnaryOp::Positive) {
             return Ok(None);
         }
@@ -1919,7 +1919,7 @@ impl Solver {
         rhs: &Ty,
         location: Location,
     ) -> Result<Option<Ty>> {
-        let is_frame = |t: &Ty| matches!(t, Ty::Adt(a, _) if self.adts[*a].name == "DataFrame");
+        let is_frame = |t: &Ty| matches!(t, Ty::Adt(a, _) | Ty::Identity(a, _) if self.adts[*a].name == "DataFrame");
         // the named operators on frames dispatch to their methods (`op_dispatch`);
         // here they get the kind checks and the result's schema first
         // r[impl mimas.query.zset.kind-mix]

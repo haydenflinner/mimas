@@ -3211,25 +3211,16 @@ impl<'s> Parser<'s> {
         // stream method its glyph names (`lex::STREAM_OPS`) and binds like a
         // unary minus, so `∫ s.map(q)` integrates the mapped stream. With no
         // operand after it (`Δ⁻¹ ∘ Δ`, `(∇)`, the end of a line) the glyph is
-        // that method as a function value, `|s: Stream| s.integrate()`.
+        // that method as a function value, `__stream_integrate`.
         if let TokKind::StreamOp(glyph) = self.peek() {
             let method = crate::lex::stream_op_method(glyph).unwrap_or("integrate");
             self.advance();
             let at = self.location(start);
             if !self.peek().starts_expr() || !self.infix_binds() {
-                let param = Ident::new("__s", at);
-                let recv = self.new_expr(param.clone(), start);
-                let body = self.method_call(recv, method, start);
-                let mut binding = Binding::new(param);
-                binding.annotation = Some(Annotation::Ty(Ident::new("Stream", at)));
-                return self.new_expr(
-                    Closure {
-                        parameters: vec![binding],
-                        body,
-                        return_type: None,
-                    },
-                    start,
-                );
+                // the generic `__stream_<method>` of `library/src/group.mim`,
+                // so the function takes a stream of any group
+                // r[impl mimas.group.stream]
+                return self.new_expr(Ident::new(format!("__stream_{method}"), at), start);
             }
             let operand = self
                 .nested(Self::unary)

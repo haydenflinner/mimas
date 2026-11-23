@@ -2347,12 +2347,28 @@ fn dispatch_pact_method(
     pids: &[PactId],
     method: &str,
 ) -> Option<InstId> {
+    /// What an implementer's arm runs: its method, a native method, or the
+    /// built-in operator of a type whose `+ - -x` are built in (`int`,
+    /// `float`, `dec`, `DataFrame`) and that declares no method of the name.
+    enum Arm {
+        Body(BodyId),
+        Native(NativeId),
+        Op(&'static str),
+    }
+    let builtin = |m: &str| -> Option<&'static str> {
+        Some(match m {
+            "add" => "add",
+            "sub" => "sub",
+            "neg" => "neg",
+            _ => return None,
+        })
+    };
     let candidates: Vec<_> = ir
         .resolutions
         .adts
         .iter()
         .filter(|(_, adt)| pids.iter().all(|p| adt.implements.contains(p)))
-        .map(|(_, adt)| {
+        .filter_map(|(_, adt)| {
             // a primitive implementer (`impl Num for float`) has no instance id:
             // its arm tests the value's kind through a sentinel id
             // r[impl mimas.pact.primitive]
@@ -2360,21 +2376,47 @@ fn dispatch_pact_method(
                 Some(p) if adt.name != "bool" => vec![p],
                 _ => adt.dispatch_ids.clone(),
             };
-            (adt.methods[method], ids, adt.name == "bool")
+            let target = match adt.methods.get(method) {
+                Some(dec) => Ok(*dec),
+                None => Err(builtin(method)?),
+            };
+            Some((target, ids, adt.name == "bool"))
         })
         .collect();
     let candidates: Vec<_> = candidates
         .into_iter()
-        .map(|(dec, ids, is_bool)| (ir.item_body_for(dec), ids, is_bool))
+        .map(|(target, ids, is_bool)| {
+            let arm = match target {
+                Err(op) => Arm::Op(op),
+                Ok(dec) => match ir.resolutions.decs[dec].kind {
+                    ResolvedDeclKind::Item { native: Some(nid), .. } => Arm::Native(nid),
+                    _ => Arm::Body(ir.item_body_for(dec)),
+                },
+            };
+            (arm, ids, is_bool)
+        })
         .collect();
 
-    if let [(body, _, _)] = candidates.as_slice() {
-        return Some(ir.current().call_direct(*body, args));
+    // r[impl mimas.pact.own-method]
+    let run = |ir: &mut Ir, arm: &Arm, args: &[InstId]| -> InstId {
+        match arm {
+            Arm::Body(body) => ir.current().call_direct(*body, args.to_vec()),
+            Arm::Native(nid) => ir.current().call_native(*nid, args.to_vec()),
+            Arm::Op("neg") => ir.current().unary(UnaryOp::Negative, args[0]),
+            Arm::Op(op) => {
+                let op = if *op == "add" { BinOp::Add } else { BinOp::Sub };
+                ir.current().bin(op, args[0], args[1], OperandKind::Generic)
+            }
+        }
+    };
+
+    if let [(arm, _, _)] = candidates.as_slice() {
+        return Some(run(ir, arm, &args));
     }
 
     let merge = ir.push_block("pact_merge");
     let mut branches = Vec::new();
-    for (body, ids, is_bool) in candidates {
+    for (arm, ids, is_bool) in candidates {
         // a `bool` implementer (`impl Opp for bool`) has no instance id to
         // test: its arm asks whether the value is `true` or `false`
         let tests: Vec<Option<AdtId>> = if is_bool {
@@ -2404,7 +2446,7 @@ fn dispatch_pact_method(
                 block.jump(hit);
             });
             ir.target(hit);
-            let value = ir.current().call_direct(body, args.clone());
+            let value = run(ir, &arm, &args);
             let end = ir.current_block_id();
             ir.current().jump(merge);
             branches.push((end, value));

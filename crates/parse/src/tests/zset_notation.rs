@@ -95,14 +95,17 @@ fn incremental_is_a_call() {
 // r[verify mimas.query.zset.stream-ops]
 #[test]
 fn a_glyph_alone_is_a_function() {
-    // `Δ⁻¹ ∘ Δ`: each glyph with no operand is its method as a closure
+    // `Δ⁻¹ ∘ Δ`: each glyph with no operand is its method as a generic
+    // function on streams of any group (`library/src/group.mim`)
+    // r[verify mimas.group.stream]
     let e = parse("Δ⁻¹ ∘ Δ");
     let crate::expr::ExprKind::Evaluation(ev) = e.kind() else { panic!("{e}") };
     assert_eq!(ev.op, crate::expr::EvaluationOp::Compose);
-    let left = parse("|__s: Stream| __s.sum_before()");
-    let right = parse("|__s: Stream| __s.forward_difference()");
-    assert_eq!(ev.left.kind(), left.kind());
-    assert_eq!(ev.right.kind(), right.kind());
-    same("f(∇)", "f(|__s: Stream| __s.differentiate())");
-    same("[∫, z⁻¹]", "[|__s: Stream| __s.integrate(), |__s: Stream| __s.delay()]");
+    assert_eq!(ev.left.as_ident().map(|i| i.lexeme.as_str()), Some("__stream_sum_before"));
+    assert_eq!(
+        ev.right.as_ident().map(|i| i.lexeme.as_str()),
+        Some("__stream_forward_difference")
+    );
+    same("f(∇)", "f(__stream_differentiate)");
+    same("[∫, z⁻¹]", "[__stream_integrate, __stream_delay]");
 }

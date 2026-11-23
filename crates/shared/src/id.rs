@@ -197,6 +197,11 @@ macro_rules! id {
                 pub const PRIM_FLOAT: Self = Self(u32::MAX - 2);
                 pub const PRIM_STR: Self = Self(u32::MAX - 3);
                 pub const PRIM_BOOL: Self = Self(u32::MAX - 4);
+                /// A `dec` and a `DataFrame` are values of their own kind too,
+                /// not instances, so `impl AbelianGroup for DataFrame` takes its
+                /// arm through a sentinel the same way.
+                pub const PRIM_DEC: Self = Self(u32::MAX - 5);
+                pub const PRIM_FRAME: Self = Self(u32::MAX - 6);
 
                 /// The primitive sentinel for a library namespace adt's name.
                 pub fn primitive(name: &str) -> Option<Self> {
@@ -205,12 +210,14 @@ macro_rules! id {
                         "float" => Some(Self::PRIM_FLOAT),
                         "str" => Some(Self::PRIM_STR),
                         "bool" => Some(Self::PRIM_BOOL),
+                        "dec" => Some(Self::PRIM_DEC),
+                        "DataFrame" => Some(Self::PRIM_FRAME),
                         _ => None,
                     }
                 }
 
                 pub fn is_primitive_sentinel(self) -> bool {
-                    self.0 >= u32::MAX - 4 && self.0 != u32::MAX
+                    self.0 >= u32::MAX - 6 && self.0 != u32::MAX
                 }
 
                 pub fn index(self) -> usize {

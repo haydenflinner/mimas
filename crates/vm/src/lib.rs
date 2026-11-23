@@ -69,6 +69,9 @@ pub fn val_is_instance(v: &Val<'_>, adt: u32) -> bool {
         _ if id == AdtId::PRIM_FLOAT => matches!(v, Val::Float(_)),
         _ if id == AdtId::PRIM_STR => matches!(v, Val::Str(_)),
         _ if id == AdtId::PRIM_BOOL => matches!(v, Val::Bool(_)),
+        _ if id == AdtId::PRIM_DEC => matches!(v, Val::Dec(_)),
+        #[cfg(feature = "dataframe")]
+        _ if id == AdtId::PRIM_FRAME => matches!(v, Val::DataFrame(_)),
         Val::Instance(i) => i.0.borrow().struct_id == adt,
         _ => false,
     }

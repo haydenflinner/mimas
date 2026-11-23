@@ -215,7 +215,7 @@ pub(crate) fn op_dispatch(
         // a primitive's `+` is built in; a named operator has no built-in
         // meaning, so on a primitive it is the method an impl gives it
         // (`impl Approx for float` is what makes `0.1 + 0.2 ≈ 0.3` work)
-        if is_primitive(recv_ty) && !is_named_method(names.0) {
+        if (is_primitive(recv_ty) || is_dec(solver, recv_ty)) && !is_named_method(names.0) {
             continue;
         }
         let (aid, args) = match recv_ty {
@@ -356,6 +356,13 @@ fn is_primitive(ty: &Ty) -> bool {
     matches!(ty, Ty::Int | Ty::Float | Ty::Str | Ty::Bool)
 }
 
+/// `dec`'s `+ - * /` and `-x` are built in too: `impl AbelianGroup for dec`
+/// gives it an `add`, and `self + o` inside that `add` must stay the
+/// built-in sum, not call itself forever.
+fn is_dec(solver: &Solver, ty: &Ty) -> bool {
+    matches!(ty, Ty::Adt(a, _) | Ty::Identity(a, _) if solver.adts[*a].name == "dec")
+}
+
 /// `<op> a` → `a.<name>()` — the unary half of `op_dispatch`.
 fn unary_dispatch(
     solver: &mut Solver,
@@ -377,7 +384,7 @@ fn unary_dispatch(
     // a primitive's operators are built in -- `impl Opp for bool` gives `bool`
     // an `inv`, but `!b` stays the bool op (and `!self` inside that `inv`
     // can't recurse)
-    if is_primitive(ty) {
+    if is_primitive(ty) || is_dec(solver, ty) {
         return Ok(None);
     }
     let (aid, args) = match ty {
@@ -2081,7 +2088,8 @@ fn plexpr_overload_ty(lhs: &Ty, rhs: &Ty, solver: &Solver) -> Option<Ty> {
 /// `dec` arithmetic: with a `dec` or an `int` the answer is a `dec`, exact;
 /// with a `float` it is a `float` (docs/decimal.md). r[impl mimas.dec]
 pub(crate) fn dec_overload_ty(lhs: &Ty, rhs: &Ty, solver: &Solver) -> Option<Ty> {
-    let is_dec = |ty: &Ty| matches!(ty, Ty::Adt(id, _) if solver.adts[*id].name == "dec");
+    // `self` inside `impl … for dec` is the target as itself, `Identity(dec)`
+    let is_dec = |ty: &Ty| is_dec(solver, ty);
     match (is_dec(lhs), is_dec(rhs)) {
         (true, true) => Some(lhs.clone()),
         (true, false) if matches!(rhs, Ty::Int) => Some(lhs.clone()),
@@ -2152,7 +2160,7 @@ impl Solve for Equality {
         }
         // `a == b` on two frames whose weight kinds do not meet (a Z-set and a
         // plain table) names the conversion (r[impl mimas.query.zset.kind-mix])
-        let is_frame = |t: &Ty| matches!(t, Ty::Adt(a, _) if solver.adts[*a].name == "DataFrame");
+        let is_frame = |t: &Ty| matches!(t, Ty::Adt(a, _) | Ty::Identity(a, _) if solver.adts[*a].name == "DataFrame");
         if matches!(self.op, EqualityOp::Equal | EqualityOp::NotEqual)
             && is_frame(&lhs_n)
             && is_frame(&rhs_n)
@@ -3200,11 +3208,32 @@ impl Solve for Impl {
             // default body, which the impl may legally omit (the dispatch table was filled at
             // hoist) -- or a member a `via` impl forwards by name
             // r[impl mimas.impl.via]
+            // a method the target already has (a native type's own `neg`) answers
+            // a member of the same name and arity: the impl may not declare it
+            // again, so it need not (r[impl mimas.pact.own-method])
+            // `int`, `float`, `dec` and `DataFrame` have `+`, `-` and `-x`
+            // built in, so those answer `add`, `sub` and `neg` with no method
+            // (and claim no method name a page's own impl might want)
+            let builtin_ops = matches!(
+                solver.adts[aid].name.as_str(),
+                "int" | "float" | "dec" | "DataFrame"
+            );
+            let own = |key: &str, h: &FnHeader| {
+                (builtin_ops && matches!(key, "add" | "sub" | "neg"))
+                    || solver.adts[aid].impls.get(key).is_some_and(|f| {
+                    // a native's signature binds its receiver apart, so only
+                    // a source method's arity is compared here
+                    solver.dec_to_native.contains_key(&f.dec)
+                        || matches!(&f.ty, Ty::Fn(g) if g.parameters.len() == h.parameters.len())
+                })
+            };
             let missing: Vec<String> = pact
                 .functions
                 .iter()
-                .filter(|(key, (_, default))| {
-                    default.is_none() && !solver.via_covered.contains(&(aid, pid, (*key).clone()))
+                .filter(|(key, (h, default))| {
+                    default.is_none()
+                        && !solver.via_covered.contains(&(aid, pid, (*key).clone()))
+                        && !own(key, h)
                 })
                 .map(
                     |(key, (h, _))| match overload_operand_of(&Ty::Fn(h.clone())) {
@@ -3857,7 +3886,7 @@ impl Solve for Unary {
                 (UnaryOp::Negative | UnaryOp::Positive, Ty::Int) => Ok(Ty::Int),
                 (UnaryOp::Negative | UnaryOp::Positive, Ty::Float) => Ok(Ty::Float),
                 // `-price` on a `dec` stays exact (r[impl mimas.dec])
-                (UnaryOp::Negative | UnaryOp::Positive, Ty::Adt(id, _))
+                (UnaryOp::Negative | UnaryOp::Positive, Ty::Adt(id, _) | Ty::Identity(id, _))
                     if solver.adts[*id].name == "dec" =>
                 {
                     Ok(ty.clone())

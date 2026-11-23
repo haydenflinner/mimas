@@ -28,6 +28,7 @@ mod std_lib {
     pub(crate) mod dataframe;
     pub(crate) mod debug;
     pub(crate) mod fs;
+    pub(crate) mod group;
     pub(crate) mod interval;
     pub(crate) mod iso;
     pub(crate) mod math;
@@ -85,6 +86,10 @@ pub const OPP_SRC: &str = include_str!("opp.mim");
 /// (`approx.mim`) and shipped with std.
 pub const APPROX_SRC: &str = include_str!("approx.mim");
 
+/// Abelian groups, streams over any of them and tallies (light Z-sets),
+/// written in mimas (`group.mim`) and shipped with std.
+pub const GROUP_SRC: &str = include_str!("group.mim");
+
 /// Streams of Z-sets (`stream(zs)`), the stream glyphs' methods
 /// (`∫ ∇ Δ Δ⁻¹ z⁻¹`) and `incremental` (`q^Δ`), written in mimas
 /// (`zset.mim`) and shipped with `std::polars`.
@@ -114,6 +119,8 @@ pub fn std<'gc>(api: &mut Api<'_, 'gc>) {
     api.library.add_source("<std::opp>", OPP_SRC);
     api.library.add_source("<std::approx>", APPROX_SRC);
     api.library.add_source("<std::arb>", ARB_SRC);
+    api.library.add_source("<std::group>", GROUP_SRC);
+    std_lib::group::install(api);
     methods::dec::install(api);
     prelude::install(api);
     methods::array::install(api);

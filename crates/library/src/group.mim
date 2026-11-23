@@ -1,0 +1,464 @@
+// Abelian groups, streams over them, and tallies (library::GROUP_SRC,
+// shipped with std).
+//
+// `AbelianGroup` is the abelian group the Z-set docs name: a zero, `+`,
+// `-` and negation, where the order of `+` does not matter. Numbers,
+// quantities (`px`, `s`, …), Z-set tables, weighted tables and tallies
+// are all one, and so is any type a page gives an impl. A `Stream` holds
+// one value of such a type per step, so `∫ (v · dt)` runs on numbers and
+// vectors as it does on tables.
+//
+// A `Tally` is a small Z-set held in the VM: a dict from item to a
+// whole-number weight, with no polars. It is for small, hot data such as
+// entity sets, held keys and per-frame changes.
+//
+// A running total in a frame loop is `total += change`: it keeps only its
+// last value, so a tick costs O(1). `∫` over a finite stream builds every
+// prefix, and its last step equals the `+=` total. The check at the end
+// of this file states that law.
+// r[impl mimas.group]
+
+/// An abelian group: a zero, `+`, `-` and negation, where the order of
+/// `+` does not matter. This is the abelian group the Z-set docs name.
+/// The zero comes from a value, `x.zero()`, because a table's zero keeps
+/// the table's columns.
+/// r[impl mimas.group.pact]
+pact AbelianGroup {
+    /// The zero of the group this value is in: `x + x.zero() == x`. The
+    /// default is `x - x`.
+    fn zero(self) -> Self { self - self }
+    /// `a + b`.
+    fn add(self, o: Self) -> Self;
+    /// `a - b`, which is `a + -b`.
+    fn sub(self, o: Self) -> Self;
+    /// `-a`: `a + -a` is the zero.
+    fn neg(self) -> Self;
+    /// `k` copies of this value added up, `-k` copies negated. Every
+    /// abelian group has this integer scaling (it is a Z-module); an impl
+    /// may write a faster one.
+    fn times(self, k: int) -> Self {
+        let out = self.zero();
+        let step = self;
+        let n = k.abs();
+        while n > 0 {
+            if n mod 2 == 1 { out = out + step; }
+            step = step + step;
+            n = n ~/ 2;
+        }
+        if k < 0 { -out } else { out }
+    }
+    check |a, b, c| (a + b) + c == a + (b + c)
+    check |a, b| a + b == b + a
+    check |a| a + a.zero() == a
+    check |a| a + -a == a.zero()
+    check |a, b| a - b == a + -b
+    check |a| a.times(3) == a + a + a
+}
+
+/// Whole numbers under `+`. `int`'s `+`, `-` and `-x` are built in, and
+/// answer the pact's `add`, `sub` and `neg`; the zero and `times` are the
+/// pact's defaults. The impl declares no method, so a page's own pact may
+/// still give `int` an `add`.
+impl AbelianGroup for int {}
+
+/// Floats under `+`. Rounding breaks the laws for most values, so the
+/// samples are ones whose sums are exact. A quantity (`px`, `s`, `kW`) is a
+/// float with a dimension, so it is a group through this impl, and `+`
+/// keeps its dimension.
+impl AbelianGroup for float {}
+
+/// Exact decimals under `+`.
+impl AbelianGroup for dec {}
+
+// ---- streams -------------------------------------------------------------
+//
+// A stream is a list of values in time order: the state or the change at
+// each step. `stream(xs)` wraps a list, and the stream operators work on
+// whole streams: `+`, `-`, unary `-`, `k * s`, `k ⋅ s` go step by step,
+// and `==` compares step by step. The prefix glyphs call the methods here
+// (parse's `STREAM_OPS` table):
+//
+//   ∫ s, ∇⁻¹ s   s.integrate()           inclusive running total
+//   ∇ s          s.differentiate()       backward difference (DBSP's D)
+//   Δ s          s.forward_difference()  forward difference, one shorter
+//   Δ⁻¹ c        c.sum_before()          exclusive running total, one longer
+//   z⁻¹ s, E⁻¹ s s.delay()               the stream one step late
+//   (E s)        s.shift()               the stream one step early
+//
+// `q^Δ` is `incremental(q)`. The difference glyphs follow the
+// finite-difference calculus (Boole; Graham, Knuth and Patashnik's
+// Concrete Mathematics; Box and Jenkins): Δ forward, ∇ backward, E the
+// shift.
+// r[impl mimas.query.zset.stream]
+// r[impl mimas.group.stream]
+
+/// A stream: one value per step, in time order, of any type that is an
+/// abelian group. Build one with `stream(xs)`, read step `i` with `s[i]`,
+/// and get the list back with `s.list()`.
+struct Stream<T: AbelianGroup> { items: [T] }
+
+/// The list `xs` as a stream: arithmetic on the result goes step by step.
+fn stream<T: AbelianGroup>(xs: [T]) -> Stream<T> { Stream { items: xs } }
+
+/// The incremental version of `q`, `q^Δ` in the notation: the function on
+/// streams of changes that gives the changes of `q`'s result. It is
+/// `∇ ∘ q ∘ ∫`: integrate the changes into states, run `q` on each state,
+/// and take the backward difference of the results. When `q` maps the
+/// zero to the zero and reads one step at a time, it equals `Δ ∘ q ∘ Δ⁻¹`
+/// on the overlap.
+/// r[impl mimas.query.zset.incremental]
+fn incremental<T: AbelianGroup>(q: (T) -> T) -> (Stream<T>) -> Stream<T> {
+    |s: Stream<T>| s.integrate().map(q).differentiate()
+}
+
+/// The stream glyphs as functions: a glyph with no operand after it
+/// (`Δ⁻¹ ∘ Δ`) is one of these (parse's `STREAM_OPS`).
+fn __stream_integrate<T: AbelianGroup>(s: Stream<T>) -> Stream<T> { s.integrate() }
+fn __stream_differentiate<T: AbelianGroup>(s: Stream<T>) -> Stream<T> { s.differentiate() }
+fn __stream_forward_difference<T: AbelianGroup>(s: Stream<T>) -> Stream<T> { s.forward_difference() }
+fn __stream_sum_before<T: AbelianGroup>(s: Stream<T>) -> Stream<T> { s.sum_before() }
+fn __stream_delay<T: AbelianGroup>(s: Stream<T>) -> Stream<T> { s.delay() }
+
+impl Stream {
+    /// The steps as a list.
+    fn list(self) -> [T] { self.items }
+
+    /// The count of steps.
+    fn len(self) -> int { self.items.len() }
+
+    /// Step `i`: `s[i]`.
+    fn index(self, i: int) -> T { self.items[i] }
+
+    /// Steps `a` up to but not including `b`.
+    fn slice(self, a: int, b: int) -> Stream<T> { Stream { items: self.items[a..b] } }
+
+    /// `q` run on each step.
+    fn map(self, q: (T) -> T) -> Stream<T> { Stream { items: self.items.map(q) } }
+
+    /// The sum of all the steps, `∑ s`. A stream with no steps has no
+    /// value to take the zero from, so it is an error.
+    fn sum(self) -> T {
+        let total = self.items[0];
+        for i in 1..self.items.len() { total = total + self.items[i]; }
+        total
+    }
+
+    /// The last step: for `∫ s`, the running total after every change.
+    fn last(self) -> T { self.items[self.items.len() - 1] }
+
+    /// `s + o`: step by step, over the steps both streams have.
+    fn add(self, o: Stream<T>) -> Stream<T> {
+        let out: [T] = [];
+        for i in 0..self.items.len().min(o.items.len()) { out.push(self.items[i] + o.items[i]); }
+        Stream { items: out }
+    }
+
+    /// `s + z`: `z` added to every step.
+    fn add(self, z: T) -> Stream<T> { Stream { items: self.items.map(|x: T| x + z) } }
+
+    /// `s - o`: step by step, over the steps both streams have.
+    fn sub(self, o: Stream<T>) -> Stream<T> {
+        let out: [T] = [];
+        for i in 0..self.items.len().min(o.items.len()) { out.push(self.items[i] - o.items[i]); }
+        Stream { items: out }
+    }
+
+    /// `s - z`: `z` taken from every step.
+    fn sub(self, z: T) -> Stream<T> { Stream { items: self.items.map(|x: T| x - z) } }
+
+    /// `-s`: every step negated.
+    fn neg(self) -> Stream<T> { Stream { items: self.items.map(|x: T| -x) } }
+
+    /// `s * k`: every step `k` times over.
+    fn mul(self, k: int) -> Stream<T> { Stream { items: self.items.map(|x: T| x.times(k)) } }
+
+    /// `s * k` with a real `k`: each step must take a real factor (a float,
+    /// a quantity, a weighted table).
+    fn mul(self, k: float) -> Stream<T> { Stream { items: __stream_each("*", self.items, [], k) } }
+
+    /// `k * s`.
+    fn rmul(self, k: int) -> Stream<T> { self.mul(k) }
+
+    /// `k * s` with a real `k`.
+    fn rmul(self, k: float) -> Stream<T> { self.mul(k) }
+
+    /// `s ⋅ k`: `s * k`.
+    fn dot(self, k: int) -> Stream<T> { self.mul(k) }
+
+    /// `s ⋅ k` with a real `k`.
+    fn dot(self, k: float) -> Stream<T> { self.mul(k) }
+
+    /// `k ⋅ s`: `k * s`.
+    fn rdot(self, k: int) -> Stream<T> { self.mul(k) }
+
+    /// `k ⋅ s` with a real `k`.
+    fn rdot(self, k: float) -> Stream<T> { self.mul(k) }
+
+    /// `a ⊎ b`: `a + b`, step by step. Linear, like `+`.
+    /// r[impl mimas.query.zset.bag-ops]
+    fn uplus(self, o: Stream<T>) -> Stream<T> { self.add(o) }
+
+    /// `a ∪ b`: the bag union step by step, over the steps both have. Each
+    /// step must be a table with weights.
+    fn union(self, o: Stream<T>) -> Stream<T> { Stream { items: __stream_each("∪", self.items, o.items, 0.0) } }
+
+    /// `a ∩ b`: the bag intersection step by step, over the steps both have.
+    fn intersect(self, o: Stream<T>) -> Stream<T> { Stream { items: __stream_each("∩", self.items, o.items, 0.0) } }
+
+    /// `a ⋈ b`: the natural join step by step, over the steps both have.
+    /// r[impl mimas.query.zset.join-op]
+    fn natural_join(self, o: Stream<T>) -> Stream<T> { Stream { items: __stream_each("⋈", self.items, o.items, 0.0) } }
+
+    /// `s⁺`: the positive part of every step.
+    fn added(self) -> Stream<T> { Stream { items: __stream_each("⁺", self.items, [], 0.0) } }
+
+    /// `s⁻`: the negative part of every step, at positive weights.
+    fn removed(self) -> Stream<T> { Stream { items: __stream_each("⁻", self.items, [], 0.0) } }
+
+    /// `∫ s`, `∇⁻¹ s`: the inclusive running total. Step `t` is the sum of
+    /// steps `0..=t`, so the stream keeps its length.
+    fn integrate(self) -> Stream<T> {
+        let out: [T] = [];
+        for x in self.items {
+            if out.len() == 0 { out.push(x + x.zero()); } else { out.push(out[out.len() - 1] + x); }
+        }
+        Stream { items: out }
+    }
+
+    /// `∇ s`: the backward difference, DBSP's D. Step `t` is `s[t] - s[t - 1]`,
+    /// and step 0 is `s[0]` (the step before it is the zero), so the
+    /// stream keeps its length and `∇ (∫ c) == c`.
+    fn differentiate(self) -> Stream<T> {
+        let out: [T] = [];
+        for t in 0..self.items.len() {
+            if t == 0 { out.push(self.items[0] + self.items[0].zero()); }
+            else { out.push(self.items[t] - self.items[t - 1]); }
+        }
+        Stream { items: out }
+    }
+
+    /// `z⁻¹ s`, `E⁻¹ s`: the stream one step late. Step 0 is the zero, and
+    /// the last step drops out.
+    fn delay(self) -> Stream<T> {
+        if self.items.len() == 0 { return self; }
+        let out = [self.items[0].zero()];
+        for t in 0..self.items.len() - 1 { out.push(self.items[t] + self.items[t].zero()); }
+        Stream { items: out }
+    }
+
+    /// `s.shift()`, E in the notation: the stream one step early. The first
+    /// step drops out, so the stream is one shorter.
+    fn shift(self) -> Stream<T> { Stream { items: self.items[1..] } }
+
+    /// `Δ s`: the forward difference. Step `t` is `s[t + 1] - s[t]`, the
+    /// change from one state to the next, so `n` states give `n - 1`
+    /// changes: the panels between fence posts.
+    fn forward_difference(self) -> Stream<T> {
+        let out: [T] = [];
+        for t in 1..self.items.len() { out.push(self.items[t] - self.items[t - 1]); }
+        Stream { items: out }
+    }
+
+    /// `Δ⁻¹ c`: the exclusive running total. Step `t` is the sum of steps
+    /// `0..t`, from the zero up to the sum of them all, so `n` changes give
+    /// `n + 1` states: the fence posts around the panels.
+    /// `Δ (Δ⁻¹ c) == c`, and `Δ⁻¹ (Δ s) == s - s[0]`.
+    fn sum_before(self) -> Stream<T> {
+        if self.items.len() == 0 { return self; }
+        let posts = [self.items[0].zero()];
+        for c in self.items { posts.push(posts[posts.len() - 1] + c); }
+        Stream { items: posts }
+    }
+}
+
+// ---- tallies ---------------------------------------------------------------
+
+/// A tally: a small Z-set held in the VM, with no polars. Each item has a
+/// whole-number weight; an item of weight 0 is not in it. `+`, `-`, `-t`,
+/// `k * t`, `t⁺`, `t⁻`, `‖t‖`, `∈`, `∪`, `∩`, `⊎` and `⋈` work as they do on
+/// a Z-set table. Items are keyed by their printed form, so two items that
+/// print the same are one item. `==` compares weights, whatever the order.
+/// r[impl mimas.group.tally]
+struct Tally<T> { w: {int}, items: {T} }
+
+/// The items of `xs`, each at weight 1; repeats add up.
+fn tally<T>(xs: [T]) -> Tally<T> {
+    let t = Tally { w: {:}, items: {:} };
+    for x in xs { t.put(x, 1); }
+    t
+}
+
+/// A tally from `(item, weight)` pairs; the weights of repeats add up.
+fn tally_w<T>(pairs: [(T, int)]) -> Tally<T> {
+    let t = Tally { w: {:}, items: {:} };
+    for p in pairs { t.put(p.0, p.1); }
+    t
+}
+
+impl Tally {
+    /// A copy that shares nothing with this tally.
+    fn copy(self) -> Tally<T> {
+        let t = Tally { w: {:}, items: {:} };
+        for k in self.w.keys() { t.w.insert(k, self.w[k]!); t.items.insert(k, self.items[k]!); }
+        t
+    }
+
+    /// Adds `w` to `x`'s weight in place, dropping `x` when it comes to 0.
+    /// This is the O(1) step for a hot loop; `+` builds a new tally.
+    fn put(self, x: T, w: int) {
+        let k = f"{x}";
+        let n = (self.w[k] ?? 0) + w;
+        if n == 0 {
+            self.w.remove(k);
+            self.items.remove(k);
+        } else {
+            self.w.insert(k, n);
+            self.items.insert(k, x);
+        }
+    }
+
+    /// The weight of `x`, 0 when it is not in the tally.
+    fn weight(self, x: T) -> int { self.w[f"{x}"] ?? 0 }
+
+    /// `x ∈ t`: whether `x` is present, at a weight above 0.
+    fn contains(self, x: T) -> bool { self.weight(x) > 0 }
+
+    /// The items with a weight other than 0, in the order they came.
+    fn items(self) -> [T] { self.items.values() }
+
+    /// The items with their weights.
+    fn pairs(self) -> [(T, int)] {
+        let xs = self.items.values();
+        let ws = self.w.values();
+        let out: [(T, int)] = [];
+        for i in 0..xs.len() { out.push((xs[i], ws[i])); }
+        out
+    }
+
+    /// The count of items with a weight other than 0.
+    fn len(self) -> int { self.w.len() }
+
+    /// The sum of the weights, `count()` as a `query z` aggregate reads it:
+    /// additions minus removals.
+    fn count(self) -> int {
+        let n = 0;
+        for w in self.w.values() { n += w; }
+        n
+    }
+
+    /// `‖t‖`: the sum of the absolute weights.
+    fn size(self) -> int {
+        let n = 0;
+        for w in self.w.values() { n += w.abs(); }
+        n
+    }
+
+    /// `t * k`.
+    fn mul(self, k: int) -> Tally<T> { self.times(k) }
+
+    /// `k * t`.
+    fn rmul(self, k: int) -> Tally<T> { self.times(k) }
+
+    /// `t ⋅ k`.
+    fn dot(self, k: int) -> Tally<T> { self.times(k) }
+
+    /// `k ⋅ t`.
+    fn rdot(self, k: int) -> Tally<T> { self.times(k) }
+
+    /// `t⁺`: the items of positive weight.
+    fn added(self) -> Tally<T> {
+        let t = self.zero();
+        for k in self.w.keys() { if self.w[k]! > 0 { t.w.insert(k, self.w[k]!); t.items.insert(k, self.items[k]!); } }
+        t
+    }
+
+    /// `t⁻`: the items of negative weight, at positive weights, so
+    /// `t == t⁺ - t⁻`.
+    fn removed(self) -> Tally<T> {
+        let t = self.zero();
+        for k in self.w.keys() { if self.w[k]! < 0 { t.w.insert(k, -self.w[k]!); t.items.insert(k, self.items[k]!); } }
+        t
+    }
+
+    /// The present items at weight 1: presence, the tally as a set.
+    fn as_set(self) -> Tally<T> {
+        let t = self.zero();
+        for k in self.w.keys() { if self.w[k]! > 0 { t.w.insert(k, 1); t.items.insert(k, self.items[k]!); } }
+        t
+    }
+
+    /// `a ∪ b` (`larger`) or `a ∩ b`: the larger or smaller weight of each
+    /// item, an item one side lacks counting 0. A removal has no count to
+    /// compare, so it is an error.
+    fn __bag(self, o: Tally<T>, larger: bool, op: str) -> Tally<T> {
+        if self.removed().len() > 0 || o.removed().len() > 0 {
+            panic(f"`{op}` is a bag operation, and this tally has items of negative weight: take `t⁺` first, or use `+`/`⊎` to apply a change");
+        }
+        let t = self.zero();
+        for k in self.w.keys() {
+            let a = self.w[k]!;
+            let b = o.w[k] ?? 0;
+            let n = if larger { a.max(b) } else { a.min(b) };
+            if n != 0 { t.w.insert(k, n); t.items.insert(k, self.items[k]!); }
+        }
+        if larger {
+            for k in o.w.keys() {
+                if self.w[k] == null { t.w.insert(k, o.w[k]!); t.items.insert(k, o.items[k]!); }
+            }
+        }
+        t
+    }
+
+    /// `a ∪ b`: the larger weight of each item.
+    fn union(self, o: Tally<T>) -> Tally<T> { self.__bag(o, true, "∪") }
+
+    /// `a ∩ b`: the smaller weight of each item.
+    fn intersect(self, o: Tally<T>) -> Tally<T> { self.__bag(o, false, "∩") }
+
+    /// `a ⊎ b`: `a + b`.
+    fn uplus(self, o: Tally<T>) -> Tally<T> { self.add(o) }
+
+    /// `a ⋈ b`: the join on the whole item, so the items both have, each at
+    /// the product of its two weights. Joining held keys with key bindings
+    /// gives each held key's binding.
+    fn natural_join(self, o: Tally<T>) -> Tally<T> {
+        let t = self.zero();
+        for k in self.w.keys() {
+            let b = o.w[k] ?? 0;
+            if b != 0 { t.w.insert(k, self.w[k]! * b); t.items.insert(k, self.items[k]!); }
+        }
+        t
+    }
+}
+
+/// Tallies under `+`: the empty tally is the zero.
+impl AbelianGroup for Tally {
+    /// The empty tally.
+    fn zero(self) -> Tally<T> { Tally { w: {:}, items: {:} } }
+
+    /// `a + b`: the weights of equal items add.
+    fn add(self, o: Tally<T>) -> Tally<T> {
+        let t = self.copy();
+        for k in o.w.keys() { t.put(o.items[k]!, o.w[k]!); }
+        t
+    }
+
+    /// `a - b`: `a + -b`.
+    fn sub(self, o: Tally<T>) -> Tally<T> {
+        let t = self.copy();
+        for k in o.w.keys() { t.put(o.items[k]!, -o.w[k]!); }
+        t
+    }
+
+    /// `-t`: every weight negated, the change undone.
+    fn neg(self) -> Tally<T> { self.times(-1) }
+
+    /// `k * t`: every weight times `k`.
+    fn times(self, k: int) -> Tally<T> {
+        let t = self.zero();
+        if k == 0 { return t; }
+        for kk in self.w.keys() { t.w.insert(kk, self.w[kk]! * k); t.items.insert(kk, self.items[kk]!); }
+        t
+    }
+
+}
