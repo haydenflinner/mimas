@@ -3485,6 +3485,13 @@ impl<'s> Parser<'s> {
             let expr = self.table_literal();
             self.chain_accesses(expr)
         } else if self.struct_literals
+            && self.peek() == TokKind::Ident("zset")
+            && self.nth(1) == TokKind::LeftBrace
+        {
+            // r[impl mimas.query.zset.literal]
+            let expr = self.with_juxta(Juxta::Off, |p| p.table_cells_as(true));
+            self.chain_accesses(expr)
+        } else if self.struct_literals
             && self.peek() == TokKind::Ident("query")
             && (self.nth(1) == TokKind::LeftBrace
                 || (self.nth(1) == TokKind::Ident("z") && self.nth(2) == TokKind::LeftBrace))
@@ -3621,8 +3628,16 @@ impl<'s> Parser<'s> {
     }
 
     fn table_cells(&mut self) -> Expr {
+        self.table_cells_as(false)
+    }
+
+    /// The cells of `table { … }`, or of `zset { … }` when `zset`: the same
+    /// body, lifted as `query z { table { … } }` lifts it. A `zset` names a
+    /// `w` column, and its cells are the counts, so a float weight is an
+    /// error (r[impl mimas.query.zset.literal]).
+    fn table_cells_as(&mut self, zset: bool) -> Expr {
         let start = self.next_start();
-        self.advance(); // `table`
+        self.advance(); // `table` or `zset`
         self.bump(TokKind::LeftBrace);
         let here = self.location(start);
 
@@ -3683,6 +3698,10 @@ impl<'s> Parser<'s> {
         }
         self.expect(TokKind::RightBrace);
 
+        if zset {
+            self.zset_weights(&names, &rows, here);
+        }
+
         // build the column-by-column call chain
         let ident = |p: &Self, name: &str| p.new_expr(Ident::new(name.to_string(), here), start);
         let arg = |value: Expr| Argument { name: None, value };
@@ -3700,7 +3719,45 @@ impl<'s> Parser<'s> {
                 start,
             );
         }
+        if zset {
+            // the lift `query z { table { … } }` writes: the user `w` becomes
+            // the weights, and equal rows merge
+            let lifted = self.q_call("__z_in", vec![table], start);
+            return self.q_call("__z_cons", vec![lifted], start);
+        }
         table
+    }
+
+    /// A `zset { … }` names a `w` column of counts: one is required, and a
+    /// float in it is an error that names the plain lift for real weights.
+    fn zset_weights(&mut self, names: &[String], rows: &[Vec<Expr>], here: Location) {
+        let Some(j) = names.iter().position(|n| n == shared::weights::USER_W) else {
+            self.error(Misdirection {
+                src: self.src(),
+                at: here.into(),
+                msg: "a `zset` needs a `w` column: its rows' counts".into(),
+                label: "name a `w` column on the first line".into(),
+            });
+            return;
+        };
+        for row in rows {
+            let Some(cell) = row.get(j) else { continue };
+            let float = match cell.kind() {
+                ExprKind::Literal(Literal::Float(_)) => true,
+                ExprKind::Unary(u) => {
+                    matches!(u.right.kind(), ExprKind::Literal(Literal::Float(_)))
+                }
+                _ => false,
+            };
+            if float {
+                self.error(Misdirection {
+                    src: self.src(),
+                    at: cell.location().into(),
+                    msg: "a Z-set's weights are counts, so `w` holds whole numbers".into(),
+                    label: "write an int here; for real weights, lift a table: `query z { table { … } }`".into(),
+                });
+            }
+        }
     }
 
     // ---- `query { … }` ----------------------------------------------------------------------

@@ -2872,3 +2872,13 @@ fn zset_kind_mix_faults_at_run_time() {
     let e = fault("query { t join hide(z) item }");
     assert!(e.contains("a plain query joins plain tables"), "{e}");
 }
+
+// r[verify mimas.query.zset.literal]
+// `zset { … }` is the lifted table: its `w` is the counts, and it adds
+// with another Z-set where a plain table would not
+test_run_display!(
+    zset_literal_lifts,
+    "use std::polars::*;\nlet basket = zset {\n    item     w\n    \"apple\"  2\n    \"bread\"  1\n}\nlet change = zset {\n    item     w\n    \"apple\"  1\n    \"bread\"  -1\n}",
+    "basket + change == zset {\n    item  w\n    \"apple\"  3\n}" => "true",
+    "basket == query z { table {\n    item  w\n    \"apple\"  2\n    \"bread\"  1\n} }" => "true",
+);

@@ -109,3 +109,29 @@ fn a_glyph_alone_is_a_function() {
     same("f(∇)", "f(__stream_differentiate)");
     same("[∫, z⁻¹]", "[__stream_integrate, __stream_delay]");
 }
+
+/// Every parse error `src` reports, as text.
+fn errors_of(src: &str) -> Vec<std::string::String> {
+    let (_, errors) = super::utils::parse(src);
+    errors.iter().map(|e| format!("{e:?}")).collect()
+}
+
+// r[verify mimas.query.zset.literal]
+// `zset { … }` is the lift `query z { table { … } }` writes
+#[test]
+fn zset_literal_is_the_lifted_table() {
+    let lit = parse("zset {\n    item     w\n    \"apple\"  2\n    \"bread\"  -1\n}");
+    let lifted = parse("query z { table {\n    item     w\n    \"apple\"  2\n    \"bread\"  -1\n} }");
+    assert_eq!(lit.to_string(), lifted.to_string());
+}
+
+// r[verify mimas.query.zset.literal]
+#[test]
+fn zset_literal_needs_int_weights() {
+    let missing = errors_of("let z = zset {\n    item\n    \"apple\"\n}\n");
+    assert!(missing.iter().any(|e| e.contains("needs a `w` column")), "{missing:?}");
+    let float = errors_of("let z = zset {\n    item  w\n    \"apple\"  2.5\n}\n");
+    assert!(float.iter().any(|e| e.contains("weights are counts")), "{float:?}");
+    // `zset` stays a name where no `{` follows
+    assert!(errors_of("let zset = 1\nlet y = zset + 1\n").is_empty());
+}
