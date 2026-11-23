@@ -14,12 +14,12 @@ fn test_solver() -> Solver {
     let mut solver = Solver::new();
     let mut lib = api::Library::new();
     lib.method(api::ApiMethod {
-        recv_ty: Ty::Dict(Box::new(Ty::Anon(0))),
+        recv_ty: Ty::dict_of(Ty::Anon(6), Ty::Anon(0)),
         name: "new".into(),
         parameters: vec![],
         param_dims: vec![],
         param_names: vec![],
-        return_ty: Some(Ty::Dict(Box::new(Ty::Anon(0)))),
+        return_ty: Some(Ty::dict_of(Ty::Anon(6), Ty::Anon(0))),
         return_dim: None,
         takes_self: false,
         mutates_recv: false,
@@ -109,8 +109,9 @@ impl LooseEq for Ty {
     fn loose_eq(&self, other: &Ty, solver: &Solver) -> bool {
         match (self, other) {
             (Ty::Vid(_), Ty::Vid(_)) => true, // may live to regret that?
-            (Ty::Array(ty, _), Ty::Array(o_ty, _)) | (Ty::Dict(ty), Ty::Dict(o_ty)) => {
-                ty.loose_eq(o_ty, solver)
+            (Ty::Array(ty, _), Ty::Array(o_ty, _)) => ty.loose_eq(o_ty, solver),
+            (Ty::Dict(k, ty), Ty::Dict(o_k, o_ty)) => {
+                k.loose_eq(o_k, solver) && ty.loose_eq(o_ty, solver)
             }
             // vids and declared params are both "a type variable we can't name from the test
             // side" -- loose equality accepts either for the other
@@ -198,7 +199,7 @@ macro_rules! tuple {
 }
 
 macro_rules! dictionary {
-    ($ty:expr) => {{ $crate::components::Ty::Dict(Box::new($ty)) }};
+    ($ty:expr) => {{ $crate::components::Ty::dict($ty) }};
 }
 
 macro_rules! option {

@@ -1385,6 +1385,7 @@ fn access_kind(k: compile::AccessKind) -> &'static str {
     match k {
         compile::AccessKind::Direct => "AccessKind::Direct",
         compile::AccessKind::Option => "AccessKind::Option",
+        compile::AccessKind::Entry => "AccessKind::Entry",
     }
 }
 

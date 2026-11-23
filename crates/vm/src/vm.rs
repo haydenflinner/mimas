@@ -2631,12 +2631,15 @@ pub fn get_index<'gc>(
             let v = a.0.borrow();
             v.get(pos(i, v.len())?).unwrap()
         }
+        // r[impl mimas.dict.key.index]
         (Val::Dict(d), Val::Str(key)) => d.0.borrow().get(&key).copied().unwrap_or(Val::Null),
-        (Val::Dict(d), Val::Int(i)) => {
+        // a `for` loop's walk: the `i`th entry as a `(key, value)` pair
+        (Val::Dict(d), Val::Int(i)) if kind == AccessKind::Entry => {
             let m = d.0.borrow();
             let (k, v) = m.entry_at(pos(i, m.len())?);
-            Val::Array(ctx.new_array(vec![Val::Str(k), v]))
+            Val::Array(ctx.new_array(vec![k, v]))
         }
+        (Val::Dict(d), key) => d.0.borrow().get_key(key).copied().unwrap_or(Val::Null),
         (Val::Instance(inst), Val::Int(i)) => {
             let inst = inst.0.borrow();
             inst.fields[pos(i, inst.fields.len())?]
@@ -2697,6 +2700,17 @@ pub fn set_index<'gc>(
         (Val::Dict(d), Val::Str(key)) => {
             d.0.try_borrow_mut(&ctx).map_err(|_| RtErr::const_write())?.insert(key, value);
         }
+        (Val::Dict(d), key) => {
+            let mut m = d.0.try_borrow_mut(&ctx).map_err(|_| RtErr::const_write())?;
+            // an existing key keeps the copy it was stored under: no new copy, no check
+            if let Some(slot) = m.get_key_mut(key) {
+                *slot = value;
+            } else {
+                drop(m);
+                let key = ctx.dict_key(key)?;
+                d.0.borrow_mut(&ctx).insert_key(key, value);
+            }
+        }
         (Val::Instance(inst), Val::Int(i)) => {
             let mut inst = inst.0.try_borrow_mut(&ctx).map_err(|_| RtErr::const_write())?;
             let p = pos(i, inst.fields.len())?;
@@ -2729,10 +2743,8 @@ pub fn contains<'gc>(needle: Val<'gc>, haystack: Val<'gc>, condition: bool) -> V
     let c = match haystack {
         Val::Array(a) => a.0.borrow().contains(&needle),
         Val::IntArray(a) | Val::FloatArray(a) => a.0.borrow().contains(needle),
-        Val::Dict(d) => {
-            let Val::Str(key) = needle else { todo!() };
-            d.0.borrow().contains_key(&key)
-        }
+        // r[impl mimas.dict.key.in]
+        Val::Dict(d) => d.0.borrow().contains(needle),
         Val::Str(s) => {
             let Val::Str(n) = needle else { todo!() };
             s.as_str().contains(n.as_str())

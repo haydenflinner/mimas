@@ -113,11 +113,13 @@ pub enum Ty {
     ///
     /// See more in the [book](https://mim.as/reference/collections/arrays.html).
     Array(Box<Ty>, Len),
-    /// A hash map from string keys to values of one type, like a `HashMap<String, T>` in Rust.
-    /// Written `{T}`. Any key might be absent, so indexing one yields `T?`.
+    /// A hash map from keys of one type to values of one type, like a `HashMap<K, V>` in Rust:
+    /// the key type first, then the value type. Written `{V}` for string keys, `{K: V}` for any
+    /// other key type (an int, bool, dec, float, tuple or plain struct; the checker refuses a
+    /// list, dict, function or `()` as a key). Any key might be absent, so indexing one yields `V?`.
     ///
     /// See more in the [book](https://mim.as/reference/collections/dictionaries.html).
-    Dict(Box<Ty>),
+    Dict(Box<Ty>, Box<Ty>),
     /// A fixed-length, heterogeneous sequence. Written as a parenthesized list, like `(int, str)`.
     ///
     /// See more in the [book](https://mim.as/reference/collections/tuples.html).
@@ -186,7 +188,7 @@ impl PartialEq for Ty {
             (Self::Vid(l), Self::Vid(r)) => l == r,
             (Self::Anon(l), Self::Anon(r)) => l == r,
             (Self::Array(l, ll), Self::Array(r, rl)) => l == r && ll == rl,
-            (Self::Dict(l), Self::Dict(r)) => l == r,
+            (Self::Dict(lk, l), Self::Dict(rk, r)) => lk == rk && l == r,
             (Self::Tuple(l), Self::Tuple(r)) => l == r,
             (Self::Fn(l), Self::Fn(r)) => l == r,
             (Self::Option(l), Self::Option(r)) => l == r,
@@ -238,6 +240,16 @@ impl Ty {
     }
 
     /// A growable `[elem]` -- the array type any unsized context wants.
+    /// `{V}`: string keys to `value`.
+    pub fn dict(value: Ty) -> Ty {
+        Ty::Dict(Box::new(Ty::Str), Box::new(value))
+    }
+
+    /// `{K: V}`.
+    pub fn dict_of(key: Ty, value: Ty) -> Ty {
+        Ty::Dict(Box::new(key), Box::new(value))
+    }
+
     pub fn array(elem: Ty) -> Ty {
         Ty::Array(Box::new(elem), Len::Unknown)
     }
@@ -293,9 +305,10 @@ impl Ty {
     pub fn contains_params(&self) -> bool {
         match self {
             Ty::Param(_) => true,
-            Ty::Array(inner, _) | Ty::Dict(inner) | Ty::Option(inner) | Ty::Result(inner) => {
+            Ty::Array(inner, _) | Ty::Option(inner) | Ty::Result(inner) => {
                 inner.contains_params()
             }
+            Ty::Dict(k, v) => k.contains_params() || v.contains_params(),
             Ty::Tuple(members) => members.iter().any(Ty::contains_params),
             Ty::Fn(h) => {
                 h.parameters.iter().any(|p| p.ty.contains_params()) || h.return_ty.contains_params()
@@ -309,9 +322,10 @@ impl Ty {
     pub fn contains_skolem(&self) -> bool {
         match self {
             Ty::Skolem(_) => true,
-            Ty::Array(inner, _) | Ty::Dict(inner) | Ty::Option(inner) | Ty::Result(inner) => {
+            Ty::Array(inner, _) | Ty::Option(inner) | Ty::Result(inner) => {
                 inner.contains_skolem()
             }
+            Ty::Dict(k, v) => k.contains_skolem() || v.contains_skolem(),
             Ty::Tuple(members) => members.iter().any(Ty::contains_skolem),
             Ty::Fn(h) => {
                 h.parameters.iter().any(|p| p.ty.contains_skolem()) || h.return_ty.contains_skolem()
@@ -518,7 +532,8 @@ impl Ty {
                 }
                 format!("[{}; {}]", elem.display(names), dims.iter().join(", "))
             }
-            Ty::Dict(ty) => format!("{{{}}}", ty.display(names)),
+            Ty::Dict(k, v) if **k == Ty::Str => format!("{{{}}}", v.display(names)),
+            Ty::Dict(k, v) => format!("{{{}: {}}}", k.display(names), v.display(names)),
             Ty::Tuple(members) => {
                 format!("({})", members.iter().map(|v| v.display(names)).join(", "))
             }

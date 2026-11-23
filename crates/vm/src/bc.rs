@@ -1883,10 +1883,10 @@ pub mod jit {
         out: *mut RtResult<Flow<'gc>>,
     ) -> u8 {
         unsafe {
-            let kind = if kind == 0 {
-                AccessKind::Direct
-            } else {
-                AccessKind::Option
+            let kind = match kind {
+                0 => AccessKind::Direct,
+                1 => AccessKind::Option,
+                _ => AccessKind::Entry,
             };
             match super::get_index(ctx, *regs.add(s), *regs.add(i), kind) {
                 Ok(v) => {
@@ -1931,10 +1931,10 @@ pub mod jit {
         out: *mut RtResult<Flow<'gc>>,
     ) -> u8 {
         unsafe {
-            let kind = if kind == 0 {
-                AccessKind::Direct
-            } else {
-                AccessKind::Option
+            let kind = match kind {
+                0 => AccessKind::Direct,
+                1 => AccessKind::Option,
+                _ => AccessKind::Entry,
             };
             let receiver = *regs.add(src);
             if kind == AccessKind::Option && receiver == Val::Null {

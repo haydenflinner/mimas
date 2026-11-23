@@ -20,13 +20,13 @@
 // The carriers are the ones in group.mim: a `Stream<T>` of any
 // `AbelianGroup` for ∫, ∇ and z⁻¹, and a `Tally<T>` for the relational
 // operators, which need keyed state. Join and group-by keep their indexes
-// in dicts keyed by a key's printed form (`__ikey`), the same rule `Tally`
-// uses for its items.
+// in dicts keyed by the join or group key itself (`__ikey`), as `Tally`
+// keys its items: keys that are `==` are one key.
 // r[impl mimas.incremental]
 
-/// The dict key of a join or group key: its printed form, as `Tally`
-/// keys its items.
-fn __ikey<K>(k: K) -> str { f"{k}" }
+/// The dict key of a join or group key: the key itself, as `Tally` keys
+/// its items (a dict keys by any value a key can be).
+fn __ikey<K>(k: K) -> K { k }
 
 // ---- ∫, ∇ and z⁻¹ as operators -------------------------------------------
 
@@ -208,7 +208,7 @@ impl ZFlatMap {
 /// form `ZJoin` is checked against.
 /// r[impl mimas.incremental.join]
 fn zjoin<A, B, K, C>(a: Tally<A>, b: Tally<B>, ka: (A) -> K, kb: (B) -> K, both: (A, B) -> C) -> Tally<C> {
-    let index: {Tally<B>} = {:};
+    let index: {K: Tally<B>} = {:};
     for p in b.pairs() {
         let k = __ikey(kb(p.0));
         if index[k] == null { index[k] = tally([]); }
@@ -232,8 +232,8 @@ struct ZJoin<A, B, K, C> {
     ka: (A) -> K,
     kb: (B) -> K,
     both: (A, B) -> C,
-    left: {Tally<A>},
-    right: {Tally<B>},
+    left: {K: Tally<A>},
+    right: {K: Tally<B>},
 }
 
 /// A join on `ka(a) == kb(b)` whose output items are `both(a, b)`.
@@ -247,7 +247,7 @@ impl ZJoin {
     fn step(self, da: Tally<A>, db: Tally<B>) -> Tally<C> {
         let out: Tally<C> = tally([]);
         // Δa ⋈ (B + Δb): the left change against the right as it will be.
-        let db_by: {Tally<B>} = {:};
+        let db_by: {K: Tally<B>} = {:};
         for q in db.pairs() {
             let k = __ikey(self.kb(q.0));
             if db_by[k] == null { db_by[k] = tally([]); }
@@ -334,9 +334,9 @@ impl ZDistinct {
 /// form `ZGroupSum` is checked against.
 /// r[impl mimas.incremental.group_sum]
 fn zgroup_sum<A, K>(t: Tally<A>, key: (A) -> K, val: (A) -> int) -> Tally<(K, int)> {
-    let sums: {int} = {:};
-    let counts: {int} = {:};
-    let keys: {K} = {:};
+    let sums: {K: int} = {:};
+    let counts: {K: int} = {:};
+    let keys: {K: K} = {:};
     for p in t.pairs() {
         let k = key(p.0);
         let s = __ikey(k);
@@ -358,9 +358,9 @@ fn zgroup_sum<A, K>(t: Tally<A>, key: (A) -> K, val: (A) -> int) -> Tally<(K, in
 struct ZGroupSum<A, K> {
     key: (A) -> K,
     val: (A) -> int,
-    sums: {int},
-    counts: {int},
-    keys: {K},
+    sums: {K: int},
+    counts: {K: int},
+    keys: {K: K},
 }
 
 /// A group-by on `key` that sums `val`.
@@ -372,9 +372,9 @@ impl ZGroupSum {
     #[scans]
     fn step(self, c: Tally<A>) -> Tally<(K, int)> {
         // The groups this change touches, with their rows before the step.
-        let touched: {K} = {:};
-        let old_sum: {int} = {:};
-        let old_count: {int} = {:};
+        let touched: {K: K} = {:};
+        let old_sum: {K: int} = {:};
+        let old_count: {K: int} = {:};
         for p in c.pairs() {
             let k = self.key(p.0);
             let s = __ikey(k);

@@ -724,6 +724,10 @@ impl<'s> Scoped<'s> {
             | Annotation::Result(inner)
             | Annotation::Array(inner, _)
             | Annotation::Dictionary(inner) => self.annotation(inner),
+            Annotation::Map(key, value, _) => {
+                self.annotation(key);
+                self.annotation(value);
+            }
             Annotation::Tuple(members) => {
                 for member in members {
                     self.annotation(member);

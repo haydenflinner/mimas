@@ -1172,12 +1172,15 @@ fn preview(source: &str) -> String {
 
 test_error_label!(let_mut_label_sits_on_mut, "let mut i = 0;", "mut");
 
+// `{K: V}` is the dict keyed by `K` values: once Rust's `HashMap<str, int>`
+// habit that this parser refused, now the spelling (`{str: int}` is `{int}`)
+// r[verify mimas.dict.key.type]
 test_recover!(
-    rust_dict_type_habit,
-    "fn f(d: {str: int}) -> int { 0 }
+    keyed_dict_type,
+    "fn f(d: {str: int}, e: {(int, int): bool}) -> int { 0 }
      let x = 1;",
-    errors: ["`{str: V}` isn't a type -- a dict type is `{V}` (keys are always `str`)"],
-    stmts: ["fn f(d: <poison>) -> int {0 }", "let x = 1;"],
+    errors: [],
+    stmts: ["fn f(d: {str: int}, e: {(int, int): bool}) -> int {0 }", "let x = 1;"],
 );
 
 // `fn(..) -> T`, `Fn(..)`, `impl Fn` in a type slot name the bare spelling

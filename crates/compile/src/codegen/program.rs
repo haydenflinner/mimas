@@ -587,7 +587,7 @@ impl Decode for AccessKind {
     fn decode(decoder: &mut Decoder) -> Self {
         let b = decoder.u8();
         debug_assert!(
-            (b as usize) <= AccessKind::Option as usize,
+            (b as usize) <= AccessKind::Entry as usize,
             "invalid AccessKind byte {b}: bytecode desync"
         );
         unsafe { std::mem::transmute::<u8, AccessKind>(b) }

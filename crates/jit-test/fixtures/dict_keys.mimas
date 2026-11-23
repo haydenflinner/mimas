@@ -1,0 +1,19 @@
+// value-keyed dicts on both lanes: an int key is the key, never the
+// position, and a `for` walks entries by position (`AccessKind::Entry`)
+fn walk() -> int {
+    let d: {int: int} = {:};
+    d[10] = 1;
+    d[0] = 2;
+    d[3] = 3;
+    let s = 0;
+    for (k, v) in d { s += k * 100 + v; }
+    let t: {(int, int): int} = {:};
+    for i in 0..5 { t[(i, i % 2)] = i; }
+    let hits = 0;
+    for i in 0..5 { if (i, 0) in t { hits += 1; } }
+    let names = { a: 1, b: 2 };
+    let n = 0;
+    for (_k, v) in names { n += v; }
+    s * 1000 + hits * 10 + n + (d[0] ?? 0) + (d[1] ?? 0)
+}
+let TEST_VALUE = walk();

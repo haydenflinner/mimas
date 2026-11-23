@@ -622,6 +622,61 @@ impl<'gc> Ctx<'gc> {
         crate::val::Tensor(Gc::new(self.mutation, gc_arena::Static(t)))
     }
 
+    /// `key` as a dict can store it, or why it cannot be a key. A string, int, bool, dec,
+    /// null, or float other than NaN is a key as it is. A tuple or struct is a key when all
+    /// of its parts are: the dict stores a frozen copy, so the key is the value at insert
+    /// time, and a later change to the value the caller holds does not move it. A key read
+    /// back out of the dict is that frozen copy. A dict, a function or a NaN is refused.
+    /// Lists pass here too (a tuple is a list at run time); the checker refuses a list key
+    /// type before a program runs.
+    /// r[impl mimas.dict.key.runtime]
+    /// r[impl mimas.dict.key.copy]
+    pub fn dict_key(self, key: Val<'gc>) -> RtResult<Val<'gc>> {
+        match key {
+            Val::Str(_) | Val::Int(_) | Val::Bool(_) | Val::Dec(_) | Val::Null => Ok(key),
+            Val::Array(_) | Val::IntArray(_) | Val::FloatArray(_) | Val::Instance(_) => {
+                Self::key_parts(key)?;
+                if self.is_frozen(key) {
+                    return Ok(key);
+                }
+                let copy = self.deep_clone(key);
+                self.freeze(copy);
+                Ok(copy)
+            }
+            other => Self::key_parts(other).map(|_| other),
+        }
+    }
+
+    /// Whether every part of `key` can be part of a dict key.
+    fn key_parts(key: Val<'gc>) -> RtResult<()> {
+        let refuse = |what: &str| {
+            Err(RtErr::Custom(format!(
+                "{what} cannot be a dict key: a key is a string, number, bool, or a tuple or \
+                 struct made of those"
+            )))
+        };
+        match key {
+            Val::Str(_) | Val::Int(_) | Val::Bool(_) | Val::Dec(_) | Val::Null => Ok(()),
+            Val::Float(f) if f.is_nan() => Err(RtErr::Custom(
+                "NaN cannot be a dict key: NaN is not equal to itself, so it could never be \
+                 found again"
+                    .into(),
+            )),
+            Val::Float(_) => Ok(()),
+            Val::Array(a) => a.0.borrow().iter().try_for_each(|&v| Self::key_parts(v)),
+            Val::IntArray(a) | Val::FloatArray(a) => {
+                let a = a.0.borrow();
+                (0..a.len()).try_for_each(|i| Self::key_parts(a.at(i)))
+            }
+            Val::Instance(i) => i.0.borrow().fields.iter().try_for_each(|&v| Self::key_parts(v)),
+            Val::Dict(_) => refuse("a dict"),
+            Val::Fn(_) | Val::Closure(_) => refuse("a function"),
+            Val::Raised(_) => refuse("a raised error"),
+            #[allow(unreachable_patterns)]
+            _ => refuse("this value"),
+        }
+    }
+
     // fresh allocation per container so the result shares no mutable state with `value`. scalars,
     // interned strs, fns and closures are copied by handle (immutable / callable). recurses like
     // `display`, so it shares display's no-cycles assumption.
@@ -901,7 +956,17 @@ impl<'gc> Ctx<'gc> {
                     if i > 0 {
                         out.push_str(", ");
                     }
-                    let _ = write!(out, "{}: ", k.as_str());
+                    // a string key prints bare, as a record field; any other key prints
+                    // as the value it is
+                    match k {
+                        Val::Str(s) => {
+                            let _ = write!(out, "{}: ", s.as_str());
+                        }
+                        k => {
+                            self.render_into(out, *k, true, depth + 1, path)?;
+                            out.push_str(": ");
+                        }
+                    }
                     self.render_into(out, *v, true, depth + 1, path)?;
                 }
                 out.push('}');

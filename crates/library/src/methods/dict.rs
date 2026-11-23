@@ -1,12 +1,10 @@
-use std::collections::HashMap;
-
 use macros::native;
 use shared::Ty;
-use vm::{Ctx, DictMap, Str, anon, api::Api};
+use vm::{Ctx, DictMap, RtErr, Val, anon, api::Api};
 
 pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     // r[impl mimas.dict.type] `dict::new()` is the empty dict
-    api.add_assoc(Ty::Dict(Box::new(Ty::Anon(0))), new);
+    api.add_assoc(Ty::dict_of(Ty::Anon(anon::KEY_SLOT), Ty::Anon(0)), new);
     api.add_method(len);
     api.add_method(contains_key);
     api.add_method(insert);
@@ -24,9 +22,11 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
 /// ```mimas
 /// let ids: {int} = dict::new();
 /// ids["a"] = 1; // ids is now {"a": 1}
+/// let seen: {(int, int): bool} = dict::new();
+/// seen[(2, 3)] = true;
 /// ```
-fn new<'gc>() -> HashMap<String, anon::T<'gc>> {
-    HashMap::new()
+fn new<'gc>(ctx: Ctx<'gc>) -> anon::DictOf<'gc, 0> {
+    anon::DictOf(ctx.new_dict(DictMap::new()))
 }
 
 #[native]
@@ -49,11 +49,8 @@ fn len(d: &DictMap<'gc>) -> usize {
 /// let a = slots.contains_key("a"); // true, though slots["a"] is null
 /// let b = slots.contains_key("b"); // false
 /// ```
-fn contains_key<'gc>(ctx: Ctx<'gc>, d: &DictMap<'gc>, key: String) -> bool {
-    // intern to normalize: `Str` uses pointer-identity Eq/Hash, so we need the same Gc
-    // handle that's already in the dict's keys.
-    let key = ctx.intern(&key);
-    d.contains_key(&key)
+fn contains_key<'gc>(d: &DictMap<'gc>, key: anon::K<'gc>) -> bool {
+    d.contains(key.0)
 }
 
 #[native]
@@ -67,12 +64,22 @@ fn contains_key<'gc>(ctx: Ctx<'gc>, d: &DictMap<'gc>, key: String) -> bool {
 /// let old = stock.insert("apples", 5); // 3
 /// let new = stock.insert("pears", 2);  // null
 /// ```
-fn insert(
+fn insert<'gc>(
+    ctx: Ctx<'gc>,
     d: &mut DictMap<'gc, anon::T<'gc>>,
-    key: Str<'gc>,
+    key: anon::K<'gc>,
     val: anon::T<'gc>,
-) -> Option<anon::T<'gc>> {
-    d.insert(key, val)
+) -> Result<Option<anon::T<'gc>>, RtErr> {
+    if let Some(slot) = d.get_key_mut(key.0) {
+        return Ok(Some(std::mem::replace(slot, val)));
+    }
+    Ok(d.insert_key(dict_key(ctx, key.0)?, val))
+}
+
+/// A key as the dict stores it: checked, and a tuple or struct copied and frozen
+/// (`Ctx::dict_key`).
+fn dict_key<'gc>(ctx: Ctx<'gc>, key: Val<'gc>) -> Result<Val<'gc>, RtErr> {
+    ctx.dict_key(key)
 }
 
 #[native]
@@ -84,8 +91,8 @@ fn insert(
 /// let a = stock.remove("apples"); // 3, and stock is now { pears: 2 }
 /// let b = stock.remove("plums");  // null
 /// ```
-fn remove(d: &mut DictMap<'gc, anon::T<'gc>>, key: Str<'gc>) -> Option<anon::T<'gc>> {
-    d.remove(&key)
+fn remove(d: &mut DictMap<'gc, anon::T<'gc>>, key: anon::K<'gc>) -> Option<anon::T<'gc>> {
+    d.remove_key(key.0)
 }
 
 #[native]
@@ -103,8 +110,8 @@ fn remove(d: &mut DictMap<'gc, anon::T<'gc>>, key: Str<'gc>) -> Option<anon::T<'
 ///     print(f"{name} has {score}");
 /// }
 /// ```
-fn pairs(d: &DictMap<'gc, anon::T<'gc>>) -> Vec<(Str<'gc>, anon::T<'gc>)> {
-    d.iter().map(|(&k, &v)| (k, v)).collect()
+fn pairs(d: &DictMap<'gc, anon::T<'gc>>) -> Vec<(anon::K<'gc>, anon::T<'gc>)> {
+    d.iter().map(|(&k, &v)| (anon::Anon(k), v)).collect()
 }
 
 #[native]
@@ -114,8 +121,8 @@ fn pairs(d: &DictMap<'gc, anon::T<'gc>>) -> Vec<(Str<'gc>, anon::T<'gc>)> {
 /// let ages = { ann: 31, bo: 7 };
 /// let names = ages.keys(); // ["ann", "bo"]
 /// ```
-fn keys(d: &DictMap<'gc, anon::T<'gc>>) -> Vec<Str<'gc>> {
-    d.iter().map(|(&k, _)| k).collect()
+fn keys(d: &DictMap<'gc, anon::T<'gc>>) -> Vec<anon::K<'gc>> {
+    d.iter().map(|(&k, _)| anon::Anon(k)).collect()
 }
 
 #[native]

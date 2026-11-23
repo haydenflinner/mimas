@@ -178,7 +178,7 @@ impl Builder<'_> {
                 let entries: Vec<(String, Val<'gc>)> =
                     d.0.borrow()
                         .iter()
-                        .map(|(k, v)| (k.as_str().to_string(), *v))
+                        .map(|(k, v)| (crate::val::key_label(k), *v))
                         .collect();
                 Obj::Dict(entries.into_iter().map(|(k, v)| (k, b.slot(v))).collect())
             }),

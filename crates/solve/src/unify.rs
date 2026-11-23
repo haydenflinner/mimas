@@ -181,8 +181,11 @@ impl Unification {
                 }
                 Self::unify_inner(ty, exp_ty, solver).map_err(|_| ())
             }
-            (Ty::Dict(ty), Ty::Dict(exp_ty)) => {
-                Self::unify_inner(ty, exp_ty, solver).map_err(|_| ())
+            (Ty::Dict(key, ty), Ty::Dict(exp_key, exp_ty)) => {
+                let sub = Self::unify_inner(key, exp_key, solver).map_err(|_| ())?;
+                Self::unify_inner(ty, exp_ty, solver)
+                    .map(|v| sub.combo(v))
+                    .map_err(|_| ())
             }
             (Ty::Tuple(lhs), Ty::Tuple(rhs)) if lhs.len() == rhs.len() => lhs
                 .iter_mut()

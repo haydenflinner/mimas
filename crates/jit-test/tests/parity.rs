@@ -41,6 +41,18 @@ fn basic_parity() {
     assert_eq!(run(source, None), run(source, Some(bodies)));
 }
 
+// r[verify mimas.dict.key.for]
+#[test]
+fn dict_keys_parity() {
+    let source = include_str!("../fixtures/dict_keys.mimas");
+    let j = jit_bodies(source);
+    let (v, k, e) = run(source, Some(j.bodies()));
+    assert!(e.is_none(), "jit dict run errored: {e:?}");
+    // 10*100+1 + 0*100+2 + 3*100+3 = 1306; hits (0,0),(2,0),(4,0) = 3; n = 3; d[0] = 2
+    assert!(matches!(v, Some(Captured::Int(1306035))), "{v:?}");
+    assert_eq!(run(source, None), (v, k, e));
+}
+
 #[test]
 fn cold_parity() {
     let source = include_str!("../fixtures/cold.mimas");

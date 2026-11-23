@@ -117,13 +117,14 @@ pub enum RtErr {
 }
 
 impl RtErr {
-    /// A write to a value that came from a `const`.
+    /// A write to a value that came from a `const`, or to a key a dict holds (a dict
+    /// stores a frozen copy of a tuple or struct key, `Ctx::dict_key`).
     // r[impl mimas.const.frozen]
     pub fn const_write() -> Self {
         RtErr::Custom(
-            "cannot change a constant: this value comes from a `const`, and a constant \
-             cannot be changed, nor anything inside it. Take a copy to change: \
-             `deep_clone(value)`"
+            "cannot change a constant: this value comes from a `const` or is a key a dict \
+             holds, and neither can be changed, nor anything inside it. Take a copy to \
+             change: `deep_clone(value)`"
                 .into(),
         )
     }

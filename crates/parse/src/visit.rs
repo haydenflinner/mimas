@@ -387,6 +387,10 @@ pub fn walk_annotation(annotation: &Annotation, visitor: &mut impl Visitor) {
         | Annotation::Array(inner, _)
         | Annotation::Dictionary(inner)
         | Annotation::Inout(_, inner) => walk_annotation(inner, visitor),
+        Annotation::Map(key, value, _) => {
+            walk_annotation(key, visitor);
+            walk_annotation(value, visitor);
+        }
         Annotation::Tuple(members) => {
             for member in members {
                 walk_annotation(member, visitor);

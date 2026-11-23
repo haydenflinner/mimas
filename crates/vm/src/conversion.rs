@@ -230,7 +230,7 @@ impl<'gc> MimasType<'gc> for Array<'gc> {
 
 impl<'gc> MimasType<'gc> for Dict<'gc> {
     fn mimas_ty(_: &Registry) -> Option<Ty> {
-        Some(Ty::Dict(Box::new(Ty::Anon(0))))
+        Some(Ty::dict_of(Ty::Anon(crate::anon::KEY_SLOT), Ty::Anon(0)))
     }
     fn from_value(_ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError> {
         v.as_dict().ok_or_else(|| ty_error("dict", v))
@@ -562,15 +562,18 @@ impl<'gc, T: MimasType<'gc>> MimasType<'gc> for Vec<T> {
 
 impl<'gc, T: MimasType<'gc>> MimasType<'gc> for HashMap<String, T> {
     fn mimas_ty(reg: &Registry) -> Option<Ty> {
-        T::mimas_ty(reg).map(|i| Ty::Dict(Box::new(i)))
+        T::mimas_ty(reg).map(Ty::dict)
     }
     fn from_value(ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError> {
         let dict = v.as_dict().ok_or_else(|| ty_error("dict", v))?;
-        let items: Vec<(Str<'gc>, Val<'gc>)> =
+        let items: Vec<(Val<'gc>, Val<'gc>)> =
             dict.0.borrow().iter().map(|(&k, &v)| (k, v)).collect();
         items
             .into_iter()
-            .map(|(k, v)| Ok((k.as_str().to_string(), T::from_value(ctx, v)?)))
+            .map(|(k, v)| match k {
+                Val::Str(k) => Ok((k.as_str().to_string(), T::from_value(ctx, v)?)),
+                k => Err(ty_error("a dict with string keys", k)),
+            })
             .collect()
     }
     fn into_value(self, ctx: Ctx<'gc>) -> Val<'gc> {
@@ -621,11 +624,25 @@ impl<'gc, const N: u32> MimasType<'gc> for crate::anon::SeqOf<'gc, N> {
 
 impl<'gc, const N: u32> MimasType<'gc> for crate::anon::DictOf<'gc, N> {
     fn mimas_ty(_: &Registry) -> Option<Ty> {
-        Some(Ty::Dict(Box::new(Ty::Anon(N))))
+        Some(Ty::dict_of(Ty::Anon(crate::anon::KEY_SLOT), Ty::Anon(N)))
     }
     fn from_value(_ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError> {
         v.as_dict()
             .map(crate::anon::DictOf)
+            .ok_or_else(|| ty_error("dict", v))
+    }
+    fn into_value(self, _ctx: Ctx<'gc>) -> Val<'gc> {
+        Val::Dict(self.0)
+    }
+}
+
+impl<'gc, const N: u32> MimasType<'gc> for crate::anon::StrDictOf<'gc, N> {
+    fn mimas_ty(_: &Registry) -> Option<Ty> {
+        Some(Ty::dict(Ty::Anon(N)))
+    }
+    fn from_value(_ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, TypeError> {
+        v.as_dict()
+            .map(crate::anon::StrDictOf)
             .ok_or_else(|| ty_error("dict", v))
     }
     fn into_value(self, _ctx: Ctx<'gc>) -> Val<'gc> {

@@ -1104,8 +1104,10 @@ impl<'a> WFx<'a> {
     /// only `AccessKind::Direct` lowers to bare loads
     fn direct(&self, kind: &compile::AccessKind) -> Result<(), Bail> {
         match kind {
-            compile::AccessKind::Direct => Ok(()),
-            _ => bail!("optional access needs Null values"),
+            // a dict walk (`Entry`) reads by position, as an int index on a dict
+            // always has here: wasmgen's dicts are string-keyed
+            compile::AccessKind::Direct | compile::AccessKind::Entry => Ok(()),
+            compile::AccessKind::Option => bail!("optional access needs Null values"),
         }
     }
 

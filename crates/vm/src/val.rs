@@ -803,16 +803,180 @@ impl<'gc> ArrayStore<'gc> {
 
 // generic over the value slot so natives can take a type-safe `DictMap<'gc, anon::T<'gc>>` view
 // (see `anon::as_dict_mut`); gc storage is always the `V = Val` default.
+//
+// A key is a value, not only a string (spec `mimas.dict.key`): a string, int, bool, dec,
+// float other than NaN, null, or a tuple or plain struct built from those. `Key` hashes it so
+// that two values `==` calls equal hash the same (`1`, `1.0` and `1dec` are one key), and
+// compares with `Val`'s own `==`. A string key hashes exactly as a bare `Str` did, so a
+// string-keyed dict pays one tag test over the old `HashMap<Str, usize>`.
+// r[impl mimas.dict.key]
 #[derive(Debug)]
 pub struct DictMap<'gc, V = Val<'gc>> {
     // entries holds (key, value) in insertion order for stable positional iteration; index maps
     // each key to its slot in entries. invariant: index[k] == position of k in entries.
-    entries: Vec<(Str<'gc>, V)>,
-    index: HashMap<Str<'gc>, usize>,
+    entries: Vec<(Val<'gc>, V)>,
+    index: HashMap<Key<'gc>, usize>,
+}
+
+/// A dict key in the index: a [`Val`] with the hash and equality of a key. Equality is
+/// `Val`'s `PartialEq`, which is Mimas `==`; [`hash_key`] agrees with it.
+#[derive(Copy, Clone, Debug, Collect)]
+#[collect(no_drop)]
+#[repr(transparent)]
+pub struct Key<'gc>(pub Val<'gc>);
+
+impl PartialEq for Key<'_> {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        match (self.0, other.0) {
+            (Val::Str(a), Val::Str(b)) => a == b,
+            (a, b) => a == b,
+        }
+    }
+}
+// `Val`'s `==` is not reflexive for NaN, so a NaN never goes in as a key
+// (`Ctx::dict_key` refuses it); every stored key equals itself.
+impl Eq for Key<'_> {}
+
+impl std::hash::Hash for Key<'_> {
+    #[inline]
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        hash_key(&self.0, h)
+    }
+}
+
+/// The hash of a dict key. Values `==` calls equal hash the same:
+/// - a string hashes its bytes, as `Str` does;
+/// - numbers hash by value across `int`, `float` and `dec`: a whole number hashes as the
+///   `i64` its double rounds to, any other number as its double's bits (so `-0.0` and `0`
+///   are one key, and `0.5dec` meets `0.5`);
+/// - a list or tuple hashes its length and its elements, whatever the store kind;
+/// - a struct hashes its type and its fields.
+///
+/// A value that cannot be a key (a dict, a function) hashes as a constant: lookups with
+/// one only miss, since nothing like it is ever stored.
+/// r[impl mimas.dict.key.hash]
+pub fn hash_key<H: std::hash::Hasher>(v: &Val<'_>, h: &mut H) {
+    use std::hash::Hash;
+    match v {
+        Val::Str(s) => s.as_str().hash(h),
+        Val::Int(i) => hash_int(*i, h),
+        Val::Float(f) => hash_float(*f, h),
+        Val::Dec(d) => {
+            let n = d.normalized();
+            let (c, e) = (n.coefficient(), n.exponent());
+            // a whole dec hashes as its int; a fraction as its double, which is what a
+            // float compares it by
+            match (e >= 0).then(|| 10i64.checked_pow(e as u32).and_then(|p| c.checked_mul(p))) {
+                Some(Some(i)) => hash_int(i, h),
+                _ => hash_float(d.to_f64(), h),
+            }
+        }
+        Val::Bool(b) => h.write_u8(0xB0 | *b as u8),
+        Val::Null => h.write_u8(0xA0),
+        Val::Array(a) => {
+            let a = a.0.borrow();
+            h.write_usize(a.len());
+            for x in a.iter() {
+                hash_key(x, h);
+            }
+        }
+        Val::IntArray(a) | Val::FloatArray(a) => {
+            let a = a.0.borrow();
+            h.write_usize(a.len());
+            for i in 0..a.len() {
+                hash_key(&a.at(i), h);
+            }
+        }
+        Val::Instance(i) => {
+            let i = i.0.borrow();
+            h.write_u32(i.struct_id);
+            for x in i.fields.iter() {
+                hash_key(x, h);
+            }
+        }
+        _ => h.write_u8(0xFF),
+    }
+}
+
+/// A dict key as text, for the views that have no `Ctx` to render with (captures, the
+/// inspector, the heap graph): a string key is itself, a number or bool prints as it reads,
+/// a tuple as `(a, b)` and a struct as `{a, b}` (its field values; the name needs the
+/// program's tables).
+pub fn key_label(v: &Val<'_>) -> String {
+    fn part(v: &Val<'_>, out: &mut String) {
+        use std::fmt::Write;
+        match v {
+            Val::Str(s) => {
+                let _ = write!(out, "{:?}", s.as_str());
+            }
+            Val::Int(i) => {
+                let _ = write!(out, "{i}");
+            }
+            Val::Float(f) => {
+                let _ = write!(out, "{f:?}");
+            }
+            Val::Dec(d) => {
+                let _ = write!(out, "{d}");
+            }
+            Val::Bool(b) => {
+                let _ = write!(out, "{b}");
+            }
+            Val::Null => out.push_str("null"),
+            Val::Array(_) | Val::IntArray(_) | Val::FloatArray(_) => {
+                out.push('(');
+                let n = v.seq_len().unwrap_or(0);
+                for i in 0..n {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    if let Some(x) = v.seq_get(i) {
+                        part(&x, out);
+                    }
+                }
+                out.push(')');
+            }
+            Val::Instance(inst) => {
+                out.push('{');
+                for (i, x) in inst.0.borrow().fields.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    part(x, out);
+                }
+                out.push('}');
+            }
+            _ => out.push('?'),
+        }
+    }
+    match v {
+        Val::Str(s) => s.as_str().to_string(),
+        v => {
+            let mut out = String::new();
+            part(v, &mut out);
+            out
+        }
+    }
+}
+
+#[inline]
+fn hash_int<H: std::hash::Hasher>(i: i64, h: &mut H) {
+    // past 2^53 an int meets the float its double rounds to; hash that
+    const EXACT: u64 = 1 << 53;
+    h.write_i64(if i.unsigned_abs() <= EXACT { i } else { (i as f64) as i64 });
+}
+
+#[inline]
+fn hash_float<H: std::hash::Hasher>(f: f64, h: &mut H) {
+    if f.fract() == 0.0 && f.abs() < 9.2e18 {
+        h.write_i64(f as i64);
+    } else {
+        h.write_u64(f.to_bits());
+    }
 }
 
 // Manual so a full mark tallies the entry and index buffers for the memory budget (see
-// `crate::mem`). The index holds the same `Str`s as `entries`, so tracing `entries` covers it.
+// `crate::mem`). The index holds the same keys as `entries`, so tracing `entries` covers it.
 unsafe impl<'gc, V: Collect<'gc>> Collect<'gc> for DictMap<'gc, V> {
     fn trace<T: gc_arena::collect::Trace<'gc>>(&self, cc: &mut T) {
         crate::mem::note_traced(self.heap_bytes());
@@ -841,56 +1005,114 @@ impl<'gc, V> DictMap<'gc, V> {
 
     /// Bytes of the entry and index buffers — what the memory budget counts for this map.
     pub fn heap_bytes(&self) -> usize {
-        self.entries.capacity() * std::mem::size_of::<(Str<'gc>, V)>()
-            + self.index.capacity() * (std::mem::size_of::<(Str<'gc>, usize)>() + 1)
+        self.entries.capacity() * std::mem::size_of::<(Val<'gc>, V)>()
+            + self.index.capacity() * (std::mem::size_of::<(Key<'gc>, usize)>() + 1)
     }
 
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
+    /// The value at string key `key`.
+    #[inline]
     pub fn get(&self, key: &Str<'gc>) -> Option<&V> {
-        self.index.get(key).map(|&i| &self.entries[i].1)
+        self.get_key(Val::Str(*key))
     }
 
+    /// The value at any key.
+    #[inline]
+    pub fn get_key(&self, key: Val<'gc>) -> Option<&V> {
+        self.index.get(&Key(key)).map(|&i| &self.entries[i].1)
+    }
+
+    /// The value at any key, to change in place.
+    #[inline]
+    pub fn get_key_mut(&mut self, key: Val<'gc>) -> Option<&mut V> {
+        self.index.get(&Key(key)).map(|&i| &mut self.entries[i].1)
+    }
+
+    #[inline]
     pub fn contains_key(&self, key: &Str<'gc>) -> bool {
-        self.index.contains_key(key)
+        self.contains(Val::Str(*key))
     }
 
+    /// Whether any key `==` `key`.
+    #[inline]
+    pub fn contains(&self, key: Val<'gc>) -> bool {
+        self.index.contains_key(&Key(key))
+    }
+
+    /// Set string key `key`.
+    #[inline]
     pub fn insert(&mut self, key: Str<'gc>, val: V) -> Option<V> {
-        if let Some(&i) = self.index.get(&key) {
+        self.insert_key(Val::Str(key), val)
+    }
+
+    /// Set any key. The key must already be one a dict can hold: a value from
+    /// [`Ctx::dict_key`](crate::Ctx::dict_key), which refuses the others and stores a frozen
+    /// copy of a tuple or struct. A replaced value keeps the key it was first stored under.
+    pub fn insert_key(&mut self, key: Val<'gc>, val: V) -> Option<V> {
+        if let Some(&i) = self.index.get(&Key(key)) {
             Some(std::mem::replace(&mut self.entries[i].1, val))
         } else {
-            self.index.insert(key, self.entries.len());
+            self.index.insert(Key(key), self.entries.len());
             self.entries.push((key, val));
             None
         }
     }
 
+    #[inline]
     pub fn remove(&mut self, key: &Str<'gc>) -> Option<V> {
-        let i = self.index.remove(key)?;
+        self.remove_key(Val::Str(*key))
+    }
+
+    pub fn remove_key(&mut self, key: Val<'gc>) -> Option<V> {
+        let i = self.index.remove(&Key(key))?;
         let (_, val) = self.entries.remove(i);
-        for (k, _) in &self.entries[i..] {
-            *self.index.get_mut(k).unwrap() -= 1;
+        // the later entries moved down one: fix their slots without hashing them again
+        // (a tuple key would hash its whole content)
+        if i < self.entries.len() {
+            for slot in self.index.values_mut() {
+                if *slot > i {
+                    *slot -= 1;
+                }
+            }
         }
         Some(val)
     }
 
-    pub fn entry_at(&self, i: usize) -> (Str<'gc>, V)
+    pub fn entry_at(&self, i: usize) -> (Val<'gc>, V)
     where
         V: Copy,
     {
         self.entries[i]
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&Str<'gc>, &V)> {
+    /// Entries in insertion order.
+    pub fn iter(&self) -> impl Iterator<Item = (&Val<'gc>, &V)> {
         self.entries.iter().map(|(k, v)| (k, v))
+    }
+
+    /// Append an entry without indexing it: a restore's first pass, whose keys are distinct
+    /// but may point at objects not filled yet. [`reindex`](Self::reindex) must follow
+    /// before any lookup.
+    pub fn push_unindexed(&mut self, key: Val<'gc>, val: V) {
+        self.entries.push((key, val));
+    }
+
+    /// Rebuild the index from the entries — after a restore filled the key objects the
+    /// entries point at (their hashes were not known when they went in).
+    pub fn reindex(&mut self) {
+        self.index.clear();
+        for (i, (k, _)) in self.entries.iter().enumerate() {
+            self.index.insert(Key(*k), i);
+        }
     }
 }
 
 impl<'gc, V: PartialEq> PartialEq for DictMap<'gc, V> {
     fn eq(&self, other: &Self) -> bool {
-        self.len() == other.len() && self.iter().all(|(k, v)| other.get(k) == Some(v))
+        self.len() == other.len() && self.iter().all(|(k, v)| other.get_key(*k) == Some(v))
     }
 }
 
@@ -899,6 +1121,17 @@ impl<'gc, V> FromIterator<(Str<'gc>, V)> for DictMap<'gc, V> {
         let mut map = DictMap::new();
         for (k, v) in iter {
             map.insert(k, v);
+        }
+        map
+    }
+}
+
+impl<'gc, V> FromIterator<(Val<'gc>, V)> for DictMap<'gc, V> {
+    /// The keys must already be dict keys (see [`DictMap::insert_key`]).
+    fn from_iter<I: IntoIterator<Item = (Val<'gc>, V)>>(iter: I) -> Self {
+        let mut map = DictMap::new();
+        for (k, v) in iter {
+            map.insert_key(k, v);
         }
         map
     }
@@ -1372,7 +1605,7 @@ impl<'gc> Val<'gc> {
                 Captured::Dict(
                     d.0.borrow()
                         .iter()
-                        .map(|(k, v)| (k.as_str().to_string(), v.capture_at(path)))
+                        .map(|(k, v)| (key_label(k), v.capture_at(path)))
                         .collect(),
                 )
             }),
@@ -1511,7 +1744,7 @@ impl<'gc> Val<'gc> {
                         .iter()
                         .map(|(k, v)| {
                             (
-                                k.as_str().to_string(),
+                                key_label(k),
                                 v.inspect(struct_names, field_names, variant_ordinals, seen),
                             )
                         })
@@ -1667,7 +1900,7 @@ impl<'gc> Val<'gc> {
                                 .iter()
                                 .map(|(k, v)| {
                                     (
-                                        k.as_str().to_string(),
+                                        key_label(k),
                                         walk(
                                             *v,
                                             struct_names,

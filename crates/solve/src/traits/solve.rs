@@ -575,9 +575,15 @@ impl Solve for Access {
         fn rides(solver: &mut Solver, e: &Expr) -> bool {
             match e.kind() {
                 ExprKind::Access(Access::Square { left, key, kind }) => {
+                    // a dict index, by a string or any other key, is a fresh option
                     let dict = key
                         .query(solver)
-                        .is_ok_and(|t| matches!(t.normalized(solver), Ty::Str));
+                        .is_ok_and(|t| matches!(t.normalized(solver), Ty::Str))
+                        || left.query(solver).is_ok_and(|t| match t.normalized(solver) {
+                            Ty::Dict(..) => true,
+                            Ty::Option(inner) => matches!(*inner, Ty::Dict(..)),
+                            _ => false,
+                        });
                     !dict && (*kind == AccessKind::Option || rides(solver, left))
                 }
                 ExprKind::Access(Access::Dot { left, kind, .. }) => {
@@ -628,6 +634,35 @@ impl Solve for Access {
                     }
                 }
 
+                // r[impl mimas.dict.key.index]
+                // a known dict takes a key of its key type, whatever that type is, and
+                // answers an option: `d[(1, 2)]` on a `{(int, int): bool}` is a `bool?`
+                let known_dict = match &receiver {
+                    Ty::Dict(kt, vt) => Some((kt.as_ref().clone(), vt.as_ref().clone())),
+                    Ty::Option(inner) if optional => match inner.as_ref() {
+                        Ty::Dict(kt, vt) => Some((kt.as_ref().clone(), vt.as_ref().clone())),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some((kt, vt)) = known_dict {
+                    key.fulfill_ty(kt.clone(), solver)?;
+                    // `{:}` leaves the key type open: the first key settles it, and has
+                    // to be a type a key can be
+                    // r[impl mimas.dict.key.refused]
+                    let kt = kt.normalized(solver);
+                    if let Some(why) = solver.key_problem(&kt) {
+                        return Err(InvalidDictKey {
+                            src: solver.src(key.location()),
+                            at: key.location().into(),
+                            ty: kt.to_string(),
+                            why,
+                        }
+                        .into());
+                    }
+                    return Ok(option!(vt.normalized(solver)));
+                }
+
                 // `xs[idxs]` -- a list of ints gathers: `b[[0, 4, 8]]` is `[b[0], b[4], b[8]]`,
                 // and a nested index list gathers a nested result (`b[LINES]` is `[[T]]`)
                 let mut depth = 0;
@@ -648,10 +683,33 @@ impl Solve for Access {
                     return Ok(if optional { option!(out) } else { out });
                 }
 
+                let k_norm = k.clone().normalized(solver);
+                let key_problem = solver.key_problem(&k_norm);
+                // only a receiver whose type is still open becomes a dict keyed by a
+                // non-string key; a list indexed by a float keeps its own error
+                let receiver_open = match &receiver {
+                    Ty::Vid(_) => true,
+                    Ty::Option(inner) => matches!(inner.as_ref(), Ty::Vid(_)),
+                    _ => false,
+                };
                 let shape = |inner: Ty| -> Result<Ty> {
                     match &k {
                         Ty::Int => Ok(Ty::array(inner)),
-                        Ty::Str => Ok(Ty::Dict(Box::new(inner))),
+                        Ty::Str => Ok(Ty::dict(inner)),
+                        // any other key type that can be a key makes the receiver a dict
+                        // keyed by it
+                        _ if receiver_open
+                            && !matches!(k_norm, Ty::Vid(_) | Ty::Param(_) | Ty::Anon(_))
+                            && key_problem.is_none() =>
+                        {
+                            Ok(Ty::dict_of(k_norm.clone(), inner))
+                        }
+                        _ if receiver_open && key_problem.is_some() => Err(InvalidDictKey {
+                            src: key_src.clone(),
+                            at: location.into(),
+                            ty: k_norm.to_string(),
+                            why: key_problem.clone().unwrap_or_default(),
+                        })?,
                         _ => Err(InvalidAccess {
                             src: key_src.clone(),
                             at: location.into(),
@@ -667,7 +725,7 @@ impl Solve for Access {
                 } else {
                     let value = solver.vid();
                     let ty = shape(Ty::from(value))?;
-                    let is_dict = matches!(ty, Ty::Dict(_));
+                    let is_dict = matches!(ty, Ty::Dict(..));
                     left.fulfill_ty(ty, solver)?;
 
                     let out = if is_dict {
@@ -2129,7 +2187,7 @@ fn seq_cmp_overload_ty(lhs: &Ty, rhs: &Ty, solver: &mut Solver) -> Option<Ty> {
         }
         if matches!(
             scalar,
-            Ty::Array(..) | Ty::Null | Ty::Option(_) | Ty::Vid(_) | Ty::Dict(_) | Ty::Tuple(_)
+            Ty::Array(..) | Ty::Null | Ty::Option(_) | Ty::Vid(_) | Ty::Dict(..) | Ty::Tuple(_)
         ) {
             return None;
         }
@@ -2592,10 +2650,11 @@ impl Solve for For {
             Ty::Array(value, _) => {
                 solver.solve_pat(&self.binding, value.as_ref().clone())?;
             }
-            Ty::Dict(value) => {
+            // r[impl mimas.dict.key.for]
+            Ty::Dict(key, value) => {
                 solver.solve_pat(
                     &self.binding,
-                    Ty::Tuple(vec![Ty::Str, value.as_ref().clone()]),
+                    Ty::Tuple(vec![key.as_ref().clone(), value.as_ref().clone()]),
                 )?;
             }
             other => Err(InvalidIterTarget {
@@ -2620,7 +2679,7 @@ impl Solve for For {
         // warns (r[mimas.for.elem-write]). Dict iteration yields a fresh
         // `(key, value)` pair even when the dict itself is a place, so `p.1 =`
         // is dead there too.
-        let fresh = if matches!(iter_ty, Ty::Dict(_)) {
+        let fresh = if matches!(iter_ty, Ty::Dict(..)) {
             Some(crate::FreshElem::DictPair(self.iterator.to_string()))
         } else if place_elem {
             // the element IS a place descriptor -- `v.f =` writes through it
@@ -2644,7 +2703,7 @@ impl Solve for For {
         // would grow the bound mid-loop. only arrays/dicts can be mutated at all, and only a
         // name-rooted iterator (`xs`, `s.arr`, `xs[0]` -- not `f()`) names a place to guard.
         let guard = match &iter_ty {
-            Ty::Array(..) | Ty::Dict(_) => {
+            Ty::Array(..) | Ty::Dict(..) => {
                 crate::root_and_path(&self.iterator).and_then(|(root, path)| {
                     solver.ribs.resolve(root).map(|dec| crate::IterGuard {
                         dec,
@@ -3319,8 +3378,9 @@ impl Solve for In {
             Ty::Array(ref inner, _) => {
                 self.left.fulfill_ty(*inner.clone(), solver)?;
             }
-            Ty::Dict(_) => {
-                self.left.fulfill_ty(Ty::Str, solver)?;
+            // r[impl mimas.dict.key.in]
+            Ty::Dict(key, _) => {
+                self.left.fulfill_ty(*key, solver)?;
             }
             Ty::Str => {
                 self.left.fulfill_ty(Ty::Str, solver)?;
@@ -3547,8 +3607,13 @@ impl Solve for Literal {
                     struct_fields(solver, adt, &variant, adt, &keyed, None, location)?
                 } else {
                     let values: Vec<&Expr> = fields.iter().map(|(_, v)| v).collect();
+                    let empty = values.is_empty();
                     match assemble(values, solver) {
-                        Ok(t) => Ty::Dict(Box::new(t)),
+                        Ok(t) if empty => {
+                            // `{:}`: the keys are whatever the dict's use makes them
+                            Ty::dict_of(Ty::Vid(solver.vid()), t)
+                        }
+                        Ok(t) => Ty::dict(t),
                         Err(_) => Err(UntypedRecord {
                             src: solver.src(location),
                             at: location.into(),
@@ -4287,7 +4352,7 @@ fn check_member_defaultable(
     };
     match ty {
         Ty::Unit | Ty::Null | Ty::Bool | Ty::Int | Ty::Float | Ty::Str => Ok(()),
-        Ty::Array(..) | Ty::Dict(_) | Ty::Option(_) => Ok(()),
+        Ty::Array(..) | Ty::Dict(..) | Ty::Option(_) => Ok(()),
         Ty::Tuple(members) => {
             for m in members {
                 check_member_defaultable(solver, call_name, m, member, loc, visiting)?;

@@ -18,6 +18,9 @@ pub enum Annotation {
     /// `[f32; 4, 8]` reads as "4 rows of `[f32; 8]`".
     Array(Box<Annotation>, Vec<usize>),
     Dictionary(Box<Annotation>),
+    /// `{K: V}`: a dict keyed by `K` values instead of strings. The location is the key
+    /// type's, for the checker's "cannot be a key" error.
+    Map(Box<Annotation>, Box<Annotation>, shared::Location),
     Function(Vec<Annotation>, Box<Annotation>),
     Ty(Ident),
     Path(Vec<Ident>),
@@ -50,6 +53,7 @@ impl std::fmt::Display for Annotation {
             Annotation::Array(e, dims) if dims.is_empty() => f.pad(&format!("[{e}]")),
             Annotation::Array(e, dims) => f.pad(&format!("[{e}; {}]", dims.iter().join(", "))),
             Annotation::Dictionary(e) => f.pad(&format!("{{{e}}}")),
+            Annotation::Map(k, v, _) => f.pad(&format!("{{{k}: {v}}}")),
             Annotation::Function(params, ret) => f.pad(&format!(
                 "({}) -> {ret}",
                 params.iter().map(|p| p.to_string()).join(", "),

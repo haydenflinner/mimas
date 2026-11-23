@@ -538,21 +538,26 @@ impl Posts {
 /// A tally: a small Z-set held in the VM, with no polars. Each item has a
 /// whole-number weight; an item of weight 0 is not in it. `+`, `-`, `-t`,
 /// `k * t`, `t⁺`, `t⁻`, `‖t‖`, `∈`, `∪`, `∩`, `⊎` and `⋈` work as they do on
-/// a Z-set table. Items are keyed by their printed form, so two items that
-/// print the same are one item. `==` compares weights, whatever the order.
+/// a Z-set table. The item itself is the key of its weight, so items that
+/// are `==` are one item, and an item must be a value a dict can key by: a
+/// string, number, bool, atom, or a tuple or struct of those. `==`
+/// compares weights, whatever the order. `put` keeps the sum of the
+/// weights and the sum of their sizes as it goes, so `t.count()` and
+/// `‖t‖` cost O(1) in a frame loop.
 /// r[impl mimas.group.tally]
-struct Tally<T> { w: {int}, items: {T} }
+/// r[impl mimas.group.tally.by-value]
+struct Tally<T> { w: {T: int}, sum_w: int, sum_abs: int }
 
 /// The items of `xs`, each at weight 1; repeats add up.
 fn tally<T>(xs: [T]) -> Tally<T> {
-    let t = Tally { w: {:}, items: {:} };
+    let t = Tally { w: {:}, sum_w: 0, sum_abs: 0 };
     for x in xs { t.put(x, 1); }
     t
 }
 
 /// A tally from `(item, weight)` pairs; the weights of repeats add up.
 fn tally_w<T>(pairs: [(T, int)]) -> Tally<T> {
-    let t = Tally { w: {:}, items: {:} };
+    let t = Tally { w: {:}, sum_w: 0, sum_abs: 0 };
     for p in pairs { t.put(p.0, p.1); }
     t
 }
@@ -560,23 +565,20 @@ fn tally_w<T>(pairs: [(T, int)]) -> Tally<T> {
 impl Tally {
     /// A copy that shares nothing with this tally.
     fn copy(self) -> Tally<T> {
-        let t = Tally { w: {:}, items: {:} };
-        for k in self.w.keys() { t.w.insert(k, self.w[k]!); t.items.insert(k, self.items[k]!); }
+        let t = Tally { w: {:}, sum_w: self.sum_w, sum_abs: self.sum_abs };
+        for (x, n) in self.w { t.w[x] = n; }
         t
     }
 
     /// Adds `w` to `x`'s weight in place, dropping `x` when it comes to 0.
     /// This is the O(1) step for a hot loop; `+` builds a new tally.
     fn put(self, x: T, w: int) {
-        let k = f"{x}";
-        let n = (self.w[k] ?? 0) + w;
-        if n == 0 {
-            self.w.remove(k);
-            self.items.remove(k);
-        } else {
-            self.w.insert(k, n);
-            self.items.insert(k, x);
-        }
+        if w == 0 { return; }
+        let old = self.w[x] ?? 0;
+        let n = old + w;
+        if n == 0 { self.w.remove(x); } else { self.w[x] = n; }
+        self.sum_w += w;
+        self.sum_abs += (if n < 0 { -n } else { n }) - (if old < 0 { -old } else { old });
     }
 
     /// Adds every weight of `o` into this tally in place: `t += o` without
@@ -587,40 +589,26 @@ impl Tally {
     }
 
     /// The weight of `x`, 0 when it is not in the tally.
-    fn weight(self, x: T) -> int { self.w[f"{x}"] ?? 0 }
+    fn weight(self, x: T) -> int { self.w[x] ?? 0 }
 
     /// `x ∈ t`: whether `x` is present, at a weight above 0.
-    fn contains(self, x: T) -> bool { self.weight(x) > 0 }
+    fn contains(self, x: T) -> bool { (self.w[x] ?? 0) > 0 }
 
     /// The items with a weight other than 0, in the order they came.
-    fn items(self) -> [T] { self.items.values() }
+    fn items(self) -> [T] { self.w.keys() }
 
     /// The items with their weights.
-    fn pairs(self) -> [(T, int)] {
-        let xs = self.items.values();
-        let ws = self.w.values();
-        let out: [(T, int)] = [];
-        for i in 0..xs.len() { out.push((xs[i], ws[i])); }
-        out
-    }
+    fn pairs(self) -> [(T, int)] { self.w.pairs() }
 
     /// The count of items with a weight other than 0.
     fn len(self) -> int { self.w.len() }
 
     /// The sum of the weights, `count()` as a `query z` aggregate reads it:
     /// additions minus removals.
-    fn count(self) -> int {
-        let n = 0;
-        for w in self.w.values() { n += w; }
-        n
-    }
+    fn count(self) -> int { self.sum_w }
 
     /// `‖t‖`: the sum of the absolute weights.
-    fn size(self) -> int {
-        let n = 0;
-        for w in self.w.values() { n += w.abs(); }
-        n
-    }
+    fn size(self) -> int { self.sum_abs }
 
     /// `t * k`.
     fn mul(self, k: int) -> Tally<T> { self.times(k) }
@@ -637,7 +625,7 @@ impl Tally {
     /// `t⁺`: the items of positive weight.
     fn added(self) -> Tally<T> {
         let t = self.zero();
-        for k in self.w.keys() { if self.w[k]! > 0 { t.w.insert(k, self.w[k]!); t.items.insert(k, self.items[k]!); } }
+        for (x, n) in self.w { if n > 0 { t.put(x, n); } }
         t
     }
 
@@ -645,14 +633,14 @@ impl Tally {
     /// `t == t⁺ - t⁻`.
     fn removed(self) -> Tally<T> {
         let t = self.zero();
-        for k in self.w.keys() { if self.w[k]! < 0 { t.w.insert(k, -self.w[k]!); t.items.insert(k, self.items[k]!); } }
+        for (x, n) in self.w { if n < 0 { t.put(x, -n); } }
         t
     }
 
     /// The present items at weight 1: presence, the tally as a set.
     fn as_set(self) -> Tally<T> {
         let t = self.zero();
-        for k in self.w.keys() { if self.w[k]! > 0 { t.w.insert(k, 1); t.items.insert(k, self.items[k]!); } }
+        for (x, n) in self.w { if n > 0 { t.put(x, 1); } }
         t
     }
 
@@ -664,16 +652,13 @@ impl Tally {
             panic(f"`{op}` is a bag operation, and this tally has items of negative weight: take `t⁺` first, or use `+`/`⊎` to apply a change");
         }
         let t = self.zero();
-        for k in self.w.keys() {
-            let a = self.w[k]!;
-            let b = o.w[k] ?? 0;
+        for (x, a) in self.w {
+            let b = o.w[x] ?? 0;
             let n = if larger { a.max(b) } else { a.min(b) };
-            if n != 0 { t.w.insert(k, n); t.items.insert(k, self.items[k]!); }
+            if n != 0 { t.put(x, n); }
         }
         if larger {
-            for k in o.w.keys() {
-                if self.w[k] == null { t.w.insert(k, o.w[k]!); t.items.insert(k, o.items[k]!); }
-            }
+            for (x, b) in o.w { if !(x in self.w) { t.put(x, b); } }
         }
         t
     }
@@ -692,9 +677,9 @@ impl Tally {
     /// gives each held key's binding.
     fn natural_join(self, o: Tally<T>) -> Tally<T> {
         let t = self.zero();
-        for k in self.w.keys() {
-            let b = o.w[k] ?? 0;
-            if b != 0 { t.w.insert(k, self.w[k]! * b); t.items.insert(k, self.items[k]!); }
+        for (x, a) in self.w {
+            let b = o.w[x] ?? 0;
+            if b != 0 { t.put(x, a * b); }
         }
         t
     }
@@ -703,19 +688,19 @@ impl Tally {
 /// Tallies under `+`: the empty tally is the zero.
 impl AbelianGroup for Tally {
     /// The empty tally.
-    fn zero(self) -> Tally<T> { Tally { w: {:}, items: {:} } }
+    fn zero(self) -> Tally<T> { Tally { w: {:}, sum_w: 0, sum_abs: 0 } }
 
     /// `a + b`: the weights of equal items add.
     fn add(self, o: Tally<T>) -> Tally<T> {
         let t = self.copy();
-        for k in o.w.keys() { t.put(o.items[k]!, o.w[k]!); }
+        for (x, n) in o.w { t.put(x, n); }
         t
     }
 
     /// `a - b`: `a + -b`.
     fn sub(self, o: Tally<T>) -> Tally<T> {
         let t = self.copy();
-        for k in o.w.keys() { t.put(o.items[k]!, -o.w[k]!); }
+        for (x, n) in o.w { t.put(x, -n); }
         t
     }
 
@@ -726,7 +711,7 @@ impl AbelianGroup for Tally {
     fn times(self, k: int) -> Tally<T> {
         let t = self.zero();
         if k == 0 { return t; }
-        for kk in self.w.keys() { t.w.insert(kk, self.w[kk]! * k); t.items.insert(kk, self.items[kk]!); }
+        for (x, n) in self.w { t.put(x, n * k); }
         t
     }
 

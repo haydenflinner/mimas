@@ -26,6 +26,10 @@ pub struct SeqOf<'gc, const N: u32>(pub Val<'gc>);
 /// [`ArrayOf`].
 pub struct DictOf<'gc, const N: u32>(pub Dict<'gc>);
 
+/// A gc dict with string keys whose values are placeholder slot `N`: registers as `{T}`, where
+/// [`DictOf`] registers as `{K: T}`. For natives that build a dict keyed by text.
+pub struct StrDictOf<'gc, const N: u32>(pub Dict<'gc>);
+
 /// Reinterpret a gc array's backing `Vec<Val>` as `&mut Vec<Anon<N>>`, so a `#[native]` can take a
 /// type-safe-but-generic `&mut Vec<anon::T<'gc>>` and mutate the array in place. Unlike a real
 /// typed element (`&mut Vec<i64>`), this needs no copy-in/out -- `Anon` *is* a `Val`.
@@ -82,6 +86,14 @@ pub struct Fn3<'gc, A, B, C, R>(pub Val<'gc>, pub PhantomData<fn(A, B, C) -> R>)
 /// Placeholder parameter type for native signatures. Can represent any type but must be the same as
 /// every other `T` within the context of this specific signature.
 pub type T<'gc> = Anon<'gc, 0>;
+
+/// The slot a dict's key type takes in a native signature: a `&DictMap` receiver or a `DictOf`
+/// registers as `{K: T}`, so a native that takes or returns keys writes them as [`K`].
+pub const KEY_SLOT: u32 = 6;
+
+/// A dict key in a native signature: the same type as the key of every dict the signature
+/// names (see [`KEY_SLOT`]).
+pub type K<'gc> = Anon<'gc, KEY_SLOT>;
 
 /// Placeholder parameter type for native signatures. Can represent any type but must be the same as
 /// every other `U` within the context of this specific signature.

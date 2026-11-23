@@ -71,7 +71,9 @@ pub enum SnapNode {
     /// restores as `Val::Array` — same contents, same aliasing.
     IntArray(Vec<i64>),
     FloatArray(Vec<f64>),
-    Dict(Vec<(SharedStr, SnapVal)>),
+    /// Entries in insertion order. A string key is `SnapVal::Str`; a tuple or struct key is
+    /// the node of its frozen copy (`Snapshot::frozen` lists it).
+    Dict(Vec<(SnapVal, SnapVal)>),
     Instance {
         struct_id: u32,
         fields: Vec<SnapVal>,
@@ -233,14 +235,10 @@ impl<'gc> Snapper<'gc> {
                 }
             },
             Val::Dict(d) => {
-                let items: Vec<(SharedStr, Val)> =
-                    d.0.borrow()
-                        .iter()
-                        .map(|(k, &v)| (SharedStr::from(k.as_str()), v))
-                        .collect();
+                let items: Vec<(Val, Val)> = d.0.borrow().iter().map(|(&k, &v)| (k, v)).collect();
                 let items = items
                     .into_iter()
-                    .map(|(k, v)| Ok((k, self.val(v)?)))
+                    .map(|(k, v)| Ok((self.val(k)?, self.val(v)?)))
                     .collect::<Result<_, SnapError>>()?;
                 SnapNode::Dict(items)
             }
@@ -454,6 +452,7 @@ impl Vm {
                 .iter()
                 .map(|sv| thaw.thaw(sv))
                 .collect::<Result<Vec<_>, _>>()?;
+            let mut dicts = Vec::new();
             for (i, node) in snap.nodes.iter().enumerate() {
                 match (node, thaw.resolved[i]) {
                     (SnapNode::Array(items), Some(Val::Array(a))) => {
@@ -469,12 +468,16 @@ impl Vm {
                     (SnapNode::FloatArray(items), Some(Val::FloatArray(a))) => {
                         *a.0.borrow_mut(mc) = crate::val::ArrayStore::Floats(items.clone());
                     }
+                    // r[impl mimas.dict.key.snapshot]
+                    // a tuple or struct key may be a node this pass has not filled yet, so
+                    // its hash is not known: the entries go in now, the index after the fill
                     (SnapNode::Dict(items), Some(Val::Dict(d))) => {
                         let mut map = DictMap::new();
                         for (k, sv) in items {
-                            map.insert(ctx.intern(k), thaw.thaw(sv)?);
+                            map.push_unindexed(thaw.thaw(k)?, thaw.thaw(sv)?);
                         }
                         *d.0.borrow_mut(mc) = map;
+                        dicts.push(d);
                     }
                     (SnapNode::Instance { fields, .. }, Some(Val::Instance(inst))) => {
                         let vals = fields
@@ -488,6 +491,9 @@ impl Vm {
                     (SnapNode::DataFrame(_) | SnapNode::PlExpr(_), _) => {} // whole at pre-allocation
                     _ => unreachable!("thawed node kind matches its snapshot kind"),
                 }
+            }
+            for d in dicts {
+                d.0.borrow_mut(mc).reindex();
             }
             // r[impl mimas.const.frozen]
             // the values of consts are read-only in the new heap too

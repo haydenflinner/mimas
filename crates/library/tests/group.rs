@@ -175,7 +175,7 @@ test_run!(
     // a join on the whole item multiplies weights: held keys meet their bindings
     "(held ⋈ steer).count()" => "1",
     "a.as_set() == tally([\"x\", \"y\"])" => "true",
-    // any printable item: tuples and records
+    // any item a dict can key by: tuples and structs
     "(1, 2) ∈ tally([(1, 2), (3, 4)])" => "true",
     "Cell { r: 1, c: 0 } ∈ tally([Cell { r: 1, c: 0 }])" => "true",
     // `put` adds in place for a hot loop
@@ -185,6 +185,20 @@ test_run!(
         \"x\", 2
         \"y\", 1
     } }" => "true",
+);
+
+// the item is the key: items that are `==` are one item, with no printing
+// r[verify mimas.group.tally.by-value]
+test_run!(
+    tally_keys_by_the_item,
+    "struct Cell { r: int, c: int }",
+    "tally([(1, 2), (1, 2), (2, 1)]).weight((1, 2))" => "2",
+    "tally([(1, 2), (1, 2), (2, 1)]).len()" => "2",
+    "tally([Cell { r: 1, c: 0 }, Cell { r: 1, c: 0 }]).weight(Cell { r: 1, c: 0 })" => "2",
+    "tally([3, 1, 3, 2]).items()" => "[3, 1, 2]",
+    "(tally([(0, 0), (0, 1)]) - tally([(0, 0)])).items()" => "[[0, 1]]",
+    // a moved struct is not the item it was when it went in
+    "{ let c = Cell { r: 1, c: 0 }; let t = tally([c]); c.r = 5; t.contains(Cell { r: 1, c: 0 }) && !t.contains(c) }" => "true",
 );
 
 // r[verify mimas.group.tally]

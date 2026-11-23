@@ -45,7 +45,8 @@ test_ty!(
 test_ty!(
     let_infer_empty_dictionary,
     "let a = dict::new();",
-    "a" => dictionary!(unknown!()),
+    // the keys are open too: `{K: V}` until a use settles them
+    "a" => crate::components::Ty::dict_of(unknown!(), unknown!()),
 );
 test_ty!(
     let_infer_dictionary,

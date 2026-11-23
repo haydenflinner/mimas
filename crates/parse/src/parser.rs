@@ -5598,11 +5598,6 @@ impl<'s> Parser<'s> {
             }
             annotation
         }
-        // `{V}` is the dict type (r[impl mimas.dict.type]); `{str: int}` is
-        // Rust's `HashMap<str, int>` habit — keys are always `str`, so the value
-        // type alone goes in the braces. `reject` skips the whole brace group.
-        // `str` lexes as a type keyword, not a name -- any token then `:` is the habit
-        let key_colon = self.at(TokKind::LeftBrace) && self.nth(2) == TokKind::Colon;
         // `fn(int) -> bool`, `Fn(int)`, `impl Fn`: the function-type
         // habits from other languages -- Mimas writes `(params) -> ret`
         // bare, and `fn` belongs to declarations.
@@ -5610,16 +5605,8 @@ impl<'s> Parser<'s> {
         let fn_type_habit = self.at(TokKind::Fn)
             || self.at(TokKind::Impl)
             || (self.at(TokKind::Ident("Fn")) && self.nth(1) == TokKind::LeftParenthesis);
-        if key_colon || fn_type_habit || !self.peek().starts_annotation() {
-            if key_colon {
-                self.reject(Misdirection {
-                    src: self.src(),
-                    at: self.next_location().into(),
-                    msg: "`{str: V}` isn't a type -- a dict type is `{V}` (keys are always `str`)"
-                        .into(),
-                    label: "not a type -- write `{V}`".into(),
-                });
-            } else if fn_type_habit {
+        if fn_type_habit || !self.peek().starts_annotation() {
+            if fn_type_habit {
                 self.reject(Misdirection {
                     src: self.src(),
                     at: self.next_location().into(),
@@ -5714,9 +5701,16 @@ impl<'s> Parser<'s> {
                 Annotation::Array(Box::new(inner), dims)
             }
             // r[impl mimas.dict.type] `{float}` is the dict type
+            // r[impl mimas.dict.key.type] `{(int, int): bool}` keys by a value type
             TokKind::LeftBrace => {
                 self.advance();
+                let at = self.next_location();
                 let inner = self.annotation();
+                if self.eat(TokKind::Colon) {
+                    let value = self.annotation();
+                    self.expect(TokKind::RightBrace);
+                    return Annotation::Map(Box::new(inner), Box::new(value), at);
+                }
                 self.expect(TokKind::RightBrace);
                 Annotation::Dictionary(Box::new(inner))
             }

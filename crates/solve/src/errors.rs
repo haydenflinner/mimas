@@ -570,6 +570,22 @@ pub struct InvalidAccess {
     pub ty: String,
 }
 
+/// A dict key type that cannot be a key: a list, a dict, a function or `()`.
+/// r[impl mimas.dict.key.refused]
+#[derive(Error, Debug, Diagnostic)]
+#[error("`{ty}` cannot be a dict key: {why}")]
+#[diagnostic(help(
+    "a key is a string, number, bool, or a tuple or plain struct made of those: `{{(int, int): bool}}`"
+))]
+pub struct InvalidDictKey {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("this key type")]
+    pub at: SourceSpan,
+    pub ty: String,
+    pub why: String,
+}
+
 #[derive(Error, Debug, Diagnostic)]
 #[error("invalid in target")]
 pub struct InvalidInTarget {

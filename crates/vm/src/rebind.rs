@@ -239,10 +239,24 @@ impl<'a> Tx<'a> {
                     Some(SnapNode::Dict(h)) => Some(h),
                     _ => None,
                 };
+                // a scalar key finds its twin in the edit's run by value; a tuple or struct
+                // key is a node with no stable number across runs, so it carries no hint
+                fn same(a: &SnapVal, b: &SnapVal) -> bool {
+                    match (a, b) {
+                        (SnapVal::Str(a), SnapVal::Str(b)) => a == b,
+                        (SnapVal::Int(a), SnapVal::Int(b)) => a == b,
+                        (SnapVal::Bool(a), SnapVal::Bool(b)) => a == b,
+                        (SnapVal::Dec(a), SnapVal::Dec(b)) => a == b,
+                        (SnapVal::Float(a), SnapVal::Float(b)) => a == b,
+                        (SnapVal::Null, SnapVal::Null) => true,
+                        _ => false,
+                    }
+                }
                 let mut vals = Vec::with_capacity(items.len());
                 for (k, v) in items {
-                    let hv = h.and_then(|h| h.iter().find(|(hk, _)| hk == k).map(|(_, v)| v));
-                    vals.push((k.clone(), self.val(v, hv, &format!("{path}[{k:?}]"))?));
+                    let hv = h.and_then(|h| h.iter().find(|(hk, _)| same(hk, k)).map(|(_, v)| v));
+                    let key = self.val(k, None, &format!("{path} key"))?;
+                    vals.push((key, self.val(v, hv, &format!("{path}[{k:?}]"))?));
                 }
                 SnapNode::Dict(vals)
             }

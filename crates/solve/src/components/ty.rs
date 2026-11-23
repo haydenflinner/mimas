@@ -28,7 +28,8 @@ impl TyExt for Ty {
         match self {
             Ty::Vid(vid) if *vid == other => true,
             Ty::Vid(vid) => solver.sub(*vid).is_some_and(|v| v.occurs(other, solver)),
-            Ty::Array(ty, _) | Ty::Dict(ty) => ty.occurs(other, solver),
+            Ty::Array(ty, _) => ty.occurs(other, solver),
+            Ty::Dict(k, v) => k.occurs(other, solver) || v.occurs(other, solver),
             Ty::Fn(fn_data) => {
                 fn_data
                     .parameters
@@ -159,7 +160,21 @@ impl TyExt for Ty {
                     elem
                 })
             }
-            Annotation::Dictionary(ty) => Ok(Ty::Dict(Box::new(Ty::from_annotation(*ty, solver)?))),
+            Annotation::Dictionary(ty) => Ok(Ty::dict(Ty::from_annotation(*ty, solver)?)),
+            // r[impl mimas.dict.key.type]
+            Annotation::Map(key, value, at) => {
+                let key = Ty::from_annotation(*key, solver)?;
+                if let Some(why) = solver.key_problem(&key) {
+                    return Err(crate::errors::InvalidDictKey {
+                        src: solver.src(at),
+                        at: at.into(),
+                        ty: key.to_string(),
+                        why,
+                    }
+                    .into());
+                }
+                Ok(Ty::dict_of(key, Ty::from_annotation(*value, solver)?))
+            }
             Annotation::Function(params, ret) => {
                 let parameters = params
                     .into_iter()
@@ -395,7 +410,7 @@ impl TyExt for Ty {
                 .map(|ty| ty.clone().normalized(solver))
                 .unwrap_or(Ty::Vid(vid)),
             Ty::Array(ty, len) => Ty::Array(Box::new(ty.normalized(solver)), len),
-            Ty::Dict(ty) => Ty::Dict(Box::new(ty.normalized(solver))),
+            Ty::Dict(k, v) => Ty::dict_of(k.normalized(solver), v.normalized(solver)),
             Ty::Tuple(members) => {
                 Ty::Tuple(members.into_iter().map(|v| v.normalized(solver)).collect())
             }
@@ -438,7 +453,7 @@ impl TyExt for Ty {
     fn filter_adt(&self, adt: AdtId) -> Ty {
         match self {
             Ty::Array(ty, len) => Ty::Array(Box::new(ty.filter_adt(adt)), *len),
-            Ty::Dict(ty) => Ty::Dict(Box::new(ty.filter_adt(adt))),
+            Ty::Dict(k, v) => Ty::dict_of(k.filter_adt(adt), v.filter_adt(adt)),
             Ty::Tuple(members) => Ty::Tuple(members.iter().map(|m| m.filter_adt(adt)).collect()),
             Ty::Adt(this_adt, args) if *this_adt == adt => {
                 Ty::Identity(adt, args.iter().map(|a| a.filter_adt(adt)).collect())

@@ -175,7 +175,7 @@ fn shown_text<'gc>(ctx: Ctx<'gc>, v: Val<'gc>, shown: &shared::units::Shown) -> 
         }
     } else if let Some(d) = v.as_dict() {
         let pairs: Vec<(String, Val<'gc>)> =
-            d.0.borrow().iter().map(|(k, x)| (k.as_str().to_string(), *x)).collect();
+            d.0.borrow().iter().map(|(k, x)| (vm::key_label(k), *x)).collect();
         let mut parts = Vec::with_capacity(pairs.len());
         for (k, x) in pairs {
             match x.as_float() {
@@ -311,8 +311,8 @@ fn group_map<'gc>(ctx: Ctx<'gc>, rows: Vec<(String, Val<'gc>)>) -> vm::Dict<'gc>
     ctx.new_dict(map)
 }
 
-fn group_dict<'gc>(ctx: Ctx<'gc>, rows: Vec<(String, Val<'gc>)>) -> anon::DictOf<'gc, 0> {
-    anon::DictOf(group_map(ctx, rows))
+fn group_dict<'gc>(ctx: Ctx<'gc>, rows: Vec<(String, Val<'gc>)>) -> anon::StrDictOf<'gc, 0> {
+    anon::StrDictOf(group_map(ctx, rows))
 }
 
 /// A grouped result whose values are all of one primitive type (`count_by` is
@@ -321,7 +321,7 @@ struct Grouped<'gc, const FLOAT: bool>(vm::Dict<'gc>);
 
 impl<'gc, const FLOAT: bool> vm::conversion::MimasType<'gc> for Grouped<'gc, FLOAT> {
     fn mimas_ty(_: &vm::Registry) -> Option<shared::Ty> {
-        Some(shared::Ty::Dict(Box::new(if FLOAT { shared::Ty::Float } else { shared::Ty::Int })))
+        Some(shared::Ty::dict(if FLOAT { shared::Ty::Float } else { shared::Ty::Int }))
     }
     fn from_value(_ctx: Ctx<'gc>, v: Val<'gc>) -> Result<Self, vm::conversion::TypeError> {
         v.as_dict().map(Grouped).ok_or_else(|| vm::conversion::TypeError {
@@ -349,7 +349,7 @@ fn sum_by<'gc>(
     ctx: Ctx<'gc>,
     vals: Vec<anon::T<'gc>>,
     keys: Vec<anon::U<'gc>>,
-) -> Result<anon::DictOf<'gc, 0>, RtErr> {
+) -> Result<anon::StrDictOf<'gc, 0>, RtErr> {
     let mut rows = Vec::new();
     for (k, xs) in groups(ctx, &vals, &keys, "sum_by")? {
         rows.push((k, sum_vals(&xs, "sum_by")?));

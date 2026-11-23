@@ -733,7 +733,7 @@ impl Solver {
             Ty::Str => "str",
             Ty::Bool => "bool",
             Ty::Array(..) => "array",
-            Ty::Dict(_) => "dict",
+            Ty::Dict(..) => "dict",
             _ => return None,
         };
         self.library.get(name).copied()
@@ -1776,7 +1776,10 @@ impl Solver {
             Ty::Array(inner, len) => {
                 Ty::Array(Box::new(self.fresh_vids(&inner, self_ty, memo)), len)
             }
-            Ty::Dict(inner) => Ty::Dict(Box::new(self.fresh_vids(&inner, self_ty, memo))),
+            Ty::Dict(k, v) => Ty::dict_of(
+                self.fresh_vids(&k, self_ty, memo),
+                self.fresh_vids(&v, self_ty, memo),
+            ),
             Ty::Option(inner) => Ty::Option(Box::new(self.fresh_vids(&inner, self_ty, memo))),
             Ty::Result(inner) => Ty::Result(Box::new(self.fresh_vids(&inner, self_ty, memo))),
             Ty::Tuple(ts) => Ty::Tuple(
@@ -1823,7 +1826,9 @@ impl Solver {
         match t {
             Ty::Anon(n) => Ty::Vid(*memo.entry(*n).or_insert_with(|| self.vid())),
             Ty::Array(v, len) => Ty::Array(Box::new(self.substitute_anons(v, memo)), *len),
-            Ty::Dict(v) => Ty::Dict(Box::new(self.substitute_anons(v, memo))),
+            Ty::Dict(k, v) => {
+                Ty::dict_of(self.substitute_anons(k, memo), self.substitute_anons(v, memo))
+            }
             Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| self.substitute_anons(t, memo)).collect()),
             Ty::Option(inner) => Ty::Option(Box::new(self.substitute_anons(inner, memo))),
             Ty::Result(inner) => Ty::Result(Box::new(self.substitute_anons(inner, memo))),
@@ -2292,6 +2297,55 @@ impl Solver {
 }
 
 // some id utils
+impl Solver {
+    /// Why `ty` cannot be a dict key, or `None` when it can (or is not known yet: a type
+    /// parameter is checked when the program runs). A key must keep its equality while it
+    /// sits in the dict, so the containers that change in place (a list, a dict), a function
+    /// (no value equality) and `()` are refused. A tuple, an option or a struct or enum is a
+    /// key when its parts are; the dict stores a frozen copy of a struct key.
+    /// r[impl mimas.dict.key.refused]
+    pub(crate) fn key_problem(&self, ty: &Ty) -> Option<String> {
+        fn walk(s: &Solver, ty: &Ty, seen: &mut Vec<AdtId>) -> Option<String> {
+            match ty.clone().normalized(s) {
+                Ty::Array(..) => Some(
+                    "a list can change after it goes in, and the dict could not find it again; \
+                     use a tuple"
+                        .into(),
+                ),
+                Ty::Dict(..) => Some("a dict can change after it goes in".into()),
+                Ty::Fn(_) => Some("a function has no equality a key could use".into()),
+                Ty::Unit => Some("`()` holds no value to key by".into()),
+                Ty::Tuple(members) => members.iter().find_map(|m| walk(s, m, seen)),
+                Ty::Option(inner) => walk(s, &inner, seen),
+                // `Self` in an impl is the adt itself
+                Ty::Adt(aid, _) | Ty::Identity(aid, _) => {
+                    if seen.contains(&aid) {
+                        return None;
+                    }
+                    seen.push(aid);
+                    let adt = &s.adts[aid];
+                    let field_tys: Vec<Ty> = adt
+                        .variants
+                        .values()
+                        .flat_map(|v| match v {
+                            Variant::Tuple(t) => t.members.clone(),
+                            Variant::Struct(st) => {
+                                st.fields.values().map(|f| f.ty.clone()).collect()
+                            }
+                        })
+                        .collect();
+                    let name = adt.name.clone();
+                    field_tys.iter().find_map(|t| walk(s, t, seen)).map(|why| {
+                        format!("a `{name}` holds a value that cannot be a key ({why})")
+                    })
+                }
+                _ => None,
+            }
+        }
+        walk(self, ty, &mut Vec::new())
+    }
+}
+
 impl Solver {
     pub(crate) fn vid(&mut self) -> Vid {
         let vid = self.vids.push(());
@@ -3203,7 +3257,9 @@ impl Solver {
                 }
             },
             Ty::Array(v, len) => Ty::Array(Box::new(self.substitute_params(v, map)), *len),
-            Ty::Dict(v) => Ty::Dict(Box::new(self.substitute_params(v, map))),
+            Ty::Dict(k, v) => {
+                Ty::dict_of(self.substitute_params(k, map), self.substitute_params(v, map))
+            }
             Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| self.substitute_params(t, map)).collect()),
             Ty::Option(inner) => Ty::Option(Box::new(self.substitute_params(inner, map))),
             Ty::Result(inner) => Ty::Result(Box::new(self.substitute_params(inner, map))),
@@ -4946,7 +5002,7 @@ impl Solver {
                                 | Ty::Float
                                 | Ty::Bool
                                 | Ty::Array(..)
-                                | Ty::Dict(_)
+                                | Ty::Dict(..)
                                 | Ty::Option(_)
                         )
                     });

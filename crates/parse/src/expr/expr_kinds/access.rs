@@ -55,13 +55,14 @@ impl std::fmt::Display for Access {
         match self {
             Access::Identity { right } => f.pad(&format!("self.{right}")),
             Access::Dot { left, right, kind } => match kind {
-                AccessKind::Direct => f.pad(&format!("{left}.{right}")),
+                AccessKind::Direct | AccessKind::Entry => f.pad(&format!("{left}.{right}")),
                 AccessKind::Option => f.pad(&format!("{left}?.{right}")),
             },
             Access::DoubleColon { left, right } => f.pad(&format!("{left}::{right}")),
             Access::Square { left, key, kind } => match kind {
                 AccessKind::Direct => f.pad(&format!("{left}[{key}]")),
                 AccessKind::Option => f.pad(&format!("{left}?[{key}]")),
+                AccessKind::Entry => f.pad(&format!("{left}[entry {key}]")),
             },
         }
     }
@@ -72,6 +73,9 @@ impl std::fmt::Display for Access {
 pub enum AccessKind {
     Direct,
     Option,
+    /// The `i`th entry of a dict as a `(key, value)` pair, in insertion order: how a `for`
+    /// loop walks a dict. Never written in source; `d[i]` on a dict looks up the key `i`.
+    Entry,
 }
 
 impl TryFrom<TokKind<'_>> for AccessKind {

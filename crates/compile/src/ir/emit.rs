@@ -1406,6 +1406,17 @@ impl Emit for For {
             };
         }
 
+        // r[impl mimas.dict.key.for]
+        // a dict walks its entries by position, a kind of read its own (`d[i]` on a dict
+        // looks up the key `i`)
+        let walk = if matches!(
+            ir.resolutions.node_tys.get(&self.iterator.id()),
+            Some(Ty::Dict(..))
+        ) {
+            AccessKind::Entry
+        } else {
+            AccessKind::Direct
+        };
         let (idx_local, start, frozen_bound, seq, check_len) = match self.iterator.kind() {
             ExprKind::Range(Range {
                 start,
@@ -1443,7 +1454,7 @@ impl Emit for For {
                 } else {
                     let dict_iter = matches!(
                         ir.resolutions.node_tys.get(&self.iterator.id()),
-                        Some(Ty::Dict(_))
+                        Some(Ty::Dict(..))
                     );
                     // the bound is always frozen at entry: a body that may
                     // touch len (`ys.push`, `f(xs)`, a dict add) re-checks
@@ -1482,7 +1493,7 @@ impl Emit for For {
         ir.target(header);
         if let Some(seq) = seq {
             let i = ir.current().get_local(idx_local);
-            let elem = ir.current().get_index(seq, i, AccessKind::Direct);
+            let elem = ir.current().get_index(seq, i, walk);
             ir.pattern(&self.binding, Some(elem))?;
         }
 
@@ -2842,7 +2853,9 @@ fn subst_params(ty: &Ty, params: &[ParamId], args: &[Ty]) -> Ty {
             .and_then(|i| args.get(i).cloned())
             .unwrap_or_else(|| ty.clone()),
         Ty::Array(inner, len) => Ty::Array(Box::new(subst_params(inner, params, args)), *len),
-        Ty::Dict(inner) => Ty::Dict(Box::new(subst_params(inner, params, args))),
+        Ty::Dict(k, v) => {
+            Ty::dict_of(subst_params(k, params, args), subst_params(v, params, args))
+        }
         Ty::Option(inner) => Ty::Option(Box::new(subst_params(inner, params, args))),
         Ty::Result(inner) => Ty::Result(Box::new(subst_params(inner, params, args))),
         Ty::Tuple(members) => Ty::Tuple(
@@ -2876,7 +2889,7 @@ fn default_inst(ir: &mut Ir, ty: &Ty) -> Option<InstId> {
             ir.current().constant(Constant::Str(s))
         }
         Ty::Array(..) => ir.current().new_array(),
-        Ty::Dict(_) => ir.current().new_dict(),
+        Ty::Dict(..) => ir.current().new_dict(),
         Ty::Tuple(members) => {
             let tuple = ir.current().new_array();
             for member in members {
