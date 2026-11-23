@@ -1,0 +1,10 @@
+# macOS malloc keeps freed large blocks in a per-process cache with a high
+# limit. libtest runs each test on a new thread, and every thread that solves
+# the std prelude leaves about 7 MB in that cache. In the one-binary
+# `tests/it` suites (about 1,200 tests in one process) the cache grew past
+# 15 GB and earlyoom killed the run. With the cache off, the
+# `mimas-library` suite peaks at about 2.4 GB and runs no slower. The runner
+# applies only to binaries that cargo runs (`cargo test`, `cargo run`),
+# not to rustc or the linker.
+[target.'cfg(target_os = "macos")']
+runner = ["env", "MallocLargeCache=0"]

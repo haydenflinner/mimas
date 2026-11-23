@@ -52,7 +52,7 @@ phase 1: each block recomputes from its inputs. Incremental upkeep across
 live passes is not here yet (see the parent repo's
 `docs/devlog/zset-query-2026-11-21.md`).
 
-Tests: `library/tests/dataframe.rs` (`zset_*`), one per verb rule plus
+Tests: `library/tests/it/dataframe.rs` (`zset_*`), one per verb rule plus
 `changes`, the int `w` rule (`zset_int_w_column_is_the_weights`,
 `zset_float_w_column_*`), the weighted aggregates
 (`zset_aggregate_sums_by_weight`, `zset_min_max_*`) and `+`/`-`
@@ -374,7 +374,7 @@ direction word is parsed as a signed unary whose node the parser records in
 `Ast::directions`, so at run time `up 50.0px` is the float `-50.0` and
 nothing else moves. A direction is `Sign` on an axis, the opp made
 spatial; `space` fields that are quantities flip the same way.
-Tests: `library/tests/axes.rs`. Book: Units › Axes and directions.
+Tests: `library/tests/it/axes.rs`. Book: Units › Axes and directions.
 
 ## Math spellings, the big reductions, `⋅`, masks and gather
 
@@ -392,7 +392,7 @@ compares pervasively to a mask, nested as deep as the list, the way a tensor
 does (`seq_cmp_overload_ty`; list-vs-list and anything-vs-null stay
 structural), and `xs[idxs]` gathers. Tic-tac-toe's win check is
 `⨆⨅ (b[LINES] == p)`, gather–compare–meet–join, and a test.
-Tests: `library/tests/symbols.rs`. Book: Operators › Math spellings, Arrays ›
+Tests: `library/tests/it/symbols.rs`. Book: Operators › Math spellings, Arrays ›
 Gather and pervasive comparison.
 
 ## `raise` carries any value
@@ -588,7 +588,7 @@ Two consequences fell out of making it ordinary methods:
   record` unifies fieldwise with `⊥` propagating. The lattice laws are
   `check` lines run by `cue_kit::cue_kit_check_lines_all_pass`.
 
-`crates/library/tests/operators.rs` pins the contract: left dispatch,
+`crates/library/tests/it/operators.rs` pins the contract: left dispatch,
 reverse dispatch, non-bool comparisons, compound assign, structural
 equality untouched, and arity/type rejections.
 
@@ -617,7 +617,7 @@ grades pass warns at the declaration: `shadowed_builtin`, a stable
 miette code a host can filter on (Nina hides it per page with the
 `allow` page property). nand2tetris's gate lib is the motivating page.
 Tests: `parse_validity::a_declared_fn_takes_back_an_operator_word`,
-`library/tests/juxta.rs` (`a_declared_fn_shadows_its_operator_word`,
+`library/tests/it/juxta.rs` (`a_declared_fn_shadows_its_operator_word`,
 `shadowing_an_operator_word_warns_with_a_code`,
 `a_kits_shadowing_reaches_the_page_that_uses_it`),
 `parse_validity::a_spliced_source_shadows_per_page`.
@@ -669,7 +669,7 @@ The parser lowers a block to plain mimas (`parse::parser::datalog`): one
 array per relation, a hash-bucketed dedup index, a `loop` per stratum
 whose rounds only revisit combinations touching last round's delta. No new
 runtime. Not yet: lattices, `if let`, several heads per rule. Tests:
-`library/tests/datalog.rs` (closure, seeds, filters, the carp-kit and
+`library/tests/it/datalog.rs` (closure, seeds, filters, the carp-kit and
 learned lessons, Ascent spelling, negation, aggregates, errors).
 
 ## `opp`: a dichotomy, as basic as an enum
@@ -714,7 +714,7 @@ consts); a tuple variant's constructor is still not a value
 in spirit; `impl Opp for bool` waits on pact impls for primitive types.
 A unit variant now prints as its bare name (`Sky::Moon`, not
 `Sky::Moon {  }`). Tests: `parse_validity::opp_is_an_enum_and_its_flip`,
-`library/tests/structs.rs` (`opp_declares_a_dichotomy`,
+`library/tests/it/structs.rs` (`opp_declares_a_dichotomy`,
 `unary_operator_through_a_pact`).
 
 **`bool` is an opp.** The built-in source has `impl Opp for bool` (`inv` is
@@ -746,7 +746,7 @@ use site, the way a struct const already did (`Constant::needs_alloc`
 in `emit_const_dec` and the module-constant export), so a write into
 one use never reaches the next. Tests:
 `solve_variables::{const_struct_in_array, const_array_of_struct_consts}`,
-`library/tests/structs.rs::const_array_of_struct_consts`.
+`library/tests/it/structs.rs::const_array_of_struct_consts`.
 
 ## Typed arrays: `IntArray`/`FloatArray` backing stores: branch `typed-arrays`
 
@@ -1094,7 +1094,7 @@ needs between steps; `run` steps a whole stream.
   each group the change touches.
 
 Each has a batch form (`zmap`, `zfilter`, `zflat_map`, `zjoin`, `zdistinct`,
-`zgroup_sum`). `tests/incremental.rs` checks every operator against
+`zgroup_sum`). `library/tests/it/incremental.rs` checks every operator against
 `incremental(q)` or against `∇` of the batch query on the states, on seeded
 random change streams with removals and re-adds. A one-row change to a
 join over 4,000 rows a side costs 214 VM ops; recomputing costs 760,219.
