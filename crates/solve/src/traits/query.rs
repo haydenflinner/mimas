@@ -125,8 +125,13 @@ impl Query for Expr {
                     #[cfg(feature = "logging")]
                     println!("{}", utils::Printer::query(self));
 
-                    inner(self)
-                        .solve(self.id(), self.location(), solver)
+                    let solved = inner(self).solve(self.id(), self.location(), solver);
+                    // r[impl mimas.group.affine.errors]
+                    let solved = match self.kind() {
+                        ExprKind::Call(call) => crate::affine::after_call(solver, call, solved),
+                        _ => solved,
+                    };
+                    solved
                         .and_then(|ty| {
                             // a `__Place`-typed field (`c.p`, `ps[i]`)
                             // reads through its descriptor in value

@@ -54,6 +54,7 @@ impl<'a> HoistCtx<'a> {
         // r[impl mimas.prelude.shadow]
         if self.solver.in_prelude {
             self.solver.prelude_types.insert(ident.lexeme.clone());
+            self.solver.prelude_adts.insert(ident.lexeme.clone(), adt_id);
         } else if self.solver.prelude_types.contains(&ident.lexeme) {
             self.solver.warnings.push(std::rc::Rc::new(
                 crate::errors::ShadowedBuiltinType {

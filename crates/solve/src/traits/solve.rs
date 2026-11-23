@@ -2509,6 +2509,10 @@ impl Solve for Evaluation {
         )?) {
             return Ok(ty);
         }
+        // r[impl mimas.group.affine.add-posts]
+        if let Some(e) = crate::affine::binary(solver, self.op, &lhs_n, &rhs_n, location) {
+            return Err(e);
+        }
         eval(self.op, &lhs_n, &rhs_n, location, solver)
     }
 }
@@ -3929,6 +3933,10 @@ impl Solve for Unary {
             && let Some(t) = unary_dispatch(solver, id, name, &self.right, &ty, location)?
         {
             return Ok(t);
+        }
+        // r[impl mimas.group.affine.scale]
+        if let Some(e) = crate::affine::unary(solver, self.op, &ty, location) {
+            return Err(e);
         }
         unary(self.op, &ty, location, solver)
     }

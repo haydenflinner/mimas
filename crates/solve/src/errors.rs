@@ -1871,3 +1871,21 @@ pub struct InoutDefault {
     #[label("the caller supplies the place with `&`; there is nothing to default to")]
     pub at: SourceSpan,
 }
+
+/// A post (`Post<T>`, a point: a position, an instant, an index) or a
+/// stream of posts used where only a panel (a difference) has a meaning:
+/// `p + q`, `k * p`, `-p`, `∫ ps`, a stream of posts with no start, or two
+/// streams of different lengths zipped. r[impl mimas.group.affine.errors]
+#[derive(Error, Debug, Diagnostic)]
+#[error("{msg}")]
+#[diagnostic(code(affine))]
+pub struct AffineMisuse {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("{label}")]
+    pub at: SourceSpan,
+    pub msg: String,
+    pub label: String,
+    #[help]
+    pub help: String,
+}

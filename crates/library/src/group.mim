@@ -269,6 +269,268 @@ impl Stream {
         for c in self.items { posts.push(posts[posts.len() - 1] + c); }
         Stream { items: posts }
     }
+
+    /// `Δ⁻¹ c from p`: the exclusive running total from the post `p`, so
+    /// `n` panels give `n + 1` posts: `p`, then `p` plus each prefix.
+    /// r[impl mimas.group.affine.from]
+    fn sum_before_from(self, p: Post<T>) -> Posts<T> {
+        let out = [p.at];
+        for c in self.items { out.push(out[out.len() - 1] + c); }
+        Posts { at: out }
+    }
+
+    /// `Δ⁻¹ c from z`: the exclusive running total from `z` in place of
+    /// the zero.
+    fn sum_before_from(self, z: T) -> Stream<T> {
+        let out = [z];
+        for c in self.items { out.push(out[out.len() - 1] + c); }
+        Stream { items: out }
+    }
+
+    /// `∫ c from p`: the inclusive running total from the post `p`. Step
+    /// `t` is `p` plus steps `0..=t`, so the posts keep the stream's
+    /// length. This is the `+ C` of an integral, written as an argument.
+    fn integrate_from(self, p: Post<T>) -> Posts<T> {
+        let out: [T] = [];
+        let at = p.at;
+        for c in self.items { at = at + c; out.push(at); }
+        Posts { at: out }
+    }
+
+    /// `∫ c from z`: the inclusive running total from `z` in place of the
+    /// zero.
+    fn integrate_from(self, z: T) -> Stream<T> {
+        let out: [T] = [];
+        let at = z;
+        for c in self.items { at = at + c; out.push(at); }
+        Stream { items: out }
+    }
+
+    /// `∇ s from z`: the backward difference with `z` as the step before
+    /// the first, in place of the zero.
+    fn differentiate_from(self, z: T) -> Stream<T> {
+        let out: [T] = [];
+        let prev = z;
+        for x in self.items { out.push(x - prev); prev = x; }
+        Stream { items: out }
+    }
+
+    /// `z⁻¹ s from z`: the stream one step late, with `z` first in place
+    /// of the zero.
+    fn delay_from(self, z: T) -> Stream<T> {
+        if self.items.len() == 0 { return self; }
+        let out = [z];
+        for t in 0..self.items.len() - 1 { out.push(self.items[t]); }
+        Stream { items: out }
+    }
+
+    /// Every step but the last: the steps that have a step after them.
+    fn before(self) -> Stream<T> {
+        if self.items.len() == 0 { return self; }
+        Stream { items: self.items[0..self.items.len() - 1] }
+    }
+
+    /// Every step but the first: the steps that have a step before them.
+    fn after(self) -> Stream<T> {
+        if self.items.len() == 0 { return self; }
+        Stream { items: self.items[1..] }
+    }
+
+    /// `s.zip(o)`: the steps of two streams in pairs. Two streams of
+    /// different lengths are an error, not a quiet cut to the shorter:
+    /// `zip` on lists keeps that cut.
+    fn zip<U: AbelianGroup>(self, o: Stream<U>) -> [(T, U)] {
+        if self.items.len() != o.items.len() { panic(__misaligned(self.items.len(), o.items.len())); }
+        self.items.zip(o.items)
+    }
+
+    /// `s.zip(ps)`: each step with the post of the same step.
+    fn zip<U: AbelianGroup>(self, o: Posts<U>) -> [(T, Post<U>)] {
+        if self.items.len() != o.at.len() { panic(__misaligned(self.items.len(), o.at.len())); }
+        self.items.zip(o.list())
+    }
+}
+
+// ---- posts and panels -------------------------------------------------------
+//
+// A state is a fence post and a change is the panel between two posts.
+// `n` posts have `n - 1` panels between them. Posts and panels form an
+// affine space over a group `T`:
+//
+//   post - post  = panel        post + panel = post
+//   post - panel = post         panel + panel = panel, k · panel = panel
+//   post + post, k · post, -post: check errors
+//
+// A plain value is a panel: numbers, quantities, vectors, tallies and
+// tables all keep their group operators. Wrap a value with `post(x)` to say
+// that it is a place (a position, an instant, an index), not a change.
+// The same split is position and displacement, instant and duration,
+// pointer and offset, caret and character.
+//
+// A stream of posts is `Posts<T>`: `posts(xs)` makes one from the posts'
+// coordinates. `Δ ps` and `∇ ps` both give the `n - 1` panels. `Δ` stamps
+// each panel on the post before it, so it pairs with `ps.before()`; `∇`
+// stamps it on the post it made, so it pairs with `ps.after()`. `zip` on
+// streams refuses two streams of different lengths, because that is where
+// the fencepost error hides.
+// r[impl mimas.group.affine]
+
+/// A post: a point in the affine space over the group `T`, such as a
+/// position, an instant or an index. `p - q` is the panel between two
+/// posts, `p + d` and `p - d` move a post by a panel, and `p + q`, `k * p`
+/// and `-p` are check errors. `p.at` is the post's coordinate: the panel
+/// from the zero post to it.
+/// r[impl mimas.group.affine.post]
+struct Post<T: AbelianGroup> { at: T }
+
+/// The post at coordinate `x`.
+fn post<T: AbelianGroup>(x: T) -> Post<T> { Post { at: x } }
+
+impl Post {
+    /// `p - q`: the panel from post `q` to post `p`.
+    /// r[impl mimas.group.affine.sub-posts]
+    fn sub(self, o: Post<T>) -> T { self.at - o.at }
+
+    /// `p - d`: the post one panel `d` back.
+    fn sub(self, d: T) -> Post<T> { Post { at: self.at - d } }
+
+    /// `p + d`: the post one panel `d` on.
+    /// r[impl mimas.group.affine.add-panel]
+    fn add(self, d: T) -> Post<T> { Post { at: self.at + d } }
+
+    /// `d + p`: `p + d`.
+    fn radd(self, d: T) -> Post<T> { Post { at: self.at + d } }
+}
+
+/// A stream of posts: one post per step, in time order. `posts(xs)` makes
+/// one from the coordinates `xs`; `ps[i]` is post `i`, and `ps.at` the
+/// coordinates as a list.
+/// r[impl mimas.group.affine.posts]
+struct Posts<T: AbelianGroup> { at: [T] }
+
+/// The posts at the coordinates `xs`, in order.
+fn posts<T: AbelianGroup>(xs: [T]) -> Posts<T> { Posts { at: xs } }
+
+/// The `zip` refusal both stream types share: the two lengths, and the
+/// two alignments a fencepost error usually meant.
+fn __misaligned(a: int, b: int) -> str {
+    f"zip: these streams have {a} and {b} steps. `n` posts have `n - 1` panels: pair each post with the panel after it with `ps.before().zip(Δ ps)`, or with the panel that made it with `ps.after().zip(∇ ps)`"
+}
+
+impl Posts {
+    /// The posts as a list.
+    fn list(self) -> [Post<T>] { self.at.map(|x: T| Post { at: x }) }
+
+    /// The count of posts.
+    fn len(self) -> int { self.at.len() }
+
+    /// Post `i`: `ps[i]`.
+    fn index(self, i: int) -> Post<T> { Post { at: self.at[i] } }
+
+    /// The last post.
+    fn last(self) -> Post<T> { Post { at: self.at[self.at.len() - 1] } }
+
+    /// Posts `a` up to but not including `b`.
+    fn slice(self, a: int, b: int) -> Posts<T> { Posts { at: self.at[a..b] } }
+
+    /// Every post that has a panel after it: all but the last. `Δ ps`
+    /// stamps panel `t` on post `t`, so `ps.before().zip(Δ ps)` pairs each
+    /// post with the change that leaves it.
+    /// r[impl mimas.group.affine.before]
+    fn before(self) -> Posts<T> {
+        if self.at.len() == 0 { return self; }
+        Posts { at: self.at[0..self.at.len() - 1] }
+    }
+
+    /// Every post that has a panel before it: all but the first. `∇ ps`
+    /// stamps each panel on the post it made, so `ps.after().zip(∇ ps)`
+    /// pairs each post with the change that made it.
+    /// r[impl mimas.group.affine.after]
+    fn after(self) -> Posts<T> {
+        if self.at.len() == 0 { return self; }
+        Posts { at: self.at[1..] }
+    }
+
+    /// `Δ ps`: the panels between the posts, `n` posts giving `n - 1`.
+    /// Panel `t` is `ps[t + 1] - ps[t]`.
+    /// r[impl mimas.group.affine.forward-difference]
+    fn forward_difference(self) -> Stream<T> {
+        let out: [T] = [];
+        for t in 1..self.at.len() { out.push(self.at[t] - self.at[t - 1]); }
+        Stream { items: out }
+    }
+
+    /// `∇ ps`: the same `n - 1` panels, each stamped on the post it made,
+    /// so they line up with `ps.after()`. Post 0 has no post before it,
+    /// and posts have no zero to stand in; `∇ ps from p` names one.
+    fn differentiate(self) -> Stream<T> { self.forward_difference() }
+
+    /// `∇ ps from p`: the backward difference with `p` as the post before
+    /// the first, so all `n` posts get a panel.
+    fn differentiate_from(self, p: Post<T>) -> Stream<T> {
+        let out: [T] = [];
+        let prev = p.at;
+        for x in self.at { out.push(x - prev); prev = x; }
+        Stream { items: out }
+    }
+
+    /// `z⁻¹ ps from p`: the posts one step late, with `p` first. The last
+    /// post drops out.
+    fn delay_from(self, p: Post<T>) -> Posts<T> {
+        if self.at.len() == 0 { return self; }
+        let out = [p.at];
+        for t in 0..self.at.len() - 1 { out.push(self.at[t]); }
+        Posts { at: out }
+    }
+
+    /// `ps.shift()`: the posts one step early. The first drops out.
+    fn shift(self) -> Posts<T> { self.after() }
+
+    /// `ps + c`: each post moved by the panel of the same step. The two
+    /// streams must have the same length.
+    fn add(self, c: Stream<T>) -> Posts<T> {
+        if self.at.len() != c.items.len() { panic(__misaligned(self.at.len(), c.items.len())); }
+        let out: [T] = [];
+        for i in 0..self.at.len() { out.push(self.at[i] + c.items[i]); }
+        Posts { at: out }
+    }
+
+    /// `ps + d`: every post moved by the one panel `d`.
+    fn add(self, d: T) -> Posts<T> { Posts { at: self.at.map(|x: T| x + d) } }
+
+    /// `ps - qs`: the panel from each post of `qs` to the post of `ps` at
+    /// the same step. The two streams must have the same length.
+    fn sub(self, o: Posts<T>) -> Stream<T> {
+        if self.at.len() != o.at.len() { panic(__misaligned(self.at.len(), o.at.len())); }
+        let out: [T] = [];
+        for i in 0..self.at.len() { out.push(self.at[i] - o.at[i]); }
+        Stream { items: out }
+    }
+
+    /// `ps - p`: the panel from post `p` to each post.
+    fn sub(self, p: Post<T>) -> Stream<T> { Stream { items: self.at.map(|x: T| x - p.at) } }
+
+    /// `ps - c`: each post moved back by the panel of the same step.
+    fn sub(self, c: Stream<T>) -> Posts<T> {
+        if self.at.len() != c.items.len() { panic(__misaligned(self.at.len(), c.items.len())); }
+        let out: [T] = [];
+        for i in 0..self.at.len() { out.push(self.at[i] - c.items[i]); }
+        Posts { at: out }
+    }
+
+    /// `ps.zip(c)`: each post with the panel of the same step. Two streams
+    /// of different lengths are an error, not a quiet cut to the shorter.
+    /// r[impl mimas.group.affine.zip]
+    fn zip<U: AbelianGroup>(self, c: Stream<U>) -> [(Post<T>, U)] {
+        if self.at.len() != c.items.len() { panic(__misaligned(self.at.len(), c.items.len())); }
+        self.list().zip(c.items)
+    }
+
+    /// `ps.zip(qs)`: the posts of two streams, step by step.
+    fn zip<U: AbelianGroup>(self, o: Posts<U>) -> [(Post<T>, Post<U>)] {
+        if self.at.len() != o.at.len() { panic(__misaligned(self.at.len(), o.at.len())); }
+        self.list().zip(o.list())
+    }
 }
 
 // ---- tallies ---------------------------------------------------------------

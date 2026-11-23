@@ -319,6 +319,10 @@ pub struct Solver {
     /// for user code, with a `shadowed_builtin` warning.
     pub(crate) in_prelude: bool,
     pub(crate) prelude_types: FxHashSet<String>,
+    /// The prelude's own adts by name (`Post`, `Posts`, `Stream`): a user
+    /// type of the same name is a different adt, so name checks that mean
+    /// the std type go through this map. r[impl mimas.group.affine.errors]
+    pub(crate) prelude_adts: FxHashMap<String, AdtId>,
 
     /// Decs minted before the current `solve_all`. A `fn` redeclare only
     /// errors when the dec it would replace was hoisted in this same solve:
@@ -490,6 +494,7 @@ impl Solver {
             resolved_uses: FxHashMap::default(),
             in_prelude: false,
             prelude_types: FxHashSet::default(),
+            prelude_adts: FxHashMap::default(),
             declare_floor: 0,
             non_value: None,
             iter_guards: vec![],
@@ -2818,6 +2823,20 @@ impl Solver {
                     .builtin_adt(other)
                     .is_some_and(|aid| self.pact_impls.contains(&(pact, aid))),
             };
+            // a post is the one type std leaves out of `AbelianGroup` on
+            // purpose: say why, and what a stream of posts is
+            // r[impl mimas.group.affine.posts]
+            if !ok && matches!(crate::affine::kind(self, &ty), Some(crate::affine::Kind::Post)) {
+                return Err(crate::errors::AffineMisuse {
+                    src: self.src(at),
+                    at: at.into(),
+                    msg: format!("`{ty}` is a post, and posts do not add"),
+                    label: format!("`{ty}` is held to `{}` here", self.pacts[pact].name),
+                    help: "a post is a place, not a change, so it is no group. A stream of posts is `posts(xs)` on the posts' coordinates; a stream of the panels between them is `Δ ps`"
+                        .into(),
+                }
+                .into());
+            }
             if !ok {
                 return Err(BoundNotSatisfied {
                     src: self.src(at),
@@ -3713,6 +3732,7 @@ impl Solver {
                             // `xs += ys`/`xs -= ys` — `add`/`sub` only take
                             // elements, so a list rhs falls through here to
                             // `union`/`minus`, the same call `xs + ys` makes.
+                            let op_orig = op;
                             let op = match *op {
                                 parse::AssignmentOp::PlusEqual => Some(parse::EvaluationOp::Plus),
                                 parse::AssignmentOp::MinusEqual => Some(parse::EvaluationOp::Minus),
@@ -3736,7 +3756,22 @@ impl Solver {
                             };
                             match seq {
                                 Some(ret) => left.fulfill_ty(ret, self)?,
-                                None => right.fulfill_ty(place, self)?,
+                                None => {
+                                    // `p += q` on two posts, `p *= k` on one
+                                    // r[impl mimas.group.affine.add-posts]
+                                    if let Some(op) = op.or(match *op_orig {
+                                        parse::AssignmentOp::StarEqual => Some(parse::EvaluationOp::Multiply),
+                                        parse::AssignmentOp::SlashEqual => Some(parse::EvaluationOp::Divide),
+                                        _ => None,
+                                    }) {
+                                        let place_n = place.clone().normalized(self);
+                                        let right_n = right.query(self)?.normalized(self);
+                                        if let Some(e) = crate::affine::binary(self, op, &place_n, &right_n, left.location()) {
+                                            return Err(e);
+                                        }
+                                    }
+                                    right.fulfill_ty(place, self)?
+                                }
                             }
                         }
                     }

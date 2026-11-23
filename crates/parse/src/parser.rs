@@ -83,6 +83,9 @@ pub struct Parser<'s> {
     /// (`x ± 10%`) instead of folding as postfix percent. Groups reset it -- inside
     /// `x ± (50%)` the `%` is postfix again.
     pct_marker: bool,
+    /// Set while a stream glyph's operand parses: a `from` there starts
+    /// the glyph's starting post (`∫ c from p`), not an argument.
+    stream_from: bool,
     /// Monotonic counter for `__assert_left_N` / `__assert_right_N` names minted by `assert!`
     /// rewriting, so nested asserts don't collide.
     assert_id: u32,
@@ -273,6 +276,7 @@ impl<'s> Parser<'s> {
             generator_place: None,
             accessor_yield: false,
             pct_marker: false,
+            stream_from: false,
             assert_id: 0,
             with_id: 0,
             depth: 0,
@@ -3222,9 +3226,41 @@ impl<'s> Parser<'s> {
                 // r[impl mimas.group.stream]
                 return self.new_expr(Ident::new(format!("__stream_{method}"), at), start);
             }
+            let saved = std::mem::replace(&mut self.stream_from, true);
             let operand = self
                 .nested(Self::unary)
                 .unwrap_or_else(|| self.poison_expr(self.cursor()));
+            self.stream_from = saved;
+            // r[impl mimas.group.affine.from]
+            // `∫ c from p`, `Δ⁻¹ c from p`, `∇ s from p`, `z⁻¹ s from p`: the
+            // value before step 0, which is the zero when no `from` names
+            // it. A stream of posts has no zero, so there it is required.
+            if self.peek() == TokKind::Ident("from") && !self.at_line_start() {
+                let from_at = self.next_location();
+                self.advance();
+                let first = self
+                    .nested(Self::unary)
+                    .unwrap_or_else(|| self.poison_expr(self.cursor()));
+                if method == "forward_difference" {
+                    self.error(Misdirection {
+                        src: self.src(),
+                        at: from_at.into(),
+                        msg: "`Δ s` reads no step before the first, so it takes no `from`".into(),
+                        label: "`from` names the start of `∫`, `Δ⁻¹`, `∇` or `z⁻¹`".into(),
+                    });
+                }
+                let at = self.location(start);
+                let callee = self.new_expr(
+                    Access::Dot {
+                        left: operand,
+                        right: self.new_expr(Ident::new(format!("{method}_from"), at), start),
+                        kind: AccessKind::Direct,
+                    },
+                    start,
+                );
+                let arg = Argument { name: None, value: first };
+                return self.new_expr(Call::new(callee, vec![arg]), start);
+            }
             return self.method_call(operand, method, start);
         }
         // `↑ x` — the old prefix spelling. Directions follow their
@@ -4527,6 +4563,7 @@ impl<'s> Parser<'s> {
                 // inside a whitespace-separated region like `table {}`.
                 tok if !fresh_line
                     && self.juxta == Juxta::Apply
+                    && !(self.stream_from && tok == TokKind::Ident("from"))
                     && (tok.starts_juxta_arg()
                         || (tok == TokKind::At && self.spaced_path_ahead()))
                     // `1 b => 2`: an atom right before `=>` is the next

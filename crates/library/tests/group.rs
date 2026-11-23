@@ -198,3 +198,184 @@ fn tally_bag_ops_refuse_removals() {
     };
     assert!(err.contains("negative weight"), "{err}");
 }
+
+// ---- posts and panels ------------------------------------------------------
+
+const POSTS: &str = r#"
+    let p = post(3.0px);
+    let q = post(5.5px);
+    let ps = posts([0.0, 1.0, 3.0, 6.0]);
+    let v = stream([1.0, 2.0, 3.0]);
+    struct Post2 { at: int }"#;
+
+// r[verify mimas.group.affine]
+// r[verify mimas.group.affine.post]
+// r[verify mimas.group.affine.sub-posts]
+// r[verify mimas.group.affine.add-panel]
+test_run!(
+    a_post_moves_by_panels,
+    POSTS,
+    "q - p" => "2.5",
+    "(p + 2.0px).at" => "5.0",
+    "(2.0px + p).at" => "5.0",
+    "(p - 1.0px).at" => "2.0",
+    "(p + (q - p)) == q" => "true",
+    "{ let at = p; at += 1.5px; at -= 0.5px; at.at }" => "4.0",
+    // any group's posts: an index and a vector-like tally
+    "(post(3) + 2) - post(3)" => "2",
+    "(post(tally([\"a\"])) + tally([\"b\"])).at == tally([\"a\", \"b\"])" => "true",
+);
+
+// r[verify mimas.group.affine.posts]
+// r[verify mimas.group.affine.forward-difference]
+// r[verify mimas.group.affine.before]
+// r[verify mimas.group.affine.after]
+test_run!(
+    a_stream_of_posts_has_one_panel_fewer,
+    POSTS,
+    "ps.len()" => "4",
+    "ps[2].at" => "3.0",
+    "ps.at" => "[0.0, 1.0, 3.0, 6.0]",
+    "(Δ ps).list()" => "[1.0, 2.0, 3.0]",
+    "(∇ ps).list()" => "[1.0, 2.0, 3.0]",
+    "ps.before().at" => "[0.0, 1.0, 3.0]",
+    "ps.after().at" => "[1.0, 3.0, 6.0]",
+    "(ps - ps[0]).list()" => "[0.0, 1.0, 3.0, 6.0]",
+    "(ps.before() + Δ ps) == ps.after()" => "true",
+    "(ps.after() - ∇ ps) == ps.before()" => "true",
+    "(ps + 1.0).at" => "[1.0, 2.0, 4.0, 7.0]",
+    "ps.last().at" => "6.0",
+    // a group stream gets the same helpers
+    "v.before().list()" => "[1.0, 2.0]",
+    "v.after().list()" => "[2.0, 3.0]",
+);
+
+// r[verify mimas.group.affine.from]
+test_run!(
+    from_names_the_start,
+    POSTS,
+    "(∫ v from post(10.0)).at" => "[11.0, 13.0, 16.0]",
+    "(Δ⁻¹ v from post(10.0)).at" => "[10.0, 11.0, 13.0, 16.0]",
+    "(∫ v from 10.0).list()" => "[11.0, 13.0, 16.0]",
+    "(Δ⁻¹ v from 10.0).list()" => "[10.0, 11.0, 13.0, 16.0]",
+    "(∇ ps from post(-1.0)).list()" => "[1.0, 1.0, 2.0, 3.0]",
+    "(∇ v from 1.0).list()" => "[0.0, 1.0, 1.0]",
+    "(z⁻¹ ps from post(-1.0)).at" => "[-1.0, 0.0, 1.0, 3.0]",
+    "(z⁻¹ v from 9.0).list()" => "[9.0, 1.0, 2.0]",
+    // the default start is the zero
+    "(∫ v from 0.0) == ∫ v && (Δ⁻¹ v from 0.0) == Δ⁻¹ v" => "true",
+    // the fundamental theorem with its constant
+    "Δ⁻¹ (Δ ps) from ps[0] == ps" => "true",
+    "∫ (Δ ps) from ps[0] == ps.after()" => "true",
+    "∫ (∇ ps from ps[0]) from ps[0] == ps" => "true",
+    // `from` binds after the glyph's operand, and a name `from` still works
+    "{ let from = 2; from + 1 }" => "3",
+    "(∫ v.map(|x: float| 2.0 * x) from 1.0).list()" => "[3.0, 7.0, 13.0]",
+);
+
+// r[verify mimas.group.affine.zip]
+test_run!(
+    zip_pairs_aligned_streams,
+    POSTS,
+    "ps.before().zip(Δ ps).len()" => "3",
+    "ps.after().zip(∇ ps)[0].0.at" => "1.0",
+    "v.zip(v).len()" => "3",
+    "(Δ ps).zip(ps.before())[2].1.at" => "3.0",
+    // lists keep their quiet cut to the shorter
+    "[1, 2, 3].zip([4, 5]).len()" => "2",
+);
+
+fn compile_err(src: &str) -> String {
+    match vm::Vm::compile(src, library::std) {
+        Ok(_) => panic!("expected a compile error:\n{src}"),
+        Err(e) => format!("{e:?}"),
+    }
+}
+
+fn post_err(expr: &str) -> String {
+    let e = compile_err(&format!("{POSTS}\n let _x = {expr};"));
+    e.replace('│', " ").split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+// r[verify mimas.group.affine.add-posts]
+// r[verify mimas.group.affine.scale]
+// r[verify mimas.group.affine.errors]
+#[test]
+fn post_arithmetic_that_has_no_meaning_is_a_check_error() {
+    let e = post_err("p + q");
+    assert!(e.contains("adding two posts"), "{e}");
+    assert!(e.contains("subtract them to get a panel"), "{e}");
+    let e = post_err("{ let r = p; r += q; r }");
+    assert!(e.contains("adding two posts"), "{e}");
+    let e = post_err("ps + ps");
+    assert!(e.contains("adding two posts"), "{e}");
+    let e = post_err("3.0 * p");
+    assert!(e.contains("scaling a post: only a panel scales"), "{e}");
+    let e = post_err("p * 2.0");
+    assert!(e.contains("scaling a post"), "{e}");
+    let e = post_err("p / 2.0");
+    assert!(e.contains("scaling a post"), "{e}");
+    let e = post_err("2 * ps");
+    assert!(e.contains("scaling a stream of posts"), "{e}");
+    let e = post_err("-p");
+    assert!(e.contains("negating a post"), "{e}");
+    let e = post_err("1.0px - p");
+    assert!(e.contains("subtracting a post from a panel"), "{e}");
+    // a post is no group, so a `Stream` of posts is refused with the reason
+    let e = post_err("stream([p, q])");
+    assert!(e.contains("is a post, and posts do not add"), "{e}");
+    assert!(e.contains("posts(xs)"), "{e}");
+    // a page's own type named like a post is another type: the plain error
+    let e = post_err("Post2 { at: 1 } + Post2 { at: 2 }");
+    assert!(!e.contains("adding two posts"), "{e}");
+}
+
+// r[verify mimas.group.affine.from]
+#[test]
+fn a_stream_of_posts_needs_its_start() {
+    let e = post_err("∫ ps");
+    assert!(e.contains("`∫` adds up every step, and posts do not add"), "{e}");
+    assert!(e.contains("∫ (Δ ps) from ps[0]"), "{e}");
+    let e = post_err("∫ ps from post(0.0)");
+    assert!(e.contains("posts do not add"), "{e}");
+    let e = post_err("Δ⁻¹ ps");
+    assert!(e.contains("`Δ⁻¹` adds up every step"), "{e}");
+    let e = post_err("z⁻¹ ps");
+    assert!(e.contains("needs the post before the first"), "{e}");
+    assert!(e.contains("z⁻¹ ps from p"), "{e}");
+    let e = post_err("ps.sum()");
+    assert!(e.contains("summing a stream of posts"), "{e}");
+    // panels where posts go: the start is what is missing
+    let e = compile_err(&format!("{POSTS}\n let _x: Posts<float> = ∫ v;"));
+    assert!(e.contains("name the starting post"), "{e}");
+    assert!(e.contains("∫ c from p"), "{e}");
+    let e = compile_err(&format!("{POSTS}\n let _x: Post<float> = 3.0;"));
+    assert!(e.contains("a panel where a post goes"), "{e}");
+    // `Δ` looks before no step, so it takes no start
+    let e = compile_err(&format!("{POSTS}\n let _x = Δ ps from post(0.0);"));
+    assert!(e.contains("takes no `from`"), "{e}");
+}
+
+// r[verify mimas.group.affine.zip]
+#[test]
+fn zipping_misaligned_streams_is_refused() {
+    // the checker sees both sides come from `ps`
+    let e = post_err("ps.zip(Δ ps)");
+    assert!(e.contains("zipping two streams of different lengths"), "{e}");
+    assert!(e.contains("this side has n and the other n - 1"), "{e}");
+    assert!(e.contains("ps.before().zip(Δ ps)"), "{e}");
+    let e = post_err("ps.zip(∇ ps)");
+    assert!(e.contains("n - 1"), "{e}");
+    let e = post_err("v.zip(Δ⁻¹ v)");
+    assert!(e.contains("n + 1"), "{e}");
+    // lengths known only at run time fault with the same advice
+    let err = match test_runner::try_execute(
+        "fn pair(a: Posts<float>, b: Stream<float>) -> int { a.zip(b).len() }
+         let _n = pair(posts([0.0, 1.0, 3.0]), stream([1.0, 2.0]));",
+    ) {
+        Ok(_) => panic!("expected a misaligned zip to fault"),
+        Err(e) => format!("{e}"),
+    };
+    assert!(err.contains("these streams have 3 and 2 steps"), "{err}");
+    assert!(err.contains("ps.after().zip(∇ ps)"), "{err}");
+}

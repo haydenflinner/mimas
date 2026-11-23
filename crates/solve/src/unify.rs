@@ -286,6 +286,10 @@ impl UnificationError {
             }
             .into();
         }
+        // r[impl mimas.group.affine.from]
+        if let Some(e) = crate::affine::mismatch(solver, &self.expected, &self.found, location) {
+            return e;
+        }
         TypeMismatch {
             src: solver.src(location),
             at: location.into(),
