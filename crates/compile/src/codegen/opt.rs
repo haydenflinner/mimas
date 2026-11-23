@@ -602,68 +602,53 @@ fn successors(body: &Body) -> Vec<Vec<BlockId>> {
         .collect()
 }
 
-/// `dom[b]` as a bitset row: the blocks on every path from the entry to `b`
-/// (itself included). Unreachable blocks keep a zero row, so nothing in them
-/// counts as dominated.
+/// Dominance over a body's blocks: the dominator tree (`idom`) and a
+/// preorder/postorder numbering of it, so "does `d` dominate `b`" is two
+/// compares. Unreachable blocks have no number, so nothing in them counts
+/// as dominated (not even by themselves).
 struct Dom {
-    rows: Vec<u64>,
-    words: usize,
+    /// Immediate dominator of each reachable non-entry block.
+    idom: Vec<Option<BlockId>>,
+    pre: Vec<u32>,
+    post: Vec<u32>,
 }
 
 impl Dom {
-    fn row(&self, b: usize) -> &[u64] {
-        &self.rows[b * self.words..(b + 1) * self.words]
-    }
-    fn row_mut(&mut self, b: usize) -> &mut [u64] {
-        &mut self.rows[b * self.words..(b + 1) * self.words]
-    }
     /// Does `d` dominate `b`?
     fn contains(&self, b: BlockId, d: BlockId) -> bool {
-        self.row(b.index())[d.index() / 64] & (1 << (d.index() % 64)) != 0
+        let (b, d) = (b.index(), d.index());
+        self.reachable(b)
+            && self.reachable(d)
+            && self.pre[d] <= self.pre[b]
+            && self.post[b] <= self.post[d]
     }
     fn reachable(&self, b: usize) -> bool {
-        self.row(b).iter().any(|&w| w != 0)
-    }
-    fn len(&self, b: usize) -> usize {
-        self.row(b).iter().map(|w| w.count_ones() as usize).sum()
-    }
-    /// The strict dominators of `b`.
-    fn strict(&self, b: BlockId) -> impl Iterator<Item = BlockId> + '_ {
-        self.row(b.index())
-            .iter()
-            .enumerate()
-            .flat_map(move |(wi, &w)| {
-                (0..64).filter_map(move |bit| {
-                    if w & (1 << bit) != 0 {
-                        let d = BlockId::from((wi * 64 + bit) as u32);
-                        (d != b).then_some(d)
-                    } else {
-                        None
-                    }
-                })
-            })
+        self.pre[b] != u32::MAX
     }
 }
 
-/// Dominance as the greatest fixpoint of `dom[b] = {b} ∪ ⋂ dom[p]` over
-/// reachable preds — same meet as the old `HashSet` solve, but rows are
-/// word-parallel bitsets and the sweep runs in reverse postorder, which is
-/// near-topological for a forward flow: it converges in passes on the order
-/// of the deepest loop nest, where an arbitrary order could take one pass
-/// per block, and each meet is a run of word ANDs instead of hashed clones.
-/// On a spliced game's few-thousand-block body the difference is the one
-/// between milliseconds and minutes.
+/// Immediate dominators by Cooper, Harvey and Kennedy's iterative scheme ("A
+/// Simple, Fast Dominance Algorithm"): sweep the reachable blocks in reverse
+/// postorder, each block's idom the intersection (a walk up the tree by
+/// postorder rank) of its processed predecessors'. Converges in a couple of
+/// sweeps on structured code; each step touches only tree paths, where the
+/// bitset fixpoint it replaced did a word-AND per block per pred and then
+/// found each idom by scanning and counting every strict dominator's row
+/// (quadratic in blocks: 48 ms of florilegium's compile).
 fn dominators(body: &Body) -> Dom {
-    let n = body.blocks.len();
     let succ = successors(body);
     let preds = predecessors(&succ);
-    let words = n.div_ceil(64);
+    dominators_of(&succ, &preds)
+}
 
-    // Postorder DFS over the reachable region; `order` is the reverse —
-    // the reverse postorder sweep order — and `rank` its inverse.
+fn dominators_of(succ: &[Vec<BlockId>], preds: &[Vec<BlockId>]) -> Dom {
+    let n = succ.len();
+
+    // postorder DFS over the reachable region; `rpo` is its reverse and
+    // `rank` the postorder number (higher is earlier in rpo)
     let mut rank = vec![u32::MAX; n];
-    let mut order: Vec<u32> = Vec::new();
-    {
+    let mut rpo: Vec<u32> = Vec::new();
+    if n > 0 {
         let mut seen = vec![false; n];
         let mut post: Vec<u32> = Vec::with_capacity(n);
         let mut stack: Vec<(u32, usize)> = vec![(0, 0)];
@@ -678,75 +663,115 @@ fn dominators(body: &Body) -> Dom {
                     stack.push((t, 0));
                 }
             } else {
+                rank[b as usize] = post.len() as u32;
                 post.push(b);
                 stack.pop();
             }
         }
-        for b in post.into_iter().rev() {
-            rank[b as usize] = order.len() as u32;
-            order.push(b);
+        rpo = post.into_iter().rev().collect();
+    }
+
+    let mut idom = vec![u32::MAX; n];
+    if n > 0 {
+        idom[0] = 0;
+    }
+    let intersect = |idom: &[u32], mut a: u32, mut b: u32| -> u32 {
+        while a != b {
+            while rank[a as usize] < rank[b as usize] {
+                a = idom[a as usize];
+            }
+            while rank[b as usize] < rank[a as usize] {
+                b = idom[b as usize];
+            }
         }
-    }
-
-    let mut dom = Dom {
-        rows: vec![0; n * words],
-        words,
+        a
     };
-    // Descending solve: reachable non-entry rows start at the whole
-    // reachable universe; entry's row is itself.
-    let mut all = vec![0u64; words];
-    for &b in &order {
-        all[b as usize / 64] |= 1 << (b as usize % 64);
-    }
-    for &b in &order[1..] {
-        dom.row_mut(b as usize).copy_from_slice(&all);
-    }
-    dom.rows[0] |= 1;
-
-    let mut next = vec![0u64; words];
     let mut changed = true;
     while changed {
         changed = false;
-        for &b in &order[1..] {
-            let bi = b as usize;
-            let mut seeded = false;
-            for &p in &preds[bi] {
-                let pi = p.index();
-                if rank[pi] == u32::MAX {
-                    continue;
+        for &b in rpo.iter().skip(1) {
+            let mut new: Option<u32> = None;
+            for &p in &preds[b as usize] {
+                let p = p.index() as u32;
+                if idom[p as usize] == u32::MAX {
+                    continue; // unreachable, or not yet processed
                 }
-                let row = dom.row(pi);
-                if seeded {
-                    for (nw, &pw) in next.iter_mut().zip(row) {
-                        *nw &= pw;
-                    }
-                } else {
-                    next.copy_from_slice(row);
-                    seeded = true;
+                new = Some(match new {
+                    None => p,
+                    Some(x) => intersect(&idom, p, x),
+                });
+            }
+            if let Some(d) = new {
+                if idom[b as usize] != d {
+                    idom[b as usize] = d;
+                    changed = true;
                 }
-            }
-            if !seeded {
-                continue;
-            }
-            next[bi / 64] |= 1 << (bi % 64);
-            if next != dom.row(bi) {
-                dom.row_mut(bi).copy_from_slice(&next);
-                changed = true;
             }
         }
     }
-    dom
+
+    // the tree, then its pre/post numbering by an explicit DFS
+    let mut children: Vec<Vec<u32>> = vec![Vec::new(); n];
+    for &b in rpo.iter().skip(1) {
+        children[idom[b as usize] as usize].push(b);
+    }
+    let mut pre = vec![u32::MAX; n];
+    let mut postn = vec![u32::MAX; n];
+    if n > 0 {
+        let (mut tp, mut tq) = (0u32, 0u32);
+        let mut stack: Vec<(u32, usize)> = vec![(0, 0)];
+        pre[0] = tp;
+        tp += 1;
+        while let Some(top) = stack.last_mut() {
+            let (b, ci) = (top.0, top.1);
+            if ci < children[b as usize].len() {
+                top.1 += 1;
+                let c = children[b as usize][ci];
+                pre[c as usize] = tp;
+                tp += 1;
+                stack.push((c, 0));
+            } else {
+                postn[b as usize] = tq;
+                tq += 1;
+                stack.pop();
+            }
+        }
+    }
+    Dom {
+        idom: (0..n)
+            .map(|i| (i != 0 && idom[i] != u32::MAX).then(|| BlockId::from(idom[i])))
+            .collect(),
+        pre,
+        post: postn,
+    }
 }
 
-/// Where each instruction sits: its block and position in the stream.
-fn positions(body: &Body) -> HashMap<InstId, (BlockId, usize)> {
-    let mut out = HashMap::new();
+/// Where each instruction sits: its block and position in the stream, by
+/// instruction index (a dense table: the passes ask it once per read and
+/// write, and a hashed map was most of promote_locals' scan).
+struct Positions(Vec<Option<(BlockId, usize)>>);
+
+impl Positions {
+    fn get(&self, iid: &InstId) -> Option<&(BlockId, usize)> {
+        self.0.get(iid.index()).and_then(Option::as_ref)
+    }
+}
+
+impl std::ops::Index<&InstId> for Positions {
+    type Output = (BlockId, usize);
+    fn index(&self, iid: &InstId) -> &(BlockId, usize) {
+        self.get(iid).expect("instruction not in a block")
+    }
+}
+
+fn positions(body: &Body) -> Positions {
+    let mut out = vec![None; body.instructions.len()];
     for (bid, block) in body.blocks.iter() {
         for (i, &iid) in block.stream.iter().enumerate() {
-            out.insert(iid, (bid, i));
+            out[iid.index()] = Some((bid, i));
         }
     }
-    out
+    Positions(out)
 }
 
 /// Replace struct locals with one local per field, so the struct is never
@@ -1028,17 +1053,9 @@ struct Cfg {
 fn cfg_of(body: &Body) -> Cfg {
     let succ = successors(body);
     let preds = predecessors(&succ);
-    let dom = dominators(body);
+    let dom = dominators_of(&succ, &preds);
     let n = body.blocks.len();
-    let mut idom: Vec<Option<BlockId>> = vec![None; n];
-    for i in 1..n {
-        if !dom.reachable(i) {
-            continue;
-        }
-        // the immediate dominator is the strict dominator dominated by all others
-        let b = BlockId::from(i as u32);
-        idom[i] = dom.strict(b).max_by_key(|d| dom.len(d.index()));
-    }
+    let idom = dom.idom.clone();
     let mut children: Vec<Vec<BlockId>> = vec![Vec::new(); n];
     for (i, d) in idom.iter().enumerate() {
         if let Some(d) = d {
@@ -1204,7 +1221,10 @@ fn promote_locals(
         return false;
     }
     promote.sort_by_key(|l| l.index());
-    let promote_set: HashSet<Local> = promote.iter().copied().collect();
+    let mut promote_set = vec![false; body.locals.len()];
+    for &l in &promote {
+        promote_set[l.index()] = true;
+    }
     // the debugger's copy: every store to a local it can see also lands in a
     // shadow slot, as an `Inst::Shadow` right after the store (the value
     // operand follows the renaming below like any other). Without shadows a
@@ -1231,8 +1251,10 @@ fn promote_locals(
             st.insert(at, sh);
         }
     }
-    // phis at the iterated dominance frontier of each local's definition blocks
-    let mut phi_of: HashMap<(BlockId, Local), InstId> = HashMap::new();
+    // phis at the iterated dominance frontier of each local's definition
+    // blocks, listed per block (in `promote` order) so renaming visits a
+    // block's own phis, not every promoted local at every block
+    let mut phis_at: Vec<Vec<(Local, InstId)>> = vec![Vec::new(); body.blocks.len()];
     for &l in &promote {
         let mut work: Vec<BlockId> = writes[&l].iter().map(|w| pos[w].0).collect();
         let mut placed: HashSet<BlockId> = HashSet::new();
@@ -1246,7 +1268,7 @@ fn promote_locals(
                         .unwrap_or_default();
                     let phi = push_inst(body, Inst::Phi(Vec::new()), loc);
                     body.blocks[f].stream.insert(0, phi);
-                    phi_of.insert((f, l), phi);
+                    phis_at[f.index()].push((l, phi));
                     work.push(f);
                 }
             }
@@ -1254,13 +1276,18 @@ fn promote_locals(
     }
     // renaming, down the dominator tree
     let mut undef: Option<InstId> = None;
-    let mut rewrite: HashMap<InstId, InstId> = HashMap::new(); // promoted GetLocal -> def
+    // promoted GetLocal -> its def, by instruction index (u32::MAX: none);
+    // every operand of every instruction is resolved through it below
+    let mut rewrite: Vec<u32> = vec![u32::MAX; body.instructions.len()];
     let mut stores: Vec<(InstId, Local, InstId)> = Vec::new(); // promoted SetLocal, its local, resolved value
-    let mut stack: HashMap<Local, Vec<InstId>> = HashMap::new();
-    let resolve = |v: InstId, rewrite: &HashMap<InstId, InstId>| -> InstId {
+    let mut stack: Vec<Vec<InstId>> = vec![Vec::new(); body.locals.len()];
+    let resolve = |v: InstId, rewrite: &[u32]| -> InstId {
         let mut v = v;
-        while let Some(&n) = rewrite.get(&v) {
-            v = n;
+        while let Some(&n) = rewrite.get(v.index()) {
+            if n == u32::MAX {
+                break;
+            }
+            v = InstId::from(n);
         }
         v
     };
@@ -1270,21 +1297,19 @@ fn promote_locals(
     while let Some((b, leaving)) = dfs.pop() {
         if leaving {
             for l in pushed.pop().unwrap() {
-                stack.get_mut(&l).unwrap().pop();
+                stack[l.index()].pop();
             }
             continue;
         }
         let mut mine: Vec<Local> = Vec::new();
-        for &l in &promote {
-            if let Some(&phi) = phi_of.get(&(b, l)) {
-                stack.entry(l).or_default().push(phi);
-                mine.push(l);
-            }
+        for &(l, phi) in &phis_at[b.index()] {
+            stack[l.index()].push(phi);
+            mine.push(l);
         }
         for &iid in &body.blocks[b].stream.clone() {
             match body.instructions[iid].clone() {
-                Inst::GetLocal(l) if promote_set.contains(&l) => {
-                    let def = match stack.get(&l).and_then(|s| s.last()) {
+                Inst::GetLocal(l) if promote_set.get(l.index()).copied().unwrap_or(false) => {
+                    let def = match stack[l.index()].last() {
                         Some(&d) => d,
                         None => *undef.get_or_insert_with(|| {
                             let u = push_inst(
@@ -1296,11 +1321,11 @@ fn promote_locals(
                             u
                         }),
                     };
-                    rewrite.insert(iid, def);
+                    rewrite[iid.index()] = def.index() as u32;
                 }
-                Inst::SetLocal(l, v) if promote_set.contains(&l) => {
+                Inst::SetLocal(l, v) if promote_set.get(l.index()).copied().unwrap_or(false) => {
                     let v = resolve(v, &rewrite);
-                    stack.entry(l).or_default().push(v);
+                    stack[l.index()].push(v);
                     mine.push(l);
                     stores.push((iid, l, v));
                 }
@@ -1308,9 +1333,9 @@ fn promote_locals(
             }
         }
         for &s in &cfg.succ[b.index()] {
-            for &l in &promote {
-                if let Some(&phi) = phi_of.get(&(s, l)) {
-                    let def = match stack.get(&l).and_then(|st| st.last()) {
+            for &(l, phi) in &phis_at[s.index()] {
+                {
+                    let def = match stack[l.index()].last() {
                         Some(&d) => d,
                         None => *undef.get_or_insert_with(|| {
                             let u = push_inst(
@@ -1335,15 +1360,16 @@ fn promote_locals(
         }
     }
     // apply: operands through the rewrite map; the slot's reads and stores go
-    let drop_stores: HashSet<InstId> = stores.iter().map(|(iid, _, _)| *iid).collect();
-    let dropped_reads: HashSet<InstId> = rewrite.keys().copied().collect();
+    let mut drop = rewrite.iter().map(|&r| r != u32::MAX).collect::<Vec<bool>>();
+    drop.resize(body.instructions.len(), false);
+    for (iid, _, _) in &stores {
+        drop[iid.index()] = true;
+    }
     for inst in body.instructions.values_mut() {
         map_operands(inst, &|x| resolve(x, &rewrite));
     }
     for block in body.blocks.values_mut() {
-        block
-            .stream
-            .retain(|iid| !dropped_reads.contains(iid) && !drop_stores.contains(iid));
+        block.stream.retain(|iid| !drop[iid.index()]);
     }
     true
 }
@@ -1616,7 +1642,7 @@ fn split_struct_phis(
             v: InstId,
             slot: u32,
             field_phi: &mut HashMap<(InstId, u32), InstId>,
-            pos: &HashMap<InstId, (BlockId, usize)>,
+            pos: &Positions,
         ) -> InstId {
             match body.instructions[v].clone() {
                 Inst::NewInstance { fields, .. } => fields[slot as usize],
