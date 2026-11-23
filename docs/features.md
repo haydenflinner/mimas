@@ -1074,3 +1074,34 @@ Host-facing quirk to know: `Vm::call` uses entry reg 0 as its return
 scratch and restores it afterwards, so a callee's `StoreEntry` to global
 slot 0 inside an injected call is silently restored away. Keep mutable
 globals out of slot 0 (see `call_ic_hit_and_miss`'s `pad`).
+
+## Incremental operators: `std::incremental`
+
+`incremental(q)` (`q^Δ`) in `group.mim` is `∇ ∘ q ∘ ∫`: correct, but each
+step rebuilds the whole state and runs `q` on all of it. `incremental.mim`
+gives the same changes from the changes alone. Each operator is a value
+with a `step` method (one change in, one change out) and keeps the state it
+needs between steps; `run` steps a whole stream.
+
+- `integrator(z)`, `differentiator(z)`, `delayer(z)`: `∫`, `∇` and `z⁻¹`
+  with one value of state, for any `AbelianGroup`.
+- `linear(q)`, `zmap_op`, `zfilter_op`, `zflat_map_op`: linear, so a step is
+  `q` on the change, with no state.
+- `zjoin_op(ka, kb, both)`: bilinear, `Δa ⋈ B + A ⋈ Δb + Δa ⋈ Δb`, with both
+  inputs indexed by key.
+- `zdistinct_op()`: an item's output changes only when its weight crosses 0.
+- `zgroup_sum_op(key, val)`: takes back the old row and adds the new row of
+  each group the change touches.
+
+Each has a batch form (`zmap`, `zfilter`, `zflat_map`, `zjoin`, `zdistinct`,
+`zgroup_sum`). `tests/incremental.rs` checks every operator against
+`incremental(q)` or against `∇` of the batch query on the states, on seeded
+random change streams with removals and re-adds. A one-row change to a
+join over 4,000 rows a side costs 214 VM ops; recomputing costs 760,219.
+`examples/incremental-build.mim` writes a build as a circuit: items `(name,
+body, iface)` and edges in, the change of `{ (name, body, Σ iface of deps)
+}` out, so a body edit rebuilds one item and an interface edit also
+rebuilds its direct users.
+
+The join and group-by indexes key on a key's printed form, as `Tally` does,
+until value-keyed dicts land.

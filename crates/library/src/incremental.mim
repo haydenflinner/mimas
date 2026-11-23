@@ -1,0 +1,413 @@
+// Incremental operators (library::INCREMENTAL_SRC, shipped with std).
+//
+// `incremental(q)` in group.mim is `q^Δ` by definition, `∇ ∘ q ∘ ∫`: it
+// rebuilds every state and runs `q` on all of it at each step. The
+// operators here give the same changes from the changes alone, with state
+// that each operator keeps between steps. This is the DBSP construction:
+//
+//   linear q (map, filter, flat_map)   q^Δ = q: run q on the change
+//   bilinear ⋈                         (a ⋈ b)^Δ = Δa ⋈ B + A ⋈ Δb + Δa ⋈ Δb,
+//                                      A and B the inputs before the step
+//   distinct, group by                 recompute only the items or groups
+//                                      the change touches
+//
+// Each operator is a value with a `step` method: one change in, one change
+// out, state updated in place. `run` steps a whole stream, so an operator
+// can be checked against `incremental(q)` and against `q` on the states.
+// The work of a step is in proportion to the change and to the state the
+// change touches, not to the whole state.
+//
+// The carriers are the ones in group.mim: a `Stream<T>` of any
+// `AbelianGroup` for ∫, ∇ and z⁻¹, and a `Tally<T>` for the relational
+// operators, which need keyed state. Join and group-by keep their indexes
+// in dicts keyed by a key's printed form (`__ikey`), the same rule `Tally`
+// uses for its items.
+// r[impl mimas.incremental]
+
+/// The dict key of a join or group key: its printed form, as `Tally`
+/// keys its items.
+fn __ikey<K>(k: K) -> str { f"{k}" }
+
+// ---- ∫, ∇ and z⁻¹ as operators -------------------------------------------
+
+/// `∫` one step at a time: keeps the running total of the changes so far.
+/// `step(c)` adds `c` and returns the new total. Over a stream it gives
+/// `∫ s`, and a step costs one `+`.
+/// r[impl mimas.incremental.integrate]
+struct Integrator<T: AbelianGroup> { total: T }
+
+/// An integrator that starts from `zero` (`0`, `0.0px`, `tally([])`, …).
+fn integrator<T: AbelianGroup>(zero: T) -> Integrator<T> { Integrator { total: zero } }
+
+impl Integrator {
+    /// Adds the change `c` and returns the total so far.
+    fn step(self, c: T) -> T {
+        self.total = self.total + c;
+        self.total
+    }
+    /// `∫ s`: every step of `s` through `step`.
+    fn run(self, s: Stream<T>) -> Stream<T> {
+        let out: [T] = [];
+        for c in s.list() { out.push(self.step(c)); }
+        stream(out)
+    }
+}
+
+/// `∇` one step at a time: keeps the previous state. `step(x)` returns
+/// `x` minus the state before it (the zero at the first step). Over a
+/// stream it gives `∇ s`, so `differentiator(z).run(integrator(z).run(s))`
+/// is `s`.
+/// r[impl mimas.incremental.differentiate]
+struct Differentiator<T: AbelianGroup> { prev: T }
+
+/// A differentiator whose state before the first step is `zero`.
+fn differentiator<T: AbelianGroup>(zero: T) -> Differentiator<T> { Differentiator { prev: zero } }
+
+impl Differentiator {
+    /// The change from the previous state to `x`.
+    fn step(self, x: T) -> T {
+        let c = x - self.prev;
+        self.prev = x;
+        c
+    }
+    /// `∇ s`: every step of `s` through `step`.
+    fn run(self, s: Stream<T>) -> Stream<T> {
+        let out: [T] = [];
+        for x in s.list() { out.push(self.step(x)); }
+        stream(out)
+    }
+}
+
+/// `z⁻¹` one step at a time: `step(x)` returns the value of the step
+/// before (the zero at the first step) and keeps `x` for the next one.
+/// r[impl mimas.incremental.delay]
+struct Delayer<T: AbelianGroup> { prev: T }
+
+/// A delay whose value before the first step is `zero`.
+fn delayer<T: AbelianGroup>(zero: T) -> Delayer<T> { Delayer { prev: zero } }
+
+impl Delayer {
+    /// The previous step's value; `x` is kept for the next step.
+    fn step(self, x: T) -> T {
+        let out = self.prev;
+        self.prev = x;
+        out
+    }
+    /// `z⁻¹ s`: every step of `s` through `step`.
+    fn run(self, s: Stream<T>) -> Stream<T> {
+        let out: [T] = [];
+        for x in s.list() { out.push(self.step(x)); }
+        stream(out)
+    }
+}
+
+// ---- linear operators ----------------------------------------------------
+
+/// A linear `q` lifted to changes: `q^Δ == q` when `q(a + b) == q(a) +
+/// q(b)`, so the operator keeps no state and runs `q` on the change. Map,
+/// filter and flat_map on tallies are linear; `q(x) = x + 1` is not, and
+/// `linear` gives wrong changes for it.
+/// r[impl mimas.incremental.linear]
+struct Linear<T: AbelianGroup, U: AbelianGroup> { q: (T) -> U }
+
+/// The linear function `q` as an incremental operator.
+fn linear<T: AbelianGroup, U: AbelianGroup>(q: (T) -> U) -> Linear<T, U> { Linear { q } }
+
+impl Linear {
+    /// `q` on the change.
+    fn step(self, c: T) -> U { self.q(c) }
+    /// `q` on every change of `s`.
+    fn run(self, s: Stream<T>) -> Stream<U> {
+        let out: [U] = [];
+        for c in s.list() { out.push(self.step(c)); }
+        stream(out)
+    }
+}
+
+/// `t` with `f` applied to every item; the weights of items that map to
+/// the same value add up. Linear, so it is its own incremental form.
+/// r[impl mimas.incremental.map]
+fn zmap<A, B>(t: Tally<A>, f: (A) -> B) -> Tally<B> {
+    let out: Tally<B> = tally([]);
+    for p in t.pairs() { out.put(f(p.0), p.1); }
+    out
+}
+
+/// The items of `t` that `keep` accepts, at their weights. Linear.
+/// r[impl mimas.incremental.filter]
+fn zfilter<A>(t: Tally<A>, keep: (A) -> bool) -> Tally<A> {
+    let out: Tally<A> = tally([]);
+    for p in t.pairs() { if keep(p.0) { out.put(p.0, p.1); } }
+    out
+}
+
+/// Every item of `f(x)` for every item `x` of `t`, at `x`'s weight.
+/// Linear.
+/// r[impl mimas.incremental.flat_map]
+fn zflat_map<A, B>(t: Tally<A>, f: (A) -> [B]) -> Tally<B> {
+    let out: Tally<B> = tally([]);
+    for p in t.pairs() { for y in f(p.0) { out.put(y, p.1); } }
+    out
+}
+
+/// `zmap` as an operator: no state, so a step costs the size of the change.
+struct ZMap<A, B> { f: (A) -> B }
+fn zmap_op<A, B>(f: (A) -> B) -> ZMap<A, B> { ZMap { f } }
+impl ZMap {
+    #[scans]
+    fn step(self, c: Tally<A>) -> Tally<B> {
+        let out: Tally<B> = tally([]);
+        for p in c.pairs() { out.put(self.f(p.0), p.1); }
+        out
+    }
+    fn run(self, s: Stream<Tally<A>>) -> Stream<Tally<B>> {
+        let out: [Tally<B>] = [];
+        for c in s.list() { out.push(self.step(c)); }
+        stream(out)
+    }
+}
+
+/// `zfilter` as an operator.
+struct ZFilter<A> { keep: (A) -> bool }
+fn zfilter_op<A>(keep: (A) -> bool) -> ZFilter<A> { ZFilter { keep } }
+impl ZFilter {
+    #[scans]
+    fn step(self, c: Tally<A>) -> Tally<A> {
+        let out: Tally<A> = tally([]);
+        for p in c.pairs() { if self.keep(p.0) { out.put(p.0, p.1); } }
+        out
+    }
+    fn run(self, s: Stream<Tally<A>>) -> Stream<Tally<A>> {
+        let out: [Tally<A>] = [];
+        for c in s.list() { out.push(self.step(c)); }
+        stream(out)
+    }
+}
+
+/// `zflat_map` as an operator.
+struct ZFlatMap<A, B> { f: (A) -> [B] }
+fn zflat_map_op<A, B>(f: (A) -> [B]) -> ZFlatMap<A, B> { ZFlatMap { f } }
+impl ZFlatMap {
+    #[scans]
+    fn step(self, c: Tally<A>) -> Tally<B> {
+        let out: Tally<B> = tally([]);
+        for p in c.pairs() { for y in self.f(p.0) { out.put(y, p.1); } }
+        out
+    }
+    fn run(self, s: Stream<Tally<A>>) -> Stream<Tally<B>> {
+        let out: [Tally<B>] = [];
+        for c in s.list() { out.push(self.step(c)); }
+        stream(out)
+    }
+}
+
+// ---- join: bilinear ------------------------------------------------------
+
+/// The equi-join of `a` and `b`: every pair whose keys are equal,
+/// combined by `both`, at the product of the two weights. This is the batch
+/// form `ZJoin` is checked against.
+/// r[impl mimas.incremental.join]
+fn zjoin<A, B, K, C>(a: Tally<A>, b: Tally<B>, ka: (A) -> K, kb: (B) -> K, both: (A, B) -> C) -> Tally<C> {
+    let index: {Tally<B>} = {:};
+    for p in b.pairs() {
+        let k = __ikey(kb(p.0));
+        if index[k] == null { index[k] = tally([]); }
+        index[k]!.put(p.0, p.1);
+    }
+    let out: Tally<C> = tally([]);
+    for p in a.pairs() {
+        let k = __ikey(ka(p.0));
+        if index[k] != null {
+            for q in index[k]!.pairs() { out.put(both(p.0, q.0), p.1 * q.1); }
+        }
+    }
+    out
+}
+
+/// The join one step at a time. `⋈` is bilinear, so the change of the
+/// output is `Δa ⋈ B + A ⋈ Δb + Δa ⋈ Δb`, where `A` and `B` are the
+/// inputs before the step. Both inputs stay indexed by key, so a step
+/// reads only the index entries whose keys the changes carry.
+struct ZJoin<A, B, K, C> {
+    ka: (A) -> K,
+    kb: (B) -> K,
+    both: (A, B) -> C,
+    left: {Tally<A>},
+    right: {Tally<B>},
+}
+
+/// A join on `ka(a) == kb(b)` whose output items are `both(a, b)`.
+fn zjoin_op<A, B, K, C>(ka: (A) -> K, kb: (B) -> K, both: (A, B) -> C) -> ZJoin<A, B, K, C> {
+    ZJoin { ka, kb, both, left: {:}, right: {:} }
+}
+
+impl ZJoin {
+    /// The change of the join for the changes `da` and `db`.
+    #[scans]
+    fn step(self, da: Tally<A>, db: Tally<B>) -> Tally<C> {
+        let out: Tally<C> = tally([]);
+        // Δa ⋈ (B + Δb): the left change against the right as it will be.
+        let db_by: {Tally<B>} = {:};
+        for q in db.pairs() {
+            let k = __ikey(self.kb(q.0));
+            if db_by[k] == null { db_by[k] = tally([]); }
+            db_by[k]!.put(q.0, q.1);
+        }
+        for p in da.pairs() {
+            let k = __ikey(self.ka(p.0));
+            if self.right[k] != null {
+                for q in self.right[k]!.pairs() { out.put(self.both(p.0, q.0), p.1 * q.1); }
+            }
+            if db_by[k] != null {
+                for q in db_by[k]!.pairs() { out.put(self.both(p.0, q.0), p.1 * q.1); }
+            }
+        }
+        // A ⋈ Δb: the left as it was against the right change.
+        for q in db.pairs() {
+            let k = __ikey(self.kb(q.0));
+            if self.left[k] != null {
+                for p in self.left[k]!.pairs() { out.put(self.both(p.0, q.0), p.1 * q.1); }
+            }
+        }
+        // A += Δa, B += Δb.
+        for p in da.pairs() {
+            let k = __ikey(self.ka(p.0));
+            if self.left[k] == null { self.left[k] = tally([]); }
+            self.left[k]!.put(p.0, p.1);
+        }
+        for q in db.pairs() {
+            let k = __ikey(self.kb(q.0));
+            if self.right[k] == null { self.right[k] = tally([]); }
+            self.right[k]!.put(q.0, q.1);
+        }
+        out
+    }
+    /// The joined changes of two streams of the same length.
+    fn run(self, sa: Stream<Tally<A>>, sb: Stream<Tally<B>>) -> Stream<Tally<C>> {
+        let out: [Tally<C>] = [];
+        for t in 0..sa.len() { out.push(self.step(sa[t], sb[t])); }
+        stream(out)
+    }
+}
+
+// ---- distinct ------------------------------------------------------------
+
+/// The items of `t` with a weight above 0, each at weight 1: `t` as a set.
+/// The batch form `ZDistinct` is checked against.
+/// r[impl mimas.incremental.distinct]
+fn zdistinct<A>(t: Tally<A>) -> Tally<A> { t.as_set() }
+
+/// Distinct one step at a time. It keeps the integrated input; an item's
+/// output changes only when its weight crosses from 0 or less to above 0,
+/// or back, so a step looks at the items of the change and nothing else.
+struct ZDistinct<A> { acc: Tally<A> }
+
+/// A distinct operator with an empty input so far.
+fn zdistinct_op<A>() -> ZDistinct<A> { ZDistinct { acc: tally([]) } }
+
+impl ZDistinct {
+    #[scans]
+    fn step(self, c: Tally<A>) -> Tally<A> {
+        let out: Tally<A> = tally([]);
+        for p in c.pairs() {
+            let before = self.acc.weight(p.0);
+            let after = before + p.1;
+            let was = if before > 0 { 1 } else { 0 };
+            let now = if after > 0 { 1 } else { 0 };
+            if now != was { out.put(p.0, now - was); }
+            self.acc.put(p.0, p.1);
+        }
+        out
+    }
+    fn run(self, s: Stream<Tally<A>>) -> Stream<Tally<A>> {
+        let out: [Tally<A>] = [];
+        for c in s.list() { out.push(self.step(c)); }
+        stream(out)
+    }
+}
+
+// ---- group by with a sum -------------------------------------------------
+
+/// For each key `key(x)` that some item of `t` has, the pair `(key, sum)`
+/// at weight 1, where `sum` adds `val(x)` once for each unit of `x`'s
+/// weight. A key whose items add to a weight of 0 has no row. The batch
+/// form `ZGroupSum` is checked against.
+/// r[impl mimas.incremental.group_sum]
+fn zgroup_sum<A, K>(t: Tally<A>, key: (A) -> K, val: (A) -> int) -> Tally<(K, int)> {
+    let sums: {int} = {:};
+    let counts: {int} = {:};
+    let keys: {K} = {:};
+    for p in t.pairs() {
+        let k = key(p.0);
+        let s = __ikey(k);
+        keys[s] = k;
+        sums[s] = (sums[s] ?? 0) + val(p.0) * p.1;
+        counts[s] = (counts[s] ?? 0) + p.1;
+    }
+    let out: Tally<(K, int)> = tally([]);
+    for s in keys.keys() {
+        if counts[s]! != 0 { out.put((keys[s]!, sums[s]!), 1); }
+    }
+    out
+}
+
+/// Group by and sum one step at a time. It keeps each group's sum and the
+/// sum of its weights. A step touches only the groups of the change's
+/// items: for each, it takes back the old row `(key, sum)` and adds the
+/// new one, so the output is the change of `zgroup_sum`.
+struct ZGroupSum<A, K> {
+    key: (A) -> K,
+    val: (A) -> int,
+    sums: {int},
+    counts: {int},
+    keys: {K},
+}
+
+/// A group-by on `key` that sums `val`.
+fn zgroup_sum_op<A, K>(key: (A) -> K, val: (A) -> int) -> ZGroupSum<A, K> {
+    ZGroupSum { key, val, sums: {:}, counts: {:}, keys: {:} }
+}
+
+impl ZGroupSum {
+    #[scans]
+    fn step(self, c: Tally<A>) -> Tally<(K, int)> {
+        // The groups this change touches, with their rows before the step.
+        let touched: {K} = {:};
+        let old_sum: {int} = {:};
+        let old_count: {int} = {:};
+        for p in c.pairs() {
+            let k = self.key(p.0);
+            let s = __ikey(k);
+            if touched[s] == null {
+                touched[s] = k;
+                old_sum[s] = self.sums[s] ?? 0;
+                old_count[s] = self.counts[s] ?? 0;
+            }
+            self.keys[s] = k;
+            self.sums[s] = (self.sums[s] ?? 0) + self.val(p.0) * p.1;
+            self.counts[s] = (self.counts[s] ?? 0) + p.1;
+        }
+        let out: Tally<(K, int)> = tally([]);
+        for s in touched.keys() {
+            let k = touched[s]!;
+            if old_count[s]! != 0 { out.put((k, old_sum[s]!), -1); }
+            if self.counts[s]! != 0 {
+                out.put((k, self.sums[s]!), 1);
+            } else if self.sums[s]! == 0 {
+                // A group with no weight left shows no row but keeps its
+                // sum while the sum is not 0: `+(a, 1)` then `-(a, 2)`
+                // leaves weight 0 and sum -1, and a later `+(a, 2)` must
+                // bring the row back at 1, not at 2.
+                self.sums.remove(s);
+                self.counts.remove(s);
+                self.keys.remove(s);
+            }
+        }
+        out
+    }
+    fn run(self, s: Stream<Tally<A>>) -> Stream<Tally<(K, int)>> {
+        let out: [Tally<(K, int)>] = [];
+        for c in s.list() { out.push(self.step(c)); }
+        stream(out)
+    }
+}

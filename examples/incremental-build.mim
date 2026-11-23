@@ -1,0 +1,63 @@
+// An incremental build as a circuit of Z-set operators (std::incremental).
+//
+// The sources are a Z-set of items `(name, body, iface)`: `body` is the
+// content hash of the whole item, `iface` the hash of what other items see
+// of it (its signature). The dependencies are a Z-set of edges `(from,
+// to)`. An edit is a change to these: the old row at weight -1 and the new
+// one at +1.
+//
+// As in separate compilation, the artifact of an item depends on its own
+// body and on the interfaces of the items it uses directly. The circuit
+// keeps the view
+//
+//   artifacts = { (name, body, Σ iface of name's deps) }
+//
+// and each step outputs the view's change. The rows at weight +1 are the
+// artifacts to build, the rows at -1 the stale ones to delete. A body edit
+// rebuilds only its item; an interface edit also rebuilds the items that
+// use it directly; adding an edge rebuilds the item that gained it. A step
+// does work for the rows the edit touches, not for the whole program.
+
+struct Build {
+    // deps ⋈ items on deps.to == items.name: `(from, iface of to)`
+    uses: ZJoin<(str, str), (str, int, int), str, (str, int)>,
+    // Σ iface per item; every item adds `(name, 0)`, so an item with no
+    // deps still has a row
+    ifaces: ZGroupSum<(str, int), str>,
+    // items ⋈ sums on name: `(name, body, Σ iface)`
+    arts: ZJoin<(str, int), (str, int), str, (str, int, int)>,
+}
+
+fn build() -> Build {
+    Build {
+        uses: zjoin_op(|e: (str, str)| e.1, |i: (str, int, int)| i.0,
+                       |e: (str, str), i: (str, int, int)| (e.0, i.2)),
+        ifaces: zgroup_sum_op(|r: (str, int)| r.0, |r: (str, int)| r.1),
+        arts: zjoin_op(|b: (str, int)| b.0, |s: (str, int)| s.0,
+                       |b: (str, int), s: (str, int)| (b.0, b.1, s.1)),
+    }
+}
+
+impl Build {
+    /// The change of the artifacts for a change of the items and of the
+    /// edges.
+    fn step(self, items: Tally<(str, int, int)>, deps: Tally<(str, str)>) -> Tally<(str, int, int)> {
+        let used = self.uses.step(deps, items);
+        let own = zmap(items, |i: (str, int, int)| (i.0, 0));
+        let sums = self.ifaces.step(used + own);
+        let bodies = zmap(items, |i: (str, int, int)| (i.0, i.1));
+        self.arts.step(bodies, sums)
+    }
+}
+
+/// The names of the artifacts a change asks to build, sorted.
+fn to_build(change: Tally<(str, int, int)>) -> [str] {
+    let names: [str] = [];
+    for a in change.added().items() { names.push(a.0); }
+    names.sorted()
+}
+
+/// An edit of one item: its old row out, its new row in.
+fn edit(old: (str, int, int), new: (str, int, int)) -> Tally<(str, int, int)> {
+    tally_w([(old, -1), (new, 1)])
+}

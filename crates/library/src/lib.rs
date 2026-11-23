@@ -90,6 +90,13 @@ pub const APPROX_SRC: &str = include_str!("approx.mim");
 /// written in mimas (`group.mim`) and shipped with std.
 pub const GROUP_SRC: &str = include_str!("group.mim");
 
+/// Incremental operators over the group kit's streams and tallies: `∫`,
+/// `∇` and `z⁻¹` one step at a time, and map, filter, join, distinct and
+/// group-by that turn a change into the output's change with kept state
+/// (DBSP's `q^Δ` per operator), written in mimas (`incremental.mim`) and
+/// shipped with std.
+pub const INCREMENTAL_SRC: &str = include_str!("incremental.mim");
+
 /// Streams of Z-sets (`stream(zs)`), the stream glyphs' methods
 /// (`∫ ∇ Δ Δ⁻¹ z⁻¹`) and `incremental` (`q^Δ`), written in mimas
 /// (`zset.mim`) and shipped with `std::polars`.
@@ -120,6 +127,7 @@ pub fn std<'gc>(api: &mut Api<'_, 'gc>) {
     api.library.add_source("<std::approx>", APPROX_SRC);
     api.library.add_source("<std::arb>", ARB_SRC);
     api.library.add_source("<std::group>", GROUP_SRC);
+    api.library.add_source("<std::incremental>", INCREMENTAL_SRC);
     std_lib::group::install(api);
     methods::dec::install(api);
     prelude::install(api);
