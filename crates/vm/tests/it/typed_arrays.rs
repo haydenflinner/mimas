@@ -13,8 +13,6 @@
 //! and demotion through natives that take the untyped `Array` handle.
 //! The typechecker also refuses heterogeneous literals and `arr * scalar`
 //! infix, so the broadcast arms are reached through tuples.
-#[macro_use]
-mod vm_test_utils;
 
 use vm::Captured::*;
 use vm::conversion::MimasType;

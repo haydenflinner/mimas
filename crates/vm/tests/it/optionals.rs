@@ -1,6 +1,3 @@
-#[macro_use]
-mod vm_test_utils;
-
 use vm::{Captured::*, Vm};
 
 test_vm!(

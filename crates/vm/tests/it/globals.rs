@@ -1,6 +1,3 @@
-#[macro_use]
-mod vm_test_utils;
-
 use vm::Captured::*;
 
 // a top-level `let` is a global: function bodies read the same entry-frame slot,

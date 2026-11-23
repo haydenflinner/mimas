@@ -109,7 +109,7 @@ disables them; `MIMAS_DUMP_OPT=1` prints the IR after them.
   the VM hands the compiler every `std::debug::*` id via
   `Compiler::with_frame_natives`, so `debug::caller_line` keeps reporting
   the truth. Call-edge *tracing* (`Vm::trace_take`) sees no edge for an
-  inlined call; `vm/tests/trace.rs` uses a recursive callee for that
+  inlined call; `vm/tests/it/trace.rs` uses a recursive callee for that
   reason.
 - **Scalar replacement.** A struct local that is only ever built from a
   `make_instance` and read or written field by field becomes one local
@@ -146,7 +146,7 @@ trapped in `__alloc` before, and runs now.
 Tests: `compile/src/tests/opt_tests.rs` (what the passes leave:
 inlined arithmetic, no field ops on a scalarized local, params and
 escaping or rebound structs untouched, entry body untouched, recursion
-not inlined), `vm/tests/opt_semantics.rs` (mutation through an inlined
+not inlined), `vm/tests/it/opt_semantics.rs` (mutation through an inlined
 param, copy-then-rebind, struct in an array, returned structs,
 structural equality, a struct per loop iteration, branch-chosen struct,
 nested fields). `wgbench` moved here from `host/eval/examples` and binds
@@ -195,7 +195,7 @@ Results identical.
 `Inst::TraceEdge { callee }` → `Op::TraceEdge` where the call was: the
 hot dispatcher bumps the trace fixture's `caller → callee` counter with
 the current frame's chunk, so `Vm::trace_take` -- the sonification
-substrate -- shows the same call graph it did before (`vm/tests/trace.rs`
+substrate -- shows the same call graph it did before (`vm/tests/it/trace.rs`
 runs its original inlinable program again). bcgen and JIT bodies drop
 it (they bypass call tracing already); the wasm lane has no trace.
 Per-op hits were never lost: copied instructions keep the callee's
@@ -248,7 +248,7 @@ see the later write (`let t = a; a = b; b = t`, or a param rebound by a
 tail call). Every forwarder refuses: `promote_locals` keeps a local
 whose store reads a written, unpromoted slot, `forward_value_fields`
 leaves such a field read alone, `split_struct_phis` leaves such a
-class alone (`volatile_reads`). `vm/tests/opt_semantics.rs` pins it
+class alone (`volatile_reads`). `vm/tests/it/opt_semantics.rs` pins it
 (`a_read_of_a_slot_written_later_is_a_snapshot`).
 
 **The debugger's shadows.** A struct local the optimizer dissolves
@@ -277,7 +277,7 @@ read; a struct whose every leaf is still null is the local before its
 first store. The program never reads a shadow slot, so the
 optimizer's results are unchanged. Pinned by
 `a_dissolved_struct_local_still_shows_in_the_frame`
-(`vm/tests/debug_events.rs`) and
+(`vm/tests/it/debug_events.rs`) and
 `a_dissolved_struct_local_keeps_a_shadow_per_field`.
 
 **Value types for hosts.** `Program::value_adts` is the inferred set,
@@ -781,7 +781,7 @@ observes. The tag is a birth hint; the store is the truth (an
 `bin`/`unary`, deep-clone, snapshots (`SnapNode::IntArray/FloatArray` ride
 unboxed) and rebind all go through `ArrayStore`'s boxed accessors, so
 semantics. Including cross-representation equality between a typed array
-and a `Vec<Val>` array. Are identical. `crates/vm/tests/typed_arrays.rs`
+and a `Vec<Val>` array. Are identical. `crates/vm/tests/it/typed_arrays.rs`
 pins both halves of that contract.
 
 ## `|>`: the pipe operator is gone

@@ -9,7 +9,7 @@
 //! `mimas::vm::Inspect`) is parsed into [`Shape`] (this module's own typed tree, understanding
 //! only `img`'s specific variants) by matching on `Inspect::Instance`'s `type_name` -- enum
 //! variants report qualified names ("Image::Circle", not "Circle"), confirmed via
-//! `crates/vm/tests/img_inspect.rs`. From there it's a conventional two-pass layout: [`measure`]
+//! `crates/vm/tests/it/img_inspect.rs`. From there it's a conventional two-pass layout: [`measure`]
 //! computes each node's bounding box bottom-up, [`arrange`] walks back down assigning absolute
 //! positions, matching Pyret's actual composition semantics (`overlay` centers, `beside`/`above`
 //! concatenate and center-align the cross axis, `place-image` positions by center point, ..).

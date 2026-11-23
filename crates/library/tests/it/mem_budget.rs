@@ -1,5 +1,5 @@
 //! The memory budget with the std library installed (`push` is a library intrinsic). The
-//! budget's own semantics are tested in `mimas-vm`'s `tests/budget.rs`.
+//! budget's own semantics are tested in `mimas-vm`'s `tests/it/budget.rs`.
 use vm::Vm;
 
 const MB: usize = 1 << 20;

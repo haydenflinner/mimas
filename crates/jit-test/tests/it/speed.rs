@@ -1,7 +1,7 @@
 //! Not a gate — a `#[ignore]`d timing probe for "is the JIT actually
 //! faster on this machine". Run with:
 //!
-//!     cargo test -p mimas-jit-test --test speed -- --ignored --nocapture
+//!     cargo test -p mimas-jit-test --test it -- speed:: --ignored --nocapture
 //!
 //! Each case runs the same program through the interpreter and through
 //! `install_bc` JIT bodies and prints both wall times. Correctness of

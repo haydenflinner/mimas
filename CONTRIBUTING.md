@@ -30,6 +30,16 @@ cargo bench                      # runs our benchmarks
 cargo install --path crates/cli  # install the `mimas` binary locally
 ```
 
+The integration tests of `mimas-library`, `mimas-vm` and `mimas-jit-test` are one test binary
+per crate: `crates/<crate>/tests/it/main.rs` holds one `mod` per file. Each test binary links
+polars, so add a new test file as a module there, not as a new top-level
+`tests/*.rs`. To run one file, filter by its module path:
+
+```sh
+cargo test -p mimas-library --test it -- dict::   # tests/it/dict.rs
+cargo test -p mimas-vm --test it -- trace::       # tests/it/trace.rs
+```
+
 ## Tools
 
 We also have some tools that are useful for development. They are written in `mimas`, so install it first!

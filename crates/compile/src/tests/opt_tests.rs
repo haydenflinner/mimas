@@ -1,5 +1,5 @@
 // The IR optimizer's guarantees -- what inlining and scalar replacement leave
-// behind -- which a result-only VM test cannot see (vm/tests/opt_semantics.rs
+// behind -- which a result-only VM test cannot see (vm/tests/it/opt_semantics.rs
 // pins that the results stay the same).
 use super::compile_test_utils::optimized_ir;
 

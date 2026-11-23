@@ -1,8 +1,6 @@
 // Results the IR optimizer must not change: aliasing of struct locals under
 // inlining and scalar replacement (compile/src/tests/opt_tests.rs pins what
 // the passes do; these pin that it is invisible).
-#[macro_use]
-mod vm_test_utils;
 
 use vm::Captured::*;
 

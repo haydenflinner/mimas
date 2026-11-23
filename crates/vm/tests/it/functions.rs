@@ -1,8 +1,5 @@
-#[macro_use]
-mod vm_test_utils;
-
 use vm::{Captured::*, Vm};
-use vm_test_utils::{Arities, arity, dynamic_call, kept, with_keep};
+use crate::vm_test_utils::{self, Arities, arity, dynamic_call, kept, with_keep};
 
 test_vm!(
     return_int,

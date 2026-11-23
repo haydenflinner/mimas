@@ -6,9 +6,6 @@
 //! checks, since the point of the feature is that ordinary semicolon-free code behaves
 //! identically to its semicolon'd equivalent.
 
-#[macro_use]
-mod vm_test_utils;
-
 use vm::Captured::*;
 
 test_vm!(

@@ -154,7 +154,7 @@ fn an_indexed_field_read_on_a_const_list_builds_nothing() {
 // This harness has no std, so it has no `__freeze`: without it a const cannot be
 // made read-only, and so it is not shared. Each use builds its own value, as
 // before `mimas.const.shared`. With std the const is one stored value
-// (`library/tests/const_read.rs`).
+// (`library/tests/it/const_read.rs`).
 #[test]
 fn without_std_a_const_used_whole_is_still_built() {
     let ops =

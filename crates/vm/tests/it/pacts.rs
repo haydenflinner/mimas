@@ -3,9 +3,6 @@
 // bottom are known-broken shapes that encode the correct expected result -- drop the ignore once
 // the lowering is fixed and they become regression guards.
 
-#[macro_use]
-mod vm_test_utils;
-
 use vm::Captured::*;
 
 test_vm!(

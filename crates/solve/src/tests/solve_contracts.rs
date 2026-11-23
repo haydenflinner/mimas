@@ -1,5 +1,5 @@
 //! `where` clauses and `[T; n]` sized arrays: what solves, what fails statically.
-//! Runtime fallbacks live in `library/tests/contracts.rs` -- everything here is
+//! Runtime fallbacks live in `library/tests/it/contracts.rs` -- everything here is
 //! about what the checker can prove (see `lens.rs`). The test session has no std
 //! library, so predicates stick to operators and `.len()` stays in those tests.
 

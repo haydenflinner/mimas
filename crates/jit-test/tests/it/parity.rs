@@ -33,7 +33,7 @@ fn jit_bodies(source: &str) -> jit::Jit {
 
 #[test]
 fn basic_parity() {
-    let source = include_str!("../fixtures/basic.mimas");
+    let source = include_str!("../../fixtures/basic.mimas");
     let j = jit_bodies(source);
     let bodies = j.bodies();
     assert!(!bodies.is_empty());
@@ -44,7 +44,7 @@ fn basic_parity() {
 // r[verify mimas.dict.key.for]
 #[test]
 fn dict_keys_parity() {
-    let source = include_str!("../fixtures/dict_keys.mimas");
+    let source = include_str!("../../fixtures/dict_keys.mimas");
     let j = jit_bodies(source);
     let (v, k, e) = run(source, Some(j.bodies()));
     assert!(e.is_none(), "jit dict run errored: {e:?}");
@@ -55,7 +55,7 @@ fn dict_keys_parity() {
 
 #[test]
 fn cold_parity() {
-    let source = include_str!("../fixtures/cold.mimas");
+    let source = include_str!("../../fixtures/cold.mimas");
     let j = jit_bodies(source);
     assert_eq!(run(source, None), run(source, Some(j.bodies())));
 }
@@ -64,7 +64,7 @@ fn cold_parity() {
 /// `Flow::Call` at the cap; both lanes must still land the same answer.
 #[test]
 fn deep_parity() {
-    let source = include_str!("../fixtures/deep.mimas");
+    let source = include_str!("../../fixtures/deep.mimas");
     let j = jit_bodies(source);
     let (v, k, e) = run(source, Some(j.bodies()));
     assert!(e.is_none(), "jit deep run errored: {e:?}");
@@ -74,7 +74,7 @@ fn deep_parity() {
 
 #[test]
 fn mixed_parity() {
-    let source = include_str!("../fixtures/mixed.mimas");
+    let source = include_str!("../../fixtures/mixed.mimas");
     let j = jit_bodies(source);
     assert_eq!(run(source, None), run(source, Some(j.bodies())));
 }
@@ -85,7 +85,7 @@ fn mixed_parity() {
 /// the new lowering paths rather than assuming it.
 #[test]
 fn subscripts_parity() {
-    let source = include_str!("../fixtures/subscripts.mimas");
+    let source = include_str!("../../fixtures/subscripts.mimas");
     let j = jit_bodies(source);
     assert!(j.bodies().iter().all(|b| b.is_some()));
     let (v, k, e) = run(source, Some(j.bodies()));
@@ -99,7 +99,7 @@ fn subscripts_parity() {
 /// no-op and both runs ran plain).
 #[test]
 fn jit_run_produces_values() {
-    let source = include_str!("../fixtures/basic.mimas");
+    let source = include_str!("../../fixtures/basic.mimas");
     let j = jit_bodies(source);
     let (test_value, kept, err) = run(source, Some(j.bodies()));
     assert!(err.is_none(), "jit run errored: {err:?}");
