@@ -1103,5 +1103,21 @@ body, iface)` and edges in, the change of `{ (name, body, Σ iface of deps)
 }` out, so a body edit rebuilds one item and an interface edit also
 rebuilds its direct users.
 
+Recursion is `zfixpoint_op(make)`, a nested circuit for `R = f(I, R)` (batch
+form `zfixpoint`). `make()` builds a copy of the body: a closure over fresh
+operators that turns `(ΔI, ΔRᵢ)` into `ΔRᵢ₊₁`. There is one copy per inner
+iteration, each fed the outer-time changes of its inputs. A step runs at
+least as deep as any step before, and stops when `ΔRᵢ₊₁ == ΔRᵢ`: past the old
+depth the previous state had converged, so equal changes mean the new state
+has converged too. A step that goes deeper primes each new copy with what
+the deepest copy was fed before (`∫ ΔI` and its summed `ΔR` inputs), which
+is exact because every operator's state is the sum of its inputs.
+Transitive closure is `distinct(ΔE + join(ΔRᵢ, ΔE))` in the body.
+`examples/incremental-build.mim` has a second circuit, `DeepBuild`, without
+interface hashes: an artifact depends on every body it reaches through the
+closure, so a body edit rebuilds everything that reaches it.
+
+`Tally.put_all(o)` adds `o`'s weights in place, written on `put`.
+
 The join and group-by indexes key on a key's printed form, as `Tally` does,
 until value-keyed dicts land.

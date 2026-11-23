@@ -579,6 +579,13 @@ impl Tally {
         }
     }
 
+    /// Adds every weight of `o` into this tally in place: `t += o` without
+    /// building a new tally. The O(|o|) step for a running total kept in a
+    /// loop; `+` copies `t` first.
+    fn put_all(self, o: Tally<T>) {
+        for p in o.pairs() { self.put(p.0, p.1); }
+    }
+
     /// The weight of `x`, 0 when it is not in the tally.
     fn weight(self, x: T) -> int { self.w[f"{x}"] ?? 0 }
 

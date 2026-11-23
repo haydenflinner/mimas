@@ -411,3 +411,109 @@ impl ZGroupSum {
         stream(out)
     }
 }
+
+// ---- recursion: a fixpoint as a nested circuit ---------------------------
+//
+// A recursive query is the fixpoint of `R = f(I, R)`: from `R₀ = 0`,
+// `Rᵢ₊₁ = f(I, Rᵢ)` until it stops moving. Transitive closure is
+// `R = distinct(E + R ⋈ E)`. In DBSP this is a nested circuit: an inner
+// time (the iteration `i`) runs inside each outer step (each change to
+// `I`). Every inner iteration keeps its own copy of `f`'s operators, and
+// that copy sees the outer-time changes of its own inputs, `ΔI` and `ΔRᵢ`.
+// So iteration `i`'s copy turns `(ΔI, ΔRᵢ)` into `ΔRᵢ₊₁`, and work stays in
+// proportion to the change at every depth.
+
+/// The batch fixpoint of `R = f(i, R)` from the empty tally: `f` again and
+/// again until the result stops moving. `max_iter` bounds the loop; a
+/// query that does not converge (a count that grows on a cycle, with no
+/// `distinct`) panics there.
+/// r[impl mimas.incremental.fixpoint]
+fn zfixpoint<I, R>(i: Tally<I>, f: (Tally<I>, Tally<R>) -> Tally<R>, max_iter: int = 1000) -> Tally<R> {
+    let r: Tally<R> = tally([]);
+    for _n in max_iter {
+        let next = f(i, r);
+        if next == r { return r; }
+        r = next;
+    }
+    panic(f"zfixpoint: no fixpoint after {max_iter} iterations")
+}
+
+/// The fixpoint one outer step at a time. `make()` builds one copy of the
+/// body: a closure over fresh incremental operators that turns `(ΔI,
+/// ΔRᵢ)` into `ΔRᵢ₊₁`. The operator keeps one copy per inner iteration
+/// and runs them in order on each outer change.
+///
+/// When to stop: let `depth` be the deepest iteration any earlier step
+/// needed. Past `depth` the state before this step had already
+/// converged, so `ΔRᵢ₊₁ == ΔRᵢ` there means the new state has converged
+/// too: `Rᵢ₊₁ == Rᵢ`. The step runs at least to `depth`, so every copy
+/// sees every change, and returns `ΔRᵢ`, the change of the fixpoint.
+///
+/// A step that must go deeper than any before needs a copy for the new
+/// iteration, and that copy must start with the history it would have
+/// had. Past the old depth, every earlier step gave the new copy the same
+/// inputs as the deepest one, so the new copy is primed with what the
+/// deepest copy was fed before this step: `∫ ΔI` and the sum of its
+/// `ΔR` inputs, as one change. That is exact for bodies whose operators'
+/// state is the sum of their inputs: join, distinct, group-by, map,
+/// filter and `integrator`. A body that holds `differentiator` or
+/// `delayer` state cannot be primed this way.
+struct ZFixpoint<I, R> {
+    make: () -> (Tally<I>, Tally<R>) -> Tally<R>,
+    bodies: [(Tally<I>, Tally<R>) -> Tally<R>],
+    depth: int,
+    max_iter: int,
+    // ∫ ΔI over the steps so far, and the sum of the ΔR inputs the
+    // deepest copy has been fed: what primes a new copy.
+    seen_i: Tally<I>,
+    seen_r: Tally<R>,
+}
+
+/// The body must converge on every input it is given, as the batch
+/// `zfixpoint` must: a monotone body over sets does (transitive closure on
+/// a set of edges, with `distinct`). Negative weights in a recursive input
+/// can make the iterates oscillate, and then the step panics at
+/// `max_iter`, as the batch fixpoint does.
+/// A fixpoint operator whose body copies come from `make`.
+fn zfixpoint_op<I, R>(make: () -> (Tally<I>, Tally<R>) -> Tally<R>, max_iter: int = 1000) -> ZFixpoint<I, R> {
+    ZFixpoint { make, bodies: [], depth: 0, max_iter, seen_i: tally([]), seen_r: tally([]) }
+}
+
+impl ZFixpoint {
+    /// The copy of the body for inner iteration `i`. A new copy is primed
+    /// with the history of the deepest copy before this step.
+    fn __body(self, i: int) -> (Tally<I>, Tally<R>) -> Tally<R> {
+        while self.bodies.len() <= i {
+            let b = self.make();
+            let _ = b(self.seen_i, self.seen_r);
+            self.bodies.push(b);
+        }
+        self.bodies[i]
+    }
+
+    /// The change of the fixpoint for the change `di` of the input.
+    #[scans]
+    fn step(self, di: Tally<I>) -> Tally<R> {
+        let d: Tally<R> = tally([]);
+        let i = 0;
+        while true {
+            let next = self.__body(i)(di, d);
+            if i >= self.depth && next == d { break; }
+            d = next;
+            i += 1;
+            if i > self.max_iter { panic(f"zfixpoint_op: no fixpoint after {self.max_iter} iterations"); }
+        }
+        if i > self.depth { self.depth = i; }
+        // The copy run last is the deepest, and `d` is what it was fed.
+        self.seen_i.put_all(di);
+        self.seen_r.put_all(d);
+        d
+    }
+
+    /// The fixpoint's changes for every change of `s`.
+    fn run(self, s: Stream<Tally<I>>) -> Stream<Tally<R>> {
+        let out: [Tally<R>] = [];
+        for c in s.list() { out.push(self.step(c)); }
+        stream(out)
+    }
+}

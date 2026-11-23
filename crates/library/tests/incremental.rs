@@ -223,3 +223,114 @@ fn incremental_build_rebuilds_what_an_edit_reaches() {
        [first, body, iface, added, unlinked, quiet] }");
     assert_eq!(got, "[[\"a\", \"b\", \"c\"], [\"a\"], [\"a\", \"b\"], [\"d\"], [\"c\"], []]");
 }
+
+// Transitive closure, `R = distinct(E + R ⋈ E)`, as a nested circuit: one
+// body copy per inner iteration, each fed the outer-time changes.
+const CLOSURE: &str = r#"
+    fn tc_body() -> (Tally<(int, int)>, Tally<(int, int)>) -> Tally<(int, int)> {
+        let j = zjoin_op(|r: (int, int)| r.1, |e: (int, int)| e.0,
+                         |r: (int, int), e: (int, int)| (r.0, e.1));
+        let d = zdistinct_op();
+        |de: Tally<(int, int)>, dr: Tally<(int, int)>| d.step(de + j.step(dr, de))
+    }
+    fn tc_batch(e: Tally<(int, int)>) -> Tally<(int, int)> {
+        zfixpoint(e, |e: Tally<(int, int)>, r: Tally<(int, int)>|
+            zdistinct(e + zjoin(r, e, |r: (int, int)| r.1, |x: (int, int)| x.0,
+                                |r: (int, int), x: (int, int)| (r.0, x.1))))
+    }
+    /// `n` changes of a set of edges over `k` nodes: each change toggles up
+    /// to three edges, adding one that is absent and taking away one that
+    /// is there, so edges come, go, come back and form cycles. Closure is
+    /// defined on a set, so the integrated weights stay 0 or 1.
+    fn edges(seed: int, n: int, k: int) -> Stream<Tally<(int, int)>> {
+        random::seed(seed);
+        let held: Tally<(int, int)> = tally([]);
+        let out: [Tally<(int, int)>] = [];
+        for _t in n {
+            let c: Tally<(int, int)> = tally([]);
+            for _i in int::random(4) {
+                let e = (int::random(k), int::random(k));
+                if c.weight(e) != 0 { continue; }
+                let w = if held.weight(e) > 0 { -1 } else { 1 };
+                c.put(e, w);
+            }
+            held.put_all(c);
+            out.push(c);
+        }
+        stream(out)
+    }
+"#;
+
+// r[verify mimas.incremental.fixpoint]
+#[test]
+fn transitive_closure_equals_the_batch_fixpoint() {
+    let body = r#"
+        let ok = true;
+        for seed in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] {
+            let s = edges(seed, 14, 5);
+            let got = zfixpoint_op(|| tc_body()).run(s);
+            let want: [Tally<(int, int)>] = [];
+            for st in (∫ s).list() { want.push(tc_batch(st)); }
+            if got != ∇ stream(want) { ok = false; }
+        }
+        ok"#;
+    let got = test_runner::render(CLOSURE, &format!("{{ {body} }}"));
+    assert_eq!(got, "true");
+}
+
+// A chain that grows one edge a step makes every step need one inner
+// iteration more than any before: each new body copy must start with the
+// history the deepest copy saw, or the far ends of the chain go missing.
+// r[verify mimas.incremental.fixpoint]
+#[test]
+fn a_growing_chain_needs_deeper_copies_primed_with_history() {
+    let body = r#"
+        let tc = zfixpoint_op(|| tc_body());
+        let ok = true;
+        let all: Tally<(int, int)> = tally([]);
+        for n in 1..8 {
+            let c = tally([(n, n + 1)]);
+            all.put_all(c);
+            let got = tc.step(c);
+            // the new edge reaches back to every earlier node: n new pairs
+            if got.len() != n { ok = false; }
+            if got.weight((1, n + 1)) != 1 { ok = false; }
+        }
+        // and taking the first edge away removes every pair that started at 1
+        let gone = tc.step(tally_w([((1, 2), -1)]));
+        if gone.len() != 7 || gone.weight((1, 8)) != -1 { ok = false; }
+        ok"#;
+    assert_eq!(test_runner::render(CLOSURE, &format!("{{ {body} }}")), "true");
+}
+
+// The build without interfaces (`DeepBuild`): an artifact depends on every
+// body it reaches, through the recursive closure of the edges.
+// r[verify mimas.incremental.fixpoint]
+#[test]
+fn deep_build_rebuilds_everything_that_reaches_an_edit() {
+    let got = test_runner::render(BUILD, "{ let none: Tally<(str, int)> = tally([]);
+       let no_edges: Tally<(str, str)> = tally([]);
+       let b = deep_build();
+       let first = deep_to_build(b.step(tally([(\"a\", 1), (\"b\", 2), (\"c\", 3)]),
+                                        tally([(\"b\", \"a\"), (\"c\", \"b\")])));
+       // a body edit of `a`: `a`, and `b` and `c`, which reach it
+       let leaf = deep_to_build(b.step(tally_w([((\"a\", 1), -1), ((\"a\", 4), 1)]), no_edges));
+       // a body edit of `c`: only `c`, nothing reaches it
+       let root = deep_to_build(b.step(tally_w([((\"c\", 3), -1), ((\"c\", 5), 1)]), no_edges));
+       // `b` stops using `a`: `b`, and `c` through `b`
+       let cut = deep_to_build(b.step(none, tally_w([((\"b\", \"a\"), -1)])));
+       // now an edit of `a` reaches nobody else
+       let alone = deep_to_build(b.step(tally_w([((\"a\", 4), -1), ((\"a\", 6), 1)]), no_edges));
+       [first, leaf, root, cut, alone] }");
+    assert_eq!(got, "[[\"a\", \"b\", \"c\"], [\"a\", \"b\", \"c\"], [\"c\"], [\"b\", \"c\"], [\"a\"]]");
+}
+
+// `t.put_all(o)` adds `o`'s weights into `t` in place: `t + o`, kept in `t`,
+// an item whose weight comes to 0 dropped.
+// r[verify mimas.group.tally]
+test_run!(
+    tally_put_all_adds_in_place,
+    "{ let t = tally([\"a\", \"b\"]);
+       t.put_all(tally_w([(\"a\", 2), (\"b\", -1), (\"c\", 1)]));
+       (t == tally_w([(\"a\", 3), (\"c\", 1)])) && (t.len() == 2) }" => "true",
+);

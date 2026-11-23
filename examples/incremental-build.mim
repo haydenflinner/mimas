@@ -61,3 +61,56 @@ fn to_build(change: Tally<(str, int, int)>) -> [str] {
 fn edit(old: (str, int, int), new: (str, int, int)) -> Tally<(str, int, int)> {
     tally_w([(old, -1), (new, 1)])
 }
+
+// ---- the same build without interfaces: transitive dependencies ----------
+//
+// Without an interface hash, an artifact depends on the bodies of
+// everything it reaches, so the circuit needs the transitive closure of the
+// edges: a recursive query, `reach = distinct(edges + reach ⋈ edges)`, run
+// as a nested circuit (`zfixpoint_op`). The view is
+//
+//   artifacts = { (name, Σ body over name and everything it reaches) }
+//
+// and a body edit rebuilds the item and every item that reaches it.
+
+struct DeepBuild {
+    // (x, y): x reaches y through one or more edges
+    reach: ZFixpoint<(str, str), (str, str)>,
+    // reach ⋈ items on y: (x, body of y)
+    bodies: ZJoin<(str, str), (str, int), str, (str, int)>,
+    // Σ body per item, its own body included
+    sums: ZGroupSum<(str, int), str>,
+}
+
+fn __reach_body() -> (Tally<(str, str)>, Tally<(str, str)>) -> Tally<(str, str)> {
+    let j = zjoin_op(|r: (str, str)| r.1, |e: (str, str)| e.0,
+                     |r: (str, str), e: (str, str)| (r.0, e.1));
+    let d = zdistinct_op();
+    |de: Tally<(str, str)>, dr: Tally<(str, str)>| d.step(de + j.step(dr, de))
+}
+
+fn deep_build() -> DeepBuild {
+    DeepBuild {
+        reach: zfixpoint_op(|| __reach_body()),
+        bodies: zjoin_op(|r: (str, str)| r.1, |i: (str, int)| i.0,
+                         |r: (str, str), i: (str, int)| (r.0, i.1)),
+        sums: zgroup_sum_op(|r: (str, int)| r.0, |r: (str, int)| r.1),
+    }
+}
+
+impl DeepBuild {
+    /// The change of the artifacts for a change of the items `(name,
+    /// body)` and of the edges.
+    fn step(self, items: Tally<(str, int)>, deps: Tally<(str, str)>) -> Tally<(str, int)> {
+        let dr = self.reach.step(deps);
+        let theirs = self.bodies.step(dr, items);
+        self.sums.step(theirs + items)
+    }
+}
+
+/// The names a change of the artifacts asks to build, sorted.
+fn deep_to_build(change: Tally<(str, int)>) -> [str] {
+    let names: [str] = [];
+    for a in change.added().items() { names.push(a.0); }
+    names.sorted()
+}
