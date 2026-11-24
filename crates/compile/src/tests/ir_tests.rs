@@ -144,9 +144,18 @@ fn an_indexed_field_read_on_a_const_list_builds_nothing() {
     let ops = compile_ops(
         "struct B { row: int, name: str }\nconst MENU = [B { row = 0, name = \"a\" }, B { row = 1, name = \"b\" }];\nlet n = 0;\nfor i in 2 { n = n + MENU[i].row; }",
     );
-    assert!(
-        !ops.iter()
-            .any(|op| matches!(op, Op::NewInstance { .. } | Op::NewArray { .. })),
+    // Every program carries the prelude's bodies (766c74b), and `quot_rem`
+    // builds its tuple with a `NewArray`. Count against a program with no
+    // code of its own, so only the file's allocations are checked.
+    let allocs = |ops: &[Op]| {
+        ops.iter()
+            .filter(|op| matches!(op, Op::NewInstance { .. } | Op::NewArray { .. }))
+            .count()
+    };
+    let prelude = allocs(&compile_ops("let n = 0;"));
+    assert_eq!(
+        allocs(&ops),
+        prelude,
         "`MENU[i].row` should read one stored list:\n{ops:#?}"
     );
 }

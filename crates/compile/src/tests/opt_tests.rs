@@ -137,16 +137,17 @@ fn recursion_is_not_inlined() {
     let ir = optimized_ir(
         "fn fact(n: int) -> int { if n <= 1 { 1 } else { n * fact(n - 1) } }\nfn g() -> int { fact(5) }",
     );
-    let fact = ir
-        .split("body @1")
-        .nth(1)
-        .unwrap()
+    // The prelude's fns (766c74b) lower ahead of the file's, so `fact` is
+    // not body @1: find it as the body with the `n * …` multiply.
+    let (id, fact) = ir
         .split("body @")
-        .next()
-        .unwrap();
+        .skip(1)
+        .filter_map(|b| b.split_once('\n'))
+        .find(|(_, body)| body.contains("mult"))
+        .unwrap_or_else(|| panic!("no body multiplies:\n{ir}"));
     assert!(
-        fact.contains("call_direct @1"),
-        "fact must still call itself:\n{fact}"
+        fact.contains(&format!("call_direct @{id}")),
+        "fact (body @{id}) must still call itself:\n{fact}"
     );
 }
 
