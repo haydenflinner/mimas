@@ -39,11 +39,10 @@ pub(crate) fn parse(source: &str) -> (crate::Ast, Vec<shared::Error>) {
 #[cfg(test)]
 pub(crate) fn parse_to_strings(source: &str) -> (Vec<String>, Vec<String>) {
     let (ast, errors) = parse(source);
-    // the prelude rides ahead of every file; tests assert on the file's
-    // own statements, so skip the prelude's.
-    let n = crate::parser::prelude_stmts().len();
+    // the prelude rides ahead of a file that reaches it; tests assert on
+    // the file's own statements, so skip the prelude's.
     (
-        ast.stmts()[n..].iter().map(ToString::to_string).collect(),
+        ast.own_stmts().iter().map(ToString::to_string).collect(),
         errors.iter().map(ToString::to_string).collect(),
     )
 }
@@ -51,8 +50,7 @@ pub(crate) fn parse_to_strings(source: &str) -> (Vec<String>, Vec<String>) {
 /// The file's own statements — everything after the prelude.
 #[cfg(test)]
 pub(crate) fn file_stmts(ast: &crate::Ast) -> &[crate::Stmt] {
-    let n = crate::parser::prelude_stmts().len();
-    &ast.stmts()[n..]
+    ast.own_stmts()
 }
 
 /// The text `err`'s first label points at.

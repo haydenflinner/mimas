@@ -305,8 +305,7 @@ impl<'s> Parser<'s> {
     }
 
     fn into_ast_inner(mut self, prelude: bool) -> (Ast, Vec<shared::Error>) {
-        let mut statements = if prelude { prelude_stmts() } else { vec![] };
-        let prelude_len = statements.len();
+        let mut statements = vec![];
         while !self.at(TokKind::Eof) {
             if let Some(err) = self.line_start_plusminus() {
                 self.reject_stmt(err);
@@ -318,6 +317,17 @@ impl<'s> Parser<'s> {
             }
         }
         self.unread_marks();
+        // the prelude rides ahead of the file, but only the items the file
+        // reaches: an unused `compose` costs a solve and a body per file
+        // (r[impl mimas.prelude.shake])
+        let prelude_len = if prelude {
+            let kept = prelude_for(&statements, &self.tokens);
+            let n = kept.len();
+            statements.splice(0..0, kept);
+            n
+        } else {
+            0
+        };
         // the lexer's errors went in first
         self.errors.sort_by_cached_key(|err| {
             let label = err.labels().and_then(|mut labels| labels.next());
@@ -6616,6 +6626,109 @@ pub(crate) fn prelude_stmts() -> Vec<Stmt> {
     reflect::install(decls);
     debug_assert!(errors.is_empty(), "the prelude must parse: {errors:?}");
     ast.unpack()
+}
+
+/// The names of the prelude's items, in order, and for each the prelude
+/// names its own body reaches. Read once: the prelude is fixed text.
+fn prelude_index() -> &'static [(String, Vec<String>)] {
+    static INDEX: std::sync::OnceLock<Vec<(String, Vec<String>)>> = std::sync::OnceLock::new();
+    INDEX.get_or_init(|| {
+        let stmts = prelude_stmts();
+        let names: Vec<String> = stmts.iter().map(|s| prelude_item_name(s).to_string()).collect();
+        stmts
+            .iter()
+            .zip(&names)
+            .map(|(stmt, name)| {
+                let mut reach = Reach::new(&names);
+                crate::visit::walk_stmt(stmt, &mut reach);
+                (name.clone(), reach.found.into_iter().filter(|n| n != name).collect())
+            })
+            .collect()
+    })
+}
+
+/// A prelude statement's name. Every prelude statement is a named fn: one
+/// that is not could never be shaken away, so the prelude refuses it.
+fn prelude_item_name(stmt: &Stmt) -> &str {
+    match stmt.kind() {
+        StmtKind::Item(item) => match item.kind() {
+            ItemKind::Function(f) => f.name.lexeme.as_str(),
+            _ => panic!("prelude.mim holds only fns, found {item:?}"),
+        },
+        _ => panic!("prelude.mim holds only fns, found {stmt:?}"),
+    }
+}
+
+/// Collects which of `names` an AST names: as an identifier anywhere (a
+/// call, a method name, a shadowing `fn`, an f-string hole, a parser
+/// desugar like `÷`'s `quot_rem`), or through the one operator the solver
+/// resolves to a prelude fn by name, `f ∘ g`'s `compose`.
+struct Reach<'n> {
+    names: &'n [String],
+    found: Vec<String>,
+}
+
+impl<'n> Reach<'n> {
+    fn new(names: &'n [String]) -> Self {
+        Self { names, found: vec![] }
+    }
+
+    fn note(&mut self, name: &str) {
+        if self.names.iter().any(|n| n == name) && !self.found.iter().any(|n| n == name) {
+            self.found.push(name.to_string());
+        }
+    }
+}
+
+impl crate::visit::Visitor for Reach<'_> {
+    fn ident(&mut self, ident: &Ident) {
+        self.note(&ident.lexeme);
+    }
+
+    fn expr(&mut self, expr: &Expr) {
+        if let ExprKind::Evaluation(ev) = expr.kind()
+            && matches!(ev.op, EvaluationOp::Compose)
+        {
+            self.note("compose");
+        }
+    }
+}
+
+/// The prelude statements a file reaches, in prelude order: each item the
+/// file's statements or tokens name, and each item those reach in turn.
+/// The token scan backs up the walk: a macro expansion lands in the token
+/// stream, so a name the walk might miss still keeps its item. Nothing is
+/// parsed when the file reaches no item at all.
+// r[impl mimas.prelude.shake]
+fn prelude_for(statements: &[Stmt], tokens: &[Tok<TokKind<'_>>]) -> Vec<Stmt> {
+    let index = prelude_index();
+    let names: Vec<String> = index.iter().map(|(n, _)| n.clone()).collect();
+    let mut reach = Reach::new(&names);
+    crate::visit::walk_stmts(statements, &mut reach);
+    for tok in tokens {
+        match tok.kind() {
+            TokKind::Ident(name) => reach.note(name),
+            TokKind::Compose => reach.note("compose"),
+            TokKind::Obelus => reach.note("quot_rem"),
+            _ => {}
+        }
+    }
+    let mut keep = reach.found;
+    let mut i = 0;
+    while i < keep.len() {
+        if let Some((_, deps)) = index.iter().find(|(n, _)| *n == keep[i]) {
+            for d in deps {
+                if !keep.contains(d) {
+                    keep.push(d.clone());
+                }
+            }
+        }
+        i += 1;
+    }
+    if keep.is_empty() {
+        return vec![];
+    }
+    prelude_stmts().into_iter().filter(|s| keep.iter().any(|k| k == prelude_item_name(s))).collect()
 }
 
 fn foreign_spelling(name: &str) -> Option<(&'static str, &'static str)> {
