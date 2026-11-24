@@ -63,13 +63,16 @@ fn warns(src: &str) -> Vec<String> {
 }
 
 /// The `DecId` of the dec named `name` (any kind). `fn` decs are what `fn_effects` keys on.
+/// The test source's dec named `name`. The prelude's decs come first and
+/// are skipped: since 62a522d its `compose` binds `|x: A|`, `f` and `g`,
+/// and a test asking for its own `x` must not get the prelude's.
 fn dec_named(name: &str) -> DecId {
     TEST_SESSION.with(|s| {
         s.borrow()
             .0
             .decs
             .iter()
-            .find(|(_, d)| d.name == name)
+            .find(|(_, d)| d.name == name && d.location.file_id != shared::PRELUDE_FILE)
             .map_or_else(|| panic!("no dec named {name}"), |(id, _)| id)
     })
 }
