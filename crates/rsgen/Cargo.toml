@@ -1,0 +1,17 @@
+[package]
+name = "mimas-rsgen"
+version = "0.2.0"
+edition = "2024"
+publish = false
+description = "The Mimas protocol subset and its Rust target: a checker for the subset a `#[protocol]` page may use, then an emitter from post-solve IR to a no-deps Rust crate."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "mimas_rsgen"
+
+[dependencies]
+parse = { package = "mimas-parse", path = "../parse", version = "0.2.0" }
+shared = { package = "mimas-shared", path = "../shared", version = "0.2.0" }

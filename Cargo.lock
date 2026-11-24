@@ -5770,6 +5770,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "mimas-rsgen"
+version = "0.2.0"
+dependencies = [
+ "mimas-parse",
+ "mimas-shared",
+]
+
+[[package]]
 name = "mimas-shared"
 version = "0.2.0"
 dependencies = [
