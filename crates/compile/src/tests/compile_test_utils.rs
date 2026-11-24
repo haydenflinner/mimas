@@ -21,7 +21,16 @@ pub(crate) fn optimized_ir(src: &str) -> String {
     let resolutions = solver.into();
     let mut ir = crate::Ir::new(resolutions, Default::default());
     ir.lower(&ast.unpack());
-    crate::codegen::opt::optimize(&mut ir, &Default::default(), &Default::default(), true);
+    // the two halves the compiler runs (see its `MIMAS_DUMP_OPT` path):
+    // whole program first, then every body but the entry on its own
+    use crate::codegen::opt;
+    let mut times = opt::OptTimes::new();
+    let global = opt::optimize_global(&mut ir, &Default::default(), &Default::default(), &mut times);
+    for (bid, body) in ir.bodies.iter_mut() {
+        if bid != crate::BodyId::ZERO {
+            opt::optimize_body(body, &global, &ir.resolutions, true, &mut times);
+        }
+    }
     ir.to_string()
 }
 
