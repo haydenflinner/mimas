@@ -302,7 +302,7 @@ impl Globals {
         else {
             return;
         };
-        for stmt in ast.stmts() {
+        for stmt in ast.own_stmts() {
             let StmtKind::Item(item) = stmt.kind() else {
                 continue;
             };
@@ -945,7 +945,7 @@ fn scoped_pass<'s>(item_source: &'s str, globals: &'s Globals, base: usize) -> O
     let ast = Parser::new_extending(Lexer::new(item_source, 0, "scoped".into()))
         .try_into_ast()
         .ok()?;
-    let function = ast.stmts().iter().find_map(|stmt| match stmt.kind() {
+    let function = ast.own_stmts().iter().find_map(|stmt| match stmt.kind() {
         StmtKind::Item(item) => item.as_function(),
         _ => None,
     })?;

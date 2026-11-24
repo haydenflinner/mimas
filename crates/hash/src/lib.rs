@@ -289,7 +289,7 @@ fn extract_parsed(source: &str) -> Option<Vec<Item>> {
         .try_into_ast()
         .ok()?;
     let mut items = Vec::new();
-    for stmt in ast.stmts() {
+    for stmt in ast.own_stmts() {
         let StmtKind::Item(item) = stmt.kind() else {
             continue;
         };
@@ -588,7 +588,7 @@ fn references(source: &str) -> Option<std::collections::HashSet<String>> {
         .try_into_ast()
         .ok()?;
     let mut out = std::collections::HashSet::new();
-    for stmt in ast.stmts() {
+    for stmt in ast.own_stmts() {
         stmt_refs(stmt, &mut out);
     }
     Some(out)

@@ -59,7 +59,7 @@ pub fn use_sites(source: &str) -> Vec<UseSite> {
     else {
         return Vec::new();
     };
-    ast.stmts()
+    ast.own_stmts()
         .iter()
         .filter_map(|stmt| {
             let StmtKind::Item(item) = stmt.kind() else {
