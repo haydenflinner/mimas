@@ -67,10 +67,10 @@ impl Ball {
         // paddle (where the ball lands decides the angle it leaves at)
         let paddle_top = core::PADDLE_Y + core::PADDLE_HEIGHT / 2.0;
         let across = (at.x - paddle.translation.x) / (core::PADDLE_WIDTH / 2.0);
-        if self.velocity.y < 0.0
-            && at.y - r <= paddle_top
-            && at.y > core::PADDLE_Y
-            && across.abs() <= 1.1
+        if self.velocity.y < 0.0 &&
+            at.y - r <= paddle_top &&
+            at.y > core::PADDLE_Y &&
+            across.abs() <= 1.1
         {
             at.y = paddle_top + r;
             self.aim(across * 0.8);
