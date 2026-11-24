@@ -355,6 +355,48 @@ fn check_lines_stand_alone() {
     }
 }
 
+// r[verify check.line]
+#[test]
+fn same_source_checks_mint_distinct_names() {
+    // two `check` lines with the same source text used to mint the same test
+    // name (`pll_wild()` twice on games/rubiks-kit): the second dec shadowed
+    // the first, which the duplicate-fn rule then names as a redeclare.
+    // names dedupe across the whole file, not only inside one check line.
+    let lexer = crate::lex::Lexer::new("check f()\ncheck f()\n", 0, "test".into());
+    let ast = crate::Parser::new(lexer).try_into_ast().unwrap();
+    let names: Vec<String> = super::utils::file_stmts(&ast)
+        .iter()
+        .map(|s| {
+            let crate::StmtKind::Item(item) = s.kind() else {
+                panic!("check line should be an item")
+            };
+            let crate::ItemKind::Tests(tests) = item.kind() else {
+                panic!("check line should be a tests item")
+            };
+            tests.cases[0].name.lexeme.clone()
+        })
+        .collect();
+    assert_eq!(names, ["f()", "f() #2"]);
+    // a `#[tests]` list draws from the same table, so the two spellings
+    // can't mint each other's names either
+    let lexer =
+        crate::lex::Lexer::new("check f()\n#[tests] [f(), f()]\n", 0, "test".into());
+    let ast = crate::Parser::new(lexer).try_into_ast().unwrap();
+    let names: Vec<String> = super::utils::file_stmts(&ast)
+        .iter()
+        .flat_map(|s| {
+            let crate::StmtKind::Item(item) = s.kind() else {
+                panic!("check line should be an item")
+            };
+            let crate::ItemKind::Tests(tests) = item.kind() else {
+                panic!("check line should be a tests item")
+            };
+            tests.cases.iter().map(|c| c.name.lexeme.clone()).collect::<Vec<_>>()
+        })
+        .collect();
+    assert_eq!(names, ["f()", "f() #2", "f() #3"]);
+}
+
 // r[verify mimas.array.comprehension]
 #[test]
 fn check_of_a_comprehension_is_named_by_the_whole_bracket() {

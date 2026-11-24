@@ -92,6 +92,11 @@ pub struct Parser<'s> {
     /// Monotonic counter for `__with_N` names minted by the `with` desugar,
     /// so nested regions don't collide.
     with_id: u32,
+    /// Check names already minted in this parse, so two `check`s with the
+    /// same source text (`check pll_wild()` twice) don't mint the same test
+    /// dec -- a per-line set let the second one shadow the first, which the
+    /// duplicate-fn rule then names as a redeclare.
+    check_names: std::collections::HashSet<String>,
     depth: usize,
     /// The dimension of each unit-suffixed literal (`25kW`), by the literal's node.
     quantities: HashMap<NodeId, shared::units::Dim>,
@@ -279,6 +284,7 @@ impl<'s> Parser<'s> {
             stream_from: false,
             assert_id: 0,
             with_id: 0,
+            check_names: Default::default(),
             depth: 0,
             quantities: HashMap::new(),
             exact_literals: Default::default(),
@@ -952,10 +958,10 @@ impl<'s> Parser<'s> {
                 });
             }
             let mut cases = vec![];
-            let mut names = std::collections::HashSet::new();
             loop {
                 let inner = p.expr();
-                let name = unique_test_name(&mut names, p.source_of(&inner));
+                let source = p.source_of(&inner);
+                let name = unique_test_name(&mut p.check_names, source);
                 let location = inner.location();
                 cases.push(TestCase {
                     id: NodeId::new(),
@@ -1300,25 +1306,25 @@ impl<'s> Parser<'s> {
     /// expression may be a block: `check { let a = 2; a * 3 } == 6`.
     fn check_block(&mut self) -> Tests {
         self.advance();
-        let mut names = std::collections::HashSet::new();
-        let mut cases = vec![self.check_case(&mut names)];
+        let mut cases = vec![self.check_case()];
         // `,`/`;` chain more checks on the same line.
         while self.eat(TokKind::Comma) || self.eat(TokKind::SemiColon) {
             if !self.check_chains() {
                 break;
             }
-            cases.push(self.check_case(&mut names));
+            cases.push(self.check_case());
         }
         Tests::new(cases)
     }
 
     /// One check: the `expr`, wrapped in `assert`'s operand-reporting rewrite.
-    fn check_case(&mut self, names: &mut std::collections::HashSet<String>) -> TestCase {
+    fn check_case(&mut self) -> TestCase {
         // a check is always an expression: a block that opens it can take
         // an operator after it (`check { let a = 2; a * 3 } == 6`), where a
         // statement-start block ends the expression
         let expr = if self.at(TokKind::LeftBrace) { self.null_coalecence() } else { self.expr() };
-        let name = unique_test_name(names, self.source_of(&expr));
+        let source = self.source_of(&expr);
+        let name = unique_test_name(&mut self.check_names, source);
         let location = expr.location();
         // `check` gets `assert`'s operand rewrite: a failed `check x == 40`
         // panics "assertion failed: 39 == 40" -- the got value, not just
