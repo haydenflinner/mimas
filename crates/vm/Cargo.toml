@@ -35,6 +35,8 @@ thiserror.workspace = true
 smallvec = { version = "=1.16.5", features = ["const_generics", "serde", "union"] }
 rustc-hash = "2"
 itoa = "1.0.18"
+# the frame-span clock (`Trace::spans`) — std Instant::now panics on wasm32
+web-time = "1.1"
 glam.workspace = true
 # the local clone at ~/code/dsa/polars, not crates.io -- `lazy` pulls in polars-plan's `Expr`
 # builder (needed for the `df.filter(col("x") > 5)` query surface), `fmt` gives DataFrame a real

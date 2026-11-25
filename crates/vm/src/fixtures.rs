@@ -45,6 +45,7 @@ use std::{
 };
 
 use shared::{BodyId, FileId, IdVec, Location};
+use web_time::Instant;
 
 /// Marker for types that can live as a per-Vm fixture. Must be `Default`-constructible and
 /// `'static` -- see the module docs for why both bounds are load-bearing.
@@ -132,6 +133,25 @@ pub struct Trace {
     pub path_on: Cell<bool>,
     /// The ordered path since the last take. See [`Path`].
     pub path: RefCell<Path>,
+    /// The frame-span recorder is running: one chrome-trace `X` event
+    /// per popped call edge, wall-timed. Off by default — a clock read
+    /// per call edge is real noise, so only a host that drains
+    /// (`Vm::trace_spans_take`) turns it on.
+    pub spans_on: Cell<bool>,
+    /// The `Instant` span `t0`s are measured from, captured by
+    /// [`spans_enable`](Self::spans_enable). On wasm `web_time::Instant`
+    /// is `performance.now`, so `t0`s land on the same clock a web
+    /// host's trace ring already uses.
+    span_epoch: RefCell<Option<Instant>>,
+    /// Open spans `(callee, t0_us)`, mirroring `edge_stack` while
+    /// `spans_on` — the same match-or-fold discipline applies.
+    span_stack: RefCell<Vec<(u32, f64)>>,
+    /// Finished spans `(callee, t0_us, dur_us)` since the last take.
+    /// Past [`SPANS_LIMIT`](Self::SPANS_LIMIT) new spans only count
+    /// into `spans_dropped`.
+    pub spans: RefCell<Vec<(u32, f64, f64)>>,
+    /// Spans dropped at the cap since the last take.
+    pub spans_dropped: Cell<u32>,
 }
 
 /// The run as an ordered path, stored as taken jumps only. Execution is
@@ -306,6 +326,11 @@ impl Trace {
         self.edge_stack
             .borrow_mut()
             .push((caller, callee, self.ops_total.get()));
+        if self.spans_on.get() && self.span_epoch.borrow().is_some() {
+            self.span_stack
+                .borrow_mut()
+                .push((callee, self.span_now()));
+        }
     }
 
     /// A frame `callee` popped: charge `ops_total - start` to its edge.
@@ -323,6 +348,10 @@ impl Trace {
                     .borrow_mut()
                     .entry(((caller as u64) << 32) | callee as u64)
                     .or_default() += spent;
+                if self.spans_on.get() && self.span_epoch.borrow().is_some() {
+                    drop(stack);
+                    self.close_span(callee);
+                }
             }
         }
     }
@@ -339,7 +368,61 @@ impl Trace {
     /// fresh; `edge_ops` drains like `take_calls` so hosts can read it.
     pub fn reset_frames(&self) {
         self.edge_stack.borrow_mut().clear();
+        self.span_stack.borrow_mut().clear();
         self.ops_total.set(0);
+    }
+
+    /// Finished spans `spans` may hold before new completions count
+    /// into `spans_dropped` instead.
+    pub const SPANS_LIMIT: usize = 1 << 16;
+
+    /// Start or stop the frame-span recorder. Enabling sets the wall
+    /// epoch; disabling clears the open and finished buffers.
+    // r[impl app.perf.trace.eval]
+    pub fn spans_enable(&self, on: bool) {
+        self.spans_on.set(on);
+        *self.span_epoch.borrow_mut() = on.then(Instant::now);
+        self.span_stack.borrow_mut().clear();
+        if !on {
+            self.spans.borrow_mut().clear();
+            self.spans_dropped.set(0);
+        }
+    }
+
+    /// Drain finished spans: `[dropped, callee, t0_us, dur_us, …]`
+    /// flat so one wire type carries it — body promoted to f64.
+    pub fn take_spans(&self) -> Vec<f64> {
+        let mut spans = self.spans.borrow_mut();
+        let mut out = Vec::with_capacity(spans.len() * 3 + 1);
+        out.push(self.spans_dropped.replace(0) as f64);
+        for (body, t0, dur) in spans.drain(..) {
+            out.extend([body as f64, t0, dur]);
+        }
+        out
+    }
+
+    /// µs since `span_epoch`; the span clock.
+    fn span_now(&self) -> f64 {
+        Instant::now()
+            .saturating_duration_since(self.span_epoch.borrow().unwrap())
+            .as_micros() as f64
+    }
+
+    /// The matched edge popped while `spans_on`: record the callee's
+    /// wall span. `span_stack` mirrors `edge_stack`, so a `pop_frame`
+    /// that matched leaves exactly its entry here — a caller that
+    /// enabled mid-run may hold more open spans than edges.
+    fn close_span(&self, callee: u32) {
+        let Some((_, t0)) = self.span_stack.borrow_mut().pop() else {
+            return;
+        };
+        let dur = self.span_now() - t0;
+        let mut spans = self.spans.borrow_mut();
+        if spans.len() < Self::SPANS_LIMIT {
+            spans.push((callee, t0, dur));
+        } else {
+            self.spans_dropped.set(self.spans_dropped.get() + 1);
+        }
     }
 
     /// One call edge taken: `caller` (the frame on top at dispatch) →

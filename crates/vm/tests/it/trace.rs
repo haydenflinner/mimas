@@ -131,3 +131,47 @@ fn trace_path_cost() {
         );
     }
 }
+
+// r[verify app.perf.trace.eval]
+#[test]
+fn trace_spans_time_frames() {
+    // `add` inlines into `twice` (compile's `codegen::opt`), so it may
+    // not get its own frame — `twice` is the asserted span.
+    let mut vm = Vm::compile(
+        "fn add(a: int, b: int) -> int { a + b }\n\
+         fn twice() -> int { add(1, 2) + add(3, 4) }\n\
+         let TEST_VALUE = twice();",
+        |_| {},
+    )
+    .unwrap();
+    vm.trace_spans_enable(true);
+    vm.run().unwrap();
+
+    let flat = vm.trace_spans_take();
+    assert_eq!(flat[0], 0.0, "no drops under the cap");
+    let spans: Vec<(u32, f64, f64)> = flat[1..]
+        .chunks_exact(3)
+        .map(|t| (t[0] as u32, t[1], t[2]))
+        .collect();
+    assert!(!spans.is_empty(), "frames were recorded");
+
+    let map = vm.trace_map();
+    let twice = map.iter().find(|c| c.name == "twice").unwrap().body as u32;
+    assert!(
+        spans.iter().any(|&(b, _, _)| b == twice),
+        "twice() has a span: {spans:?}"
+    );
+    for &(body, t0, dur) in &spans {
+        assert!(body < map.len() as u32 && t0 >= 0.0 && dur >= 0.0);
+    }
+
+    // drained: a second take is just the drop counter.
+    assert_eq!(vm.trace_spans_take(), vec![0.0]);
+
+    // disabled mid-run clears the buffers; nothing records after.
+    let mut vm = Vm::compile("let y = 1;", |_| {}).unwrap();
+    vm.trace_spans_enable(true);
+    vm.trace_spans_enable(false);
+    vm.run().unwrap();
+    assert_eq!(vm.trace_spans_take(), vec![0.0]);
+}

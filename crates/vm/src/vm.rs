@@ -980,6 +980,29 @@ impl Vm {
         })
     }
 
+    /// Start or stop the frame-span recorder (see
+    /// [`Trace::spans_on`](crate::fixtures::Trace)). Off by default: a
+    /// wall-clock read per call edge is real noise, so only a host that
+    /// drains it with [`trace_spans_take`](Self::trace_spans_take)
+    /// turns it on. Enabling captures the span epoch.
+    pub fn trace_spans_enable(&mut self, on: bool) {
+        self.arena.mutate(|_, state| {
+            state
+                .fixtures
+                .get::<crate::fixtures::Trace>()
+                .spans_enable(on);
+        })
+    }
+
+    /// Drain finished frame spans: `[dropped, callee, t0_us, dur_us,
+    /// …]` flat — body promoted to f64 for one wire type. `t0`/`dur`
+    /// are µs on the `Instant` `trace_spans_enable` captured
+    /// (`performance.now`'s clock on wasm).
+    pub fn trace_spans_take(&mut self) -> Vec<f64> {
+        self.arena
+            .mutate(|_, state| state.fixtures.get::<crate::fixtures::Trace>().take_spans())
+    }
+
     /// Drain the ordered path: `[start, end, items…]`, every op since
     /// the last take in run order, stored as taken jumps with loops
     /// folded. Empty while nothing has run.

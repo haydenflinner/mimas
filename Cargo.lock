@@ -5836,6 +5836,7 @@ dependencies = [
  "rustc-hash 2.1.2",
  "smallvec",
  "thiserror 1.0.69",
+ "web-time",
 ]
 
 [[package]]
