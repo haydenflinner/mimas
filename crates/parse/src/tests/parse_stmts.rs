@@ -1057,6 +1057,66 @@ stmt_test!(
     struc!(Foo(Annotation::Kw(TyKw::Int))).into_item()
 );
 
+// r[verify mimas.struct.alias]
+stmt_test!(
+    struct_alias_class,
+    "class Foo { bar: int }",
+    struc!(Foo {
+        bar: Annotation::Kw(TyKw::Int)
+    })
+    .into_item()
+);
+
+stmt_test!(
+    struct_alias_record,
+    "record Foo { bar: int }",
+    struc!(Foo {
+        bar: Annotation::Kw(TyKw::Int)
+    })
+    .into_item()
+);
+
+stmt_test!(
+    struct_alias_record_tuple,
+    "record Foo(int, str)",
+    struc!(Foo(Annotation::Kw(TyKw::Int), Annotation::Kw(TyKw::Str))).into_item()
+);
+
+stmt_test!(
+    struct_alias_record_unit,
+    "record Foo;",
+    struc!(Foo).into_item()
+);
+
+// `record`/`class` stay names everywhere the decl shape isn't there:
+// a bare application, a parenthesized call, a comparison.
+test_ok!(
+    record_stays_a_name,
+    "record x",
+    "record(x)",
+    "record x < 3",
+    "class.meth(4)",
+);
+
+// r[verify mimas.struct.members]
+#[test]
+fn struct_members_become_an_impl() {
+    let src = "struct V {\n    x: int,\n    fn get(self) -> int { self.x }\n}";
+    let ast = crate::Parser::new(crate::lex::Lexer::new(src, 0, "t".into()))
+        .try_into_ast()
+        .unwrap();
+    let stmts = super::utils::file_stmts(&ast);
+    assert_eq!(stmts.len(), 2);
+    let StmtKind::Item(item) = stmts[1].kind() else {
+        panic!("expected an item, got {:?}", stmts[1].kind())
+    };
+    let ItemKind::Impl(imp) = item.kind() else {
+        panic!("expected an impl, got {:?}", item.kind())
+    };
+    assert_eq!(imp.target.lexeme, "V");
+    assert_eq!(imp.items.len(), 1);
+}
+
 stmt_test!(
     function,
     "fn foo() {}",

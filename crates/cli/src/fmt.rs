@@ -215,8 +215,15 @@ pub fn format_source(src: &str, file_name: &str) -> Result<String, usize> {
     if !lexer.take_errors().is_empty() {
         return Err(1);
     }
-    let out = Fmt::new(src, toks).finish();
-    if !same_token_stream(src, &out, file_name) {
+    let f = Fmt::new(src, toks);
+    // `class`/`record` in decl position relex as `struct` after the
+    // rewrite — their starts normalize the comparison, like `not`→`!`.
+    let aliases: std::collections::HashSet<usize> = (0..f.toks.len())
+        .filter(|&i| f.alias_kw[i])
+        .map(|i| f.toks[i].start)
+        .collect();
+    let out = f.finish();
+    if !same_token_stream(src, &out, file_name, &aliases) {
         // The respacer only writes whitespace — a token-stream diff means a
         // formatter bug; refuse to touch the file rather than risk it.
         return Err(1);
@@ -227,22 +234,37 @@ pub fn format_source(src: &str, file_name: &str) -> Result<String, usize> {
 /// The semantic guard: the formatted text must relex to the same
 /// non-comment token stream (`and`→`&&`, `·`→`⋅` and friends are the
 /// lexer's own canonical spellings, so kinds compare equal across the
-/// rewrite; `not` is the one kind the formatter respells, to `!`).
-fn same_token_stream(before: &str, after: &str, file_name: &str) -> bool {
-    fn kinds<'a>(src: &'a str, file_name: &str) -> Option<Vec<TokKind<'a>>> {
+/// rewrite; `not` respells to `!`, and a `class`/`record` whose start
+/// sits in `aliases` respells to `struct`).
+fn same_token_stream(
+    before: &str,
+    after: &str,
+    file_name: &str,
+    aliases: &std::collections::HashSet<usize>,
+) -> bool {
+    fn kinds<'a>(
+        src: &'a str,
+        file_name: &str,
+        aliases: &std::collections::HashSet<usize>,
+    ) -> Option<Vec<TokKind<'a>>> {
         let mut lexer = Lexer::new(src, 0, file_name.into());
         let mut ks = Vec::new();
         for tok in lexer.by_ref() {
             if !tok.kind.is_comment() {
                 ks.push(match tok.kind {
                     TokKind::NotWord => TokKind::Bang,
+                    TokKind::Ident("class" | "record")
+                        if aliases.contains(&tok.location.span().start()) =>
+                    {
+                        TokKind::Struct
+                    }
                     k => k,
                 });
             }
         }
         lexer.take_errors().is_empty().then_some(ks)
     }
-    kinds(before, file_name) == kinds(after, file_name)
+    kinds(before, file_name, aliases) == kinds(after, file_name, aliases)
 }
 
 /// A token as the formatter sees it: kind + byte span into the source.
@@ -567,6 +589,9 @@ struct Fmt<'s> {
     /// Unmatched openers before each token — the token's nesting depth,
     /// with a leading `}` counted at its outer level.
     depth: Vec<usize>,
+    /// `class`/`record` tokens sitting in `struct` decl position —
+    /// canonical spelling is `struct` (r[impl mimas.struct.alias]).
+    alias_kw: Vec<bool>,
     /// Source lines a `// fmt: off`/`// fmt: on` region or a
     /// `// fmt: skip` node keeps verbatim.
     off_line: Vec<bool>,
@@ -594,6 +619,7 @@ impl<'s> Fmt<'s> {
             pipe: vec![PipeRole::Infix; n],
             cell_pad: Default::default(),
             depth: vec![0; n],
+            alias_kw: vec![false; n],
             off_line: vec![false; src.lines().count() + 1],
         };
         f.prepare();
@@ -675,6 +701,101 @@ impl<'s> Fmt<'s> {
         self.table_cells();
         self.bracket_depths();
         self.off_regions();
+        self.struct_aliases();
+    }
+
+    /// `class`/`record` where the parser's decl gate fires canonicalize
+    /// to `struct` (r[impl mimas.struct.alias]): the word opens a
+    /// statement — after `;`/`{`/`}`/`pub`, or at a line head outside
+    /// parens/brackets — and a name then `{`, a same-line `(`/`;`, or a
+    /// balanced generic `<…>` the `{`/`(`/`;` of a decl follows.
+    fn struct_aliases(&mut self) {
+        let mut paren = vec![false; self.toks.len()];
+        let mut depth = 0usize;
+        for i in 0..self.toks.len() {
+            let k = self.kind(i);
+            if matches!(k, TokKind::RightParenthesis | TokKind::RightSquare) {
+                depth = depth.saturating_sub(1);
+            }
+            paren[i] = depth > 0;
+            if matches!(
+                k,
+                TokKind::LeftParenthesis | TokKind::LeftSquare | TokKind::HookLeftSquare
+            ) {
+                depth += 1;
+            }
+        }
+        for i in 0..self.toks.len() {
+            let TokKind::Ident("class" | "record") = self.kind(i) else {
+                continue;
+            };
+            self.alias_kw[i] = self.alias_decl_at(i, &paren);
+        }
+    }
+
+    /// Whether the `class`/`record` token at `i` sits where the parser
+    /// would read a `struct` decl — the token-level echo of
+    /// `Parser::struct_alias_intro`.
+    fn alias_decl_at(&self, i: usize, paren: &[bool]) -> bool {
+        let stmt_start = match self.sig(i) {
+            None => true,
+            Some(p) => {
+                matches!(
+                    self.kind(p),
+                    TokKind::SemiColon | TokKind::LeftBrace | TokKind::RightBrace | TokKind::Pub
+                ) || (self.start_line(i) > self.end_line(p) && !paren[i])
+            }
+        };
+        if !stmt_start {
+            return false;
+        }
+        let Some(name) = self.sig_next(i) else {
+            return false;
+        };
+        if !matches!(self.kind(name), TokKind::Ident(_))
+            || self.start_line(name) != self.end_line(i)
+        {
+            return false;
+        }
+        let Some(shape) = self.sig_next(name) else {
+            return false;
+        };
+        match self.kind(shape) {
+            TokKind::LeftBrace => true,
+            TokKind::LeftParenthesis | TokKind::SemiColon => {
+                self.start_line(shape) == self.end_line(name)
+            }
+            TokKind::Less => {
+                let mut depth = 0usize;
+                let mut j = shape;
+                loop {
+                    match self.kind(j) {
+                        TokKind::Less => depth += 1,
+                        TokKind::Greater => depth = depth.saturating_sub(1),
+                        TokKind::DoubleRightCaret => depth = depth.saturating_sub(2),
+                        TokKind::Eof => return false,
+                        _ => {}
+                    }
+                    if depth == 0
+                        && matches!(
+                            self.kind(j),
+                            TokKind::Greater | TokKind::DoubleRightCaret
+                        )
+                    {
+                        break;
+                    }
+                    j += 1;
+                }
+                let Some(after) = self.sig_next(j) else {
+                    return false;
+                };
+                matches!(
+                    self.kind(after),
+                    TokKind::LeftBrace | TokKind::LeftParenthesis | TokKind::SemiColon
+                )
+            }
+            _ => false,
+        }
     }
 
     /// Nesting depth per token: a `{`/`(`/`[`/`?[` raises it for what
@@ -1547,7 +1668,12 @@ impl<'s> Fmt<'s> {
             if matches!(pk, TokKind::Ident("check")) || pk == TokKind::Hash {
                 return if self.gap_bytes(i) == 0 { "" } else { " " }.into();
             }
-            return if is_ender(pk) { "" } else { " " }.into();
+            // `X<(`: after an all-glued `<` the paren stays glued too —
+            // spacing it would unglue the generic on the next pass
+            let glued_generic = pk == TokKind::Less
+                && self.glued_left(i - 1)
+                && self.glued_left(i);
+            return if is_ender(pk) || glued_generic { "" } else { " " }.into();
         }
         // `!`/`?`/`%`: postfix only when glued — keep the written gap
         if matches!(ck, TokKind::Bang | TokKind::Hook | TokKind::Percent) {
@@ -1679,6 +1805,7 @@ impl<'s> Fmt<'s> {
                 emit_comment(out, text, line_indent);
             }
             TokKind::NotWord => out.push('!'),
+            TokKind::Ident("class" | "record") if self.alias_kw[i] => out.push_str("struct"),
             _ if has_text(k) => out.push_str(&self.src[self.toks[i].start..self.toks[i].end]),
             _ => out.push_str(&k.to_string()),
         }
@@ -1863,6 +1990,19 @@ mod tests {
         unchanged("space Politics { econ: Dial, power: Dial }\n");
         unchanged("macro double($e:expr) { $e + $e }\n");
         unchanged("use \"page\";\n");
+    }
+
+    // r[verify mimas.struct.alias]
+    #[test]
+    fn struct_aliases_canonicalize() {
+        assert_eq!(fmt("class P { x: int }"), "struct P { x: int }\n");
+        assert_eq!(fmt("record P { x: int }"), "struct P { x: int }\n");
+        assert_eq!(fmt("record P(int, int)"), "struct P(int, int)\n");
+        assert_eq!(fmt("record P<A> { x: A }"), "struct P<A> { x: A }\n");
+        assert_eq!(fmt("pub record P { x: int }"), "pub struct P { x: int }\n");
+        assert_eq!(fmt("record P;"), "struct P;\n");
+        // a `record`/`class` that isn't decl-shaped stays a name
+        unchanged("fn record(x: int) -> int { x + 1 }\nlet y = record 10\nlet z = record y < 4\nlet c = class 3\n");
     }
 
     #[test]

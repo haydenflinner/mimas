@@ -740,6 +740,16 @@ impl<'s> Parser<'s> {
                 self.end_item(&item);
                 BlockElement::Stmt(self.new_stmt(item, start))
             }
+            // `class V {…}`/`record V {…}` — `struct` under a softer
+            // word; `mimas fmt` writes it back `struct`. Contextual:
+            // `record x` calls and `record x < y` stay expressions.
+            TokKind::Ident("class" | "record") if self.struct_alias_intro() => {
+                let first = self.next;
+                let item = self.item();
+                self.record_decl(&item, first);
+                self.end_item(&item);
+                BlockElement::Stmt(self.new_stmt(item, start))
+            }
             kind if kind.starts_item() && !self.at_exact_literal() && !self.at_atom() => {
                 let first = self.next;
                 let item = self.item();
@@ -801,6 +811,12 @@ impl<'s> Parser<'s> {
             match parser.peek() {
                 TokKind::Fn => parser.function().into(),
                 TokKind::Struct => parser.struct_decl().into(),
+                // `pub class V {…}`/`#[attr] record V {…}` — the bare
+                // forms dispatch from `node()`; the wrapped forms reach
+                // the same decl through here.
+                TokKind::Ident("class" | "record") if parser.struct_alias_intro() => {
+                    parser.struct_decl().into()
+                }
                 TokKind::Pact => parser.pact_decl().into(),
                 TokKind::Enum => {
                     let start = parser.next_start();
@@ -1602,15 +1618,21 @@ impl<'s> Parser<'s> {
         }
     }
 
+    // r[impl mimas.struct.alias]
+    /// `struct V {…}` — and its `class`/`record` spellings, which
+    /// [Parser::struct_alias_intro] dispatched on. `struct_decl` eats
+    /// whichever word opened it.
     fn struct_decl(&mut self) -> Struct {
-        self.bump(TokKind::Struct);
+        let start = self.next_start();
+        self.advance();
         let name = self.require_ident();
         let type_params = self.type_params();
+        let mut items = vec![];
         let fields = if self.eat(TokKind::SemiColon) {
             vec![]
         } else if self.eat(TokKind::LeftParenthesis) {
             let mut index = 0;
-            self.list(
+            let fields = self.list(
                 TokKind::RightParenthesis,
                 |kind| kind == TokKind::Pub || kind.starts_annotation(),
                 |p| {
@@ -1625,20 +1647,133 @@ impl<'s> Parser<'s> {
                         location: p.location(start),
                     }
                 },
-            )
-        } else if self.expect(TokKind::LeftBrace) {
-            self.list(
-                TokKind::RightBrace,
-                |kind| kind == TokKind::Pub || kind.is_ident(),
-                Self::named_field,
-            )
+            );
+            // `struct V(int) { fn … }` — a brace after positional fields
+            // holds members only; a `name: type` there is misdirection.
+            if self.at(TokKind::LeftBrace) {
+                let (named, members) = self.struct_members();
+                if let Some(field) = named.first() {
+                    self.error(Misdirection {
+                        src: self.src(),
+                        at: field.location.into(),
+                        msg: "a positional struct's fields go in the parens".into(),
+                        label: "the `{…}` after `(…)` holds methods".into(),
+                    });
+                }
+                items = members;
+            }
+            fields
+        } else if self.at(TokKind::LeftBrace) {
+            let (fields, members) = self.struct_members();
+            items = members;
+            fields
         } else {
+            self.expect(TokKind::LeftBrace);
             vec![]
         };
+        // r[impl mimas.struct.members]
+        // members in the braces attach the way an `impl` would: the decl
+        // stays a shape, and its items land as a synthesized `impl V {…}`
+        // after it — the same desugar an enum's glyph impl takes. A nested
+        // decl can't (its `impl` would drop to the top level where the name
+        // isn't declared), so it reports instead.
+        if !items.is_empty() {
+            if self.depth == 1 {
+                let at = self.location(start);
+                let imp = Impl::new(
+                    Ident::new(name.lexeme.clone(), name.location),
+                    None,
+                    None,
+                    items,
+                );
+                self.pending
+                    .push(self.new_stmt(Item::new(imp.into(), at, false), start));
+            } else {
+                self.error(Misdirection {
+                    src: self.src(),
+                    at: self.location(start).into(),
+                    msg: "a nested struct's methods go in an `impl`".into(),
+                    label: "move the members to `impl Name { … }`".into(),
+                });
+            }
+        }
         Struct {
             name,
             type_params,
             fields,
+        }
+    }
+
+    /// A `{…}` body on a `struct`: `name: type` fields and `fn`/`const`/
+    /// `subscript` members interleaved — the members attach through the
+    /// `impl` the caller synthesizes. Fields keep their `,` separation; a
+    /// member ends itself the way it does in an `impl` block, and a `,`
+    /// after it is tolerated.
+    // r[impl mimas.struct.members]
+    fn struct_members(&mut self) -> (Vec<StructField>, Vec<Item>) {
+        let mut fields = vec![];
+        let mut items = vec![];
+        if !self.expect(TokKind::LeftBrace) {
+            return (fields, items);
+        }
+        while !self.eat(TokKind::RightBrace) {
+            let at = self.next;
+            let kind = if self.at(TokKind::Pub) {
+                self.nth(1)
+            } else {
+                self.peek()
+            };
+            match kind {
+                TokKind::Const | TokKind::Fn | TokKind::Hash => {
+                    let item = self.item();
+                    for attr in item.attrs() {
+                        if matches!(attr.name.lexeme.as_str(), "test" | "tests") {
+                            self.error(TestOnMethod {
+                                src: self.src(),
+                                at: attr.name.location.into(),
+                            });
+                        }
+                    }
+                    self.end_item(&item);
+                    items.push(item);
+                }
+                TokKind::Ident("subscript") if !self.subscript_is_field() => {
+                    let public = self.eat(TokKind::Pub);
+                    if self.accessor_intro() {
+                        items.extend(self.accessor_items(true, public));
+                    } else {
+                        items.push(self.member_generator_item(public));
+                    }
+                }
+                TokKind::Eof => {
+                    self.expect(TokKind::RightBrace);
+                    break;
+                }
+                _ => {
+                    fields.push(self.named_field());
+                    if !self.eat(TokKind::Comma) && !self.at(TokKind::RightBrace) {
+                        self.expect(TokKind::Comma);
+                    }
+                }
+            }
+            self.eat(TokKind::Comma);
+            // a member that consumed nothing can't loop forever
+            if self.next == at {
+                self.error(self.unexpected_token());
+                self.advance();
+            }
+        }
+        (fields, items)
+    }
+
+    /// `subscript: T` in a struct body is a field named `subscript`, not
+    /// an accessor — `subscript name(…)` and the `{get,set}` form stay
+    /// members.
+    fn subscript_is_field(&self) -> bool {
+        if self.at(TokKind::Pub) {
+            self.nth(2) == TokKind::Colon
+        } else {
+            self.nth(1) == TokKind::Colon
         }
     }
 
@@ -2047,6 +2182,55 @@ impl<'s> Parser<'s> {
     /// `opp Name {` — a type name and a brace after the word.
     fn opp_intro(&self) -> bool {
         matches!(self.nth(1), TokKind::Ident(_)) && matches!(self.nth(2), TokKind::LeftBrace)
+    }
+
+    /// `class V {`/`record V {` — `struct` under a softer word; `mimas
+    /// fmt` writes it back `struct`. Contextual like `opp`, gated a
+    /// shape tighter since `record` is a plausible call name: the word,
+    /// a name on its line, then `{`, a same-line `(`/`;`, or a generic
+    /// `<…>` the `{`/`(`/`;` of a decl follows — so `record x` calls,
+    /// `record(x)` applications, and `record x < y` comparisons stay
+    /// expressions.
+    // r[impl mimas.struct.alias]
+    fn struct_alias_intro(&self) -> bool {
+        if self.meta_at(1).newline || !matches!(self.nth(1), TokKind::Ident(_)) {
+            return false;
+        }
+        match self.nth(2) {
+            TokKind::LeftBrace => true,
+            TokKind::LeftParenthesis | TokKind::SemiColon => !self.meta_at(2).newline,
+            TokKind::Less => self.alias_generic_intro(),
+            _ => false,
+        }
+    }
+
+    /// `record V<A> {` — the `<…>` parameter list is only a decl shape
+    /// when it balances and a `{`/`(`/`;` follows it, against `record
+    /// x < y` comparisons.
+    fn alias_generic_intro(&self) -> bool {
+        let mut depth = 0usize;
+        let mut i = self.next + 2;
+        loop {
+            match self.tokens.get(i).map(|t| t.kind()) {
+                Some(TokKind::Less) => depth += 1,
+                Some(TokKind::Greater) => depth = depth.saturating_sub(1),
+                Some(TokKind::DoubleRightCaret) => depth = depth.saturating_sub(2),
+                Some(TokKind::Eof) | None => return false,
+                _ => {}
+            }
+            if depth == 0
+                && matches!(
+                    self.tokens.get(i).map(|t| t.kind()),
+                    Some(TokKind::Greater | TokKind::DoubleRightCaret)
+                )
+            {
+                return matches!(
+                    self.tokens.get(i + 1).map(|t| t.kind()),
+                    Some(TokKind::LeftBrace | TokKind::LeftParenthesis | TokKind::SemiColon)
+                );
+            }
+            i += 1;
+        }
     }
 
     /// `opp Sky { Sun, Moon }` — a dichotomy, as basic as an enum: two ends
