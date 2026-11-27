@@ -22,10 +22,14 @@ let TEST_VALUE = sum(scale(P { x: 1, y: 2 }, 3)) + tri(10) + pick(7);
 
 #[test]
 fn a_recompile_takes_every_body_from_the_cache() {
-    assert_eq!(value(PROGRAM), Captured::Int(9 + 55 + 8));
+    // the store is process-wide, and the other tests here compile PROGRAM
+    // in parallel: a `tri` of its own keeps this test's first compile cold
+    // whatever ran before it
+    let program = PROGRAM.replace("if n == 0 { 0 }", "if n <= 0 { 0 }");
+    assert_eq!(value(&program), Captured::Int(9 + 55 + 8));
     let (_, cold_misses) = compile::body_cache_stats();
     assert!(cold_misses > 0 || std::env::var("MIMAS_BODYCACHE").is_ok_and(|v| v == "0"));
-    assert_eq!(value(PROGRAM), Captured::Int(9 + 55 + 8));
+    assert_eq!(value(&program), Captured::Int(9 + 55 + 8));
     let (hits, misses) = compile::body_cache_stats();
     if std::env::var("MIMAS_BODYCACHE").is_ok_and(|v| v == "0") {
         return;
