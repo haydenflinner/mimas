@@ -813,6 +813,14 @@ impl<'a> Pass<'a> {
             Annotation::Inout(_, inner) => D::Place(Box::new(self.annotation(inner))),
             Annotation::Option(inner) | Annotation::Result(inner) => self.annotation(inner),
             Annotation::Array(inner, _) => D::Arr(Box::new(self.annotation(inner))),
+            // `{px}` and `{str: px}` track their values as `[px]` does
+            // (r[impl mimas.unit.dict])
+            Annotation::Dictionary(inner) | Annotation::Map(_, inner, _) => {
+                match self.annotation(inner) {
+                    D::Any => D::Any,
+                    d => D::Arr(Box::new(d)),
+                }
+            }
             Annotation::Tuple(parts) => {
                 D::Tuple(parts.iter().map(|p| self.annotation(p)).collect())
             }
@@ -1316,9 +1324,19 @@ impl<'a> Pass<'a> {
             }
             ExprKind::For(f) => {
                 let it = self.expr(&f.iterator);
+                let is_dict = matches!(
+                    self.solver.node_ty(f.iterator.id()),
+                    Some(Ty::Dict(..))
+                );
                 let item = match (&it, f.iterator.kind()) {
+                    // a dict walks `(key, value)` pairs (r[impl mimas.unit.dict])
+                    (D::Arr(inner), _) if is_dict => D::Tuple(vec![D::Any, (**inner).clone()]),
                     (D::Arr(inner), _) => (**inner).clone(),
                     (_, ExprKind::Range(_)) => PLAIN,
+                    // a generator is a `() -> T?`: `for` walks its `T`s, so
+                    // `subscript ws() -> px` gives `px` items
+                    // (r[impl mimas.unit.generator])
+                    (D::Fn(params, item), _) if params.is_empty() => (**item).clone(),
                     _ => D::Any,
                 };
                 self.bind(&f.binding, item);
@@ -1543,8 +1561,10 @@ impl<'a> Pass<'a> {
             // like `Name { … }` does r[impl mimas.record.context]
             Literal::Record(fields) => {
                 let decl = self.adt_name(e).and_then(|n| self.structs.get(&n).copied());
+                let mut gots = Vec::with_capacity(fields.len());
                 for (k, value) in fields {
                     let got = self.expr(value);
+                    gots.push(got.clone());
                     let Some(decl) = decl else { continue };
                     let field = decl
                         .fields
@@ -1557,6 +1577,15 @@ impl<'a> Pass<'a> {
                         );
                         self.expect_conv(&want, &got, value, &format!("field `{}`", k.lexeme));
                         self.range_check(value, &want);
+                    }
+                }
+                // a dict whose values share a unit tracks as a list of it, so
+                // `d["a"]` keeps the unit (r[impl mimas.unit.dict])
+                if decl.is_none() && !gots.is_empty() {
+                    if let Some(D::Q(first)) = gots.first()
+                        && gots.iter().all(|d| matches!(d, D::Q(x) if x == first))
+                    {
+                        return D::Arr(Box::new(D::Q(*first)));
                     }
                 }
                 D::Any
@@ -1770,7 +1799,30 @@ impl<'a> Pass<'a> {
             && let ExprKind::Ident(method) = right.kind()
         {
             let recv = self.expr(left);
-            let args: Vec<D> = c.arguments.iter().map(|a| self.expr(&a.value)).collect();
+            // a std combinator's closure learns its parameters from the
+            // list's items (r[impl mimas.unit.combinator])
+            let mut args: Vec<D> = Vec::with_capacity(c.arguments.len());
+            for a in &c.arguments {
+                if matches!(a.value.kind(), ExprKind::Closure(_))
+                    && let D::Arr(item) = &recv
+                {
+                    let item = (**item).clone();
+                    let hint = match method.lexeme.as_str() {
+                        "map" | "filter" | "find" | "any" | "all" | "flat_map" | "each"
+                        | "sort_by" | "min_by" | "max_by" | "sorted_by" | "count_by" => {
+                            Some(vec![item])
+                        }
+                        "fold" => args.first().map(|init| vec![init.clone(), item]),
+                        "mapi" => Some(vec![PLAIN, item]),
+                        "foldi" => args.first().map(|init| vec![PLAIN, init.clone(), item]),
+                        _ => None,
+                    };
+                    if let Some(h) = hint {
+                        self.closure_hints.insert(a.value.id(), h);
+                    }
+                }
+                args.push(self.expr(&a.value));
+            }
             if let D::Place(element) = &recv {
                 if method.lexeme == "read" {
                     return (**element).clone();
@@ -1828,6 +1880,15 @@ impl<'a> Pass<'a> {
         }
         let args: Vec<D> = c.arguments.iter().map(|a| self.expr(&a.value)).collect();
         if let ExprKind::Ident(callee) = c.left.kind() {
+            // `a ÷ b` is the prelude's `quot_rem(a, b)`: a whole quotient
+            // worth `a / b` and a remainder worth `a` (r[impl mimas.unit.combinator])
+            if let Some(f) = user
+                && callee.lexeme == "quot_rem"
+                && f.parameters.iter().all(|p| p.annotation.is_none())
+                && let [D::Q(a), D::Q(b)] = args.as_slice()
+            {
+                return D::Tuple(vec![D::Q(a.div(*b)), D::Q(*a)]);
+            }
             if let Some(f) = user {
                 return self.apply(f, c, &args, false, None);
             }
@@ -2407,6 +2468,26 @@ impl<'a> Pass<'a> {
                 D::Any
             }
             (D::Arr(inner), "pop" | "remove" | "get" | "max" | "min" | "sum") => (**inner).clone(),
+            // `⨅ xs` and `⨆ xs` keep the items' unit (r[impl mimas.unit.combinator])
+            (D::Arr(inner), "inf" | "sup" | "first" | "last") => (**inner).clone(),
+            (D::Arr(_), "filter" | "sorted" | "reversed" | "sorted_by" | "shuffled") => recv.clone(),
+            (D::Arr(inner), "find" | "min_by" | "max_by") => (**inner).clone(),
+            // `xs.map(f)` is a list of what `f` returns
+            (D::Arr(_), "map" | "mapi") => match args.first() {
+                Some(D::Fn(_, ret)) => D::Arr(ret.clone()),
+                _ => D::Any,
+            },
+            // `xs.fold(init, f)`: `f` returns the accumulator's unit
+            (D::Arr(_), "fold" | "foldi") => match (args.first(), args.get(1)) {
+                (Some(init), Some(D::Fn(_, ret))) => {
+                    if let Some(a) = c.arguments.get(1) {
+                        self.expect_conv(init, ret, &a.value, "`fold`'s step returns the wrong dimension");
+                    }
+                    init.clone()
+                }
+                (Some(init), _) => init.clone(),
+                _ => D::Any,
+            },
             (D::Arr(_), "len") => PLAIN,
             // `a ⋅ b` on two lists: the sum of products, worth the product
             // of the item units (r[impl mimas.glyph.dot.list])
