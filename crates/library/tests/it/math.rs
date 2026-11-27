@@ -2,7 +2,7 @@ test_run!(
     vec2_math,
     "use std::math::Vec2;",
     "Vec2::new(3.0, 4.0).length()" => "5.0",
-    "Vec2 { x = 1.0, y = 2.0 }.add(Vec2::new(2.0, 3.0)).y" => "5.0",
+    "(Vec2 { x = 1.0, y = 2.0 } + Vec2::new(2.0, 3.0)).y" => "5.0",
     "Vec2::new(0.0, 2.0).normalize().y" => "1.0",
     "Vec2::from_angle(0.0rad).x" => "1.0",
     "(Vec2::from_angle(90deg).y - 1.0).abs() < 1.0e-4" => "true",
@@ -109,4 +109,43 @@ test_run!(
     "Vec2::new(0.0, 2.0).norm().y" => "1.0",
     "Vec2::new(0.0, 0.0).dist(Vec2::new(3.0, 4.0))" => "5.0",
     "Vec3::new(0.0, 3.0, 4.0).len()" => "5.0",
+);
+
+// One `Vec2`, in f64, with the game kit's operators: `+ - * /` are
+// component-wise between two vectors and broadcast a scalar on either
+// side, `-v` negates; `dot` stays a method, `cmul` the complex multiply,
+// and the short and long names both work.
+// r[verify mimas.math.vec-ops]
+test_run!(
+    vec2_operator_forms,
+    "use std::math::Vec2; let a = Vec2::new(1.0, 2.0); let b = Vec2::new(3.0, 4.0);",
+    "a + b" => "{ 4.0, 6.0 }",
+    "a - b" => "{ -2.0, -2.0 }",
+    "a * b" => "{ 3.0, 8.0 }",
+    "(a / b).y" => "0.5",
+    "a * 2.0" => "{ 2.0, 4.0 }",
+    "2.0 * a" => "{ 2.0, 4.0 }",
+    "a * 2" => "{ 2.0, 4.0 }",
+    "a + 1.0" => "{ 2.0, 3.0 }",
+    "1.0 - a" => "{ 0.0, -1.0 }",
+    "a / 2.0" => "{ 0.5, 1.0 }",
+    "2.0 / a" => "{ 2.0, 1.0 }",
+    "-a" => "{ -1.0, -2.0 }",
+    "a.dot(b)" => "11.0",
+    "a.cmul(b)" => "{ -5.0, 10.0 }",
+    "a.lerp(b, 0.5)" => "{ 2.0, 3.0 }",
+    "a.len() == a.length()" => "true",
+    "a.norm() == a.normalize()" => "true",
+    "a.dist(b) == a.distance(b)" => "true",
+    "Vec2::new(0.0, 0.0).norm()" => "{ 0.0, 0.0 }",
+);
+
+// The components are f64: a value round-trips exactly.
+// r[verify mimas.math.vec2-f64]
+test_run!(
+    vec2_holds_f64,
+    "use std::math::{Vec2, Vec3}; let p = Vec2::new(0.1, 0.2);",
+    "p.x + p.y" => "0.30000000000000004",
+    "Vec2::new(1.0e300, 1.0).x" => "1e300",
+    "Vec3::new(1.0, 2.0, 3.0) * Vec3::new(1.0, 2.0, 3.0)" => "{ 1.0, 4.0, 9.0 }",
 );

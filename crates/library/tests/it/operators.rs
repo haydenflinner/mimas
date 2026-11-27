@@ -75,8 +75,8 @@ test_run!(
     "a != b" => "true",
 );
 
-// natives get the same surface: Vec2/Vec3 ship `mul`/`rmul`/`div`/`neg` in
-// std::math (component scale, symmetric `s * v`, scalar `/`, unary `-`).
+// natives get the same surface: std::math's Vec2/Vec3 register their
+// operators (component-wise, a scalar on either side, unary `-`).
 test_run!(
     vec2_native_ops,
     "use std::math::Vec2; let v = Vec2::new(3.0, 4.0);",

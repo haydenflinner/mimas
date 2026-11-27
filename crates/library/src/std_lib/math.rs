@@ -1,9 +1,10 @@
 use macros::native;
 use shared::{Literal, Ty};
 use vm::{
-    Rad,
+    BinOp, Ctx, Rad, RtErr, RtResult, UnaryOp, Val,
     api::Api,
-    glam::{Quat, Vec2, Vec3},
+    conversion::MimasType,
+    glam::{DQuat, DVec2, DVec3},
 };
 
 pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
@@ -30,11 +31,11 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
         Literal::Float(std::f64::consts::E),
         "Euler's number, the base of the natural logarithm, about `2.71828`.",
     );
-    m.add_adt::<Vec2>();
-    m.add_adt::<Vec3>();
-    m.add_adt::<Quat>();
-    api.add_assoc_of::<Vec2, _, _>("new", vec2_new);
-    api.add_assoc_of::<Vec2, _, _>("from_angle", vec2_from_angle);
+    m.add_adt::<DVec2>();
+    m.add_adt::<DVec3>();
+    m.add_adt::<DQuat>();
+    api.add_assoc_of::<DVec2, _, _>("new", vec2_new);
+    api.add_assoc_of::<DVec2, _, _>("from_angle", vec2_from_angle);
     api.add_method_named("length", vec2_length);
     api.add_method_named("normalize", vec2_normalize);
     // the game kit's short names, the same functions, so one `Vec2` serves
@@ -42,15 +43,14 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add_method_named("len", vec2_length);
     api.add_method_named("norm", vec2_normalize);
     api.add_method_named("dist", vec2_distance);
-    api.add_method_named("add", vec2_add);
-    api.add_method_named("sub", vec2_sub);
     api.add_method_named("scale", vec2_scale);
-    // the `*`, `/` and unary `-` operators — `mul`/`rmul` cover `v * s` and
-    // `s * v`, `div` is `v / s`, `neg` is `-v` (see `op_method_names` in solve)
-    api.add_method_named("mul", vec2_scale);
-    api.add_method_named("rmul", vec2_scale);
-    api.add_method_named("div", vec2_div);
     api.add_method_named("neg", vec2_neg);
+    // r[impl mimas.math.vec-ops] `+ - * /` are component-wise between two
+    // vectors and broadcast a scalar on either side, `-v` negates: the game
+    // kit's, GLSL's and glam's rules. `dot` stays a method and `cmul` the
+    // complex multiply.
+    api.add_bin_op::<DVec2, _>(vec2_bin);
+    api.add_unary_op::<DVec2, _>(vec2_un);
     api.add_method_named("dot", vec2_dot);
     api.add_method_named("distance", vec2_distance);
     api.add_method_named("angle", vec2_angle);
@@ -62,28 +62,26 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add_method_named("conj", vec2_conj);
     api.add_method_named("arg", vec2_angle);
     api.add_method_named("exp", vec2_exp);
-    api.add_assoc_of::<Vec2, _, _>("from_polar", vec2_from_polar);
-    api.add_assoc_of::<Vec3, _, _>("new", vec3_new);
+    api.add_assoc_of::<DVec2, _, _>("from_polar", vec2_from_polar);
+    api.add_assoc_of::<DVec3, _, _>("new", vec3_new);
     api.add_method_named("length", vec3_length);
     api.add_method_named("normalize", vec3_normalize);
     api.add_method_named("len", vec3_length);
     api.add_method_named("norm", vec3_normalize);
     api.add_method_named("dist", vec3_distance);
-    api.add_method_named("add", vec3_add);
-    api.add_method_named("sub", vec3_sub);
-    api.add_method_named("mul", vec3_scale);
-    api.add_method_named("rmul", vec3_scale);
-    api.add_method_named("div", vec3_div);
+    api.add_method_named("scale", vec3_scale);
     api.add_method_named("neg", vec3_neg);
+    api.add_bin_op::<DVec3, _>(vec3_bin);
+    api.add_unary_op::<DVec3, _>(vec3_un);
     api.add_method_named("dot", vec3_dot);
     api.add_method_named("cross", vec3_cross);
     api.add_method_named("distance", vec3_distance);
     api.add_method_named("angle", vec3_angle);
     api.add_method_named("lerp", vec3_lerp);
-    api.add_assoc_of::<Quat, _, _>("from_rotation_x", quat_from_rotation_x);
-    api.add_assoc_of::<Quat, _, _>("from_rotation_y", quat_from_rotation_y);
-    api.add_assoc_of::<Quat, _, _>("from_rotation_z", quat_from_rotation_z);
-    api.add_assoc_of::<Quat, _, _>("from_axis_angle", quat_from_axis_angle);
+    api.add_assoc_of::<DQuat, _, _>("from_rotation_x", quat_from_rotation_x);
+    api.add_assoc_of::<DQuat, _, _>("from_rotation_y", quat_from_rotation_y);
+    api.add_assoc_of::<DQuat, _, _>("from_rotation_z", quat_from_rotation_z);
+    api.add_assoc_of::<DQuat, _, _>("from_axis_angle", quat_from_axis_angle);
     api.add_method_named("rotate_z", quat_rotate_z);
     api.add_method_named("mul", quat_mul);
     api.add_method_named("conj", quat_conj);
@@ -93,6 +91,61 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add_method_named("axis", quat_axis);
     api.add_method_named("rotate", quat_rotate_vec3);
 }
+
+/// A scalar operand of a vector operator: `int` or `float`.
+fn scalar(v: Val<'_>) -> Option<f64> {
+    match v {
+        Val::Float(f) => Some(f),
+        Val::Int(i) => Some(i as f64),
+        _ => None,
+    }
+}
+
+/// One component of `a <op> b`.
+fn apply(op: BinOp, a: f64, b: f64) -> Option<f64> {
+    Some(match op {
+        BinOp::Add => a + b,
+        BinOp::Sub => a - b,
+        BinOp::Mult => a * b,
+        BinOp::Div => a / b,
+        _ => return None,
+    })
+}
+
+macro_rules! vec_ops {
+    ($bin:ident, $un:ident, $V:ident, ($($f:ident),+)) => {
+        /// Infix `v <op> v` (component-wise), `v <op> s` and `s <op> v`
+        /// (the scalar broadcast) for `+ - * /` (r[impl mimas.math.vec-ops]).
+        fn $bin<'gc>(ctx: Ctx<'gc>, a: Val<'gc>, b: Val<'gc>, op: BinOp) -> RtResult<Val<'gc>> {
+            let va = <$V as MimasType>::from_value(ctx, a).ok();
+            let vb = <$V as MimasType>::from_value(ctx, b).ok();
+            let bad = || RtErr::invalid_bin(a, op, b);
+            let out = match (va, vb, scalar(a), scalar(b)) {
+                (Some(x), Some(y), _, _) => $V::new($(apply(op, x.$f, y.$f).ok_or_else(bad)?),+),
+                (Some(x), _, _, Some(s)) => $V::new($(apply(op, x.$f, s).ok_or_else(bad)?),+),
+                (_, Some(y), Some(s), _) => $V::new($(apply(op, s, y.$f).ok_or_else(bad)?),+),
+                _ => return Err(bad()),
+            };
+            Ok(out.into_value(ctx))
+        }
+
+        /// `-v` and `+v`.
+        fn $un<'gc>(ctx: Ctx<'gc>, a: Val<'gc>, op: UnaryOp) -> RtResult<Val<'gc>> {
+            let Ok(v) = <$V as MimasType>::from_value(ctx, a) else {
+                return Err(RtErr::InvalidUnaryOperand);
+            };
+            let out = match op {
+                UnaryOp::Negative => -v,
+                UnaryOp::Positive => v,
+                _ => return Err(RtErr::InvalidUnaryOperand),
+            };
+            Ok(out.into_value(ctx))
+        }
+    };
+}
+
+vec_ops!(vec2_bin, vec2_un, DVec2, (x, y));
+vec_ops!(vec3_bin, vec3_un, DVec3, (x, y, z));
 
 /// Creates a vector from its `x` and `y` components. A struct literal such as
 /// `Vec2 { x = 3.0, y = 4.0 }` does the same.
@@ -104,8 +157,8 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
 /// let y = v.y; // 4.0
 /// ```
 #[native]
-fn vec2_new(x: f32, y: f32) -> Vec2 {
-    Vec2 { x, y }
+fn vec2_new(x: f64, y: f64) -> DVec2 {
+    DVec2 { x, y }
 }
 
 /// Creates a vector of length `1.0` pointing at `angle`, measured from the positive
@@ -118,8 +171,8 @@ fn vec2_new(x: f32, y: f32) -> Vec2 {
 /// let x = right.x; // 1.0
 /// ```
 #[native]
-fn vec2_from_angle(angle: Rad) -> Vec2 {
-    Vec2::from_angle(angle.0 as f32)
+fn vec2_from_angle(angle: Rad) -> DVec2 {
+    DVec2::from_angle(angle.0)
 }
 
 /// Returns the vector's straight-line length, `sqrt(x * x + y * y)`.
@@ -130,7 +183,7 @@ fn vec2_from_angle(angle: Rad) -> Vec2 {
 /// let d = Vec2::new(3.0, 4.0).length(); // 5.0
 /// ```
 #[native]
-fn vec2_length(v: Vec2) -> f32 {
+fn vec2_length(v: DVec2) -> f64 {
     v.length()
 }
 
@@ -143,37 +196,8 @@ fn vec2_length(v: Vec2) -> f32 {
 /// let d = u.length(); // 1.0
 /// ```
 #[native]
-fn vec2_normalize(v: Vec2) -> Vec2 {
+fn vec2_normalize(v: DVec2) -> DVec2 {
     v.normalize_or_zero()
-}
-
-/// Returns the sum of the two vectors, adding them component by component.
-///
-/// ```mimas
-/// use std::math::Vec2;
-///
-/// let v = Vec2::new(3.0, 4.0).add(Vec2::new(1.0, 1.0));
-/// let x = v.x; // 4.0
-/// ```
-#[native]
-fn vec2_add(v: Vec2, other: Vec2) -> Vec2 {
-    v + other
-}
-
-/// Returns this vector minus `other`, component by component. `b.sub(a)` is the vector that
-/// points from `a` to `b`.
-///
-/// ```mimas
-/// use std::math::Vec2;
-///
-/// let player = Vec2::new(1.0, 1.0);
-/// let enemy = Vec2::new(4.0, 5.0);
-/// let offset = enemy.sub(player);
-/// let x = offset.x; // 3.0
-/// ```
-#[native]
-fn vec2_sub(v: Vec2, other: Vec2) -> Vec2 {
-    v - other
 }
 
 /// Returns the vector with both components multiplied by `by`.
@@ -185,22 +209,8 @@ fn vec2_sub(v: Vec2, other: Vec2) -> Vec2 {
 /// let x = half.x; // 1.5
 /// ```
 #[native]
-fn vec2_scale(v: Vec2, by: f32) -> Vec2 {
+fn vec2_scale(v: DVec2, by: f64) -> DVec2 {
     v * by
-}
-
-/// `v / by` — componentwise division. `v.div(2.0)` is also the `/` operator's method,
-/// so `v / 2.0` spells the same thing.
-///
-/// ```mimas
-/// use std::math::Vec2;
-///
-/// let half = Vec2::new(3.0, 4.0) / 2.0;
-/// let x = half.x; // 1.5
-/// ```
-#[native]
-fn vec2_div(v: Vec2, by: f32) -> Vec2 {
-    v / by
 }
 
 /// `-v` — the unary `-` operator's method.
@@ -211,7 +221,7 @@ fn vec2_div(v: Vec2, by: f32) -> Vec2 {
 /// let backwards = -Vec2::new(1.0, 0.0); // Vec2(-1, 0)
 /// ```
 #[native]
-fn vec2_neg(v: Vec2) -> Vec2 {
+fn vec2_neg(v: DVec2) -> DVec2 {
     -v
 }
 
@@ -223,20 +233,8 @@ fn vec2_neg(v: Vec2) -> Vec2 {
 /// let dbl = Vec3 { x = 1.0, y = 0.0, z = 2.0 } * 2.0;
 /// ```
 #[native]
-fn vec3_scale(v: Vec3, by: f32) -> Vec3 {
+fn vec3_scale(v: DVec3, by: f64) -> DVec3 {
     v * by
-}
-
-/// `Vec3`'s `/` — `v / s`.
-///
-/// ```mimas
-/// use std::math::Vec3;
-///
-/// let half = Vec3 { x = 1.0, y = 0.0, z = 2.0 } / 2.0;
-/// ```
-#[native]
-fn vec3_div(v: Vec3, by: f32) -> Vec3 {
-    v / by
 }
 
 /// `Vec3`'s unary `-`.
@@ -247,7 +245,7 @@ fn vec3_div(v: Vec3, by: f32) -> Vec3 {
 /// let down = -Vec3 { x = 0.0, y = 0.0, z = 1.0 };
 /// ```
 #[native]
-fn vec3_neg(v: Vec3) -> Vec3 {
+fn vec3_neg(v: DVec3) -> DVec3 {
     -v
 }
 
@@ -260,7 +258,7 @@ fn vec3_neg(v: Vec3) -> Vec3 {
 /// let a = Vec2::new(3.0, 4.0).dot(Vec2::new(1.0, 0.0)); // 3.0
 /// ```
 #[native]
-fn vec2_dot(v: Vec2, other: Vec2) -> f32 {
+fn vec2_dot(v: DVec2, other: DVec2) -> f64 {
     v.dot(other)
 }
 
@@ -272,7 +270,7 @@ fn vec2_dot(v: Vec2, other: Vec2) -> f32 {
 /// let d = Vec2::new(0.0, 0.0).distance(Vec2::new(3.0, 4.0)); // 5.0
 /// ```
 #[native]
-fn vec2_distance(v: Vec2, other: Vec2) -> f32 {
+fn vec2_distance(v: DVec2, other: DVec2) -> f64 {
     v.distance(other)
 }
 
@@ -287,7 +285,7 @@ fn vec2_distance(v: Vec2, other: Vec2) -> f32 {
 /// let a = Vec2::new(1.0, 0.0).angle(); // 0.0rad
 /// ```
 #[native]
-fn vec2_angle(v: Vec2) -> Rad {
+fn vec2_angle(v: DVec2) -> Rad {
     Rad(v.to_angle() as f64)
 }
 
@@ -304,7 +302,7 @@ fn vec2_angle(v: Vec2) -> Rad {
 /// let y = quarter.y; // 5.0
 /// ```
 #[native]
-fn vec2_lerp(v: Vec2, other: Vec2, t: f32) -> Vec2 {
+fn vec2_lerp(v: DVec2, other: DVec2, t: f64) -> DVec2 {
     v.lerp(other, t)
 }
 
@@ -316,7 +314,7 @@ fn vec2_lerp(v: Vec2, other: Vec2, t: f32) -> Vec2 {
 /// let d = Vec3 { x = 2.0, y = 3.0, z = 6.0 }.length(); // 7.0
 /// ```
 #[native]
-fn vec3_length(v: Vec3) -> f32 {
+fn vec3_length(v: DVec3) -> f64 {
     v.length()
 }
 
@@ -329,7 +327,7 @@ fn vec3_length(v: Vec3) -> f32 {
 /// let z = u.z; // 1.0
 /// ```
 #[native]
-fn vec3_normalize(v: Vec3) -> Vec3 {
+fn vec3_normalize(v: DVec3) -> DVec3 {
     v.normalize_or_zero()
 }
 
@@ -341,8 +339,8 @@ fn vec3_normalize(v: Vec3) -> Vec3 {
 /// let pitch = Quat::from_rotation_x(15deg);
 /// ```
 #[native]
-fn quat_from_rotation_x(angle: Rad) -> Quat {
-    Quat::from_rotation_x(angle.0 as f32)
+fn quat_from_rotation_x(angle: Rad) -> DQuat {
+    DQuat::from_rotation_x(angle.0)
 }
 
 /// Creates a rotation of `angle` around the y axis.
@@ -353,8 +351,8 @@ fn quat_from_rotation_x(angle: Rad) -> Quat {
 /// let yaw = Quat::from_rotation_y(0.25turn);
 /// ```
 #[native]
-fn quat_from_rotation_y(angle: Rad) -> Quat {
-    Quat::from_rotation_y(angle.0 as f32)
+fn quat_from_rotation_y(angle: Rad) -> DQuat {
+    DQuat::from_rotation_y(angle.0)
 }
 
 /// Creates a rotation of `angle` around the z axis. For 2D work, this is a turn within the x-y
@@ -366,8 +364,8 @@ fn quat_from_rotation_y(angle: Rad) -> Quat {
 /// let quarter_turn = Quat::from_rotation_z(90deg);
 /// ```
 #[native]
-fn quat_from_rotation_z(angle: Rad) -> Quat {
-    Quat::from_rotation_z(angle.0 as f32)
+fn quat_from_rotation_z(angle: Rad) -> DQuat {
+    DQuat::from_rotation_z(angle.0)
 }
 
 /// Creates a rotation of `angle` around `axis` (which needn't be unit — it's normalized).
@@ -378,8 +376,8 @@ fn quat_from_rotation_z(angle: Rad) -> Quat {
 /// let flip = Quat::from_axis_angle(Vec3::new(0.0, 1.0, 0.0), 0.5turn);
 /// ```
 #[native]
-fn quat_from_axis_angle(axis: Vec3, angle: Rad) -> Quat {
-    Quat::from_axis_angle(axis, angle.0 as f32)
+fn quat_from_axis_angle(axis: DVec3, angle: Rad) -> DQuat {
+    DQuat::from_axis_angle(axis, angle.0)
 }
 
 /// Returns the rotation turned a further `angle` around its own z axis.
@@ -391,8 +389,8 @@ fn quat_from_axis_angle(axis: Vec3, angle: Rad) -> Quat {
 /// let turned = facing.rotate_z(90deg); // a quarter turn
 /// ```
 #[native]
-fn quat_rotate_z(q: Quat, angle: Rad) -> Quat {
-    q * Quat::from_rotation_z(angle.0 as f32)
+fn quat_rotate_z(q: DQuat, angle: Rad) -> DQuat {
+    q * DQuat::from_rotation_z(angle.0)
 }
 
 /// `q * other` — the `*` operator: rotations compose, `q * r` being `r`'s turn then `q`'s.
@@ -404,7 +402,7 @@ fn quat_rotate_z(q: Quat, angle: Rad) -> Quat {
 /// check (both.angle().to("deg") - 90.0).abs() < 0.001;
 /// ```
 #[native]
-fn quat_mul(q: Quat, other: Quat) -> Quat {
+fn quat_mul(q: DQuat, other: DQuat) -> DQuat {
     q * other
 }
 
@@ -417,7 +415,7 @@ fn quat_mul(q: Quat, other: Quat) -> Quat {
 /// let back = Quat::from_rotation_z(30deg).conj();
 /// ```
 #[native]
-fn quat_conj(q: Quat) -> Quat {
+fn quat_conj(q: DQuat) -> DQuat {
     q.conjugate()
 }
 
@@ -429,7 +427,7 @@ fn quat_conj(q: Quat) -> Quat {
 /// let eye = Quat::from_rotation_z(30deg) * Quat::from_rotation_z(30deg).inverse();
 /// ```
 #[native]
-fn quat_inverse(q: Quat) -> Quat {
+fn quat_inverse(q: DQuat) -> DQuat {
     q.inverse()
 }
 
@@ -443,7 +441,7 @@ fn quat_inverse(q: Quat) -> Quat {
 /// check (mid.angle().to("deg") - 45.0).abs() < 0.001;
 /// ```
 #[native]
-fn quat_slerp(q: Quat, other: Quat, t: f32) -> Quat {
+fn quat_slerp(q: DQuat, other: DQuat, t: f64) -> DQuat {
     q.slerp(other, t)
 }
 
@@ -455,7 +453,7 @@ fn quat_slerp(q: Quat, other: Quat, t: f32) -> Quat {
 /// check (Quat::from_rotation_z(90deg).angle().to("deg") - 90.0).abs() < 0.001;
 /// ```
 #[native]
-fn quat_angle(q: Quat) -> Rad {
+fn quat_angle(q: DQuat) -> Rad {
     Rad(q.to_axis_angle().1 as f64)
 }
 
@@ -467,7 +465,7 @@ fn quat_angle(q: Quat) -> Rad {
 /// check (Quat::from_axis_angle(Vec3::new(0.0, 0.0, 1.0), 30deg).axis().z - 1.0).abs() < 0.001;
 /// ```
 #[native]
-fn quat_axis(q: Quat) -> Vec3 {
+fn quat_axis(q: DQuat) -> DVec3 {
     q.to_axis_angle().0
 }
 
@@ -480,7 +478,7 @@ fn quat_axis(q: Quat) -> Vec3 {
 /// check (east.y - 1.0).abs() < 0.001;
 /// ```
 #[native]
-fn quat_rotate_vec3(q: Quat, v: Vec3) -> Vec3 {
+fn quat_rotate_vec3(q: DQuat, v: DVec3) -> DVec3 {
     q * v
 }
 
@@ -495,32 +493,8 @@ fn quat_rotate_vec3(q: Quat, v: Vec3) -> Vec3 {
 /// let v = Vec3::new(1.0, 2.0, 3.0);
 /// ```
 #[native]
-fn vec3_new(x: f32, y: f32, z: f32) -> Vec3 {
-    Vec3 { x, y, z }
-}
-
-/// Returns the sum of the two vectors, component by component.
-///
-/// ```mimas
-/// use std::math::Vec3;
-///
-/// check (Vec3::new(1.0, 0.0, 0.0) + Vec3::new(0.0, 2.0, 0.0)).y == 2.0;
-/// ```
-#[native]
-fn vec3_add(v: Vec3, other: Vec3) -> Vec3 {
-    v + other
-}
-
-/// `v - other`, component by component.
-///
-/// ```mimas
-/// use std::math::Vec3;
-///
-/// check (Vec3::new(3.0, 4.0, 0.0) - Vec3::new(1.0, 1.0, 0.0)).x == 2.0;
-/// ```
-#[native]
-fn vec3_sub(v: Vec3, other: Vec3) -> Vec3 {
-    v - other
+fn vec3_new(x: f64, y: f64, z: f64) -> DVec3 {
+    DVec3 { x, y, z }
 }
 
 /// Returns the dot product. For two unit vectors it's the cosine of the angle between them.
@@ -531,7 +505,7 @@ fn vec3_sub(v: Vec3, other: Vec3) -> Vec3 {
 /// check Vec3::new(1.0, 0.0, 0.0).dot(Vec3::new(0.0, 1.0, 0.0)) == 0.0;
 /// ```
 #[native]
-fn vec3_dot(v: Vec3, other: Vec3) -> f32 {
+fn vec3_dot(v: DVec3, other: DVec3) -> f64 {
     v.dot(other)
 }
 
@@ -544,7 +518,7 @@ fn vec3_dot(v: Vec3, other: Vec3) -> f32 {
 /// check Vec3::new(1.0, 0.0, 0.0).cross(Vec3::new(0.0, 1.0, 0.0)).z == 1.0;
 /// ```
 #[native]
-fn vec3_cross(v: Vec3, other: Vec3) -> Vec3 {
+fn vec3_cross(v: DVec3, other: DVec3) -> DVec3 {
     v.cross(other)
 }
 
@@ -556,7 +530,7 @@ fn vec3_cross(v: Vec3, other: Vec3) -> Vec3 {
 /// check Vec3::new(0.0, 0.0, 0.0).distance(Vec3::new(2.0, 3.0, 6.0)) == 7.0;
 /// ```
 #[native]
-fn vec3_distance(v: Vec3, other: Vec3) -> f32 {
+fn vec3_distance(v: DVec3, other: DVec3) -> f64 {
     v.distance(other)
 }
 
@@ -568,7 +542,7 @@ fn vec3_distance(v: Vec3, other: Vec3) -> f32 {
 /// check (Vec3::new(1.0, 0.0, 0.0).angle(Vec3::new(0.0, 1.0, 0.0)).to("deg") - 90.0).abs() < 0.001;
 /// ```
 #[native]
-fn vec3_angle(v: Vec3, other: Vec3) -> Rad {
+fn vec3_angle(v: DVec3, other: DVec3) -> Rad {
     Rad(v.angle_between(other) as f64)
 }
 
@@ -580,7 +554,7 @@ fn vec3_angle(v: Vec3, other: Vec3) -> Rad {
 /// check Vec3::new(0.0, 0.0, 0.0).lerp(Vec3::new(4.0, 8.0, 0.0), 0.25).y == 2.0;
 /// ```
 #[native]
-fn vec3_lerp(v: Vec3, other: Vec3, t: f32) -> Vec3 {
+fn vec3_lerp(v: DVec3, other: DVec3, t: f64) -> DVec3 {
     v.lerp(other, t)
 }
 
@@ -597,7 +571,7 @@ fn vec3_lerp(v: Vec3, other: Vec3, t: f32) -> Vec3 {
 /// check Vec2::new(0.0, 1.0).cmul(Vec2::new(0.0, 1.0)).x == -1.0;
 /// ```
 #[native]
-fn vec2_cmul(v: Vec2, other: Vec2) -> Vec2 {
+fn vec2_cmul(v: DVec2, other: DVec2) -> DVec2 {
     v.rotate(other)
 }
 
@@ -609,8 +583,8 @@ fn vec2_cmul(v: Vec2, other: Vec2) -> Vec2 {
 /// check Vec2::new(3.0, 4.0).conj().y == -4.0;
 /// ```
 #[native]
-fn vec2_conj(v: Vec2) -> Vec2 {
-    Vec2::new(v.x, -v.y)
+fn vec2_conj(v: DVec2) -> DVec2 {
+    DVec2::new(v.x, -v.y)
 }
 
 /// Creates the complex number `r` at `angle` — `Vec2::from_angle(angle) * r`.
@@ -622,8 +596,8 @@ fn vec2_conj(v: Vec2) -> Vec2 {
 /// check v.y == 2.0;
 /// ```
 #[native]
-fn vec2_from_polar(r: f32, angle: Rad) -> Vec2 {
-    Vec2::from_angle(angle.0 as f32) * r
+fn vec2_from_polar(r: f64, angle: Rad) -> DVec2 {
+    DVec2::from_angle(angle.0) * r
 }
 
 /// The complex exponential: `(x, y).exp()` is `e^x` at angle `y` — where the
@@ -637,6 +611,6 @@ fn vec2_from_polar(r: f32, angle: Rad) -> Vec2 {
 /// check (z.x + 1.0).abs() < 1e-6;
 /// ```
 #[native]
-fn vec2_exp(v: Vec2) -> Vec2 {
-    Vec2::from_angle(v.y) * v.x.exp()
+fn vec2_exp(v: DVec2) -> DVec2 {
+    DVec2::from_angle(v.y) * v.x.exp()
 }
