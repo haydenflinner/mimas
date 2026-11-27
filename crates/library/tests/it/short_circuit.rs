@@ -252,3 +252,29 @@ test_run!(
     "callbacks[1]()" => "17",
     "standalone()" => "29",
 );
+
+// A line that starts `|| {` or `|| ->` opens a closure, never the right
+// side of an OR (combo C17, x03b): the closure is a statement of its own,
+// or the value a body ends with.
+// r[verify mimas.stmt.double-pipe]
+test_run!(
+    a_line_starting_with_a_closure_body_is_a_closure,
+    "let i = 0
+     || { 1 }
+     fn mk() -> () -> int {
+         let n = 4
+         || { n * 2 }
+     }
+     fn gen() -> () -> int? {
+         let n = [0]
+         || -> int? { n[0] += 1; if n[0] < 3 { n[0] } else { null } }
+     }
+     let total = 0
+     for v in gen() { total += v }
+     let b = false
+         || true",
+    "i" => "0",
+    "mk()()" => "8",
+    "total" => "3",
+    "b" => "true",
+);

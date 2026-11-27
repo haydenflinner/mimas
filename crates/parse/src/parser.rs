@@ -3567,8 +3567,13 @@ impl<'s> Parser<'s> {
             };
             // r[impl mimas.stmt.double-pipe]
             // After a left operand, `||` continues the expression across a newline.
-            // Where a new expression is expected, prefix `||` still opens a closure.
-            let continues = self.infix_binds() || self.at(TokKind::DoublePipe);
+            // Where a new expression is expected, prefix `||` still opens a closure,
+            // and so does a line that starts `|| {` or `|| ->`: a closure body or
+            // its return type, never the right side of an OR (`let i = 0` then
+            // `|| { 1 }` is a statement of its own).
+            let continues = self.infix_binds()
+                || (self.at(TokKind::DoublePipe)
+                    && !matches!(self.nth(1), TokKind::LeftBrace | TokKind::Arrow));
             if !(min_power..max_power).contains(&power) || !continues {
                 break;
             }
