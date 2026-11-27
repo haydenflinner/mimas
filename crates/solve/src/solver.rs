@@ -5731,6 +5731,19 @@ impl Solver {
         Ok(ty)
     }
 
+    /// Whether the adt implements the pact named `pact` (`Show`, `Ord`).
+    pub(crate) fn implements_named(&self, aid: AdtId, pact: &str) -> bool {
+        self.pacts
+            .iter()
+            .any(|(pid, p)| p.name == pact && self.pact_impls.contains(&(pid, aid)))
+    }
+
+    /// Whether a value of `ty` writes itself through `Show` (a user adt that
+    /// implements it; the built-in scalars keep their own display).
+    pub(crate) fn shows(&self, ty: &Ty) -> bool {
+        matches!(ty, Ty::Adt(aid, _) | Ty::Identity(aid, _) if self.implements_named(*aid, "Show"))
+    }
+
     /// Lists a hoisted item among its module's exports. An item of a named
     /// `//# page:` region also exports as `region::name` (`button-kit::click`),
     /// and never takes the bare name from the page's own item.

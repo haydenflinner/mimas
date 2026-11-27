@@ -1,0 +1,32 @@
+//! The protocols a type joins so the language's own forms work on it.
+//! `Show` is how `print` and an f-string write a value, and `Ord` is how
+//! `<`, `<=`, `>` and `>=` compare one. A user type joins with an `impl`,
+//! the same way the built-in types below do. (`for x in v` walks any
+//! value whose type has `fn iter(self) -> () -> T?`; a pact cannot name
+//! the element type `T` yet, so that protocol has no pact of its own.)
+
+/// How a value writes itself: `print(v)` and `f"{v}"` call `show` when the
+/// value's type implements `Show`.
+pact Show {
+    fn show(self) -> str;
+}
+
+/// A total order. `cmp` answers a negative number, zero or a positive
+/// number. `<`, `<=`, `>` and `>=` on a type that implements `Ord` and has
+/// no `lt` compare through it.
+pact Ord {
+    fn cmp(self, o: Self) -> int;
+}
+
+impl Ord for int {
+    fn cmp(self, o: int) -> int { if self < o { -1 } else if self > o { 1 } else { 0 } }
+}
+
+impl Ord for float {
+    fn cmp(self, o: float) -> int { if self < o { -1 } else if self > o { 1 } else { 0 } }
+}
+
+impl Ord for str {
+    fn cmp(self, o: str) -> int { if self < o { -1 } else if self > o { 1 } else { 0 } }
+}
+

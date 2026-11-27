@@ -60,6 +60,7 @@ mod reflect;
 mod regions;
 mod pact_keys;
 mod struct_forms;
+mod protocols;
 mod rng;
 mod runtime_errors;
 mod scripts;

@@ -1147,6 +1147,33 @@ impl Solve for Break {
 
 impl Solve for Call {
     fn solve(&self, id: NodeId, location: Location, solver: &mut Solver) -> Result<Ty> {
+        // `print(v)` on a type that implements `Show` prints `v.show()`
+        // r[impl mimas.protocol.show]
+        if self.left.as_ident().is_some_and(|i| i.lexeme == "print")
+            && self.arguments.len() == 1
+            && self.arguments[0].name.is_none()
+            && solver
+                .ribs
+                .resolve(self.left.as_ident().unwrap())
+                .is_some_and(|d| solver.dec_to_native.contains_key(&d))
+        {
+            let ty = self.arguments[0].value.query(solver)?.normalized(solver);
+            if solver.shows(&ty) {
+                let rewritten = Expr::new(
+                    ExprKind::Call(Call {
+                        left: self.left.clone(),
+                        arguments: vec![Argument {
+                            name: None,
+                            value: show_call(&self.arguments[0].value),
+                        }],
+                    }),
+                    location,
+                );
+                let ty = rewritten.query(solver)?;
+                solver.rewrites.insert(id, rewritten);
+                return Ok(ty);
+            }
+        }
         if let Some(ty) = solver.validate_place_target(id, self, location)? { return Ok(ty); }
         if let Some(ty) = solver.borrow_place(id, self, location)? { return Ok(ty); }
         if let Some(ty) = solver.yield_place(id, self, location)? { return Ok(ty); }
@@ -2363,6 +2390,38 @@ impl Solve for Equality {
             {
                 return Ok(ty);
             }
+            // a type that implements `Ord` and has no `lt`: `a < b` is
+            // `a.cmp(b) < 0` r[impl mimas.protocol.ord]
+            if let Ty::Adt(aid, _) | Ty::Identity(aid, _) = &lhs_n
+                && solver.implements_named(*aid, "Ord")
+            {
+                let at = location;
+                let cmp = Expr::new(
+                    ExprKind::Call(Call {
+                        left: Expr::new(
+                            ExprKind::Access(Access::Dot {
+                                left: self.left.clone(),
+                                right: Expr::new(ExprKind::Ident(Ident::new("cmp", at)), at),
+                                kind: parse::AccessKind::Direct,
+                            }),
+                            at,
+                        ),
+                        arguments: vec![Argument { name: None, value: self.right.clone() }],
+                    }),
+                    at,
+                );
+                let rewritten = Expr::new(
+                    ExprKind::Equality(Equality {
+                        left: cmp,
+                        op: self.op,
+                        right: Expr::new(ExprKind::Literal(Literal::Int(0)), at),
+                    }),
+                    at,
+                );
+                let ty = rewritten.query(solver)?;
+                solver.rewrites.insert(id, rewritten);
+                return Ok(ty);
+            }
             // unresolved operands on a relational op (`r.x <= r.w` inside `Rect<T>`):
             // anywhere the comparison could run both sides already agree, so a shared
             // var settles to `bool` and a lone vid pins to the concrete operand's type
@@ -2757,6 +2816,41 @@ impl Solve for For {
                     Ty::Tuple(vec![key.as_ref().clone(), value.as_ref().clone()]),
                 )?;
             }
+            // a type with `fn iter(self) -> () -> T?` walks through its pull:
+            // `for x in v` is `for x in v.iter()` r[impl mimas.protocol.iter]
+            Ty::Adt(aid, _) | Ty::Identity(aid, _)
+                if solver.adts[*aid].impls.get("iter").is_some_and(|f| {
+                    matches!(&f.ty, Ty::Fn(h) if h.is_method && h.parameters.len() == 1)
+                }) =>
+            {
+                solver.ribs.pop();
+                let at = self.iterator.location();
+                let pull = Expr::new(
+                    ExprKind::Call(Call {
+                        left: Expr::new(
+                            ExprKind::Access(Access::Dot {
+                                left: self.iterator.clone(),
+                                right: Expr::new(ExprKind::Ident(Ident::new("iter", at)), at),
+                                kind: parse::AccessKind::Direct,
+                            }),
+                            at,
+                        ),
+                        arguments: vec![],
+                    }),
+                    at,
+                );
+                let rewritten = Expr::new(
+                    ExprKind::For(For {
+                        binding: self.binding.clone(),
+                        iterator: pull,
+                        body: self.body.clone(),
+                    }),
+                    location,
+                );
+                let ty = rewritten.query(solver)?;
+                solver.rewrites.insert(id, rewritten);
+                return Ok(ty);
+            }
             other => Err(InvalidIterTarget {
                 src: solver.src(self.iterator.location()),
                 at: self.iterator.location().into(),
@@ -2882,14 +2976,56 @@ impl Solve for For {
 }
 
 impl Solve for FString {
-    fn solve(&self, _id: NodeId, _location: Location, solver: &mut Solver) -> Result<Ty> {
+    fn solve(&self, id: NodeId, location: Location, solver: &mut Solver) -> Result<Ty> {
+        let mut shows = false;
         for part in &self.parts {
             if let FStringPart::Expr(expr) = part {
-                expr.query(solver)?;
+                let ty = expr.query(solver)?.normalized(solver);
+                shows |= solver.shows(&ty);
             }
+        }
+        // a part whose type implements `Show` writes `part.show()`
+        // r[impl mimas.protocol.show]
+        if shows {
+            let mut parts = Vec::with_capacity(self.parts.len());
+            for part in &self.parts {
+                parts.push(match part {
+                    FStringPart::Expr(expr)
+                        if {
+                            let ty = expr.query(solver)?.normalized(solver);
+                            solver.shows(&ty)
+                        } =>
+                    {
+                        FStringPart::Expr(show_call(expr))
+                    }
+                    other => other.clone(),
+                });
+            }
+            let rewritten = Expr::new(ExprKind::FString(FString { parts }), location);
+            rewritten.query(solver)?;
+            solver.rewrites.insert(id, rewritten);
         }
         Ok(Ty::Str)
     }
+}
+
+/// `expr.show()`, for a value whose type implements `Show`.
+fn show_call(expr: &Expr) -> Expr {
+    let at = expr.location();
+    Expr::new(
+        ExprKind::Call(Call {
+            left: Expr::new(
+                ExprKind::Access(Access::Dot {
+                    left: expr.clone(),
+                    right: Expr::new(ExprKind::Ident(Ident::new("show", at)), at),
+                    kind: parse::AccessKind::Direct,
+                }),
+                at,
+            ),
+            arguments: vec![],
+        }),
+        at,
+    )
 }
 
 impl Solve for Function {

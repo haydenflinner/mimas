@@ -103,6 +103,10 @@ pub const INCREMENTAL_SRC: &str = include_str!("incremental.mim");
 #[cfg(feature = "dataframe")]
 pub const ZSET_SRC: &str = include_str!("zset.mim");
 
+/// `Show` and `Ord`, the protocols `print`, f-strings and `<` read
+/// (`protocols.mim`), shipped with std. r[impl mimas.protocol.show]
+pub const PROTOCOLS_SRC: &str = include_str!("protocols.mim");
+
 /// `Arbitrary`, the pact a law's expansion uses to draw and shrink sample
 /// values (`arb.mim`), shipped with std.
 pub const ARB_SRC: &str = include_str!("arb.mim");
@@ -125,6 +129,7 @@ pub fn codegen<'gc>(api: &mut Api<'_, 'gc>) {
 pub fn std<'gc>(api: &mut Api<'_, 'gc>) {
     api.library.add_source("<std::opp>", OPP_SRC);
     api.library.add_source("<std::approx>", APPROX_SRC);
+    api.library.add_source("<std::protocols>", PROTOCOLS_SRC);
     api.library.add_source("<std::arb>", ARB_SRC);
     api.library.add_source("<std::group>", GROUP_SRC);
     api.library.add_source("<std::incremental>", INCREMENTAL_SRC);
