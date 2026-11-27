@@ -6664,6 +6664,13 @@ impl<'s> Parser<'s> {
             None => Annotation::Unit,
             // no use complaining about the parens when what's inside them didn't parse
             Some(inner @ (Annotation::Bounds(_) | Annotation::Poison(_))) => inner,
+            // `((int) -> int)?`: the parentheses group a function type so a
+            // postfix `?`/`!` takes the whole function (r[impl mimas.call.optional-fn])
+            Some(inner @ Annotation::Function(..))
+                if matches!(self.peek(), TokKind::Hook | TokKind::Bang) =>
+            {
+                inner
+            }
             Some(single) => {
                 self.error(SingleTypeParens {
                     src: self.src(),

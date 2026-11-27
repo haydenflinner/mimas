@@ -1147,6 +1147,41 @@ impl Solve for Break {
 
 impl Solve for Call {
     fn solve(&self, id: NodeId, location: Location, solver: &mut Solver) -> Result<Ty> {
+        // `v(…)` on a value whose type has `fn call(self, …)` is `v.call(…)`;
+        // a type name called stays its constructor (r[impl mimas.call.call-method])
+        if let Some(ident) = self.left.as_ident()
+            && let Some(dec) = solver.ribs.resolve(ident)
+            && matches!(
+                solver.decs[dec].kind,
+                DecKind::Local | DecKind::Global | DecKind::LoopVar
+            )
+        {
+            let ty = self.left.query(solver)?.normalized(solver);
+            if let Ty::Adt(aid, _) | Ty::Identity(aid, _) = ty
+                && solver.adts[aid].impls.get("call").is_some_and(|f| {
+                    matches!(&f.ty, Ty::Fn(h) if h.is_method)
+                })
+            {
+                let at = location;
+                let rewritten = Expr::new(
+                    ExprKind::Call(Call {
+                        left: Expr::new(
+                            ExprKind::Access(Access::Dot {
+                                left: self.left.clone(),
+                                right: Expr::new(ExprKind::Ident(Ident::new("call", at)), at),
+                                kind: parse::AccessKind::Direct,
+                            }),
+                            at,
+                        ),
+                        arguments: self.arguments.clone(),
+                    }),
+                    at,
+                );
+                let ty = rewritten.query(solver)?;
+                solver.rewrites.insert(id, rewritten);
+                return Ok(ty);
+            }
+        }
         // combinators over anything that iterates: a pull (`() -> T?`), or a
         // value whose type has `iter()` and no method of the name itself.
         // `to_list()` is the one conversion, also on a list.
