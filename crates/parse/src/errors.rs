@@ -250,6 +250,42 @@ pub struct PactSigDefaultParam {
     pub at: SourceSpan,
 }
 
+/// `let 0..3 = x`: a range pattern stands only in a match arm.
+#[derive(Error, Debug, Diagnostic)]
+#[error("a range pattern only stands in a `match` arm")]
+#[diagnostic(help("compare instead: `if lo <= x && x < hi`"))]
+pub struct RangePatternPlace {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("this range")]
+    pub at: SourceSpan,
+}
+
+/// `0..3 | 7..9 =>`: each range binds its own name, which `|` cannot join.
+#[derive(Error, Debug, Diagnostic)]
+#[error("a range pattern cannot be one side of `|`")]
+#[diagnostic(help("write one arm per range"))]
+pub struct RangePatternInOr {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("this pattern")]
+    pub at: SourceSpan,
+}
+
+/// `impl Box<T> { … }`: an `impl` names its type bare; the struct's own
+/// parameters are in scope in the body (combo item C18a).
+#[derive(Error, Debug, Diagnostic)]
+#[error("an `impl` names its type without parameters")]
+#[diagnostic(help("write `impl {name}`: the parameters come from the struct, and they (`{params}`) are in scope in the body"))]
+pub struct ImplTypeParams {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("drop this `<...>`")]
+    pub at: SourceSpan,
+    pub name: String,
+    pub params: String,
+}
+
 #[derive(Error, Debug, Diagnostic)]
 #[error("type parameters are not allowed here")]
 #[diagnostic(help("only `fn`, `struct`, `enum`, and `impl` items declare type parameters"))]

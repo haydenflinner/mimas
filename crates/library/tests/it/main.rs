@@ -54,6 +54,7 @@ mod positional;
 mod prelude;
 mod prepared;
 mod propagate;
+mod range_patterns;
 mod records;
 mod reflect;
 mod regions;

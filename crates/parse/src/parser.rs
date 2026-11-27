@@ -117,6 +117,12 @@ pub struct Parser<'s> {
     /// dec -- a per-line set let the second one shadow the first, which the
     /// duplicate-fn rule then names as a redeclare.
     check_names: std::collections::HashSet<String>,
+    /// Guards a match arm's range patterns (`0..3 =>`) owe it: each range
+    /// binds a fresh name, and its bounds check joins the arm's guard.
+    range_guards: Vec<Expr>,
+    /// On while a match arm's pattern parses, the one place a range
+    /// pattern may stand.
+    range_pats: bool,
     /// How many `{ … }` blocks enclose the cursor. A `check` at depth 0 is a
     /// top-level check; deeper, it runs where it stands (`block_check`).
     block_depth: usize,
@@ -403,6 +409,8 @@ impl<'s> Parser<'s> {
             assert_id: 0,
             with_id: 0,
             check_names: Default::default(),
+            range_guards: Vec::new(),
+            range_pats: false,
             block_depth: 0,
             fn_names: Vec::new(),
             soft_check: None,
@@ -1869,6 +1877,18 @@ impl<'s> Parser<'s> {
 
     /// The span covering a `<...>` list already parsed, for rejecting it in positions that
     /// don't take generics.
+    /// `impl Box<T>`: the error says to write `impl Box` (r[impl mimas.impl.bare-name]).
+    fn reject_impl_params(&mut self, name: &Ident, params: &[TypeParam]) {
+        if let (Some(first), Some(last)) = (params.first(), params.last()) {
+            self.error(ImplTypeParams {
+                src: self.src(),
+                at: first.location.span.until(last.location.span).into(),
+                name: name.lexeme.clone(),
+                params: params.iter().map(|p| p.name.lexeme.as_str()).collect::<Vec<_>>().join(", "),
+            });
+        }
+    }
+
     fn reject_type_params(&mut self, params: &[TypeParam]) {
         if let (Some(first), Some(last)) = (params.first(), params.last()) {
             self.error(GenericsNotAllowed {
@@ -2772,7 +2792,7 @@ impl<'s> Parser<'s> {
         // `impl Foo<T>` would mean specializing one instantiation -- not supported. `impl Foo`
         // on a generic type implements all of them at once, with the adt's params in scope.
         let generics = self.type_params();
-        self.reject_type_params(&generics);
+        self.reject_impl_params(&first, &generics);
         // `impl Foo {}` (inherent) vs `impl Pact for Foo {}` (pact impl). After the first ident,
         // a `for` token disambiguates -- first becomes the pact, second becomes the target.
         let (pact, target) = if self.eat(TokKind::For) {
@@ -2786,7 +2806,7 @@ impl<'s> Parser<'s> {
                 _ => self.require_ident(),
             };
             let generics = self.type_params();
-            self.reject_type_params(&generics);
+            self.reject_impl_params(&target, &generics);
             (Some(first), target)
         } else {
             (None, first)
@@ -3444,8 +3464,19 @@ impl<'s> Parser<'s> {
                         }
                         return None;
                     }
+                    p.range_guards.clear();
+                    p.range_pats = true;
                     let pattern = p.pattern();
-                    let guard = p.eat(TokKind::If).then(|| p.expr());
+                    p.range_pats = false;
+                    let user_guard = p.eat(TokKind::If).then(|| p.expr());
+                    // r[impl mimas.match.range] a range pattern's bounds check
+                    // runs before the arm's own guard
+                    let mut guards = std::mem::take(&mut p.range_guards);
+                    guards.extend(user_guard);
+                    let guard = guards.into_iter().reduce(|a, b| {
+                        let at = a.span().start();
+                        p.new_expr(Logical::new(a, LogicalOp::And, b), at)
+                    });
                     p.expect(TokKind::FatArrow);
                     let body_is_block = p.at(TokKind::LeftBrace);
                     let body = p.expr();
@@ -6846,9 +6877,17 @@ impl<'s> Parser<'s> {
                 return first;
             }
             let location = first.location();
+            let ranges = parser.range_guards.len();
             let mut alts = vec![first];
             while parser.eat(TokKind::Pipe) {
                 alts.push(parser.match_pat_atom());
+            }
+            // each range binds its own name, which `|` cannot join
+            if parser.range_guards.len() > ranges {
+                parser.error(RangePatternInOr {
+                    src: parser.src(),
+                    at: location.into(),
+                });
             }
             Pat::new(PatKind::Or(alts), location)
         }
@@ -6860,6 +6899,49 @@ impl<'s> Parser<'s> {
         self.nested(inner)
             .map(|pat| desugar_prefix_pat(&pat, ""))
             .unwrap_or_else(|| self.new_pat(PatKind::Poison(Poison), start))
+    }
+
+    /// After a number in a pattern: `lo..hi` (or `lo..=hi`) makes a range
+    /// pattern, else the literal stands alone. A range binds a fresh name
+    /// and owes the arm the guard `lo <= x && x < hi`. Only a match arm
+    /// takes one. r[impl mimas.match.range]
+    fn range_tail(&mut self, lo: Literal, start: usize) -> Pat {
+        let inclusive = self.at(TokKind::DoubleDotEqual);
+        if !inclusive && !self.at(TokKind::DoubleDot) {
+            return self.new_pat(PatKind::Literal(lo), start);
+        }
+        self.advance();
+        let neg = self.eat(TokKind::Minus);
+        let hi = match (self.peek(), neg) {
+            (TokKind::Int(i), false) => Literal::Int(i),
+            (TokKind::Int(i), true) => Literal::Int(-i),
+            (TokKind::Float(f), false) => Literal::Float(f),
+            (TokKind::Float(f), true) => Literal::Float(-f),
+            _ => {
+                self.expected("number");
+                return self.new_pat(PatKind::Poison(Poison), start);
+            }
+        };
+        self.advance();
+        if !self.range_pats {
+            self.error(RangePatternPlace {
+                src: self.src(),
+                at: self.location(start).into(),
+            });
+            return self.new_pat(PatKind::Poison(Poison), start);
+        }
+        self.assert_id += 1;
+        let name = self.ident_at(format!("__range_{}", self.assert_id), start);
+        let x = || self.new_expr(name.clone(), start);
+        let low = self.new_expr(
+            Equality::new(x(), EqualityOp::GreaterOrEqual, self.new_expr(lo, start)),
+            start,
+        );
+        let op = if inclusive { EqualityOp::LessOrEqual } else { EqualityOp::Less };
+        let high = self.new_expr(Equality::new(x(), op, self.new_expr(hi, start)), start);
+        let both = self.new_expr(Logical::new(low, LogicalOp::And, high), start);
+        self.range_guards.push(both);
+        self.new_pat(PatKind::Ident(name), start)
     }
 
     fn match_pat_atom(&mut self) -> Pat {
@@ -6895,7 +6977,7 @@ impl<'s> Parser<'s> {
                     }
                 };
                 self.advance();
-                self.new_pat(PatKind::Literal(literal), start)
+                self.range_tail(literal, start)
             }
             TokKind::Ident(_) | TokKind::Hash => {
                 // `#Name`: an atom arm, the payload in the same shapes a
@@ -6971,7 +7053,7 @@ impl<'s> Parser<'s> {
             _ => match Literal::try_from(kind) {
                 Ok(literal) => {
                     self.advance();
-                    self.new_pat(PatKind::Literal(literal), start)
+                    self.range_tail(literal, start)
                 }
                 Err(()) => {
                     self.expected("pattern");

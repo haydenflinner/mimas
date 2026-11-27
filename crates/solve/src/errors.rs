@@ -71,6 +71,7 @@ pub struct ExpectedUnitValue {
 /// the writer has to unwrap first.
 #[derive(Error, Debug, Diagnostic)]
 #[error("this is an option ({ty}): unwrap it with `!` or `?`")]
+#[diagnostic(help("in a `match`, bind the value inside with `x? =>`; a bare `x =>` binds the whole option, even after a `null` arm"))]
 pub struct OptionAccess {
     #[source_code]
     pub src: NamedSource<Arc<str>>,
