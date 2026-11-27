@@ -2853,8 +2853,16 @@ impl<'s> Parser<'s> {
         let first = self.require_ident();
         // `impl Foo<T>` would mean specializing one instantiation -- not supported. `impl Foo`
         // on a generic type implements all of them at once, with the adt's params in scope.
+        // `impl Foo<T: Bound>` bounds the type's own parameter; a param with
+        // no bound would be a specialization, which stays refused
+        // (r[impl mimas.generic.impl-bound])
         let generics = self.type_params();
-        self.reject_impl_params(&first, &generics);
+        let mut bounds = vec![];
+        if !generics.is_empty() && generics.iter().all(|g| !g.bounds.is_empty()) {
+            bounds = generics;
+        } else {
+            self.reject_impl_params(&first, &generics);
+        }
         // `impl Foo {}` (inherent) vs `impl Pact for Foo {}` (pact impl). After the first ident,
         // a `for` token disambiguates -- first becomes the pact, second becomes the target.
         let (pact, target) = if self.eat(TokKind::For) {
@@ -2868,7 +2876,11 @@ impl<'s> Parser<'s> {
                 _ => self.require_ident(),
             };
             let generics = self.type_params();
-            self.reject_impl_params(&target, &generics);
+            if !generics.is_empty() && generics.iter().all(|g| !g.bounds.is_empty()) {
+                bounds = generics;
+            } else {
+                self.reject_impl_params(&target, &generics);
+            }
             (Some(first), target)
         } else {
             (None, first)
@@ -2887,10 +2899,10 @@ impl<'s> Parser<'s> {
         let mut items = vec![];
         // a via impl may carry no braces at all
         if via.is_some() && !self.at(TokKind::LeftBrace) {
-            return Impl::new(target, pact, via, items);
+            return { let mut imp = Impl::new(target, pact, via, items); imp.bounds = bounds; imp };
         }
         if !self.expect(TokKind::LeftBrace) {
-            return Impl::new(target, pact, via, items);
+            return { let mut imp = Impl::new(target, pact, via, items); imp.bounds = bounds; imp };
         }
         while !self.eat(TokKind::RightBrace) {
             let kind = if self.at(TokKind::Pub) {
@@ -2938,7 +2950,7 @@ impl<'s> Parser<'s> {
                 }),
             }
         }
-        Impl::new(target, pact, via, items)
+        { let mut imp = Impl::new(target, pact, via, items); imp.bounds = bounds; imp }
     }
 
     /// A function up to its body. A pact's signatures don't get `defaults`. Returns the

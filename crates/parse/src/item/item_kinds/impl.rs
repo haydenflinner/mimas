@@ -18,6 +18,9 @@ pub struct Impl {
     pub via: Option<Ident>,
     /// The items this impl declares.
     pub items: Vec<Item>,
+    /// `impl S<T: Bound>`: bounds on the type's own parameters, each with at
+    /// least one pact (`mimas.generic.impl-bound`). Empty for a plain impl.
+    pub bounds: Vec<crate::components::TypeParam>,
 }
 impl Impl {
     pub(crate) fn new(
@@ -31,6 +34,7 @@ impl Impl {
             pact,
             via,
             items,
+            bounds: vec![],
         }
     }
 }

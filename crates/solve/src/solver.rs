@@ -2567,7 +2567,7 @@ impl Solver {
     // r[impl mimas.generic.bound]
     /// `T: Draw` -- hold `pid` to the pact `bound` names. A name that doesn't resolve yet
     /// (the pact is hoisted after the types) waits in `pending_bounds`.
-    fn bind_param(&mut self, pid: ParamId, bound: &Ident) {
+    pub(crate) fn bind_param(&mut self, pid: ParamId, bound: &Ident) {
         let pact = self
             .resolve_name(bound, bound.location)
             .ok()

@@ -416,6 +416,30 @@ impl Hoist for Impl {
             })?
         };
 
+        // `impl S<T: Bound>`: the bound holds `S`'s own `T` (r[impl mimas.generic.impl-bound])
+        for tp in &self.bounds {
+            let Some(pid) = ctx.solver.adts[adt]
+                .type_params
+                .iter()
+                .find(|(n, _)| *n == tp.name.lexeme)
+                .map(|(_, p)| *p)
+            else {
+                return Err(crate::errors::NotFound {
+                    src: ctx.solver.src(tp.name.location),
+                    at: tp.name.location.into(),
+                    name: tp.name.lexeme.clone(),
+                    help: Some(format!(
+                        "`impl {}<{}: …>` bounds a type parameter `{}` declares",
+                        self.target.lexeme, tp.name.lexeme, self.target.lexeme
+                    )),
+                }
+                .into());
+            };
+            for bound in &tp.bounds {
+                ctx.solver.bind_param(pid, bound);
+            }
+        }
+
         // Record pact membership up front (before any body solves) so coercions resolve regardless
         // of source order. Implementing the same pact twice is rejected here; member-name clashes
         // with anything else already on the adt surface as the members land in `impls` below.
