@@ -1570,7 +1570,30 @@ impl Emit for FString {
                             let text = ir.current().call_native(nid, vec![value, k, name]);
                             parts.push(FormatPart::Value(text));
                         }
-                        _ => parts.push(FormatPart::Value(value)),
+                        // a hole whose static shape says more than its value
+                        // (a tuple, a unit) renders through `__shown`
+                        // (r[impl mimas.display.one])
+                        _ => match (
+                            ir.resolutions.hole_shapes.get(&expr.id()).cloned(),
+                            ir.resolutions.shown_native,
+                        ) {
+                            (Some(shape), Some(nid)) => {
+                                // one entry per distinct shape: an edit that adds a
+                                // hole above moves no other body's index, so the body
+                                // cache keeps hitting
+                                let i = match ir.hole_shapes.iter().position(|s| *s == shape) {
+                                    Some(i) => i,
+                                    None => {
+                                        ir.hole_shapes.push(shape);
+                                        ir.hole_shapes.len() - 1
+                                    }
+                                } as i64;
+                                let k = ir.current().constant(Constant::Int(i));
+                                let text = ir.current().call_native(nid, vec![value, k]);
+                                parts.push(FormatPart::Value(text));
+                            }
+                            _ => parts.push(FormatPart::Value(value)),
+                        },
                     }
                 }
             }

@@ -177,7 +177,7 @@ fn a_failing_law_names_the_minimal_witness() {
     let r = results(src);
     assert_eq!(r.len(), 1, "{r:?}");
     let err = r[0].1.as_ref().expect("the law fails for v > 3");
-    assert!(err.contains("fails for x = S { 4 }"), "{err}");
+    assert!(err.contains("fails for x = S { v: 4 }"), "{err}");
 }
 
 // r[verify mimas.pact.samples] r[verify mimas.pact.samples.arb]
@@ -209,7 +209,7 @@ fn an_arbitrary_impl_drives_draws_and_shrink() {
     impl Small for N { fn v(self) -> int { self.v } }";
     let r = results(src);
     let err = r[0].1.as_ref().expect("the law fails for v = 9");
-    assert!(err.contains("fails for x = N { 4 }"), "{err}");
+    assert!(err.contains("fails for x = N { v: 4 }"), "{err}");
 }
 
 // r[verify mimas.pact.law.impl]

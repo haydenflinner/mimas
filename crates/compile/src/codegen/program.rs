@@ -56,6 +56,17 @@ pub struct Program {
     /// program wrote for its dimension (`12lb` echoes `12 lb`). Empty in programs
     /// a loader didn't solve.
     pub echo_units: HashMap<Location, shared::units::Shown>,
+    /// Display site (`print`/`dbg`/`warn` call, top-level echo) -> the shown
+    /// value's static shape: tuple parentheses and units the runtime value
+    /// cannot tell (r[impl mimas.display.one]).
+    pub print_shapes: HashMap<Location, shared::units::Shape>,
+    /// The shapes `__shown` renders f-string holes by, by index.
+    pub hole_shapes: Vec<shared::units::Shape>,
+    /// Per adt, each field's display shape (its declared unit), parallel to
+    /// `field_names`.
+    pub field_shapes: IdVec<AdtId, Vec<shared::units::Shape>>,
+    /// The unit the page wrote for each dimension a display names.
+    pub shown_units: HashMap<shared::units::Dim, shared::units::Shown>,
     /// Declared member types, parallel to `field_names` -- copied from
     /// `solve::ResolvedAdt::member_tys`. `Ty::Param`s stand for the adt's
     /// own params (see `member_tys`), so generic fields stay generic until

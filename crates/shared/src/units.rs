@@ -530,6 +530,71 @@ pub struct Shown {
     pub list: bool,
 }
 
+/// The static shape of a displayed value, where the runtime value cannot
+/// tell it: a tuple is a list at runtime, and a float does not carry its
+/// unit. The dims pass computes one per display site (`print`, an echo, an
+/// f-string hole) from the value's type and dimension; the renderer
+/// (`Ctx::render_shaped`) follows it. `Plain` is what the value alone says.
+/// r[impl mimas.display.one]
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum Shape {
+    #[default]
+    Plain,
+    /// A quantity in this dimension: `3 px`.
+    Q(Dim),
+    /// A list whose items have this shape. A list of quantities shows its
+    /// unit once, after the list: `[12, 8] lb`.
+    List(Box<Shape>),
+    /// A tuple, one shape per item: `("a", 1)`, `(2 px, 3 px)`.
+    Tuple(Vec<Shape>),
+    /// A dict whose values have this shape.
+    Dict(Box<Shape>),
+}
+
+impl Shape {
+    /// Every dimension the shape names, appended to `out`.
+    pub fn dims_into(&self, out: &mut Vec<Dim>) {
+        match self {
+            Shape::Plain => {}
+            Shape::Q(d) => out.push(*d),
+            Shape::List(s) | Shape::Dict(s) => s.dims_into(out),
+            Shape::Tuple(ss) => ss.iter().for_each(|s| s.dims_into(out)),
+        }
+    }
+
+    /// The shape of a struct field declared as `ty` whose numbers carry `dim`
+    /// (a field's declared unit reaches through `?` and `[..]`).
+    pub fn of_field(ty: &crate::Ty, dim: Option<Dim>) -> Shape {
+        use crate::Ty;
+        match ty {
+            Ty::Option(inner) => Shape::of_field(inner, dim),
+            Ty::Array(inner, _) => match Shape::of_field(inner, dim) {
+                Shape::Plain => Shape::Plain,
+                s => Shape::List(Box::new(s)),
+            },
+            Ty::Dict(_, v) => match Shape::of_field(v, dim) {
+                Shape::Plain => Shape::Plain,
+                s => Shape::Dict(Box::new(s)),
+            },
+            Ty::Tuple(ts) => Shape::Tuple(ts.iter().map(|t| Shape::of_field(t, None)).collect()),
+            Ty::Float | Ty::Int => match dim {
+                Some(d) if !d.is_none() && d != INDEX => Shape::Q(d),
+                _ => Shape::Plain,
+            },
+            _ => Shape::Plain,
+        }
+    }
+
+    /// Whether this shape says anything the value alone does not.
+    pub fn is_plain(&self) -> bool {
+        match self {
+            Shape::Plain => true,
+            Shape::Q(_) | Shape::Tuple(_) => false,
+            Shape::List(s) | Shape::Dict(s) => s.is_plain(),
+        }
+    }
+}
+
 /// A float as an echo writes it beside a unit: at most 12 significant
 /// digits, trailing zeros dropped, so a value converted out of base units
 /// (`12lb` round-trips as `12.000000000000002`) reads `12`.

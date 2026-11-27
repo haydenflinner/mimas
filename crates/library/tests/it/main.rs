@@ -25,6 +25,7 @@ mod debug;
 mod dec;
 mod derived_writes;
 mod dict;
+mod display;
 mod doc_examples;
 mod effects;
 mod group;

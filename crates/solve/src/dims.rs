@@ -193,6 +193,12 @@ struct Pass<'a> {
     /// Each top-level echo site's computed dim (a quantity, or a list of them) —
     /// resolved to [`units::Shown`] once the walk has seen every written unit.
     echo_ds: FxIndexMap<Location, D>,
+    /// Each display site (`print`/`dbg`/`warn` call, top-level echo) with the
+    /// shown expression and its dim, made a [`units::Shape`] at the end of the
+    /// walk (r[impl mimas.display.one]).
+    site_ds: FxIndexMap<Location, (NodeId, D)>,
+    /// Each f-string hole's dim, made a [`units::Shape`] at the end of the walk.
+    hole_ds: FxIndexMap<NodeId, D>,
     /// Each value a failing check's message interpolates, with its
     /// dimension, so the message can say the unit (r[impl check.report.units]).
     check_ds: FxIndexMap<parse::NodeId, D>,
@@ -249,6 +255,8 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> Result<()> {
             want_dims: FxIndexMap::default(),
             print_dims: FxIndexMap::default(),
             echo_ds: FxIndexMap::default(),
+            site_ds: FxIndexMap::default(),
+            hole_ds: FxIndexMap::default(),
             check_ds: FxIndexMap::default(),
             check_texts: FxIndexMap::default(),
             dec_notes: FxIndexMap::default(),
@@ -298,6 +306,32 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> Result<()> {
             .filter_map(|(loc, d)| pass.shown(&d).map(|s| (loc, s)))
             .collect();
         let check_texts = std::mem::take(&mut pass.check_texts);
+        // r[impl mimas.display.one] each display site's shape, and the unit
+        // the page wrote for every dimension a shape or a struct field names
+        let site_ds = std::mem::take(&mut pass.site_ds);
+        let print_shapes: Vec<(Location, units::Shape)> = site_ds
+            .iter()
+            .map(|(loc, (id, d))| (*loc, pass.shape(solver.node_ty(*id).as_ref(), d)))
+            .filter(|(_, s)| !s.is_plain())
+            .collect();
+        let hole_ds = std::mem::take(&mut pass.hole_ds);
+        let hole_shapes: Vec<(parse::NodeId, units::Shape)> = hole_ds
+            .iter()
+            .map(|(id, d)| (*id, pass.shape(solver.node_ty(*id).as_ref(), d)))
+            .filter(|(_, s)| !s.is_plain())
+            .collect();
+        let mut shown_dims: Vec<Dim> = solver.member_units.values().copied().collect();
+        for shape in print_shapes.iter().map(|(_, s)| s).chain(hole_shapes.iter().map(|(_, s)| s)) {
+            shape.dims_into(&mut shown_dims);
+        }
+        for (_, d) in &member_units {
+            shown_dims.push(*d);
+        }
+        let shown_units: Vec<(Dim, units::Shown)> = shown_dims
+            .into_iter()
+            .unique()
+            .filter_map(|d| pass.shown(&D::Q(d)).map(|s| (d, s)))
+            .collect();
         let scale_of = |pass: &Pass, d: Dim| {
             if d.is_none() {
                 1.0
@@ -347,6 +381,9 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> Result<()> {
         solver.want_dims.extend(want_dims);
         solver.print_dims.extend(print_dims);
         solver.member_units.extend(member_units);
+        solver.print_shapes.extend(print_shapes);
+        solver.hole_shapes.extend(hole_shapes);
+        solver.shown_units.extend(shown_units);
     }
     Ok(())
 }
@@ -356,6 +393,57 @@ impl<'a> Pass<'a> {
     /// dimension, else a ratio or product of two written units (`usd/lb`), else
     /// the coherent unit. `None` for a value with no known dimension.
     /// r[impl mimas.echo.unit]
+    /// How a value of type `ty` and dim `d` displays where its runtime value
+    /// cannot tell: tuple parentheses and units (r[impl mimas.display.one]).
+    fn shape(&self, ty: Option<&shared::Ty>, d: &D) -> units::Shape {
+        use shared::Ty;
+        use units::Shape;
+        let d = match d {
+            D::Place(inner) => &**inner,
+            d => d,
+        };
+        let q = |d: &D| match d {
+            D::Q(dim) if !dim.is_none() && *dim != units::INDEX => Shape::Q(*dim),
+            _ => Shape::Plain,
+        };
+        match ty {
+            Some(Ty::Option(inner)) => self.shape(Some(inner), d),
+            Some(Ty::Tuple(ts)) => Shape::Tuple(
+                ts.iter()
+                    .enumerate()
+                    .map(|(i, t)| {
+                        let di = match d {
+                            D::Tuple(ds) => ds.get(i).unwrap_or(&D::Any),
+                            _ => &D::Any,
+                        };
+                        self.shape(Some(t), di)
+                    })
+                    .collect(),
+            ),
+            Some(Ty::Array(inner, _)) => {
+                let di = match d {
+                    D::Arr(x) => &**x,
+                    _ => &D::Any,
+                };
+                Shape::List(Box::new(self.shape(Some(inner), di)))
+            }
+            Some(Ty::Dict(_, v)) => {
+                let di = match d {
+                    D::Arr(x) => &**x,
+                    _ => &D::Any,
+                };
+                Shape::Dict(Box::new(self.shape(Some(v), di)))
+            }
+            Some(Ty::Float | Ty::Int) => q(d),
+            Some(_) => Shape::Plain,
+            None => match d {
+                D::Arr(x) => Shape::List(Box::new(self.shape(None, x))),
+                D::Tuple(ds) => Shape::Tuple(ds.iter().map(|x| self.shape(None, x)).collect()),
+                d => q(d),
+            },
+        }
+    }
+
     fn shown(&self, d: &D) -> Option<units::Shown> {
         let (dim, list) = match d {
             D::Q(dim) => (*dim, false),
@@ -839,6 +927,7 @@ impl<'a> Pass<'a> {
                     self.print_dims.insert(stmt.location(), dim);
                 }
                 self.echo_ds.insert(stmt.location(), d.clone());
+                self.site_ds.insert(stmt.location(), (l.right.id(), d.clone()));
                 self.bind(&l.left, d);
             }
             StmtKind::Assignment(a) => {
@@ -859,6 +948,9 @@ impl<'a> Pass<'a> {
                 if let Some(dim) = d.dim().filter(|x| !x.is_none()) {
                     self.print_dims.insert(stmt.location(), dim);
                 }
+                // a `print(x)` statement shares its call's location: the
+                // print's own site (the shown argument) wins
+                self.site_ds.entry(stmt.location()).or_insert((e.id(), d.clone()));
                 self.echo_ds.insert(stmt.location(), d);
             }
             StmtKind::Item(item) => self.item(item),
@@ -1273,6 +1365,7 @@ impl<'a> Pass<'a> {
                 for part in &f.parts {
                     if let FStringPart::Expr(x) = part {
                         let d = self.expr(x);
+                        self.hole_ds.insert(x.id(), d.clone());
                         if check_message {
                             let loc = x.location();
                             let text = self.solver.sources.get(&loc.file_id).and_then(|s| {
@@ -1722,6 +1815,16 @@ impl<'a> Pass<'a> {
             && !d.is_none()
         {
             self.print_dims.insert(e.location(), d);
+        }
+        // r[impl mimas.display.one] the shown value's shape, for every print
+        if let ExprKind::Ident(_) = c.left.kind()
+            && matches!(
+                self.solver.decs[dec].name.as_str(),
+                "print" | "dbg" | "warn"
+            )
+            && let (Some(arg), Some(d)) = (c.arguments.first(), args.first())
+        {
+            self.site_ds.insert(e.location(), (arg.value.id(), d.clone()));
         }
         if binding.sig.return_dim.is_none() && binding.sig.param_dims.iter().all(Option::is_none) {
             return None;

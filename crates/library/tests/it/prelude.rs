@@ -4,7 +4,8 @@ test_run!(
     r#"{ print([1, 2, 3]); 0 }"# => "0",
 );
 
-// a quantity prints its unit with the base-unit value (`25kW` -> `25000 W`);
+// a quantity prints in the unit the page wrote for it (`25kW` -> `25 kW`,
+// changed 2026-11-27 from the base-unit `25000.0 W`, mimas.display.one);
 // a bare number stays bare
 #[test]
 fn print_names_the_unit() {
@@ -22,11 +23,11 @@ fn print_names_the_unit() {
     assert_eq!(
         lines,
         [
-            "25000.0 W",
-            "0.11430000000000001 m/px",
+            "25 kW",
+            "0.375 ft/px",
             "42",
-            "dbg value: 3.0 s",
-            "5.0 kg",
+            "dbg value: 3 s",
+            "5 kg",
         ]
     );
 }

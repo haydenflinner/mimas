@@ -100,7 +100,7 @@ let s = f"{a}";
         })
         .unwrap();
     let s = handle.join().expect("no stack overflow").expect("s bound");
-    assert_eq!(s, Captured::Str("Node { 1, Node 1 ↺ }".to_string()));
+    assert_eq!(s, Captured::Str("Node { val: 1, next: Node 1 ↺ }".to_string()));
 }
 
 #[test]
@@ -192,9 +192,9 @@ let s_sky = f"{[Sky::Moon, Sky::Moon]}";
     };
     assert_eq!(
         get(&mut vm, "s_list"),
-        "List { Node { 1, null, Node { 2, Node 1 ↺, Node { 3, Node 2 ↺, null } } }, Node 3 ↺, 3 }"
+        "List { head: Node { val: 1, prev: null, next: Node { val: 2, prev: Node 1 ↺, next: Node { val: 3, prev: Node 2 ↺, next: null } } }, tail: Node 3 ↺, len: 3 }"
     );
-    assert_eq!(get(&mut vm, "s_b"), "Node { 2, Node { 1, null, Node 2 ↺ }, Node { 3, Node 2 ↺, null } }");
-    assert_eq!(get(&mut vm, "s_pts"), "[Point { 1, 2 }, Point { 1, 2 }]");
+    assert_eq!(get(&mut vm, "s_b"), "Node { val: 2, prev: Node { val: 1, prev: null, next: Node 2 ↺ }, next: Node { val: 3, prev: Node 2 ↺, next: null } }");
+    assert_eq!(get(&mut vm, "s_pts"), "[Point { x: 1, y: 2 }, Point { x: 1, y: 2 }]");
     assert_eq!(get(&mut vm, "s_sky"), "[Sky::Moon, Sky::Moon]");
 }

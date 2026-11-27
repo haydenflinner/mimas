@@ -955,6 +955,25 @@ impl Compiler {
             .collect::<Vec<_>>()
             .into();
 
+        let field_shapes: IdVec<_, Vec<shared::units::Shape>> = ir
+            .resolutions
+            .adts
+            .values()
+            .map(|adt| {
+                adt.member_tys
+                    .iter()
+                    .enumerate()
+                    .map(|(i, ty)| {
+                        shared::units::Shape::of_field(ty, adt.member_dims.get(i).copied().flatten())
+                    })
+                    .collect()
+            })
+            .collect::<Vec<_>>()
+            .into();
+        let print_shapes = std::mem::take(&mut ir.resolutions.print_shapes).into_iter().collect();
+        let shown_units = std::mem::take(&mut ir.resolutions.shown_units).into_iter().collect();
+        let hole_shapes = std::mem::take(&mut ir.hole_shapes);
+
         let tests = std::mem::take(&mut ir.tests);
 
         let print_dims = std::mem::take(&mut ir.resolutions.print_dims)
@@ -978,6 +997,10 @@ impl Compiler {
             field_dims,
             print_dims,
             echo_units,
+            print_shapes,
+            hole_shapes,
+            field_shapes,
+            shown_units,
             field_tys,
             value_adts,
             tests,

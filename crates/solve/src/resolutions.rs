@@ -29,6 +29,16 @@ pub struct Resolutions {
     /// Top-level echo site → the unit its quantity shows in (the unit the program
     /// wrote for that dimension) — codegen ships it so `12lb` echoes `12 lb`.
     pub echo_units: FxIndexMap<Location, shared::units::Shown>,
+    /// Display site (`print`/`dbg`/`warn` call, top-level echo) → the shown value's
+    /// shape: tuple parentheses and units the runtime value cannot tell.
+    pub print_shapes: FxIndexMap<Location, shared::units::Shape>,
+    /// f-string hole → its value's shape; emit renders a non-plain one through
+    /// `__shown`.
+    pub hole_shapes: rustc_hash::FxHashMap<NodeId, shared::units::Shape>,
+    /// The unit the page wrote for each dimension a display names.
+    pub shown_units: FxIndexMap<shared::units::Dim, shared::units::Shown>,
+    /// `__shown`: a value rendered by a shape, for an f-string hole.
+    pub shown_native: Option<NativeId>,
     /// Values a failing check's message names, with the unit to name them in.
     pub check_units: rustc_hash::FxHashMap<NodeId, shared::units::Shown>,
     /// Numbers with units written in a check, as written (`47lb`).
@@ -520,6 +530,12 @@ impl From<Solver> for Resolutions {
             .filter(|(id, _)| solver.dec_to_native.contains_key(id))
             .find(|(_, dec)| dec.name == "__in_unit")
             .map(|(id, _)| solver.dec_to_native[&id].id);
+        let shown_native = solver
+            .decs
+            .iter()
+            .filter(|(id, _)| solver.dec_to_native.contains_key(id))
+            .find(|(_, dec)| dec.name == "__shown")
+            .map(|(id, _)| solver.dec_to_native[&id].id);
         let freeze_native = solver
             .decs
             .iter()
@@ -635,6 +651,10 @@ impl From<Solver> for Resolutions {
             want_dims: solver.want_dims,
             print_dims: solver.print_dims,
             echo_units: solver.echo_units,
+            print_shapes: solver.print_shapes,
+            hole_shapes: solver.hole_shapes,
+            shown_units: solver.shown_units,
+            shown_native,
             check_units: solver.check_units,
             check_texts: solver.check_texts,
             dec_scales: solver.dec_scales,

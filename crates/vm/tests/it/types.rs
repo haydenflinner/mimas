@@ -43,28 +43,30 @@ test_vm!(
     "if let Wrap(x) = w { x } else { -1 }" => Int(7),
 );
 
-// `print`/`display`/f-strings render an instance as `Name { .. }`, not the bare `@id { .. }`
-// the runtime used to fall back to before struct/variant names were threaded through to the VM.
+// `print`/`display`/f-strings render an instance as `Name { field: .. }`, not the bare
+// `@id { .. }` the runtime used to fall back to before struct/variant names were threaded
+// through to the VM. Field names since 2026-11-27 (mimas.display.one); a positional struct
+// shows `Wrap(9)`.
 test_vm!(
     instance_display_uses_struct_name,
     "struct Node { next: Node?, prev: Node?, val: int }
      let n = Node { next = null, prev = null, val = 3 };",
-    r#"f"{n}""# => str!("Node { null, null, 3 }"),
+    r#"f"{n}""# => str!("Node { next: null, prev: null, val: 3 }"),
 );
 
 test_vm!(
     tuple_struct_display_uses_struct_name,
     "struct Wrap(int);
      let w = Wrap(9);",
-    r#"f"{w}""# => str!("Wrap { 9 }"),
+    r#"f"{w}""# => str!("Wrap(9)"),
 );
 
 // enum variant instances display qualified as `Enum::Variant { .. }`
 test_vm!(
     enum_variant_display_uses_qualified_name,
     "enum Shape { Circle { radius: int }, Square(int) }",
-    r#"f"{Shape::Circle { radius = 5 }}""# => str!("Shape::Circle { 5 }"),
-    r#"f"{Shape::Square(4)}""# => str!("Shape::Square { 4 }"),
+    r#"f"{Shape::Circle { radius = 5 }}""# => str!("Shape::Circle { radius: 5 }"),
+    r#"f"{Shape::Square(4)}""# => str!("Shape::Square(4)"),
 );
 
 // a self-referential instance (`a.next = b; b.prev = a;`) used to blow the native stack --
@@ -79,7 +81,7 @@ test_vm!(
      let a = Node { next = null, prev = null, val = 1 };
      let b = Node { next = null, prev = a, val = 2 };
      a.next = b;",
-    r#"f"{a}""# => str!("Node { Node { null, Node 1 ↺, 2 }, null, 1 }"),
+    r#"f"{a}""# => str!("Node { next: Node { next: null, prev: Node 1 ↺, val: 2 }, prev: null, val: 1 }"),
 );
 
 // `S::default()` -- the implicit memberwise-default ctor every struct carries:

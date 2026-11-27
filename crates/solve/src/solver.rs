@@ -215,6 +215,13 @@ pub struct Solver {
     /// Top-level echo site → how its quantity shows (the unit as written).
     /// Surfaces on [`Resolutions::echo_units`](crate::Resolutions).
     pub(crate) echo_units: FxIndexMap<shared::Location, shared::units::Shown>,
+    /// Display site (`print`/`dbg`/`warn` call, top-level echo) → the shown
+    /// value's shape. Surfaces on [`Resolutions::print_shapes`](crate::Resolutions).
+    pub(crate) print_shapes: FxIndexMap<shared::Location, shared::units::Shape>,
+    /// f-string hole → its value's shape.
+    pub(crate) hole_shapes: FxHashMap<NodeId, shared::units::Shape>,
+    /// The unit the page wrote for each dimension a display names.
+    pub(crate) shown_units: FxIndexMap<shared::units::Dim, shared::units::Shown>,
     /// Values a failing check's message names, with the unit to name them in.
     pub(crate) check_units: FxHashMap<NodeId, shared::units::Shown>,
     /// Numbers with units written in a check, as written.
@@ -474,6 +481,9 @@ impl Solver {
             want_dims: FxIndexMap::default(),
             print_dims: FxIndexMap::default(),
             echo_units: FxIndexMap::default(),
+            print_shapes: FxIndexMap::default(),
+            hole_shapes: FxHashMap::default(),
+            shown_units: FxIndexMap::default(),
             check_units: FxHashMap::default(),
             check_texts: FxHashMap::default(),
             dec_scales: FxHashMap::default(),

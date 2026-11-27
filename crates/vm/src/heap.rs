@@ -5,7 +5,7 @@ use gc_arena::{
     lock::{Lock, RefLock},
 };
 use rustc_hash::FxHashMap;
-use shared::{FnHeader, IdVec};
+use shared::{FnHeader, IdVec, units::Shape};
 use std::{
     any::TypeId,
     cell::{Cell, Ref, RefCell},
@@ -802,7 +802,16 @@ impl<'gc> Ctx<'gc> {
     /// a revisited container prints a `Node 1 ↺` back-reference (see [`Self::render_into`]).
     pub fn display(self, value: Val<'gc>) -> RtResult<String> {
         let mut out = String::new();
-        self.render_into(&mut out, value, true, 0, &mut Walk::default())?;
+        self.render_into(&mut out, value, true, 0, &mut Walk::default(), &Shape::Plain)?;
+        Ok(out)
+    }
+
+    /// [Ctx::display] or [Ctx::to_string] (`quote` picks), following the
+    /// value's static `shape`: tuple parentheses and units the runtime value
+    /// cannot tell (r[impl mimas.display.one]).
+    pub fn render_shaped(self, value: Val<'gc>, shape: &Shape, quote: bool) -> RtResult<String> {
+        let mut out = String::new();
+        self.render_into(&mut out, value, quote, 0, &mut Walk::default(), shape)?;
         Ok(out)
     }
 
@@ -810,13 +819,51 @@ impl<'gc> Ctx<'gc> {
     /// f-strings and `print` use; every non-string renders the same as [Ctx::display].
     pub fn to_string(self, value: Val<'gc>) -> RtResult<String> {
         let mut out = String::new();
-        self.render_into(&mut out, value, false, 0, &mut Walk::default())?;
+        self.render_into(&mut out, value, false, 0, &mut Walk::default(), &Shape::Plain)?;
         Ok(out)
     }
 
     /// [Ctx::to_string], appending into an existing buffer (the f-string builder).
     pub fn to_string_into(self, out: &mut String, value: Val<'gc>) -> RtResult<()> {
-        self.render_into(out, value, false, 0, &mut Walk::default())
+        self.render_into(out, value, false, 0, &mut Walk::default(), &Shape::Plain)
+    }
+
+    /// A list's length, however it is backed (0 for a non-list).
+    fn array_len(self, value: Val<'gc>) -> usize {
+        match value {
+            Val::Array(a) => a.0.borrow().len(),
+            Val::IntArray(a) | Val::FloatArray(a) => a.0.borrow().len(),
+            _ => 0,
+        }
+    }
+
+    /// A list's `i`th item, however it is backed.
+    fn array_at(self, value: Val<'gc>, i: usize) -> Val<'gc> {
+        match value {
+            Val::Array(a) => a.0.borrow()[i],
+            Val::IntArray(a) | Val::FloatArray(a) => a.0.borrow().at(i),
+            _ => Val::Null,
+        }
+    }
+
+    /// A quantity's text: the number in the unit the page wrote for `dim`
+    /// (`25kW` shows `25 kW`), or in the coherent unit when it wrote none.
+    fn quantity_into(self, out: &mut String, value: Val<'gc>, dim: shared::units::Dim) -> bool {
+        let shown = self.fixture::<crate::fixtures::DisplayShapes>().unit(dim);
+        match value {
+            Val::Float(_) | Val::Int(_) => {
+                let x = value.as_float().unwrap_or_default();
+                out.push_str(&shared::units::shown_number(x / shown.scale));
+            }
+            // a `dec` quantity is already held in the page's unit
+            Val::Dec(d) => {
+                let _ = write!(out, "{d}");
+            }
+            _ => return false,
+        }
+        out.push(' ');
+        out.push_str(&shown.name);
+        true
     }
 
     /// `path.path` holds the containers being rendered around `value`; `path.seen` holds
@@ -837,6 +884,7 @@ impl<'gc> Ctx<'gc> {
         quote: bool,
         depth: usize,
         path: &mut Walk,
+        shape: &Shape,
     ) -> RtResult<()> {
         let ptr = match value {
             Val::Array(a) => Some(Gc::as_ptr(a.0) as *const ()),
@@ -847,7 +895,7 @@ impl<'gc> Ctx<'gc> {
             _ => None,
         };
         let Some(ptr) = ptr else {
-            return self.render_node(out, value, quote, depth, path);
+            return self.render_node(out, value, quote, depth, path, shape);
         };
         // r[impl mimas.display.cycle]
         // r[impl mimas.display.cycle.full]
@@ -877,7 +925,7 @@ impl<'gc> Ctx<'gc> {
                     });
                     if let Some(&v) = label {
                         out.push(' ');
-                        self.render_node(out, v, true, depth + 1, path)?;
+                        self.render_node(out, v, true, depth + 1, path, &Shape::Plain)?;
                     }
                     out.push_str(" ↺");
                 }
@@ -891,11 +939,18 @@ impl<'gc> Ctx<'gc> {
         if is_node {
             path.seen.push(ptr);
         }
-        let r = self.render_node(out, value, quote, depth, path);
+        let r = self.render_node(out, value, quote, depth, path, shape);
         path.path.pop();
         r
     }
 
+    /// The one renderer behind `print`, f-strings, echo and check messages
+    /// (r[impl mimas.display.one]). `shape` adds what the static type knows:
+    /// a tuple's parentheses and a quantity's unit. A struct shows its field
+    /// names and each field's declared unit.
+    ///
+    /// A `Show` pact (lang lane, L4) hooks in here, at the top of the
+    /// `Val::Instance` arm: a type that implements it renders as its `show`.
     fn render_node(
         self,
         out: &mut String,
@@ -903,10 +958,64 @@ impl<'gc> Ctx<'gc> {
         quote: bool,
         depth: usize,
         path: &mut Walk,
+        shape: &Shape,
     ) -> RtResult<()> {
         if depth > MAX_DISPLAY_DEPTH {
             return Err(RtErr::DisplayTooDeep);
         }
+        if let Shape::Q(dim) = shape
+            && self.quantity_into(out, value, *dim)
+        {
+            return Ok(());
+        }
+        // a list of quantities shows its unit once, after the list
+        if let Shape::List(inner) = shape
+            && let Shape::Q(dim) = **inner
+            && matches!(value, Val::Array(_) | Val::IntArray(_) | Val::FloatArray(_))
+        {
+            let shown = self.fixture::<crate::fixtures::DisplayShapes>().unit(dim);
+            let n = self.array_len(value);
+            out.push('[');
+            for i in 0..n {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                let v = self.array_at(value, i);
+                match v.as_float() {
+                    Some(x) if !matches!(v, Val::Dec(_)) => {
+                        out.push_str(&shared::units::shown_number(x / shown.scale))
+                    }
+                    _ => self.render_into(out, v, true, depth + 1, path, &Shape::Plain)?,
+                }
+            }
+            out.push_str("] ");
+            out.push_str(&shown.name);
+            return Ok(());
+        }
+        // a tuple is a list at runtime: its static shape gives the parentheses
+        if let Shape::Tuple(items) = shape
+            && matches!(value, Val::Array(_) | Val::IntArray(_) | Val::FloatArray(_))
+        {
+            let n = self.array_len(value);
+            out.push('(');
+            for i in 0..n {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                let v = self.array_at(value, i);
+                let s = items.get(i).unwrap_or(&Shape::Plain);
+                self.render_into(out, v, true, depth + 1, path, s)?;
+            }
+            if n == 1 {
+                out.push(',');
+            }
+            out.push(')');
+            return Ok(());
+        }
+        let item_shape = match shape {
+            Shape::List(s) | Shape::Dict(s) => &**s,
+            _ => &Shape::Plain,
+        };
         match value {
             Val::Null => out.push_str("null"),
             Val::Bool(b) => out.push_str(if b { "true" } else { "false" }),
@@ -927,11 +1036,12 @@ impl<'gc> Ctx<'gc> {
             // `print("x")` is bare while `print(["x"])` renders ["x"]
             Val::Array(a) => {
                 out.push('[');
-                for (i, &v) in a.0.borrow().iter().enumerate() {
+                let items: Vec<Val<'gc>> = a.0.borrow().iter().copied().collect();
+                for (i, v) in items.into_iter().enumerate() {
                     if i > 0 {
                         out.push_str(", ");
                     }
-                    self.render_into(out, v, true, depth + 1, path)?;
+                    self.render_into(out, v, true, depth + 1, path, item_shape)?;
                 }
                 out.push(']');
             }
@@ -946,13 +1056,19 @@ impl<'gc> Ctx<'gc> {
                         out.push_str(", ");
                     }
                     let v = a.0.borrow().at(i);
-                    self.render_into(out, v, true, depth + 1, path)?;
+                    self.render_into(out, v, true, depth + 1, path, item_shape)?;
                 }
                 out.push(']');
             }
             Val::Dict(d) => {
+                // a dict of quantities shows its unit once, after the braces
+                let unit = match item_shape {
+                    Shape::Q(dim) => Some(self.fixture::<crate::fixtures::DisplayShapes>().unit(*dim)),
+                    _ => None,
+                };
                 out.push_str("{");
-                for (i, (k, v)) in d.0.borrow().iter().enumerate() {
+                let pairs: Vec<(Val<'gc>, Val<'gc>)> = d.0.borrow().iter().map(|(k, v)| (*k, *v)).collect();
+                for (i, (k, v)) in pairs.iter().enumerate() {
                     if i > 0 {
                         out.push_str(", ");
                     }
@@ -963,13 +1079,25 @@ impl<'gc> Ctx<'gc> {
                             let _ = write!(out, "{}: ", s.as_str());
                         }
                         k => {
-                            self.render_into(out, *k, true, depth + 1, path)?;
+                            self.render_into(out, *k, true, depth + 1, path, &Shape::Plain)?;
                             out.push_str(": ");
                         }
                     }
-                    self.render_into(out, *v, true, depth + 1, path)?;
+                    match (&unit, v.as_float()) {
+                        (Some(shown), Some(x)) if !matches!(v, Val::Dec(_)) => {
+                            out.push_str(&shared::units::shown_number(x / shown.scale))
+                        }
+                        _ if unit.is_some() => {
+                            self.render_into(out, *v, true, depth + 1, path, &Shape::Plain)?
+                        }
+                        _ => self.render_into(out, *v, true, depth + 1, path, item_shape)?,
+                    }
                 }
                 out.push('}');
+                if let Some(shown) = unit {
+                    out.push(' ');
+                    out.push_str(&shown.name);
+                }
             }
             Val::Fn(b) => {
                 let _ = write!(out, "<fn @{}>", b.index());
@@ -984,7 +1112,7 @@ impl<'gc> Ctx<'gc> {
             }
             Val::Raised(s) => {
                 out.push_str("<raised ");
-                self.render_into(out, *s, true, depth + 1, path)?;
+                self.render_into(out, *s, true, depth + 1, path, &Shape::Plain)?;
                 out.push('>');
             }
             Val::Instance(i) => {
@@ -996,16 +1124,45 @@ impl<'gc> Ctx<'gc> {
                         let _ = write!(out, "@{}", inst.struct_id);
                     }
                 }
-                // a unit variant (`Sky::Moon`) prints as its name alone
+                drop(names);
+                // a unit variant (`Sky::Moon`) prints as its name alone; a
+                // struct names each field and shows its declared unit
+                // (`M { w: 3 px, n: "a" }`), a positional one (`Square(4)`)
+                // lists its values in parentheses
                 if !inst.fields.is_empty() {
-                    out.push_str(" { ");
-                    for (i, &v) in inst.fields.iter().enumerate() {
+                    let sid = inst.struct_id as usize;
+                    let fields: Vec<Val<'gc>> = inst.fields.iter().copied().collect();
+                    drop(inst);
+                    let field_names = self.state.field_names.borrow();
+                    let labels: Vec<String> = field_names.get(sid).cloned().unwrap_or_default();
+                    drop(field_names);
+                    let shapes = self.fixture::<crate::fixtures::DisplayShapes>().fields_of(sid);
+                    let positional = labels.is_empty()
+                        || labels.iter().all(|l| l.chars().all(|c| c.is_ascii_digit()));
+                    // an atom's payload reads as it is written, `#ParseError(line: 3)`
+                    let atom = self
+                        .state
+                        .struct_names
+                        .borrow()
+                        .get(sid)
+                        .is_some_and(|n| n.starts_with('#'));
+                    let (open, close) = match (positional, atom) {
+                        (true, _) | (_, true) => ("(", ")"),
+                        _ => (" { ", " }"),
+                    };
+                    out.push_str(open);
+                    for (i, v) in fields.into_iter().enumerate() {
                         if i > 0 {
                             out.push_str(", ");
                         }
-                        self.render_into(out, v, true, depth + 1, path)?;
+                        if !positional && let Some(label) = labels.get(i) {
+                            out.push_str(label);
+                            out.push_str(": ");
+                        }
+                        let s = shapes.get(i).unwrap_or(&Shape::Plain);
+                        self.render_into(out, v, true, depth + 1, path, s)?;
                     }
-                    out.push_str(" }");
+                    out.push_str(close);
                 }
             }
             #[cfg(feature = "dataframe")]

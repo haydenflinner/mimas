@@ -5,7 +5,7 @@ use vm::{
     anon::{self},
     api::Api,
     conversion::NeverReturn,
-    fixtures::{BlockChecks, DebugInfo, Echoes, Out, PrintDims, Prints, Witnesses},
+    fixtures::{BlockChecks, DebugInfo, DisplayShapes, Echoes, Out, PrintDims, Prints, Witnesses},
 };
 
 /// The ` {unit}` a `print`/`dbg`/`warn` appends when the dims pass proved the value's
@@ -18,6 +18,15 @@ fn unit_suffix(ctx: Ctx<'_>, loc: Option<shared::Location>) -> String {
         .unwrap_or_default()
 }
 
+/// The value shown at a display site `loc` by its static shape, as text
+/// (`quote` false) or display (`quote` true); `None` when the dims pass
+/// recorded no shape there, so the caller keeps its plain path
+/// (r[impl mimas.display.one]).
+fn shaped_at<'gc>(ctx: Ctx<'gc>, loc: Option<shared::Location>, v: Val<'gc>, quote: bool) -> Option<Result<String, RtErr>> {
+    let shape = ctx.fixture::<DisplayShapes>().at(loc?);
+    (!shape.is_plain()).then(|| ctx.render_shaped(v, &shape, quote))
+}
+
 pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add(print);
     api.add(warn);
@@ -26,6 +35,7 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add(dbg);
     api.add(echo);
     api.add(__in_unit);
+    api.add(__shown);
     api.add(__contract_fail);
     api.add(__check_operand);
     api.add(__check_miss);
@@ -43,7 +53,9 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
 /// Writes `value` to standard output, followed by a newline. A string prints as its plain text,
 /// and any other value prints the same way it would inside an f-string.
 ///
-/// A quantity prints with its unit — `print(25kW)` writes `25000 W`.
+/// A quantity prints with its unit, in the unit the page wrote for it —
+/// `print(25kW)` writes `25 kW`. A tuple prints in parentheses, a struct
+/// with its field names.
 ///
 /// ```mimas
 /// print("hello");           // hello
@@ -52,6 +64,15 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
 /// ```
 fn print<'gc>(ctx: Ctx<'gc>, msg: Val<'gc>) -> Result<(), RtErr> {
     let loc = ctx.fixture::<DebugInfo>().top_loc();
+    if let Some(line) = shaped_at(ctx, loc, msg, false) {
+        let line = line?;
+        ctx.fixture::<Out>().write(&line);
+        if let Some(loc) = loc {
+            let text = shaped_at(ctx, Some(loc), msg, true).and_then(Result::ok).unwrap_or(line);
+            ctx.fixture::<Prints>().push(loc, text);
+        }
+        return Ok(());
+    }
     // a `dec` quantity is held in the page's unit, so it prints with that
     // unit's name, not the coherent one (r[impl mimas.dec.units])
     let suffix = match (msg, loc.and_then(|l| ctx.fixture::<PrintDims>().shown(l))) {
@@ -75,11 +96,15 @@ fn print<'gc>(ctx: Ctx<'gc>, msg: Val<'gc>) -> Result<(), RtErr> {
 /// side of "skip the bit that's in err". Repeats from the same site are
 /// suppressed, so `warn` inside a loop doesn't flood.
 ///
-/// A quantity warns with its unit — `warn(25kW)` writes `warning: 25000 W`.
+/// A quantity warns with its unit — `warn(25kW)` writes `warning: 25 kW`.
 #[native]
 #[effects(io)]
 fn warn<'gc>(ctx: Ctx<'gc>, msg: Val<'gc>) -> Result<(), RtErr> {
     let loc = ctx.fixture::<DebugInfo>().top_loc();
+    if let Some(line) = shaped_at(ctx, loc, msg, false) {
+        ctx.warn(&line?);
+        return Ok(());
+    }
     let suffix = unit_suffix(ctx, loc);
     let line = ctx.to_string(msg)?;
     ctx.warn(&format!("{line}{suffix}"));
@@ -153,7 +178,10 @@ fn echo<'gc>(ctx: Ctx<'gc>, val: anon::T<'gc>) -> Result<(), RtErr> {
         // r[impl mimas.echo.unit]
         let text = match ctx.fixture::<PrintDims>().shown(loc) {
             Some(shown) => shown_text(ctx, val.0, &shown)?,
-            None => format!("{}{}", ctx.display(val.0)?, unit_suffix(ctx, Some(loc))),
+            None => match shaped_at(ctx, Some(loc), val.0, true) {
+                Some(text) => text?,
+                None => format!("{}{}", ctx.display(val.0)?, unit_suffix(ctx, Some(loc))),
+            },
         };
         echoes.push(loc, text, ctx.inspect(val.0));
     }
@@ -425,8 +453,10 @@ fn __contract_fail<'gc>(
 /// ```
 fn dbg<'gc>(ctx: Ctx<'gc>, val: anon::T<'gc>) -> Result<anon::T<'gc>, RtErr> {
     let loc = ctx.fixture::<DebugInfo>().top_loc();
-    let suffix = unit_suffix(ctx, loc);
-    let text = format!("dbg value: {}{}", ctx.display(val.0)?, suffix);
+    let text = match shaped_at(ctx, loc, val.0, true) {
+        Some(shown) => format!("dbg value: {}", shown?),
+        None => format!("dbg value: {}{}", ctx.display(val.0)?, unit_suffix(ctx, loc)),
+    };
     ctx.fixture::<Out>().write(&text);
     if let Some(loc) = loc {
         ctx.fixture::<Prints>().push(loc, text);
@@ -480,6 +510,17 @@ fn __check_verdict<'gc>(ctx: Ctx<'gc>, name: &str) -> Result<bool, RtErr> {
         Some(message) => Err(RtErr::Custom(format!("panic: {message}"))),
         None => Ok(true),
     }
+}
+
+#[native]
+#[effects()]
+/// An f-string hole whose static shape says more than its value: a tuple's
+/// parentheses, a quantity's unit (`f"{w}"` with `w = 3.5px` gives
+/// `3.5 px`). `shape` indexes the program's hole shapes. Not for user code;
+/// the compiler calls it (r[impl mimas.display.one]).
+fn __shown<'gc>(ctx: Ctx<'gc>, val: anon::T<'gc>, shape: i64) -> Result<String, RtErr> {
+    let shape = ctx.fixture::<DisplayShapes>().hole(shape as usize);
+    ctx.render_shaped(val.0, &shape, false)
 }
 
 #[native]

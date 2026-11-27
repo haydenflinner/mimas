@@ -880,3 +880,42 @@ impl BlockChecks {
         self.fresh.borrow_mut().take();
     }
 }
+
+/// What the one renderer needs beyond the value (r[impl mimas.display.one]):
+/// each display site's static shape (`print`, `dbg`, `warn`, a top-level
+/// echo), the shapes f-string holes name by index (`__shown`), each struct's
+/// field shapes (declared units), and the unit the page wrote for each
+/// dimension. `load_program` refreshes it.
+#[derive(Default)]
+pub struct DisplayShapes {
+    pub sites: RefCell<HashMap<Location, shared::units::Shape>>,
+    pub holes: RefCell<Vec<shared::units::Shape>>,
+    pub fields: RefCell<Vec<Vec<shared::units::Shape>>>,
+    pub units: RefCell<HashMap<shared::units::Dim, shared::units::Shown>>,
+}
+
+impl DisplayShapes {
+    /// The shape of the value shown at `loc`, `Plain` when nothing is known.
+    pub fn at(&self, loc: Location) -> shared::units::Shape {
+        self.sites.borrow().get(&loc).cloned().unwrap_or_default()
+    }
+
+    /// The `i`th f-string hole shape.
+    pub fn hole(&self, i: usize) -> shared::units::Shape {
+        self.holes.borrow().get(i).cloned().unwrap_or_default()
+    }
+
+    /// The field shapes of struct `sid`, in slot order.
+    pub fn fields_of(&self, sid: usize) -> Vec<shared::units::Shape> {
+        self.fields.borrow().get(sid).cloned().unwrap_or_default()
+    }
+
+    /// How a quantity of `dim` shows: the page's unit, else the coherent one.
+    pub fn unit(&self, dim: shared::units::Dim) -> shared::units::Shown {
+        self.units.borrow().get(&dim).cloned().unwrap_or_else(|| shared::units::Shown {
+            name: dim.name(),
+            scale: 1.0,
+            list: false,
+        })
+    }
+}

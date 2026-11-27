@@ -10,8 +10,8 @@ const HEAD: &str = "fn head(l: [int]) -> int! {
 test_run_display!(
     atom_display,
     "#EmptyList" => "#EmptyList",
-    "#ParseError(line: 3)" => "#ParseError { 3 }",
-    "#Pair(1, \"x\")" => "#Pair { 1, \"x\" }",
+    "#ParseError(line: 3)" => "#ParseError(line: 3)",
+    "#Pair(1, \"x\")" => "#Pair(1, \"x\")",
     "f\"{#Done}\"" => "#Done",
     "[#A, #B]" => "[#A, #B]",
 );
@@ -48,7 +48,7 @@ test_run_display!(
 test_run_display!(
     atom_in_fields_and_branches,
     "struct Job { state: atom }",
-    "Job { state: #Running }" => "Job { #Running }",
+    "Job { state: #Running }" => "Job { state: #Running }",
     "Job { state: #Running }.state == #Running" => "true",
     "match (if true { #Many } else { #Few }) { #Many => \"many\", #Few => \"few\" }" => "many",
 );

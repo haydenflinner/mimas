@@ -371,6 +371,10 @@ impl Vm {
             field_dims,
             print_dims,
             echo_units,
+            print_shapes,
+            hole_shapes,
+            field_shapes,
+            shown_units,
             field_tys: _,
             value_adts,
             tests,
@@ -463,6 +467,12 @@ impl Vm {
                 .get::<crate::fixtures::PrintDims>()
                 .shown
                 .borrow_mut() = echo_units;
+            // r[impl mimas.display.one] what the renderer knows beyond values
+            let shapes = state.fixtures.get::<crate::fixtures::DisplayShapes>();
+            *shapes.sites.borrow_mut() = print_shapes;
+            *shapes.holes.borrow_mut() = hole_shapes;
+            *shapes.fields.borrow_mut() = field_shapes.into_values().collect();
+            *shapes.units.borrow_mut() = shown_units;
             // fresh program = fresh trace: re-size the op counter to the
             // new code length and drop edges that named dead BodyIds
             let trace = state.fixtures.get::<crate::fixtures::Trace>();

@@ -44,6 +44,9 @@ pub struct Ir {
     /// `multi fn` dec → the synthesized dispatch trampoline `ref_body` hands
     /// out when the generic is used as a value. r[impl mimas.multi]
     pub(crate) multi_tramps: HashMap<DecId, BodyId>,
+    /// The shapes f-string holes render by (`__shown(value, i)` names the
+    /// `i`th), shipped on `Program::hole_shapes` (r[impl mimas.display.one]).
+    pub hole_shapes: Vec<shared::units::Shape>,
 }
 
 impl Ir {
@@ -60,6 +63,7 @@ impl Ir {
             body_stack: Vec::new(),
             item_bodies: HashMap::new(),
             tests: Vec::new(),
+            hole_shapes: Vec::new(),
             closure_bodies: HashMap::new(),
             current_loc: Location::SYNTHETIC,
             stmt_depth: 0,
