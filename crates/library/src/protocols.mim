@@ -267,3 +267,12 @@ impl Range {
 fn __range(start: int, end: int, inclusive: bool) -> Range {
     Range { start, end: if inclusive { end + 1 } else { end } }
 }
+
+/// One shared, writable value: `let b = Cell { value: 100 }`. A closure
+/// that captures `b` and writes `b.value -= amt` changes the one value
+/// every holder of `b` sees, where a write to a captured plain `let` is
+/// refused (it would change only that call's copy). The field is a place:
+/// `+=`, `&b.value` and an `inout` argument work on it.
+/// r[impl mimas.std.cell]
+struct Cell<T> { value: T }
+

@@ -880,7 +880,7 @@ pub struct AssignToLoopVar {
 #[derive(Error, Debug, Diagnostic)]
 #[error("cannot assign to `{name}` here: this closure captured a copy of it")]
 #[diagnostic(help(
-    "the write changes only this call's copy, and the next call starts from the captured value again. Keep the state in a struct field (`s.{name} = …` reaches the shared value), return the new value, or bind a fresh local first (`let {name} = {name};`) if the change is meant to stay inside this call"
+    "the write changes only this call's copy, and the next call starts from the captured value again. To keep the change, wrap it in a `Cell`: `let {name} = Cell {{ value: … }}` and write `{name}.value -= …` (a field write reaches the shared value). Or return the new value, or bind a fresh local first (`let {name} = {name};`) if the change is meant to stay inside this call"
 ))]
 pub struct AssignToCapture {
     #[source_code]
