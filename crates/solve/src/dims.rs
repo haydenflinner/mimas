@@ -1906,10 +1906,12 @@ impl<'a> Pass<'a> {
         }
         let args: Vec<D> = c.arguments.iter().map(|a| self.expr(&a.value)).collect();
         if let ExprKind::Ident(callee) = c.left.kind() {
-            // `a ÷ b` is the prelude's `quot_rem(a, b)`: a whole quotient
-            // worth `a / b` and a remainder worth `a` (r[impl mimas.unit.combinator])
+            // `a ÷ b` is the prelude's `__op_quot_rem(a, b)` (L10's reserved
+            // name; `quot_rem(a, b)` written out is the same): a whole
+            // quotient worth `a / b` and a remainder worth `a`
+            // (r[impl mimas.unit.combinator])
             if let Some(f) = user
-                && callee.lexeme == "quot_rem"
+                && matches!(callee.lexeme.as_str(), "__op_quot_rem" | "quot_rem")
                 && f.parameters.iter().all(|p| p.annotation.is_none())
                 && let [D::Q(a), D::Q(b)] = args.as_slice()
             {
