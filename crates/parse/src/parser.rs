@@ -159,6 +159,9 @@ pub struct Parser<'s> {
     /// Pattern parameters of the `fn` signature being read, each with the
     /// synthetic parameter that carries it (`mimas.fn.pattern-param`).
     param_prologue: Vec<(Pat, Ident)>,
+    /// Whether `a..b` after an expression reads as a range value; off for a
+    /// slice's index, whose brackets read the `..` themselves.
+    range_values: bool,
     /// `x: int = 0` in the struct body being read: each field's default, for
     /// the `__dflt_S_x` fn the struct desugars it to (`mimas.struct.field-default`).
     field_defaults: Vec<(String, Annotation, Expr, usize)>,
@@ -382,6 +385,7 @@ impl<'s> Parser<'s> {
             pending: Vec::new(),
             pending_marks: Vec::new(),
             param_prologue: Vec::new(),
+            range_values: true,
             field_defaults: Vec::new(),
             regions: if lexer.offset() == 0 && relocate.is_none() {
                 page_regions(lexer.source())
@@ -1818,7 +1822,22 @@ impl<'s> Parser<'s> {
     /// error in [Self::errors]. See [Self::into_ast] for what that means for the caller.
     pub fn expr(&mut self) -> Expr {
         let expr = self.block_body();
-        self.chain_after_block(expr)
+        let expr = self.chain_after_block(expr);
+        // `a..b` / `a..=b` is a range value wherever an expression goes; a
+        // slice's brackets read their own `..` (r[impl mimas.range.value])
+        if self.range_values
+            && (self.at(TokKind::DoubleDot) || self.at(TokKind::DoubleDotEqual))
+            && self.infix_binds()
+            && self.nth(1).starts_expr()
+        {
+            let inclusive = self.at(TokKind::DoubleDotEqual);
+            self.advance();
+            let start = expr.span().start();
+            let end = self.block_body();
+            let end = self.chain_after_block(end);
+            return self.new_expr(Range::new(expr, end, inclusive), start);
+        }
+        expr
     }
 
     /// The expression dispatch without chaining a trailing block. Control-flow *bodies* parse
@@ -5883,7 +5902,9 @@ impl<'s> Parser<'s> {
             let zero = self.new_expr(Literal::Int(0), start);
             return self.slice_call(left, zero, Some(end), inclusive, start);
         }
+        let outer = std::mem::replace(&mut self.range_values, false);
         let key = self.struct_literals(true, Self::expr);
+        self.range_values = outer;
         // `xs[a..b]`, `xs[a..=b]`, `xs[a..]`
         if kind == AccessKind::Direct && (self.at(TokKind::DoubleDot) || self.at(TokKind::DoubleDotEqual)) {
             let inclusive = self.at(TokKind::DoubleDotEqual);

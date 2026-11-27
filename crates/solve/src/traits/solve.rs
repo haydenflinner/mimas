@@ -2901,6 +2901,11 @@ impl Solve for For {
             return solver.solve_for_in_place(id, self, iterator, location);
         }
 
+        // a range in the `for` head stays the counted loop, not a `Range`
+        if let ExprKind::Range(_) = iterator.kind() {
+            solver.for_ranges.insert(iterator.id());
+        }
+
         // Run the loop
         solver.ribs.push_block();
 
@@ -4553,7 +4558,30 @@ impl Solve for parse::Raise {
 }
 
 impl Solve for parse::Range {
-    fn solve(&self, _: NodeId, _: Location, solver: &mut Solver) -> Result<Ty> {
+    fn solve(&self, id: NodeId, location: Location, solver: &mut Solver) -> Result<Ty> {
+        // `a..b` outside a `for` head is a `Range` value (std
+        // protocols.mim); the `for` head keeps its fast loop.
+        // r[impl mimas.range.value]
+        if !solver.for_ranges.contains(&id) {
+            let at = location;
+            let rewritten = Expr::new(
+                ExprKind::Call(Call {
+                    left: Expr::new(ExprKind::Ident(Ident::new("__range", at)), at),
+                    arguments: vec![
+                        Argument { name: None, value: self.start.clone() },
+                        Argument { name: None, value: self.end.clone() },
+                        Argument {
+                            name: None,
+                            value: Expr::new(ExprKind::Literal(if self.inclusive { Literal::True } else { Literal::False }), at),
+                        },
+                    ],
+                }),
+                at,
+            );
+            let ty = rewritten.query(solver)?;
+            solver.rewrites.insert(id, rewritten);
+            return Ok(ty);
+        }
         self.start.fulfill_ty(Ty::Int, solver)?;
         self.end.fulfill_ty(Ty::Int, solver)?;
         Ok(Ty::Int)

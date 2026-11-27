@@ -236,3 +236,34 @@ fn __list_to_list<T>(xs: [T]) -> [T] {
     out
 }
 
+// Ranges as values (L7): `0..5` outside a `for` head is a `Range`.
+
+/// `a..b` as a value: the integers from `start` up to `end`, `end` left
+/// out. `a..=b` is `Range { start: a, end: b + 1 }`. A `for` over `a..b`
+/// keeps its own fast loop.
+struct Range { start: int, end: int }
+
+impl Range {
+    /// A pull over the integers, smallest first.
+    fn iter(self) -> () -> int? {
+        let at = [self.start];
+        let end = self.end;
+        || -> int? {
+            if at[0] < end {
+                let v = at[0];
+                at[0] += 1;
+                v
+            } else {
+                null
+            }
+        }
+    }
+    /// How many integers the range holds.
+    fn len(self) -> int { if self.end > self.start { self.end - self.start } else { 0 } }
+    /// Whether `x` is in the range.
+    fn contains(self, x: int) -> bool { x >= self.start && x < self.end }
+}
+
+fn __range(start: int, end: int, inclusive: bool) -> Range {
+    Range { start, end: if inclusive { end + 1 } else { end } }
+}

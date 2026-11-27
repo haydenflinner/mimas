@@ -115,6 +115,8 @@ pub struct Solver {
     /// `S::default()` calls a field-default rewrite made: the memberwise
     /// default under `..` (`mimas.struct.field-default`).
     pub(crate) plain_default_calls: FxHashSet<NodeId>,
+    /// `a..b` nodes that are a `for` head: counted loops, not `Range` values.
+    pub(crate) for_ranges: FxHashSet<NodeId>,
     /// Each impl member a pact owns: its dec and the pact (C3). A member whose
     /// name another member of the type already holds lives under the key
     /// `name@Pact` in `Adt::impls`.
@@ -457,6 +459,7 @@ impl Solver {
             run_once_closures: FxHashSet::default(),
             hoisting_pact: None,
             plain_default_calls: FxHashSet::default(),
+            for_ranges: FxHashSet::default(),
             member_pact: FxHashMap::default(),
             ambiguous_members: FxHashMap::default(),
             inout_params: FxHashSet::default(),

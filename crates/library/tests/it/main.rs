@@ -63,6 +63,7 @@ mod struct_forms;
 mod protocols;
 mod sort_ord;
 mod iter_combinators;
+mod range_value;
 mod rng;
 mod runtime_errors;
 mod scripts;
