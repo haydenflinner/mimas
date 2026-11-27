@@ -126,3 +126,113 @@ fn __min_by<T, K: Ord>(xs: [T], key: (T) -> K) -> T? {
     best
 }
 
+// Combinators over anything that iterates (L6). `g.map(f)` on a pull
+// (`() -> T?`), or on a value whose type has `iter()` and no `map` of its
+// own, calls these. A list keeps its own fast `map`, `filter` and `fold`.
+
+/// A pull over the items of a list, first to last.
+fn __list_pull<T>(xs: [T]) -> () -> T? {
+    let at = [0];
+    || -> T? {
+        if at[0] < xs.len() {
+            let v = xs[at[0]];
+            at[0] += 1;
+            v
+        } else {
+            null
+        }
+    }
+}
+
+fn __pull_map<T, U>(g: () -> T?, f: (T) -> U) -> () -> U? {
+    || -> U? {
+        let x = g();
+        if x == null { null } else { f(x!) }
+    }
+}
+
+fn __pull_filter<T>(g: () -> T?, p: (T) -> bool) -> () -> T? {
+    || -> T? {
+        loop {
+            let x = g();
+            if x == null { return null; }
+            if p(x!) { return x; }
+        }
+    }
+}
+
+fn __pull_fold<T, A>(g: () -> T?, init: A, f: (A, T) -> A) -> A {
+    let acc = init;
+    for x in g { acc = f(acc, x); }
+    acc
+}
+
+fn __pull_find<T>(g: () -> T?, p: (T) -> bool) -> T? {
+    for x in g { if p(x) { return x; } }
+    null
+}
+
+fn __pull_any<T>(g: () -> T?, p: (T) -> bool) -> bool {
+    for x in g { if p(x) { return true; } }
+    false
+}
+
+fn __pull_all<T>(g: () -> T?, p: (T) -> bool) -> bool {
+    for x in g { if !p(x) { return false; } }
+    true
+}
+
+fn __pull_enumerate<T>(g: () -> T?) -> () -> (int, T)? {
+    let n = [0];
+    || -> (int, T)? {
+        let x = g();
+        if x == null {
+            null
+        } else {
+            let i = n[0];
+            n[0] += 1;
+            (i, x!)
+        }
+    }
+}
+
+fn __pull_zip<T, U>(g: () -> T?, h: () -> U?) -> () -> (T, U)? {
+    || -> (T, U)? {
+        let a = g();
+        let b = h();
+        if a == null || b == null { null } else { (a!, b!) }
+    }
+}
+
+fn __pull_flat_map<T, U>(g: () -> T?, f: (T) -> [U]) -> () -> U? {
+    let buf: [[U]] = [[]];
+    let at = [0];
+    || -> U? {
+        loop {
+            if at[0] < buf[0].len() {
+                let v = buf[0][at[0]];
+                at[0] += 1;
+                return v;
+            }
+            let x = g();
+            if x == null { return null; }
+            buf[0] = f(x!);
+            at[0] = 0;
+        }
+    }
+}
+
+/// The items left in a pull, as a list.
+fn __pull_to_list<T>(g: () -> T?) -> [T] {
+    let out: [T] = [];
+    for x in g { out.push(x); }
+    out
+}
+
+/// A copy of the list: `to_list()` is the one conversion, also on a list.
+fn __list_to_list<T>(xs: [T]) -> [T] {
+    let out: [T] = [];
+    for x in xs { out.push(x); }
+    out
+}
+

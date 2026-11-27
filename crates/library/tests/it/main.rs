@@ -62,6 +62,7 @@ mod pact_keys;
 mod struct_forms;
 mod protocols;
 mod sort_ord;
+mod iter_combinators;
 mod rng;
 mod runtime_errors;
 mod scripts;

@@ -1147,6 +1147,94 @@ impl Solve for Break {
 
 impl Solve for Call {
     fn solve(&self, id: NodeId, location: Location, solver: &mut Solver) -> Result<Ty> {
+        // combinators over anything that iterates: a pull (`() -> T?`), or a
+        // value whose type has `iter()` and no method of the name itself.
+        // `to_list()` is the one conversion, also on a list.
+        // r[impl mimas.iter.combinators]
+        if let ExprKind::Access(Access::Dot { left: recv, right, .. }) = self.left.kind()
+            && let Some(name) = right.as_ident().map(|i| i.lexeme.clone())
+            && let Some(helper) = match name.as_str() {
+                "map" => Some("__pull_map"),
+                "filter" => Some("__pull_filter"),
+                "fold" => Some("__pull_fold"),
+                "find" => Some("__pull_find"),
+                "any" => Some("__pull_any"),
+                "all" => Some("__pull_all"),
+                "enumerate" => Some("__pull_enumerate"),
+                "zip" => Some("__pull_zip"),
+                "flat_map" => Some("__pull_flat_map"),
+                "to_list" => Some("__pull_to_list"),
+                _ => None,
+            }
+            && self.arguments.iter().all(|a| a.name.is_none())
+        {
+            let recv_ty = recv.query(solver)?.normalized(solver);
+            let at = location;
+            let iter_of = |e: &Expr| -> Expr {
+                let at = e.location();
+                Expr::new(
+                    ExprKind::Call(Call {
+                        left: Expr::new(
+                            ExprKind::Access(Access::Dot {
+                                left: e.clone(),
+                                right: Expr::new(ExprKind::Ident(Ident::new("iter", at)), at),
+                                kind: parse::AccessKind::Direct,
+                            }),
+                            at,
+                        ),
+                        arguments: vec![],
+                    }),
+                    at,
+                )
+            };
+            let has_iter = |s: &Solver, t: &Ty| match t {
+                Ty::Adt(aid, _) | Ty::Identity(aid, _) => s.adts[*aid].impls.get("iter").is_some_and(|f| {
+                    matches!(&f.ty, Ty::Fn(h) if h.is_method && h.parameters.len() == 1)
+                }),
+                _ => false,
+            };
+            let is_pull = |t: &Ty| {
+                matches!(t, Ty::Fn(h) if h.parameters.is_empty() && matches!(h.return_ty.as_ref(), Ty::Option(_)))
+            };
+            let own = match &recv_ty {
+                Ty::Adt(aid, _) | Ty::Identity(aid, _) => solver.adts[*aid].impls.contains_key(&name),
+                _ => false,
+            };
+            let source = if is_pull(&recv_ty) {
+                Some(recv.clone())
+            } else if !own && has_iter(solver, &recv_ty) {
+                Some(iter_of(recv))
+            } else {
+                None
+            };
+            let helper = match (&recv_ty, name.as_str()) {
+                (Ty::Array(..), "to_list") => Some(("__list_to_list", recv.clone())),
+                _ => source.map(|s| (helper, s)),
+            };
+            if let Some((helper, source)) = helper {
+                let mut arguments = vec![Argument { name: None, value: source }];
+                for a in &self.arguments {
+                    // `zip`'s other side iterates the same way
+                    let ty = a.value.query(solver)?.normalized(solver);
+                    let value = if name == "zip" && has_iter(solver, &ty) {
+                        iter_of(&a.value)
+                    } else {
+                        a.value.clone()
+                    };
+                    arguments.push(Argument { name: None, value });
+                }
+                let rewritten = Expr::new(
+                    ExprKind::Call(Call {
+                        left: Expr::new(ExprKind::Ident(Ident::new(helper, at)), at),
+                        arguments,
+                    }),
+                    at,
+                );
+                let ty = rewritten.query(solver)?;
+                solver.rewrites.insert(id, rewritten);
+                return Ok(ty);
+            }
+        }
         // `xs.sorted()`, `.max()`, `.min()` on a list of an `Ord` type, and
         // `sorted_by`/`max_by`/`min_by` on any list, call the std helpers
         // over `Ord` (protocols.mim). r[impl mimas.list.sort-ord]
