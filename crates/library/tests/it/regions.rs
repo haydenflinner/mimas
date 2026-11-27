@@ -206,3 +206,25 @@ fn clamp01(x: float) -> float { 0.5 }
     "clamp01(3.0)" => "0.5",
     "[1, 2].len()" => "2",
 );
+
+// A byte offset orders positions within one source only. std's
+// protocols.mim declares `struct Range` near byte ~7000; a page that
+// declares its own `Range` near byte 0 and uses it past that offset used to
+// resolve the use to std's `Range` ("expected Range but found Range"),
+// because reading order compared the page's offset with the library file's.
+// The pad sweeps the use across std's offset.
+// r[verify mimas.decl.source-order]
+#[test]
+fn a_page_type_beats_a_library_type_at_any_offset() {
+    let lib_at = library::PROTOCOLS_SRC.find("struct Range").expect("std declares Range");
+    for pad in (0..=lib_at + 400).step_by(97) {
+        let src = format!(
+            "struct Range {{ lo: int }}\n//{}\nfn f(r: Range) -> int {{ r.lo }}\nlet TEST_VALUE = f(Range {{ lo: 3 }});",
+            "x".repeat(pad)
+        );
+        assert!(
+            crate::test_runner::try_execute(&src).is_ok(),
+            "pad {pad} (std's Range at {lib_at}) failed"
+        );
+    }
+}

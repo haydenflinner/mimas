@@ -356,15 +356,36 @@ impl Rib {
     }
 
     /// The latest declaration at or before `at` among `decls`, else the latest.
-    fn reading_order(decls: &[&(Location, DecId)], at: usize) -> Option<DecId> {
-        let mut best: Option<(usize, DecId)> = None;
-        for &&(loc, id) in decls {
+    /// The declaration a use at `at` reads, by reading order. A byte offset
+    /// orders positions within one source only: a page's offset 1800 says
+    /// nothing about a library file's offset 1713. So only declarations in
+    /// the use's own file compete by position: the latest at or before the
+    /// use, else the first after it (an item is hoisted). With none in that
+    /// file, the latest declared (the file solved last) answers.
+    /// r[impl mimas.decl.source-order]
+    fn reading_order(decls: &[&(Location, DecId)], at: Location) -> Option<DecId> {
+        let pos = at.span.start;
+        let same: Vec<&(Location, DecId)> = decls
+            .iter()
+            .copied()
+            .filter(|(loc, _)| loc.file_id() == at.file_id())
+            .collect();
+        if same.is_empty() {
+            return decls.last().map(|(_, id)| *id);
+        }
+        let mut before: Option<(usize, DecId)> = None;
+        let mut after: Option<(usize, DecId)> = None;
+        for &&(loc, id) in &same {
             let start = loc.span.start;
-            if start <= at && best.is_none_or(|(b, _)| start >= b) {
-                best = Some((start, id));
+            if start <= pos {
+                if before.is_none_or(|(b, _)| start >= b) {
+                    before = Some((start, id));
+                }
+            } else if after.is_none_or(|(a, _)| start < a) {
+                after = Some((start, id));
             }
         }
-        best.map(|(_, id)| id).or_else(|| decls.last().map(|(_, id)| *id))
+        before.or(after).map(|(_, id)| id)
     }
 
     /// A declaration of `name` in the region `region` of this module rib.
@@ -388,7 +409,7 @@ impl Rib {
                 .iter()
                 .filter(|(loc, _)| regions::spelled(&regions::of(*loc)) == region)
                 .collect();
-            return Self::reading_order(&picked, ident.location.span.start);
+            return Self::reading_order(&picked, ident.location);
         }
         // a redeclared module-level name: the latest declaration at or before this use
         if let Some(decls) = self.history.get(&ident.lexeme)
@@ -413,7 +434,7 @@ impl Rib {
                     for r in [here.as_str(), ""] {
                         let own = pick(r);
                         if !own.is_empty() {
-                            return Self::reading_order(&own, at);
+                            return Self::reading_order(&own, ident.location);
                         }
                     }
                     // then the one kit that declares it, then std
@@ -423,19 +444,15 @@ impl Rib {
                         .cloned()
                         .collect();
                     match kits.len() {
-                        1 => return Self::reading_order(&pick(&kits[0]), at),
-                        0 => return Self::reading_order(&pick(regions::OUTSIDE), at),
+                        1 => return Self::reading_order(&pick(&kits[0]), ident.location),
+                        0 => return Self::reading_order(&pick(regions::OUTSIDE), ident.location),
                         // two kits define it and neither is the use's: ambiguous
                         _ => regions::note_ambiguous(&ident.lexeme, ident.location, kits),
                     }
                 }
             }
             let all: Vec<_> = decls.iter().collect();
-            if let Some(id) = Self::reading_order(&all, at)
-                && decls.iter().any(|(loc, _)| loc.span.start <= at)
-            {
-                return Some(id);
-            }
+            return Self::reading_order(&all, ident.location);
         }
         self.table.get(&ident.lexeme).copied()
     }
