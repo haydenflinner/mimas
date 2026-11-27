@@ -46,6 +46,14 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add(sum_by);
     api.add(avg_by);
     api.add(count_by);
+    api.add(filled);
+}
+
+#[native]
+/// A list of `n` copies of `v`: `filled(3, 0)` is `[0, 0, 0]`. A
+/// non-positive `n` gives an empty list. r[impl mimas.list.filled]
+fn filled<'gc>(n: i64, v: anon::T<'gc>) -> Vec<anon::T<'gc>> {
+    vec![v; n.max(0) as usize]
 }
 
 #[native]

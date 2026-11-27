@@ -21,6 +21,13 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add_method(chars);
     api.add_method(find);
     api.add_method(find_all);
+    // r[impl mimas.str.re-find] the regex names; `find`/`find_all` stay as
+    // forwards until the corpus moves (a list's `find` takes a predicate)
+    api.add_method_named("re_find", find);
+    api.add_method_named("re_find_all", find_all);
+    api.add_method_named("to_float", str_to_float);
+    api.add_method(bytes);
+    api.add_assoc(shared::Ty::Str, from_bytes);
     api.add_method(lines);
     api.add_method(capitalize);
     api.add_method(to_int);
@@ -353,4 +360,36 @@ fn str_slice_from(s: &str, a: i64) -> String {
 // r[impl mimas.list.reversed]
 fn str_reversed(s: &str) -> String {
     s.chars().rev().collect()
+}
+
+#[native]
+/// The number this text writes, or `null` when it isn't one.
+///
+/// ```mimas
+/// let a = " 2.5 ".to_float(); // 2.5
+/// let b = "two".to_float();   // null
+/// ```
+// r[impl mimas.str.parse-option]
+fn str_to_float(s: &str) -> Option<f64> {
+    s.trim().parse::<f64>().ok()
+}
+
+#[native]
+/// The text's UTF-8 bytes, each `0` to `255`.
+///
+/// ```mimas
+/// let b = "hé".bytes(); // [104, 195, 169]
+/// ```
+// r[impl mimas.str.bytes]
+fn bytes(s: &str) -> Vec<i64> {
+    s.bytes().map(i64::from).collect()
+}
+
+#[native]
+/// The text these UTF-8 bytes spell, or `null` when they are not UTF-8 or
+/// a value is not a byte. `str::from_bytes(s.bytes())` is `s`.
+// r[impl mimas.str.bytes]
+fn from_bytes(bytes: Vec<i64>) -> Option<String> {
+    let raw: Option<Vec<u8>> = bytes.iter().map(|&b| u8::try_from(b).ok()).collect();
+    String::from_utf8(raw?).ok()
 }

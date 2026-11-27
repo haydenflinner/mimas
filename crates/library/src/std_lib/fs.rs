@@ -43,8 +43,9 @@ fn read<'gc>(path: &str) -> Raisable<String> {
 /// ```
 #[native]
 #[effects(io)]
-fn write<'gc>(path: &str, contents: &str) -> Raisable<bool> {
-    std::fs::write(path, contents).map(|_| true).into()
+// r[impl mimas.fs.unit-result]
+fn write<'gc>(path: &str, contents: &str) -> Raisable<()> {
+    std::fs::write(path, contents).into()
 }
 
 /// Deletes the file at `path` and returns `true`. Raises if it can't, including when `path` is a
@@ -57,8 +58,8 @@ fn write<'gc>(path: &str, contents: &str) -> Raisable<bool> {
 /// ```
 #[native]
 #[effects(io)]
-fn remove<'gc>(path: &str) -> Raisable<bool> {
-    std::fs::remove_file(path).map(|_| true).into()
+fn remove<'gc>(path: &str) -> Raisable<()> {
+    std::fs::remove_file(path).into()
 }
 
 /// Deletes the directory at `path` and everything inside it, then returns `true`. Raises if it
@@ -71,8 +72,8 @@ fn remove<'gc>(path: &str) -> Raisable<bool> {
 /// ```
 #[native]
 #[effects(io)]
-fn remove_dir<'gc>(path: &str) -> Raisable<bool> {
-    std::fs::remove_dir_all(path).map(|_| true).into()
+fn remove_dir<'gc>(path: &str) -> Raisable<()> {
+    std::fs::remove_dir_all(path).into()
 }
 
 /// Creates a directory at `path`, along with any parent directories that are missing, and returns
@@ -87,8 +88,8 @@ fn remove_dir<'gc>(path: &str) -> Raisable<bool> {
 /// ```
 #[native]
 #[effects(io)]
-fn make_dir<'gc>(path: &str) -> Raisable<bool> {
-    std::fs::create_dir_all(path).map(|_| true).into()
+fn make_dir<'gc>(path: &str) -> Raisable<()> {
+    std::fs::create_dir_all(path).into()
 }
 
 /// Returns the paths of the files and directories directly inside the directory at `path`. Each

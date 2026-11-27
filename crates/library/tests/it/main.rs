@@ -65,6 +65,7 @@ mod sort_ord;
 mod iter_combinators;
 mod range_value;
 mod callables;
+mod failure_names;
 mod rng;
 mod runtime_errors;
 mod scripts;

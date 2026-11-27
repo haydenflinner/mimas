@@ -59,11 +59,8 @@ fn float_to_dec(f: f64) -> Result<Dec, RtErr> {
 }
 
 #[native]
-/// The decimal this text writes (`"3.50"`, `"-12"`, `"1.5e3"`), or a raise
-/// when it isn't one.
-fn str_to_dec(s: String) -> Raisable<Dec> {
-    match s.parse::<Dec>() {
-        Ok(d) => Raisable::Ok(d),
-        Err(e) => Raisable::Raised(format!("{s:?} is {e}")),
-    }
+/// The decimal this text writes (`"3.50"`, `"-12"`, `"1.5e3"`), or `null`
+/// when it isn't one, as `str.to_int` answers. r[impl mimas.str.parse-option]
+fn str_to_dec(s: String) -> Option<Dec> {
+    s.trim().parse::<Dec>().ok()
 }

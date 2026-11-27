@@ -73,6 +73,7 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     // r[impl mimas.sorted]
     api.add_method_named("sorted", sorted_int);
     api.add_method(reversed);
+    api.add_method(shuffled);
     api.add_method(reverse);
     api.add_method_named("sorted", sorted_float);
     api.add_method_named("sorted", sorted_str);
@@ -900,4 +901,18 @@ vm::inventory::submit! {
 #[effects()]
 fn get<'gc>(arr: anon::SeqOf<'gc, 0>, index: i64) -> Option<anon::T<'gc>> {
     usize::try_from(index).ok().and_then(|i| arr.0.seq_get(i)).map(anon::Anon)
+}
+
+#[native]
+#[effects(rng)]
+/// A copy of the list in a random order. The list itself is unchanged
+/// (`shuffle` mixes it in place).
+// r[impl mimas.list.shuffled]
+fn shuffled<'gc>(ctx: Ctx<'gc>, arr: Vec<anon::T<'gc>>) -> Vec<anon::T<'gc>> {
+    let mut out = arr;
+    for i in (1..out.len()).rev() {
+        let j = (super::rng::unit(ctx) * (i as f64 + 1.0)) as usize;
+        out.swap(i, j.min(i));
+    }
+    out
 }

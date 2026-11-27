@@ -6,6 +6,7 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     // r[impl mimas.dict.type] `dict::new()` is the empty dict
     api.add_assoc(Ty::dict_of(Ty::Anon(anon::KEY_SLOT), Ty::Anon(0)), new);
     api.add_method(len);
+    api.add_method(is_empty);
     api.add_method(contains_key);
     api.add_method(insert);
     api.add_method(remove);
@@ -129,4 +130,10 @@ fn keys(d: &DictMap<'gc, anon::T<'gc>>) -> Vec<anon::K<'gc>> {
 /// The values, in the order their keys were added.
 fn values(d: &DictMap<'gc, anon::T<'gc>>) -> Vec<anon::T<'gc>> {
     d.iter().map(|(_, &v)| v).collect()
+}
+
+#[native]
+/// Whether the dictionary has no entries. r[impl mimas.dict.is-empty]
+fn is_empty(d: &DictMap<'gc>) -> bool {
+    d.len() == 0
 }
