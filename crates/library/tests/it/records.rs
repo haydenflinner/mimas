@@ -62,8 +62,11 @@ test_run!(
 // r[verify mimas.record.separator]
 test_run!(
     a_lone_assignment_stays_a_block,
-    // `{ x = 5 }` assigns — closures and match arms rely on it
-    "{ let x = 0; let f = || { x = 5 }; f(); x }" => "0",
+    // `{ x = 5 }` assigns — closures and match arms rely on it (a closure's
+    // write to a captured local is refused since L1, so the closure writes a
+    // shared slot)
+    "{ let x = [0]; let f = || { x[0] = 5 }; f(); x[0] }" => "5",
+    "{ let x = 0; match 1 { _ => { x = 5 } }; x }" => "5",
     "{ let x = 0; { x = 5 }; x }" => "5",
     "{ let y = { 7 }; y }" => "7",
 );
