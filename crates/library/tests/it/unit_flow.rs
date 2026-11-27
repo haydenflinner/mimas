@@ -112,3 +112,15 @@ fn generator_items_keep_their_unit() {
     assert!(refused(src).contains(ADD_PX_S));
     compiles("subscript ws() -> px { yield 1.0px; yield 2.0px }\nfor w in ws() { let ok = w + 1.0px }\n");
 }
+
+// x05g: a member generator read as a field (`b.wide`) gives its
+// declared item unit in `for`.
+// r[verify mimas.unit.generator]
+#[test]
+fn a_member_generator_keeps_its_unit() {
+    let bag = "struct Bag { ws: [px] }\n\
+               impl Bag { subscript wide() -> px { for w in self.ws { if w > 1.0px { yield w } } } }\n\
+               let b = Bag { ws: [1.0px, 2.0px] }\n";
+    assert!(refused(&format!("{bag}for w in b.wide {{ let bad = w + 1.0s }}\n")).contains(ADD_PX_S));
+    compiles(&format!("{bag}for w in b.wide {{ let ok = w + 1.0px }}\n"));
+}

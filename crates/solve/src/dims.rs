@@ -1800,8 +1800,18 @@ impl<'a> Pass<'a> {
                             );
                         }
                         // host adts carry field dims on their api descriptor (`Input.dt` is `s`)
-                        if let Some(d) = self.solver.field_dims.get(&(ty, field.lexeme.clone())) {
+                        if let Some(d) = self.solver.field_dims.get(&(ty.clone(), field.lexeme.clone())) {
                             return D::Q(*d);
+                        }
+                        // a member generator read as a field, `b.wide`: worth
+                        // its `() -> px?`, so `for w in b.wide` gives `px`
+                        // (r[impl mimas.unit.generator])
+                        if let Some(f) = self.methods.get(&(ty.clone(), field.lexeme.clone())).copied()
+                            && let Some(ret) = &f.return_type
+                            && let D::Fn(ps, item) = self.with_ty_params(self.adt_param_names(&ty), |s| s.annotation(ret))
+                            && ps.is_empty()
+                        {
+                            return D::Fn(ps, item);
                         }
                     }
                 }
