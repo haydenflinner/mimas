@@ -250,6 +250,17 @@ pub struct PactSigDefaultParam {
     pub at: SourceSpan,
 }
 
+/// `B { ..b, up = false }`: the `..base` spread closes a struct literal.
+#[derive(Error, Debug, Diagnostic)]
+#[error("`..base` comes last in a struct literal")]
+#[diagnostic(help("move it after the fields: `B {{ up = false, ..b }}`"))]
+pub struct StructBaseNotLast {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("this spread")]
+    pub at: SourceSpan,
+}
+
 /// `let 0..3 = x`: a range pattern stands only in a match arm.
 #[derive(Error, Debug, Diagnostic)]
 #[error("a range pattern only stands in a `match` arm")]

@@ -316,6 +316,22 @@ pub struct InvalidEvaluation {
     pub op: String,
 }
 
+/// `a ∧ b` on numbers or bools: `∧` and `∨` are named operators (wedge,
+/// vee), not logical and/or.
+#[derive(Error, Debug, Diagnostic)]
+#[error("`{op}` is a named operator, not logic")]
+#[diagnostic(help("for logic write `{keyboard}`; `{op}` binds like `*`, so `a < b {op} c < d` joins `b` and `c`"))]
+pub struct LogicGlyph {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("`{op}` between `{lhs}` and `{rhs}`")]
+    pub at: SourceSpan,
+    pub op: String,
+    pub keyboard: &'static str,
+    pub lhs: String,
+    pub rhs: String,
+}
+
 /// A named operator (`∧`, `⋅`, `×`, …) between two values neither of whose
 /// types has its method. r[impl mimas.op.named]
 #[derive(Error, Debug, Diagnostic)]

@@ -378,8 +378,10 @@ Tests: `library/tests/it/axes.rs`. Book: Units › Axes and directions.
 
 ## Math spellings, the big reductions, `⋅`, masks and gather
 
-`≠ ≤ ≥ ¬ ∧ ∨ ∈ ∉` lex to the tokens their keyboard forms do, so the AST and
-every diagnostic still print ASCII. `∑ ∏ ⨅ ⨆` are prefix reductions — the
+`≠ ≤ ≥ ¬ ∈ ∉` lex to the tokens their keyboard forms do, so the AST and
+every diagnostic still print ASCII. `∧` and `∨` do not: they are named
+operators, `a.wedge(b)` and `a.vee(b)` (`mimas.op.named`). On two bools
+the error says to write `&&` or `||`. `∑ ∏ ⨅ ⨆` are prefix reductions — the
 big form of an operator is its fold — desugaring in `Parser::unary` to
 `.sum()` `.product()` `.inf()` `.sup()`: meet and join, all-of/min and
 any-of/max, the lattice glyphs rather than `⋀ ⋁` so they don't read as

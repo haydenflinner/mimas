@@ -48,6 +48,7 @@ mod multi_dispatch;
 mod numbers;
 mod operators;
 mod pact_ops;
+mod plain_messages;
 mod parquet;
 mod place_generators;
 mod positional;

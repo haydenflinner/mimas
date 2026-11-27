@@ -1696,6 +1696,32 @@ impl<'a> Pass<'a> {
                     _ => D::Any,
                 }
             }
+            // `a ≈ b` compares, so its sides must measure the same thing, as
+            // `==`'s must (r[impl mimas.unit.dimension])
+            EvaluationOp::Approx => {
+                if let ExprKind::Evaluation(ev) = e.kind()
+                    && !Self::is_zero(&ev.left)
+                    && !Self::is_zero(&ev.right)
+                    && let Some((a, b)) = clash(&l, &r)
+                    && self.conv_pair(&l, Some(&ev.left), &r, Some(&ev.right)).is_none()
+                {
+                    self.fail(
+                        e.location(),
+                        format!(
+                            "cannot compare {} and {}",
+                            self.describe_operand(&ev.left, &a),
+                            self.describe_operand(&ev.right, &b)
+                        ),
+                        format!(
+                            "{} against {}",
+                            self.describe_operand(&ev.left, &a),
+                            self.describe_operand(&ev.right, &b)
+                        ),
+                        "quantities are only comparable in the same dimension; convert one side with `.to(unit)`",
+                    );
+                }
+                D::Any
+            }
             // `a ⋅ b` on two lists of quantities: the sum of products, worth
             // the product of the item units (r[impl mimas.glyph.dot.list])
             EvaluationOp::Dot => match (&l, &r) {

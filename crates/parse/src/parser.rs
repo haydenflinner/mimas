@@ -4156,9 +4156,21 @@ impl<'s> Parser<'s> {
                 if self.at(TokKind::RightBrace) {
                     break;
                 }
-                if self.eat(TokKind::DoubleDot) {
+                if self.at(TokKind::DoubleDot) {
+                    let at = self.next_start();
+                    self.advance();
                     base = Some(self.expr());
+                    let base_at = self.location(at);
                     self.eat(TokKind::Comma);
+                    // `B { ..b, up = false }`: the spread closes the literal.
+                    // Say so, and read the fields after it so the rest checks.
+                    if self.peek().is_ident() {
+                        self.error(StructBaseNotLast {
+                            src: self.src(),
+                            at: base_at.into(),
+                        });
+                        continue;
+                    }
                     break;
                 }
                 if !self.peek().is_ident() {

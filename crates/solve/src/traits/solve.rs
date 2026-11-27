@@ -2707,6 +2707,21 @@ impl Solve for Evaluation {
         ) -> Result<Ty> {
             // a named operator reaching here found no method on either side:
             // say which methods would have caught it (r[impl mimas.op.named])
+            // `a ∧ b` on two bools reads as logic, but `∧`/`∨` are named
+            // operators: point at `&&`/`||`
+            let plain = |t: &Ty| matches!(t, Ty::Bool | Ty::Int | Ty::Float);
+            if matches!(op, EvaluationOp::Wedge | EvaluationOp::Vee) && plain(lhs) && plain(rhs) {
+                let keyboard = if op == EvaluationOp::Wedge { "&&" } else { "||" };
+                return Err(crate::errors::LogicGlyph {
+                    src: solver.src(location),
+                    at: location.into(),
+                    op: op.to_string(),
+                    keyboard,
+                    lhs: lhs.to_string(),
+                    rhs: rhs.to_string(),
+                }
+                .into());
+            }
             if op.is_named() {
                 let (method, rmethod) = op_method_names(op);
                 return Err(UnboundOperator {
