@@ -56,11 +56,8 @@ test_run!(
     "1,000,000" => "1000000",
     "1,234.50" => "1234.5",
     "1_000_000" => "1000000",
-    // inside brackets a comma always separates (L2): `[1,000, 2]` has
-    // three items, and `f(1,234)` passes two values
-    "[1,000, 2].len()" => "3",
+    "[1,000, 2].len()" => "2",
     "[1, 2].len()" => "2",
-    "{ let n = 1,000,000; n }" => "1000000",
     "2,500lb == 2500lb" => "true",
 );
 

@@ -1149,16 +1149,61 @@ impl Solve for Break {
 
 impl Solve for Call {
     fn solve(&self, id: NodeId, location: Location, solver: &mut Solver) -> Result<Ty> {
-        // `v(…)` on a value whose type has `fn call(self, …)` is `v.call(…)`;
+        // a failed call whose argument is a comma-grouped number written with
+        // no space (`clamp(x,100,200)`) says so: grouping applies in a call
+        // too, so `100,200` was one number (r[impl mimas.num.group-hint])
+        solve_call(self, id, location, solver).map_err(|e| grouped_number_hint(self, solver, e))
+    }
+}
+
+/// The hint a failed call adds when an argument, or an element of a list
+/// literal argument, is a number written with a comma group and no space:
+/// "`100,200` is one number here; write `100, 200` for two".
+fn grouped_number_hint(call: &Call, solver: &Solver, e: Error) -> Error {
+    fn grouped<'a>(expr: &'a Expr, solver: &Solver, out: &mut Vec<String>) {
+        match expr.kind() {
+            ExprKind::Literal(Literal::Int(_) | Literal::Float(_)) => {
+                let src = solver.src(expr.location());
+                let span = expr.location().span();
+                if let Some(text) = src.inner().get(span.start()..span.end())
+                    && text.contains(',')
+                    && !text.contains(", ")
+                {
+                    out.push(text.to_string());
+                }
+            }
+            ExprKind::Literal(Literal::Array(items)) => {
+                for item in items {
+                    grouped(item, solver, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut found = vec![];
+    for arg in &call.arguments {
+        grouped(&arg.value, solver, &mut found);
+    }
+    match found.first() {
+        Some(text) => {
+            let split = text.replacen(',', ", ", 1);
+            e.wrap_err(format!("`{text}` is one number here; write `{split}` for two"))
+        }
+        None => e,
+    }
+}
+
+fn solve_call(this: &Call, id: NodeId, location: Location, solver: &mut Solver) -> Result<Ty> {
+        // `v(…)` on a value whose type has `fn call(this, …)` is `v.call(…)`;
         // a type name called stays its constructor (r[impl mimas.call.call-method])
-        if let Some(ident) = self.left.as_ident()
+        if let Some(ident) = this.left.as_ident()
             && let Some(dec) = solver.ribs.resolve(ident)
             && matches!(
                 solver.decs[dec].kind,
                 DecKind::Local | DecKind::Global | DecKind::LoopVar
             )
         {
-            let ty = self.left.query(solver)?.normalized(solver);
+            let ty = this.left.query(solver)?.normalized(solver);
             if let Ty::Adt(aid, _) | Ty::Identity(aid, _) = ty
                 && solver.adts[aid].impls.get("call").is_some_and(|f| {
                     matches!(&f.ty, Ty::Fn(h) if h.is_method)
@@ -1169,13 +1214,13 @@ impl Solve for Call {
                     ExprKind::Call(Call {
                         left: Expr::new(
                             ExprKind::Access(Access::Dot {
-                                left: self.left.clone(),
+                                left: this.left.clone(),
                                 right: Expr::new(ExprKind::Ident(Ident::new("call", at)), at),
                                 kind: parse::AccessKind::Direct,
                             }),
                             at,
                         ),
-                        arguments: self.arguments.clone(),
+                        arguments: this.arguments.clone(),
                     }),
                     at,
                 );
@@ -1188,7 +1233,7 @@ impl Solve for Call {
         // value whose type has `iter()` and no method of the name itself.
         // `to_list()` is the one conversion, also on a list.
         // r[impl mimas.iter.combinators]
-        if let ExprKind::Access(Access::Dot { left: recv, right, .. }) = self.left.kind()
+        if let ExprKind::Access(Access::Dot { left: recv, right, .. }) = this.left.kind()
             && let Some(name) = right.as_ident().map(|i| i.lexeme.clone())
             && let Some(helper) = match name.as_str() {
                 "map" => Some("__pull_map"),
@@ -1203,7 +1248,7 @@ impl Solve for Call {
                 "to_list" => Some("__pull_to_list"),
                 _ => None,
             }
-            && self.arguments.iter().all(|a| a.name.is_none())
+            && this.arguments.iter().all(|a| a.name.is_none())
         {
             let recv_ty = recv.query(solver)?.normalized(solver);
             let at = location;
@@ -1250,7 +1295,7 @@ impl Solve for Call {
             };
             if let Some((helper, source)) = helper {
                 let mut arguments = vec![Argument { name: None, value: source }];
-                for a in &self.arguments {
+                for a in &this.arguments {
                     // `zip`'s other side iterates the same way
                     let ty = a.value.query(solver)?.normalized(solver);
                     let value = if name == "zip" && has_iter(solver, &ty) {
@@ -1275,13 +1320,13 @@ impl Solve for Call {
         // `xs.sorted()`, `.max()`, `.min()` on a list of an `Ord` type, and
         // `sorted_by`/`max_by`/`min_by` on any list, call the std helpers
         // over `Ord` (protocols.mim). r[impl mimas.list.sort-ord]
-        if let ExprKind::Access(Access::Dot { left: recv, right, .. }) = self.left.kind()
+        if let ExprKind::Access(Access::Dot { left: recv, right, .. }) = this.left.kind()
             && let Some(name) = right.as_ident().map(|i| i.lexeme.clone())
             && matches!(
-                (name.as_str(), self.arguments.len()),
+                (name.as_str(), this.arguments.len()),
                 ("sorted" | "max" | "min", 0) | ("sorted_by" | "max_by" | "min_by", 1)
             )
-            && self.arguments.iter().all(|a| a.name.is_none())
+            && this.arguments.iter().all(|a| a.name.is_none())
         {
             let recv_ty = recv.query(solver)?.normalized(solver);
             let helper = match (&recv_ty, name.as_str()) {
@@ -1307,7 +1352,7 @@ impl Solve for Call {
             if let Some(helper) = helper {
                 let at = location;
                 let mut arguments = vec![Argument { name: None, value: recv.clone() }];
-                arguments.extend(self.arguments.iter().cloned());
+                arguments.extend(this.arguments.iter().cloned());
                 let rewritten = Expr::new(
                     ExprKind::Call(Call {
                         left: Expr::new(ExprKind::Ident(Ident::new(helper, at)), at),
@@ -1322,22 +1367,22 @@ impl Solve for Call {
         }
         // `print(v)` on a type that implements `Show` prints `v.show()`
         // r[impl mimas.protocol.show]
-        if self.left.as_ident().is_some_and(|i| i.lexeme == "print")
-            && self.arguments.len() == 1
-            && self.arguments[0].name.is_none()
+        if this.left.as_ident().is_some_and(|i| i.lexeme == "print")
+            && this.arguments.len() == 1
+            && this.arguments[0].name.is_none()
             && solver
                 .ribs
-                .resolve(self.left.as_ident().unwrap())
+                .resolve(this.left.as_ident().unwrap())
                 .is_some_and(|d| solver.dec_to_native.contains_key(&d))
         {
-            let ty = self.arguments[0].value.query(solver)?.normalized(solver);
+            let ty = this.arguments[0].value.query(solver)?.normalized(solver);
             if solver.shows(&ty) {
                 let rewritten = Expr::new(
                     ExprKind::Call(Call {
-                        left: self.left.clone(),
+                        left: this.left.clone(),
                         arguments: vec![Argument {
                             name: None,
-                            value: show_call(&self.arguments[0].value),
+                            value: show_call(&this.arguments[0].value),
                         }],
                     }),
                     location,
@@ -1347,20 +1392,20 @@ impl Solve for Call {
                 return Ok(ty);
             }
         }
-        if let Some(ty) = solver.validate_place_target(id, self, location)? { return Ok(ty); }
-        if let Some(ty) = solver.borrow_place(id, self, location)? { return Ok(ty); }
-        if let Some(ty) = solver.yield_place(id, self, location)? { return Ok(ty); }
-        if let Some(ty) = solver.subscript_removal(id, self, location)? { return Ok(ty); }
+        if let Some(ty) = solver.validate_place_target(id, this, location)? { return Ok(ty); }
+        if let Some(ty) = solver.borrow_place(id, this, location)? { return Ok(ty); }
+        if let Some(ty) = solver.yield_place(id, this, location)? { return Ok(ty); }
+        if let Some(ty) = solver.subscript_removal(id, this, location)? { return Ok(ty); }
 
         // `__fn_writes(f)` is `sig!`'s placeholder for the derived write set:
         // `[str]` now, rewritten to the literal once the grades fixpoint
         // settles. r[impl mimas.fn.writes]
-        if self
+        if this
             .left
             .as_ident()
             .is_some_and(|i| i.lexeme == "__fn_writes")
         {
-            let dec = self
+            let dec = this
                 .arguments
                 .first()
                 .and_then(|a| a.value.as_ident())
@@ -1374,7 +1419,7 @@ impl Solve for Call {
         // can reach the receiver without solving this access first, so the
         // mark lives here, not only in `Access::solve`.
         // r[impl mimas.place.field]
-        if let ExprKind::Access(Access::Dot { left, right, .. }) = self.left.kind()
+        if let ExprKind::Access(Access::Dot { left, right, .. }) = this.left.kind()
             && right
                 .as_ident()
                 .is_some_and(|i| matches!(i.lexeme.as_str(), "read" | "write" | "remove"))
@@ -1386,21 +1431,21 @@ impl Solve for Call {
         // -- when the bound value is a place (`yield &e` bodies annotate
         // `__yield_value: __Place<T>`) the descriptor IS the yielded value,
         // so the ident must not place-read. r[impl mimas.generator.place]
-        if self
+        if this
             .left
             .as_ident()
             .is_some_and(|i| i.lexeme == "__generator_yield")
         {
-            for argument in &self.arguments {
+            for argument in &this.arguments {
                 solver.raw_places.insert(argument.value.id());
             }
         }
 
-        let adt = match self.left.kind() {
+        let adt = match this.left.kind() {
             // `Pact::m(x, …)` names one pact's member: `x` seen as the pact,
             // then `.m(…)`. r[impl mimas.pact.member-key]
             ExprKind::Access(Access::DoubleColon { left, right })
-                if !self.arguments.is_empty()
+                if !this.arguments.is_empty()
                     && left.as_ident().is_some_and(|i| {
                         !i.is_identity()
                             && solver.ribs.resolve(i).is_none_or(|d| {
@@ -1416,7 +1461,7 @@ impl Solve for Call {
                     Let {
                         left: recv.clone().into(),
                         annotation: Some(parse::components::Annotation::Ty(pact)),
-                        right: self.arguments[0].value.clone(),
+                        right: this.arguments[0].value.clone(),
                         else_branch: None,
                     }
                     .into(),
@@ -1434,7 +1479,7 @@ impl Solve for Call {
                 let call = Expr::new(
                     ExprKind::Call(Call {
                         left: method,
-                        arguments: self.arguments[1..].to_vec(),
+                        arguments: this.arguments[1..].to_vec(),
                     }),
                     at,
                 );
@@ -1491,7 +1536,7 @@ impl Solve for Call {
                         // zero-arg constructor filling each member with its
                         // type's default. A variant or impl member named
                         // `default` shadows it.
-                        return default_ctor(self, id, right, adt, solver);
+                        return default_ctor(this, id, right, adt, solver);
                     }
                     if let Some(variant) = &variant {
                         solver.note(right, Ty::adt(adt), variant.dec());
@@ -1550,7 +1595,7 @@ impl Solve for Call {
             let ctor_spelling = variant.ctor(&solver.adts[layout].name);
             match variant {
                 Variant::Tuple(variant) => {
-                    if let Some(named) = self.arguments.iter().find(|a| a.name.is_some()) {
+                    if let Some(named) = this.arguments.iter().find(|a| a.name.is_some()) {
                         let name = named.name.as_ref().unwrap();
                         Err(UnknownNamedArgument {
                             src: solver.src(name.location),
@@ -1566,7 +1611,7 @@ impl Solve for Call {
                         Ty::Adt(_, args) => args.clone(),
                         _ => vec![],
                     };
-                    let mut args = self.arguments.clone().into_iter().peekable();
+                    let mut args = this.arguments.clone().into_iter().peekable();
                     let mut params = variant
                         .members
                         .iter()
@@ -1591,7 +1636,7 @@ impl Solve for Call {
                         }
                     }
 
-                    solver.shadow_expr_ty(self.left.id(), Ty::adt(layout), self.left.location())?;
+                    solver.shadow_expr_ty(this.left.id(), Ty::adt(layout), this.left.location())?;
                     Ok(adt_ty.normalized(solver))
                 }
                 // r[impl mimas.struct.positional]
@@ -1605,7 +1650,7 @@ impl Solve for Call {
                         .filter(|(_, f)| !f.constant)
                         .map(|(n, _)| n.clone())
                         .collect();
-                    let positional = self.arguments.iter().filter(|a| a.name.is_none()).count();
+                    let positional = this.arguments.iter().filter(|a| a.name.is_none()).count();
                     if positional > names.len() {
                         Err(ExtraTupleMembers {
                             src: solver.src(location),
@@ -1615,7 +1660,7 @@ impl Solve for Call {
                     }
                     let mut keyed: Vec<(FieldKey, &Expr)> = vec![];
                     let mut order: Vec<String> = vec![];
-                    for (i, arg) in self.arguments.iter().enumerate() {
+                    for (i, arg) in this.arguments.iter().enumerate() {
                         let key = match &arg.name {
                             Some(name) => name.clone(),
                             None => {
@@ -1636,7 +1681,7 @@ impl Solve for Call {
                         .collect();
                     solver.ctor_slots.insert(id, slots);
                     solver.ctor_names.insert(id, order);
-                    solver.shadow_expr_ty(self.left.id(), Ty::adt(layout), self.left.location())?;
+                    solver.shadow_expr_ty(this.left.id(), Ty::adt(layout), this.left.location())?;
                     Ok(ty)
                 }
                 v @ Variant::Struct(_) => Err(ExpectedTupleStruct {
@@ -1744,7 +1789,7 @@ impl Solve for Call {
                     // receiver's own args (`l.push(5)` on `List<int>` sees `x: int`)
                     solver.specialize(&field.ty, aid, &recv_args)
                 };
-                // `v.mul(2.0)` beside `fn mul(self, o: V)` and `fn mul(self, k: float)`:
+                // `v.mul(2.0)` beside `fn mul(this, o: V)` and `fn mul(this, k: float)`:
                 // the call picks the overload its one argument fits, the same
                 // choice `v * 2.0` makes (r[impl mimas.op.overload])
                 let (dec, ty) =
@@ -1753,13 +1798,13 @@ impl Solve for Call {
                 solver.note(ident, ty.clone(), Some(dec));
                 Ok(Some(ty))
             }
-            let ty = match method_intercept(self, solver)? {
+            let ty = match method_intercept(this, solver)? {
                 Some(t) => {
-                    solver.shadow_expr_ty(self.left.id(), t.clone(), self.left.location())?;
+                    solver.shadow_expr_ty(this.left.id(), t.clone(), this.left.location())?;
                     t.normalized(solver)
                 }
                 // the callee is the one place a method access is legal
-                None => solver.query_non_value(&self.left)?.normalized(solver),
+                None => solver.query_non_value(&this.left)?.normalized(solver),
             };
             let fn_data = match ty {
                 Ty::Fn(fn_data) => fn_data,
@@ -1772,8 +1817,8 @@ impl Solve for Call {
                 // named args aren't supported in this path: the synthesized params have no
                 // source names. anything that tried `f(b=1)` falls through to NotCallable
                 // since we can't decide what `b` refers to without a real signature.
-                Ty::Vid(_) if self.arguments.iter().all(|a| a.name.is_none()) => {
-                    let synth_params: Vec<FnParam> = self
+                Ty::Vid(_) if this.arguments.iter().all(|a| a.name.is_none()) => {
+                    let synth_params: Vec<FnParam> = this
                         .arguments
                         .iter()
                         .map(|_| FnParam::new(None, Ty::Vid(solver.vid()), false))
@@ -1781,7 +1826,7 @@ impl Solve for Call {
                     let synth_return = Ty::Vid(solver.vid());
                     let synth =
                         FnHeader::new(synth_params, synth_return, /* is_method */ false);
-                    self.left.fulfill_ty(Ty::Fn(synth.clone()), solver)?;
+                    this.left.fulfill_ty(Ty::Fn(synth.clone()), solver)?;
                     synth
                 }
                 _ => Err(NotCallable {
@@ -1794,7 +1839,7 @@ impl Solve for Call {
             // dispatch over the method arms, not a direct call. the header's
             // own params still check the arguments against the bound types.
             // r[impl mimas.multi]
-            if let Some(&gdec) = solver.node_decs.get(&self.left.id())
+            if let Some(&gdec) = solver.node_decs.get(&this.left.id())
                 && solver.multis.contains_key(&gdec)
             {
                 solver.multi_calls.insert(id, gdec);
@@ -1804,22 +1849,22 @@ impl Solve for Call {
             let mut cursor = 0usize;
 
             if fn_data.is_method
-                && let ExprKind::Access(Access::Dot { left, kind, .. }) = self.left.kind()
+                && let ExprKind::Access(Access::Dot { left, kind, .. }) = this.left.kind()
                 && let Some(first) = params.first()
             {
                 if solver.place_element(&first.ty).is_some() {
-                    // `fn reset(inout self)` -- the caller lends the receiver's
+                    // `fn reset(inout this)` -- the caller lends the receiver's
                     // own slot: `obj.reset()` mints `&obj` the same way a `&`
-                    // argument would, so `self = next` inside writes back the
+                    // argument would, so `this = next` inside writes back the
                     // caller's variable or field. arg-0 at emit is the minted
                     // descriptor instead of the receiver's value.
-                    // r[impl mimas.inout.self]
+                    // r[impl mimas.inout.this]
                     if *kind == AccessKind::Option {
                         Err(crate::errors::SubscriptUse {
                             src: solver.src(left.location()),
                             at: left.location().into(),
                             message: "a `?.` call can't lend its receiver -- the \
-                                      method writes `self` back, and an optional \
+                                      method writes `this` back, and an optional \
                                       has no slot to write"
                                 .into(),
                         })?
@@ -1885,7 +1930,7 @@ impl Solve for Call {
                     cursor = 1;
                 } else {
                     // a `?.` receiver is option-typed; dispatch is on the unwrapped inner
-                    // (method_intercept already vetted it), so expect Option(self) here
+                    // (method_intercept already vetted it), so expect Option(this) here
                     let expected = if *kind == AccessKind::Option {
                         Ty::Option(Box::new(first.ty.clone()))
                     } else {
@@ -1903,7 +1948,7 @@ impl Solve for Call {
             // positional arg pins down (`under(at(2), |x| x * 10, xs)` -- `xs`
             // binds the lens's element vid before `|x|`'s body is checked).
             let mut args_by_slot: Vec<(usize, &parse::Argument)> = Vec::new();
-            for arg in &self.arguments {
+            for arg in &this.arguments {
                 let slot = match &arg.name {
                     None => {
                         if cursor >= params.len() {
@@ -1947,9 +1992,9 @@ impl Solve for Call {
             let mut lent: Vec<(DecId, Vec<GuardSeg>, String, Location)> = Vec::new();
             let mut plain_roots: Vec<(DecId, Vec<GuardSeg>, usize, String, Location)> =
                 Vec::new();
-            // a lent receiver (`obj.reset()` on `inout self`) counts as a `&`
+            // a lent receiver (`obj.reset()` on `inout this`) counts as a `&`
             // loan on its root: `obj.reset(&obj.f)` overlaps like any pair.
-            // r[impl mimas.inout.self]
+            // r[impl mimas.inout.this]
             if let Some(marker) = solver.self_place_mints.get(&id)
                 && let Some((root, path)) = solver
                     .place_sources
@@ -2079,7 +2124,7 @@ impl Solve for Call {
                 }
             }
             // r[impl mimas.inout.exclusive]
-            let callee_dec = solver.node_decs.get(&self.left.id()).copied();
+            let callee_dec = solver.node_decs.get(&this.left.id()).copied();
             for (i, (dec, path, name, at)) in lent.iter().enumerate() {
                 // two `&` loans must name disjoint places: `swap(&x, &x)`
                 // is out, `f(&w.tour, &w.other)` is in.
@@ -2139,7 +2184,7 @@ impl Solve for Call {
                 let mut arg_roots: Vec<Option<(DecId, Vec<GuardSeg>)>> =
                     vec![None; params.len()];
                 if fn_data.is_method
-                    && let ExprKind::Access(Access::Dot { left, .. }) = self.left.kind()
+                    && let ExprKind::Access(Access::Dot { left, .. }) = this.left.kind()
                 {
                     arg_roots[0] = crate::root_and_path(left)
                         .and_then(|(r, p)| solver.ribs.resolve(r).map(|d| (d, p)));
@@ -2163,8 +2208,8 @@ impl Solve for Call {
             // `where` predicates on the callee: prove what the call site's args can
             // prove -- a predicate that's false-forever fails here, anything unknown
             // defers to the callee's entry check (see lens.rs).
-            if let Some(&dec) = solver.node_decs.get(&self.left.id()) {
-                let receiver = match self.left.kind() {
+            if let Some(&dec) = solver.node_decs.get(&this.left.id()) {
+                let receiver = match this.left.kind() {
                     ExprKind::Access(Access::Dot { left, .. }) if fn_data.is_method => Some(left),
                     _ => None,
                 };
@@ -2175,18 +2220,17 @@ impl Solve for Call {
             // dataframe schemas ride beside the type system: `pull` gets the column's
             // concrete element type here, and `schema`/`table{}`/`__q_*` calls record
             // column maps for downstream calls (see frames.rs)
-            let ty = solver.frame_call(id, self, ty)?;
+            let ty = solver.frame_call(id, this, ty)?;
             if let ExprKind::Access(Access::Dot {
                 kind: AccessKind::Option,
                 ..
-            }) = self.left.kind()
+            }) = this.left.kind()
             {
                 Ok(Ty::Option(Box::new(ty)))
             } else {
                 Ok(ty)
             }
         }
-    }
 }
 
 impl Solve for Closure {
