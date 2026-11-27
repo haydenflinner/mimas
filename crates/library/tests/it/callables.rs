@@ -38,3 +38,13 @@ test_run!(
     "maybe(null, 5)" => "5",
     "maybe(|x: int| x * 10, 5)" => "50",
 );
+
+test_run!(
+    // r[verify mimas.num.groups]
+    // L2: a call's arguments are separated by every comma
+    a_comma_in_a_call_always_separates,
+    "fn clamp3(x: int, lo: int, hi: int) -> int { if x < lo { lo } else if x > hi { hi } else { x } }",
+    "clamp3(150,100,200)" => "150",
+    "clamp3(50,100,200)" => "100",
+    "[clamp3(999,100,200), 1,000].len()" => "3",
+);

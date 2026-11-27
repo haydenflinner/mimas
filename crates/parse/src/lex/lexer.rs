@@ -63,6 +63,10 @@ pub struct Lexer<'s> {
     /// or, not])` per page of a spliced source (`shadow_table`), the last
     /// entry at or before a token's start applies.
     shadow: Vec<(usize, [bool; 3])>,
+    /// The brackets open at the next token, innermost last: `(` and `[`
+    /// hold argument and element lists, where a comma always separates; `{`
+    /// opens a block (or a dict), where a statement may group digits.
+    brackets: Vec<u8>,
 }
 
 /// The operator words a source may take back as names, with the symbol
@@ -325,6 +329,7 @@ impl<'s> Lexer<'s> {
             errors: vec![],
             cut_short: false,
             shadow: shadow_table(source),
+            brackets: Vec::new(),
         }
     }
 
@@ -547,7 +552,17 @@ impl<'s> Iterator for Lexer<'s> {
 
     fn next(&mut self) -> Option<Self::Item> {
         // chompy's trait makes `lex` a result, but ours has no way to fail
-        self.lex().ok().flatten()
+        let tok = self.lex().ok().flatten()?;
+        match tok.kind {
+            TokKind::LeftParenthesis => self.brackets.push(b'('),
+            TokKind::LeftSquare | TokKind::HookLeftSquare => self.brackets.push(b'['),
+            TokKind::LeftBrace => self.brackets.push(b'{'),
+            TokKind::RightParenthesis | TokKind::RightSquare | TokKind::RightBrace => {
+                self.brackets.pop();
+            }
+            _ => {}
+        }
+        Some(tok)
     }
 }
 
@@ -624,7 +639,11 @@ impl<'s> Lex<'s, Tok<TokKind<'s>>, TokKind<'s>> for Lexer<'s> {
                     TokKind::Hex("")
                 }
             }
-        } else if let Some((len, text, is_float)) = grouped_number(rest) {
+        } else if let Some((len, text, is_float)) =
+            // inside `(…)` or `[…]` a comma separates: `f(1,234)` is two
+            // arguments (r[impl mimas.num.groups])
+            grouped_number(rest).filter(|_| !matches!(self.brackets.last(), Some(b'(' | b'[')))
+        {
             // `1,000,000`, `1,234.50`: commas group thousands (r[impl mimas.num.groups])
             for _ in 0..len {
                 self.char_stream.match_chomp_with(|_| true);
