@@ -375,6 +375,7 @@ impl Vm {
             hole_shapes,
             field_shapes,
             shown_units,
+            show_bodies,
             field_tys: _,
             value_adts,
             tests,
@@ -484,6 +485,8 @@ impl Vm {
             *shapes.holes.borrow_mut() = hole_shapes;
             *shapes.fields.borrow_mut() = field_shapes.into_values().collect();
             *shapes.units.borrow_mut() = shown_units;
+            *shapes.show_bodies.borrow_mut() = show_bodies.into_values().collect();
+            state.any_show.set(shapes.show_bodies.borrow().iter().any(Option::is_some));
             // fresh program = fresh trace: re-size the op counter to the
             // new code length and drop edges that named dead BodyIds
             let trace = state.fixtures.get::<crate::fixtures::Trace>();
@@ -1396,9 +1399,30 @@ fn run_dispatch<'gc>(
     fuel: usize,
     stop_depth: usize,
 ) -> Result<bool, Error> {
-    let result = run_dispatch_inner(
+    // op replays for `show` are on for this dispatch, and back as they were
+    // after it (r[impl mimas.show.runtime])
+    let replay_outer = ctx.state().show_replay.replace(true);
+    let mut result = run_dispatch_inner(
         ctx, code, chunks, signatures, strs, sources, thread, bc, fuel, stop_depth,
     );
+    // an op stopped for the `show`s of values it displays: run them, then
+    // enter again at that op, which now finds their texts
+    let mut rounds = 0;
+    while matches!(result, Ok(false)) && ctx.state().show_pending.get() {
+        ctx.state().show_pending.set(false);
+        if let Err(e) = run_shows(ctx, code, chunks, signatures, strs, sources, thread) {
+            result = Err(e);
+            break;
+        }
+        rounds += 1;
+        // a safety stop: the replayed op meets the same values, so one
+        // round answers it; past a few, displays keep the built-in form
+        ctx.state().show_replay.set(rounds < 8);
+        result = run_dispatch_inner(
+            ctx, code, chunks, signatures, strs, sources, thread, bc, fuel, stop_depth,
+        );
+    }
+    ctx.state().show_replay.set(replay_outer);
     if result.is_err() {
         unwind_cleanups(
             ctx, code, chunks, signatures, strs, sources, thread, bc, stop_depth,
@@ -1626,10 +1650,15 @@ fn run_dispatch_inner<'gc>(
                 };
                 // SAFETY: all pointers borrow live driver state; the BodyFn
                 // contract requires `*env.out` to be written before return.
-                unsafe {
+                // A generated body cannot replay an op, so its displays of
+                // `Show` values keep the built-in form.
+                ctx.state().show_replay.set(false);
+                let r = unsafe {
                     f(&env);
                     slot.assume_init()
-                }
+                };
+                ctx.state().show_replay.set(true);
+                r
             }
             None => {
                 fuel -= 1;
@@ -1646,6 +1675,8 @@ fn run_dispatch_inner<'gc>(
                 // (regs[base..base+count]), refreshed after every resize/truncate
                 // below. The pointer is the only live reference into the window.
                 let regs = unsafe { std::slice::from_raw_parts_mut(regs_ptr, regs_len) };
+                // r[impl mimas.show.runtime] in this lane an op that displays a
+                // `Show` value may stop, have its `show`s run, and run again
                 step_one(regs, code, ctx, strs, &thread.frames)
             }
         };
@@ -1831,9 +1862,106 @@ fn run_dispatch_inner<'gc>(
                 }
                 (regs_ptr, regs_len) = window(thread, chunks);
             }
+            // r[impl mimas.show.runtime] an op that displayed a `Show` value
+            // stopped: run the `show`s it left pending, then replay it
+            // (the `run_dispatch` wrapper runs them and enters again here)
+            Err(RtErr::ShowPending) => {
+                code.ip = op_ip;
+                if let Some(top) = thread.frames.last_mut() {
+                    top.ip = op_ip;
+                }
+                return Ok(false);
+            }
             Err(kind) => return Err(locate(kind, op_ip, thread, chunks, sources)),
         }
     }
+}
+
+
+
+/// The ops one `show` call may spend before its value falls back to the
+/// built-in form (r[impl mimas.show.runtime]).
+const SHOW_OPS: u64 = 1_000_000;
+
+/// Runs the `show` of each value a display left pending, each on a thread
+/// of its own under its own op budget, and keeps the texts for the replayed
+/// op. A `show` that faults or runs out of ops leaves a note instead; the
+/// value then prints in its built-in form (r[impl mimas.show.runtime]).
+#[allow(clippy::too_many_arguments)]
+#[cold]
+#[inline(never)]
+fn run_shows<'gc>(
+    ctx: Ctx<'gc>,
+    code: &mut Decoder,
+    chunks: &IdVec<BodyId, Chunk>,
+    signatures: &IdVec<BodyId, Option<Function>>,
+    strs: &StrInterner,
+    sources: &Sources,
+    thread: &mut ThreadState<'gc>,
+) -> Result<(), Error> {
+    let calls = ctx.fixture::<crate::fixtures::ShowCalls>();
+    let pending = std::mem::take(&mut *calls.pending.borrow_mut());
+    if calls.running.borrow().is_empty() {
+        calls.texts.borrow_mut().clear();
+    }
+    let ip = code.ip;
+    for (key, stashed, body) in pending {
+        let value = ctx.fetch(&stashed);
+        let budget = thread.ops_left.min(SHOW_OPS);
+        let mut child = ThreadState {
+            regs: vec![Val::Null],
+            // a caller frame for the call to return into: never resumed
+            frames: vec![Frame {
+                chunk: body,
+                ip: chunks[body].offset,
+                return_reg: 0,
+                base: 0,
+            }],
+            cleanups: Gc::new(&ctx, gc_arena::lock::RefLock::new(vec![])),
+            ops_left: budget,
+            max_frames: thread.max_frames.saturating_sub(thread.frames.len()).max(2),
+        };
+        let nested = &ctx.state().mem.nested;
+        let text = if nested.get() >= crate::mem::MAX_NESTED_CALLS {
+            crate::fixtures::ShowText::Failed("`show` nests too deep".into())
+        } else if let Err(e) = enter_call(&mut child, code, chunks, body, Reg::ZERO, &[value], &[]) {
+            crate::fixtures::ShowText::Failed(e.to_string())
+        } else {
+            nested.set(nested.get() + 1);
+            calls.running.borrow_mut().push(key);
+            let previous_cleanups = ctx.state().active_cleanups.get();
+            ctx.state().active_cleanups.set(&ctx, child.cleanups);
+            let ran = run_dispatch(
+                ctx, code, chunks, signatures, strs, sources, &mut child, None, usize::MAX, 2,
+            );
+            ctx.state().active_cleanups.set(&ctx, previous_cleanups);
+            calls.running.borrow_mut().pop();
+            nested.set(nested.get() - 1);
+            thread.ops_left = thread.ops_left.saturating_sub(budget - child.ops_left);
+            match ran {
+                Ok(_) => match child.regs.first() {
+                    Some(Val::Str(t)) => crate::fixtures::ShowText::Text(t.as_str().to_string()),
+                    _ => crate::fixtures::ShowText::Failed("`show` gave no text".into()),
+                },
+                Err(e) => {
+                    let trace = ctx.state().fixtures.get::<crate::fixtures::Trace>();
+                    trace.pop_frames(
+                        &child.frames[1..].iter().map(|f| f.chunk.index() as u32).collect::<Vec<_>>(),
+                    );
+                    ctx.fixture::<crate::fixtures::Rng>().reconcile(1);
+                    let msg = e.to_string();
+                    let first = msg.lines().next().unwrap_or("").to_string();
+                    crate::fixtures::ShowText::Failed(first)
+                }
+            }
+        };
+        calls.texts.borrow_mut().insert(key, text);
+    }
+    code.ip = ip;
+    // the texts answer the replayed op alone: the next op to tick
+    let trace = ctx.state().fixtures.get::<crate::fixtures::Trace>();
+    calls.op.set(trace.ops_total.get() + 1);
+    Ok(())
 }
 
 /// Raw `(ptr, len)` for the current top frame's register window. Must ALWAYS be recomputed after
@@ -3031,9 +3159,11 @@ pub fn cold_dispatch<'gc>(
             for _ in 0..len {
                 match OpFormatPart::decode(code) {
                     OpFormatPart::Literal(str_id) => text.push_str(strs.get(str_id)),
-                    OpFormatPart::Value(reg) => ctx.to_string_into(&mut text, rd!(regs, reg))?,
+                    OpFormatPart::Value(reg) => ctx.render_text_into(&mut text, rd!(regs, reg))?,
                 }
             }
+            // every hole's `show`s are asked for at once (r[impl mimas.show.runtime])
+            ctx.shows_ready()?;
             wr!(regs, dst, Val::Str(ctx.intern(&text)));
         }
         OpCode::NewInstance => {

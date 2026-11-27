@@ -189,6 +189,18 @@ pub struct State<'gc> {
     pub retry_call: Cell<bool>,
     #[collect(require_static)]
     pub unwinding_cleanup: Cell<bool>,
+    /// On while the dispatch loop can replay the current op after running
+    /// the `show`s a display left pending (r[impl mimas.show.runtime]). A
+    /// field, not a fixture: the loop writes it around every op.
+    #[collect(require_static)]
+    pub show_replay: Cell<bool>,
+    /// A display recorded `show`s to run (see `fixtures::ShowCalls`).
+    #[collect(require_static)]
+    pub show_pending: Cell<bool>,
+    /// Whether any type of the loaded program implements `Show`: off, the
+    /// renderer never looks for a `show`.
+    #[collect(require_static)]
+    pub any_show: Cell<bool>,
     /// The memory budget and the nested-call count — see [`crate::mem`].
     #[collect(require_static)]
     pub mem: crate::mem::MemBudget,
@@ -230,6 +242,9 @@ impl<'gc> State<'gc> {
             paused: Cell::new(false),
             retry_call: Cell::new(false),
             unwinding_cleanup: Cell::new(false),
+            show_replay: Cell::new(false),
+            show_pending: Cell::new(false),
+            any_show: Cell::new(false),
             mem: crate::mem::MemBudget::default(),
         }
     }
@@ -803,7 +818,74 @@ impl<'gc> Ctx<'gc> {
     pub fn display(self, value: Val<'gc>) -> RtResult<String> {
         let mut out = String::new();
         self.render_into(&mut out, value, true, 0, &mut Walk::default(), &Shape::Plain)?;
+        self.shows_ready()?;
         Ok(out)
+    }
+
+    /// `Err(ShowPending)` when the walk just done met `Show` values whose
+    /// `show` has not run: the dispatch loop runs them and replays the op
+    /// (r[impl mimas.show.runtime]).
+    #[inline(always)]
+    pub fn shows_ready(self) -> RtResult<()> {
+        if self.state.show_pending.get() && self.state.show_replay.get() {
+            return Err(RtErr::ShowPending);
+        }
+        Ok(())
+    }
+
+    /// Writes a `Show` value as its `show` text, when its type implements
+    /// `Show` and the text is known; `false` sends the caller to the built-in
+    /// form. A text not yet known is recorded as pending (when the op can be
+    /// replayed) and the value is skipped: the op runs again. A `show` whose run faulted writes the built-in form and a
+    /// note. A value whose `show` is running writes the built-in form.
+    #[inline(never)]
+    fn show_into(self, out: &mut String, value: Val<'gc>, sid: usize) -> bool {
+        let shapes = self.fixture::<crate::fixtures::DisplayShapes>();
+        let Some(body) = shapes.show_bodies.borrow().get(sid).copied().flatten() else {
+            return false;
+        };
+        let Val::Instance(i) = value else { return false };
+        let key = Gc::as_ptr(i.0) as *const ();
+        let calls = self.fixture::<crate::fixtures::ShowCalls>();
+        if calls.running.borrow().contains(&key) {
+            return false;
+        }
+        let fresh = calls.op.get() == self.state.fixtures.get::<crate::fixtures::Trace>().ops_total.get();
+        if fresh {
+            match calls.texts.borrow().get(&key) {
+                Some(crate::fixtures::ShowText::Text(t)) => {
+                    out.push_str(t);
+                    return true;
+                }
+                Some(crate::fixtures::ShowText::Failed(_)) => return false,
+                None => {}
+            }
+        }
+        if self.state.show_replay.get() {
+            let mut pending = calls.pending.borrow_mut();
+            if !pending.iter().any(|(k, _, _)| *k == key) {
+                pending.push((key, self.stash(value), body));
+            }
+            self.state.show_pending.set(true);
+            // the op replays once this `show` ran, so nothing written now
+            // is kept: skip the value, and do not collect what it holds
+            return true;
+        }
+        false
+    }
+
+    /// The note a failed `show` leaves after the built-in form.
+    fn show_note(self, value: Val<'gc>) -> Option<String> {
+        let Val::Instance(i) = value else { return None };
+        let key = Gc::as_ptr(i.0) as *const ();
+        let calls = self.fixture::<crate::fixtures::ShowCalls>();
+        if calls.op.get() != self.state.fixtures.get::<crate::fixtures::Trace>().ops_total.get() {
+            return None;
+        }
+        match calls.texts.borrow().get(&key) {
+            Some(crate::fixtures::ShowText::Failed(note)) => Some(note.clone()),
+            _ => None,
+        }
     }
 
     /// [Ctx::display] or [Ctx::to_string] (`quote` picks), following the
@@ -812,6 +894,7 @@ impl<'gc> Ctx<'gc> {
     pub fn render_shaped(self, value: Val<'gc>, shape: &Shape, quote: bool) -> RtResult<String> {
         let mut out = String::new();
         self.render_into(&mut out, value, quote, 0, &mut Walk::default(), shape)?;
+        self.shows_ready()?;
         Ok(out)
     }
 
@@ -820,12 +903,20 @@ impl<'gc> Ctx<'gc> {
     pub fn to_string(self, value: Val<'gc>) -> RtResult<String> {
         let mut out = String::new();
         self.render_into(&mut out, value, false, 0, &mut Walk::default(), &Shape::Plain)?;
+        self.shows_ready()?;
         Ok(out)
+    }
+
+    /// [Ctx::to_string_into] without the `show` check: the f-string op asks
+    /// once, after its last hole ([Ctx::shows_ready]).
+    pub fn render_text_into(self, out: &mut String, value: Val<'gc>) -> RtResult<()> {
+        self.render_into(out, value, false, 0, &mut Walk::default(), &Shape::Plain)
     }
 
     /// [Ctx::to_string], appending into an existing buffer (the f-string builder).
     pub fn to_string_into(self, out: &mut String, value: Val<'gc>) -> RtResult<()> {
-        self.render_into(out, value, false, 0, &mut Walk::default(), &Shape::Plain)
+        self.render_into(out, value, false, 0, &mut Walk::default(), &Shape::Plain)?;
+        self.shows_ready()
     }
 
     /// A list's length, however it is backed (0 for a non-list).
@@ -1118,6 +1209,13 @@ impl<'gc> Ctx<'gc> {
                 out.push('>');
             }
             Val::Instance(i) => {
+                // r[impl mimas.show.runtime] a type that implements `Show`
+                // writes itself through its `show`
+                if self.state.any_show.get()
+                    && self.show_into(out, value, i.0.borrow().struct_id as usize)
+                {
+                    return Ok(());
+                }
                 let inst = i.0.borrow();
                 let sid = inst.struct_id as usize;
                 let names = self.state.struct_names.borrow();
@@ -1160,6 +1258,15 @@ impl<'gc> Ctx<'gc> {
                         self.render_into(out, v, true, depth + 1, path, s)?;
                     }
                     out.push_str(close);
+                }
+                drop(inst);
+                // a `show` that faulted: the built-in form, then why
+                if self.state.any_show.get()
+                    && let Some(note) = self.show_note(value)
+                {
+                    out.push_str(" (show failed: ");
+                    out.push_str(&note);
+                    out.push(')');
                 }
             }
             #[cfg(feature = "dataframe")]

@@ -892,6 +892,36 @@ pub struct DisplayShapes {
     pub holes: RefCell<Vec<shared::units::Shape>>,
     pub fields: RefCell<Vec<Vec<shared::units::Shape>>>,
     pub units: RefCell<HashMap<shared::units::Dim, shared::units::Shown>>,
+    /// Per struct id, the body of the type's `show` when it implements
+    /// `Show` (r[impl mimas.show.runtime]).
+    pub show_bodies: RefCell<Vec<Option<BodyId>>>,
+}
+
+/// What a `show` call gave, for the renderer (r[impl mimas.show.runtime]).
+pub enum ShowText {
+    /// The text `show` returned.
+    Text(String),
+    /// `show` faulted or ran out of ops: the built-in form, then this note.
+    Failed(String),
+}
+
+/// The runtime half of `Show` (r[impl mimas.show.runtime]). A display that
+/// meets a value whose type implements `Show` asks for its `show` result
+/// here. Missing, it records the value in `pending` and the display fails
+/// with `RtErr::ShowPending`; the dispatch loop runs each pending `show` on
+/// a thread of its own, keeps the text in `texts`, and replays the op,
+/// which then finds them. `running` holds the values whose `show` is on the
+/// stack, so a `show` that prints itself (or a cycle of them) gets the
+/// built-in form. `State::show_replay` is on only while the loop can
+/// replay the op.
+#[derive(Default)]
+pub struct ShowCalls {
+    pub texts: RefCell<HashMap<*const (), ShowText>>,
+    pub pending: RefCell<Vec<(*const (), crate::Stashed, BodyId)>>,
+    pub running: RefCell<Vec<*const ()>>,
+    /// The op count (`Trace::ops_total`) of the replayed op: the texts are
+    /// good for that op alone.
+    pub op: Cell<u64>,
 }
 
 impl DisplayShapes {

@@ -915,6 +915,35 @@ impl Compiler {
                 }
             }
         }
+        // r[impl mimas.show.runtime] each adt that implements `Show`, and each
+        // of its variant ids, names the body of its `show`
+        let shows = |i: usize, by_adt: &Vec<HashMap<String, BodyId>>| -> Option<BodyId> {
+            let adt = ir.resolutions.adts.values().nth(i)?;
+            let implements = adt
+                .implements
+                .iter()
+                .any(|p| ir.resolutions.pact_names.get(*p).is_some_and(|n| n == "Show"));
+            if !implements {
+                return None;
+            }
+            let table = by_adt.get(i)?;
+            table.get("show").copied().or_else(|| {
+                table.iter().find(|(k, _)| k.ends_with("::show")).map(|(_, b)| *b)
+            })
+        };
+        let mut show_bodies: Vec<Option<BodyId>> =
+            (0..by_adt.len()).map(|i| shows(i, &by_adt)).collect();
+        for (i, adt) in ir.resolutions.adts.values().enumerate() {
+            let Some(body) = show_bodies[i] else { continue };
+            for did in &adt.dispatch_ids {
+                if let Some(slot) = show_bodies.get_mut(did.index())
+                    && slot.is_none()
+                {
+                    *slot = Some(body);
+                }
+            }
+        }
+        let show_bodies: IdVec<AdtId, Option<BodyId>> = show_bodies.into();
         let methods: IdVec<_, HashMap<String, BodyId>> = by_adt.into();
 
         let field_names: IdVec<_, Vec<String>> = ir
@@ -1002,6 +1031,7 @@ impl Compiler {
             hole_shapes,
             field_shapes,
             shown_units,
+            show_bodies,
             field_tys,
             value_adts,
             tests,

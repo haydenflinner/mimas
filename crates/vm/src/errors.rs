@@ -71,6 +71,12 @@ pub enum RtErr {
     #[error("value nesting is too deep to display (possible reference cycle)")]
     DisplayTooDeep,
 
+    /// Internal: a display met values whose type implements `Show` and has
+    /// not run their `show` yet. The dispatch loop runs them and replays the
+    /// op; it never reaches a user (r[impl mimas.show.runtime]).
+    #[error("a display needs `show` results first")]
+    ShowPending,
+
     #[error("user-triggered panic")]
     UserPanic,
 
@@ -151,6 +157,7 @@ impl RtErr {
             Self::InvalidUnaryOperand => "this operand does not support the operator".to_string(),
             Self::IntegerOverflow => "this arithmetic overflows a 64 bit integer".to_string(),
             Self::DisplayTooDeep => "nesting exceeds the display depth limit here".to_string(),
+            Self::ShowPending => "a display waits on `show` here".to_string(),
             Self::UserPanic => "panicked here".to_string(),
             Self::OutOfFuel => "ran out of steps here".to_string(),
             Self::OutOfMemory { .. } => "memory ran out here".to_string(),

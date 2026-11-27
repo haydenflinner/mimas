@@ -74,6 +74,7 @@ mod impl_bound;
 mod rng;
 mod runtime_errors;
 mod scripts;
+mod show_runtime;
 mod short_circuit;
 mod std_fs;
 mod str;

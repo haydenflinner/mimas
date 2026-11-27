@@ -67,6 +67,10 @@ pub struct Program {
     pub field_shapes: IdVec<AdtId, Vec<shared::units::Shape>>,
     /// The unit the page wrote for each dimension a display names.
     pub shown_units: HashMap<shared::units::Dim, shared::units::Shown>,
+    /// Per adt (a variant's id too), the body of its `show` when its type
+    /// implements `Show`: the renderer calls it for a nested value
+    /// (r[impl mimas.show.runtime]).
+    pub show_bodies: IdVec<AdtId, Option<BodyId>>,
     /// Declared member types, parallel to `field_names` -- copied from
     /// `solve::ResolvedAdt::member_tys`. `Ty::Param`s stand for the adt's
     /// own params (see `member_tys`), so generic fields stay generic until
