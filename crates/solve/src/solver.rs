@@ -4467,6 +4467,23 @@ impl Solver {
                     self.hint_records(case.body(), ty);
                 }
             }
+            // a closure in a slot of a known fn type learns its parameter
+            // types from it, as a call argument does: a struct field
+            // (`Btn { on: |me| me.label }`), a `let f: (Btn) -> str`, a
+            // return value (r[impl mimas.closure.expected])
+            ExprKind::Closure(c) if !self.node_visits.contains(&expr.id()) => {
+                let want = match ty.clone().normalized(self) {
+                    Ty::Option(inner) => inner.normalized(self),
+                    t => t,
+                };
+                if let Ty::Fn(header) = want
+                    && header.parameters.len() == c.parameters.len()
+                {
+                    self.expected_closures
+                        .entry(expr.id())
+                        .or_insert(header.parameters);
+                }
+            }
             _ => {}
         }
     }

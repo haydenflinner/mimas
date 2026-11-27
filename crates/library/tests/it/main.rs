@@ -11,6 +11,7 @@ mod approx;
 mod array;
 mod assert;
 mod block_check;
+mod closure_expected;
 mod atoms;
 mod axes;
 mod colrow;

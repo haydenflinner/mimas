@@ -1702,6 +1702,28 @@ impl Solve for Call {
                     })
             };
             for &(slot, arg) in rest.iter().chain(&closures) {
+                // a closure where the parameter is plainly no function: say so
+                // before its body solves against parameters nothing typed
+                // (`sort_by_int(|p| p.age)` takes `[int]`, not a key fn)
+                // r[impl mimas.closure.expected]
+                if matches!(arg.value.kind(), ExprKind::Closure(_)) {
+                    let want = match params[slot].ty.clone().normalized(solver) {
+                        Ty::Option(inner) => inner.normalized(solver),
+                        t => t,
+                    };
+                    if matches!(
+                        want,
+                        Ty::Bool | Ty::Int | Ty::Float | Ty::Str | Ty::Unit | Ty::Null
+                            | Ty::Array(..) | Ty::Dict(..) | Ty::Tuple(..)
+                    ) {
+                        Err(crate::errors::TypeMismatch {
+                            src: solver.src(arg.value.location()),
+                            at: arg.value.location().into(),
+                            expected: params[slot].ty.clone().normalized(solver).to_string(),
+                            found: "a closure".into(),
+                        })?
+                    }
+                }
                 if matches!(arg.value.kind(), ExprKind::Closure(_))
                     && let Ty::Fn(header) = params[slot].ty.clone().normalized(solver)
                 {
