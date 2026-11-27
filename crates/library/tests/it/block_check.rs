@@ -102,3 +102,18 @@ fn a_rerun_starts_clean() {
     assert!(vm.run_tests().iter().all(|r| r.passed()));
     assert!(vm.run_tests().iter().all(|r| r.passed()));
 }
+
+// A block check no run reached is neither passed nor failed: its entry
+// reports "not reached". One that ran reports pass or fail as before.
+// r[verify check.block.unreached]
+#[test]
+fn a_block_check_no_run_reached_is_not_reached() {
+    let results = run("fn f(x: int) -> int { check x > 0; x }\nfn g(x: int) -> int { check x < 100; x }\nlet a = f(1)\ncheck a == 1\n");
+    let reached = find(&results, "x > 0");
+    assert!(reached.passed() && !reached.not_reached, "{results:?}");
+    let missed = find(&results, "x < 100");
+    assert!(missed.not_reached && !missed.passed() && !missed.failed(), "{results:?}");
+    // a later run reaching it settles it
+    let results = run("fn g(x: int) -> int { check x < 100; x }\nlet b = g(200)\n");
+    assert!(find(&results, "x < 100").failed(), "{results:?}");
+}

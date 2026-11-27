@@ -212,11 +212,20 @@ pub struct TestResult {
     /// so a run's cost compares on work, not wall time. `0` for a check
     /// that never ran. r[impl check.ops]
     pub ops: u64,
+    /// A `check` inside a block that no run reached: neither passed nor
+    /// failed (r[impl check.block.unreached]).
+    pub not_reached: bool,
 }
 
 impl TestResult {
+    /// Ran and held. A check no run reached has not passed.
     pub fn passed(&self) -> bool {
-        self.error.is_none()
+        self.error.is_none() && !self.not_reached
+    }
+
+    /// Ran and failed.
+    pub fn failed(&self) -> bool {
+        self.error.is_some()
     }
 }
 
@@ -3762,6 +3771,7 @@ impl Vm {
             return names
                 .into_iter()
                 .map(|name| TestResult {
+                    not_reached: false,
                     name,
                     error: Some(why.clone()),
                     operands: Vec::new(),
@@ -3792,6 +3802,8 @@ impl Vm {
             // a `check` inside a block this call ran failed: the call fails
             // with it, under the test's own name (r[impl check.block])
             let block_miss = self.fixture::<crate::fixtures::BlockChecks>().take_fresh();
+            // a block check's entry whose check never ran (r[impl check.block.unreached])
+            let not_reached = self.fixture::<crate::fixtures::BlockChecks>().take_unreached();
             let error = match ran {
                 Err(e) => Some(format!("{e}")),
                 Ok(Captured::Bool(false)) => Some("assertion failed".into()),
@@ -3800,7 +3812,7 @@ impl Vm {
                 // anything else is a broken check, not a pass
                 Ok(other) => Some(format!("check produced {other:?}, expected a bool")),
             };
-            results.push(TestResult { name, error, operands, ops });
+            results.push(TestResult { name, error, operands, ops, not_reached });
         }
         self.reset_to_entry();
         results

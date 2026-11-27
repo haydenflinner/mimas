@@ -39,6 +39,7 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add(__contract_fail);
     api.add(__check_operand);
     api.add(__check_miss);
+    api.add(__check_hit);
     api.add(__check_verdict);
     api.add(sum);
     api.add(avg);
@@ -504,6 +505,16 @@ fn __check_miss<'gc>(ctx: Ctx<'gc>, name: &str, within: &str, message: &str) -> 
         format!("in {within}: {message}")
     };
     ctx.fixture::<BlockChecks>().miss(name, message);
+    Ok(())
+}
+
+#[native]
+#[effects()]
+/// A `check` inside a block ran (r[impl check.block.unreached]): its entry
+/// then reports pass or fail, never "not reached". Not for user code; the
+/// `check` desugar calls it.
+fn __check_hit<'gc>(ctx: Ctx<'gc>, name: &str) -> Result<(), RtErr> {
+    ctx.fixture::<BlockChecks>().hit(name);
     Ok(())
 }
 

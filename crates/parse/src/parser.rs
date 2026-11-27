@@ -1610,6 +1610,9 @@ impl<'s> Parser<'s> {
             self.soft_check = Some((name.clone(), within.clone()));
             let asserted = self.rewrite_assert(at, expr);
             self.soft_check = None;
+            // r[impl check.block.unreached] the run reached this check
+            let hit = self.internal_call("__check_hit", vec![self.str_lit(&name, at)], at);
+            body.push(self.new_stmt(StmtKind::Expr(hit), at));
             body.push(self.new_stmt(StmtKind::Expr(asserted), at));
             let verdict = self.internal_call("__check_verdict", vec![self.str_lit(&name, at)], at);
             let entry = self.new_expr(

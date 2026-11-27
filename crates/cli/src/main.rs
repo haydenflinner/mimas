@@ -345,9 +345,14 @@ fn build(
                 return 1;
             }
             Ok(Ok((ops, checks))) => {
-                let failed: Vec<_> = checks.iter().filter(|c| !c.passed()).collect();
+                let failed: Vec<_> = checks.iter().filter(|c| c.failed()).collect();
                 for c in &failed {
                     eprintln!("{} {}: {}", "✕".red(), c.name, c.error.as_deref().unwrap_or("failed"));
+                }
+                // a `check` in a block no run reached: neither pass nor fail
+                // (r[impl check.block.unreached])
+                for c in checks.iter().filter(|c| c.not_reached) {
+                    eprintln!("{} {}: not reached", "○".bright_black(), c.name);
                 }
                 if !failed.is_empty() {
                     eprintln!("{} of {} checks failed", failed.len(), checks.len());

@@ -850,6 +850,10 @@ impl Witnesses {
 pub struct BlockChecks {
     failed: RefCell<HashMap<String, String>>,
     fresh: RefCell<Option<String>>,
+    /// The block checks some run reached, failed or not.
+    reached: RefCell<std::collections::HashSet<String>>,
+    /// Set by `verdict` when its check never ran; the runner takes it.
+    unreached: Cell<bool>,
 }
 
 impl BlockChecks {
@@ -863,10 +867,27 @@ impl BlockChecks {
             .or_insert(message);
     }
 
+    /// A run reached the block check `name` (r[impl check.block.unreached]).
+    pub fn hit(&self, name: &str) {
+        if !self.reached.borrow().contains(name) {
+            self.reached.borrow_mut().insert(name.to_string());
+        }
+    }
+
     /// The first failure recorded for `name`, or `None` when every run of
-    /// it passed or it never ran.
+    /// it passed or it never ran. A check that never ran leaves
+    /// `take_unreached` set.
     pub fn verdict(&self, name: &str) -> Option<String> {
-        self.failed.borrow().get(name).cloned()
+        let failed = self.failed.borrow().get(name).cloned();
+        if failed.is_none() && !self.reached.borrow().contains(name) {
+            self.unreached.set(true);
+        }
+        failed
+    }
+
+    /// Whether the verdict just asked for was of a check no run reached.
+    pub fn take_unreached(&self) -> bool {
+        self.unreached.replace(false)
     }
 
     /// The first failure since the last call, taken.
@@ -878,6 +899,8 @@ impl BlockChecks {
     pub fn clear(&self) {
         self.failed.borrow_mut().clear();
         self.fresh.borrow_mut().take();
+        self.reached.borrow_mut().clear();
+        self.unreached.set(false);
     }
 }
 
