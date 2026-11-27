@@ -293,6 +293,7 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> Result<()> {
         };
         pass.index(ast.stmts());
         let member_units = pass.member_units();
+        let member_shapes = pass.member_shapes();
         // two quiet rounds settle constants that build on each other in any order, then the
         // real one reports
         for _ in 0..2 {
@@ -401,6 +402,7 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> Result<()> {
         solver.want_dims.extend(want_dims);
         solver.print_dims.extend(print_dims);
         solver.member_units.extend(member_units);
+        solver.member_shapes.extend(member_shapes);
         solver.print_shapes.extend(print_shapes);
         solver.hole_shapes.extend(hole_shapes);
         solver.shown_units.extend(shown_units);
@@ -542,6 +544,30 @@ impl<'a> Pass<'a> {
                 let d = self.with_ty_params(tps, |p| p.annotation(&f.annotation));
                 if let Some(d) = scalar(d) {
                     out.push(((name.clone(), k.lexeme.clone()), d));
+                }
+            }
+        }
+        out
+    }
+
+    /// Each struct field's display shape from its annotation, one unit per
+    /// tuple slot: `p: (px, px)` shows `(1 px, 2 px)`
+    /// (r[impl mimas.display.one]). Plain shapes are left out.
+    fn member_shapes(&mut self) -> Vec<((String, String), units::Shape)> {
+        let mut out = Vec::new();
+        let structs: Vec<(String, &'a Struct)> =
+            self.structs.iter().map(|(n, s)| (n.clone(), *s)).collect();
+        for (name, s) in structs {
+            for f in &s.fields {
+                let key = match &f.name {
+                    FieldKey::Ident(k) => k.lexeme.clone(),
+                    FieldKey::Int(i) => i.to_string(),
+                };
+                let tps = s.type_params.iter().map(|i| i.lexeme.clone()).collect();
+                let d = self.with_ty_params(tps, |p| p.annotation(&f.annotation));
+                let shape = self.shape(None, &d);
+                if !shape.is_plain() {
+                    out.push(((name.clone(), key), shape));
                 }
             }
         }

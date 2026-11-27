@@ -290,6 +290,10 @@ pub struct Solver {
     /// land as `INDEX`. Recorded by the dims pass; surfaces on
     /// [`ResolvedAdt::member_dims`](crate::ResolvedAdt).
     pub(crate) member_units: FxHashMap<(String, String), shared::units::Dim>,
+    /// Display shape of each source-struct member whose annotation carries
+    /// units, one per tuple slot: `(struct name, field name)`. Surfaces on
+    /// [`ResolvedAdt::member_shapes`](crate::ResolvedAdt).
+    pub(crate) member_shapes: FxHashMap<(String, String), shared::units::Shape>,
     /// Exprs that fulfill a `[T; n]` position with a length the compiler couldn't
     /// prove -- emit wraps each in a runtime dim check (see `lens.rs`).
     /// Surfaces on [`Resolutions::len_checks`](crate::Resolutions).
@@ -518,6 +522,7 @@ impl Solver {
             computed_consts: Vec::new(),
             field_dims: FxHashMap::default(),
             member_units: FxHashMap::default(),
+            member_shapes: FxHashMap::default(),
             len_checks: FxIndexMap::default(),
             default_ctors: FxIndexMap::default(),
             multis: FxHashMap::default(),

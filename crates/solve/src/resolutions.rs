@@ -323,6 +323,9 @@ pub struct ResolvedAdt {
     /// Each member's declared unit, parallel to `fields` (through `?`/`[..]`):
     /// `next: index?` is `Some(INDEX)`. `None` for unitless members and tuples.
     pub member_dims: Vec<Option<shared::units::Dim>>,
+    /// Each member's display shape from its annotation, parallel to
+    /// `fields`, one unit per tuple slot. `None` when the member shows plain.
+    pub member_shapes: Vec<Option<shared::units::Shape>>,
     /// The adt's declared type params (`struct P<T>` → `[T]`), positionally
     /// parallel to the `args` on a `Ty::Adt`/`Ty::Identity` instantiation.
     pub type_params: Vec<ParamId>,
@@ -354,6 +357,15 @@ impl ResolvedAdt {
                 .collect(),
             _ => Vec::new(),
         };
+        let member_shapes = fields
+            .iter()
+            .map(|f| {
+                solver
+                    .member_shapes
+                    .get(&(adt.name.clone(), f.clone()))
+                    .cloned()
+            })
+            .collect();
         let member_dims = fields
             .iter()
             .map(|f| {
@@ -423,6 +435,7 @@ impl ResolvedAdt {
             fields,
             member_tys,
             member_dims,
+            member_shapes,
             type_params,
             implements,
             methods,

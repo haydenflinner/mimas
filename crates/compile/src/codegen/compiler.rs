@@ -963,8 +963,9 @@ impl Compiler {
                 adt.member_tys
                     .iter()
                     .enumerate()
-                    .map(|(i, ty)| {
-                        shared::units::Shape::of_field(ty, adt.member_dims.get(i).copied().flatten())
+                    .map(|(i, ty)| match adt.member_shapes.get(i).cloned().flatten() {
+                        Some(shape) => shape,
+                        None => shared::units::Shape::of_field(ty, adt.member_dims.get(i).copied().flatten()),
                     })
                     .collect()
             })

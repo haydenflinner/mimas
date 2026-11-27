@@ -84,3 +84,16 @@ fn a_field_shows_the_page_unit() {
     let src = "struct S { ws: [px], k: kW }\nprint(S { ws: [3.0px], k: 25kW })\n";
     assert_eq!(printed(src), ["S { ws: [3] px, k: 25 kW }"]);
 }
+
+// A tuple field shows each slot's unit, named or positional.
+// r[verify mimas.display.one]
+#[test]
+fn a_tuple_field_shows_each_slots_unit() {
+    let src = "struct T { p: (px, px), q: (px, s, str), n: int }\n\
+               print(T { p: (1.0px, 2.0px), q: (1.0px, 2.0s, \"a\"), n: 3 })\n\
+               struct U(px, (px, px))\nprint(U(1.0px, (2.0px, 3.0px)))\n";
+    assert_eq!(
+        printed(src),
+        ["T { p: (1 px, 2 px), q: (1 px, 2 s, \"a\"), n: 3 }", "U(1 px, (2 px, 3 px))"]
+    );
+}
