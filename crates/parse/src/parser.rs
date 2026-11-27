@@ -2850,7 +2850,17 @@ impl<'s> Parser<'s> {
 
     fn impl_decl(&mut self) -> Impl {
         self.bump(TokKind::Impl);
-        let first = self.require_ident();
+        // `impl int { … }`: one rule for every built-in, an inherent impl
+        // is accepted as it is on `DataFrame` or `Vec2` (C11)
+        // r[impl mimas.impl.builtin-inherent]
+        let first = match self.peek() {
+            TokKind::TyKw(ty) => {
+                let at = self.next_location();
+                self.advance();
+                Ident::new(ty.to_string(), at)
+            }
+            _ => self.require_ident(),
+        };
         // `impl Foo<T>` would mean specializing one instantiation -- not supported. `impl Foo`
         // on a generic type implements all of them at once, with the adt's params in scope.
         // `impl Foo<T: Bound>` bounds the type's own parameter; a param with

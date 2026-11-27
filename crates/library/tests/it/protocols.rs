@@ -58,3 +58,17 @@ fn print_calls_show() {
     // `P` implements `Show`; `V` does not and keeps the plain display
     assert_eq!(lines.borrow().clone(), ["<1,2>", "V { n: 3 }"]);
 }
+
+test_run!(
+    // r[verify mimas.tuple.ord]
+    // C11: tuples order lexicographically, slot by slot
+    tuples_compare,
+    "struct V { n: int }\nimpl Ord for V { fn cmp(self, o: V) -> int { self.n - o.n } }",
+    "(1, 2) < (1, 3)" => "true",
+    "(2, 0) < (1, 9)" => "false",
+    "(1, \"b\") >= (1, \"a\")" => "true",
+    "(1, 2) <= (1, 2)" => "true",
+    "((1, 2), 3) < ((1, 3), 0)" => "true",
+    "(V { n = 1 }, 0) < (V { n = 2 }, 0)" => "true",
+    "[(2, 1), (1, 5), (1, 2)].sorted_by(|p: (int, int)| p.0 * 10 + p.1)" => "[[1, 2], [1, 5], [2, 1]]",
+);

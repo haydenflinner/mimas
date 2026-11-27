@@ -79,3 +79,21 @@ impl Nil for int { fn zero() -> int { 0 } fn tag(self) -> str { \"nil\" } }
 fn t<T: Nil>(x: T) -> str { x.tag() }",
     "t(3)" => "\"nil\"",
 );
+
+test_run!(
+    // r[verify mimas.impl.builtin-inherent]
+    // C11: one rule for every built-in, an inherent impl is accepted, on a
+    // primitive as on a native type
+    an_inherent_impl_on_a_builtin_works,
+    "impl int { fn twice(self) -> int { self * 2 } }\nimpl str { fn shout(self) -> str { self + \"!\" } }",
+    "21.twice()" => "42",
+    "\"hi\".shout()" => "\"hi!\"",
+);
+
+test_run!(
+    // r[verify mimas.impl.builtin-inherent]
+    // the pact route stays open
+    a_pact_impl_on_a_builtin_works,
+    "pact Twice { fn twice(self) -> int; }\nimpl Twice for int { fn twice(self) -> int { self * 2 } }",
+    "21.twice()" => "42",
+);

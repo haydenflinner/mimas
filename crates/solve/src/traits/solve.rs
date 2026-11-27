@@ -2542,6 +2542,75 @@ impl Solve for Equality {
         if dec_overload_ty(&lhs_n, &rhs_n, solver).is_some() {
             return Ok(Ty::Bool);
         }
+        // `(1, 2) < (1, 3)`: tuples of one arity order lexicographically,
+        // each slot through its own `<` (so a slot of an `Ord` type compares
+        // through `cmp`) r[impl mimas.tuple.ord]
+        if !matches!(self.op, EqualityOp::Equal | EqualityOp::NotEqual)
+            && let (Ty::Tuple(a), Ty::Tuple(b)) = (&lhs_n, &rhs_n)
+            && a.len() == b.len()
+        {
+            let at = location;
+            let id_of = |n: &str| Expr::new(ExprKind::Ident(Ident::new(n, at)), at);
+            let slot = |n: &str, i: usize| {
+                Expr::new(
+                    ExprKind::Access(Access::Dot {
+                        left: id_of(n),
+                        right: Expr::new(ExprKind::Literal(Literal::Int(i as i64)), at),
+                        kind: parse::AccessKind::Direct,
+                    }),
+                    at,
+                )
+            };
+            let lt = |l: Expr, r: Expr| {
+                Expr::new(ExprKind::Equality(Equality { left: l, op: EqualityOp::Less, right: r }), at)
+            };
+            let int = |v: i64| Expr::new(ExprKind::Literal(Literal::Int(v)), at);
+            let block = |e: Expr| {
+                Expr::new(ExprKind::Block(parse::Block { body: vec![], yielded_expr: Some(e) }), at)
+            };
+            let mut chain = int(0);
+            for i in (0..a.len()).rev() {
+                let inner = Expr::new(
+                    ExprKind::If(parse::If {
+                        condition: lt(slot("__tb", i), slot("__ta", i)),
+                        main_body: block(int(1)),
+                        else_expr: Some(block(chain)),
+                        binding: None,
+                    }),
+                    at,
+                );
+                chain = Expr::new(
+                    ExprKind::If(parse::If {
+                        condition: lt(slot("__ta", i), slot("__tb", i)),
+                        main_body: block(int(-1)),
+                        else_expr: Some(block(inner)),
+                        binding: None,
+                    }),
+                    at,
+                );
+            }
+            let bind = |n: &str, v: Expr| {
+                Stmt::new(
+                    Let { left: Ident::new(n, at).into(), annotation: None, right: v, else_branch: None }
+                        .into(),
+                    NodeId::new(),
+                    at,
+                )
+            };
+            let rewritten = Expr::new(
+                ExprKind::Block(parse::Block {
+                    body: vec![bind("__ta", self.left.clone()), bind("__tb", self.right.clone())],
+                    yielded_expr: Some(Expr::new(
+                        ExprKind::Equality(Equality { left: chain, op: self.op, right: int(0) }),
+                        at,
+                    )),
+                }),
+                at,
+            );
+            let ty = rewritten.query(solver)?;
+            solver.rewrites.insert(id, rewritten);
+            return Ok(ty);
+        }
         // `<` `<=` `>` `>=` on an adt with registered operator impls (`Api::add_bin_op`)
         // dispatch at runtime and answer a bool -- `==`/`!=` stay structural
         if !matches!(self.op, EqualityOp::Equal | EqualityOp::NotEqual) {
