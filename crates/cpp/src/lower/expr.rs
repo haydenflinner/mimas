@@ -953,17 +953,14 @@ impl<'a> Lower<'a> {
             "sort" => {
                 if args.len() >= 2 {
                     let v = self.iter_arg(args[0]);
-                    let ty = self.iter_elem_ty(args[0]);
-                    return match ty {
-                        CTy::Float => format!("{v}.sort_by_float({v})"),
-                        _ => format!("{v}.sort_by_int({v})"),
-                    };
+                    // `sorted()` answers the numbers, int or float, in order
+                    return format!("{{ {v} = {v}.sorted(); () }}");
                 }
             }
             "stable_sort" => {
                 if args.len() >= 2 {
                     let v = self.iter_arg(args[0]);
-                    return format!("{v}.sort_by_int({v})");
+                    return format!("{{ {v} = {v}.sorted(); () }}");
                 }
             }
             "reverse" => {
@@ -1149,7 +1146,7 @@ impl<'a> Lower<'a> {
                 "push" | "emplace" => {
                     let _ = min; // min/max order is not preserved — queue stays sorted
                     return format!(
-                        "{{ {recv}.push({}); {recv}.sort_by_int({recv}); () }}",
+                        "{{ {recv}.push({}); {recv} = {recv}.sorted(); () }}",
                         arg0()
                     );
                 }

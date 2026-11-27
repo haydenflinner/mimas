@@ -358,68 +358,19 @@ test_run!(
 
 test_fail!(sum_rejects_bool, "let _ = [true, false].sum();");
 
-// sort_by_int: in place, stable
+// a sort by a parallel key list (what sort_by_int/sort_by_float did
+// before L5 removed them): zip, sort by the key, take the values; stable
 test_run!(
-    sort_by_int,
+    sort_by_parallel_keys,
     "let a = [10, 20, 30];
-     a.sort_by_int([3, 1, 2]);",
-    "a[0]" => "20",
-    "a[1]" => "30",
-    "a[2]" => "10",
-    "a.len()" => "3",
-);
-
-test_run!(
-    sort_by_int_str_values,
-    r#"let a = ["x", "y", "z"];
-       a.sort_by_int([30, 10, 20]);"#,
-    "a[0]" => r#""y""#,
-    "a[1]" => r#""z""#,
-    "a[2]" => r#""x""#,
-);
-
-test_run!(
-    sort_by_int_already_sorted,
-    "let a = [1, 2, 3];
-     a.sort_by_int([1, 2, 3]);",
-    "a[0]" => "1",
-    "a[2]" => "3",
-);
-
-test_run!(
-    sort_by_int_empty,
-    "let a: [int] = [];
-     a.sort_by_int([]);",
-    "a.len()" => "0",
-);
-
-test_fail!(
-    sort_by_int_rejects_float_keys,
-    "let a = [1, 2, 3]; a.sort_by_int([1.0, 2.0, 3.0]);"
-);
-
-test_run!(
-    sort_by_float,
-    "let a = [10, 20, 30];
-     a.sort_by_float([3.5, 1.5, 2.5]);",
-    "a[0]" => "20",
-    "a[1]" => "30",
-    "a[2]" => "10",
-);
-
-test_run!(
-    sort_by_float_str_values,
-    r#"let a = ["a", "b", "c"];
-       a.sort_by_float([2.5, 0.5, 1.5]);"#,
-    "a[0]" => r#""b""#,
-    "a[1]" => r#""c""#,
-    "a[2]" => r#""a""#,
-);
-
-test_fail!(
-    sort_by_float_rejects_int_keys,
-    // an int list: literals would fill the float slot (`mimas.num.literal`)
-    "let a = [1, 2, 3]; let ks = [1, 2, 3]; a.sort_by_float(ks);"
+     let b = a.zip([3, 1, 2]).sorted_by(|p: (int, int)| p.1).map(|p: (int, int)| p.0);
+     let s = [\"x\", \"y\", \"z\"].zip([30, 10, 20]).sorted_by(|p: (str, int)| p.1).map(|p: (str, int)| p.0);
+     let t = [\"a\", \"b\", \"c\"].zip([1.0, 0.5, 1.0]).sorted_by(|p: (str, float)| p.1).map(|p: (str, float)| p.0);
+     let e: [int] = [];",
+    "b" => "[20, 30, 10]",
+    "s" => "[\"y\", \"z\", \"x\"]",
+    "t" => "[\"b\", \"a\", \"c\"]",
+    "e.zip(e).sorted_by(|p: (int, int)| p.1).len()" => "0",
 );
 
 // argsort dispatches on the receiver key array

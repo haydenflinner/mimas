@@ -2019,7 +2019,7 @@ fn solve_call(this: &Call, id: NodeId, location: Location, solver: &mut Solver) 
             for &(slot, arg) in rest.iter().chain(&closures) {
                 // a closure where the parameter is plainly no function: say so
                 // before its body solves against parameters nothing typed
-                // (`sort_by_int(|p| p.age)` takes `[int]`, not a key fn)
+                // (`xs.extend(|p| p.age)` takes a list, not a key fn)
                 // r[impl mimas.closure.expected]
                 if matches!(arg.value.kind(), ExprKind::Closure(_)) {
                     let want = match params[slot].ty.clone().normalized(solver) {

@@ -57,14 +57,15 @@ fn a_conflicting_annotation_still_fails() {
     assert!(err.contains("expected int but found str") || err.contains("mismatch"), "{err}");
 }
 
-// x12: `sort_by_int` takes the keys, not a key fn. The error says so
-// instead of naming an unresolved internal type.
+// x12: a list parameter given a closure (`extend` takes a list, as the
+// removed `sort_by_int` took its keys). The error says so instead of
+// naming an unresolved internal type.
 // r[verify mimas.closure.expected]
 #[test]
 fn a_closure_for_a_list_parameter_is_a_plain_mismatch() {
     let src = "struct P { n: str, age: int }\n\
                let ps = [P { n: \"b\", age: 3 }]\n\
-               ps.sort_by_int(|p| p.age)\n";
+               ps.extend(|p| p.age)\n";
     let err = refused(src);
     assert!(err.contains("a closure"), "{err}");
     assert!(!err.contains("?mimas"), "{err}");

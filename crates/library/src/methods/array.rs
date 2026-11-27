@@ -62,8 +62,6 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add_method_named("sup", sup_bool_rows);
     api.add_method_named("sup", sup_int_rows);
     api.add_method_named("sup", sup_float_rows);
-    api.add_method(sort_by_int);
-    api.add_method(sort_by_float);
     api.add_method_named("argsort", argsort_int);
     api.add_method_named("argsort", argsort_float);
     api.add_method(reorder);
@@ -453,39 +451,6 @@ fn sum_float(arr: &[f64]) -> f64 {
     crate::fsum(arr.iter().copied())
 }
 
-#[native]
-/// Sorts the array in ascending order of `keys`, where `keys[i]` is the key for element `i`. Equal
-/// keys keep their original order. `keys` is unchanged.
-///
-/// ```mimas
-/// let names = ["cat", "ant", "bee"];
-/// names.sort_by_int([3, 1, 2]); // names is now ["ant", "bee", "cat"]
-/// ```
-///
-/// `keys` should be as long as the array. An element without a key is dropped from the array, and
-/// extra keys are ignored.
-fn sort_by_int(arr: &mut Vec<anon::T<'gc>>, keys: Vec<i64>) {
-    let mut pairs: Vec<(i64, anon::T<'gc>)> = keys.into_iter().zip(arr.iter().copied()).collect();
-    pairs.sort_by_key(|&(k, _)| k);
-    *arr = pairs.into_iter().map(|(_, v)| v).collect();
-}
-
-#[native]
-/// Sorts the array in ascending order of `keys`, where `keys[i]` is the key for element `i`. Equal
-/// keys keep their original order. `keys` is unchanged.
-///
-/// ```mimas
-/// let names = ["far", "near", "mid"];
-/// names.sort_by_float([9.5, 0.5, 3.0]); // names is now ["near", "mid", "far"]
-/// ```
-///
-/// `keys` should be as long as the array. An element without a key is dropped from the array, and
-/// extra keys are ignored.
-fn sort_by_float(arr: &mut Vec<anon::T<'gc>>, keys: Vec<f64>) {
-    let mut pairs: Vec<(f64, anon::T<'gc>)> = keys.into_iter().zip(arr.iter().copied()).collect();
-    pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
-    *arr = pairs.into_iter().map(|(_, v)| v).collect();
-}
 
 // the indices that would sort `keys` ascending. dispatched on the receiver (int/float key array),
 // so each arm is its own typed overload; always returns `[int]` positions.
