@@ -57,6 +57,10 @@ enum D {
     /// An `Interval` of numbers in this dimension: `lo`, `mid` and `hi` are all quantities of it,
     /// and arithmetic on it keeps the unit like arithmetic on a plain quantity does.
     Iv(Dim),
+    /// A function: its parameters' dims and its return's. A closure, a
+    /// `(px) -> px` annotation, a binding that holds either: calling it
+    /// checks the arguments and gives the return (r[impl mimas.unit.closure]).
+    Fn(Vec<D>, Box<D>),
 }
 
 const PLAIN: D = D::Q(Dim::NONE);
@@ -105,6 +109,11 @@ fn clash(a: &D, b: &D) -> Option<(Dim, Dim)> {
         // member-wise: a swapped `(px↕, px↔)` reports its first bad slot,
         // an arity miss the type solver's own error
         (D::Tuple(x), D::Tuple(y)) => x.iter().zip(y).find_map(|(a, b)| clash(a, b)),
+        // a function fits a fn-typed slot when its parameters and its
+        // return agree (r[impl mimas.unit.closure])
+        (D::Fn(xp, xr), D::Fn(yp, yr)) => {
+            xp.iter().zip(yp).find_map(|(a, b)| clash(a, b)).or_else(|| clash(xr, yr))
+        }
         _ => None,
     }
 }
@@ -199,6 +208,9 @@ struct Pass<'a> {
     site_ds: FxIndexMap<Location, (NodeId, D)>,
     /// Each f-string hole's dim, made a [`units::Shape`] at the end of the walk.
     hole_ds: FxIndexMap<NodeId, D>,
+    /// A closure argument's parameter dims, from the fn-typed slot it fills
+    /// (`f: (px) -> px`), read when the closure walks (r[impl mimas.unit.closure]).
+    closure_hints: FxHashMap<NodeId, Vec<D>>,
     /// Each value a failing check's message interpolates, with its
     /// dimension, so the message can say the unit (r[impl check.report.units]).
     check_ds: FxIndexMap<parse::NodeId, D>,
@@ -257,6 +269,7 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> Result<()> {
             echo_ds: FxIndexMap::default(),
             site_ds: FxIndexMap::default(),
             hole_ds: FxIndexMap::default(),
+            closure_hints: FxHashMap::default(),
             check_ds: FxIndexMap::default(),
             check_texts: FxIndexMap::default(),
             dec_notes: FxIndexMap::default(),
@@ -803,6 +816,11 @@ impl<'a> Pass<'a> {
             Annotation::Tuple(parts) => {
                 D::Tuple(parts.iter().map(|p| self.annotation(p)).collect())
             }
+            // `(px) -> px`: calling it checks and gives units (r[impl mimas.unit.closure])
+            Annotation::Function(params, ret) => D::Fn(
+                params.iter().map(|p| self.annotation(p)).collect(),
+                Box::new(self.annotation(ret)),
+            ),
             _ => D::Any,
         }
     }
@@ -1269,14 +1287,32 @@ impl<'a> Pass<'a> {
             }
             ExprKind::Call(c) => self.call(e, c),
             ExprKind::Access(a) => self.access(a),
+            // r[impl mimas.unit.closure] a closure's parameters take their
+            // annotation, else the dims its slot expects (`ap(|w| …)` with
+            // `f: (px) -> px`); its return is its annotation, else its body's
             ExprKind::Closure(c) => {
-                for p in &c.parameters {
-                    self.param(p);
+                let hint = self.closure_hints.get(&e.id()).cloned();
+                let mut params = Vec::with_capacity(c.parameters.len());
+                for (i, p) in c.parameters.iter().enumerate() {
+                    let d = match &p.annotation {
+                        Some(a) => self.annotation(a),
+                        None => hint.as_ref().and_then(|h| h.get(i).cloned()).unwrap_or(D::Any),
+                    };
+                    self.bind(&p.left, d.clone());
+                    params.push(d);
                 }
-                self.rets.push(D::Any);
-                self.expr(&c.body);
+                let want = c.return_type.as_ref().map(|a| self.annotation(a));
+                self.rets.push(want.clone().unwrap_or(D::Any));
+                let got = self.expr(&c.body);
                 self.rets.pop();
-                D::Any
+                let ret = match want {
+                    Some(want) => {
+                        self.expect_conv(&want, &got, &c.body, "the closure returns the wrong dimension");
+                        want
+                    }
+                    None => got,
+                };
+                D::Fn(params, Box::new(ret))
             }
             ExprKind::For(f) => {
                 let it = self.expr(&f.iterator);
@@ -1778,22 +1814,51 @@ impl<'a> Pass<'a> {
             }
             return self.native_apply(e, c, &args).unwrap_or(D::Any);
         }
-        let args: Vec<D> = c.arguments.iter().map(|a| self.expr(&a.value)).collect();
-        if let ExprKind::Ident(callee) = c.left.kind() {
-            let user = self.dec_of(callee).and_then(|dec| {
+        let user = match c.left.kind() {
+            ExprKind::Ident(callee) => self.dec_of(callee).and_then(|dec| {
                 let loc = self.solver.decs[dec].location;
                 self.fns_by_site
                     .get(&(loc.file_id, loc.span.start))
                     .copied()
-            });
+            }),
+            _ => None,
+        };
+        if let Some(f) = user {
+            self.hint_closures(f, c, false, None);
+        }
+        let args: Vec<D> = c.arguments.iter().map(|a| self.expr(&a.value)).collect();
+        if let ExprKind::Ident(callee) = c.left.kind() {
             if let Some(f) = user {
                 return self.apply(f, c, &args, false, None);
+            }
+            // a binding that holds a function: a closure, a fn-typed
+            // parameter (r[impl mimas.unit.closure])
+            if let Some(dec) = self.dec_of(callee)
+                && let Some(D::Fn(params, ret)) = self.env.get(&dec).cloned()
+            {
+                for (i, (arg, got)) in c.arguments.iter().zip(&args).enumerate() {
+                    if let Some(want) = params.get(i) {
+                        self.expect_conv(
+                            want,
+                            got,
+                            &arg.value,
+                            &format!("argument {} of `{}`", i + 1, callee.lexeme),
+                        );
+                    }
+                }
+                return *ret;
             }
             if let Some(d) = self.aggregate(e, c, callee, &args) {
                 return d;
             }
-        } else {
-            self.expr(&c.left);
+        } else if let D::Fn(params, ret) = self.expr(&c.left) {
+            // a call of a function value: `twice(f)(x)` (r[impl mimas.unit.closure])
+            for (i, (arg, got)) in c.arguments.iter().zip(&args).enumerate() {
+                if let Some(want) = params.get(i) {
+                    self.expect_conv(want, got, &arg.value, &format!("argument {}", i + 1));
+                }
+            }
+            return *ret;
         }
         self.native_apply(e, c, &args).unwrap_or(D::Any)
     }
@@ -1865,6 +1930,38 @@ impl<'a> Pass<'a> {
             self.range_check(&arg.value, &want);
         }
         Some(binding.sig.return_dim.as_ref().map_or(D::Any, dim_tree))
+    }
+
+    /// Before a call's arguments walk: each closure argument whose parameter is
+    /// fn-typed learns that type's parameter dims (r[impl mimas.unit.closure]).
+    fn hint_closures(&mut self, f: &'a Function, c: &'a parse::Call, method: bool, owner: Option<&str>) {
+        let params: Vec<&Binding> = f
+            .parameters
+            .iter()
+            .skip(usize::from(method || f.is_method()))
+            .collect();
+        let mut scope: Vec<String> = f.type_params.iter().map(|i| i.lexeme.clone()).collect();
+        if let Some(owner) = owner {
+            scope.extend(self.adt_param_names(owner));
+        }
+        self.with_ty_params(scope, |s| {
+            for (i, arg) in c.arguments.iter().enumerate() {
+                if !matches!(arg.value.kind(), ExprKind::Closure(_)) {
+                    continue;
+                }
+                let param = match &arg.name {
+                    Some(n) => params
+                        .iter()
+                        .find(|p| p.left.as_ident().is_some_and(|id| id.lexeme == n.lexeme)),
+                    None => params.get(i),
+                };
+                if let Some(ann) = param.and_then(|p| p.annotation.as_ref())
+                    && let D::Fn(ps, _) = s.annotation(ann)
+                {
+                    s.closure_hints.insert(arg.value.id(), ps);
+                }
+            }
+        });
     }
 
     /// Check a call to a user function against its declared parameters; its declared return is
