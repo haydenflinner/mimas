@@ -46,3 +46,16 @@ fn a_tuple_slot_write_says_to_build_a_new_tuple() {
     assert!(err.contains("t = (t.0, t.1)"), "{err}");
     assert!(!err.contains("?mimas"), "{err}");
 }
+
+// Any whole power of `rad` meets a plain number, as `rad` does: dividing
+// by `PI` gives `1/rad`, and `ln`, `exp` and `sqrt` take `2.0 * PI`.
+// r[verify mimas.unit.trig]
+#[test]
+fn powers_of_radians_meet_plain_numbers() {
+    let src = "use std::math::PI\nlet t = 2.0\nlet deg = t * 180.0 / PI - 137.0\n\
+               let a = (2.0 * PI).ln()\nlet b = (2.0 * PI).sqrt()\nlet c = (PI * PI).exp()\n";
+    if let Err(e) = vm::Vm::compile(src, library::std) {
+        panic!("{e:?}");
+    }
+    assert!(refused("use std::math::PI\nlet bad = 1.0px + PI\n").contains("cannot add pixels (px) and angle (rad)"));
+}

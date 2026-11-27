@@ -89,7 +89,14 @@ fn index_plain(x: Dim, y: Dim) -> bool {
 /// `theta + p.atan2(q)` needs no `.to("rad")` unwrap. What the dimension
 /// keeps out is other quantities: `theta + 3px` still clashes.
 fn angle_plain(x: Dim, y: Dim) -> bool {
-    (x == units::ANGLE && y.is_none()) || (y == units::ANGLE && x.is_none())
+    (angle_power(x) && y.is_none()) || (angle_power(y) && x.is_none())
+}
+
+/// A whole power of the angle unit, `rad`, `1/rad`, `rad²`: radians are
+/// plain numbers that keep a name, so any power of them meets a plain
+/// number (`t * 180.0 / PI - 137.0`) and feeds `ln`, `exp` and `sqrt`.
+fn angle_power(d: Dim) -> bool {
+    (1..=4).any(|k| d == units::ANGLE.powi(k) || d == units::ANGLE.powi(-k))
 }
 
 /// Two known dimensions that differ; `None` when either is unknown or they agree.
@@ -2365,6 +2372,7 @@ impl<'a> Pass<'a> {
                 }
                 D::Q(*d)
             }
+            (D::Q(d), "sqrt") if angle_power(d.bare()) => PLAIN,
             (D::Q(d), "sqrt") => match d.sqrt() {
                 Some(h) => D::Q(h),
                 None => {
@@ -2434,7 +2442,7 @@ impl<'a> Pass<'a> {
                 D::Q(units::ANGLE)
             }
             (D::Q(d), "exp" | "ln") => {
-                if !d.is_none() {
+                if !(d.is_none() || angle_power(d.bare())) {
                     self.fail(
                         e.location(),
                         format!("`{name}` needs a plain number, found {}", Self::describe(d)),
