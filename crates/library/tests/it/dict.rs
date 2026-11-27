@@ -524,3 +524,22 @@ fn value_keys_survive_snapshot_restore() {
     vm.call_fn_result("bump").unwrap();
     assert_eq!(vm.call_fn_result("read").unwrap().to_string(), "\"1 12 3 4\"");
 }
+
+// A dict literal takes any key type `mimas.dict.key` allows (combo C15,
+// e18): ints, negative numbers, floats, enum paths, tuples and structs.
+// A bare name key stays a record field (`{x: 1}` keys the string "x").
+// r[verify mimas.dict.key.literal]
+test_run!(
+    literal_value_keys,
+    "enum C { R, G }\nstruct P { x: int }\nlet x = 5\nconst NAMES = {1: \"one\", 2: \"two\"}\n",
+    r#"{1: "a", 2: "b"}[2]"# => r#""b""#,
+    r#"{C::R: 1, C::G: 2}[C::G]"# => "2",
+    r#"{(1, 2): "b", (3, 4): "c"}[(3, 4)]"# => r#""c""#,
+    r#"{-1: "neg"}[-1]"# => r#""neg""#,
+    r#"{1.5: "f"}[1.5]"# => r#""f""#,
+    r#"{P { x: 1 }: "p"}[P { x: 1 }]"# => r#""p""#,
+    r#"{x: 1}["x"]"# => "1",
+    "{ x }" => "5",
+    "NAMES[2]" => r#""two""#,
+    "{\n  1: \"one\",\n  2: \"two\",\n}.len()" => "2",
+);

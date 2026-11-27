@@ -1818,6 +1818,7 @@ impl<'s> Parser<'s> {
                 TokKind::If => parser.if_expr(),
                 TokKind::Match => parser.match_expr(),
                 TokKind::LeftBrace if parser.record_start() => parser.record_literal(),
+                TokKind::LeftBrace if parser.keyed_dict_start() => parser.keyed_dict_literal(),
                 TokKind::LeftBrace => parser.block(),
                 TokKind::Return => parser.return_expr(),
                 TokKind::Raise => parser.raise_expr(),
@@ -5786,7 +5787,13 @@ impl<'s> Parser<'s> {
     fn parentheticals(&mut self) -> Expr {
         let start = self.next_start();
         if !self.eat(TokKind::LeftParenthesis) {
-            return if self.record_start() { self.record_literal() } else { self.block() };
+            return if self.record_start() {
+                self.record_literal()
+            } else if self.keyed_dict_start() {
+                self.keyed_dict_literal()
+            } else {
+                self.block()
+            };
         }
         // `(...)` is a fresh expression boundary: modes disarmed by an
         // enclosing head (`if`, `for .. in`, `table`) re-arm inside
@@ -5862,6 +5869,115 @@ impl<'s> Parser<'s> {
             }
             _ => false,
         }
+    }
+
+    /// At a `{` in expression position: does a dict literal whose keys are
+    /// values open here (`{1: "a"}`, `{C::R: 1}`, `{(0, 1): "b"}`)? The first
+    /// key starts with a number, a `-`, a `(`, a `#` atom, or a name that a
+    /// `::`, `{`, `(`, `.` or `[` follows, and a `:` follows the key at
+    /// bracket depth 0 on its line. No statement continues with a `:`, so a
+    /// block never reads this way. A bare name key (`{x: 1}`) stays a record
+    /// field, the string `"x"`.
+    /// r[impl mimas.dict.key.literal]
+    fn keyed_dict_start(&self) -> bool {
+        if self.peek() != TokKind::LeftBrace {
+            return false;
+        }
+        let opens = match self.nth(1) {
+            TokKind::Int(_) | TokKind::Float(_) | TokKind::Minus | TokKind::LeftParenthesis => true,
+            TokKind::Hash => true,
+            // `C::R`, a struct literal `P { x: 1 }`, a call `f(1)`, `a.b`, `xs[0]`
+            k if k.is_ident() => matches!(
+                self.nth(2),
+                TokKind::DoubleColon
+                    | TokKind::LeftBrace
+                    | TokKind::LeftParenthesis
+                    | TokKind::Dot
+                    | TokKind::LeftSquare
+            ),
+            _ => false,
+        };
+        if !opens {
+            return false;
+        }
+        let mut depth = 0i32;
+        let mut i = self.next + 1;
+        while i < self.tokens.len() {
+            if depth == 0 && i > self.next + 1 && self.meta[i].newline {
+                return false;
+            }
+            match self.tokens[i].kind() {
+                TokKind::LeftParenthesis | TokKind::LeftSquare | TokKind::LeftBrace => depth += 1,
+                TokKind::RightParenthesis | TokKind::RightSquare => depth -= 1,
+                TokKind::RightBrace => {
+                    if depth == 0 {
+                        return false;
+                    }
+                    depth -= 1
+                }
+                TokKind::Colon if depth == 0 => return true,
+                TokKind::Comma | TokKind::SemiColon | TokKind::Equal | TokKind::Eof
+                    if depth == 0 =>
+                {
+                    return false
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        false
+    }
+
+    /// `{1: "a", 2: "b"}` — a dict literal whose keys are values, any key type
+    /// `mimas.dict.key` allows. It lowers to the empty dict filled in order,
+    /// `{ let d = {:}; d[1] = "a"; d[2] = "b"; d }`, so the key and value
+    /// types come from the entries as an assignment's do.
+    /// r[impl mimas.dict.key.literal]
+    fn keyed_dict_literal(&mut self) -> Expr {
+        let start = self.next_start();
+        self.bump(TokKind::LeftBrace);
+        self.with_id += 1;
+        let name = format!("__dict_{}", self.with_id);
+        let empty = self.new_expr(Literal::Record(vec![]), start);
+        let mut body = vec![self.synthetic_let(self.ident_at(&name, start), empty, start)];
+        self.with_juxta(Juxta::Comma, |p| {
+            p.in_group(|p| loop {
+                if p.eat(TokKind::RightBrace) {
+                    break;
+                }
+                if p.at(TokKind::Eof) {
+                    p.expect(TokKind::RightBrace);
+                    break;
+                }
+                let at = p.next_start();
+                let key = p.struct_literals(true, Self::expr);
+                p.expect(TokKind::Colon);
+                let value = p.struct_literals(true, Self::expr);
+                let target = p.new_expr(p.ident_at(&name, at), at);
+                let slot = p.new_expr(
+                    Access::Square {
+                        left: target,
+                        key,
+                        kind: AccessKind::Direct,
+                    },
+                    at,
+                );
+                body.push(p.new_stmt(Assignment::new(slot, AssignmentOp::Identity, value), at));
+                if !p.eat(TokKind::Comma) {
+                    p.expect(TokKind::RightBrace);
+                    break;
+                }
+            })
+        });
+        let yielded = self.new_expr(self.ident_at(&name, start), start);
+        let expr = self.new_expr(
+            Block {
+                body,
+                yielded_expr: Some(yielded),
+            },
+            start,
+        );
+        self.chain_accesses(expr)
     }
 
     /// `{ a: 1, b = 2, c, "d e": 3 }` — entries take `:` or `=`, a bare name is

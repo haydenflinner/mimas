@@ -1308,7 +1308,9 @@ impl Solver {
             // a call to a Mimas fn can't fold until `solve_bodies` records the
             // callee — defer to the retry pass instead of erroring early
             // (r[mimas.const.eval])
-            if self.defer_call_consts && (self.calls_unsolved_fn(right) || has_atom(right)) {
+            if self.defer_call_consts
+                && (self.calls_unsolved_fn(right) || has_atom(right) || has_keyed_dict(right))
+            {
                 return Ok(ty);
             }
             // r[impl mimas.const.computed]
@@ -1321,7 +1323,8 @@ impl Solver {
                 // computed (r[impl mimas.atom.const])
                 && (self.calls_unsolved_fn(right)
                     || self.refers_to_computed(right)
-                    || has_atom(right))
+                    || has_atom(right)
+                    || has_keyed_dict(right))
                 && let Some(dec) = self.node_decs.get(&id).copied()
             {
                 if !self.computed_consts.iter().any(|(_, d, _)| *d == dec) {
@@ -6118,6 +6121,28 @@ fn direction_help(name: &str) -> Option<String> {
 }
 
 /// Whether an expression writes an atom literal anywhere (`#Fixed`, `[#A, #B]`).
+/// Whether `expr` holds a dict literal with value keys (`{1: "a"}`), which
+/// the parser lowers to a block that fills `{:}` (`__dict_N`). A const
+/// holding one is computed once, like a call (r[impl mimas.dict.key.literal]).
+fn has_keyed_dict(expr: &Expr) -> bool {
+    struct Find(bool);
+    impl parse::Visitor for Find {
+        fn expr(&mut self, e: &Expr) {
+            if let ExprKind::Block(b) = e.kind()
+                && let Some(first) = b.body.first()
+                && let StmtKind::Let(l) = first.kind()
+                && let PatKind::Ident(i) = l.left.kind()
+                && i.lexeme.starts_with("__dict_")
+            {
+                self.0 = true;
+            }
+        }
+    }
+    let mut find = Find(false);
+    parse::walk_expr(expr, &mut find);
+    find.0
+}
+
 fn has_atom(expr: &Expr) -> bool {
     struct Find(bool);
     impl parse::Visitor for Find {
