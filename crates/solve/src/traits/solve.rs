@@ -4118,9 +4118,11 @@ impl Solve for Literal {
 
                 // a field the literal leaves out takes its declared default,
                 // `__dflt_S_x()` (r[impl mimas.struct.field-default])
-                if base.is_none() && layout == adt {
+                // a variant's layout is named `E::V`; its defaults are
+                // `__dflt_E_V_f` (r[impl mimas.enum.field-default])
+                if base.is_none() {
                     let given: Vec<String> = fields.iter().map(|(k, _)| k.to_string()).collect();
-                    let sname = solver.adts[adt].name.clone();
+                    let sname = solver.adts[layout].name.replace("::", "_");
                     let mut extra = vec![];
                     for (f, field) in variant.fields.0.iter() {
                         if field.constant || given.contains(f) {

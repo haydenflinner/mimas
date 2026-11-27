@@ -191,6 +191,8 @@ pub struct Parser<'s> {
     /// `x: int = 0` in the struct body being read: each field's default, for
     /// the `__dflt_S_x` fn the struct desugars it to (`mimas.struct.field-default`).
     field_defaults: Vec<(String, Annotation, Expr, usize)>,
+    /// The enum being read: each variant's field defaults.
+    variant_defaults: Vec<(String, Vec<(String, Annotation, Expr, usize)>)>,
     /// The `//# page: NAME` regions of a spliced source, `(byte start,
     /// name)`; empty for a source without marks and for a sub-parse.
     regions: Vec<(usize, String)>,
@@ -416,6 +418,7 @@ impl<'s> Parser<'s> {
             param_prologue: Vec::new(),
             range_values: true,
             field_defaults: Vec::new(),
+            variant_defaults: Vec::new(),
             regions: if lexer.offset() == 0 && relocate.is_none() {
                 page_regions(lexer.source())
             } else {
@@ -2018,36 +2021,7 @@ impl<'s> Parser<'s> {
         // each field default becomes `fn __dflt_S_x() -> T { value }`; a
         // literal that leaves `x` out, and `S::default()`, call it
         let defaults = std::mem::replace(&mut self.field_defaults, outer_defaults);
-        for (field, annotation, value, at) in defaults {
-            if self.depth != 1 {
-                self.error(Misdirection {
-                    src: self.src(),
-                    at: self.location(at).into(),
-                    msg: "a nested struct's fields take no default".into(),
-                    label: "declare the struct at the top of the file".into(),
-                });
-                continue;
-            }
-            let loc = self.location(at);
-            let body = Expr::new(
-                ExprKind::Block(Block {
-                    body: vec![],
-                    yielded_expr: Some(value),
-                }),
-                loc,
-            );
-            let f = Function {
-                name: Ident::new(format!("__dflt_{}_{field}", name.lexeme), loc),
-                role: FnRole::Fn,
-                type_params: vec![],
-                parameters: vec![],
-                wheres: vec![],
-                return_type: Some(annotation),
-                body,
-            };
-            let item = Item::new(f.into(), loc, false);
-            self.pending.push(self.new_stmt(item, at));
-        }
+        self.emit_field_defaults(&name.lexeme, defaults);
         // r[impl mimas.struct.members]
         // members in the braces attach the way an `impl` would: the decl
         // stays a shape, and its items land as a synthesized `impl V {…}`
@@ -2357,11 +2331,17 @@ impl<'s> Parser<'s> {
         self.bump(TokKind::Enum);
         let head = self.require_ident();
         let type_params = self.type_params();
+        let outer_variants = std::mem::take(&mut self.variant_defaults);
         let (members, glyphs) = if self.expect(TokKind::LeftBrace) {
             self.enum_members()
         } else {
             (vec![], vec![])
         };
+        // a variant field's default, `V { b: float = 1.0 }`, as a struct
+        // field's (r[impl mimas.enum.field-default])
+        for (variant, defaults) in std::mem::replace(&mut self.variant_defaults, outer_variants) {
+            self.emit_field_defaults(&format!("{}_{variant}", head.lexeme), defaults);
+        }
         // r[impl mimas.enum.glyph]
         // `enum Suit { Spades "♠", … }`: every plain variant carries a glyph,
         // or none does -- an inherent `fn glyph(self) -> str` is synthesized
@@ -2444,6 +2424,44 @@ impl<'s> Parser<'s> {
 
     /// An enum's `{ … }` members, after the `{`, plus the glyph string a
     /// plain variant may carry (`Spades "♠"`), parallel to the members.
+    /// Each field default of a struct, or of an enum variant (`owner` is
+    /// `S`, or `E_V`), becomes `fn __dflt_<owner>_<field>() -> T { value }`;
+    /// a literal that leaves the field out calls it (the solver fills it in).
+    /// r[impl mimas.struct.field-default]
+    /// r[impl mimas.enum.field-default]
+    fn emit_field_defaults(&mut self, owner: &str, defaults: Vec<(String, Annotation, Expr, usize)>) {
+        for (field, annotation, value, at) in defaults {
+            if self.depth != 1 {
+                self.error(Misdirection {
+                    src: self.src(),
+                    at: self.location(at).into(),
+                    msg: "a nested declaration's fields take no default".into(),
+                    label: "declare it at the top of the file".into(),
+                });
+                continue;
+            }
+            let loc = self.location(at);
+            let body = Expr::new(
+                ExprKind::Block(Block {
+                    body: vec![],
+                    yielded_expr: Some(value),
+                }),
+                loc,
+            );
+            let f = Function {
+                name: Ident::new(format!("__dflt_{owner}_{field}"), loc),
+                role: FnRole::Fn,
+                type_params: vec![],
+                parameters: vec![],
+                wheres: vec![],
+                return_type: Some(annotation),
+                body,
+            };
+            let item = Item::new(f.into(), loc, false);
+            self.pending.push(self.new_stmt(item, at));
+        }
+    }
+
     fn enum_members(&mut self) -> (Vec<(Ident, Member)>, Vec<Option<String>>) {
         let mut glyphs = Vec::new();
         let members = self.list(TokKind::RightBrace, TokKind::is_ident, |p| {
@@ -2463,12 +2481,16 @@ impl<'s> Parser<'s> {
                     Self::annotation,
                 ))
             } else if p.eat(TokKind::LeftBrace) {
-                Member::Struct(
-                    p.list(TokKind::RightBrace, TokKind::is_ident, |p| StructField {
-                        public: true,
-                        ..p.named_field()
-                    }),
-                )
+                let outer = std::mem::take(&mut p.field_defaults);
+                let fields = p.list(TokKind::RightBrace, TokKind::is_ident, |p| StructField {
+                    public: true,
+                    ..p.named_field()
+                });
+                let mine = std::mem::replace(&mut p.field_defaults, outer);
+                if !mine.is_empty() {
+                    p.variant_defaults.push((name.lexeme.clone(), mine));
+                }
+                Member::Struct(fields)
             } else {
                 Member::Struct(vec![])
             };
