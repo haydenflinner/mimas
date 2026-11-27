@@ -6,6 +6,7 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     // r[impl mimas.slice]
     api.add_method_named("slice", str_slice);
     api.add_method_named("slice_from", str_slice_from);
+    api.add_method_named("reversed", str_reversed);
     let nid = api.add_method(len);
     api.mark_intrinsic(nid, api::Intrinsic::Len);
     let nid = api.add_method(contains);
@@ -341,4 +342,15 @@ fn str_slice(s: &str, a: i64, b: i64) -> String {
 fn str_slice_from(s: &str, a: i64) -> String {
     let n = s.chars().count() as i64;
     s.chars().skip(a.clamp(0, n) as usize).collect()
+}
+
+#[native]
+/// A copy of the text, last character first.
+///
+/// ```mimas
+/// let s = "abc".reversed(); // "cba"
+/// ```
+// r[impl mimas.list.reversed]
+fn str_reversed(s: &str) -> String {
+    s.chars().rev().collect()
 }

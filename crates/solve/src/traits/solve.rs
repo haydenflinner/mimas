@@ -1147,6 +1147,54 @@ impl Solve for Break {
 
 impl Solve for Call {
     fn solve(&self, id: NodeId, location: Location, solver: &mut Solver) -> Result<Ty> {
+        // `xs.sorted()`, `.max()`, `.min()` on a list of an `Ord` type, and
+        // `sorted_by`/`max_by`/`min_by` on any list, call the std helpers
+        // over `Ord` (protocols.mim). r[impl mimas.list.sort-ord]
+        if let ExprKind::Access(Access::Dot { left: recv, right, .. }) = self.left.kind()
+            && let Some(name) = right.as_ident().map(|i| i.lexeme.clone())
+            && matches!(
+                (name.as_str(), self.arguments.len()),
+                ("sorted" | "max" | "min", 0) | ("sorted_by" | "max_by" | "min_by", 1)
+            )
+            && self.arguments.iter().all(|a| a.name.is_none())
+        {
+            let recv_ty = recv.query(solver)?.normalized(solver);
+            let helper = match (&recv_ty, name.as_str()) {
+                (Ty::Array(elem, _), "sorted" | "max" | "min") => {
+                    match elem.as_ref().clone().normalized(solver) {
+                        Ty::Adt(aid, _) | Ty::Identity(aid, _)
+                            if solver.implements_named(aid, "Ord") =>
+                        {
+                            Some(match name.as_str() {
+                                "sorted" => "__sorted_ord",
+                                "max" => "__max_ord",
+                                _ => "__min_ord",
+                            })
+                        }
+                        _ => None,
+                    }
+                }
+                (Ty::Array(..), "sorted_by") => Some("__sorted_by"),
+                (Ty::Array(..), "max_by") => Some("__max_by"),
+                (Ty::Array(..), "min_by") => Some("__min_by"),
+                _ => None,
+            };
+            if let Some(helper) = helper {
+                let at = location;
+                let mut arguments = vec![Argument { name: None, value: recv.clone() }];
+                arguments.extend(self.arguments.iter().cloned());
+                let rewritten = Expr::new(
+                    ExprKind::Call(Call {
+                        left: Expr::new(ExprKind::Ident(Ident::new(helper, at)), at),
+                        arguments,
+                    }),
+                    at,
+                );
+                let ty = rewritten.query(solver)?;
+                solver.rewrites.insert(id, rewritten);
+                return Ok(ty);
+            }
+        }
         // `print(v)` on a type that implements `Show` prints `v.show()`
         // r[impl mimas.protocol.show]
         if self.left.as_ident().is_some_and(|i| i.lexeme == "print")

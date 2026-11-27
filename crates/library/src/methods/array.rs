@@ -69,6 +69,8 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add_method(slice_from);
     // r[impl mimas.sorted]
     api.add_method_named("sorted", sorted_int);
+    api.add_method(reversed);
+    api.add_method(reverse);
     api.add_method_named("sorted", sorted_float);
     api.add_method_named("sorted", sorted_str);
     api.add_method(zip);
@@ -653,6 +655,31 @@ fn slice(arr: Vec<anon::T<'gc>>, a: i64, b: i64) -> Vec<anon::T<'gc>> {
 fn slice_from(arr: Vec<anon::T<'gc>>, a: i64) -> Vec<anon::T<'gc>> {
     let a = clamp_index(a, arr.len());
     arr[a..].to_vec()
+}
+
+#[native]
+/// A copy of the list, last item first. The list itself is unchanged.
+///
+/// ```mimas
+/// let xs = [1, 2, 3].reversed(); // [3, 2, 1]
+/// ```
+// r[impl mimas.list.reversed]
+fn reversed(arr: Vec<anon::T<'gc>>) -> Vec<anon::T<'gc>> {
+    let mut out = arr;
+    out.reverse();
+    out
+}
+
+#[native]
+/// Reverses the list in place, last item first.
+///
+/// ```mimas
+/// let xs = [1, 2, 3];
+/// xs.reverse(); // xs is now [3, 2, 1]
+/// ```
+// r[impl mimas.list.reversed]
+fn reverse(arr: &mut Vec<anon::T<'gc>>) {
+    arr.reverse();
 }
 
 #[native]
