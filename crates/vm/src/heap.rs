@@ -949,6 +949,9 @@ impl<'gc> Ctx<'gc> {
                 Val::Dec(d) => {
                     let _ = write!(out, "{d}");
                 }
+                // an `int` quantity (`q.to_int()`) shows its number too
+                // (r[impl mimas.unit.int-shown])
+                Val::Int(i) => shared::units::shown_number_into(out, i as f64 / scale),
                 _ => {
                     let x = value.as_float().unwrap_or_default();
                     shared::units::shown_number_into(out, x / scale);
@@ -1076,7 +1079,11 @@ impl<'gc> Ctx<'gc> {
                     out.push_str(", ");
                 }
                 let v = self.array_at(value, i);
-                match v.as_float() {
+                let x = match v {
+                    Val::Int(i) => Some(i as f64),
+                    _ => v.as_float(),
+                };
+                match x {
                     Some(x) if !matches!(v, Val::Dec(_)) => {
                         shared::units::shown_number_into(out, x / scale)
                     }

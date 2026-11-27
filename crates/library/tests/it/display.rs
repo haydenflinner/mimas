@@ -97,3 +97,14 @@ fn a_tuple_field_shows_each_slots_unit() {
         ["T { p: (1 px, 2 px), q: (1 px, 2 s, \"a\"), n: 3 }", "U(1 px, (2 px, 3 px))"]
     );
 }
+
+// Host request 8: `q.to_int()` keeps the unit, as `round` and `floor` do,
+// and an `int` quantity shows its number, not 0.
+// r[verify mimas.unit.int-shown]
+#[test]
+fn an_int_quantity_shows_its_number() {
+    let src = "let a = 1600.0spx\nlet t = 2.0s\n\
+               print(a.to_int())\nprint(t.to_int())\nprint(f\"{a.to_int()}\")\n\
+               print([a.to_int(), a.to_int()])\n";
+    assert_eq!(printed(src), ["1600 spx", "2 s", "1600 spx", "[1600, 1600] spx"]);
+}
