@@ -409,10 +409,21 @@ impl Vm {
         }
         let mut items = HashMap::new();
         flatten(&self.root, String::new(), &mut items);
-        self.chunk_names = items
-            .iter()
-            .map(|(name, &body)| (body, name.clone()))
-            .collect();
+        // one body may export under two keys: a page region's item answers to
+        // `game_loop` and to `game-kit::game_loop` (C2). The name a body
+        // shows (a pause point, a trace frame) must not follow the HashMap's
+        // iteration order, which differs per process: take the shortest
+        // key, ties in byte order, so it is a function of the source alone.
+        let mut chunk_names: HashMap<BodyId, String> = HashMap::default();
+        for (name, &body) in &items {
+            match chunk_names.get(&body) {
+                Some(have) if (have.len(), have.as_str()) <= (name.len(), name.as_str()) => {}
+                _ => {
+                    chunk_names.insert(body, name.clone());
+                }
+            }
+        }
+        self.chunk_names = chunk_names;
         self.items = items;
         self.tests = tests;
         self.methods = methods.into_values().collect();

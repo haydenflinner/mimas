@@ -122,3 +122,17 @@ fn host_calls_share_a_top_level_let() {
     assert!(matches!(vm.call_fn("bump"), Some(Int(1))));
     assert!(matches!(vm.call_fn("bump"), Some(Int(2))));
 }
+
+// C2 exports a page region's item under two keys (`game_loop` and
+// `game-kit::game_loop`); the name a body shows (a pause point, a trace
+// frame) must not follow a HashMap's iteration order. Twenty compiles, each
+// with fresh hash seeds, must agree.
+#[test]
+fn a_region_item_has_one_name_across_compiles() {
+    let src = "//# page: game-kit\nfn game_loop() -> int { 1 }\n//# page: \nlet x = game_loop();";
+    for _ in 0..20 {
+        let vm = vm::Vm::compile(src, |_| {}).unwrap();
+        let body = vm.root().functions["game_loop"].body;
+        assert_eq!(vm.chunk_name(body), Some("game_loop"));
+    }
+}
