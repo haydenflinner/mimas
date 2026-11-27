@@ -837,3 +837,46 @@ impl Witnesses {
         self.last.borrow_mut().take()
     }
 }
+
+/// What the `check`s inside blocks saw (r[impl check.block]). A `check`
+/// in a `fn` body, a loop or an `if` runs where it stands, with that
+/// block's locals in scope, and a failure does not stop the run: the
+/// desugar calls `__check_miss` instead of `panic`. The check's own entry
+/// in the run's check list (`__check_verdict`, registered at the top
+/// level under the check's source text) reads the first failure back.
+/// `fresh` holds the first failure since the last `take_fresh`, so a check
+/// runner fails the `#[test]` fn or top-level check whose call made it.
+#[derive(Default)]
+pub struct BlockChecks {
+    failed: RefCell<HashMap<String, String>>,
+    fresh: RefCell<Option<String>>,
+}
+
+impl BlockChecks {
+    /// A failure of the block check `name`. The first message for a name
+    /// stays; a loop that fails ten times reports its first.
+    pub fn miss(&self, name: &str, message: String) {
+        self.fresh.borrow_mut().get_or_insert_with(|| message.clone());
+        self.failed
+            .borrow_mut()
+            .entry(name.to_string())
+            .or_insert(message);
+    }
+
+    /// The first failure recorded for `name`, or `None` when every run of
+    /// it passed or it never ran.
+    pub fn verdict(&self, name: &str) -> Option<String> {
+        self.failed.borrow().get(name).cloned()
+    }
+
+    /// The first failure since the last call, taken.
+    pub fn take_fresh(&self) -> Option<String> {
+        self.fresh.borrow_mut().take()
+    }
+
+    /// Forget every record: a new run of the top level starts clean.
+    pub fn clear(&self) {
+        self.failed.borrow_mut().clear();
+        self.fresh.borrow_mut().take();
+    }
+}

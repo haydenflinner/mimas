@@ -5,7 +5,7 @@ use vm::{
     anon::{self},
     api::Api,
     conversion::NeverReturn,
-    fixtures::{DebugInfo, Echoes, Out, PrintDims, Prints, Witnesses},
+    fixtures::{BlockChecks, DebugInfo, Echoes, Out, PrintDims, Prints, Witnesses},
 };
 
 /// The ` {unit}` a `print`/`dbg`/`warn` appends when the dims pass proved the value's
@@ -28,6 +28,8 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add(__in_unit);
     api.add(__contract_fail);
     api.add(__check_operand);
+    api.add(__check_miss);
+    api.add(__check_verdict);
     api.add(sum);
     api.add(avg);
     api.add(count);
@@ -448,6 +450,36 @@ fn __check_operand<'gc>(ctx: Ctx<'gc>, val: anon::T<'gc>) -> Result<(), RtErr> {
     ctx.fixture::<Witnesses>()
         .push(loc, ctx.inspect(val.0), ctx.stash(val.0));
     Ok(())
+}
+
+#[native]
+#[effects()]
+/// A `check` inside a block failed: `name` is the check's source text (its
+/// entry in the run's check list), `within` the enclosing `fn`'s name (empty
+/// at the top level), `message` what the failure says. The run goes on; the
+/// check's entry and the test that ran it report the failure
+/// (r[impl check.block]). Not for user code; the `check` desugar calls it.
+fn __check_miss<'gc>(ctx: Ctx<'gc>, name: &str, within: &str, message: &str) -> Result<(), RtErr> {
+    let message = if within.is_empty() {
+        message.to_string()
+    } else {
+        format!("in {within}: {message}")
+    };
+    ctx.fixture::<BlockChecks>().miss(name, message);
+    Ok(())
+}
+
+#[native]
+#[effects()]
+/// The entry of a `check` inside a block: `true` when every run of it
+/// passed (or none ran), else the first failure as a panic
+/// (r[impl check.block]). Not for user code; the `check` desugar registers
+/// it.
+fn __check_verdict<'gc>(ctx: Ctx<'gc>, name: &str) -> Result<bool, RtErr> {
+    match ctx.fixture::<BlockChecks>().verdict(name) {
+        Some(message) => Err(RtErr::Custom(format!("panic: {message}"))),
+        None => Ok(true),
+    }
 }
 
 #[native]

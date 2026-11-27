@@ -97,6 +97,16 @@ pub struct Parser<'s> {
     /// dec -- a per-line set let the second one shadow the first, which the
     /// duplicate-fn rule then names as a redeclare.
     check_names: std::collections::HashSet<String>,
+    /// How many `{ … }` blocks enclose the cursor. A `check` at depth 0 is a
+    /// top-level check; deeper, it runs where it stands (`block_check`).
+    block_depth: usize,
+    /// The names of the `fn`s whose bodies enclose the cursor, innermost
+    /// last: a block check's failure says which one it was in.
+    fn_names: Vec<String>,
+    /// Set while a block check's assert rewrite runs: the check's entry
+    /// name and its enclosing `fn`. The failure branch then records the
+    /// miss (`__check_miss`) instead of panicking.
+    soft_check: Option<(String, String)>,
     depth: usize,
     /// The dimension of each unit-suffixed literal (`25kW`), by the literal's node.
     quantities: HashMap<NodeId, shared::units::Dim>,
@@ -347,6 +357,9 @@ impl<'s> Parser<'s> {
             assert_id: 0,
             with_id: 0,
             check_names: Default::default(),
+            block_depth: 0,
+            fn_names: Vec::new(),
+            soft_check: None,
             depth: 0,
             quantities: HashMap::new(),
             exact_literals: Default::default(),
@@ -708,6 +721,9 @@ impl<'s> Parser<'s> {
             // contextual: it only opens a check when a same-line expr follows, so `check(x)`
             // or `check = 5` still parse as ordinary expressions.
             // r[impl check.line]
+            TokKind::Ident("check") if self.check_intro() && self.block_depth > 0 => {
+                BlockElement::Stmt(self.block_check(start))
+            }
             TokKind::Ident("check") if self.check_intro() => {
                 let item = Item::new(self.check_block().into(), self.location(start), false);
                 BlockElement::Stmt(self.new_stmt(item, start))
@@ -1088,6 +1104,8 @@ impl<'s> Parser<'s> {
             | TokKind::Tagged(..)
             | TokKind::Bang
             | TokKind::NotWord => true,
+            // `check self.x >= 0` in a method body
+            TokKind::SelfKeyword => true,
             // `check ∑ xs == 6` -- a prefix reduction opens one like a name does
             TokKind::Sum | TokKind::Prod | TokKind::Inf | TokKind::Sup => true,
             // `check ∫ zs == …`, `check ‖z‖ == 3`
@@ -1403,6 +1421,80 @@ impl<'s> Parser<'s> {
             cases.push(self.check_case());
         }
         Tests::new(cases)
+    }
+
+    // r[impl check.block]
+    /// `check <expr>` inside a block (a `fn` body, a loop, an `if`, a
+    /// `#[test]` fn): an assertion that runs where it stands, with the
+    /// block's locals in scope. A failure records itself (`__check_miss`)
+    /// and the run goes on. Each check also gets an entry in the run's
+    /// check list under its source text, as a top-level check does, whose
+    /// body reads the record back (`__check_verdict`); the entry rides
+    /// out to the top level through `pending`, after the statement that
+    /// holds the block.
+    fn block_check(&mut self, start: usize) -> Stmt {
+        self.advance();
+        let within = self.fn_names.last().cloned().unwrap_or_default();
+        let mut body = vec![];
+        let mut entries = vec![];
+        loop {
+            let expr =
+                if self.at(TokKind::LeftBrace) { self.null_coalecence() } else { self.expr() };
+            let source = self.source_of(&expr);
+            let name = unique_test_name(&mut self.check_names, source);
+            let location = expr.location();
+            let at = expr.span().start();
+            self.soft_check = Some((name.clone(), within.clone()));
+            let asserted = self.rewrite_assert(at, expr);
+            self.soft_check = None;
+            body.push(self.new_stmt(StmtKind::Expr(asserted), at));
+            let verdict = self.internal_call("__check_verdict", vec![self.str_lit(&name, at)], at);
+            let entry = self.new_expr(
+                Block {
+                    body: vec![],
+                    yielded_expr: Some(verdict),
+                },
+                at,
+            );
+            entries.push(TestCase {
+                id: NodeId::new(),
+                name: Ident::new(name, location),
+                expr: entry,
+            });
+            // in a block `;` ends the statement, as after any other: only
+            // `,` chains another check
+            if !self.eat(TokKind::Comma) || !self.check_chains() {
+                break;
+            }
+        }
+        let item = Item::new(Tests::new(entries).into(), self.location(start), false);
+        let entry = self.new_stmt(item, start);
+        self.pending.push(entry);
+        self.end_stmt(self.location(start));
+        let block = self.new_expr(
+            Block {
+                body,
+                yielded_expr: None,
+            },
+            start,
+        );
+        self.new_stmt(StmtKind::Expr(block), start)
+    }
+
+    /// A call of a compiler-internal native by name (`__check_miss`).
+    fn internal_call(&self, name: &str, args: Vec<Expr>, start: usize) -> Expr {
+        self.new_expr(
+            Call::new(
+                self.new_expr(self.ident_at(name, start), start),
+                args.into_iter().map(|value| Argument { name: None, value }).collect(),
+            ),
+            start,
+        )
+    }
+
+    /// A string literal the compiler wrote, at `start`.
+    fn str_lit(&self, text: &str, start: usize) -> Expr {
+        self.new_expr(Literal::String(text.to_string()), start)
     }
 
     /// One check: the `expr`, wrapped in `assert`'s operand-reporting rewrite.
@@ -2722,7 +2814,14 @@ impl<'s> Parser<'s> {
         let (name, type_params, parameters, return_type) = self.function_sig(true, prefix);
         let wheres = self.where_clause();
         let body = if self.at(TokKind::LeftBrace) {
-            self.block()
+            let shown = match prefix {
+                Some(p) => name.lexeme.strip_prefix(p).unwrap_or(&name.lexeme).to_string(),
+                None => name.lexeme.clone(),
+            };
+            self.fn_names.push(shown);
+            let body = self.block();
+            self.fn_names.pop();
+            body
         } else {
             self.error_here(MissingFunctionBody {
                 src: self.src(),
@@ -5327,12 +5426,21 @@ impl<'s> Parser<'s> {
     fn assert_lets_if(
         &self,
         start: usize,
-        mut body: Vec<Stmt>,
+        body: Vec<Stmt>,
         condition: Expr,
         message: Expr,
         witnesses: Vec<Expr>,
     ) -> Expr {
         let mut then = Vec::with_capacity(witnesses.len() + 1);
+        // a block check records its failure and the run goes on: no
+        // operands (they would ride onto whatever check runs next) and no
+        // panic (r[impl check.block])
+        if let Some((name, within)) = self.soft_check.clone() {
+            let args = vec![self.str_lit(&name, start), self.str_lit(&within, start), message];
+            let miss = self.internal_call("__check_miss", args, start);
+            then.push(self.new_stmt(StmtKind::Expr(miss), start));
+            return self.assert_if_block(start, body, condition, then);
+        }
         for witness in witnesses {
             let record = self.new_expr(
                 Call::new(
@@ -5357,6 +5465,11 @@ impl<'s> Parser<'s> {
             start,
         );
         then.push(self.new_stmt(StmtKind::Expr(panic_call), start));
+        self.assert_if_block(start, body, condition, then)
+    }
+
+    /// `{ <body>; if <condition> { <then> } }`, the tail of every assert rewrite.
+    fn assert_if_block(&self, start: usize, mut body: Vec<Stmt>, condition: Expr, then: Vec<Stmt>) -> Expr {
         let then_body = self.new_expr(
             Block {
                 body: then,
@@ -5679,6 +5792,7 @@ impl<'s> Parser<'s> {
             return self.ident();
         }
         let mut body: Vec<Stmt> = vec![];
+        self.block_depth += 1;
         // A block is a fresh statement list. Even when the block sits inside `(...)`,
         // statements inside must not inherit infix-across-newline permission -- otherwise
         // `({ c = a\n-b })` would still parse as `c = a - b`.
@@ -5710,6 +5824,7 @@ impl<'s> Parser<'s> {
                 }
             }
         });
+        self.block_depth -= 1;
         self.new_expr(Block { body, yielded_expr }, start)
     }
 

@@ -480,6 +480,7 @@ impl Vm {
     /// leave register 0 / extra frames dirty.
     fn reset_to_entry(&mut self) {
         self.top_level_ran = false;
+        self.fixture::<crate::fixtures::BlockChecks>().clear();
         let entry_chunk = &self.chunks[self.entry];
         let regs_count = entry_chunk.regs as usize;
         let entry_offset = entry_chunk.offset;
@@ -3612,6 +3613,9 @@ impl Vm {
         // a top-level `assert!` may have recorded its operands before the
         // run faulted — drop them so they can't ride onto the first check
         let _ = self.fixture::<crate::fixtures::Witnesses>().take();
+        // a block check that failed during the top level is its own
+        // entry's to report, not the first check's (r[impl check.block])
+        let _ = self.fixture::<crate::fixtures::BlockChecks>().take_fresh();
         let mut results = Vec::with_capacity(names.len());
         for name in names {
             // the check's own spend, armed `u64::MAX` or not: the diff
@@ -3626,11 +3630,14 @@ impl Vm {
                 .take()
                 .map(|w| w.operands)
                 .unwrap_or_default();
+            // a `check` inside a block this call ran failed: the call fails
+            // with it, under the test's own name (r[impl check.block])
+            let block_miss = self.fixture::<crate::fixtures::BlockChecks>().take_fresh();
             let error = match ran {
                 Err(e) => Some(format!("{e}")),
                 Ok(Captured::Bool(false)) => Some("assertion failed".into()),
                 // `true` for a check case, unit for a `#[test]` fn (which asserts or panics)
-                Ok(Captured::Bool(true) | Captured::Null) => None,
+                Ok(Captured::Bool(true) | Captured::Null) => block_miss.map(|m| format!("panic: {m}")),
                 // anything else is a broken check, not a pass
                 Ok(other) => Some(format!("check produced {other:?}, expected a bool")),
             };

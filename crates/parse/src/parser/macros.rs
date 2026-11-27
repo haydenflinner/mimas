@@ -948,6 +948,9 @@ impl<'s> Parser<'s> {
         let errors = self.errors.len();
         let last_error = self.last_error;
         let pending = self.pending.len();
+        // a block check mints its entry name as it parses; a speculative
+        // parse must not take the name the real parse will want
+        let check_names = self.check_names.clone();
         let bound = self.hygiene.bound.clone();
         self.hygiene.speculating += 1;
         let parsed = match kind {
@@ -1008,6 +1011,7 @@ impl<'s> Parser<'s> {
         self.errors.truncate(errors);
         self.last_error = last_error;
         self.pending.truncate(pending);
+        self.check_names = check_names;
         self.hygiene.bound = bound;
         if !clean {
             self.next = from;

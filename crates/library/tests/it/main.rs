@@ -10,6 +10,7 @@ mod test_runner;
 mod approx;
 mod array;
 mod assert;
+mod block_check;
 mod atoms;
 mod axes;
 mod colrow;
