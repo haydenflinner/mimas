@@ -173,6 +173,29 @@ unit_ty!(
     /// sheet's way.
     WpxDown, "wpx↓", units::WORLD_PX.mul(Dim::axis_dir(1, true))
 );
+unit_ty!(
+    /// Sheet units -- a card's position and size on its page's sheet.
+    /// Its own dimension, outside the pixel family: a `Sheet` value
+    /// never meets `Px`, `Spx` or `Wpx` without a written conversion.
+    Sheet, "sheet", units::SHEET
+);
+unit_ty!(
+    /// Sheet units along x (`sheet↔`), a card's width.
+    SheetX, "sheet↔", units::SHEET.mul(Dim::axis(0))
+);
+unit_ty!(
+    /// Sheet units along y (`sheet↕`), a card's height.
+    SheetY, "sheet↕", units::SHEET.mul(Dim::axis(1))
+);
+unit_ty!(
+    /// Sheet units, right-positive (`sheet→`) -- a card's x.
+    SheetRight, "sheet→", units::SHEET.mul(Dim::axis_dir(0, false))
+);
+unit_ty!(
+    /// Sheet units, down-positive (`sheet↓`) -- a card's y. The sheet
+    /// grows down, so an up-positive (`↑`) y refuses here.
+    SheetDown, "sheet↓", units::SHEET.mul(Dim::axis_dir(1, true))
+);
 // r[impl mimas.unit.angle]
 unit_ty!(
     /// Radians -- `deg`/`turn`/`grad`/`arcmin`/`arcsec`/`mrad` are the same

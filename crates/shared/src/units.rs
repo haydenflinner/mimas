@@ -45,7 +45,7 @@ const NORMS: [(&str, usize); 2] = [("snorm", NORM0), ("unorm", NORM0 + 1)];
 
 /// Where a `unit tile;` declaration's base dimension sits in the [`Dim`]
 /// array -- the builtins occupy the slots before it.
-const FIRST_CUSTOM: usize = 17;
+const FIRST_CUSTOM: usize = 18;
 
 /// How many new base dimensions (`unit tile;`) one program may declare.
 /// Derived decls (`unit league = 3mi;`) don't spend a slot -- they share
@@ -57,7 +57,7 @@ pub const MAX_CUSTOM: usize = 8;
 /// a `Dim` that outlives its compilation.
 pub const BASES: [&str; N] = [
     "m", "kg", "s", "A", "K", "mol", "cd", "usd", "px", "frame", "beat", "st", "b", "index", "rad",
-    "spx", "wpx",
+    "spx", "wpx", "sheet",
     "", "", "", "", "", "", "", "",
     "", "", "", "", "", "", "", "",
     "", "",
@@ -241,6 +241,17 @@ impl Dim {
         })
     }
 
+    /// `want` claims the negative end of a slot where `got` claims no
+    /// end at all — an untagged or `↕` value bound for a `wpx↓` slot.
+    /// The checker lets a quantity literal adopt that end as written
+    /// and refuses a computed value, which reads its positive end.
+    pub fn neg_end_over_endless(want: Dim, got: Dim) -> bool {
+        (0..MAX_AXES).any(|i| {
+            let (w, g) = (want.0[AXIS0 + i], got.0[AXIS0 + i]);
+            w == -2 && g != 2 && g != -2
+        })
+    }
+
     /// `.to("px↓")` re-expresses the value in the named convention, so
     /// the number negates when the source reads the other end. A bare
     /// or unsigned target (`px`, `px↕`) names no end — `.to` returns
@@ -339,7 +350,7 @@ impl Dim {
 
     /// The suffix a type annotation writes for the axes: `↔`, `↕`, `→`,
     /// `↓`, or `@name`/`@dir`.
-    fn axis_suffix(&self) -> String {
+    pub fn axis_suffix(&self) -> String {
         (0..MAX_AXES)
             .filter(|i| self.0[AXIS0 + i] != 0)
             .map(|i| axis_dir_suffix(i, self.0[AXIS0 + i]))
@@ -663,49 +674,57 @@ const fn d(e: [i8; FIRST_CUSTOM]) -> Dim {
     Dim(out)
 }
 
-// exponents:        m  kg  s  A  K mol cd usd px frame beat st bit index rad spx wpx
-pub const LENGTH: Dim = d([1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const MASS: Dim = d([0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const TIME: Dim = d([0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const CURRENT: Dim = d([0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const TEMP: Dim = d([0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const AMOUNT: Dim = d([0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const LUMINOUS: Dim = d([0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const MONEY: Dim = d([0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const PIXELS: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const FRAMES: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]);
-pub const BEAT: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0]);
-pub const PITCH: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0]);
-pub const DATA: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0]);
+// exponents:        m  kg  s  A  K mol cd usd px frame beat st bit index rad spx wpx sheet
+pub const LENGTH: Dim = d([1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const MASS: Dim = d([0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const TIME: Dim = d([0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const CURRENT: Dim = d([0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const TEMP: Dim = d([0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const AMOUNT: Dim = d([0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const LUMINOUS: Dim = d([0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const MONEY: Dim = d([0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const PIXELS: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const FRAMES: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const BEAT: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]);
+pub const PITCH: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0]);
+pub const DATA: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0]);
 /// A position into a collection: `i: index` is an `int` that can't be mixed
 /// with any quantity (`i + 3px` is an error). Plain numbers convert freely
 /// (`i += 1`, `i < xs.len()`) -- the dimension exists to keep *measurements*
 /// out of index variables, not to make counting verbose.
-pub const INDEX: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0]);
+pub const INDEX: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0]);
 /// An angle, in radians: `deg`, `turn`, `grad`, `arcmin`, `arcsec` and `mrad`
 /// are scaled spellings of it. Unlike `prob`/`pct`, an angle *does* compose —
 /// `angle / s` is angular velocity and `rad^2` is a solid angle.
-pub const ANGLE: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0]);
-pub const FREQ: Dim = d([0, 0, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const FORCE: Dim = d([1, 1, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const PRESSURE: Dim = d([-1, 1, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const ENERGY: Dim = d([2, 1, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const POWER: Dim = d([2, 1, -3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const CHARGE: Dim = d([0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-pub const VOLTAGE: Dim = d([2, 1, -3, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const ANGLE: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0]);
+pub const FREQ: Dim = d([0, 0, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const FORCE: Dim = d([1, 1, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const PRESSURE: Dim = d([-1, 1, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const ENERGY: Dim = d([2, 1, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const POWER: Dim = d([2, 1, -3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const CHARGE: Dim = d([0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+pub const VOLTAGE: Dim = d([2, 1, -3, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
 /// A screen-space pixel: a coordinate the host measured in its own space
 /// (a browser point, a viewport extent, a sheet-plane position) and handed
 /// the page. `spx` is a *specific* pixel space — it never meets `wpx` in
 /// arithmetic or a typed slot; the page crosses deliberately through
 /// `game::to_world`/`game::to_screen`. Bare `px` is the pixel family's
 /// unspecified member: it meets any specific space and absorbs into it.
-pub const SCREEN_PX: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0]);
+pub const SCREEN_PX: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0]);
 /// A world-space pixel: a coordinate in the page's own world — the field,
 /// board or chart plane the camera looks at. `wpx` never meets `spx`;
 /// `game::to_world`/`game::to_screen` own the seam. A render or
 /// backbuffer pixel (`rpx`) would join the family as a fourth member if
 /// a native ever hands raster coords across the boundary.
-pub const WORLD_PX: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+pub const WORLD_PX: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0]);
+
+/// A sheet unit: a card's position and size on its page's sheet, the
+/// coordinates `page::Card` and `page::move` read and write. Its own base
+/// dimension, outside the pixel family, so a drawing `px` never meets a
+/// card coordinate without a written conversion. The sheet's y axis
+/// grows down, so a host native declares `sheet↓` for a card's y.
+// r[impl mimas.unit.sheet]
+pub const SHEET: Dim = d([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
 
 /// The pixel units: `PIXELS` (`px`) first — the family's *unspecified*
 /// member — then every specific pixel space. A render/backbuffer px
@@ -764,7 +783,7 @@ fn pixel_agree(a: Dim, b: Dim) -> bool {
 }
 
 /// Dimension families, for error messages.
-const SI: [(&str, Dim); 25] = [
+const SI: [(&str, Dim); 26] = [
     ("length", LENGTH),
     ("volume", LENGTH.powi(3)),
     ("mass", MASS),
@@ -790,10 +809,11 @@ const SI: [(&str, Dim); 25] = [
     ("angle", ANGLE),
     ("screen pixels", SCREEN_PX),
     ("world pixels", WORLD_PX),
+    ("sheet units", SHEET),
 ];
 
 /// The coherent unit each family is kept in.
-const NAMED: [(&str, Dim, f64); 24] = [
+const NAMED: [(&str, Dim, f64); 25] = [
     ("m", LENGTH, 1.0),
     ("kg", MASS, 1.0),
     ("s", TIME, 1.0),
@@ -818,6 +838,7 @@ const NAMED: [(&str, Dim, f64); 24] = [
     ("rad", ANGLE, 1.0),
     ("spx", SCREEN_PX, 1.0),
     ("wpx", WORLD_PX, 1.0),
+    ("sheet", SHEET, 1.0),
 ];
 
 /// The word for base-dimension slot `i` — builtins by name, custom slots
@@ -1277,6 +1298,9 @@ fn lookup_builtin(name: &str) -> Option<(Dim, f64)> {
         "px" => (PIXELS, 1.0),
         "spx" => (SCREEN_PX, 1.0),
         "wpx" => (WORLD_PX, 1.0),
+        // a card coordinate on the page's sheet: its own dimension, not a
+        // pixel space, so `px` and `spx` never meet it
+        "sheet" => (SHEET, 1.0),
         "frame" => (FRAMES, 1.0),
         // index: an `int` position into a collection. its own dimension so a
         // quantity can never pass for one (`xs[i] + 3px` fails), but plain
@@ -1694,6 +1718,20 @@ mod dir_tests {
         assert_eq!(Dim::absorb(up, any), up);
         // an axis an end doesn't claim is kept (`x↕` + `y↓` claim ≠ clobber)
         assert_eq!(Dim::axis_dir(1, true).with_axes(any), dn);
+
+        // `sheet` is a base of its own, outside the pixel family
+        let sheet_dn = SHEET.mul(Dim::axis_dir(1, true));
+        assert_eq!(parse("sheet↓"), Some((sheet_dn, 1.0)));
+        assert_eq!(sheet_dn.name(), "sheet↓");
+        for px in PIXEL_UNITS {
+            assert!(!Dim::agree(SHEET, px));
+            assert!(!Dim::sign_convertible(sheet_dn, px.mul(Dim::axis_dir(1, false))));
+        }
+        // a no-end value bound for a negative-end slot is its own case
+        assert!(Dim::neg_end_over_endless(dn, any));
+        assert!(Dim::neg_end_over_endless(dn, WORLD_PX));
+        assert!(!Dim::neg_end_over_endless(dn, up));
+        assert!(!Dim::neg_end_over_endless(up, any));
 
         // annotations and prose spell the end, not the axis
         assert_eq!(dn.name(), "wpx↓");

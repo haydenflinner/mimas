@@ -702,11 +702,14 @@ impl<'a> Pass<'a> {
         }
     }
 
-    /// `expect` for a value the caller has in hand, with scalar
-    /// convention conversion: `40px↓` into a `wpx↑` slot negates at the
-    /// boundary rather than failing. The one hard wall is a *place* —
-    /// an `inout` slot writes back in its own convention, so an
-    /// opposite-signed place can't stand in for it.
+    /// `expect` for a value the caller has in hand, with the scalar
+    /// readings a slot allows: a signed value into a slot that claims no
+    /// end reads its positive end, and a quantity literal adopts a
+    /// signed slot as written. Opposite ends (`40px↓` into a `wpx↑`
+    /// slot) refuse and name the conversion to write, and so does a
+    /// computed value with no end bound for a negative-end slot. A
+    /// *place* refuses opposite ends too: an `inout` slot writes back in
+    /// its own convention.
     // r[impl mimas.unit.direction.signed]
     fn expect_conv(&mut self, want: &D, got: &D, val: &'a Expr, what: &str) {
         if let D::Place(inner) = got
@@ -726,14 +729,31 @@ impl<'a> Pass<'a> {
             );
             return;
         }
-        // a scalar crosses conventions where it lands: a signed value
-        // reads at its positive end wherever the slot doesn't claim the
-        // negative one — `40↓` is −40 under `wpx↕` or `wpx`, and negates
-        // into a `wpx↑` slot
+        // two opposite ends never meet unless the program writes the
+        // conversion: `px↑` into a `spx↓` slot refuses, naming both
+        if let (D::Q(w) | D::Iv(w), D::Q(g) | D::Iv(g)) = (want, got)
+            && Dim::sign_convertible(*w, *g)
+            && (Dim::sign_opposed(*w, *g) || Dim::sign_opposed(*g, *w))
+        {
+            self.direction_clash(val.location(), what, *w, *g);
+            return;
+        }
+        // a value that claims no end reads its positive end. A quantity
+        // literal is written in the slot's own terms, so it adopts a
+        // negative-end slot as it stands (`20.0sheet` into `sheet↓` is
+        // 20 down); a computed one refuses there and names the claim to
+        // write. Into a slot that claims no end, a signed value reads at
+        // its positive end: `40↓` is −40 under `wpx↕` or `wpx`
         if let (D::Q(w) | D::Iv(w), D::Q(g) | D::Iv(g)) = (want, got)
             && Dim::sign_convertible(*w, *g)
             && Dim::sign_flip(*w, *g)
         {
+            if Dim::neg_end_over_endless(*w, *g) {
+                if !self.is_quantity_literal(val) {
+                    self.endless_into_neg_end(val.location(), what, *w, *g);
+                }
+                return;
+            }
             self.sign_negs.insert(val.id());
             return;
         }
@@ -769,9 +789,62 @@ impl<'a> Pass<'a> {
         }
     }
 
-    /// Two operands that agree but for opposite conventions — `x↓ + y↑`.
-    /// Both convert to the positive end, whichever side holds `↓`
-    /// negating, and the joined dim reports the positive convention.
+    /// Opposite ends of one axis met without a written conversion. The
+    /// message names both directions and the conversion to write: a
+    /// direction after a value re-reads it in that end (`(y)↓`).
+    // r[impl mimas.unit.direction.refuse]
+    fn direction_clash(&mut self, at: Location, what: &str, want: Dim, got: Dim) {
+        let (wg, gg) = (want.axis_suffix(), got.axis_suffix());
+        self.fail(
+            at,
+            format!(
+                "{what}: {} and {} point opposite ways",
+                want.name(),
+                got.name()
+            ),
+            format!("{gg} against {wg}: opposite directions never convert by themselves"),
+            &format!(
+                "write the conversion where you mean it: `(v){wg}` reads a {} value in the {wg} direction (the number negates)",
+                got.name()
+            ),
+        );
+    }
+
+    /// A computed value that claims no end, bound for a slot that claims
+    /// the negative one. It reads its positive end, so a silent pass
+    /// would flip its sign; the program writes which end it measures.
+    // r[impl mimas.unit.direction.endless]
+    fn endless_into_neg_end(&mut self, at: Location, what: &str, want: Dim, got: Dim) {
+        let wg = want.axis_suffix();
+        let pos = want.pos_axes().axis_suffix();
+        self.fail(
+            at,
+            format!(
+                "{what}: expected {}, found {}, which claims no direction",
+                want.name(),
+                got.name()
+            ),
+            format!("a value with no direction reads {pos}, and this slot is {wg}"),
+            &format!(
+                "write the direction the value measures: `(v){wg}` if it already measures {wg}, `(v{pos}){wg}` if it measures {pos} (the number negates)"
+            ),
+        );
+    }
+
+    /// A quantity literal, signed or not: `20.0sheet`, `-3.0px`.
+    fn is_quantity_literal(&self, e: &Expr) -> bool {
+        let inner = match e.kind() {
+            ExprKind::Unary(u) if matches!(u.op, UnaryOp::Negative | UnaryOp::Positive) => &u.right,
+            ExprKind::Grouping(g) => &g.inner,
+            _ => e,
+        };
+        self.ast.quantity_unit(inner.id()).is_some()
+    }
+
+    /// Two operands that agree but for their conventions. Same ends, or
+    /// one side that claims no end, add as they stand. Opposite ends
+    /// (`x↓ + y↑`) are an error naming both; the joined dim then reports
+    /// the positive end so one mistake gives one message.
     fn conv_pair(
         &mut self,
         l: &D,
@@ -790,15 +863,10 @@ impl<'a> Pass<'a> {
         if !Dim::sign_opposed(*lq, *rq) && !Dim::sign_opposed(*rq, *lq) {
             return Some((l.clone(), r.clone()));
         }
-        if Dim::sign_opposed(*lq, *rq)
-            && let Some(le) = le
-        {
-            self.sign_negs.insert(le.id());
-        }
-        if Dim::sign_opposed(*rq, *lq)
-            && let Some(re) = re
-        {
-            self.sign_negs.insert(re.id());
+        // opposite ends: the program must write the conversion
+        // (r[impl mimas.unit.direction.refuse])
+        if let Some(at) = re.or(le).map(|e| e.location()) {
+            self.direction_clash(at, "mixed directions", *lq, *rq);
         }
         let norm = |d: &D| match d {
             D::Q(q) => D::Q(q.pos_axes()),
@@ -1242,8 +1310,7 @@ impl<'a> Pass<'a> {
             ExprKind::Equality(eq) => {
                 let l = self.expr(&eq.left);
                 let r = self.expr(&eq.right);
-                // opposite conventions compare fine — `40↑ < 40↓` is
-                // "40 above" against "40 below", ordered in up-terms
+                // opposite ends refuse in `conv_pair`, which names both
                 if !Self::is_zero(&eq.left)
                     && !Self::is_zero(&eq.right)
                     && let Some((a, b)) = clash(&l, &r)
@@ -1486,7 +1553,7 @@ impl<'a> Pass<'a> {
     /// their shared dimension. Opposite conventions normalize to the
     /// positive end, negating whichever arm reads the other way.
     fn branches(&mut self, mut a: D, ae: Option<&'a Expr>, mut b: D, be: &'a Expr, at: Location) -> D {
-        // `if c { x↑ } else { y↓ }` gives an `↑`, the `↓` arm negated
+        // `if c { x↑ } else { y↓ }` refuses in `conv_pair`
         if let Some((a2, b2)) = self.conv_pair(&a, ae, &b, Some(be)) {
             (a, b) = (a2, b2);
         }
@@ -1651,8 +1718,8 @@ impl<'a> Pass<'a> {
         };
         match op {
             EvaluationOp::Plus | EvaluationOp::Minus | EvaluationOp::Modulo => {
-                // `x↓ + y↑` — both convert to the positive end, the `↓`
-                // side negating; the result reports the positive convention
+                // `x↓ + y↑` refuses in `conv_pair`; same ends and an
+                // end-less side add as they stand
                 if let ExprKind::Evaluation(ev) = e.kind()
                     && let Some((l2, r2)) =
                         self.conv_pair(&l, Some(&ev.left), &r, Some(&ev.right))

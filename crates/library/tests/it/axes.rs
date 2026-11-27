@@ -1,10 +1,12 @@
 //! Axes and directions: `50.0px↑` is a `px` claimed at the `↑` convention —
 //! the value reads "50 in up-positive terms". A direction is a *convention
-//! claim*, not a negation: `50.0px↓` is +50 measured down-positive. Values
-//! mix conventions freely — `x↓ + y↑` converts the `↓` side (the checker
-//! negates it, the result reports the positive end), and a `px↓` argument
-//! into a `wpx↑` parameter converts at the boundary. `px↕` in a type is the
-//! unsigned axis claim — it adopts either convention. `x@y` tags an axis
+//! claim*, not a negation: `50.0px↓` is +50 measured down-positive. Two
+//! opposite ends never mix by themselves: `x↓ + y↑` and a `px↓` argument
+//! into a `wpx↑` parameter are errors, and the program writes the
+//! conversion (`(y)↓` re-reads `y` in the down convention, negating it).
+//! `px↕` in a type is the unsigned axis claim. A signed value into it
+//! reads its positive end; a quantity literal adopts a signed slot as
+//! written. `x@y` tags an axis
 //! unsigned; `x@word` spells a direction with no glyph (`5usd@in`).
 //! `+ - < ==` need agreeing axes (an untagged side adopts); `* /` xor them
 //! and read every signed factor at its positive end.
@@ -26,9 +28,10 @@ test_run!(
     // `.to` can name the convention: "50 up" written in down-terms is −50
     "(50.0px↑).to(\"px↓\")" => "-50.0",
     "(50.0px↓).to(\"px↑\")" => "-50.0",
-    // mixed conventions add fine — the `↓` side negates to the positive end
-    "(50.0px↑ + 20.0px↓).to(\"px\")" => "30.0",
-    "(50.0px↓ + 20.0px↑).to(\"px↓\")" => "30.0",
+    // opposite ends mix only through a written conversion: `(v)↑`
+    // re-reads a `↓` value in up-terms, negating it
+    "(50.0px↑ + (20.0px↓)↑).to(\"px\")" => "30.0",
+    "(50.0px↓ + (20.0px↑)↓).to(\"px↓\")" => "30.0",
 );
 
 // r[verify mimas.unit.direction.signed]
@@ -90,24 +93,24 @@ test_run!(
     "pay(10usd@in, 4usd@out).to(\"usd\")" => "6.0",
 );
 
-// r[verify mimas.unit.direction.signed]
+// r[verify mimas.unit.direction.refuse]
 test_run!(
     conventions_convert_at_the_boundary,
     // a `wpx↑` parameter declares the up convention — a `↓`-claimed
-    // value negates as it crosses
+    // value crosses only through a written conversion, which negates
     "fn rise(dy: wpx↑) -> wpx↑ { dy }
      fn fall(dy: wpx↓) -> wpx↓ { dy }
      fn slide(dy: wpx↕) -> wpx↕ { dy }
      let base: wpx↑ = 100.0wpx
      let u: wpx↕ = 8.0wpx",
-    "rise(40.0wpx↓).to(\"wpx\")" => "-40.0",
-    "fall(40.0wpx↑).to(\"wpx\")" => "-40.0",
+    "rise((40.0wpx↓)↑).to(\"wpx\")" => "-40.0",
+    "fall((40.0wpx↑)↓).to(\"wpx\")" => "-40.0",
     // an unsigned slot takes any convention, reading it positive-end:
     // "40 down" arrives as −40
     "slide(40.0wpx↓).to(\"wpx\")" => "-40.0",
     // and a `↕`-written value claims an end at the boundary
     "rise(u).to(\"wpx\")" => "8.0",
-    "rise(base + 40.0wpx↓).to(\"wpx\")" => "60.0",
+    "rise(base + (40.0wpx↓)↑).to(\"wpx\")" => "60.0",
 );
 
 // r[verify mimas.unit.direction.signed]
@@ -118,6 +121,56 @@ fn opposite_conventions_in_composites_still_reject() {
     rejected("fn f(p: (wpx↑, wpx↑)) -> wpx↑ { p.0 }\nlet a = f((1.0wpx↓, 2.0wpx↑));", "expected");
     // and the seams still hold: `wpx↓` never converts to `spx↓`
     rejected("fn f(y: spx↓) -> spx↓ { y }\nlet a = f(1.0wpx↓);", "expected");
+}
+
+// r[verify mimas.unit.direction.refuse]
+#[test]
+fn opposite_ends_never_mix_unwritten() {
+    // a slot: the H14 case, a drawing `px↑` y into a `spx↓` parameter
+    let slot = "fn f(y: spx↓) -> spx↓ { y }\nlet a = f(3.0px↑);";
+    rejected(slot, "spx↓ and px↑ point opposite ways");
+    rejected(slot, "`(v)↓`");
+    rejected("let y: px↑ = 3.0px↓;", "point opposite ways");
+    rejected("fn f() -> px↑ { 3.0px↓ }\nlet a = f();", "point opposite ways");
+    // arithmetic, comparison, branches
+    rejected("let a = 5.0px↑ + 3.0px↓;", "mixed directions");
+    rejected("let a = 5.0px↑ - 3.0px↓;", "point opposite ways");
+    rejected("let a = 5.0px→ + 3.0px←;", "point opposite ways");
+    rejected("let a = 5.0px↑ < 3.0px↓;", "point opposite ways");
+    rejected("let a = if true { 5.0px↑ } else { 3.0px↓ };", "point opposite ways");
+    rejected("axis flow (out, in);\nlet a = 5usd@in + 4usd@out;", "point opposite ways");
+}
+
+// r[verify mimas.unit.direction.endless]
+test_run!(
+    a_literal_adopts_a_negative_end_slot,
+    "fn down(y: sheet↓) -> sheet↓ { y }
+     let h = 3.0sheet",
+    "down(20.0sheet).to(\"sheet↓\")" => "20.0",
+    "down(-20.0sheet).to(\"sheet↓\")" => "-20.0",
+    "down((h)↓).to(\"sheet↓\")" => "3.0",
+    "down((h↑)↓).to(\"sheet↓\")" => "-3.0",
+);
+
+// r[verify mimas.unit.direction.endless]
+#[test]
+fn a_computed_endless_value_names_its_direction() {
+    let src = "fn down(y: sheet↓) -> sheet↓ { y }\nlet h = 3.0sheet;\nlet a = down(h);";
+    rejected(src, "which claims no");
+    rejected(src, "`(v↑)↓`");
+    // an up-positive slot takes it as it stands: no end means `↑`
+    assert!(test_runner::try_execute("fn up(y: px↑) -> px↑ { y }\nlet h = 3.0px;\nlet a = up(h);").is_ok());
+}
+
+// r[verify mimas.unit.sheet]
+#[test]
+fn sheet_is_its_own_dimension() {
+    rejected("let a = 3.0sheet + 2.0px;", "cannot add");
+    rejected("let a = 3.0sheet + 2.0spx;", "cannot add");
+    rejected("let a = 3.0sheet + 2.0wpx;", "cannot add");
+    rejected("fn f(y: sheet↓) -> sheet↓ { y }\nlet a = f(2.0px);", "expected");
+    assert_eq!(test_runner::render("", "(3.0sheet + 2.0sheet).to(\"sheet\")"), "5.0");
+    assert_eq!(test_runner::render("", "(3.0sheet→ + 2.0sheet).to(\"sheet→\")"), "5.0");
 }
 
 fn rejected(src: &str, needle: &str) {
@@ -173,7 +226,7 @@ fn in_is_a_direction_word_and_still_a_keyword() {
     // ever follows `@` or sits inside `axis (…)`, so both reads coexist
     assert!(test_runner::try_execute("axis flow (out, in);\nlet a = 5usd@in;").is_ok());
     assert_eq!(
-        test_runner::render("axis flow (out, in);", "(5usd@in + 4usd@out).to(\"usd\")"),
+        test_runner::render("axis flow (out, in);", "(5usd@in + (4usd@out)@in).to(\"usd\")"),
         "1.0"
     );
     // `x@in` on a name takes the same suffix as the literal

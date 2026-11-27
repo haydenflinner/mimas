@@ -28,6 +28,7 @@ mod opt_semantics;
 mod optionals;
 mod pacts;
 mod scene;
+mod sheet_units;
 mod trace;
 mod typed_arrays;
 mod types;
