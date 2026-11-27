@@ -2205,10 +2205,20 @@ impl Solve for Closure {
         // param's vid with it before the body solves, so `|n| n + 1` learns `n: int` from the
         // annotation rather than erroring on an unresolved vid. only when arities match; a mismatch
         // falls through to the call-site unification, which reports it.
-        let expected = solver
-            .expected_closures
-            .swap_remove(&id)
-            .filter(|e| e.len() == self.parameters.len());
+        let expected = solver.expected_closures.swap_remove(&id);
+        // a slot that states a fn type of another arity: say so in counts,
+        // not as a mismatch of unresolved parameter types
+        if let Some(e) = &expected
+            && e.len() != self.parameters.len()
+        {
+            Err(crate::errors::ClosureArity {
+                src: solver.src(_location),
+                at: _location.into(),
+                got: self.parameters.len(),
+                want: e.len(),
+            })?;
+        }
+        let expected = expected.filter(|e| e.len() == self.parameters.len());
 
         let mut parameters = vec![];
         for (i, binding) in self.parameters.iter().enumerate() {

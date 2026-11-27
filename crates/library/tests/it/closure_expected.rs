@@ -69,3 +69,15 @@ fn a_closure_for_a_list_parameter_is_a_plain_mismatch() {
     assert!(err.contains("a closure"), "{err}");
     assert!(!err.contains("?mimas"), "{err}");
 }
+
+// A closure of the wrong arity for its slot says so in counts, not as a
+// mismatch of unresolved parameter types.
+// r[verify mimas.closure.expected]
+#[test]
+fn a_closure_of_the_wrong_arity_counts_its_parameters() {
+    let err = refused("let f: (int) -> int = |a, b| a\n");
+    assert!(err.contains("takes 2 parameter(s); its slot expects 1"), "{err}");
+    assert!(!err.contains("?mimas"), "{err}");
+    let err = refused("fn ap(f: (int) -> int) -> int { f(1) }\nlet x = ap(|a, b| a)\n");
+    assert!(err.contains("its slot expects 1"), "{err}");
+}

@@ -316,6 +316,19 @@ pub struct InvalidEvaluation {
     pub op: String,
 }
 
+/// A closure whose slot states a fn type with another number of parameters.
+#[derive(Error, Debug, Diagnostic)]
+#[error("this closure takes {got} parameter(s); its slot expects {want}")]
+#[diagnostic(help("give the closure {want} parameter(s), or change the type it fills"))]
+pub struct ClosureArity {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("{got} parameter(s) here")]
+    pub at: SourceSpan,
+    pub got: usize,
+    pub want: usize,
+}
+
 /// `t[0] = 7` on a tuple: a tuple is a value, not written in place.
 #[derive(Error, Debug, Diagnostic)]
 #[error("a tuple is not written in place")]

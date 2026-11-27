@@ -4617,9 +4617,7 @@ impl Solver {
                     Ty::Option(inner) => inner.normalized(self),
                     t => t,
                 };
-                if let Ty::Fn(header) = want
-                    && header.parameters.len() == c.parameters.len()
-                {
+                if let Ty::Fn(header) = want {
                     self.expected_closures
                         .entry(expr.id())
                         .or_insert(header.parameters);
