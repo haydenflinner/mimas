@@ -1984,6 +1984,10 @@ impl<'a> Pass<'a> {
         if let Some(owner) = owner {
             scope.extend(self.adt_param_names(owner));
         }
+        // r[impl mimas.unit.generic] a type parameter takes the unit of the
+        // first argument it meets, and every later use must agree
+        let tps: Vec<String> = f.type_params.iter().map(|i| i.lexeme.clone()).collect();
+        let mut tmap: FxHashMap<String, D> = FxHashMap::default();
         self.with_ty_params(scope, |s| {
             for (i, (arg, got)) in c.arguments.iter().zip(args).enumerate() {
                 let param = match &arg.name {
@@ -1994,7 +1998,7 @@ impl<'a> Pass<'a> {
                 };
                 let Some(p) = param else { continue };
                 let Some(ann) = &p.annotation else { continue };
-                let want = s.annotation(ann);
+                let want = s.tparam_want(ann, got, &mut tmap, &tps);
                 if let Some(d) = want.dim()
                     && !d.is_none()
                 {
@@ -2009,8 +2013,77 @@ impl<'a> Pass<'a> {
                 );
                 s.range_check(&arg.value, &want);
             }
-            f.return_type.as_ref().map_or(D::Any, |a| s.annotation(a))
+            f.return_type.as_ref().map_or(D::Any, |a| s.tparam_subst(a, &tmap, &tps))
         })
+    }
+
+    /// The dim a parameter declared `ann` asks of an argument worth `got`,
+    /// binding each type parameter it names to the first unit it meets
+    /// (r[impl mimas.unit.generic]).
+    fn tparam_want(&self, ann: &Annotation, got: &D, tmap: &mut FxHashMap<String, D>, tps: &[String]) -> D {
+        let got = match got {
+            D::Place(inner) => &**inner,
+            g => g,
+        };
+        match ann {
+            Annotation::Ty(id) if tps.contains(&id.lexeme) => match tmap.get(&id.lexeme) {
+                Some(d) => d.clone(),
+                None => {
+                    if matches!(got, D::Q(_) | D::Arr(_) | D::Tuple(_) | D::Fn(..)) {
+                        tmap.insert(id.lexeme.clone(), got.clone());
+                    }
+                    D::Any
+                }
+            },
+            Annotation::Option(inner) | Annotation::Result(inner) => {
+                self.tparam_want(inner, got, tmap, tps)
+            }
+            Annotation::Array(inner, _) => {
+                let g = match got {
+                    D::Arr(g) => &**g,
+                    _ => &D::Any,
+                };
+                D::Arr(Box::new(self.tparam_want(inner, g, tmap, tps)))
+            }
+            Annotation::Tuple(parts) => D::Tuple(
+                parts
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| {
+                        let g = match got {
+                            D::Tuple(gs) => gs.get(i).unwrap_or(&D::Any),
+                            _ => &D::Any,
+                        };
+                        self.tparam_want(p, g, tmap, tps)
+                    })
+                    .collect(),
+            ),
+            Annotation::Function(ps, r) => D::Fn(
+                ps.iter().map(|p| self.tparam_subst(p, tmap, tps)).collect(),
+                Box::new(self.tparam_subst(r, tmap, tps)),
+            ),
+            _ => self.annotation(ann),
+        }
+    }
+
+    /// `ann` with each bound type parameter replaced by its unit, for a
+    /// generic function's return (r[impl mimas.unit.generic]).
+    fn tparam_subst(&self, ann: &Annotation, tmap: &FxHashMap<String, D>, tps: &[String]) -> D {
+        match ann {
+            Annotation::Ty(id) if tps.contains(&id.lexeme) => {
+                tmap.get(&id.lexeme).cloned().unwrap_or(D::Any)
+            }
+            Annotation::Option(inner) | Annotation::Result(inner) => self.tparam_subst(inner, tmap, tps),
+            Annotation::Array(inner, _) => D::Arr(Box::new(self.tparam_subst(inner, tmap, tps))),
+            Annotation::Tuple(parts) => {
+                D::Tuple(parts.iter().map(|p| self.tparam_subst(p, tmap, tps)).collect())
+            }
+            Annotation::Function(ps, r) => D::Fn(
+                ps.iter().map(|p| self.tparam_subst(p, tmap, tps)).collect(),
+                Box::new(self.tparam_subst(r, tmap, tps)),
+            ),
+            _ => self.annotation(ann),
+        }
     }
 
     /// `Interval::pm(x, rel)` and friends: an interval in the unit of its number arguments.
