@@ -106,6 +106,10 @@ pub struct Solver {
     /// obligation against it. `None` when the caller has no use site to blame.
     pub(crate) obligation_at: Option<Location>,
     pub(crate) closure_captures: FxIndexMap<NodeId, FxIndexSet<DecId>>,
+    /// Closures the generator desugar builds (`__generator(|__generator_type| body)`):
+    /// one call runs the whole body, so a write to a captured parameter lasts
+    /// as long as anything reads it. r[impl mimas.closure.capture-write]
+    pub(crate) run_once_closures: FxHashSet<NodeId>,
     /// Param bindings spelled `x: inout T`, by the binding ident's node id --
     /// `Function::solve` marks the dec each declares once it exists.
     pub(crate) inout_params: FxHashSet<NodeId>,
@@ -431,6 +435,7 @@ impl Solver {
             propagates: FxIndexMap::default(),
             pact_ops: FxIndexMap::default(),
             closure_captures: FxIndexMap::default(),
+            run_once_closures: FxHashSet::default(),
             inout_params: FxHashSet::default(),
             inout_decs: FxHashSet::default(),
             inout_calls: FxHashSet::default(),
@@ -3702,7 +3707,7 @@ impl Solver {
                 if matches!(left.kind(), ExprKind::Ident(_))
                     && matches!(self.decs[dec_id].kind, DecKind::Local)
                     && let Some((_, crossed)) = self.ribs.resolve_with_closures(root)
-                    && !crossed.is_empty()
+                    && crossed.iter().any(|c| !self.run_once_closures.contains(c))
                 {
                     Err(crate::errors::AssignToCapture {
                         src: self.src(left.location()),

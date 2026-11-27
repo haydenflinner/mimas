@@ -1900,6 +1900,14 @@ impl Solve for Call {
 impl Solve for Closure {
     fn solve(&self, id: NodeId, _location: Location, solver: &mut Solver) -> Result<Ty> {
         solver.ribs.push_closure(id);
+        if self
+            .parameters
+            .first()
+            .and_then(|p| p.left.as_ident())
+            .is_some_and(|i| i.lexeme == "__generator_type")
+        {
+            solver.run_once_closures.insert(id);
+        }
 
         // a call site may have stashed the fn-typed parameter it expects here -- seed each closure
         // param's vid with it before the body solves, so `|n| n + 1` learns `n: int` from the

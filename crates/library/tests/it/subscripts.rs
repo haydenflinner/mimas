@@ -557,3 +557,14 @@ test_fail!(
     "struct S { xs: [int] }
      impl S { subscript live() { } }",
 );
+
+// a generator subscript's body runs in one call, so writing its own
+// parameter is a write that lasts: the lost-capture refusal leaves it alone
+// (`lessons/dsa-heap.mimas` walks `at` up the heap this way)
+test_run!(
+    // r[verify mimas.closure.capture-write]
+    a_generator_writes_its_own_parameter,
+    "subscript countdown(n: int) -> int { while n > 0 { yield n; n -= 1; } }
+     let xs = for x in countdown(3) collect x;",
+    "xs" => "[3, 2, 1]",
+);
