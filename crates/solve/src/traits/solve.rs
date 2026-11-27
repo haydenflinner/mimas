@@ -1269,12 +1269,7 @@ fn solve_call(this: &Call, id: NodeId, location: Location, solver: &mut Solver) 
                     at,
                 )
             };
-            let has_iter = |s: &Solver, t: &Ty| match t {
-                Ty::Adt(aid, _) | Ty::Identity(aid, _) => s.adts[*aid].impls.get("iter").is_some_and(|f| {
-                    matches!(&f.ty, Ty::Fn(h) if h.is_method && h.parameters.len() == 1)
-                }),
-                _ => false,
-            };
+            let has_iter = |s: &Solver, t: &Ty| s.walks_by_iter(t);
             let is_pull = |t: &Ty| {
                 matches!(t, Ty::Fn(h) if h.parameters.is_empty() && matches!(h.return_ty.as_ref(), Ty::Option(_)))
             };
@@ -1296,9 +1291,14 @@ fn solve_call(this: &Call, id: NodeId, location: Location, solver: &mut Solver) 
             if let Some((helper, source)) = helper {
                 let mut arguments = vec![Argument { name: None, value: source }];
                 for a in &this.arguments {
-                    // `zip`'s other side iterates the same way
-                    let ty = a.value.query(solver)?.normalized(solver);
-                    let value = if name == "zip" && has_iter(solver, &ty) {
+                    // `zip`'s other side iterates the same way. Only `zip`
+                    // reads its argument here: a closure solved before the
+                    // pull has no type for its parameter (`|c| c.len()`)
+                    let zips = name == "zip" && {
+                        let ty = a.value.query(solver)?.normalized(solver);
+                        has_iter(solver, &ty)
+                    };
+                    let value = if zips {
                         iter_of(&a.value)
                     } else {
                         a.value.clone()
@@ -3134,11 +3134,7 @@ impl Solve for For {
             }
             // a type with `fn iter(self) -> () -> T?` walks through its pull:
             // `for x in v` is `for x in v.iter()` r[impl mimas.protocol.iter]
-            Ty::Adt(aid, _) | Ty::Identity(aid, _)
-                if solver.adts[*aid].impls.get("iter").is_some_and(|f| {
-                    matches!(&f.ty, Ty::Fn(h) if h.is_method && h.parameters.len() == 1)
-                }) =>
-            {
+            ref t if solver.walks_by_iter(t) => {
                 solver.ribs.pop();
                 let at = self.iterator.location();
                 let pull = Expr::new(
@@ -3682,6 +3678,20 @@ impl Solve for Impl {
         if generic {
             solver.push_adt_params(aid);
         }
+        // `type Item = Card;`: member bodies name the impl's associated
+        // types (r[impl mimas.pact.assoc-type])
+        let fixed: crate::FxHashMap<String, Ty> = match &pact {
+            Some((_, pid)) => self
+                .assoc
+                .iter()
+                .filter_map(|(name, _)| {
+                    let key = (*pid, aid, name.lexeme.clone());
+                    solver.assoc_bindings.get(&key).map(|t| (name.lexeme.clone(), t.clone()))
+                })
+                .collect(),
+            None => Default::default(),
+        };
+        solver.assoc_scope.push(fixed);
 
         // todo, I am not positive that these need to be in separate passes, it may be okay to do
         // them concurrently
@@ -3825,6 +3835,7 @@ impl Solve for Impl {
             Ok(())
         });
 
+        solver.assoc_scope.pop();
         result?;
         if generic {
             solver.pop_type_params();

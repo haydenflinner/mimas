@@ -1,14 +1,23 @@
 //! The protocols a type joins so the language's own forms work on it.
 //! `Show` is how `print` and an f-string write a value, and `Ord` is how
 //! `<`, `<=`, `>` and `>=` compare one. A user type joins with an `impl`,
-//! the same way the built-in types below do. (`for x in v` walks any
-//! value whose type has `fn iter(self) -> () -> T?`; a pact cannot name
-//! the element type `T` yet, so that protocol has no pact of its own.)
+//! the same way the built-in types below do. `Iter` is how `for x in v`
+//! and the combinators walk a value: its `type Item` names what each step
+//! gives, and each impl fixes it.
 
 /// How a value writes itself: `print(v)` and `f"{v}"` call `show` when the
 /// value's type implements `Show`.
 pact Show {
     fn show(self) -> str;
+}
+
+/// A walk over a value, one step at a time. `iter` answers a pull: each
+/// call gives the next item, then `null` when the walk is done. `for x in
+/// v` walks any `Iter`, and so do `map`, `filter` and the other
+/// combinators. r[impl mimas.std.iter]
+pact Iter {
+    type Item;
+    fn iter(self) -> () -> Item?;
 }
 
 /// A total order. `cmp` answers a negative number, zero or a positive
@@ -243,7 +252,8 @@ fn __list_to_list<T>(xs: [T]) -> [T] {
 /// keeps its own fast loop.
 struct Range { start: int, end: int }
 
-impl Range {
+impl Iter for Range {
+    type Item = int;
     /// A pull over the integers, smallest first.
     fn iter(self) -> () -> int? {
         let at = [self.start];
@@ -258,6 +268,9 @@ impl Range {
             }
         }
     }
+}
+
+impl Range {
     /// How many integers the range holds.
     fn len(self) -> int { if self.end > self.start { self.end - self.start } else { 0 } }
     /// Whether `x` is in the range.

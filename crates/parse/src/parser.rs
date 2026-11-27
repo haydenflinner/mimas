@@ -2208,6 +2208,17 @@ impl<'s> Parser<'s> {
                         location: self.location(start),
                     });
                 }
+                // `type Item;`: an associated type each impl fixes
+                // (r[impl mimas.pact.assoc-type])
+                TokKind::Ident("type") if matches!(self.nth(1), TokKind::Ident(_)) => {
+                    self.advance();
+                    let name = self.require_ident();
+                    self.end_stmt(self.location(start));
+                    items.push(PactItem::Type {
+                        name,
+                        location: self.location(start),
+                    });
+                }
                 TokKind::Fn => {
                     let (name, generics, parameters, return_type) = self.function_sig(false, None);
                     self.reject_type_params(&generics);
@@ -2932,12 +2943,13 @@ impl<'s> Parser<'s> {
             None
         };
         let mut items = vec![];
+        let mut assoc = vec![];
         // a via impl may carry no braces at all
         if via.is_some() && !self.at(TokKind::LeftBrace) {
-            return { let mut imp = Impl::new(target, pact, via, items); imp.bounds = bounds; imp };
+            return { let mut imp = Impl::new(target, pact, via, items); imp.bounds = bounds; imp.assoc = assoc; imp };
         }
         if !self.expect(TokKind::LeftBrace) {
-            return { let mut imp = Impl::new(target, pact, via, items); imp.bounds = bounds; imp };
+            return { let mut imp = Impl::new(target, pact, via, items); imp.bounds = bounds; imp.assoc = assoc; imp };
         }
         while !self.eat(TokKind::RightBrace) {
             let kind = if self.at(TokKind::Pub) {
@@ -2946,6 +2958,18 @@ impl<'s> Parser<'s> {
                 self.peek()
             };
             match kind {
+                // `type Item = Card;`: the impl fixes a pact's associated
+                // type (r[impl mimas.pact.assoc-type])
+                TokKind::Ident("type")
+                    if matches!(self.nth(1), TokKind::Ident(_)) && self.nth(2) == TokKind::Equal =>
+                {
+                    self.advance();
+                    let name = self.require_ident();
+                    self.expect(TokKind::Equal);
+                    let ann = self.annotation();
+                    self.eat(TokKind::SemiColon);
+                    assoc.push((name, ann));
+                }
                 TokKind::Ident("subscript") => {
                     let public = self.eat(TokKind::Pub);
                     if self.accessor_intro() {
@@ -2985,7 +3009,7 @@ impl<'s> Parser<'s> {
                 }),
             }
         }
-        { let mut imp = Impl::new(target, pact, via, items); imp.bounds = bounds; imp }
+        { let mut imp = Impl::new(target, pact, via, items); imp.bounds = bounds; imp.assoc = assoc; imp }
     }
 
     /// A function up to its body. A pact's signatures don't get `defaults`. Returns the

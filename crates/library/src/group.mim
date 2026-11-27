@@ -122,9 +122,6 @@ fn __stream_delay<T: AbelianGroup>(s: Stream<T>) -> Stream<T> { s.delay() }
 impl Stream {
     /// The steps as a list.
     fn list(self) -> [T] { self.items }
-    /// A pull over the steps, first to last: `for x in s` walks it.
-    /// r[impl mimas.iter.combinators]
-    fn iter(self) -> () -> T? { __list_pull(self.items) }
     /// The steps as a list.
     fn to_list(self) -> [T] { self.items }
 
@@ -425,8 +422,6 @@ fn __misaligned(a: int, b: int) -> str {
 impl Posts {
     /// The posts as a list.
     fn list(self) -> [Post<T>] { self.at.map(|x: T| Post { at: x }) }
-    /// A pull over the posts, first to last.
-    fn iter(self) -> () -> Post<T>? { __list_pull(self.list()) }
 
     /// The count of posts.
     fn len(self) -> int { self.at.len() }
@@ -603,8 +598,6 @@ impl Tally {
 
     /// The items with a weight other than 0, in the order they came.
     fn items(self) -> [T] { self.w.keys() }
-    /// A pull over the items, each once.
-    fn iter(self) -> () -> T? { __list_pull(self.w.keys()) }
 
     /// The items with their weights.
     fn pairs(self) -> [(T, int)] { self.w.pairs() }
@@ -724,4 +717,23 @@ impl AbelianGroup for Tally {
         t
     }
 
+}
+
+impl Iter for Stream {
+    type Item = T;
+    /// A pull over the steps, first to last: `for x in s` walks it.
+    /// r[impl mimas.iter.combinators]
+    fn iter(self) -> () -> T? { __list_pull(self.items) }
+}
+
+impl Iter for Posts {
+    type Item = Post<T>;
+    /// A pull over the posts, first to last.
+    fn iter(self) -> () -> Post<T>? { __list_pull(self.list()) }
+}
+
+impl Iter for Tally {
+    type Item = T;
+    /// A pull over the items, each once.
+    fn iter(self) -> () -> T? { __list_pull(self.w.keys()) }
 }

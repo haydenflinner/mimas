@@ -130,6 +130,7 @@ impl SourceFile {
                             let (name, kind) = match item {
                                 PactItem::Const { name, .. } => (name, SymbolKind::Constant),
                                 PactItem::Fn { name, .. } => (name, SymbolKind::Method),
+                                PactItem::Type { name, .. } => (name, SymbolKind::TypeParameter),
                             };
                             symbol(file, name, kind, name.location.span)
                         })
@@ -236,7 +237,9 @@ impl SourceFile {
                     ItemKind::Pact(pact) => {
                         self.check(&pact.name, start);
                         for member in &pact.items {
-                            let (PactItem::Const { name, .. } | PactItem::Fn { name, .. }) = member;
+                            let (PactItem::Const { name, .. }
+                            | PactItem::Fn { name, .. }
+                            | PactItem::Type { name, .. }) = member;
                             self.check(name, member.span().start);
                         }
                     }

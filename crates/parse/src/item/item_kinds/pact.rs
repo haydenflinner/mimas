@@ -74,6 +74,13 @@ impl std::fmt::Display for Pact {
 
 #[derive(Debug, Clone)]
 pub enum PactItem {
+    /// An associated type: `type Item;`. Each impl fixes it
+    /// (`type Item = Card;`), and a member signature may name it
+    /// (`mimas.pact.assoc-type`).
+    Type {
+        name: Ident,
+        location: Location,
+    },
     /// A constant signature: `const NAME: T;`. Pacts cannot declare default values for constants
     /// (an `impl` block must always supply one).
     Const {
@@ -97,7 +104,9 @@ pub enum PactItem {
 impl Located for PactItem {
     fn location(&self) -> Location {
         match self {
-            PactItem::Const { location, .. } | PactItem::Fn { location, .. } => *location,
+            PactItem::Const { location, .. }
+            | PactItem::Fn { location, .. }
+            | PactItem::Type { location, .. } => *location,
         }
     }
 }
@@ -105,6 +114,7 @@ impl Located for PactItem {
 impl PartialEq for PactItem {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
+            (PactItem::Type { name, .. }, PactItem::Type { name: other, .. }) => name == other,
             (
                 PactItem::Const {
                     name, annotation, ..
@@ -148,6 +158,7 @@ impl PartialEq for PactItem {
 impl std::fmt::Display for PactItem {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            PactItem::Type { name, .. } => f.pad(&format!("type {name};")),
             PactItem::Const {
                 name, annotation, ..
             } => f.pad(&format!("const {}: {};", name, annotation)),

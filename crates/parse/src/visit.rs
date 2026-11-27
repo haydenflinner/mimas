@@ -80,6 +80,7 @@ pub fn walk_item(item: &Item, visitor: &mut impl Visitor) {
             visitor.ident(&pact.name);
             for item in &pact.items {
                 match item {
+                    PactItem::Type { name, .. } => visitor.ident(name),
                     PactItem::Const {
                         name, annotation, ..
                     } => {

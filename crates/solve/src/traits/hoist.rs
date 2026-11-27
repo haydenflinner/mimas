@@ -499,6 +499,17 @@ impl Hoist for Impl {
         // write `x: T` / `rest: List<T>` -- `impl List<int>`-style specializations are rejected
         // by the parser)
         ctx.solver.push_adt_params(adt);
+        // `type Item = Card;`: the impl fixes its pact's associated types,
+        // and names them in its own members (r[impl mimas.pact.assoc-type])
+        let fixed = match crate::traits::assoc_fixes(ctx.solver, self, adt, pid) {
+            Ok(fixed) => fixed,
+            Err(e) => {
+                ctx.solver.pop_type_params();
+                ctx.solver.ribs.pop();
+                return Err(e);
+            }
+        };
+        ctx.solver.assoc_scope.push(fixed);
 
         let prev_pact = std::mem::replace(&mut ctx.solver.hoisting_pact, pid);
         let hoist_result: Result<()> = (|| {
@@ -578,6 +589,7 @@ impl Hoist for Impl {
         })();
 
         ctx.solver.hoisting_pact = prev_pact;
+        ctx.solver.assoc_scope.pop();
         ctx.solver.pop_type_params();
         ctx.solver.ribs.pop();
 
@@ -606,8 +618,25 @@ impl Hoist for Pact {
         shared::name_pact(pact_id.index(), &self.name.lexeme);
         let prev_self = ctx.solver.pact_self.replace(pact_id);
 
+        // `type Item;`: a stand-in vid each impl's binding replaces
+        // (r[impl mimas.pact.assoc-type])
+        let mut assoc = FxHashMap::default();
+        for item in self.items.iter() {
+            if let PactItem::Type { name, .. } = item {
+                let p = Solver::param_id_of(name);
+                ctx.solver.assoc_params.insert(p, (pact_id, name.lexeme.clone()));
+                assoc.insert(name.lexeme.clone(), Ty::Param(p));
+            }
+        }
+        let scoped = !assoc.is_empty();
+        if scoped {
+            ctx.solver.pact_assoc.insert(pact_id, assoc.keys().cloned().collect());
+            ctx.solver.assoc_scope.push(assoc);
+        }
+
         for item in self.items.iter() {
             match item {
+                PactItem::Type { .. } => {}
                 PactItem::Const {
                     name, annotation, ..
                 } => {
@@ -715,6 +744,9 @@ impl Hoist for Pact {
         }
 
         ctx.solver.pact_self = prev_self;
+        if scoped {
+            ctx.solver.assoc_scope.pop();
+        }
 
         let dec = ctx.solver.dec_id(
             &self.name,
@@ -1015,3 +1047,41 @@ fn overload_operand(ty: &Ty) -> Option<Ty> {
         _ => None,
     }
 }
+
+/// The associated types an impl fixes, `type Item = Card;`, checked against
+/// its pact's names and recorded for `fresh_vids` (r[impl mimas.pact.assoc-type]).
+pub(crate) fn assoc_fixes(
+    solver: &mut Solver,
+    imp: &Impl,
+    adt: AdtId,
+    pid: Option<shared::PactId>,
+) -> Result<crate::FxHashMap<String, Ty>> {
+    let mut fixed = crate::FxHashMap::default();
+    let Some(pid) = pid else { return Ok(fixed) };
+    let wanted = solver.pact_assoc.get(&pid).cloned().unwrap_or_default();
+    for (name, ann) in &imp.assoc {
+        if !wanted.contains(&name.lexeme) {
+            return Err(crate::errors::NotFound {
+                src: solver.src(name.location),
+                at: name.location.into(),
+                name: name.lexeme.clone(),
+                help: Some(format!("the pact declares no `type {}`", name.lexeme)),
+            }
+            .into());
+        }
+        let ty = Ty::from_annotation(ann.clone(), solver)?;
+        solver.assoc_bindings.insert((pid, adt, name.lexeme.clone()), ty.clone());
+        fixed.insert(name.lexeme.clone(), ty);
+    }
+    if let Some(missing) = wanted.iter().find(|w| !fixed.contains_key(*w)) {
+        return Err(crate::errors::NotFound {
+            src: solver.src(imp.target.location()),
+            at: imp.target.location().into(),
+            name: missing.clone(),
+            help: Some(format!("this impl must fix the pact's `type {missing} = …;`")),
+        }
+        .into());
+    }
+    Ok(fixed)
+}
+

@@ -117,6 +117,21 @@ pub struct Solver {
     pub(crate) plain_default_calls: FxHashSet<NodeId>,
     /// `a..b` nodes that are a `for` head: counted loops, not `Range` values.
     pub(crate) for_ranges: FxHashSet<NodeId>,
+    /// Names an associated type answers to in the pact or impl being read:
+    /// `Item` → its stand-in (a pact) or its binding (an impl).
+    pub(crate) assoc_scope: Vec<FxHashMap<String, Ty>>,
+    /// Each pact associated type's stand-in param: (pact, name). The param
+    /// is opaque in the pact's default bodies; a call site swaps it for
+    /// the receiver's binding.
+    pub(crate) assoc_params: FxHashMap<ParamId, (PactId, String)>,
+    /// What each impl fixes an associated type to: (pact, type, name) → type.
+    pub(crate) assoc_bindings: FxHashMap<(PactId, AdtId, String), Ty>,
+    /// A bounded type parameter's associated type, `T::Item`: one opaque
+    /// param per (owner param, stand-in param), and the reverse lookup.
+    pub(crate) assoc_of_param: FxHashMap<(ParamId, ParamId), ParamId>,
+    pub(crate) assoc_owner: FxHashMap<ParamId, (ParamId, ParamId)>,
+    /// Each pact's associated type names.
+    pub(crate) pact_assoc: FxHashMap<PactId, Vec<String>>,
     /// Each impl member a pact owns: its dec and the pact (C3). A member whose
     /// name another member of the type already holds lives under the key
     /// `name@Pact` in `Adt::impls`.
@@ -464,6 +479,12 @@ impl Solver {
             hoisting_pact: None,
             plain_default_calls: FxHashSet::default(),
             for_ranges: FxHashSet::default(),
+            assoc_scope: Vec::new(),
+            assoc_params: FxHashMap::default(),
+            assoc_bindings: FxHashMap::default(),
+            assoc_of_param: FxHashMap::default(),
+            assoc_owner: FxHashMap::default(),
+            pact_assoc: FxHashMap::default(),
             member_pact: FxHashMap::default(),
             ambiguous_members: FxHashMap::default(),
             inout_params: FxHashSet::default(),
@@ -1848,6 +1869,15 @@ impl Solver {
     /// slots get fresh handles.
     fn fresh_vids(&mut self, t: &Ty, self_ty: &Ty, memo: &mut FxHashMap<Vid, Vid>) -> Ty {
         match t.clone().normalized(self) {
+            // a pact's associated type: what the receiver's impl fixes it to;
+            // a bounded parameter's own opaque `T::Item`; itself inside a
+            // default body (r[impl mimas.pact.assoc-type])
+            Ty::Param(p) if self.assoc_params.contains_key(&p) => {
+                match self.assoc_for(p, self_ty) {
+                    Some(t) => t,
+                    None => Ty::Vid(self.vid()),
+                }
+            }
             Ty::Vid(v) => Ty::Vid(*memo.entry(v).or_insert_with(|| self.vid())),
             Ty::Skolem(_) => self_ty.clone(),
             Ty::Array(inner, len) => {
@@ -1890,6 +1920,40 @@ impl Solver {
             }
             other => other,
         }
+    }
+
+    /// The associated type stand-in `item` read through `owner`: the
+    /// impl's binding for a concrete type, the opaque `T::Item` for a
+    /// bounded param, the stand-in itself for a pact's `Self`. `None` when
+    /// the owner is still open or fixes nothing.
+    // r[impl mimas.pact.assoc-type]
+    pub(crate) fn assoc_for(&mut self, item: ParamId, owner: &Ty) -> Option<Ty> {
+        let (pid, name) = self.assoc_params.get(&item)?.clone();
+        let concrete = match owner.clone().normalized(self) {
+            Ty::Adt(aid, args) | Ty::Identity(aid, args) => Some((aid, args)),
+            Ty::Param(p) => return Some(Ty::Param(self.param_assoc(p, item, &name))),
+            Ty::Skolem(_) => return Some(Ty::Param(item)),
+            Ty::Vid(_) => None,
+            other => self.builtin_adt(&other).map(|a| (a, vec![])),
+        };
+        let (aid, args) = concrete?;
+        let bound = self.assoc_bindings.get(&(pid, aid, name)).cloned()?;
+        Some(self.specialize(&bound, aid, &args))
+    }
+
+    /// `T::Item` for a bounded param `T`: one opaque param per (owner,
+    /// stand-in), minted once and named for messages.
+    fn param_assoc(&mut self, owner: ParamId, item: ParamId, name: &str) -> ParamId {
+        if let Some(p) = self.assoc_of_param.get(&(owner, item)) {
+            return *p;
+        }
+        // a fresh node id keeps it clear of every declared param's id
+        // (and small: param names live in a vector indexed by id)
+        let fresh = ParamId::from(parse::NodeId::new().index() as u32);
+        shared::name_param(fresh.index(), &format!("{owner}::{name}", owner = Ty::Param(owner)));
+        self.assoc_of_param.insert((owner, item), fresh);
+        self.assoc_owner.insert(fresh, (owner, item));
+        fresh
     }
 
     fn materialize_slot(&mut self, t: &Option<Ty>, memo: &mut FxHashMap<u32, Vid>) -> Ty {
@@ -2666,6 +2730,27 @@ impl Solver {
     /// `A` bound grants member access to, and an `impl A for T` owes impls for.
     /// Cycle-safe -- `A: B, B: A` just yields both.
     // r[impl mimas.pact.requires]
+    /// Whether `for x in v` walks `v` through `v.iter()`: a type with a
+    /// one-receiver `iter` method, or a param bounded by a pact that has
+    /// one (`T: Iter`). r[impl mimas.protocol.iter]
+    pub(crate) fn walks_by_iter(&self, t: &Ty) -> bool {
+        let one_receiver = |h: &FnHeader| h.is_method && h.parameters.len() == 1;
+        match t {
+            Ty::Adt(aid, _) | Ty::Identity(aid, _) => self.adts[*aid]
+                .impls
+                .get("iter")
+                .is_some_and(|f| matches!(&f.ty, Ty::Fn(h) if one_receiver(h))),
+            Ty::Param(p) => self.param_bounds.get(p).is_some_and(|bounds| {
+                bounds.iter().any(|b| {
+                    self.pact_closure(*b).into_iter().any(|q| {
+                        self.pacts[q].functions.get("iter").is_some_and(|(h, _)| one_receiver(h))
+                    })
+                })
+            }),
+            _ => false,
+        }
+    }
+
     pub(crate) fn pact_closure(&self, pid: PactId) -> Vec<PactId> {
         let mut seen = FxHashSet::default();
         let mut out = vec![];
@@ -4174,6 +4259,19 @@ impl Solver {
                         unreachable!("a pact name always resolves to a single pact");
                     };
                     let prev_self = self.pact_self.replace(pid);
+                    // default bodies name the pact's associated types as
+                    // their opaque stand-ins (r[impl mimas.pact.assoc-type])
+                    let assoc: FxHashMap<String, Ty> = pact
+                        .items
+                        .iter()
+                        .filter_map(|item| match item {
+                            PactItem::Type { name, .. } => {
+                                Some((name.lexeme.clone(), Ty::Param(Self::param_id_of(name))))
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    self.assoc_scope.push(assoc);
                     for item in pact.items.iter() {
                         let PactItem::Fn {
                             default: Some(body),
@@ -4216,6 +4314,7 @@ impl Solver {
                         }
                         self.ribs.pop();
                     }
+                    self.assoc_scope.pop();
                     self.pact_self = prev_self;
                 }
                 ItemKind::Tests(tests) => {

@@ -32,6 +32,7 @@ mod group;
 mod impl_methods;
 mod incremental;
 mod inout;
+mod iter_pact;
 mod inplace_for;
 mod interval;
 mod iso;

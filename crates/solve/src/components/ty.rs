@@ -191,6 +191,22 @@ impl TyExt for Ty {
             )),
             // a declared type param (`fn map<T>`, `struct Pair<A>`) -- looked up before
             // anything else so a param named like a unit or a builtin still wins
+            // an associated type named in its pact or impl (`Item`)
+            // r[impl mimas.pact.assoc-type]
+            Annotation::Ty(ident)
+                if solver
+                    .assoc_scope
+                    .iter()
+                    .rev()
+                    .any(|s| s.contains_key(&ident.lexeme)) =>
+            {
+                Ok(solver
+                    .assoc_scope
+                    .iter()
+                    .rev()
+                    .find_map(|s| s.get(&ident.lexeme).cloned())
+                    .unwrap())
+            }
             Annotation::Ty(ident) if solver.type_param(&ident).is_some() => {
                 let ty = Ty::Param(solver.type_param(&ident).unwrap());
                 solver.note(&ident, ty.clone(), None);

@@ -21,6 +21,9 @@ pub struct Impl {
     /// `impl S<T: Bound>`: bounds on the type's own parameters, each with at
     /// least one pact (`mimas.generic.impl-bound`). Empty for a plain impl.
     pub bounds: Vec<crate::components::TypeParam>,
+    /// `type Item = Card;`: the pact's associated types this impl fixes
+    /// (`mimas.pact.assoc-type`).
+    pub assoc: Vec<(Ident, crate::components::Annotation)>,
 }
 impl Impl {
     pub(crate) fn new(
@@ -35,6 +38,7 @@ impl Impl {
             via,
             items,
             bounds: vec![],
+            assoc: vec![],
         }
     }
 }
