@@ -172,6 +172,48 @@ fn test_attribute_is_rejected_on_parameterized_fn() {
     vm_test_utils::assert_fails("#[test] fn foo(x: int) {}");
 }
 
+// r[verify check.test.impl]
+#[test]
+fn test_attribute_runs_on_impl_member() {
+    const SOURCE: &str = "
+        struct C { base: int }
+        impl C {
+            fn fetch(self) -> int { self.base }
+            #[test]
+            fn fetch_works() {}
+            #[test]
+            fn fetch_fails() {
+                let x: int? = null;
+                x!;
+            }
+        }
+    ";
+    let mut vm = vm::Vm::compile(SOURCE, |_| {}).unwrap();
+    let results = vm.run_tests();
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].name, "C::fetch_works");
+    assert!(results[0].passed(), "{:?}", results[0]);
+    assert_eq!(results[1].name, "C::fetch_fails");
+    assert!(!results[1].passed(), "{:?}", results[1]);
+}
+
+// r[verify check.test.impl]
+#[test]
+fn test_attribute_on_struct_body_member_runs() {
+    const SOURCE: &str = "
+        struct C {
+            base: int,
+            #[test]
+            fn in_body() {}
+        }
+    ";
+    let mut vm = vm::Vm::compile(SOURCE, |_| {}).unwrap();
+    let results = vm.run_tests();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].name, "C::in_body");
+    assert!(results[0].passed(), "{:?}", results[0]);
+}
+
 #[test]
 fn host_fills_defaults_and_calls_resolved_fns() {
     const SOURCE: &str = "

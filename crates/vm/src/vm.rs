@@ -391,6 +391,14 @@ impl Vm {
             for (name, f) in &module.functions {
                 items.insert(format!("{prefix}{name}"), f.body);
             }
+            // r[impl check.test.impl] a type's members call as
+            // `Type::member` — `#[test]` on a self-less member registers
+            // that path
+            for (ty_name, ty) in &module.types {
+                for (name, f) in &ty.methods {
+                    items.insert(format!("{prefix}{ty_name}::{name}"), f.body);
+                }
+            }
             for (name, m) in &module.modules {
                 flatten(m, format!("{prefix}{name}::"), items);
             }

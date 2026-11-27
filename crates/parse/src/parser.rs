@@ -176,6 +176,68 @@ fn token_meta(source: &str, offset: usize, tokens: &[Tok<TokKind<'_>>]) -> Vec<T
     meta
 }
 
+/// Whether the `class`/`record` at index `i` reads as a `struct` decl:
+/// an ident on the same line, then `{`, a same-line `(`/`;`, or a
+/// balanced generic `<…>` a `{`/`(`/`;` follows — so `record x` calls,
+/// `record(x)` applies and `record x < 3` compares. Comments in `kind`'s
+/// view are skipped (`mimas fmt` keeps them in its stream; the parser's
+/// is already clean). `kind(j)` answers the kind at `j` or `None` past
+/// the end; `newline_before(j)` whether a line breaks before `j` — the
+/// parser answers from [`Parser::meta`], fmt from its line table. One
+/// scan, both consumers: fmt rewrites an alias to `struct` exactly
+/// where a decl parses (r[impl mimas.struct.alias]).
+pub fn alias_decl_at<'s>(
+    kind: impl Fn(usize) -> Option<TokKind<'s>>,
+    newline_before: impl Fn(usize) -> bool,
+    i: usize,
+) -> bool {
+    let fwd = |j: usize| {
+        let mut j = j + 1;
+        while kind(j).is_some_and(|k| k.is_comment()) {
+            j += 1;
+        }
+        kind(j).map(|_| j)
+    };
+    let Some(name) = fwd(i) else { return false };
+    if newline_before(name) || !matches!(kind(name), Some(TokKind::Ident(_))) {
+        return false;
+    }
+    let Some(shape) = fwd(name) else { return false };
+    match kind(shape) {
+        Some(TokKind::LeftBrace) => true,
+        Some(TokKind::LeftParenthesis | TokKind::SemiColon) => !newline_before(shape),
+        Some(TokKind::Less) => {
+            let mut depth = 0usize;
+            let mut j = shape;
+            loop {
+                match kind(j) {
+                    Some(TokKind::Less) => depth += 1,
+                    Some(TokKind::Greater) => depth = depth.saturating_sub(1),
+                    Some(TokKind::DoubleRightCaret) => depth = depth.saturating_sub(2),
+                    None => return false,
+                    _ => {}
+                }
+                if depth == 0
+                    && matches!(
+                        kind(j),
+                        Some(TokKind::Greater | TokKind::DoubleRightCaret)
+                    )
+                {
+                    return matches!(
+                        fwd(j).and_then(&kind),
+                        Some(TokKind::LeftBrace | TokKind::LeftParenthesis | TokKind::SemiColon)
+                    );
+                }
+                match fwd(j) {
+                    Some(next) => j = next,
+                    None => return false,
+                }
+            }
+        }
+        _ => false,
+    }
+}
+
 // Basic features
 impl<'s> Parser<'s> {
     /// Creates a new parser.
@@ -1727,7 +1789,11 @@ impl<'s> Parser<'s> {
                 TokKind::Const | TokKind::Fn | TokKind::Hash => {
                     let item = self.item();
                     for attr in item.attrs() {
-                        if matches!(attr.name.lexeme.as_str(), "test" | "tests") {
+                        // r[impl check.test.impl] `#[test]` may sit on a
+                        // self-less member — `validate_attrs` already judged
+                        // it — but a `#[tests]` list is not an impl member
+                        // at all.
+                        if matches!(attr.name.lexeme.as_str(), "tests") {
                             self.error(TestOnMethod {
                                 src: self.src(),
                                 at: attr.name.location.into(),
@@ -2193,44 +2259,11 @@ impl<'s> Parser<'s> {
     /// expressions.
     // r[impl mimas.struct.alias]
     fn struct_alias_intro(&self) -> bool {
-        if self.meta_at(1).newline || !matches!(self.nth(1), TokKind::Ident(_)) {
-            return false;
-        }
-        match self.nth(2) {
-            TokKind::LeftBrace => true,
-            TokKind::LeftParenthesis | TokKind::SemiColon => !self.meta_at(2).newline,
-            TokKind::Less => self.alias_generic_intro(),
-            _ => false,
-        }
-    }
-
-    /// `record V<A> {` — the `<…>` parameter list is only a decl shape
-    /// when it balances and a `{`/`(`/`;` follows it, against `record
-    /// x < y` comparisons.
-    fn alias_generic_intro(&self) -> bool {
-        let mut depth = 0usize;
-        let mut i = self.next + 2;
-        loop {
-            match self.tokens.get(i).map(|t| t.kind()) {
-                Some(TokKind::Less) => depth += 1,
-                Some(TokKind::Greater) => depth = depth.saturating_sub(1),
-                Some(TokKind::DoubleRightCaret) => depth = depth.saturating_sub(2),
-                Some(TokKind::Eof) | None => return false,
-                _ => {}
-            }
-            if depth == 0
-                && matches!(
-                    self.tokens.get(i).map(|t| t.kind()),
-                    Some(TokKind::Greater | TokKind::DoubleRightCaret)
-                )
-            {
-                return matches!(
-                    self.tokens.get(i + 1).map(|t| t.kind()),
-                    Some(TokKind::LeftBrace | TokKind::LeftParenthesis | TokKind::SemiColon)
-                );
-            }
-            i += 1;
-        }
+        alias_decl_at(
+            |j| self.tokens.get(self.next + j).map(|t| t.kind()),
+            |j| self.meta_at(j).newline,
+            0,
+        )
     }
 
     /// `opp Sky { Sun, Moon }` — a dichotomy, as basic as an enum: two ends
@@ -2554,12 +2587,14 @@ impl<'s> Parser<'s> {
                     }
                 }
                 // `#[scans]` may sit on a method: `item` reads the
-                // attributes and `validate_attrs` judges them. A test is
-                // a free fn, never a member.
+                // attributes and `validate_attrs` judges them.
+                // r[impl check.test.impl] `#[test]` is fine on a self-less
+                // member — it runs as `Type::name`; a `#[tests]` list is
+                // not a member.
                 TokKind::Const | TokKind::Fn | TokKind::Hash => {
                     let item = self.item();
                     for attr in item.attrs() {
-                        if matches!(attr.name.lexeme.as_str(), "test" | "tests") {
+                        if matches!(attr.name.lexeme.as_str(), "tests") {
                             self.error(TestOnMethod {
                                 src: self.src(),
                                 at: attr.name.location.into(),

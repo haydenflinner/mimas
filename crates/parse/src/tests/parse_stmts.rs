@@ -1117,6 +1117,63 @@ fn struct_members_become_an_impl() {
     assert_eq!(imp.items.len(), 1);
 }
 
+// r[verify check.test.impl]
+#[test]
+fn test_attr_on_impl_member() {
+    let src = "impl C {\n    #[test]\n    fn works() { assert!(1 == 1) }\n}";
+    let ast = crate::Parser::new(crate::lex::Lexer::new(src, 0, "t".into()))
+        .try_into_ast()
+        .unwrap();
+    let stmts = super::utils::file_stmts(&ast);
+    let StmtKind::Item(item) = stmts[0].kind() else {
+        panic!("expected an item, got {:?}", stmts[0].kind())
+    };
+    let ItemKind::Impl(imp) = item.kind() else {
+        panic!("expected an impl, got {:?}", item.kind())
+    };
+    assert!(imp.items[0].is_test());
+}
+
+// r[verify check.test.impl]
+#[test]
+fn test_attr_on_struct_member() {
+    let src = "struct C {\n    v: int,\n    #[test]\n    fn works() { assert!(1 == 1) }\n}";
+    let ast = crate::Parser::new(crate::lex::Lexer::new(src, 0, "t".into()))
+        .try_into_ast()
+        .unwrap();
+    let stmts = super::utils::file_stmts(&ast);
+    let StmtKind::Item(item) = stmts[1].kind() else {
+        panic!("expected an item, got {:?}", stmts[1].kind())
+    };
+    let ItemKind::Impl(imp) = item.kind() else {
+        panic!("expected an impl, got {:?}", item.kind())
+    };
+    assert_eq!(imp.target.lexeme, "C");
+    assert!(imp.items[0].is_test());
+}
+
+// r[verify check.test.impl]
+#[test]
+fn test_attr_on_method_still_fails() {
+    let src = "impl C {\n    #[test]\n    fn works(self) {}\n}";
+    let errors = crate::Parser::new(crate::lex::Lexer::new(src, 0, "t".into()))
+        .try_into_ast()
+        .unwrap_err();
+    assert!(errors[0]
+        .to_string()
+        .contains("`#[test]` cannot annotate a method"));
+}
+
+// r[verify check.test.impl]
+#[test]
+fn tests_list_in_impl_still_fails() {
+    let src = "impl C {\n    #[tests]\n    [C{base: 1}.base == 1]\n}";
+    let errors = crate::Parser::new(crate::lex::Lexer::new(src, 0, "t".into()))
+        .try_into_ast()
+        .unwrap_err();
+    assert!(errors[0].to_string().contains("cannot annotate a method"));
+}
+
 stmt_test!(
     function,
     "fn foo() {}",

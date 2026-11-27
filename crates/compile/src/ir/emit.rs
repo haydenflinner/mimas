@@ -1596,6 +1596,15 @@ impl Emit for parse::Impl {
         for item in &self.items {
             match item.kind() {
                 parse::ItemKind::Function(f) => {
+                    // r[impl check.test.impl] `#[test]` on a self-less
+                    // member registers under the qualified `Type::name`
+                    // the items map flattens it to
+                    if item.is_test() {
+                        ir.tests
+                            .push(format!("{}::{}", self.target.lexeme, f.name.lexeme));
+                        let bid = ir.item_body_for(ir.node_dec(item.id()));
+                        ir.test_bodies.insert(bid);
+                    }
                     let _ = f.emit(item.id(), ir);
                 }
                 // associated consts are compile-time; nothing to lower

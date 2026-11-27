@@ -734,8 +734,10 @@ impl<'s> Fmt<'s> {
     }
 
     /// Whether the `class`/`record` token at `i` sits where the parser
-    /// would read a `struct` decl — the token-level echo of
-    /// `Parser::struct_alias_intro`.
+    /// would read a `struct` decl. The statement-start half is the
+    /// formatter's own question (the parser answers it by position);
+    /// the decl-shape half is `parse::alias_decl_at` itself, so the two
+    /// can never drift (r[impl mimas.struct.alias]).
     fn alias_decl_at(&self, i: usize, paren: &[bool]) -> bool {
         let stmt_start = match self.sig(i) {
             None => true,
@@ -749,53 +751,14 @@ impl<'s> Fmt<'s> {
         if !stmt_start {
             return false;
         }
-        let Some(name) = self.sig_next(i) else {
-            return false;
-        };
-        if !matches!(self.kind(name), TokKind::Ident(_))
-            || self.start_line(name) != self.end_line(i)
-        {
-            return false;
-        }
-        let Some(shape) = self.sig_next(name) else {
-            return false;
-        };
-        match self.kind(shape) {
-            TokKind::LeftBrace => true,
-            TokKind::LeftParenthesis | TokKind::SemiColon => {
-                self.start_line(shape) == self.end_line(name)
-            }
-            TokKind::Less => {
-                let mut depth = 0usize;
-                let mut j = shape;
-                loop {
-                    match self.kind(j) {
-                        TokKind::Less => depth += 1,
-                        TokKind::Greater => depth = depth.saturating_sub(1),
-                        TokKind::DoubleRightCaret => depth = depth.saturating_sub(2),
-                        TokKind::Eof => return false,
-                        _ => {}
-                    }
-                    if depth == 0
-                        && matches!(
-                            self.kind(j),
-                            TokKind::Greater | TokKind::DoubleRightCaret
-                        )
-                    {
-                        break;
-                    }
-                    j += 1;
-                }
-                let Some(after) = self.sig_next(j) else {
-                    return false;
-                };
-                matches!(
-                    self.kind(after),
-                    TokKind::LeftBrace | TokKind::LeftParenthesis | TokKind::SemiColon
-                )
-            }
-            _ => false,
-        }
+        parse::alias_decl_at(
+            |j| self.toks.get(j).map(|t| t.kind),
+            |j| {
+                self.sig(j)
+                    .is_some_and(|p| self.start_line(j) > self.end_line(p))
+            },
+            i,
+        )
     }
 
     /// Nesting depth per token: a `{`/`(`/`[`/`?[` raises it for what

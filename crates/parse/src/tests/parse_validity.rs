@@ -173,7 +173,7 @@ test_fail!(
     "#[test] const X = 1;",
     "#[unknown] fn foo() {}",
     "#[test] #[test] fn foo() {}",
-    "impl Foo { #[test] fn foo() {} }"
+    "impl Foo { #[test] fn foo(self) {} }"
 );
 
 // `assert!(expr)` -- parse-time rewrite; empty / extra args are rejected
