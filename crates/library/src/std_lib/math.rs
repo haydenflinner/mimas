@@ -37,6 +37,11 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add_assoc_of::<Vec2, _, _>("from_angle", vec2_from_angle);
     api.add_method_named("length", vec2_length);
     api.add_method_named("normalize", vec2_normalize);
+    // the game kit's short names, the same functions, so one `Vec2` serves
+    // both (r[impl mimas.math.vec2-names])
+    api.add_method_named("len", vec2_length);
+    api.add_method_named("norm", vec2_normalize);
+    api.add_method_named("dist", vec2_distance);
     api.add_method_named("add", vec2_add);
     api.add_method_named("sub", vec2_sub);
     api.add_method_named("scale", vec2_scale);
@@ -61,6 +66,9 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add_assoc_of::<Vec3, _, _>("new", vec3_new);
     api.add_method_named("length", vec3_length);
     api.add_method_named("normalize", vec3_normalize);
+    api.add_method_named("len", vec3_length);
+    api.add_method_named("norm", vec3_normalize);
+    api.add_method_named("dist", vec3_distance);
     api.add_method_named("add", vec3_add);
     api.add_method_named("sub", vec3_sub);
     api.add_method_named("mul", vec3_scale);

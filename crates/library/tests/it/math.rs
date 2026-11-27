@@ -99,3 +99,14 @@ test_run!(
     "int::MIN" => "-9223372036854775808",
     "int::MAX > 0 && int::MIN < 0" => "true",
 );
+
+test_run!(
+    // r[verify mimas.math.vec2-names]
+    // L9: the game kit's short names are the same functions
+    vec2_short_names,
+    "use std::math::Vec2;\nuse std::math::Vec3;",
+    "Vec2::new(3.0, 4.0).len()" => "5.0",
+    "Vec2::new(0.0, 2.0).norm().y" => "1.0",
+    "Vec2::new(0.0, 0.0).dist(Vec2::new(3.0, 4.0))" => "5.0",
+    "Vec3::new(0.0, 3.0, 4.0).len()" => "5.0",
+);
