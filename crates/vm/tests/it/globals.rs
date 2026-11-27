@@ -111,3 +111,14 @@ test_fail!(
      fn f() -> int { i }
      f();",
 );
+
+// two host calls into one fn see each other's write to a top-level `let`: the
+// slot is the entry frame's, so a memo or counter there lasts between calls.
+// r[verify mimas.global.host-call]
+#[test]
+fn host_calls_share_a_top_level_let() {
+    let mut vm = vm::Vm::compile("let c = 0;\nfn bump() -> int { c += 1; c }", |_| {}).unwrap();
+    vm.run().unwrap();
+    assert!(matches!(vm.call_fn("bump"), Some(Int(1))));
+    assert!(matches!(vm.call_fn("bump"), Some(Int(2))));
+}

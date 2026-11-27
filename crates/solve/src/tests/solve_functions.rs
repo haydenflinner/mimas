@@ -536,3 +536,45 @@ fn duplicate_fn_names_the_first_definition() {
         .expect_err("a second `fn g` should be an error");
     assert_eq!(err.to_string(), "`fn g` is already defined at line 1");
 }
+
+// a closure's write to a captured local changes its copy and is lost when the
+// call returns: SICP's `make-withdraw` compiled and answered wrong. The write
+// is refused, naming the binding.
+// r[verify mimas.closure.capture-write]
+#[test]
+fn closure_write_to_a_captured_local_is_refused() {
+    use super::solve_test_utils::*;
+    let _t = TestResetter;
+    let err = TEST_SESSION
+        .with(|s| {
+            s.borrow_mut().run(
+                "fn make_withdraw(start: int) -> (int) -> int {
+                    let b = start;
+                    |amount: int| { b -= amount; b }
+                }",
+                "test",
+            )
+        })
+        .expect_err("a write to a captured local should be an error");
+    assert_eq!(
+        err.to_string(),
+        "cannot assign to `b` here: this closure captured a copy of it"
+    );
+}
+// r[verify mimas.closure.capture-write]
+test_fail!(
+    nested_closure_write_to_outer_closure_local,
+    "fn f() -> int { let g = || { let n = 0; let h = || { n = 1; }; h(); n }; g() }"
+);
+// r[verify mimas.closure.capture-write]
+test_ty!(
+    closure_member_and_own_local_writes_stay_legal,
+    "struct S { b: int }
+     fn f() -> int {
+        let s = S { b = 1 };
+        let xs = [1, 2];
+        let g = |k: int| { let b = s.b; b += k; s.b = b; xs[0] = b; let k = k; k += 1; k };
+        g(2)
+     }",
+    "f" => func!(() -> Int)
+);

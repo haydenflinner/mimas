@@ -1068,22 +1068,34 @@ pub struct TraceMapChunk {
     pub locs: Vec<(u32, u32, u32, u32)>,
 }
 
-/// What [`Vm::call_batched`] saved of the caller's frame.
+/// Where [`Vm::call_batched`]'s callee returns: a scratch register pushed past the caller's
+/// window, so no live register of the caller (a top-level `let`'s slot) is written by the
+/// return.
 struct CallSlot {
-    caller_base: usize,
-    saved: Option<Stashed>,
+    /// Absolute index of the scratch register the callee returns into.
+    scratch: usize,
+    /// `regs.len()` before the scratch was pushed.
+    regs_len: usize,
 }
 
 impl CallSlot {
-    /// Put the caller's slot-0 value back.
-    fn restore<'gc>(self, ctx: Ctx<'gc>, thread: &mut ThreadState<'gc>) {
-        if let Some(saved) = self.saved
-            && ctx.holds(&saved)
-            && let Some(slot) = thread.regs.get_mut(self.caller_base)
-        {
-            *slot = ctx.fetch(&saved);
-        }
+    /// Take the callee's return value out of the scratch slot and drop the slot.
+    fn take<'gc>(self, thread: &mut ThreadState<'gc>) -> Option<Val<'gc>> {
+        let out = thread.regs.get(self.scratch).copied();
+        thread.regs.truncate(self.regs_len);
+        out
     }
+}
+
+/// Push a scratch register past the top frame's window for a host-made call to return into,
+/// and name it relative to the top frame's base. Returning into the caller's `r0` instead
+/// overwrote whatever lived there, and the old save-and-restore of `r0` undid a callee's write
+/// to a top-level `let` held in that slot. r[impl mimas.global.host-call]
+fn push_return_slot(thread: &mut ThreadState<'_>) -> (usize, Reg) {
+    let base = thread.frames.last().unwrap().base;
+    let scratch = thread.regs.len();
+    thread.regs.push(Val::Null);
+    (scratch, Reg::from((scratch - base) as u32))
 }
 
 impl Default for Vm {
@@ -1433,7 +1445,6 @@ fn unwind_cleanups<'gc>(
         thread
             .regs
             .truncate(base + chunks[owner.chunk].regs as usize);
-        let r0 = thread.regs[base];
         let (body, captures) = match cleanup.action {
             Val::Closure(c) => (c.0.function, Gc::as_ref(c.0).captures.as_slice()),
             Val::Fn(body) => (body, &[][..]),
@@ -1446,7 +1457,8 @@ fn unwind_cleanups<'gc>(
             continue;
         }
         calls.set(calls.get() + 1);
-        if enter_call(thread, code, chunks, body, Reg::ZERO, &[], captures).is_ok() {
+        let (_, dst) = push_return_slot(thread);
+        if enter_call(thread, code, chunks, body, dst, &[], captures).is_ok() {
             loop {
                 let ran = run_dispatch(
                     ctx,
@@ -1476,7 +1488,6 @@ fn unwind_cleanups<'gc>(
         );
         thread.frames.truncate(depth);
         thread.regs.truncate(regs);
-        thread.regs[base] = r0;
     }
     if !nested {
         thread.ops_left = old_ops;
@@ -2544,12 +2555,14 @@ fn inject_call_inner<'gc>(
     captures: &[Val<'gc>],
 ) -> Result<Val<'gc>, Error> {
     let mut thread = ctx.thread().borrow_mut(&ctx);
-    let base = thread.frames.last().unwrap().base;
     let (depth, regs, ip) = (thread.frames.len(), thread.regs.len(), code.ip);
-    // the callee returns into r0 of the entry body, which still needs its own value
-    let r0 = thread.regs[base];
-    // nothing is mutated before this fails, so the thread is untouched and needs no unwinding
-    enter_call(&mut thread, code, chunks, body, Reg::ZERO, values, captures).map_err(Error::msg)?;
+    // the callee returns into a scratch slot past the caller's window, never into a live
+    // register of the caller
+    let (scratch, dst) = push_return_slot(&mut thread);
+    if let Err(e) = enter_call(&mut thread, code, chunks, body, dst, values, captures) {
+        thread.regs.truncate(regs);
+        return Err(Error::msg(e));
+    }
     // A host-injected call isn't a frame: `paused` (yield_frame) must not
     // stop it partway, or the read of `regs[base]` below picks up garbage.
     // Run the callee to completion like `Vm::run` does — but if the callee
@@ -2598,7 +2611,9 @@ fn inject_call_inner<'gc>(
         // `with rng` scopes the unwound frames left behind restore here
         ctx.fixture::<crate::fixtures::Rng>().reconcile(depth);
     }
-    let value = std::mem::replace(&mut thread.regs[base], r0);
+    // a fault already truncated the scratch slot away
+    let value = thread.regs.get(scratch).copied().unwrap_or(Val::Null);
+    thread.regs.truncate(regs);
     drop(thread);
     ran?;
     Ok(value)
@@ -3214,11 +3229,9 @@ impl Vm {
         };
         let (slot, ran) = self.call_batched(body_id)?;
         self.arena.mutate(|mc, state| {
-            let ctx = state.ctx(mc);
             let mut thread = state.thread.borrow_mut(mc);
-            let out = ran.map(|_| thread.regs[slot.caller_base].capture());
-            slot.restore(ctx, &mut thread);
-            out
+            let ret = slot.take(&mut thread);
+            ran.map(|_| ret.unwrap_or(Val::Null).capture())
         })
     }
 
@@ -3236,24 +3249,22 @@ impl Vm {
             ..
         } = self;
         let ip = code.ip;
-        let (caller_base, saved, stop_depth, regs_len) = arena.mutate(|mc, state| {
-            let ctx = state.ctx(mc);
+        let (scratch, stop_depth, regs_len) = arena.mutate(|mc, state| {
             let mut thread = state.thread.borrow_mut(mc);
-            // The callee's return lands in `dst` of the caller's window —
-            // Reg::ZERO is the caller frame's slot 0, a *live* register once
-            // the entry body has run (a top-level `let`'s slot). A check
-            // run after `run()` would otherwise clobber the first global
-            // for the next caller, so save it (stashed: it must outlive this
-            // mutation) and restore it afterwards.
-            let caller_base = thread.frames.last().unwrap().base;
-            let saved = thread.regs.get(caller_base).map(|&v| ctx.stash(v));
+            // The callee returns into a scratch slot past the caller's
+            // window: the caller's slot 0 is a *live* register once the
+            // entry body has run (a top-level `let`'s slot), and a return
+            // into it clobbered the first global.
             let stop_depth = thread.frames.len() + 1;
             let regs_len = thread.regs.len();
-            enter_call(&mut thread, code, chunks, body_id, Reg::ZERO, &[], &[])
-                .map_err(Error::msg)?;
-            Ok::<_, Error>((caller_base, saved, stop_depth, regs_len))
+            let (scratch, dst) = push_return_slot(&mut thread);
+            if let Err(e) = enter_call(&mut thread, code, chunks, body_id, dst, &[], &[]) {
+                thread.regs.truncate(regs_len);
+                return Err(Error::msg(e));
+            }
+            Ok::<_, Error>((scratch, stop_depth, regs_len))
         })?;
-        let slot = CallSlot { caller_base, saved };
+        let slot = CallSlot { scratch, regs_len };
         // a host call isn't a frame: a yield inside it doesn't stop it (as in `inject_call`),
         // but the pause is relatched for the caller's next frame boundary
         self.arena.mutate(|_, state| state.paused.set(false));
@@ -3552,18 +3563,15 @@ impl Vm {
             return Err(miette::miette!("no fn {name}"));
         };
 
-        // Live calls run back-to-back: `call_batched` saves and restores the caller's slot 0,
-        // or each call would read the previous call's return value as its first global.
+        // Live calls run back-to-back: `call_batched` returns into a scratch slot, so no call
+        // reads the previous call's return value as its first global.
         let (slot, ran) = self.call_batched(body_id)?;
         let field_names = &self.field_names;
         let variant_ordinals = &self.variant_ordinals;
         let out = self.arena.mutate(|mc, state| {
-            let ctx = state.ctx(mc);
             let val = {
                 let mut thread = state.thread.borrow_mut(mc);
-                let ret = thread.regs.get(slot.caller_base).copied();
-                slot.restore(ctx, &mut thread);
-                ret
+                slot.take(&mut thread)
             };
             ran?;
             let val = val.unwrap_or(Val::Null);

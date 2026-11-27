@@ -3690,6 +3690,27 @@ impl Solver {
                     _ => {}
                 }
 
+                // `b -= 1` inside a closure, where `b` is a local of an
+                // enclosing body: the closure holds a copy of `b`, so the
+                // write changes that call's copy and the next call starts
+                // from the captured value again. The write can never be
+                // seen, so it is refused. A member or slot write (`s.b = v`,
+                // `xs[i] = v`) reaches the shared value and stays legal, and
+                // a top-level `let` is not captured at all (closures address
+                // the entry frame's slot directly).
+                // r[impl mimas.closure.capture-write]
+                if matches!(left.kind(), ExprKind::Ident(_))
+                    && matches!(self.decs[dec_id].kind, DecKind::Local)
+                    && let Some((_, crossed)) = self.ribs.resolve_with_closures(root)
+                    && !crossed.is_empty()
+                {
+                    Err(crate::errors::AssignToCapture {
+                        src: self.src(left.location()),
+                        at: left.location().into(),
+                        name: root.lexeme.clone(),
+                    })?
+                }
+
                 // `xs = v` rebinds a name an in-place `for r in &xs` lent
                 // element places out of -- under that freeze the name IS the
                 // loan, so reassigning it is the same refusal `xs.push`

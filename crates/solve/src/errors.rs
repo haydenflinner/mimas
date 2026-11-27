@@ -790,6 +790,21 @@ pub struct AssignToLoopVar {
     pub name: String,
 }
 
+/// A closure's write to a name it captured: the closure holds a copy, so the
+/// write is lost when the call returns. r[impl mimas.closure.capture-write]
+#[derive(Error, Debug, Diagnostic)]
+#[error("cannot assign to `{name}` here: this closure captured a copy of it")]
+#[diagnostic(help(
+    "the write changes only this call's copy, and the next call starts from the captured value again. Keep the state in a struct field (`s.{name} = …` reaches the shared value), return the new value, or bind a fresh local first (`let {name} = {name};`) if the change is meant to stay inside this call"
+))]
+pub struct AssignToCapture {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("`{name}` belongs to an enclosing body")]
+    pub at: SourceSpan,
+    pub name: String,
+}
+
 #[derive(Error, Debug, Diagnostic)]
 #[error("cannot mutate `{name}` while iterating over it")]
 #[diagnostic(help(
