@@ -112,6 +112,9 @@ pub struct Solver {
     pub(crate) run_once_closures: FxHashSet<NodeId>,
     /// The pact whose `impl` block is hoisting its members, if any (C3).
     pub(crate) hoisting_pact: Option<PactId>,
+    /// `S::default()` calls a field-default rewrite made: the memberwise
+    /// default under `..` (`mimas.struct.field-default`).
+    pub(crate) plain_default_calls: FxHashSet<NodeId>,
     /// Each impl member a pact owns: its dec and the pact (C3). A member whose
     /// name another member of the type already holds lives under the key
     /// `name@Pact` in `Adt::impls`.
@@ -453,6 +456,7 @@ impl Solver {
             closure_captures: FxIndexMap::default(),
             run_once_closures: FxHashSet::default(),
             hoisting_pact: None,
+            plain_default_calls: FxHashSet::default(),
             member_pact: FxHashMap::default(),
             ambiguous_members: FxHashMap::default(),
             inout_params: FxHashSet::default(),
@@ -3426,6 +3430,32 @@ impl Solver {
                     .iter()
                     .zip(tys.iter())
                     .try_for_each(|(pat, ty)| self.solve_pat(pat, ty.clone()))
+            }
+            // `let P { x, y = b } = p`: each field's value binds its
+            // sub-pattern (C10) r[impl mimas.struct.let-pattern]
+            (PatKind::Struct(head, fields), Ty::Adt(aid, args) | Ty::Identity(aid, args))
+                if self.adts[aid].try_as_struct().is_some()
+                    && self
+                        .resolve_path_head(head)
+                        .ok()
+                        .and_then(|t| t.normalized(self).as_adt().copied())
+                        == Some(aid) =>
+            {
+                let variant = self.adts[aid].try_as_struct().cloned().unwrap();
+                for (name, sub) in fields {
+                    let Some(field) = variant.fields.get(name) else {
+                        return Err(FieldNotFound {
+                            src: self.src(pat.location()),
+                            at: pat.location().into(),
+                            field_name: name.clone(),
+                        }
+                        .into());
+                    };
+                    let ty = self.specialize(&field.ty, aid, &args);
+                    self.solve_pat(sub, ty)?;
+                }
+                self.shadow_expr_ty(head.id(), Ty::adt(aid), head.location())?;
+                Ok(())
             }
             (a, b) => Err(InvalidPattern {
                 src: self.src(pat.location()),

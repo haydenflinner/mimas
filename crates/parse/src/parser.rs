@@ -150,6 +150,12 @@ pub struct Parser<'s> {
     /// A top-level parse keeps its source so it can run a second pass when
     /// a reflection call must see a declaration below it.
     rerun: Option<reflect::Rerun<'s>>,
+    /// Pattern parameters of the `fn` signature being read, each with the
+    /// synthetic parameter that carries it (`mimas.fn.pattern-param`).
+    param_prologue: Vec<(Pat, Ident)>,
+    /// `x: int = 0` in the struct body being read: each field's default, for
+    /// the `__dflt_S_x` fn the struct desugars it to (`mimas.struct.field-default`).
+    field_defaults: Vec<(String, Annotation, Expr, usize)>,
     /// The `//# page: NAME` regions of a spliced source, `(byte start,
     /// name)`; empty for a source without marks and for a sub-parse.
     regions: Vec<(usize, String)>,
@@ -369,6 +375,8 @@ impl<'s> Parser<'s> {
             shadow: lexer.shadow_table().to_vec(),
             pending: Vec::new(),
             pending_marks: Vec::new(),
+            param_prologue: Vec::new(),
+            field_defaults: Vec::new(),
             regions: if lexer.offset() == 0 && relocate.is_none() {
                 page_regions(lexer.source())
             } else {
@@ -1879,6 +1887,7 @@ impl<'s> Parser<'s> {
         self.advance();
         let name = self.require_ident();
         let type_params = self.type_params();
+        let outer_defaults = std::mem::take(&mut self.field_defaults);
         let mut items = vec![];
         let fields = if self.eat(TokKind::SemiColon) {
             vec![]
@@ -1923,6 +1932,40 @@ impl<'s> Parser<'s> {
             self.expect(TokKind::LeftBrace);
             vec![]
         };
+        // r[impl mimas.struct.field-default]
+        // each field default becomes `fn __dflt_S_x() -> T { value }`; a
+        // literal that leaves `x` out, and `S::default()`, call it
+        let defaults = std::mem::replace(&mut self.field_defaults, outer_defaults);
+        for (field, annotation, value, at) in defaults {
+            if self.depth != 1 {
+                self.error(Misdirection {
+                    src: self.src(),
+                    at: self.location(at).into(),
+                    msg: "a nested struct's fields take no default".into(),
+                    label: "declare the struct at the top of the file".into(),
+                });
+                continue;
+            }
+            let loc = self.location(at);
+            let body = Expr::new(
+                ExprKind::Block(Block {
+                    body: vec![],
+                    yielded_expr: Some(value),
+                }),
+                loc,
+            );
+            let f = Function {
+                name: Ident::new(format!("__dflt_{}_{field}", name.lexeme), loc),
+                role: FnRole::Fn,
+                type_params: vec![],
+                parameters: vec![],
+                wheres: vec![],
+                return_type: Some(annotation),
+                body,
+            };
+            let item = Item::new(f.into(), loc, false);
+            self.pending.push(self.new_stmt(item, at));
+        }
         // r[impl mimas.struct.members]
         // members in the braces attach the way an `impl` would: the decl
         // stays a shape, and its items land as a synthesized `impl V {…}`
@@ -2041,6 +2084,13 @@ impl<'s> Parser<'s> {
         let name = self.require_ident();
         self.expect(TokKind::Colon);
         let annotation = self.annotation();
+        // `x: int = 0` -- a default a literal may leave the field to
+        // r[impl mimas.struct.field-default]
+        if self.eat(TokKind::Equal) {
+            let value = self.expr();
+            self.field_defaults
+                .push((name.lexeme.clone(), annotation.clone(), value, start));
+        }
         StructField {
             name: FieldKey::Ident(name),
             annotation,
@@ -2828,10 +2878,26 @@ impl<'s> Parser<'s> {
             let mut first = true;
             self.list(
                 TokKind::RightParenthesis,
-                |kind| kind == TokKind::SelfKeyword || kind.is_ident(),
+                |kind| {
+                    kind == TokKind::SelfKeyword
+                        || kind.is_ident()
+                        || kind == TokKind::LeftParenthesis
+                },
                 |p| {
                     // only the first parameter can be the receiver
                     let receiver = std::mem::replace(&mut first, false);
+                    // `fn f((a, b): (int, int))`: a pattern parameter is a
+                    // synthetic `__argN` and a `let` prologue in the body, as a
+                    // closure's is. r[impl mimas.fn.pattern-param]
+                    if p.at(TokKind::LeftParenthesis) {
+                        let pat = p.match_pat_atom();
+                        let n = p.param_prologue.len() + 1;
+                        let tmp = Ident::new(format!("__arg{n}"), pat.location());
+                        let mut binding = Binding::new(tmp.clone());
+                        binding.annotation = p.eat(TokKind::Colon).then(|| p.annotation());
+                        p.param_prologue.push((pat, tmp));
+                        return binding;
+                    }
                     // `fn f(inout self)` -- the receiver lent like a `&` arg, so
                     // `self = next` inside writes back the caller's slot. The
                     // parser sugar-expands it to `self: inout Self`.
@@ -2854,6 +2920,22 @@ impl<'s> Parser<'s> {
                         return binding;
                     }
                     let mut binding = p.binding();
+                    // a type that failed to parse (`f: fn(int) -> bool`) leaves its
+                    // tail: skip it to the next `,` so a `(` there does not read
+                    // as a pattern parameter
+                    if matches!(binding.annotation, Some(Annotation::Poison(_))) {
+                        while !matches!(
+                            p.peek(),
+                            TokKind::Comma | TokKind::RightParenthesis | TokKind::Eof
+                        ) {
+                            match p.closer_of(p.next) {
+                                Some(close) if p.at(TokKind::LeftParenthesis) => p.next = close + 1,
+                                _ => {
+                                    p.advance();
+                                }
+                            }
+                        }
+                    }
                     binding.right = p.eat(TokKind::Equal).then(|| p.expr());
                     if let Some(default) = binding.right.as_ref().filter(|_| !defaults) {
                         p.error(PactSigDefaultParam {
@@ -2911,7 +2993,9 @@ impl<'s> Parser<'s> {
 
     fn ordinary_function_with(&mut self, prefix: Option<&str>) -> Function {
         let start = self.next_start();
+        let outer = std::mem::take(&mut self.param_prologue);
         let (name, type_params, parameters, return_type) = self.function_sig(true, prefix);
+        let prologue = std::mem::replace(&mut self.param_prologue, outer);
         let wheres = self.where_clause();
         let body = if self.at(TokKind::LeftBrace) {
             let shown = match prefix {
@@ -2930,6 +3014,36 @@ impl<'s> Parser<'s> {
             self.poison_expr(self.cursor())
         };
 
+        // r[impl mimas.fn.pattern-param]
+        let body = if prologue.is_empty() {
+            body
+        } else {
+            let lets = prologue
+                .into_iter()
+                .map(|(pat, tmp)| {
+                    let loc = pat.location();
+                    Stmt::new(
+                        Let {
+                            left: pat,
+                            annotation: None,
+                            right: Expr::new(ExprKind::Ident(Ident::new(tmp.lexeme, loc)), loc),
+                            else_branch: None,
+                        }
+                        .into(),
+                        NodeId::new(),
+                        loc,
+                    )
+                })
+                .collect();
+            let at = body.location();
+            Expr::new(
+                ExprKind::Block(Block {
+                    body: lets,
+                    yielded_expr: Some(body),
+                }),
+                at,
+            )
+        };
         Function {
             name,
             role: FnRole::Fn,
@@ -6820,42 +6934,15 @@ impl<'s> Parser<'s> {
                         // matches any field it doesn't mention, so it binds
                         // nothing; it just reads as the omission it is
                         let starts = |k: TokKind<'s>| k.is_ident() || k == TokKind::DoubleDot;
-                        let head_span = head_expr.span();
                         let fields = self.list(TokKind::RightBrace, starts, |p| {
                             if p.eat(TokKind::DoubleDot) {
                                 return None;
                             }
                             let name = p.require_ident();
-                            let sub = if p.eat(TokKind::Equal) {
-                                p.pattern()
-                            } else if p.at(TokKind::Colon) {
-                                // r[impl mimas.struct.pattern-eq]
-                                // `P { x: a }` is the literal's spelling; a
-                                // pattern renames a field with `=`. Teach the
-                                // spelling, then parse the pattern anyway so
-                                // the rest of the file still checks.
-                                let colon = p.next_location();
-                                p.advance();
-                                let binding = match p.peek() {
-                                    TokKind::Ident(b) => b.to_string(),
-                                    _ => "…".into(),
-                                };
-                                let head = {
-                                    let src = p.src();
-                                    src.inner()
-                                        .get(head_span.start()..head_span.end())
-                                        .unwrap_or("_")
-                                        .to_string()
-                                };
-                                p.error(Misdirection {
-                                    src: p.src(),
-                                    at: colon.into(),
-                                    msg: "a pattern renames a field with `=`".into(),
-                                    label: format!(
-                                        "write `{head} {{ {name} = {binding} }}`",
-                                        name = name.lexeme
-                                    ),
-                                });
+                            // r[impl mimas.struct.pattern-eq]
+                            // `P { x = a }` and the literal's `P { x: a }`
+                            // both rename the field `x` to `a`
+                            let sub = if p.eat(TokKind::Equal) || p.eat(TokKind::Colon) {
                                 p.pattern()
                             } else {
                                 // r[impl mimas.struct.shorthand]

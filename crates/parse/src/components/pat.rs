@@ -97,7 +97,7 @@ impl Display for PatKind {
             PatKind::Ident(ident) => f.pad(&ident.to_string()),
             PatKind::Struct(path, fields) => f.pad(&format!(
                 "{path} {{ {} }}",
-                fields.iter().map(|(k, v)| format!("{k}: {v}")).join(", ")
+                fields.iter().map(|(k, v)| if k == &v.to_string() { k.to_string() } else { format!("{k} = {v}") }).join(", ")
             )),
             PatKind::TupleVariant(path, p) => f.pad(&format!(
                 "{path}({})",

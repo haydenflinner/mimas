@@ -337,6 +337,23 @@ impl Ir {
                 }
                 Some(())
             }
+            // `let P { x, y = b } = p` (C10) r[impl mimas.struct.let-pattern]
+            PatKind::Struct(head, fields) => {
+                let adt = match ir.resolutions.node_tys.get(&head.id()) {
+                    Some(Ty::Adt(adt, _) | Ty::Identity(adt, _)) => *adt,
+                    _ => unreachable!("the solver typed a let struct pattern's head"),
+                };
+                for (name, sub) in fields {
+                    let slot = ir.resolutions.adts[adt]
+                        .fields
+                        .iter()
+                        .position(|f| f == name)
+                        .expect("the solver checked the field") as u32;
+                    let value = value.map(|v| ir.current().get_field(v, slot, AccessKind::Direct));
+                    ir.pattern(sub, value)?;
+                }
+                Some(())
+            }
             _ => todo!(),
         })
     }

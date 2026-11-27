@@ -3664,6 +3664,45 @@ impl Solve for Literal {
                     }
                 };
 
+                // a field the literal leaves out takes its declared default,
+                // `__dflt_S_x()` (r[impl mimas.struct.field-default])
+                if base.is_none() && layout == adt {
+                    let given: Vec<String> = fields.iter().map(|(k, _)| k.to_string()).collect();
+                    let sname = solver.adts[adt].name.clone();
+                    let mut extra = vec![];
+                    for (f, field) in variant.fields.0.iter() {
+                        if field.constant || given.contains(f) {
+                            continue;
+                        }
+                        let at = name.location();
+                        let callee = Ident::new(format!("__dflt_{sname}_{f}"), at);
+                        if solver.ribs.resolve(&callee).is_some() {
+                            let call = Expr::new(
+                                ExprKind::Call(Call {
+                                    left: Expr::new(ExprKind::Ident(callee), at),
+                                    arguments: vec![],
+                                }),
+                                at,
+                            );
+                            extra.push((FieldKey::Ident(Ident::new(f.clone(), at)), call));
+                        }
+                    }
+                    if !extra.is_empty() {
+                        let mut all = fields.clone();
+                        all.extend(extra);
+                        let rewritten = Expr::new(
+                            ExprKind::Literal(Literal::Struct(StructLiteral {
+                                name: name.clone(),
+                                fields: all,
+                                base: None,
+                            })),
+                            location,
+                        );
+                        let ty = rewritten.query(solver)?;
+                        solver.rewrites.insert(_id, rewritten);
+                        return Ok(ty);
+                    }
+                }
                 let keyed: Vec<(FieldKey, &Expr)> =
                     fields.iter().map(|(k, v)| (k.clone(), v)).collect();
                 let ty = struct_fields(
@@ -4364,6 +4403,55 @@ fn default_ctor(
             name: name.clone(),
             reason: "it takes no arguments".into(),
         })?
+    }
+    // a struct with field defaults: `S::default()` is `S { x = __dflt_S_x(),
+    // ..<the memberwise default> }` (r[impl mimas.struct.field-default])
+    if !solver.plain_default_calls.contains(&id)
+        && let ExprKind::Access(Access::DoubleColon { left, .. }) = call.left.kind()
+        && let Some(variant) = solver.adts[aid].try_as_struct().cloned()
+    {
+        let at = call.left.location();
+        let fields: Vec<(FieldKey, Expr)> = variant
+            .fields
+            .0
+            .iter()
+            .filter(|(_, f)| !f.constant)
+            .filter_map(|(f, _)| {
+                let callee = Ident::new(format!("__dflt_{name}_{f}"), at);
+                solver.ribs.resolve(&callee)?;
+                Some((
+                    FieldKey::Ident(Ident::new(f.clone(), at)),
+                    Expr::new(
+                        ExprKind::Call(Call {
+                            left: Expr::new(ExprKind::Ident(callee), at),
+                            arguments: vec![],
+                        }),
+                        at,
+                    ),
+                ))
+            })
+            .collect();
+        if !fields.is_empty() {
+            let inner = Expr::new(
+                ExprKind::Call(Call {
+                    left: call.left.clone(),
+                    arguments: vec![],
+                }),
+                at,
+            );
+            solver.plain_default_calls.insert(inner.id());
+            let rewritten = Expr::new(
+                ExprKind::Literal(Literal::Struct(StructLiteral {
+                    name: left.clone(),
+                    fields,
+                    base: Some(inner),
+                })),
+                at,
+            );
+            let ty = rewritten.query(solver)?;
+            solver.rewrites.insert(id, rewritten);
+            return Ok(ty);
+        }
     }
     let ty = solver.instantiated_adt(aid);
     let args = match &ty {

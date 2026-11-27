@@ -1206,7 +1206,9 @@ test_recover!(
     "fn apply(f: impl Fn, x: int) -> bool { f(x) }
      let x = 1;",
     errors: ["a function type is written `(int) -> bool`"],
-    stmts: ["fn apply(f: <poison>, Fn, x: int) -> bool {f(x) }", "let x = 1;"],
+    // the failed type's tail (`Fn`) is skipped to the next `,` since a
+    // `(` there could start a pattern parameter (mimas.fn.pattern-param)
+    stmts: ["fn apply(f: <poison>, x: int) -> bool {f(x) }", "let x = 1;"],
 );
 
 // an infix operator leading a line names the two repairs
