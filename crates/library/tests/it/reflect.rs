@@ -32,7 +32,8 @@ test_run!(
     // a doc comment of two lines is one line of text
     "sig!(hyp).doc" => "\"The long side of a right triangle with short sides `a` and `b`.\"",
     "sig!(hyp).params.map(|p| p.name).join(\",\")" => "\"a,b\"",
-    "sig!(hyp).marks" => "[\"machine\"]",
+    "sig!(hyp).marks.map(|m| m.name)" => "[\"machine\"]",
+    "sig!(hyp).marks[0].args.len()" => "0",
     "sig!(double).marks.len()" => "0",
     // no return type is `()`, no params is no params
     "sig!(shout).ret" => "\"()\"",
@@ -127,9 +128,9 @@ test_fail!(
     "#[tets]\nfn f() -> int { 1 }\nlet TEST_VALUE = f();",
     // a mark goes on a top-level function only
     "#[machine]\nstruct S { x: int }\nlet m = fns!(machine);\nlet TEST_VALUE = 1;",
-    // the name must be a function declared above the call
-    "let TEST_VALUE = sig!(later).name;\nfn later() -> int { 1 }",
+    // the name must be declared somewhere
     "let TEST_VALUE = sig!(nothing).name;",
+    "let TEST_VALUE = sig!(Nothing::m).name;",
     "struct S { x: int }\nlet TEST_VALUE = sig!(S).name;",
     "let TEST_VALUE = fields!(Nothing).len();",
     "let TEST_VALUE = variants!(Nothing).len();",
@@ -156,6 +157,28 @@ test_run!(
 );
 
 test_run!(
+    // r[verify mimas.reflect.mark-args]
+    // a mark with arguments: identifiers, strings (escapes read), numbers and
+    // bools, each as text; `fns!` still picks by the mark's name
+    a_mark_carries_its_arguments,
+    "/// Tidy the page.\n#[command(\"f s\", \"tidy \\\"it\\\"\")]\nfn tidy() { }\n#[on(click, -2, 1.5, true)]\nfn press() { }\n#[command]\nfn bare() { }\nlet CMDS = fns!(command);\nlet ONS = fns!(on);",
+    "CMDS.map(|f| f.name)" => "[\"tidy\", \"bare\"]",
+    "CMDS[0].marks[0].name" => "\"command\"",
+    "CMDS[0].marks[0].args[0]" => "\"f s\"",
+    "CMDS[0].marks[0].args[1].len()" => "9",
+    "CMDS[0].doc" => "\"Tidy the page.\"",
+    "CMDS[1].marks[0].args.len()" => "0",
+    "ONS[0].marks[0].args" => "[\"click\", \"-2\", \"1.5\", \"true\"]",
+);
+
+test_fail!(
+    // r[verify mimas.reflect.mark-args]
+    // the attributes the language reads itself take no arguments
+    a_language_attribute_takes_no_arguments,
+    "#[test(x)]\nfn t() { }\nlet TEST_VALUE = 1;"
+);
+
+test_run!(
     // r[verify mimas.reflect.sig]
     // a `>>` earlier in the source once moved every later doc comment
     // off its item
@@ -163,6 +186,32 @@ test_run!(
     "struct Pair<A, B> { a: A, b: B }\nfn wrap(p: Pair<int, Pair<int, int>>) -> int { 1 }\n/// Still here.\nfn after() -> int { 2 }",
     "sig!(after).doc" => "\"Still here.\"",
     "sig!(wrap).params[0].ty" => "\"Pair<int, Pair<int, int>>\"",
+);
+
+test_run!(
+    // r[verify mimas.reflect.below]
+    // a call sees the declarations below it in its own file: the old
+    // "declared before this `sig!`" error, on purpose, is gone
+    reflection_sees_below_the_call,
+    "let EARLY = fns!(cmd);\nlet S = sig!(later);\nlet F = fields!(Late);\nlet V = variants!(Mode);\n#[cmd]\nfn later() -> int { 1 }\nstruct Late { a: int, b: str }\nenum Mode { A, B(int) }\n#[cmd]\nfn last() { }",
+    "EARLY.map(|f| f.name)" => "[\"later\", \"last\"]",
+    "S.ret" => "\"int\"",
+    "F.map(|f| f.name)" => "[\"a\", \"b\"]",
+    "V.len()" => "2",
+);
+
+test_run!(
+    // r[verify mimas.reflect.methods]
+    // methods count as `Type::name`, from an `impl` and from a struct body,
+    // and a mark on a method reads back through `fns!`
+    reflection_sees_methods,
+    "struct Ball { x: int }\nimpl Ball {\n    /// One step.\n    #[command(\"b s\")]\n    fn step(self, by: int) -> Ball { Ball { x: self.x + by } }\n    fn origin() -> Ball { Ball { x: 0 } }\n}\nstruct Pen {\n    w: int,\n    #[command]\n    fn widen(self) -> Pen { Pen { w: self.w + 1 } }\n}\nlet CMDS = fns!(command);",
+    "sig!(Ball::step).name" => "\"Ball::step\"",
+    "sig!(Ball::step).doc" => "\"One step.\"",
+    "sig!(Ball::step).params.map(|p| p.name)" => "[\"self\", \"by\"]",
+    "sig!(Ball::origin).ret" => "\"Ball\"",
+    "CMDS.map(|f| f.name)" => "[\"Ball::step\", \"Pen::widen\"]",
+    "CMDS[0].marks[0].args" => "[\"b s\"]",
 );
 
 const GRAPH: &str = r#"
@@ -216,8 +265,15 @@ test_run!(
 test_fail!(
     // r[verify mimas.reflect.visible]
     graph_errors,
-    "let TEST_VALUE = graph!(later).name;\nfn later() -> int { 1 }",
     "let TEST_VALUE = graph!(nothing).name;",
+);
+
+test_run!(
+    // r[verify mimas.reflect.below]
+    // `graph!` sees a function below it too (this was an error before)
+    graph_sees_below,
+    "let G = graph!(later);\nfn later(a: int) -> int { a }",
+    "G.name" => "\"later\"",
 );
 
 // r[verify mimas.reflect.for-fields]

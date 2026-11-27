@@ -44,11 +44,16 @@ opp StartEnd { Start "⇤", End "⇥" }
 /// One parameter of a function.
 struct FnParam { name: str, ty: str, inout: bool }
 
+/// A mark on a function: `#[machine]` is `FnMark { name = "machine",
+/// args = [] }`, and `#[command("f s", "tidy")]` carries its arguments as
+/// text, `args = ["f s", "tidy"]`.
+struct FnMark { name: str, args: [str] }
+
 /// A function as data: its name, its parameters, its return type, its
 /// doc comment on one line, and the marks (`#[machine]`) it carries.
 /// `writes` is the derived write set: the param paths a call may
 /// mutate, like `w.tour.step` or `xs` for a whole binding.
-struct FnSig { name: str, params: [FnParam], ret: str, doc: str, marks: [str], writes: [str] }
+struct FnSig { name: str, params: [FnParam], ret: str, doc: str, marks: [FnMark], writes: [str] }
 
 /// One field of a struct, or of an enum variant. A variant written
 /// `Num(float)` has the field names `0`, `1`, ….

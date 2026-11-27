@@ -127,6 +127,9 @@ pub struct Parser<'s> {
     /// marks for `fns!` to read. One that no `fns!` call reads by the end
     /// of the source is an unknown attribute (`reflect::unread_marks`).
     pending_marks: Vec<(String, Location)>,
+    /// A top-level parse keeps its source so it can run a second pass when
+    /// a reflection call must see a declaration below it.
+    rerun: Option<reflect::Rerun<'s>>,
     /// One entry per token in `tokens`: how the token sits against the one
     /// before it, and which macro expansion wrote it. The parser asks this,
     /// not the spans, whether two tokens touch or a line breaks between
@@ -343,6 +346,13 @@ impl<'s> Parser<'s> {
             shadow: lexer.shadow_table().to_vec(),
             pending: Vec::new(),
             pending_marks: Vec::new(),
+            rerun: (lexer.offset() == 0 && relocate.is_none()).then(|| reflect::Rerun {
+                source: lexer.source(),
+                file_id: lexer.file_id(),
+                file_name: lexer.file_name().to_string(),
+                shadow: lexer.shadow_table().to_vec(),
+                start: None,
+            }),
             file_id: lexer.file_id(),
             file_name: lexer.file_name().into(),
             src,
@@ -380,6 +390,9 @@ impl<'s> Parser<'s> {
     }
 
     fn into_ast_inner(mut self, prelude: bool) -> (Ast, Vec<shared::Error>) {
+        if let Some(rerun) = &mut self.rerun {
+            reflect::begin_first_pass(rerun);
+        }
         let mut statements = vec![];
         while !self.at(TokKind::Eof) {
             if let Some(err) = self.line_start_plusminus() {
@@ -390,6 +403,21 @@ impl<'s> Parser<'s> {
             } else {
                 self.reject_stmt(self.stray_stmt_token());
             }
+        }
+        // a reflection call that must see below itself: run the file again
+        // with this pass's declarations ahead. r[impl mimas.reflect.below]
+        if let Some(rerun) = self.rerun.take()
+            && reflect::finish_first_pass()
+            && let Some(start) = rerun.start
+        {
+            reflect::begin_second_pass(start);
+            let lexer = Lexer::new(rerun.source, rerun.file_id, rerun.file_name)
+                .with_shadow_table(rerun.shadow);
+            let mut second = Parser::with_src(lexer, self.src.clone());
+            second.rerun = None;
+            let out = second.into_ast_inner(prelude);
+            reflect::end_second_pass();
+            return out;
         }
         self.unread_marks();
         // the prelude rides ahead of the file, but only the items the file
@@ -954,18 +982,59 @@ impl<'s> Parser<'s> {
         attrs
     }
 
+    /// `#[name]`, or `#[name(arg, …)]` with arguments a mark carries to
+    /// `FnSig.marks`. An argument is an identifier, a string, a number
+    /// (`-` allowed) or `true`/`false`.
+    // r[impl mimas.reflect.mark-args]
     fn attribute(&mut self) -> Attribute {
         self.bump(TokKind::Hash);
         self.expect(TokKind::LeftSquare);
         let name = self.require_ident();
+        let mut args = vec![];
+        if self.eat(TokKind::LeftParenthesis) {
+            while !self.at(TokKind::RightParenthesis) && !self.at(TokKind::Eof) {
+                let neg = self.eat(TokKind::Minus);
+                let arg = match self.peek() {
+                    TokKind::Int(n) if neg => format!("-{n}"),
+                    TokKind::Float(x) if neg => format!("-{x}"),
+                    _ if neg => {
+                        self.error(self.unexpected_token());
+                        break;
+                    }
+                    TokKind::Ident(id) => id.to_string(),
+                    TokKind::String(s) => chompy::utils::unescape(s, &['\\'], &['"']),
+                    TokKind::Int(n) => n.to_string(),
+                    TokKind::Float(x) => x.to_string(),
+                    TokKind::True => "true".to_string(),
+                    TokKind::False => "false".to_string(),
+                    _ => {
+                        self.error(self.unexpected_token());
+                        break;
+                    }
+                };
+                self.advance();
+                args.push(arg);
+                if !self.eat(TokKind::Comma) {
+                    break;
+                }
+            }
+            self.expect(TokKind::RightParenthesis);
+        }
         self.expect(TokKind::RightSquare);
-        Attribute { name }
+        Attribute { name, args }
     }
 
     fn validate_attrs(&mut self, attrs: &[Attribute], kind: &ItemKind, allow_test: bool) {
         let mut seen_test = false;
         let mut seen_tests = false;
         for attr in attrs {
+            if !attr.args.is_empty() && matches!(attr.name.lexeme.as_str(), "test" | "tests" | "scans") {
+                self.error(AttributeTakesNoArguments {
+                    src: self.src(),
+                    at: attr.name.location.into(),
+                    name: attr.name.lexeme.clone(),
+                });
+            }
             match attr.name.lexeme.as_str() {
                 "test" => {
                     if seen_test {
@@ -1035,10 +1104,10 @@ impl<'s> Parser<'s> {
                         });
                     }
                 }
-                // A mark on a top-level function, for `fns!(name)` to read.
-                // It is judged at the end of the source: a mark nothing
-                // reads is an unknown attribute.
-                _ if allow_test && matches!(kind, ItemKind::Function(f) if !f.is_method()) => {
+                // A mark on a function or a method, for `fns!(name)` to
+                // read. It is judged at the end of the source: a mark
+                // nothing reads is an unknown attribute.
+                _ if allow_test && matches!(kind, ItemKind::Function(_)) => {
                     self.pending_marks
                         .push((attr.name.lexeme.clone(), attr.name.location));
                 }
@@ -1840,6 +1909,7 @@ impl<'s> Parser<'s> {
                     None,
                     items,
                 );
+                self.record_impl_members(&imp);
                 self.pending
                     .push(self.new_stmt(Item::new(imp.into(), at, false), start));
             } else {
@@ -2541,6 +2611,7 @@ impl<'s> Parser<'s> {
         )
         .with_attrs(vec![Attribute {
             name: Ident::new("space", at),
+            args: vec![],
         }]);
         self.new_stmt(item, start)
     }

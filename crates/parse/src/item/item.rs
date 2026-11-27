@@ -45,6 +45,10 @@ declare_item_kinds!(
 #[derive(Debug, Clone, PartialEq)]
 pub struct Attribute {
     pub name: Ident,
+    /// `#[command("f s", "tidy the page")]`: each argument as text. An
+    /// identifier is its name, a string its contents (escapes read), a number
+    /// or `true`/`false` as written. A bare `#[mark]` has none.
+    pub args: Vec<String>,
 }
 
 /// A wrapper around an [ItemKind], containing additional information discovered while parsing.

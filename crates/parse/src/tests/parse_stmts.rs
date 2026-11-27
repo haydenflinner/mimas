@@ -1187,6 +1187,7 @@ stmt_test!(
         .into_item()
         .with_attrs(vec![Attribute {
             name: ident!("test"),
+            args: vec![],
         }])
 );
 
@@ -1197,6 +1198,7 @@ stmt_test!(
         .into_item()
         .with_attrs(vec![Attribute {
             name: ident!("test"),
+            args: vec![],
         }])
         .with_public()
 );

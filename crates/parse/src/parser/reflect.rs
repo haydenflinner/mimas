@@ -33,10 +33,17 @@
 //! (a `match`, a loop, an operator) is not dataflow: the answer's
 //! `opaque` is true and `why` says what the body was instead.
 //!
-//! The answer is what the parser has read so far: a declaration is
-//! visible after it, in the same file and in every file of the program
-//! parsed after it, as a macro is. Types are text, as written. Only
-//! top-level functions count, not methods.
+//! A call sees every declaration of its own file, above it or below it,
+//! and every declaration of the files of the program parsed before it.
+//! Types are text, as written. A method counts as `Type::name`:
+//! `sig!(Ball::step)`, and `fns!` lists marked methods by that name.
+//!
+//! Seeing below works in two passes. The first pass answers from what it
+//! has read so far, and remembers each answer. At the end of the file it
+//! asks again with the whole file read. When an answer changed, or a name
+//! was missing, the file parses a second time with the first pass's table
+//! as the declarations "ahead", and only then is a missing name an error.
+//! A file whose calls all look upward parses once.
 //!
 //! A mark on a function is an attribute nobody else knows: `#[machine]`.
 //! It is legal when some `fns!(machine …)` in the program reads it, so a
@@ -51,7 +58,7 @@ mod for_fields;
 
 use super::macros::Spot;
 use super::*;
-use std::{cell::RefCell, collections::HashSet};
+use std::{cell::RefCell, collections::HashSet, rc::Rc};
 
 /// A name and its type as written: a parameter, or a field.
 #[derive(Clone)]
@@ -69,10 +76,12 @@ struct FnRec {
     params: Vec<Named>,
     ret: String,
     doc: String,
-    marks: Vec<String>,
+    /// Each mark's name and its arguments as text: `#[command("f s")]` is
+    /// `("command", ["f s"])`.
+    marks: Vec<(String, Vec<String>)>,
     /// The body as parsed. `graph!` lowers it to a dataflow; the other
-    /// macros never look at it.
-    body: Option<Expr>,
+    /// macros never look at it. Shared: a table snapshot clones every rec.
+    body: Option<Rc<Expr>>,
 }
 
 #[derive(Clone)]
@@ -94,6 +103,135 @@ pub(super) struct Decls {
     pacts: Vec<(String, Vec<String>)>,
     /// Every mark some `fns!` call has asked for.
     read_marks: HashSet<String>,
+    /// In a file's second pass: the table its first pass ended with, so a
+    /// call sees the declarations below it.
+    ahead: Option<Rc<Decls>>,
+    /// A top-level parse is in its first pass and can run again: a missing
+    /// name answers `()` for now instead of failing.
+    armed: bool,
+    /// What each call answered in the first pass, to ask again at its end.
+    asks: Vec<Ask>,
+}
+
+/// One reflection call and what it answered: `None` for a missing name.
+#[derive(Clone)]
+struct Ask {
+    name: String,
+    target: Option<String>,
+    mac: Option<String>,
+    answer: Option<String>,
+}
+
+/// What a reflection call expands to.
+enum Answer {
+    Text(String),
+    /// The name it asks about is not declared (yet): (message, label).
+    Miss(String, String),
+    /// The call itself is wrong: (message, label).
+    Bad(String, String),
+}
+
+impl Decls {
+    fn find_fn(&self, name: &str) -> Option<&FnRec> {
+        self.fns.iter().find(|f| f.name == name).or_else(|| {
+            self.ahead
+                .as_ref()
+                .and_then(|a| a.fns.iter().find(|f| f.name == name))
+        })
+    }
+
+    /// Every function, in declaration order. In a second pass that is the
+    /// whole file's order, each one as this pass has it when it has it.
+    fn all_fns(&self) -> Vec<&FnRec> {
+        match &self.ahead {
+            None => self.fns.iter().collect(),
+            Some(a) => {
+                let mut out: Vec<&FnRec> = a
+                    .fns
+                    .iter()
+                    .map(|f| self.fns.iter().find(|g| g.name == f.name).unwrap_or(f))
+                    .collect();
+                for f in &self.fns {
+                    if !a.fns.iter().any(|g| g.name == f.name) {
+                        out.push(f);
+                    }
+                }
+                out
+            }
+        }
+    }
+
+    fn find_struct(&self, name: &str) -> Option<&Vec<Named>> {
+        let find = |d: &Decls| -> Option<usize> { d.structs.iter().position(|(n, _)| n == name) };
+        match find(self) {
+            Some(i) => Some(&self.structs[i].1),
+            None => self.ahead.as_ref().and_then(|a| find(a).map(|i| &a.structs[i].1)),
+        }
+    }
+
+    fn find_enum(&self, name: &str) -> Option<&Vec<VariantRec>> {
+        let find = |d: &Decls| -> Option<usize> { d.enums.iter().position(|(n, _)| n == name) };
+        match find(self) {
+            Some(i) => Some(&self.enums[i].1),
+            None => self.ahead.as_ref().and_then(|a| find(a).map(|i| &a.enums[i].1)),
+        }
+    }
+}
+
+/// What a top-level parse keeps so it can run its file a second time.
+pub(super) struct Rerun<'s> {
+    pub(super) source: &'s str,
+    pub(super) file_id: FileId,
+    pub(super) file_name: String,
+    pub(super) shadow: Vec<(usize, [bool; 3])>,
+    /// The macro and declaration tables as the file found them.
+    pub(super) start: Option<(StdMacros, Decls)>,
+}
+
+type StdMacros = std::collections::HashMap<String, Rc<macros::MacroDef>>;
+
+/// The start of a top-level parse's first pass: remember the tables as
+/// the file finds them, and let a missing name wait for the file's end.
+pub(super) fn begin_first_pass(rerun: &mut Rerun<'_>) {
+    rerun.start = Some((macros::snapshot(), snapshot()));
+    DECLS.with(|d| {
+        let mut d = d.borrow_mut();
+        d.armed = true;
+        d.asks.clear();
+    });
+}
+
+/// The end of a first pass: whether some call would answer differently
+/// with the whole file read, or named something missing.
+// r[impl mimas.reflect.below]
+pub(super) fn finish_first_pass() -> bool {
+    DECLS.with(|d| {
+        let mut d = d.borrow_mut();
+        d.armed = false;
+        let asks = std::mem::take(&mut d.asks);
+        asks.iter().any(|a| {
+            match answer(&d, &a.name, a.target.as_deref(), a.mac.as_deref()) {
+                Answer::Text(t) => a.answer.as_ref() != Some(&t),
+                Answer::Miss(..) | Answer::Bad(..) => true,
+            }
+        })
+    })
+}
+
+/// Put the tables back as the file found them, with the first pass's
+/// table ahead: the second pass starts.
+pub(super) fn begin_second_pass(start: (StdMacros, Decls)) {
+    let ahead = Rc::new(snapshot());
+    let (macs, mut decls) = start;
+    macros::install(macs);
+    decls.ahead = Some(ahead);
+    decls.armed = false;
+    install(decls);
+}
+
+/// The second pass is over: the table it built holds the whole file.
+pub(super) fn end_second_pass() {
+    DECLS.with(|d| d.borrow_mut().ahead = None);
 }
 
 thread_local! {
@@ -125,7 +263,11 @@ pub(super) fn is_builtin(name: &str) -> bool {
 
 /// Whether some `fns!` call has read functions marked `#[name]`.
 pub(super) fn mark_is_read(name: &str) -> bool {
-    DECLS.with(|d| d.borrow().read_marks.contains(name))
+    DECLS.with(|d| {
+        let d = d.borrow();
+        d.read_marks.contains(name)
+            || d.ahead.as_ref().is_some_and(|a| a.read_marks.contains(name))
+    })
 }
 
 /// A string literal that holds `text`.
@@ -171,14 +313,24 @@ fn list_value(elem: &str, items: Vec<String>) -> String {
 impl FnRec {
     fn value(&self) -> String {
         let params: Vec<_> = self.params.iter().map(|p| field_value("FnParam", p)).collect();
-        let marks: Vec<_> = self.marks.iter().map(|t| quote(t)).collect();
+        let marks: Vec<_> = self
+            .marks
+            .iter()
+            .map(|(name, args)| {
+                format!(
+                    "FnMark {{ name = {}, args = {} }}",
+                    quote(name),
+                    list_value("str", args.iter().map(|a| quote(a)).collect())
+                )
+            })
+            .collect();
         format!(
             "FnSig {{ name = {}, params = {}, ret = {}, doc = {}, marks = {}, writes = __fn_writes({}) }}",
             quote(&self.name),
             list_value("FnParam", params),
             quote(&self.ret),
             quote(&self.doc),
-            list_value("str", marks),
+            list_value("FnMark", marks),
             self.name,
         )
     }
@@ -214,55 +366,14 @@ impl<'s> Parser<'s> {
     pub(super) fn record_decl(&mut self, item: &Item, first: usize) {
         match item.kind() {
             ItemKind::Function(f) if !f.is_method() => {
-                let params = f
-                    .parameters
-                    .iter()
-                    .map(|b| Named {
-                        name: b
-                            .left
-                            .as_ident()
-                            .map(|i| macros::unhygienic(i).lexeme)
-                            .unwrap_or_else(|| "_".to_string()),
-                        ty: b.annotation.as_ref().map(|a| a.to_string()).unwrap_or_default(),
-                        inout: matches!(b.annotation, Some(Annotation::Inout(..))),
-                    })
-                    .collect();
-                let doc = self
-                    .docs
-                    .get(&first)
-                    .map(|doc| {
-                        doc.lines()
-                            .map(|line| {
-                                let line = line.trim_start().trim_start_matches('/');
-                                line.strip_prefix(' ').unwrap_or(line).trim_end()
-                            })
-                            .collect::<Vec<_>>()
-                            .join(" ")
-                    })
-                    .unwrap_or_default();
-                let rec = FnRec {
-                    name: macros::unhygienic(&f.name).lexeme,
-                    params,
-                    ret: f
-                        .return_type
-                        .as_ref()
-                        .map_or_else(|| "()".to_string(), |a| a.to_string()),
-                    doc,
-                    marks: item
-                        .attrs()
-                        .iter()
-                        .map(|a| a.name.lexeme.clone())
-                        .filter(|n| n != "test")
-                        .collect(),
-                    body: Some(f.body.clone()),
-                };
-                DECLS.with(|d| {
-                    let fns = &mut d.borrow_mut().fns;
-                    match fns.iter_mut().find(|f| f.name == rec.name) {
-                        Some(old) => *old = rec,
-                        None => fns.push(rec),
-                    }
-                });
+                let name = macros::unhygienic(&f.name).lexeme;
+                self.record_fn(name, f, item.attrs(), first);
+            }
+            ItemKind::Impl(i) => {
+                if let Some(pact) = &i.pact {
+                    DECLS.with(|d| d.borrow_mut().impls.push((i.target.lexeme.clone(), pact.lexeme.clone())));
+                }
+                self.record_impl_members(i);
             }
             ItemKind::Struct(s) => {
                 let fields = s.fields.iter().map(named_field).collect();
@@ -318,16 +429,79 @@ impl<'s> Parser<'s> {
                     enums.push((name, variants));
                 });
             }
-            ItemKind::Impl(i) => {
-                if let Some(pact) = &i.pact {
-                    DECLS.with(|d| d.borrow_mut().impls.push((i.target.lexeme.clone(), pact.lexeme.clone())));
-                }
-            }
             ItemKind::Pact(p) => {
                 DECLS.with(|d| d.borrow_mut().pacts.push((p.name.lexeme.clone(), p.requires.iter().map(|r| r.lexeme.clone()).collect())));
             }
             _ => {}
         }
+    }
+
+    /// Remembers each `fn` member of an impl (or of a struct body) as
+    /// `Type::name`. r[impl mimas.reflect.methods]
+    pub(super) fn record_impl_members(&mut self, i: &Impl) {
+        for member in &i.items {
+            if let ItemKind::Function(f) = member.kind() {
+                let name = format!("{}::{}", i.target.lexeme, macros::unhygienic(&f.name).lexeme);
+                let at = member.location().span.start;
+                let first = self
+                    .tokens
+                    .iter()
+                    .position(|t| t.span().start() >= at)
+                    .unwrap_or(0);
+                self.record_fn(name, f, member.attrs(), first);
+            }
+        }
+    }
+
+    fn record_fn(&mut self, name: String, f: &Function, attrs: &[Attribute], first: usize) {
+        let params = f
+            .parameters
+            .iter()
+            .map(|b| Named {
+                name: b
+                    .left
+                    .as_ident()
+                    .map(|i| macros::unhygienic(i).lexeme)
+                    .unwrap_or_else(|| "_".to_string()),
+                ty: b.annotation.as_ref().map(|a| a.to_string()).unwrap_or_default(),
+                inout: matches!(b.annotation, Some(Annotation::Inout(..))),
+            })
+            .collect();
+        let doc = self
+            .docs
+            .get(&first)
+            .map(|doc| {
+                doc.lines()
+                    .map(|line| {
+                        let line = line.trim_start().trim_start_matches('/');
+                        line.strip_prefix(' ').unwrap_or(line).trim_end()
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .unwrap_or_default();
+        let rec = FnRec {
+            name,
+            params,
+            ret: f
+                .return_type
+                .as_ref()
+                .map_or_else(|| "()".to_string(), |a| a.to_string()),
+            doc,
+            marks: attrs
+                .iter()
+                .filter(|a| a.name.lexeme != "test")
+                .map(|a| (a.name.lexeme.clone(), a.args.clone()))
+                .collect(),
+            body: Some(Rc::new(f.body.clone())),
+        };
+        DECLS.with(|d| {
+            let fns = &mut d.borrow_mut().fns;
+            match fns.iter_mut().find(|f| f.name == rec.name) {
+                Some(old) => *old = rec,
+                None => fns.push(rec),
+            }
+        });
     }
 
     /// Reports each mark on a function that no `fns!` call read. Called
@@ -370,11 +544,24 @@ impl<'s> Parser<'s> {
         );
         // The call's own tokens: `target`, `target => mac`, `=> mac`, or none.
         let args: Vec<TokKind<'s>> = self.tokens[open + 1..close].iter().map(|t| t.kind).collect();
+        // `Type::method` names a method (`sig!` and `graph!` only)
+        let path;
         let (target, mac) = match args.as_slice() {
             [] => (None, None),
             [TokKind::Ident(t)] => (Some(*t), None),
             [TokKind::Ident(t), TokKind::FatArrow, TokKind::Ident(m)] => (Some(*t), Some(*m)),
             [TokKind::FatArrow, TokKind::Ident(m)] => (None, Some(*m)),
+            [TokKind::Ident(t), TokKind::DoubleColon, TokKind::Ident(m), rest @ ..]
+                if matches!(name, "sig" | "graph")
+                    && matches!(rest, [] | [TokKind::FatArrow, TokKind::Ident(_)]) =>
+            {
+                path = format!("{t}::{m}");
+                let mac = match rest {
+                    [_, TokKind::Ident(mac)] => Some(*mac),
+                    _ => None,
+                };
+                (Some(path.as_str()), mac)
+            }
             _ => {
                 self.next = close + 1;
                 self.macro_error(
@@ -453,133 +640,169 @@ impl<'s> Parser<'s> {
     }
 
     /// The source text one reflection call expands to, or the error
-    /// (message, label) to report at the call.
-    // r[impl mimas.reflect.sig]
-    // r[impl mimas.reflect.fns]
-    // r[impl mimas.reflect.fields]
-    // r[impl mimas.reflect.variants]
-    // r[impl mimas.reflect.hand]
+    /// (message, label) to report at the call. In a first pass a missing
+    /// name answers `()` and the file runs again (see the module doc).
     fn reflect_text(
         &mut self,
         name: &str,
         target: Option<&str>,
         mac: Option<&str>,
     ) -> std::result::Result<String, (String, String)> {
-        let need = |what: &str| -> std::result::Result<&str, (String, String)> {
-            target.ok_or_else(|| {
-                (
-                    format!("`{name}!` needs the name of {what}"),
-                    format!("write `{name}!(name)`"),
-                )
-            })
-        };
         DECLS.with(|d| {
             let mut d = d.borrow_mut();
-            match name {
-                "sig" => {
-                    let target = need("a function")?;
-                    let f = d.fns.iter().find(|f| f.name == target).ok_or_else(|| {
-                        (
-                            format!("no function `{target}` is declared before this `sig!`"),
-                            format!("`sig!` sees the top-level functions above it; `{target}` is not one"),
-                        )
-                    })?;
-                    Ok(match mac {
-                        Some(m) => f.hand_to(m),
-                        None => f.value(),
-                    })
-                }
-                "fns" => {
-                    if let Some(wanted) = target {
-                        d.read_marks.insert(wanted.to_string());
+            if name == "fns"
+                && let Some(wanted) = target
+            {
+                d.read_marks.insert(wanted.to_string());
+            }
+            let ask = |answer: Option<String>| Ask {
+                name: name.to_string(),
+                target: target.map(str::to_string),
+                mac: mac.map(str::to_string),
+                answer,
+            };
+            match answer(&d, name, target, mac) {
+                Answer::Text(text) => {
+                    if d.armed {
+                        d.asks.push(ask(Some(text.clone())));
                     }
-                    let picked: Vec<&FnRec> = d
-                        .fns
-                        .iter()
-                        .filter(|f| target.is_none_or(|t| f.marks.iter().any(|x| x == t)))
-                        .collect();
-                    Ok(match mac {
-                        Some(m) => format!(
-                            "[{}]",
-                            picked.iter().map(|f| f.hand_to(m)).collect::<Vec<_>>().join(", ")
-                        ),
-                        None => list_value("FnSig", picked.iter().map(|f| f.value()).collect()),
-                    })
+                    Ok(text)
                 }
-                "fields" => {
-                    let target = need("a struct")?;
-                    let (_, fields) = d.structs.iter().find(|(n, _)| n == target).ok_or_else(|| {
-                        (
-                            format!("no struct `{target}` is declared before this `fields!`"),
-                            format!("`fields!` sees the structs above it; `{target}` is not one"),
-                        )
-                    })?;
-                    Ok(match mac {
-                        Some(m) => format!(
-                            "{m}!({target}; {})",
-                            fields
-                                .iter()
-                                .map(|f| format!("{}: {}", f.name, f.ty))
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        ),
-                        None => list_value(
-                            "StructField",
-                            fields.iter().map(|f| field_value("StructField", f)).collect(),
-                        ),
-                    })
+                Answer::Miss(..) if d.armed => {
+                    d.asks.push(ask(None));
+                    Ok("()".to_string())
                 }
-                "variants" => {
-                    let target = need("an enum")?;
-                    let (_, variants) = d.enums.iter().find(|(n, _)| n == target).ok_or_else(|| {
-                        (
-                            format!("no enum `{target}` is declared before this `variants!`"),
-                            format!("`variants!` sees the enums above it; `{target}` is not one"),
-                        )
-                    })?;
-                    Ok(match mac {
-                        Some(m) => format!(
-                            "{m}!({target}; {})",
-                            variants.iter().map(|v| v.text.clone()).collect::<Vec<_>>().join(", ")
-                        ),
-                        None => list_value(
-                            "EnumVariant",
-                            variants
-                                .iter()
-                                .map(|v| {
-                                    format!(
-                                        "EnumVariant {{ name = {}, fields = {} }}",
-                                        quote(&v.name),
-                                        list_value(
-                                            "StructField",
-                                            v.fields
-                                                .iter()
-                                                .map(|f| field_value("StructField", f))
-                                                .collect()
-                                        ),
-                                    )
-                                })
-                                .collect(),
-                        ),
-                    })
-                }
-                "graph" => {
-                    let target = need("a function")?;
-                    let f = d.fns.iter().find(|f| f.name == target).ok_or_else(|| {
-                        (
-                            format!("no function `{target}` is declared before this `graph!`"),
-                            format!("`graph!` sees the top-level functions above it; `{target}` is not one"),
-                        )
-                    })?;
-                    let text = f.graph_value();
-                    Ok(match mac {
-                        Some(m) => format!("{m}!({target}; {text})"),
-                        None => text,
-                    })
-                }
-                _ => unreachable!("`is_builtin` names five macros"),
+                Answer::Miss(msg, label) | Answer::Bad(msg, label) => Err((msg, label)),
             }
         })
+    }
+}
+
+/// What one reflection call answers from the table `d`.
+// r[impl mimas.reflect.sig]
+// r[impl mimas.reflect.fns]
+// r[impl mimas.reflect.fields]
+// r[impl mimas.reflect.variants]
+// r[impl mimas.reflect.hand]
+fn answer(d: &Decls, name: &str, target: Option<&str>, mac: Option<&str>) -> Answer {
+    let need = |what: &str| -> std::result::Result<&str, Answer> {
+        target.ok_or_else(|| {
+            Answer::Bad(
+                format!("`{name}!` needs the name of {what}"),
+                format!("write `{name}!(name)`"),
+            )
+        })
+    };
+    let miss = |kind: &str, target: &str, plural: &str| {
+        Answer::Miss(
+            format!("no {kind} `{target}` is declared for this `{name}!`"),
+            format!("`{name}!` sees the {plural} of this file and of the files before it; `{target}` is not one"),
+        )
+    };
+    let target = match name {
+        "fns" => target,
+        "sig" | "graph" => match need("a function") {
+            Ok(t) => Some(t),
+            Err(e) => return e,
+        },
+        "fields" => match need("a struct") {
+            Ok(t) => Some(t),
+            Err(e) => return e,
+        },
+        "variants" => match need("an enum") {
+            Ok(t) => Some(t),
+            Err(e) => return e,
+        },
+        _ => unreachable!("`is_builtin` names five macros"),
+    };
+    match name {
+        "sig" => {
+            let target = target.unwrap();
+            let Some(f) = d.find_fn(target) else {
+                return miss("function", target, "functions and methods");
+            };
+            Answer::Text(match mac {
+                Some(m) => f.hand_to(m),
+                None => f.value(),
+            })
+        }
+        "fns" => {
+            let picked: Vec<&FnRec> = d
+                .all_fns()
+                .into_iter()
+                .filter(|f| target.is_none_or(|t| f.marks.iter().any(|(x, _)| x == t)))
+                .collect();
+            Answer::Text(match mac {
+                Some(m) => format!(
+                    "[{}]",
+                    picked.iter().map(|f| f.hand_to(m)).collect::<Vec<_>>().join(", ")
+                ),
+                None => list_value("FnSig", picked.iter().map(|f| f.value()).collect()),
+            })
+        }
+        "fields" => {
+            let target = target.unwrap();
+            let Some(fields) = d.find_struct(target) else {
+                return miss("struct", target, "structs");
+            };
+            Answer::Text(match mac {
+                Some(m) => format!(
+                    "{m}!({target}; {})",
+                    fields
+                        .iter()
+                        .map(|f| format!("{}: {}", f.name, f.ty))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                None => list_value(
+                    "StructField",
+                    fields.iter().map(|f| field_value("StructField", f)).collect(),
+                ),
+            })
+        }
+        "variants" => {
+            let target = target.unwrap();
+            let Some(variants) = d.find_enum(target) else {
+                return miss("enum", target, "enums");
+            };
+            Answer::Text(match mac {
+                Some(m) => format!(
+                    "{m}!({target}; {})",
+                    variants.iter().map(|v| v.text.clone()).collect::<Vec<_>>().join(", ")
+                ),
+                None => list_value(
+                    "EnumVariant",
+                    variants
+                        .iter()
+                        .map(|v| {
+                            format!(
+                                "EnumVariant {{ name = {}, fields = {} }}",
+                                quote(&v.name),
+                                list_value(
+                                    "StructField",
+                                    v.fields
+                                        .iter()
+                                        .map(|f| field_value("StructField", f))
+                                        .collect()
+                                ),
+                            )
+                        })
+                        .collect(),
+                ),
+            })
+        }
+        "graph" => {
+            let target = target.unwrap();
+            let Some(f) = d.find_fn(target) else {
+                return miss("function", target, "functions and methods");
+            };
+            let text = f.graph_value();
+            Answer::Text(match mac {
+                Some(m) => format!("{m}!({target}; {text})"),
+                None => text,
+            })
+        }
+        _ => unreachable!("`is_builtin` names five macros"),
     }
 }
 

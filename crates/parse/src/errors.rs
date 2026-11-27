@@ -274,6 +274,17 @@ pub struct UnknownAttribute {
 }
 
 #[derive(Error, Debug, Diagnostic)]
+#[error("`#[{name}]` takes no arguments")]
+#[diagnostic(help("write `#[{name}]`. Only a mark, an attribute `fns!` reads, carries arguments"))]
+pub struct AttributeTakesNoArguments {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("the language reads `#[{name}]` itself")]
+    pub at: SourceSpan,
+    pub name: String,
+}
+
+#[derive(Error, Debug, Diagnostic)]
 #[error("duplicate attribute")]
 pub struct DuplicateAttribute {
     #[source_code]
