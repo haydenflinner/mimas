@@ -787,6 +787,18 @@ impl Solver {
                 .insert(segments[0].clone(), self.library[&segments[0]]);
         }
 
+        // the `//# page:` regions of each file: each is a namespace (C2)
+        crate::components::regions::install(
+            asts.iter()
+                .filter_map(|ast| {
+                    let file = ast.own_stmts().first()?.location().file_id();
+                    Some((
+                        file,
+                        ast.page_marks().into_iter().map(|(s, n)| (s, n.to_string())).collect(),
+                    ))
+                })
+                .collect(),
+        );
         // a `fn` redeclare errors only against decs this solve mints -- see `declare_floor`
         self.declare_floor = self.decs.len();
         // every atom a literal writes gets its variant before any body solves
@@ -875,6 +887,29 @@ impl Solver {
         lap("solve_types");
         run_phase(self, Self::solve_bodies, &mut saved_ribs)?;
         lap("solve_bodies");
+        // a bare name two included pages define, used where neither is the
+        // use's own: name both spellings. r[impl mimas.region.bare]
+        if let Some((name, at, regions)) =
+            crate::components::regions::take_ambiguous().into_iter().next()
+        {
+            let spellings = regions
+                .iter()
+                .map(|r| {
+                    if r.is_empty() {
+                        format!("`{name}`")
+                    } else {
+                        format!("`{}::{name}`", crate::components::regions::spelled(r))
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(crate::errors::AmbiguousName {
+                src: self.src(at),
+                at: at.into(),
+                name,
+                spellings,
+            })?;
+        }
 
         // a `const` that deferred on a Mimas-fn call now has the callee bodies
         // it needs — retry (r[mimas.const.eval]); anything still unresolvable
@@ -4153,6 +4188,35 @@ impl Solver {
     /// [Solve for Ident], a bare ident here may name a module or a builtin namespace.
     pub(crate) fn resolve_path_head(&mut self, expr: &parse::Expr) -> Result<Ty> {
         match expr.kind() {
+            // `a::b` never reads a value: `page::cards()` reaches the `page`
+            // module beside a `let page`. r[impl mimas.path.not-value]
+            parse::ExprKind::Ident(ident)
+                if self.ribs.resolve(ident).is_some_and(|d| {
+                    matches!(
+                        self.decs[d].kind,
+                        DecKind::Local | DecKind::Global | DecKind::LoopVar
+                    )
+                }) =>
+            {
+                let is_value = |d: DecId| {
+                    matches!(self.decs[d].kind, DecKind::Local | DecKind::Global | DecKind::LoopVar)
+                };
+                if let Some(d) = self.ribs.resolve_skipping(ident, is_value) {
+                    self.check_vis(d, expr.location())?;
+                    let stored = Ty::Vid(self.decs[d].vid).normalized(self);
+                    return Ok(stored);
+                }
+                if let Some(adt) = self.library.get(&ident.lexeme).copied() {
+                    return Ok(Ty::adt(adt));
+                }
+                Err(NotFound {
+                    src: self.src(expr.location()),
+                    at: expr.location().into(),
+                    name: ident.lexeme.clone(),
+                    help: Some(format!("`{}` is a value here; a `::` path starts at a module or a type", ident.lexeme)),
+                }
+                .into())
+            }
             parse::ExprKind::Ident(ident) => self.resolve_name(ident, expr.location()),
             _ => self.query_non_value(expr),
         }
@@ -5520,7 +5584,20 @@ impl Solver {
         #[cfg(feature = "logging")]
         println!("{}", crate::utils::Printer::declare(ident, &ty));
 
-        if let Some(prev_id) = self.ribs.module_lookup(ident) {
+        let region = crate::components::regions::of(ident.location);
+        // across `//# page:` regions one name may be declared once per region
+        // (C2): only a redeclare in the same file and region is the error
+        // r[impl mimas.region.bare]
+        let prev_here = if crate::components::regions::any() {
+            self.ribs
+                .module()
+                .in_region(&ident.lexeme, &region)
+                .map(|(_, d)| d)
+                .filter(|d| self.decs[*d].location.file_id() == ident.location.file_id())
+        } else {
+            self.ribs.module_lookup(ident)
+        };
+        if let Some(prev_id) = prev_here {
             let prev = &self.decs[prev_id];
             let prev_location = prev.location;
             if constant && prev.kind.is_constant() {
@@ -5556,6 +5633,16 @@ impl Solver {
                         .count()
                         + 1
                 };
+                // a `notation n` lowers to `fn __lit_n`: say it in the author's word
+                // r[impl mimas.region.macro]
+                if let Some(tag) = ident.lexeme.strip_prefix("__lit_") {
+                    Err(crate::errors::MultipleNotationDeclarations {
+                        src: self.src(ident.location),
+                        name: tag.to_string(),
+                        at: ident.location.into(),
+                        line,
+                    })?;
+                }
                 Err(MultipleFnDeclarations {
                     src: self.src(ident.location),
                     name: ident.lexeme.clone(),
@@ -5580,16 +5667,39 @@ impl Solver {
         };
         let dec_id = self.dec_id(ident, ty.clone(), kind, vis);
         self.ribs.module_mut().insert(ident.clone(), dec_id);
-        self.module_items
-            .entry(self.ribs.current_module())
-            .or_default()
-            .insert(ident.lexeme.clone(), dec_id);
+        self.export_item(&ident.lexeme, &region, dec_id);
 
         if let Some(node_id) = node_id {
             self.node_decs.insert(node_id, dec_id);
         }
 
         Ok(ty)
+    }
+
+    /// Lists a hoisted item among its module's exports. An item of a named
+    /// `//# page:` region also exports as `region::name` (`button-kit::click`),
+    /// and never takes the bare name from the page's own item.
+    pub(crate) fn export_item(&mut self, name: &str, region: &str, dec_id: DecId) {
+        let module = self.ribs.current_module();
+        let page_holds = |s: &Self| {
+            s.module_items
+                .get(&module)
+                .and_then(|m| m.get(name))
+                .is_some_and(|d| crate::components::regions::of(s.decs[*d].location).is_empty())
+        };
+        if !region.is_empty() && region != crate::components::regions::OUTSIDE {
+            self.module_items
+                .entry(module)
+                .or_default()
+                .insert(format!("{region}::{name}"), dec_id);
+            if page_holds(self) {
+                return;
+            }
+        }
+        self.module_items
+            .entry(module)
+            .or_default()
+            .insert(name.to_string(), dec_id);
     }
 
     /// The "ends in a value, not `()`" error, aimed at the block's last

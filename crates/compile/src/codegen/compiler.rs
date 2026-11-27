@@ -131,7 +131,9 @@ impl Compiler {
             let mut out = Module::default();
             for (name, dec) in module.items {
                 // a law's generic function has no body (see `is_generic_law`)
-                if crate::ir::is_generic_law(&name) {
+                // a page region's item also exports as `region::name` (C2)
+                let base = name.rsplit_once("::").map_or(name.as_str(), |(_, b)| b);
+                if crate::ir::is_generic_law(base) {
                     continue;
                 }
                 // a prelude decl resolves in the root scope like the file's

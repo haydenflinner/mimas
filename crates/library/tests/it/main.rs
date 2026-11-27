@@ -55,6 +55,7 @@ mod prepared;
 mod propagate;
 mod records;
 mod reflect;
+mod regions;
 mod rng;
 mod runtime_errors;
 mod scripts;

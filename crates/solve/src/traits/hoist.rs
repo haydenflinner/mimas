@@ -65,16 +65,33 @@ impl<'a> HoistCtx<'a> {
                 .into(),
             ));
         }
+        // a second type of one name in one file's region is an error (C2);
+        // across regions each is its own. r[impl mimas.region.type-dup]
+        let region = crate::components::regions::of(ident.location);
+        if crate::components::regions::any()
+            && !self.solver.in_prelude
+            && let Some((prev_at, prev)) = self.solver.ribs.module().in_region(&ident.lexeme, &region)
+            && prev_at.file_id() == ident.location.file_id()
+            && prev.index() >= self.solver.declare_floor
+            && matches!(self.solver.decs[prev].kind, DecKind::Adt(_))
+        {
+            return Err(crate::errors::MultipleTypeDeclarations {
+                src: self.solver.src(ident.location),
+                at: ident.location.into(),
+                name: ident.lexeme.clone(),
+                original: vec![crate::errors::ConstDefinedHere {
+                    src: self.solver.src(prev_at),
+                    at: prev_at.into(),
+                    name: ident.lexeme.clone(),
+                }],
+            }
+            .into());
+        }
         let dec_id = self
             .solver
             .dec_id(ident, ty.clone(), DecKind::Adt(adt_id), self.vis);
         self.solver.ribs.module_mut().insert(ident.clone(), dec_id);
-        let module = self.solver.ribs.current_module();
-        self.solver
-            .module_items
-            .entry(module)
-            .or_default()
-            .insert(ident.lexeme.clone(), dec_id);
+        self.solver.export_item(&ident.lexeme, &region, dec_id);
         if let Some(node_id) = self.node_id {
             self.solver.node_decs.insert(node_id, dec_id);
             let vid = self.solver.node_vid(node_id);

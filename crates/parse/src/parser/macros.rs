@@ -71,8 +71,43 @@ pub(super) fn intern(text: &str) -> &'static str {
     })
 }
 
-fn lookup(name: &str) -> Option<Rc<MacroDef>> {
-    MACROS.with(|m| m.borrow().get(name).cloned())
+/// The table key of a macro declared in a named `//# page:` region:
+/// `region` and `name` joined by `\u{1}`, which no name holds. A macro of
+/// the page's own text keys by its bare name.
+fn region_key(region: &str, name: &str) -> String {
+    if region.is_empty() {
+        name.to_string()
+    } else {
+        format!("{region}\u{1}{name}")
+    }
+}
+
+/// The macro `name` as a call in `region` sees it: its own region's, then
+/// the page's, then the one region that declares it. `Err` lists the
+/// regions when two declare it and neither is the call's or the page's.
+// r[impl mimas.region.macro]
+fn lookup_in(name: &str, region: &str) -> std::result::Result<Option<Rc<MacroDef>>, Vec<String>> {
+    MACROS.with(|m| {
+        let m = m.borrow();
+        if let Some(d) = m.get(&region_key(region, name)) {
+            return Ok(Some(d.clone()));
+        }
+        if let Some(d) = m.get(name) {
+            return Ok(Some(d.clone()));
+        }
+        let suffix = format!("\u{1}{name}");
+        let mut found: Vec<(&String, &Rc<MacroDef>)> =
+            m.iter().filter(|(k, _)| k.ends_with(&suffix)).collect();
+        found.sort_by(|a, b| a.0.cmp(b.0));
+        match found.len() {
+            0 => Ok(None),
+            1 => Ok(Some(found[0].1.clone())),
+            _ => Err(found
+                .iter()
+                .map(|(k, _)| k.split('\u{1}').next().unwrap_or("").to_string())
+                .collect()),
+        }
+    })
 }
 
 /// The name as the call site wrote it: a template's renamed local
@@ -618,7 +653,8 @@ impl<'s> Parser<'s> {
         let meta = token_meta(text, start, &toks);
         match parse_def(&toks, &meta, single) {
             Ok(def) => {
-                MACROS.with(|m| m.borrow_mut().insert(name, Rc::new(def)));
+                let key = region_key(&self.region_at(start), &name);
+                MACROS.with(|m| m.borrow_mut().insert(key, Rc::new(def)));
             }
             Err(e) => self.macro_error(e.at, e.msg, e.label),
         }
@@ -633,7 +669,8 @@ impl<'s> Parser<'s> {
         if self.nth(1) != TokKind::Bang || !self.meta_at(1).glued || !opens(self.nth(2)) {
             return false;
         }
-        if lookup(name).is_none() && !reflect::is_builtin(name) {
+        let region = self.region_at(self.tokens[self.next].span().start());
+        if matches!(lookup_in(name, &region), Ok(None)) && !reflect::is_builtin(name) {
             return false;
         }
         let Some(close) = self.closer_of(self.next + 2) else {
@@ -655,7 +692,9 @@ impl<'s> Parser<'s> {
         let TokKind::Ident(name) = self.tokens[self.next - 1].kind else {
             return false;
         };
-        expr.as_ident().is_some() && (lookup(name).is_some() || reflect::is_builtin(name))
+        let region = self.region_at(self.tokens[self.next - 1].span().start());
+        expr.as_ident().is_some()
+            && (!matches!(lookup_in(name, &region), Ok(None)) || reflect::is_builtin(name))
     }
 
     /// A macro call as a statement. The expansion's tokens replace the call
@@ -732,8 +771,25 @@ impl<'s> Parser<'s> {
         };
         // a declared macro of the name comes first; without one, the name
         // is one of the reflection macros (`sig!`, `fns!`, …)
-        let Some(def) = lookup(name) else {
-            return self.expand_reflect(at, spot);
+        let region = self.region_at(self.tokens[at].span().start());
+        let def = match lookup_in(name, &region) {
+            Ok(Some(def)) => def,
+            Ok(None) => return self.expand_reflect(at, spot),
+            Err(regions) => {
+                let at_loc: Location = self.tokens[at].location.into();
+                let spellings = regions
+                    .iter()
+                    .map(|r| format!("`{r}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.next = self.closer_of(at + 2).map_or(at + 1, |c| c + 1);
+                self.macro_error(
+                    at_loc,
+                    format!("macro `{name}!` is declared by more than one included page: {spellings}"),
+                    "declare it once, or in the page's own text",
+                );
+                return false;
+            }
         };
         let open = at + 2;
         let Some(close) = self.closer_of(open) else {

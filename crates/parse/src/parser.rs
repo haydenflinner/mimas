@@ -20,6 +20,26 @@ pub fn clear_macros() {
     reflect::clear();
 }
 
+/// The `//# page: NAME` marks of `source` as `(byte start, name)`, the same
+/// scan `Ast::page_marks` makes. Empty when there is no named mark.
+fn page_regions(source: &str) -> Vec<(usize, String)> {
+    let mut marks = vec![(0, String::new())];
+    let mut at = 0;
+    let mut in_island = false;
+    for line in source.split_inclusive('\n') {
+        if !crate::lex::line_in_island(line, &mut in_island)
+            && let Some(name) = line.strip_prefix(crate::lex::PAGE_MARK)
+        {
+            marks.push((at, name.trim_end().to_string()));
+        }
+        at += line.len();
+    }
+    if marks.iter().all(|(_, n)| n.is_empty()) {
+        return Vec::new();
+    }
+    marks
+}
+
 /// Recursively descends mimas source, incrementally returning various
 /// statements and expressions.
 /// What `x y` — an expression followed by an atom on the same line —
@@ -130,6 +150,9 @@ pub struct Parser<'s> {
     /// A top-level parse keeps its source so it can run a second pass when
     /// a reflection call must see a declaration below it.
     rerun: Option<reflect::Rerun<'s>>,
+    /// The `//# page: NAME` regions of a spliced source, `(byte start,
+    /// name)`; empty for a source without marks and for a sub-parse.
+    regions: Vec<(usize, String)>,
     /// One entry per token in `tokens`: how the token sits against the one
     /// before it, and which macro expansion wrote it. The parser asks this,
     /// not the spans, whether two tokens touch or a line breaks between
@@ -346,6 +369,11 @@ impl<'s> Parser<'s> {
             shadow: lexer.shadow_table().to_vec(),
             pending: Vec::new(),
             pending_marks: Vec::new(),
+            regions: if lexer.offset() == 0 && relocate.is_none() {
+                page_regions(lexer.source())
+            } else {
+                Vec::new()
+            },
             rerun: (lexer.offset() == 0 && relocate.is_none()).then(|| reflect::Rerun {
                 source: lexer.source(),
                 file_id: lexer.file_id(),
@@ -5661,7 +5689,35 @@ impl<'s> Parser<'s> {
         let start = left.span().start();
         self.bump(TokKind::DoubleColon);
         let right = self.require_member_name();
+        // `kit_a::rect`: a region of this spliced source qualifies the name,
+        // which the solver reads as "`rect` of region `kit-a`".
+        // r[impl mimas.region.qualified]
+        if let ExprKind::Ident(region) = left.kind()
+            && self.is_region(&region.lexeme)
+        {
+            let name = format!("{}::{}", region.lexeme, right.lexeme);
+            return self.new_expr(Ident::new(name, self.location(start)), start);
+        }
         self.new_expr(Access::DoubleColon { left, right }, start)
+    }
+
+    /// Whether `name` spells a named region of this source (`man_kit` for
+    /// `//# page: man-kit`).
+    fn is_region(&self, name: &str) -> bool {
+        self.regions
+            .iter()
+            .any(|(_, r)| !r.is_empty() && r.replace('-', "_") == name)
+    }
+
+    /// The region a byte offset of this source falls in (`""` for the
+    /// page's own text).
+    pub(super) fn region_at(&self, at: usize) -> String {
+        self.regions
+            .iter()
+            .rev()
+            .find(|(s, _)| *s <= at)
+            .map(|(_, n)| n.clone())
+            .unwrap_or_default()
     }
 
     fn square_access(&mut self, left: Expr) -> Expr {

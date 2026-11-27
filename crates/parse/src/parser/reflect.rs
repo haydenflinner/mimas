@@ -73,6 +73,9 @@ struct Named {
 #[derive(Clone)]
 struct FnRec {
     name: String,
+    /// The `//# page:` region the function is declared in (`""` for the
+    /// page's own text). One name may be declared once per region.
+    page: String,
     params: Vec<Named>,
     ret: String,
     doc: String,
@@ -132,12 +135,24 @@ enum Answer {
 }
 
 impl Decls {
+    /// The function `name`: the page's own first, then any region's.
+    /// `kit_a::f` names region `kit-a`'s `f`.
     fn find_fn(&self, name: &str) -> Option<&FnRec> {
-        self.fns.iter().find(|f| f.name == name).or_else(|| {
-            self.ahead
-                .as_ref()
-                .and_then(|a| a.fns.iter().find(|f| f.name == name))
-        })
+        let hit = |f: &&FnRec| {
+            f.name == name
+                || (!f.page.is_empty()
+                    && name.strip_suffix(f.name.as_str()).and_then(|p| p.strip_suffix("::"))
+                        == Some(f.page.replace('-', "_").as_str()))
+        };
+        let find = |fns: &[FnRec]| -> Option<usize> {
+            fns.iter()
+                .position(|f| hit(&f) && f.page.is_empty())
+                .or_else(|| fns.iter().position(|f| hit(&f)))
+        };
+        match find(&self.fns) {
+            Some(i) => Some(&self.fns[i]),
+            None => self.ahead.as_ref().and_then(|a| find(&a.fns).map(|i| &a.fns[i])),
+        }
     }
 
     /// Every function, in declaration order. In a second pass that is the
@@ -149,10 +164,15 @@ impl Decls {
                 let mut out: Vec<&FnRec> = a
                     .fns
                     .iter()
-                    .map(|f| self.fns.iter().find(|g| g.name == f.name).unwrap_or(f))
+                    .map(|f| {
+                        self.fns
+                            .iter()
+                            .find(|g| g.name == f.name && g.page == f.page)
+                            .unwrap_or(f)
+                    })
                     .collect();
                 for f in &self.fns {
-                    if !a.fns.iter().any(|g| g.name == f.name) {
+                    if !a.fns.iter().any(|g| g.name == f.name && g.page == f.page) {
                         out.push(f);
                     }
                 }
@@ -325,13 +345,18 @@ impl FnRec {
             })
             .collect();
         format!(
-            "FnSig {{ name = {}, params = {}, ret = {}, doc = {}, marks = {}, writes = __fn_writes({}) }}",
+            "FnSig {{ name = {}, page = {}, params = {}, ret = {}, doc = {}, marks = {}, writes = __fn_writes({}) }}",
             quote(&self.name),
+            quote(&self.page),
             list_value("FnParam", params),
             quote(&self.ret),
             quote(&self.doc),
             list_value("FnMark", marks),
-            self.name,
+            if self.page.is_empty() {
+                self.name.clone()
+            } else {
+                format!("{}::{}", self.page.replace('-', "_"), self.name)
+            },
         )
     }
 
@@ -480,8 +505,14 @@ impl<'s> Parser<'s> {
                     .join(" ")
             })
             .unwrap_or_default();
+        let page = self
+            .tokens
+            .get(first)
+            .map(|t| self.region_at(t.span().start()))
+            .unwrap_or_default();
         let rec = FnRec {
             name,
+            page,
             params,
             ret: f
                 .return_type
@@ -497,7 +528,7 @@ impl<'s> Parser<'s> {
         };
         DECLS.with(|d| {
             let fns = &mut d.borrow_mut().fns;
-            match fns.iter_mut().find(|f| f.name == rec.name) {
+            match fns.iter_mut().find(|f| f.name == rec.name && f.page == rec.page) {
                 Some(old) => *old = rec,
                 None => fns.push(rec),
             }

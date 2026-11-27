@@ -734,6 +734,33 @@ pub struct MultipleFnDeclarations {
     pub original: Vec<ConstDefinedHere>,
 }
 
+/// A second `notation` of one tag in one page region.
+#[derive(Error, Debug, Diagnostic)]
+#[error("`notation {name}` is already defined at line {line}")]
+#[diagnostic(help("rename one of them, or keep one"))]
+pub struct MultipleNotationDeclarations {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("a second `notation {name}`")]
+    pub at: SourceSpan,
+    pub name: String,
+    pub line: usize,
+}
+
+/// A bare name that two `//# page:` regions define, met where neither is
+/// the use's own region nor the page's. r[impl mimas.region.bare]
+#[derive(Error, Debug, Diagnostic)]
+#[error("`{name}` is defined by more than one included page: {spellings}")]
+#[diagnostic(help("write the one you mean with its page: {spellings}"))]
+pub struct AmbiguousName {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("which `{name}`?")]
+    pub at: SourceSpan,
+    pub name: String,
+    pub spellings: String,
+}
+
 #[derive(Error, Debug, Diagnostic)]
 #[error("type declared multiple times")]
 pub struct MultipleTypeDeclarations {
