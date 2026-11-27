@@ -316,6 +316,19 @@ pub struct InvalidEvaluation {
     pub op: String,
 }
 
+/// `t[0] = 7` on a tuple: a tuple is a value, not written in place.
+#[derive(Error, Debug, Diagnostic)]
+#[error("a tuple is not written in place")]
+#[diagnostic(help("build a new one: `{name} = ({slots})` with the slot you want changed"))]
+pub struct TupleSlotWrite {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("`{name}` is a tuple")]
+    pub at: SourceSpan,
+    pub name: String,
+    pub slots: String,
+}
+
 /// `a ∧ b` on numbers or bools: `∧` and `∨` are named operators (wedge,
 /// vee), not logical and/or.
 #[derive(Error, Debug, Diagnostic)]

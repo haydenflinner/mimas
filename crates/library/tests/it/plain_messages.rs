@@ -36,3 +36,13 @@ fn a_logic_glyph_points_at_the_keyboard_form() {
     let err = refused("let ok = true ∨ false\n");
     assert!(err.contains("`||`"), "{err}");
 }
+
+// `t[0] = 7` on a tuple says how to build the new tuple, not a list
+// mismatch with an unresolved element type.
+#[test]
+fn a_tuple_slot_write_says_to_build_a_new_tuple() {
+    let err = refused("let t = (1, 2)\nt[0] = 7\n");
+    assert!(err.contains("a tuple is not written in place"), "{err}");
+    assert!(err.contains("t = (t.0, t.1)"), "{err}");
+    assert!(!err.contains("?mimas"), "{err}");
+}

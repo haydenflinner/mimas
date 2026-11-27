@@ -3770,6 +3770,25 @@ impl Solver {
                 // count the store -- same lookup as every other ident site
                 self.node_decs.insert(root.id, dec_id);
 
+                // `t[0] = 7` on a tuple: a tuple is not written in place, so
+                // say how to build the new one instead of a list mismatch
+                // with an unresolved element type
+                if let ExprKind::Access(Access::Square { left: target, .. }) = left.kind()
+                    && let Ty::Tuple(items) = target.query(self)?.normalized(self)
+                {
+                    let name = target.to_string();
+                    let slots = (0..items.len())
+                        .map(|i| format!("{name}.{i}"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    Err(crate::errors::TupleSlotWrite {
+                        src: self.src(left.location()),
+                        at: left.location().into(),
+                        name,
+                        slots,
+                    })?;
+                }
+
                 match self.decs[dec_id].kind {
                     DecKind::Constant(_) => Err(AssignToConst {
                         src: self.src(left.location()),
