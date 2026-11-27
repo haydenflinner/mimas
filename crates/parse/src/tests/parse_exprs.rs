@@ -2102,7 +2102,8 @@ fn glued_percent_between_operands_is_infix_modulo() {
 fn obelus_is_quotient_remainder() {
     // `÷` desugars to the pair — quotient, then remainder.
     // r[verify mimas.index.div]
-    assert_eq!(parse_expr("a ÷ b"), "quot_rem(a, b)");
+    // the reserved name (L10): a page's `fn quot_rem` cannot capture `÷`
+    assert_eq!(parse_expr("a ÷ b"), "__op_quot_rem(a, b)");
 }
 
 // r[verify mimas.struct.update]

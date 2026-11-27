@@ -3,13 +3,21 @@
 // nothing here, so keep them few and unlikely to collide.
 // r[impl mimas.prelude]
 
-/// `a ÷ b` desugars to `quot_rem(a, b)` — quotient and remainder in
+/// `a ÷ b` desugars to `__op_quot_rem(a, b)` — quotient and remainder in
 /// one call, each operand evaluated exactly once. Both halves keep
-/// `index`, because `~/` and `mod` do.
+/// `index`, because `~/` and `mod` do. The `__op_` name is reserved, so a
+/// page's own `fn quot_rem` never changes what `÷` means.
 /// r[impl mimas.index.div]
+/// r[impl mimas.op.glyph-reserved]
+fn __op_quot_rem(a, b) { (a ~/ b, a % b) }
+
+/// Quotient and remainder, `a ÷ b` spelled as a call.
 fn quot_rem(a, b) { (a ~/ b, a % b) }
 
-/// `f ∘ g` on two functions desugars to `compose(f, g)`: the function that
-/// runs `g`, then `f` on its result, so `(f ∘ g)(x) == f(g(x))`.
+/// `f ∘ g` on two functions desugars to `__op_compose(f, g)`: the function
+/// that runs `g`, then `f` on its result, so `(f ∘ g)(x) == f(g(x))`.
 /// r[impl mimas.op.compose-fn]
+fn __op_compose<A, B, C>(f: (B) -> C, g: (A) -> B) -> (A) -> C { |x: A| f(g(x)) }
+
+/// `f ∘ g` spelled as a call.
 fn compose<A, B, C>(f: (B) -> C, g: (A) -> B) -> (A) -> C { |x: A| f(g(x)) }

@@ -302,15 +302,16 @@ mod own_stmts_tests {
     fn the_prelude_rides_only_as_far_as_the_file_reaches() {
         // no prelude name, no prelude
         assert!(prelude_names("let a = 1;").is_empty());
-        // `÷` reaches `quot_rem`, `∘` reaches `compose`, and only those
-        assert_eq!(prelude_names("let q = 7 ÷ 2;"), ["quot_rem"]);
-        assert_eq!(prelude_names("let h = f ∘ g;"), ["compose"]);
+        // `÷` reaches `__op_quot_rem`, `∘` reaches `__op_compose` (the
+        // reserved names, L10), and only those
+        assert_eq!(prelude_names("let q = 7 ÷ 2;"), ["__op_quot_rem"]);
+        assert_eq!(prelude_names("let h = f ∘ g;"), ["__op_compose"]);
         // a name reaches its item wherever it stands: a call, an f-string
         // hole, a method name, a shadowing fn of the same name
         assert_eq!(prelude_names("let q = quot_rem(7, 2);"), ["quot_rem"]);
         assert_eq!(prelude_names("let s = f\"{quot_rem(7, 2)}\";"), ["quot_rem"]);
         assert_eq!(prelude_names("fn compose(a: int) -> int { a }"), ["compose"]);
         // both, in prelude order
-        assert_eq!(prelude_names("let h = f ∘ g;\nlet q = 7 ÷ 2;"), ["quot_rem", "compose"]);
+        assert_eq!(prelude_names("let h = f ∘ g;\nlet q = 7 ÷ 2;"), ["__op_quot_rem", "__op_compose"]);
     }
 }

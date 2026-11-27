@@ -67,6 +67,7 @@ mod iter_combinators;
 mod range_value;
 mod callables;
 mod failure_names;
+mod glyphs;
 mod rng;
 mod runtime_errors;
 mod scripts;

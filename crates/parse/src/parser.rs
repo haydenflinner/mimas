@@ -18,6 +18,32 @@ mod subscripts;
 pub fn clear_macros() {
     macros::clear();
     reflect::clear();
+    GLYPHS.with(|g| g.borrow_mut().clear());
+}
+
+thread_local! {
+    /// A page's own infix glyphs, `infix ⊛ = combine;`: glyph → function
+    /// name. Like the unit table, a pre-pass fills it before the parse, so
+    /// a use above the declaration reads (r[impl mimas.op.glyph-decl]).
+    static GLYPHS: std::cell::RefCell<HashMap<String, String>> = std::cell::RefCell::new(HashMap::new());
+}
+
+/// The function a page-declared infix glyph names, if `glyph` is one.
+fn user_glyph(glyph: &str) -> Option<String> {
+    GLYPHS.with(|g| g.borrow().get(glyph).cloned())
+}
+
+/// Registers each top-level `infix GLYPH = name;` of a source. A glyph the
+/// lexer knows (an operator token) is not a page's to take.
+fn declare_glyphs(tokens: &[Tok<TokKind<'_>>]) {
+    let toks: Vec<&Tok<TokKind>> = tokens.iter().filter(|t| !t.kind().is_comment()).collect();
+    for w in toks.windows(4) {
+        if let [TokKind::Ident("infix"), TokKind::Invalid(g), TokKind::Equal, TokKind::Ident(f)] =
+            [w[0].kind(), w[1].kind(), w[2].kind(), w[3].kind()]
+        {
+            GLYPHS.with(|t| t.borrow_mut().insert(g.to_string(), f.to_string()));
+        }
+    }
 }
 
 /// The `//# page: NAME` marks of `source` as `(byte start, name)`, the same
@@ -330,6 +356,9 @@ impl<'s> Parser<'s> {
         // scanned for decls and the source relexed when a new name appears.
         // Top-level sources only: an f-string interpolation's sublexer
         // (offset > 0) inherits the file's table.
+        if lexer.offset() == 0 {
+            declare_glyphs(&tokens);
+        }
         if lexer.offset() == 0 && declare_units(lexer.source(), &tokens) {
             lexer = Lexer::new(
                 lexer.source(),
@@ -893,6 +922,20 @@ impl<'s> Parser<'s> {
                 let item = Item::new(f.into(), self.location(start), false);
                 self.end_item(&item);
                 BlockElement::Stmt(self.new_stmt(item, start))
+            }
+            // `infix ⊛ = combine;` -- a page's own glyph operator; the
+            // pre-pass registered it, so the statement itself is spent
+            // (r[impl mimas.op.glyph-decl])
+            TokKind::Ident("infix")
+                if matches!(self.nth(1), TokKind::Invalid(_))
+                    && self.nth(2) == TokKind::Equal
+                    && matches!(self.nth(3), TokKind::Ident(_)) =>
+            {
+                for _ in 0..4 {
+                    self.advance();
+                }
+                self.eat(TokKind::SemiColon);
+                BlockElement::Stmt(self.empty_stmt(start))
             }
             // `class V {…}`/`record V {…}` — `struct` under a softer
             // word; `mimas fmt` writes it back `struct`. Contextual:
@@ -3612,6 +3655,29 @@ impl<'s> Parser<'s> {
             if self.juxta == Juxta::Comma && self.glued_minus() {
                 break;
             }
+            // a page's own glyph, `infix ⊛ = combine;`: `a ⊛ b` is
+            // `combine(a, b)`, binding like `*` (r[impl mimas.op.glyph-decl])
+            if let TokKind::Invalid(g) = self.peek()
+                && self.infix_binds()
+                && (min_power..max_power).contains(&7)
+                && let Some(f) = user_glyph(g)
+            {
+                let at = self.next_location();
+                self.advance();
+                let right = self.binary(8);
+                let callee = self.new_expr(Ident::new(f, at), start);
+                left = self.new_expr(
+                    Call::new(
+                        callee,
+                        vec![
+                            Argument { name: None, value: left },
+                            Argument { name: None, value: right },
+                        ],
+                    ),
+                    start,
+                );
+                continue;
+            }
             let Some((op, power)) = BinaryOp::of(self.peek()) else {
                 break;
             };
@@ -3655,7 +3721,7 @@ impl<'s> Parser<'s> {
                 // prelude, quotient and remainder in one tuple, each operand
                 // evaluated exactly once. r[impl mimas.index.div]
                 if matches!(op, EvaluationOp::Obelus) {
-                    let f = self.new_expr(Ident::synthetic("quot_rem"), start);
+                    let f = self.new_expr(Ident::synthetic("__op_quot_rem"), start);
                     return self.new_expr(
                         Call::new(
                             f,
@@ -7409,12 +7475,14 @@ pub(crate) fn prelude_stmts() -> Vec<Stmt> {
     let units = shared::units::snapshot();
     let macs = macros::snapshot();
     let decls = reflect::snapshot();
+    let glyphs = GLYPHS.with(|g| g.borrow().clone());
     let (ast, errors) =
         Parser::new(Lexer::new(SRC, shared::PRELUDE_FILE, "prelude".into()))
             .into_ast_inner(false);
     shared::units::install(&units);
     macros::install(macs);
     reflect::install(decls);
+    GLYPHS.with(|g| *g.borrow_mut() = glyphs);
     debug_assert!(errors.is_empty(), "the prelude must parse: {errors:?}");
     ast.unpack()
 }
@@ -7480,7 +7548,7 @@ impl crate::visit::Visitor for Reach<'_> {
         if let ExprKind::Evaluation(ev) = expr.kind()
             && matches!(ev.op, EvaluationOp::Compose)
         {
-            self.note("compose");
+            self.note("__op_compose");
         }
     }
 }
@@ -7499,8 +7567,8 @@ fn prelude_for(statements: &[Stmt], tokens: &[Tok<TokKind<'_>>]) -> Vec<Stmt> {
     for tok in tokens {
         match tok.kind() {
             TokKind::Ident(name) => reach.note(name),
-            TokKind::Compose => reach.note("compose"),
-            TokKind::Obelus => reach.note("quot_rem"),
+            TokKind::Compose => reach.note("__op_compose"),
+            TokKind::Obelus => reach.note("__op_quot_rem"),
             _ => {}
         }
     }

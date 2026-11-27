@@ -332,7 +332,9 @@ fn compose_fns(
     right: &Expr,
     location: Location,
 ) -> Result<Option<Ty>> {
-    let name = Ident::new("compose", location);
+    // the reserved name: a page's own `fn compose` never changes `∘`
+    // r[impl mimas.op.glyph-reserved]
+    let name = Ident::new("__op_compose", location);
     let Some(dec) = solver.ribs.resolve(&name) else {
         return Ok(None);
     };
