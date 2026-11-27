@@ -85,6 +85,9 @@ test_run!(
     "n2(0,100)" => "100",
     "n2(0,500)" => "500",
     "n2(255128,0)" => "255128000",
+    // a trailing group that isn't three digits splits the whole run
+    "n3(255,128,0)" => "255128000",
+    "n3(1,234,5)" => "1234005",
     "n2(1234,567)" => "1234567",
     "one(1,234)" => "1234",
     "{ let n = 1,000,000; n }" => "1000000",
@@ -95,14 +98,11 @@ test_run!(
 
 #[test]
 // r[verify mimas.num.group-hint]
-fn rgb_with_unspaced_commas_groups_and_hints() {
+fn unspaced_lists_split_and_grouped_numbers_hint() {
     use crate::test_runner::try_execute;
-    // `255,128` groups (a well-formed run), so `rgb` gets two arguments
-    let err = format!(
-        "{:?}",
-        try_execute("fn rgb(r: int, g: int, b: int) -> int { r }\nlet TEST_VALUE = rgb(255,128,0);").unwrap_err()
-    );
-    assert!(err.contains("`255,128` is one number here; write `255, 128` for two"), "{err}");
+    // `255,128,0` ends in a group that isn't three digits, so the whole run
+    // splits: `rgb` gets three arguments and compiles, with no hint
+    assert!(try_execute("fn rgb(r: int, g: int, b: int) -> int { r }\nlet TEST_VALUE = rgb(255,128,0);").is_ok());
     // a list literal argument: `[100,200,300]` is one number, and the
     // type check on the call then fails
     let err = format!(

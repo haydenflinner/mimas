@@ -1252,6 +1252,11 @@ fn grouped_number(rest: &str) -> Option<(usize, String, bool)> {
     if groups == 0 {
         return None;
     }
+    // a trailing group that isn't three digits (`255,128,0`, `1,234,5`)
+    // shows the run is a list of numbers: no part of it groups
+    if i < b.len() && b[i] == b',' && digit(i + 1) {
+        return None;
+    }
     let mut is_float = false;
     if i < b.len() && b[i] == b'.' && digit(i + 1) {
         is_float = true;
