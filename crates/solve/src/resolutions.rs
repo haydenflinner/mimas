@@ -388,7 +388,15 @@ impl ResolvedAdt {
             .impls
             .iter()
             .filter(|(_, field)| matches!(solver.decs[field.dec].kind, DecKind::Item { .. }))
-            .flat_map(|(name, field)| slots(name, field.dec))
+            .flat_map(|(name, field)| {
+                // `label@B` (C3) dispatches by its own key, never collapsing onto
+                // another pact's `label`
+                if name.contains('@') {
+                    vec![(name.clone(), field.dec)]
+                } else {
+                    slots(name, field.dec)
+                }
+            })
             .chain(
                 adt.overloads
                     .iter()
@@ -480,7 +488,16 @@ impl From<Solver> for Resolutions {
         let mut implements: FxHashMap<DecId, DecId> = FxHashMap::default();
         for &(pid, aid) in solver.pact_impls.iter() {
             for (name, field) in &solver.adts[aid].impls {
-                if let Some(&member) = solver.pact_members.get(&(pid, name.clone()))
+                // a `name@Pact` key pairs with that pact's `name` only
+                let base = match name.split_once('@') {
+                    Some((b, p)) if p == solver.pacts[pid].name => b.to_string(),
+                    Some(_) => continue,
+                    None => name.clone(),
+                };
+                if solver.member_pact.get(&field.dec).is_some_and(|p| *p != pid) {
+                    continue;
+                }
+                if let Some(&member) = solver.pact_members.get(&(pid, base))
                     && member != field.dec
                 {
                     implements.insert(field.dec, member);

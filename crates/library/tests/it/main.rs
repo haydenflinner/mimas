@@ -57,6 +57,7 @@ mod propagate;
 mod records;
 mod reflect;
 mod regions;
+mod pact_keys;
 mod rng;
 mod runtime_errors;
 mod scripts;

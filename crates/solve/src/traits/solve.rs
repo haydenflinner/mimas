@@ -28,6 +28,24 @@ fn pick_method_overload(
     actual: &Ty,
     location: Location,
 ) -> Result<Option<Field>> {
+    // two pacts give the type `name` and nothing inherent does: say which
+    // r[impl mimas.pact.member-key]
+    if let Some(pacts) = solver.ambiguous_members.get(&(aid, name.to_string())) {
+        let names: Vec<String> = pacts.iter().map(|p| solver.pacts[*p].name.clone()).collect();
+        return Err(crate::errors::AmbiguousMethod {
+            src: solver.src(location),
+            at: location.into(),
+            member: name.to_string(),
+            ty: solver.adts[aid].name.clone(),
+            pacts: names.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", "),
+            spellings: names
+                .iter()
+                .map(|n| format!("`{n}::{name}(x)`"))
+                .collect::<Vec<_>>()
+                .join(", "),
+        }
+        .into());
+    }
     let primary = solver.adts[aid].impls.get(name).cloned();
     let overloads = solver.adts[aid]
         .native_overloads
@@ -1179,6 +1197,58 @@ impl Solve for Call {
         }
 
         let adt = match self.left.kind() {
+            // `Pact::m(x, …)` names one pact's member: `x` seen as the pact,
+            // then `.m(…)`. r[impl mimas.pact.member-key]
+            ExprKind::Access(Access::DoubleColon { left, right })
+                if !self.arguments.is_empty()
+                    && left.as_ident().is_some_and(|i| {
+                        !i.is_identity()
+                            && solver.ribs.resolve(i).is_none_or(|d| {
+                                matches!(solver.decs[d].kind, DecKind::Pact(_))
+                            })
+                            && solver.pacts.iter().any(|(_, p)| p.name == i.lexeme)
+                    }) =>
+            {
+                let pact = left.as_ident().unwrap().clone();
+                let at = location;
+                let recv = Ident::new("__pact_recv", at);
+                let bind = Stmt::new(
+                    Let {
+                        left: recv.clone().into(),
+                        annotation: Some(parse::components::Annotation::Ty(pact)),
+                        right: self.arguments[0].value.clone(),
+                        else_branch: None,
+                    }
+                    .into(),
+                    NodeId::new(),
+                    at,
+                );
+                let method = Expr::new(
+                    ExprKind::Access(Access::Dot {
+                        left: Expr::new(ExprKind::Ident(Ident::new("__pact_recv", at)), at),
+                        right: Expr::new(ExprKind::Ident(right.clone()), right.location),
+                        kind: parse::AccessKind::Direct,
+                    }),
+                    at,
+                );
+                let call = Expr::new(
+                    ExprKind::Call(Call {
+                        left: method,
+                        arguments: self.arguments[1..].to_vec(),
+                    }),
+                    at,
+                );
+                let rewritten = Expr::new(
+                    ExprKind::Block(parse::Block {
+                        body: vec![bind],
+                        yielded_expr: Some(call),
+                    }),
+                    at,
+                );
+                let ty = rewritten.query(solver)?;
+                solver.rewrites.insert(id, rewritten);
+                return Ok(ty);
+            }
             ExprKind::Access(Access::DoubleColon { left, right }) => {
                 let adt = match adt_from_type_path(left, solver) {
                     Ok(adt) => adt,

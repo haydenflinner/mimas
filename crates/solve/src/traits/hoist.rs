@@ -145,6 +145,68 @@ impl<'a> HoistCtx<'a> {
                     }
                     None => false,
                 };
+                // C3: impl members key by (pact, name). A pact member whose name
+                // the type already holds, or an inherent member whose name a pact
+                // member holds, keeps both: the pact's lives under `name@Pact`.
+                // r[impl mimas.pact.member-key]
+                if let Some(existing) = &existing
+                    && !overload
+                    && (self.solver.hoisting_pact.is_some()
+                        || self.solver.member_pact.contains_key(&existing.dec))
+                {
+                    let adt = *adt;
+                    let name = ident.lexeme.clone();
+                    let mine = self.solver.hoisting_pact;
+                    let theirs = self.solver.member_pact.get(&existing.dec).copied();
+                    if mine.is_some() && mine == theirs {
+                        Err(DuplicateImplDeclaration {
+                            src: self.solver.src(ident.location),
+                            at: ident.location.into(),
+                            original_at: Some(self.solver.decs[existing.dec].location.into()),
+                            name: name.clone(),
+                        })?;
+                    }
+                    let dec = self.solver.dec_id(ident, ty.clone(), kind, self.vis);
+                    let field = Field::new_constant(ty.clone(), self.location, dec);
+                    match (mine, theirs) {
+                        // a pact member beside an inherent or another pact's member
+                        (Some(p), _) => {
+                            let key = format!("{name}@{}", self.solver.pacts[p].name);
+                            self.solver.decs[dec].name = key.clone();
+                            self.solver.member_pact.insert(dec, p);
+                            self.solver.adts[adt].impls.insert(key, field);
+                            if let Some(t) = theirs {
+                                let e = self.solver.ambiguous_members.entry((adt, name)).or_default();
+                                for q in [t, p] {
+                                    if !e.contains(&q) {
+                                        e.push(q);
+                                    }
+                                }
+                            }
+                        }
+                        // an inherent member takes the bare name; the pact's moves aside
+                        (None, Some(t)) => {
+                            let key = format!("{name}@{}", self.solver.pacts[t].name);
+                            let moved = self.solver.adts[adt].impls.remove(&name).unwrap();
+                            self.solver.decs[moved.dec].name = key.clone();
+                            self.solver.adts[adt].impls.insert(key, moved);
+                            self.solver.adts[adt].impls.insert(name.clone(), field);
+                            self.solver.ambiguous_members.remove(&(adt, name));
+                        }
+                        (None, None) => unreachable!("guarded above"),
+                    }
+                    if let Some(node_id) = self.node_id {
+                        self.solver.node_decs.insert(node_id, dec);
+                    }
+                    if let Some(node_id) = self.node_id {
+                        let vid = self.solver.node_vid(node_id);
+                        let loc = self.location;
+                        self.solver
+                            .register_sub(vid, ty)
+                            .map_err(|e| e.into_type_mismatch(self.solver, loc))?;
+                    }
+                    return Ok(());
+                }
                 if let Some(existing) = &existing
                     && !overload
                 {
@@ -162,6 +224,9 @@ impl<'a> HoistCtx<'a> {
                 }
 
                 let dec = self.solver.dec_id(ident, ty.clone(), kind, self.vis);
+                if let Some(p) = self.solver.hoisting_pact {
+                    self.solver.member_pact.insert(dec, p);
+                }
                 let field = Field::new_constant(ty.clone(), self.location, dec);
                 if overload {
                     self.solver.adts[adt]
@@ -411,6 +476,7 @@ impl Hoist for Impl {
         // by the parser)
         ctx.solver.push_adt_params(adt);
 
+        let prev_pact = std::mem::replace(&mut ctx.solver.hoisting_pact, pid);
         let hoist_result: Result<()> = (|| {
             for item in self.items.iter() {
                 let vis = if item.public() {
@@ -457,30 +523,37 @@ impl Hoist for Impl {
                     .map(|(name, _)| name.clone())
                     .collect();
                 for name in omitted {
-                    if let Some(existing) = ctx.solver.adts[adt].impls.get(&name) {
-                        let loc = ctx.solver.decs[existing.dec].location;
-                        let original_at =
-                            (!loc.span().is_synthetic()).then(|| loc.into());
-                        Err(DuplicateImplDeclaration {
-                            src: ctx.solver.src(self.target.location()),
-                            at: self.target.location().into(),
-                            original_at,
-                            name: name.clone(),
-                        })?;
-                    }
                     let header = ctx.solver.pacts[pid].functions[&name].0.clone();
                     let ty = ctx
                         .solver
                         .instantiate_pact_fn(&header, &ctx.solver.impl_target_ty().unwrap());
                     let dec = ctx.solver.pact_members[&(pid, name.clone())];
+                    // the name is taken (an inherent member or another pact's): the
+                    // default lands under `name@Pact` (C3) r[impl mimas.pact.member-key]
+                    let key = match ctx.solver.adts[adt].impls.get(&name) {
+                        Some(existing) => {
+                            if let Some(&t) = ctx.solver.member_pact.get(&existing.dec) {
+                                let e = ctx.solver.ambiguous_members.entry((adt, name.clone())).or_default();
+                                for q in [t, pid] {
+                                    if !e.contains(&q) {
+                                        e.push(q);
+                                    }
+                                }
+                            }
+                            format!("{name}@{}", ctx.solver.pacts[pid].name)
+                        }
+                        None => name,
+                    };
+                    ctx.solver.member_pact.insert(dec, pid);
                     ctx.solver.adts[adt]
                         .impls
-                        .insert(name, Field::new_constant(ty, ctx.location, dec));
+                        .insert(key, Field::new_constant(ty, ctx.location, dec));
                 }
             }
             Ok(())
         })();
 
+        ctx.solver.hoisting_pact = prev_pact;
         ctx.solver.pop_type_params();
         ctx.solver.ribs.pop();
 

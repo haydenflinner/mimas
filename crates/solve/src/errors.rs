@@ -734,6 +734,21 @@ pub struct MultipleFnDeclarations {
     pub original: Vec<ConstDefinedHere>,
 }
 
+/// `x.m()` on a type two pacts each give an `m`, with no inherent `m` (C3).
+#[derive(Error, Debug, Diagnostic)]
+#[error("`{member}` on `{ty}` is given by more than one pact: {pacts}")]
+#[diagnostic(help("say which: {spellings}"))]
+pub struct AmbiguousMethod {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("which pact's `{member}`?")]
+    pub at: SourceSpan,
+    pub member: String,
+    pub ty: String,
+    pub pacts: String,
+    pub spellings: String,
+}
+
 /// A second `notation` of one tag in one page region.
 #[derive(Error, Debug, Diagnostic)]
 #[error("`notation {name}` is already defined at line {line}")]

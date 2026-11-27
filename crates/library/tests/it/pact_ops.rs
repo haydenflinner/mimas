@@ -146,12 +146,11 @@ test_run!(
 );
 
 // r[verify mimas.pact.primitive]
-// a primitive still can't re-declare a native it already has (`sin` on
-// float), and a bound a primitive doesn't implement stays an error
+// a bound a primitive doesn't implement stays an error. (Re-declaring a
+// native, `sin` on float, was an error here too; since C3 it keeps both,
+// see `pact_keys::a_user_pact_reuses_a_native_name`.)
 test_fail!(
     primitive_impl_limits,
-    "pact P { fn sin(self) -> Self; }
-     impl P for float { fn sin(self) -> float { self } }",
     "pact P { fn add(self, o: Self) -> Self; }
      struct R { v: float }
      impl P for R { fn add(self, o: R) -> R { R { v = self.v + o.v } } }

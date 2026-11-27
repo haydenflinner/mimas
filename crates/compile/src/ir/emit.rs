@@ -2446,8 +2446,15 @@ fn dispatch_pact_method(
                 Some(p) if adt.name != "bool" => vec![p],
                 _ => adt.dispatch_ids.clone(),
             };
-            let target = match adt.methods.get(method) {
-                Some(dec) => Ok(*dec),
+            // a member a pact owns under `name@Pact` (C3) answers for that pact
+            // r[impl mimas.pact.member-key]
+            let keyed = pids.iter().find_map(|p| {
+                adt.methods
+                    .get(&format!("{method}@{}", ir.resolutions.pact_names[*p]))
+                    .copied()
+            });
+            let target = match keyed.or_else(|| adt.methods.get(method).copied()) {
+                Some(dec) => Ok(dec),
                 None => Err(builtin(method)?),
             };
             Some((target, ids, adt.name == "bool"))

@@ -269,8 +269,10 @@ test_fail!(
      f.print_id();"
 );
 
-test_fail!(
-    pact_two_pacts_colliding_methods_rejected,
+// C3: two pacts may each give a type a member of one name (this was a
+// rejection before, on purpose changed); a plain call of it says which
+test_success!(
+    pact_two_pacts_same_method_both_land,
     "pact A { fn dup(self) -> int; }
      pact B { fn dup(self) -> str; }
      struct S { x: int }
@@ -278,8 +280,8 @@ test_fail!(
      impl B for S { fn dup(self) -> str { \"b\" } }"
 );
 
-test_fail!(
-    pact_two_pacts_colliding_defaults_rejected,
+test_success!(
+    pact_two_pacts_same_default_both_land,
     "pact A { fn dup(self) -> int { 1 } }
      pact B { fn dup(self) -> str { \"b\" } }
      struct S { x: int }

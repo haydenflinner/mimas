@@ -110,6 +110,15 @@ pub struct Solver {
     /// one call runs the whole body, so a write to a captured parameter lasts
     /// as long as anything reads it. r[impl mimas.closure.capture-write]
     pub(crate) run_once_closures: FxHashSet<NodeId>,
+    /// The pact whose `impl` block is hoisting its members, if any (C3).
+    pub(crate) hoisting_pact: Option<PactId>,
+    /// Each impl member a pact owns: its dec and the pact (C3). A member whose
+    /// name another member of the type already holds lives under the key
+    /// `name@Pact` in `Adt::impls`.
+    pub(crate) member_pact: FxHashMap<DecId, PactId>,
+    /// `(type, name)` pairs two pacts each give the type, with no inherent
+    /// member of the name: a plain `x.name()` must say which (C3).
+    pub(crate) ambiguous_members: FxHashMap<(AdtId, String), Vec<PactId>>,
     /// Param bindings spelled `x: inout T`, by the binding ident's node id --
     /// `Function::solve` marks the dec each declares once it exists.
     pub(crate) inout_params: FxHashSet<NodeId>,
@@ -443,6 +452,9 @@ impl Solver {
             pact_ops: FxIndexMap::default(),
             closure_captures: FxIndexMap::default(),
             run_once_closures: FxHashSet::default(),
+            hoisting_pact: None,
+            member_pact: FxHashMap::default(),
+            ambiguous_members: FxHashMap::default(),
             inout_params: FxHashSet::default(),
             inout_decs: FxHashSet::default(),
             inout_calls: FxHashSet::default(),
