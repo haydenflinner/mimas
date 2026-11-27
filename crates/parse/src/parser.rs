@@ -3965,6 +3965,23 @@ impl<'s> Parser<'s> {
                 TokKind::LeftParenthesis | TokKind::LeftSquare | TokKind::Bang if fresh_line => {
                     break expr;
                 }
+                // r[impl mimas.pow.postfix]
+                TokKind::Caret if self.glued()
+                    && self.nth(1) == TokKind::LeftParenthesis
+                    && self.meta_at(1).glued =>
+                {
+                    let at = self.next_start();
+                    self.advance();
+                    let exponent = self.parentheticals();
+                    self.power_call(expr, exponent, at)
+                }
+                // r[impl mimas.pow.move]
+                TokKind::MoveExponent(value) if self.glued() => {
+                    let at = self.next_start();
+                    self.advance();
+                    let exponent = self.new_expr(Literal::Int(value), at);
+                    self.power_call(expr, exponent, at)
+                }
                 TokKind::LeftParenthesis => self.call(expr),
                 TokKind::LeftSquare | TokKind::HookLeftSquare => self.square_access(expr),
                 TokKind::DoubleColon => self.colon_access(expr),
@@ -4659,6 +4676,16 @@ impl<'s> Parser<'s> {
             start,
         );
         self.new_expr(Call::new(callee, args), start)
+    }
+
+    fn power_call(&self, base: Expr, exponent: Expr, at: usize) -> Expr {
+        let start = base.span().start();
+        let method = self.new_expr(self.ident_at("pow", at), at);
+        let callee = self.new_expr(
+            Access::Dot { left: base, right: method, kind: AccessKind::Direct },
+            start,
+        );
+        self.new_expr(Call::new(callee, vec![Argument { name: None, value: exponent }]), start)
     }
 
     fn parentheticals(&mut self) -> Expr {

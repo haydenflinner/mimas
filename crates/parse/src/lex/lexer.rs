@@ -666,6 +666,25 @@ impl<'s> Lex<'s, Tok<TokKind<'s>>, TokKind<'s>> for Lexer<'s> {
             // a line whose content opens with ``` starts a prose island:
             // the lines up to its closing ``` are swallowed verbatim
             TokKind::ProseIsland(self.construct_prose_island(start))
+        } else if let Some((len, exponent)) = move_exponent(rest)
+            && self.source[..start].chars().next_back().is_some_and(is_move_glyph)
+        {
+            for _ in 0..len {
+                self.char_stream.match_chomp_with(|_| true);
+            }
+            match exponent {
+                Ok(value) => TokKind::MoveExponent(value),
+                Err(_) => {
+                    let location = self.location(start, self.char_stream.position());
+                    self.errors.push((IntegerOutOfRange(location).into(), location));
+                    TokKind::MoveExponent(0)
+                }
+            }
+        } else if let Some(glyph) = rest.chars().next().filter(|c| is_move_glyph(*c))
+            && move_exponent(&rest[glyph.len_utf8()..]).is_some()
+        {
+            self.char_stream.match_chomp_with(|_| true);
+            TokKind::Ident(&rest[..glyph.len_utf8()])
         } else if let Some(ident) = self.construct_ident() {
             let kind = match ident {
                 "self" => TokKind::SelfKeyword,
@@ -1026,6 +1045,31 @@ impl<'s> Lex<'s, Tok<TokKind<'s>>, TokKind<'s>> for Lexer<'s> {
 /// symbols stay operators: `±` (Latin-1), `⊕`/`⊻` (Mathematical
 /// Operators) and `⍲`/`⍱` (the APL slice of Miscellaneous Technical,
 /// cut out of that block below) are not in any of these ranges.
+fn is_move_glyph(c: char) -> bool {
+    matches!(c, '↻' | '↺' | '⇄' | '⇅' | '⤡')
+}
+
+fn move_exponent(source: &str) -> Option<(usize, Result<i64, std::num::ParseIntError>)> {
+    let mut digits = String::new();
+    let mut len = 0;
+    let rest = if let Some(rest) = source.strip_prefix('⁻') {
+        digits.push('-');
+        len += 1;
+        rest
+    } else {
+        source
+    };
+    let prefix_len = len;
+    for c in rest.chars() {
+        let Some(digit) = "⁰¹²³⁴⁵⁶⁷⁸⁹".chars().position(|d| d == c) else {
+            break;
+        };
+        digits.push(char::from(b'0' + digit as u8));
+        len += 1;
+    }
+    (len > prefix_len).then(|| (len, digits.parse()))
+}
+
 pub fn is_symbol_ident(c: char) -> bool {
     // the direction and axis glyphs are operators, not name parts —
     // `px↕` is `px` then `↕`, and a name must not swallow a direction

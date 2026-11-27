@@ -46,6 +46,21 @@ test_run!(
 );
 
 test_run!(
+    operation_powers_call_the_receivers_pow,
+    "struct Turn { quarters: int }
+     impl Turn {
+         fn pow(self, n: int) -> Turn { Turn { quarters = (self.quarters * n) mod 4 } }
+     }
+     let ↻ = Turn { quarters = 1 };
+     let turns = 2;",
+    // r[verify mimas.pow.move]
+    "↻³ == Turn { quarters = 3 }" => "true",
+    // r[verify mimas.pow.postfix]
+    "↻^(turns + 1) == ↻³" => "true",
+    "↻^(turns - turns) == Turn { quarters = 0 }" => "true",
+);
+
+test_run!(
     r_named_methods_cover_left_owned_ops,
     VEC,
     // `s - v` finds `v.rsub(s)` — `self` is the right operand

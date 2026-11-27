@@ -735,6 +735,26 @@ fn spaced_caret_is_old_xor() {
     assert_eq!(parser.errors().len(), 1);
 }
 
+#[test]
+fn postfix_power_calls_pow() {
+    // r[verify mimas.pow.postfix]
+    // r[verify mimas.pow.move]
+    for (source, expected) in [
+        ("v * ↻³", "v * ↻.pow(3)"),
+        ("↻⁻¹", "↻.pow(-1)"),
+        ("move^(n)", "move.pow((n))"),
+        ("v * move^(n + 1)", "v * move.pow((n + 1))"),
+    ] {
+        let parse = |text| {
+            let mut parser = crate::Parser::new(crate::lex::Lexer::new(text, 0, "test".into()));
+            let expr = parser.expr();
+            assert!(parser.errors().is_empty(), "{text}");
+            expr.to_string()
+        };
+        assert_eq!(parse(source), parse(expected), "{source}");
+    }
+}
+
 // `lit ^ lit` reads as a power — both sides are const, so the fold
 // happens at desugar and no error fires.
 expr_test!(caret_folds_lit_pow, "2^10", Literal::Int(1024));
