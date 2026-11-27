@@ -24,3 +24,24 @@ test_run!(
     "d.keys()" => "[\"ann\", \"bo\"]",
     "d.values()" => "[31, 7]",
 );
+
+// x07 (combo C16): `a ⋅ b` on two lists is the dot product; its unit is
+// the product of the item units; lists of two lengths are an error.
+// r[verify mimas.glyph.dot.list]
+test_run!(
+    dot_of_two_lists,
+    "let a = [1.0, 2.0]\nlet b = [3.0, 4.0]",
+    "a ⋅ b" => "11.0",
+    "[1, 2, 3] ⋅ [4, 5, 6]" => "32",
+    "a.dot(b)" => "11.0",
+);
+
+// r[verify mimas.glyph.dot.list]
+#[test]
+fn dot_of_lists_keeps_units_and_lengths() {
+    let src = "let a: [px] = [1.0px, 2.0px]\nlet bad = (a ⋅ a) + 1.0s\n";
+    let err = format!("{:?}", vm::Vm::compile(src, library::std).err().expect("refused"));
+    assert!(err.contains("px²"), "{err}");
+    let run = vm::Vm::execute("let d = [1.0] ⋅ [1.0, 2.0]\n", library::std);
+    assert!(format!("{:?}", run.err().expect("faults")).contains("one length"));
+}

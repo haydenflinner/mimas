@@ -39,6 +39,9 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add_method_named("sum", sum_float);
     // the reductions behind `∑ ∏ ⨅ ⨆`: `product`, and meet/join -- `inf` is
     // all-of for bools and min for numbers, `sup` any-of and max
+    // `a ⋅ b` on two lists: the dot product (r[impl mimas.glyph.dot.list])
+    api.add_method_named("dot", dot_int);
+    api.add_method_named("dot", dot_float);
     api.add_method_named("product", product_int);
     api.add_method_named("product", product_float);
     api.add_method_named("inf", inf_bool);
@@ -716,6 +719,40 @@ fn product_int(arr: &[i64]) -> Result<i64, RtErr> {
     arr.iter()
         .try_fold(1i64, |acc, &x| acc.checked_mul(x))
         .ok_or_else(|| RtErr::Custom("integer product overflowed".into()))
+}
+
+#[native]
+/// The dot product of two lists of one length, `a ⋅ b`: the sum of the
+/// products of matching items. Lists of different lengths are an error.
+///
+/// ```mimas
+/// let d = [1.0, 2.0] ⋅ [3.0, 4.0]; // 11.0
+/// ```
+fn dot_float(arr: &[f64], other: Vec<f64>) -> Result<f64, RtErr> {
+    if arr.len() != other.len() {
+        return Err(RtErr::Custom(format!(
+            "`⋅` needs two lists of one length, found {} and {}",
+            arr.len(),
+            other.len()
+        )));
+    }
+    Ok(crate::fsum(arr.iter().zip(&other).map(|(a, b)| a * b)))
+}
+
+#[native]
+/// The dot product of two int lists of one length, `a ⋅ b`.
+fn dot_int(arr: &[i64], other: Vec<i64>) -> Result<i64, RtErr> {
+    if arr.len() != other.len() {
+        return Err(RtErr::Custom(format!(
+            "`⋅` needs two lists of one length, found {} and {}",
+            arr.len(),
+            other.len()
+        )));
+    }
+    arr.iter()
+        .zip(&other)
+        .try_fold(0i64, |acc, (a, b)| acc.checked_add(a.checked_mul(*b)?))
+        .ok_or_else(|| RtErr::Custom("integer dot product overflowed".into()))
 }
 
 #[native]

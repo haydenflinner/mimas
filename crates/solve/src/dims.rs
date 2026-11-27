@@ -1631,6 +1631,15 @@ impl<'a> Pass<'a> {
                     _ => D::Any,
                 }
             }
+            // `a ⋅ b` on two lists of quantities: the sum of products, worth
+            // the product of the item units (r[impl mimas.glyph.dot.list])
+            EvaluationOp::Dot => match (&l, &r) {
+                (D::Arr(a), D::Arr(b)) => match (&**a, &**b) {
+                    (D::Q(x), D::Q(y)) => D::Q(x.mul(*y)),
+                    _ => D::Any,
+                },
+                _ => D::Any,
+            },
             _ => D::Any,
         }
     }
@@ -2229,6 +2238,15 @@ impl<'a> Pass<'a> {
             }
             (D::Arr(inner), "pop" | "remove" | "get" | "max" | "min" | "sum") => (**inner).clone(),
             (D::Arr(_), "len") => PLAIN,
+            // `a ⋅ b` on two lists: the sum of products, worth the product
+            // of the item units (r[impl mimas.glyph.dot.list])
+            (D::Arr(a), "dot") => match (&**a, args.first()) {
+                (D::Q(x), Some(D::Arr(b))) => match &**b {
+                    D::Q(y) => D::Q(x.mul(*y)),
+                    _ => D::Any,
+                },
+                _ => D::Any,
+            },
             _ => D::Any,
         }
     }
