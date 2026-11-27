@@ -984,6 +984,25 @@ fn spliced_include_beyond_its_grant_refuses() {
     assert!(e.contains("`kit` needs"), "{e}");
 }
 
+// A grant bounds every item the include declares, not only its top level:
+// a kit fn that draws from `rng` is refused under `granting {}`, by its name,
+// even when the page calls it from its own code.
+// r[verify mimas.use.page.grant-check]
+#[test]
+fn a_grant_bounds_the_include_fns() {
+    let _t = TestResetter;
+    native("draw_rng", Some(Fx::RNG));
+    let kit = "//# page: kit\nfn roll() -> int { draw_rng(); 1 }\n//# page: \n";
+    let e = err(&format!("{kit}use \"kit\" granting {{}};\nlet _x = roll();\n")).unwrap();
+    assert!(e.contains("`fn roll` needs {rng}"), "{e}");
+    // an uncalled kit fn is still the kit's own code
+    let e = err(&format!("{kit}use \"kit\" granting {{}};\n")).unwrap();
+    assert!(e.contains("`fn roll`"), "{e}");
+    run(&format!("{kit}use \"kit\" granting {{ rng }};\nlet _x = roll();\n"));
+    // the page's own fns stay under its ambient authority
+    run("//# page: kit\nlet _y = 1;\n//# page: \nuse \"kit\" granting {};\nfn mine() -> int { draw_rng(); 2 }\n");
+}
+
 // ---- for-element dead stores
 
 // r[verify mimas.for.elem-write]

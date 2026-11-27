@@ -868,6 +868,9 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> crate::errors::Result
             .into(),
         ));
     }
+    // this solve's own fns, for the grant check below: `fn_effects` may
+    // still hold decs an earlier solve of the same session minted
+    let solved_fns: Vec<(DecId, Fx)> = fn_fx.iter().map(|(d, fx)| (*d, *fx)).collect();
     for (caller, fx) in fn_fx {
         solver.fn_effects.insert(caller, fx);
     }
@@ -896,6 +899,27 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> crate::errors::Result
             solver.script_segments.push((name.clone(), site, fx));
         }
         solver.script_effects.insert(name.clone(), file_fx);
+
+        // r[impl mimas.use.page.grant-check] a region's own code is every
+        // item it declares, not only its top level: each fn's inferred set
+        // joins its page's grant footprint, and the fn is remembered so a
+        // denied grant names it
+        // (a separate footprint: `needs` bounds only what the page runs)
+        let file = asts[i].stmts().first().map(|s| s.location().file_id());
+        let mut region_fx = page_fx.clone();
+        let mut page_fns: FxHashMap<&str, Vec<(String, Fx)>> = FxHashMap::default();
+        for (dec, fx) in &solved_fns {
+            let loc = solver.decs[*dec].location;
+            if Some(loc.file_id()) != file || fx.is_empty() {
+                continue;
+            }
+            let page = page_of(loc.span.start);
+            *region_fx.entry(page).or_insert(Fx::empty()) |= *fx;
+            page_fns
+                .entry(page)
+                .or_default()
+                .push((solver.decs[*dec].name.clone(), *fx));
+        }
 
         // Effect-authority checks (`mimas.fx.needs`,
         // `mimas.use.page.grant-narrow`, `mimas.use.page.grant-check`). A
@@ -955,24 +979,42 @@ pub(crate) fn check(solver: &mut Solver, asts: &[&Ast]) -> crate::errors::Result
                 parse::UseTarget::Pinned { page, .. } => page,
             };
             let required = [spelled.as_str(), page_part].into_iter().find_map(|want| {
-                page_fx
+                region_fx
                     .iter()
                     .find(|(name, _)| name.eq_ignore_ascii_case(want))
-                    .map(|(_, fx)| *fx)
+                    .map(|(name, fx)| (*name, *fx))
             });
-            if let Some(required) = required
+            if let Some((page, required)) = required
                 && !required.fits(*granted)
             {
-                errors.push(
-                    crate::errors::IncludeGrantDenied {
-                        src: solver.src(*site),
-                        at: (*site).into(),
-                        name: spelled.clone(),
-                        missing: required.difference(*granted).to_string(),
-                        granted: granted.to_string(),
-                    }
-                    .into(),
-                );
+                // the first fn of the include whose own set escapes the grant
+                let culprit = page_fns
+                    .get(page)
+                    .and_then(|fns| fns.iter().find(|(_, fx)| !fx.fits(*granted)))
+                    .map(|(f, fx)| (f.clone(), fx.difference(*granted).to_string()));
+                match culprit {
+                    Some((fn_name, fn_missing)) => errors.push(
+                        crate::errors::IncludeFnGrantDenied {
+                            src: solver.src(*site),
+                            at: (*site).into(),
+                            name: spelled.clone(),
+                            fn_name,
+                            missing: fn_missing,
+                            granted: granted.to_string(),
+                        }
+                        .into(),
+                    ),
+                    None => errors.push(
+                        crate::errors::IncludeGrantDenied {
+                            src: solver.src(*site),
+                            at: (*site).into(),
+                            name: spelled.clone(),
+                            missing: required.difference(*granted).to_string(),
+                            granted: granted.to_string(),
+                        }
+                        .into(),
+                    ),
+                }
             }
         }
     }

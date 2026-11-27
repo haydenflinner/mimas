@@ -1874,6 +1874,24 @@ pub struct IncludeGrantDenied {
     pub granted: String,
 }
 
+/// A fn the spliced-in page declares needs effects beyond the grant its
+/// `use` declared (r[impl mimas.use.page.grant-check]).
+#[derive(Error, Debug, Diagnostic)]
+#[error("`{name}`'s `fn {fn_name}` needs {missing} beyond the granted {granted}")]
+#[diagnostic(help(
+    "widen the `granting` set, or `{name}` must lose the calls in `{fn_name}` producing {missing}"
+))]
+pub struct IncludeFnGrantDenied {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("the grant is declared here")]
+    pub at: SourceSpan,
+    pub name: String,
+    pub fn_name: String,
+    pub missing: String,
+    pub granted: String,
+}
+
 /// A bounded type param (`fn f<T: Draw>`) was filled by a type that doesn't implement the
 /// pact -- found once every use has settled, reported at the use that filled it.
 #[derive(Error, Debug, Diagnostic)]
