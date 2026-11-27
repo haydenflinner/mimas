@@ -849,20 +849,23 @@ impl<'gc> Ctx<'gc> {
     /// A quantity's text: the number in the unit the page wrote for `dim`
     /// (`25kW` shows `25 kW`), or in the coherent unit when it wrote none.
     fn quantity_into(self, out: &mut String, value: Val<'gc>, dim: shared::units::Dim) -> bool {
-        let shown = self.fixture::<crate::fixtures::DisplayShapes>().unit(dim);
-        match value {
-            Val::Float(_) | Val::Int(_) => {
-                let x = value.as_float().unwrap_or_default();
-                out.push_str(&shared::units::shown_number(x / shown.scale));
-            }
-            // a `dec` quantity is already held in the page's unit
-            Val::Dec(d) => {
-                let _ = write!(out, "{d}");
-            }
-            _ => return false,
+        if !matches!(value, Val::Float(_) | Val::Int(_) | Val::Dec(_)) {
+            return false;
         }
-        out.push(' ');
-        out.push_str(&shown.name);
+        self.fixture::<crate::fixtures::DisplayShapes>().with_unit(dim, |name, scale| {
+            match value {
+                // a `dec` quantity is already held in the page's unit
+                Val::Dec(d) => {
+                    let _ = write!(out, "{d}");
+                }
+                _ => {
+                    let x = value.as_float().unwrap_or_default();
+                    shared::units::shown_number_into(out, x / scale);
+                }
+            }
+            out.push(' ');
+            out.push_str(name);
+        });
         true
     }
 
@@ -973,7 +976,8 @@ impl<'gc> Ctx<'gc> {
             && let Shape::Q(dim) = **inner
             && matches!(value, Val::Array(_) | Val::IntArray(_) | Val::FloatArray(_))
         {
-            let shown = self.fixture::<crate::fixtures::DisplayShapes>().unit(dim);
+            let shapes = self.fixture::<crate::fixtures::DisplayShapes>();
+            let scale = shapes.with_unit(dim, |_, scale| scale);
             let n = self.array_len(value);
             out.push('[');
             for i in 0..n {
@@ -983,13 +987,13 @@ impl<'gc> Ctx<'gc> {
                 let v = self.array_at(value, i);
                 match v.as_float() {
                     Some(x) if !matches!(v, Val::Dec(_)) => {
-                        out.push_str(&shared::units::shown_number(x / shown.scale))
+                        shared::units::shown_number_into(out, x / scale)
                     }
                     _ => self.render_into(out, v, true, depth + 1, path, &Shape::Plain)?,
                 }
             }
             out.push_str("] ");
-            out.push_str(&shown.name);
+            shapes.with_unit(dim, |name, _| out.push_str(name));
             return Ok(());
         }
         // a tuple is a list at runtime: its static shape gives the parentheses
@@ -1036,8 +1040,7 @@ impl<'gc> Ctx<'gc> {
             // `print("x")` is bare while `print(["x"])` renders ["x"]
             Val::Array(a) => {
                 out.push('[');
-                let items: Vec<Val<'gc>> = a.0.borrow().iter().copied().collect();
-                for (i, v) in items.into_iter().enumerate() {
+                for (i, &v) in a.0.borrow().iter().enumerate() {
                     if i > 0 {
                         out.push_str(", ");
                     }
@@ -1067,8 +1070,7 @@ impl<'gc> Ctx<'gc> {
                     _ => None,
                 };
                 out.push_str("{");
-                let pairs: Vec<(Val<'gc>, Val<'gc>)> = d.0.borrow().iter().map(|(k, v)| (*k, *v)).collect();
-                for (i, (k, v)) in pairs.iter().enumerate() {
+                for (i, (k, v)) in d.0.borrow().iter().enumerate() {
                     if i > 0 {
                         out.push_str(", ");
                     }
@@ -1117,41 +1119,36 @@ impl<'gc> Ctx<'gc> {
             }
             Val::Instance(i) => {
                 let inst = i.0.borrow();
+                let sid = inst.struct_id as usize;
                 let names = self.state.struct_names.borrow();
-                match names.get(inst.struct_id as usize) {
-                    Some(name) => out.push_str(name),
+                let atom = match names.get(sid) {
+                    Some(name) => {
+                        out.push_str(name);
+                        // an atom's payload reads as it is written, `#ParseError(line: 3)`
+                        name.starts_with('#')
+                    }
                     None => {
                         let _ = write!(out, "@{}", inst.struct_id);
+                        false
                     }
-                }
+                };
                 drop(names);
                 // a unit variant (`Sky::Moon`) prints as its name alone; a
                 // struct names each field and shows its declared unit
                 // (`M { w: 3 px, n: "a" }`), a positional one (`Square(4)`)
-                // lists its values in parentheses
+                // lists its values in parentheses. The borrows stay held
+                // across the walk, as the instance's own does: nothing a
+                // render does writes them.
                 if !inst.fields.is_empty() {
-                    let sid = inst.struct_id as usize;
-                    let fields: Vec<Val<'gc>> = inst.fields.iter().copied().collect();
-                    drop(inst);
                     let field_names = self.state.field_names.borrow();
-                    let labels: Vec<String> = field_names.get(sid).cloned().unwrap_or_default();
-                    drop(field_names);
-                    let shapes = self.fixture::<crate::fixtures::DisplayShapes>().fields_of(sid);
+                    let labels: &[String] = field_names.get(sid).map_or(&[], Vec::as_slice);
+                    let fields_table = self.fixture::<crate::fixtures::DisplayShapes>().fields.borrow();
+                    let shapes: &[Shape] = fields_table.get(sid).map_or(&[], Vec::as_slice);
                     let positional = labels.is_empty()
-                        || labels.iter().all(|l| l.chars().all(|c| c.is_ascii_digit()));
-                    // an atom's payload reads as it is written, `#ParseError(line: 3)`
-                    let atom = self
-                        .state
-                        .struct_names
-                        .borrow()
-                        .get(sid)
-                        .is_some_and(|n| n.starts_with('#'));
-                    let (open, close) = match (positional, atom) {
-                        (true, _) | (_, true) => ("(", ")"),
-                        _ => (" { ", " }"),
-                    };
+                        || labels.iter().all(|l| l.bytes().all(|c| c.is_ascii_digit()));
+                    let (open, close) = if positional || atom { ("(", ")") } else { (" { ", " }") };
                     out.push_str(open);
-                    for (i, v) in fields.into_iter().enumerate() {
+                    for (i, &v) in inst.fields.iter().enumerate() {
                         if i > 0 {
                             out.push_str(", ");
                         }

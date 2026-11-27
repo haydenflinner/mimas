@@ -910,6 +910,15 @@ impl DisplayShapes {
         self.fields.borrow().get(sid).cloned().unwrap_or_default()
     }
 
+    /// `f` with how a quantity of `dim` shows (its unit's name and size),
+    /// borrowed, not cloned: the renderer asks once per quantity.
+    pub fn with_unit<R>(&self, dim: shared::units::Dim, f: impl FnOnce(&str, f64) -> R) -> R {
+        match self.units.borrow().get(&dim) {
+            Some(shown) => f(&shown.name, shown.scale),
+            None => f(&dim.name(), 1.0),
+        }
+    }
+
     /// How a quantity of `dim` shows: the page's unit, else the coherent one.
     pub fn unit(&self, dim: shared::units::Dim) -> shared::units::Shown {
         self.units.borrow().get(&dim).cloned().unwrap_or_else(|| shared::units::Shown {

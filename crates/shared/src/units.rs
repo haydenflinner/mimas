@@ -599,18 +599,49 @@ impl Shape {
 /// digits, trailing zeros dropped, so a value converted out of base units
 /// (`12lb` round-trips as `12.000000000000002`) reads `12`.
 pub fn shown_number(v: f64) -> String {
+    let mut out = String::new();
+    shown_number_into(&mut out, v);
+    out
+}
+
+/// [`shown_number`], appended to `out` (the renderer's buffer).
+pub fn shown_number_into(out: &mut String, v: f64) {
+    use std::fmt::Write as _;
+    // a whole number below 10^12 is its own 12-digit answer: print it as an
+    // integer, the commonest quantity (`3px`) and the cheapest print
+    if v.fract() == 0.0 && v.abs() < 1e12 && v != 0.0 {
+        let _ = write!(out, "{}", v as i64);
+        return;
+    }
+    let start = out.len();
     if !v.is_finite() || v == 0.0 {
-        return if v == 0.0 { "0".into() } else { format!("{v}") };
+        if v == 0.0 {
+            out.push('0');
+        } else {
+            let _ = write!(out, "{v}");
+        }
+        return;
     }
     let mag = v.abs().log10().floor() as i32;
     let prec = (11 - mag).clamp(0, 20) as usize;
+    if (0..=20).contains(&(11 - mag)) {
+        let _ = write!(out, "{v}");
+        let short = &out[start..];
+        let decimals = short.find('.').map_or(0, |i| short.len() - i - 1);
+        // significant digits: first nonzero digit to last nonzero digit
+        let digits = || short.bytes().filter(u8::is_ascii_digit);
+        let lead = digits().take_while(|&b| b == b'0').count();
+        let trail = digits().rev().take_while(|&b| b == b'0').count();
+        let sig = digits().count().saturating_sub(lead + trail);
+        if sig <= 12 && decimals <= prec {
+            return;
+        }
+        out.truncate(start);
+    }
     let s = format!("{v:.prec$}");
-    let s = if s.contains('.') {
-        s.trim_end_matches('0').trim_end_matches('.').to_string()
-    } else {
-        s
-    };
-    if s == "-0" { "0".into() } else { s }
+    let s = s.as_str();
+    let s = if s.contains('.') { s.trim_end_matches('0').trim_end_matches('.') } else { s };
+    out.push_str(if s == "-0" { "0" } else { s });
 }
 
 /// The word for a dimension, when it has one.
@@ -1423,6 +1454,56 @@ pub fn scan_suffix(rest: &str) -> Option<usize> {
         }
     }
     Some(end)
+}
+
+#[cfg(test)]
+mod shown_number_tests {
+    /// `shown_number` before its fast path: the exact print, trimmed.
+    fn slow(v: f64) -> String {
+        if !v.is_finite() || v == 0.0 {
+            return if v == 0.0 { "0".into() } else { format!("{v}") };
+        }
+        let mag = v.abs().log10().floor() as i32;
+        let prec = (11 - mag).clamp(0, 20) as usize;
+        let s = format!("{v:.prec$}");
+        let s = if s.contains('.') {
+            s.trim_end_matches('0').trim_end_matches('.').to_string()
+        } else {
+            s
+        };
+        if s == "-0" { "0".into() } else { s }
+    }
+
+    // The fast path must print what the exact path prints, byte for byte.
+    #[test]
+    fn the_fast_path_matches_the_exact_print() {
+        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let mut cases: Vec<f64> = vec![
+            1.0, 0.5, 12.000000000000002, 25000.0 / 1000.0, 0.1 + 0.2, 1e-9, 1e-10, 1e11,
+            1e12, 99999999999.99, 1234567890123.0, 0.375, -2.68, 3.0, 199.0, 1e-25, 1e25,
+            0.0000123456789012, 123456.789, 1.0 / 3.0, 2.0f64.sqrt(), -0.0000000001,
+        ];
+        for _ in 0..200_000 {
+            let r = next();
+            // whole numbers, short decimals, and arbitrary doubles across magnitudes
+            let int = (r % 100_000) as f64;
+            let scale = 10f64.powi((r >> 20) as i32 % 30 - 15);
+            cases.push(int);
+            cases.push(int / 100.0);
+            cases.push(int * scale);
+            cases.push(f64::from_bits(r & 0x7fef_ffff_ffff_ffff) % 1e15);
+            cases.push(-(int / 8.0));
+        }
+        for v in cases {
+            assert_eq!(super::shown_number(v), slow(v), "{v:e}");
+        }
+    }
 }
 
 #[cfg(test)]
