@@ -3,7 +3,8 @@
 //! `<`, `<=`, `>` and `>=` compare one. A user type joins with an `impl`,
 //! the same way the built-in types below do. `Iter` is how `for x in v`
 //! and the combinators walk a value: its `type Item` names what each step
-//! gives, and each impl fixes it.
+//! gives, and each impl fixes it. `Add`, `Sub`, `Mul`, `Div`, `Rem` and
+//! `Neg` are the operators: `a + b` is `a.add(b)` through `Add`.
 
 /// How a value writes itself: `print(v)` and `f"{v}"` call `show` when the
 /// value's type implements `Show`.
@@ -337,3 +338,68 @@ fn __range(start: int, end: int, inclusive: bool) -> Range {
 /// r[impl mimas.std.cell]
 struct Cell<T> { value: T }
 
+
+// ---- operators -----------------------------------------------------------
+//
+// `a + b` is `a.add(b)` through `Add<type of b>` on the type of `a`, and so
+// for `-`, `*`, `/` and `mod`; `-a` is `Neg`. `Rhs` is the right operand's
+// type, `Self` when left out, and `Out` is the result. A type may implement
+// one operator several times with different `Rhs`: `Vec2 * Vec2` and
+// `Vec2 * 2.0` are `impl Mul for Vec2` and `impl Mul<float> for Vec2`, and
+// `2.0 * v` is `impl Mul<Vec2> for float`. A bound names the result:
+// `fn sum<T: Add<Out = T>>(xs: [T]) -> T`. A type with only an inherent
+// `add` still gets `+`. r[impl mimas.std.ops]
+
+/// `a + b`.
+pact Add<Rhs = Self> {
+    type Out;
+    fn add(self, o: Rhs) -> Out;
+}
+
+/// `a - b`.
+pact Sub<Rhs = Self> {
+    type Out;
+    fn sub(self, o: Rhs) -> Out;
+}
+
+/// `a * b`.
+pact Mul<Rhs = Self> {
+    type Out;
+    fn mul(self, o: Rhs) -> Out;
+}
+
+/// `a / b`.
+pact Div<Rhs = Self> {
+    type Out;
+    fn div(self, o: Rhs) -> Out;
+}
+
+/// `a mod b`.
+pact Rem<Rhs = Self> {
+    type Out;
+    fn rem(self, o: Rhs) -> Out;
+}
+
+/// `-a`.
+pact Neg {
+    type Out;
+    fn neg(self) -> Out;
+}
+
+// The numbers' operators are built in: these impls declare no method, and
+// the built-in operator answers, as fast as before. `int / int` is a
+// `float`. r[impl mimas.op.pact-std]
+
+impl Add for int { type Out = int; }
+impl Sub for int { type Out = int; }
+impl Mul for int { type Out = int; }
+impl Div for int { type Out = float; }
+impl Rem for int { type Out = int; }
+impl Neg for int { type Out = int; }
+
+impl Add for float { type Out = float; }
+impl Sub for float { type Out = float; }
+impl Mul for float { type Out = float; }
+impl Div for float { type Out = float; }
+impl Rem for float { type Out = float; }
+impl Neg for float { type Out = float; }

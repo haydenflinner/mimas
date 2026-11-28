@@ -49,6 +49,7 @@ mod mem_budget;
 mod multi_dispatch;
 mod numbers;
 mod operators;
+mod ops_pacts;
 mod pact_ops;
 mod plain_messages;
 mod parquet;
