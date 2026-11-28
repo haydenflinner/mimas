@@ -736,6 +736,12 @@ pub fn expand_laws(user: &mut [Ast], shipped: &[Ast]) -> LawExpansion {
             let StmtKind::Item(item) = stmt.kind() else { continue };
             let ItemKind::Impl(imp) = item.kind() else { continue };
             let Some(pact) = &imp.pact else { continue };
+            // a pact's laws speak of its default instance: `impl Mul<float> for
+            // V` is another relation, and its laws would not type
+            // (r[impl mimas.pact.params])
+            if !imp.pact_args.is_empty() {
+                continue;
+            }
             let Some(pact_laws) = laws.get(&pact.lexeme) else { continue };
             let ty = imp.target.lexeme.as_str();
             let ty_ann = Annotation::Ty(imp.target.clone());

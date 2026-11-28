@@ -28,6 +28,13 @@ pub struct Impl {
     /// impl is for, with the parameters it names. The target is then the
     /// library's `array` or `dict` (`mimas.impl.builtin-shape`).
     pub shape: Option<(crate::components::Annotation, Vec<crate::components::TypeParam>)>,
+    /// `impl Mul<float> for Vec2`: the arguments for the pact's own type
+    /// parameters, in order (`mimas.pact.params`). Empty takes the defaults.
+    pub pact_args: Vec<crate::components::Annotation>,
+    /// `impl Add<T> for Stream<T>`: the target's own parameters restated, so
+    /// the pact's arguments can name them. The checker holds them to the
+    /// declared names.
+    pub target_params: Vec<Ident>,
 }
 impl Impl {
     pub(crate) fn new(
@@ -44,6 +51,8 @@ impl Impl {
             bounds: vec![],
             assoc: vec![],
             shape: None,
+            pact_args: vec![],
+            target_params: vec![],
         }
     }
 }
@@ -58,6 +67,12 @@ impl IntoItem for Impl {}
 impl std::fmt::Display for Impl {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let head = match &self.pact {
+            Some(pact) if !self.pact_args.is_empty() => format!(
+                "impl {}<{}> for {}",
+                pact,
+                self.pact_args.iter().join(", "),
+                self.target
+            ),
             Some(pact) => format!("impl {} for {}", pact, self.target),
             None => format!("impl {}", self.target),
         };

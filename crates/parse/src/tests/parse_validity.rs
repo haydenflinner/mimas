@@ -109,12 +109,22 @@ test_ok!(
     "pact A: B + C { fn f() -> (); }"
 );
 
-// `pact P<R>` -- a pact head takes no type parameters
-// r[verify mimas.pact.no-params]
-test_fail!(
-    pact_type_params_rejected,
-    "pact Add<R> { fn add(self, o: R) -> Self; }"
+// `pact P<R>` -- a pact head takes type parameters with defaults, an impl
+// and a bound name the arguments, and a bound may pin an associated type
+// r[verify mimas.pact.params]
+test_ok!(
+    pact_type_params_forms,
+    "pact Add<R> { fn add(self, o: R) -> Self; }",
+    "pact Add<Rhs = Self> { type Out; fn add(self, o: Rhs) -> Out; }",
+    "pact P<A, B = A> {}",
+    "impl Mul<float> for Vec2 { type Out = Vec2; }",
+    "impl Add<T> for Stream<T> { type Out = Stream<T>; }",
+    "fn sum<T: Add<Out = T>>(xs: [T]) -> T { xs[0] }",
+    "fn f<T: Mul<float, Out = T> + Show>(x: T) -> T { x }",
+    "pact G: Add<Out = Self> + Neg<Out = Self> {}"
 );
+// r[verify mimas.impl.bare-name]
+test_fail!(pact_args_need_for, "impl Box<int> {}");
 
 // pact items
 test_ok!(
@@ -749,11 +759,14 @@ test_ok!(
     "let l: List<int> = y;",
     "impl List { fn f(self) {} }"
 );
+// a pact impl may restate the target's params (`impl Add<T> for Stream<T>`,
+// r[verify mimas.pact.params.generic-target]); a concrete one specializes
 test_fail!(
     impl_specialization_rejected,
     "impl List<T> {}",
-    "impl Pact for List<T> {}"
+    "impl Pact for List<int> {}"
 );
+test_ok!(impl_restated_params, "impl Pact for List<T> {}");
 
 #[test]
 fn misdirection_renders_spelling() {

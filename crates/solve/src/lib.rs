@@ -49,6 +49,7 @@ pub use exhaustion::missing_patterns;
 mod frames;
 mod lens;
 mod load;
+mod pact_params;
 mod resolutions;
 mod solver;
 mod unify;

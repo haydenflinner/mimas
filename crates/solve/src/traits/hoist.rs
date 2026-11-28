@@ -443,12 +443,32 @@ impl Hoist for Impl {
         // Record pact membership up front (before any body solves) so coercions resolve regardless
         // of source order. Implementing the same pact twice is rejected here; member-name clashes
         // with anything else already on the adt surface as the members land in `impls` below.
-        let pid = self.pact.as_ref().and_then(|pact| {
-            ctx.solver
-                .resolve_name(pact, pact.location)
-                .ok()
-                .and_then(|t| t.as_single_pact())
-        });
+        // `impl Add<T> for Stream<T>`: the restated params are the target's own
+        if !self.target_params.is_empty() {
+            let declared: Vec<String> = ctx.solver.adts[adt]
+                .type_params
+                .iter()
+                .map(|(n, _)| n.clone())
+                .collect();
+            let written: Vec<String> = self.target_params.iter().map(|i| i.lexeme.clone()).collect();
+            if declared != written {
+                let at = self.target_params[0].location;
+                return Err(crate::errors::PactArgs {
+                    src: ctx.solver.src(at),
+                    at: at.into(),
+                    msg: format!(
+                        "`{}` declares <{}>, so the impl restates them as written",
+                        self.target.lexeme,
+                        declared.join(", ")
+                    ),
+                    label: format!("write `{}<{}>`", self.target.lexeme, declared.join(", ")),
+                }
+                .into());
+            }
+        }
+        // `impl Mul<float> for Vec2` implements that instance of `Mul`
+        // (r[impl mimas.pact.params]); an error in the arguments reports at solve
+        let pid = ctx.solver.impl_pact(self, adt).ok().flatten();
         if let Some(pid) = pid
             && !ctx.solver.pact_impls.insert((pid, adt))
         {
@@ -625,6 +645,19 @@ impl Hoist for Pact {
         }
         shared::name_pact(pact_id.index(), &self.name.lexeme);
         let prev_self = ctx.solver.pact_self.replace(pact_id);
+        // `pact Add<Rhs = Self>`: the parameters read as stand-ins in the
+        // member signatures (r[impl mimas.pact.params])
+        let param_scope = match ctx.solver.declare_pact_params(pact_id, &self.params) {
+            Ok(scope) => scope,
+            Err(e) => {
+                ctx.solver.pact_self = prev_self;
+                return Err(e);
+            }
+        };
+        let has_params = !param_scope.is_empty();
+        if has_params {
+            ctx.solver.assoc_scope.push(param_scope);
+        }
 
         // `type Item;`: a stand-in vid each impl's binding replaces
         // (r[impl mimas.pact.assoc-type])
@@ -762,6 +795,9 @@ impl Hoist for Pact {
 
         ctx.solver.pact_self = prev_self;
         if scoped {
+            ctx.solver.assoc_scope.pop();
+        }
+        if has_params {
             ctx.solver.assoc_scope.pop();
         }
 

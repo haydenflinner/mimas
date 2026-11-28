@@ -88,17 +88,37 @@ pub struct Solver {
     pub(crate) impl_member: FxHashMap<DecId, Vec<DecId>>,
     /// Bounds named before their pact was hoisted (a struct's `<T: Draw>` is read in
     /// `hoist_types`, ahead of `hoist_pacts`) -- settled by `resolve_pending_bounds`.
-    pub(crate) pending_bounds: Vec<(ParamId, Ident)>,
+    pub(crate) pending_bounds: Vec<(ParamId, parse::components::Bound)>,
+    /// `pact Add<Rhs = Self>`: each pact's declared type parameters
+    /// (`mimas.pact.params`). A pact absent here takes none.
+    pub(crate) pact_params: FxHashMap<PactId, Vec<crate::pact_params::PactParam>>,
+    /// The instance minted for (template, argument key).
+    pub(crate) pact_insts: FxHashMap<(PactId, String), PactId>,
+    /// A one-argument method call's argument, by its callee access node:
+    /// picks among a bound's instances of one pact.
+    pub(crate) call_args: FxHashMap<NodeId, Expr>,
+    /// (instance, adt) answered by an impl of a sibling instance
+    /// (`impl Add<T> for Box<T>` for `Add<int>`): the impl's instance.
+    pub(crate) inst_alias: FxHashMap<(PactId, AdtId), PactId>,
+    /// An instance's template and arguments (`Self` as the instance's
+    /// `Skolem`).
+    pub(crate) inst_of: FxHashMap<PactId, (PactId, Vec<Ty>)>,
+    /// `T: Add<Out = T>`: the associated types a bound pins, per (param,
+    /// bound) (`mimas.pact.assoc-bound`).
+    pub(crate) bound_assoc: FxHashMap<(ParamId, PactId), Vec<(String, Ty)>>,
+    /// `pact G: Add<Out = Self>`: the pins a pact states on one it
+    /// requires, per (requirer, required), `Self` as the requirer's.
+    pub(crate) require_assoc: FxHashMap<(PactId, PactId), Vec<(String, Ty)>>,
     /// Parameter defaults that didn't reduce at `hoist_callables` -- a default naming a
     /// `const` the fixpoint hasn't solved yet -- settled by `resolve_pending_defaults`:
     /// the fn's dec, the parameter's index, the default's expr.
     pub(crate) pending_defaults: Vec<(DecId, usize, Expr)>,
     /// Every instantiation of a bounded param: the vid it became, the pact it owes, and the
     /// use that incurred it. Checked once bodies are solved (`check_bounds`).
-    pub(crate) bound_obligations: Vec<(Ty, PactId, Location)>,
+    pub(crate) bound_obligations: Vec<(Ty, PactId, Location, Vec<(String, Ty)>)>,
     /// `pact A: B` bounds, recorded at `hoist_pacts` when `B` may not be
     /// declared yet -- settled by `resolve_pending_impls` (mimas.pact.requires).
-    pub(crate) pending_pact_requires: Vec<(PactId, Ident)>,
+    pub(crate) pending_pact_requires: Vec<(PactId, parse::components::Bound)>,
     /// `impl X for T via Y` decls, recorded at `hoist_callables` -- settled
     /// once every impl is registered, by `resolve_pending_impls` (mimas.impl.via).
     pub(crate) pending_vias: Vec<PendingVia>,
@@ -599,6 +619,13 @@ impl Solver {
             pact_groups: FxHashMap::default(),
             impl_member: FxHashMap::default(),
             pending_bounds: vec![],
+            pact_params: FxHashMap::default(),
+            pact_insts: FxHashMap::default(),
+            call_args: FxHashMap::default(),
+            inst_alias: FxHashMap::default(),
+            inst_of: FxHashMap::default(),
+            bound_assoc: FxHashMap::default(),
+            require_assoc: FxHashMap::default(),
             pending_defaults: vec![],
             bound_obligations: vec![],
             pending_pact_requires: vec![],
@@ -2000,7 +2027,15 @@ impl Solver {
     // r[impl mimas.pact.assoc-type]
     pub(crate) fn assoc_for(&mut self, item: ParamId, owner: &Ty) -> Option<Ty> {
         let (pid, name) = self.assoc_params.get(&item)?.clone();
-        let concrete = match owner.clone().normalized(self) {
+        let owner_n = owner.clone().normalized(self);
+        // `T: Add<Out = T>`, or `pact G: Add<Out = Self>` reached through
+        // `T: G` or `G`'s own `Self`: the pinned type (r[impl mimas.pact.assoc-bound])
+        if matches!(owner_n, Ty::Param(_) | Ty::Skolem(_))
+            && let Some(t) = self.assoc_pin(&owner_n, pid, &name)
+        {
+            return Some(t);
+        }
+        let concrete = match owner_n {
             Ty::Adt(aid, args) | Ty::Identity(aid, args) => Some((aid, args)),
             Ty::Param(p) => return Some(Ty::Param(self.param_assoc(p, item, &name))),
             Ty::Skolem(_) => return Some(Ty::Param(item)),
@@ -2008,7 +2043,16 @@ impl Solver {
             other => self.builtin_adt(&other).map(|a| (a, vec![])),
         };
         let (aid, args) = concrete?;
-        let bound = self.assoc_bindings.get(&(pid, aid, name)).cloned()?;
+        // `Box<int>`'s `Add<int>::Out` is what `impl Add<T> for Box<T>` fixes
+        // (r[impl mimas.pact.params.generic-target])
+        let bound = match self.assoc_bindings.get(&(pid, aid, name.clone())).cloned() {
+            Some(b) => b,
+            None => {
+                let ty = owner.clone().normalized(self);
+                let sib = self.sibling_impls(pid, aid, &args, &ty).into_iter().next()?;
+                self.assoc_bindings.get(&(sib, aid, name)).cloned()?
+            }
+        };
         // `impl Iter for [T]`: read `T` off the concrete list
         if let Some(shape) = self.impl_shapes.get(&(pid, aid)).cloned() {
             let mut map = FxHashMap::default();
@@ -2727,34 +2771,37 @@ impl Solver {
     /// Hoisting and body-solving both pass through here for one decl; the ids agree (see
     /// `param_id_of`) and a bound registers once.
     pub(crate) fn declare_type_params(&mut self, params: &[TypeParam]) -> Vec<(String, ParamId)> {
-        params
+        let declared: Vec<(String, ParamId)> = params
             .iter()
-            .map(|p| {
-                let pid = Self::param_id_of(&p.name);
-                for bound in &p.bounds {
-                    self.bind_param(pid, bound);
-                }
-                (p.lexeme.clone(), pid)
-            })
-            .collect()
+            .map(|p| (p.lexeme.clone(), Self::param_id_of(&p.name)))
+            .collect();
+        // a bound's arguments may name any param of the list, itself
+        // included (`T: Add<Out = T>`)
+        let any_args = params.iter().any(|p| p.bounds.iter().any(|b| !b.is_plain()));
+        if any_args {
+            self.type_params.push(declared.iter().cloned().collect());
+        }
+        for (p, (_, pid)) in params.iter().zip(&declared) {
+            for bound in &p.bounds {
+                self.bind_param(*pid, bound);
+            }
+        }
+        if any_args {
+            self.type_params.pop();
+        }
+        declared
     }
 
     // r[impl mimas.generic.bound]
     /// `T: Draw` -- hold `pid` to the pact `bound` names. A name that doesn't resolve yet
-    /// (the pact is hoisted after the types) waits in `pending_bounds`.
-    pub(crate) fn bind_param(&mut self, pid: ParamId, bound: &Ident) {
-        let pact = self
-            .resolve_name(bound, bound.location)
-            .ok()
-            .and_then(|ty| ty.as_single_pact());
-        match pact {
-            Some(pact) => {
-                let bounds = self.param_bounds.entry(pid).or_default();
-                if !bounds.contains(&pact) {
-                    bounds.push(pact);
-                }
-            }
-            None => {
+    /// (the pact is hoisted after the types) waits in `pending_bounds`. `T: Mul<float>`
+    /// holds it to that instance, and `T: Add<Out = T>` also pins the associated type
+    /// (r[impl mimas.pact.params] r[impl mimas.pact.assoc-bound]).
+    pub(crate) fn bind_param(&mut self, pid: ParamId, bound: &parse::components::Bound) {
+        match self.resolve_bound(bound, &Ty::Param(pid)) {
+            Ok(Some((pact, pins))) => self.add_bound(pid, pact, pins),
+            // an argument that fails to resolve here reports at `resolve_pending_bounds`
+            Ok(None) | Err(_) => {
                 let waiting = self
                     .pending_bounds
                     .iter()
@@ -2766,12 +2813,22 @@ impl Solver {
         }
     }
 
+    fn add_bound(&mut self, pid: ParamId, pact: PactId, pins: Vec<(String, Ty)>) {
+        let bounds = self.param_bounds.entry(pid).or_default();
+        if !bounds.contains(&pact) {
+            bounds.push(pact);
+        }
+        if !pins.is_empty() {
+            self.bound_assoc.insert((pid, pact), pins);
+        }
+    }
+
     /// Bounds that named a pact before it existed: resolve them now, or say what the name
     /// is instead. A phase after `hoist_callables`, when every pact is declared.
     fn resolve_pending_bounds(&mut self, _ast: &Ast) -> Result<()> {
         for (pid, bound) in std::mem::take(&mut self.pending_bounds) {
             let ty = self.resolve_name(&bound, bound.location)?;
-            let Some(pact) = ty.as_single_pact() else {
+            let Some(base) = ty.as_single_pact() else {
                 return Err(NotAPact {
                     src: self.src(bound.location),
                     at: bound.location.into(),
@@ -2779,10 +2836,8 @@ impl Solver {
                 }
                 .into());
             };
-            let bounds = self.param_bounds.entry(pid).or_default();
-            if !bounds.contains(&pact) {
-                bounds.push(pact);
-            }
+            let (pact, pins) = self.apply_bound(base, &bound, &Ty::Param(pid))?;
+            self.add_bound(pid, pact, pins);
         }
         Ok(())
     }
@@ -2888,17 +2943,44 @@ impl Solver {
         {
             return Ok(());
         }
-        for (pid, ident) in std::mem::take(&mut self.pending_pact_requires) {
-            let ty = self.resolve_name(&ident, ident.location)?;
-            let Some(req) = ty.as_single_pact() else {
+        for (pid, bound) in std::mem::take(&mut self.pending_pact_requires) {
+            let ty = self.resolve_name(&bound, bound.location)?;
+            let Some(base) = ty.as_single_pact() else {
                 return Err(NotAPact {
-                    src: self.src(ident.location),
-                    at: ident.location.into(),
+                    src: self.src(bound.location),
+                    at: bound.location.into(),
                     ty: ty.to_string(),
                 }
                 .into());
             };
+            // `pact G: Add<Out = Self>`: `Self` is `G`'s implementer
+            // (r[impl mimas.pact.assoc-bound])
+            let prev = self.pact_self.replace(pid);
+            let applied = self.apply_bound(base, &bound, &Ty::Skolem(pid));
+            self.pact_self = prev;
+            let (req, pins) = applied?;
             self.pacts[pid].requires.push(req);
+            if !pins.is_empty() {
+                self.require_assoc.insert((pid, req), pins.clone());
+            }
+            // the instances minted before this ran require it too
+            let insts: Vec<PactId> = self
+                .inst_of
+                .iter()
+                .filter(|(_, (b, _))| *b == pid)
+                .map(|(i, _)| *i)
+                .collect();
+            for i in insts {
+                self.pacts[i].requires.push(req);
+                if !pins.is_empty() {
+                    let me = Ty::Skolem(i);
+                    let pins = pins
+                        .iter()
+                        .map(|(n, t)| (n.clone(), Self::subst_pact_ty(t, &FxHashMap::default(), pid, &me)))
+                        .collect();
+                    self.require_assoc.insert((i, req), pins);
+                }
+            }
         }
         // forwards next: an auto-registered via pact owes its own required
         // pacts, and the impl check below runs once they're all in
@@ -2907,7 +2989,18 @@ impl Solver {
         }
         for (adt, pid, at) in std::mem::take(&mut self.pending_required) {
             for req in self.pact_closure(pid) {
-                if req != pid && !self.pact_impls.contains(&(req, adt)) {
+                let target = self.adt_self_ty(adt);
+                let pins: Vec<(String, Ty)> = self
+                    .pact_closure(pid)
+                    .into_iter()
+                    .filter_map(|c| self.require_assoc.get(&(c, req)).map(|p| (c, p.clone())))
+                    .flat_map(|(c, p)| {
+                        p.into_iter()
+                            .map(|(n, t)| (n, Self::subst_pact_ty(&t, &FxHashMap::default(), c, &target)))
+                            .collect::<Vec<_>>()
+                    })
+                    .collect();
+                if req != pid && !self.implements(&target, req, &pins) {
                     return Err(PactRequires {
                         src: self.src(at),
                         at: at.into(),
@@ -3141,7 +3234,18 @@ impl Solver {
             return;
         };
         for pact in self.param_bounds.get(&pid).cloned().unwrap_or_default() {
-            self.bound_obligations.push((ty.clone(), pact, at));
+            // a pin's own param reads as what it settled to (`Out = T`)
+            let mut map = FxHashMap::default();
+            map.insert(pid, ty.clone());
+            let pins = self
+                .bound_assoc
+                .get(&(pid, pact))
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(n, t)| (n, Self::subst_pact_ty(&t, &map, PactId::from(u32::MAX), &Ty::Unit)))
+                .collect();
+            self.bound_obligations.push((ty.clone(), pact, at, pins));
         }
     }
 
@@ -3150,21 +3254,9 @@ impl Solver {
     /// the pact? Runs once bodies are solved, so each vid is as pinned as it will get --
     /// one still open is held to nothing.
     fn check_bounds(&mut self) -> Result<()> {
-        for (ty, pact, at) in std::mem::take(&mut self.bound_obligations) {
+        for (ty, pact, at, pins) in std::mem::take(&mut self.bound_obligations) {
             let ty = ty.normalized(self);
-            let ok = match &ty {
-                Ty::Vid(_) | Ty::Never => true,
-                Ty::Adt(aid, _) | Ty::Identity(aid, _) => self.pact_impls.contains(&(pact, *aid)),
-                Ty::Pacts(pids) => pids.iter().any(|p| self.pact_closure(*p).contains(&pact)),
-                Ty::Skolem(p) => self.pact_closure(*p).contains(&pact),
-                Ty::Param(p) => self.param_bounds.get(p).is_some_and(|b| {
-                    b.iter()
-                        .any(|bound| self.pact_closure(*bound).contains(&pact))
-                }),
-                other => self
-                    .builtin_adt(other)
-                    .is_some_and(|aid| self.pact_impls.contains(&(pact, aid))),
-            };
+            let ok = self.implements(&ty, pact, &pins);
             // a post is the one type std leaves out of `AbelianGroup` on
             // purpose: say why, and what a stream of posts is
             // r[impl mimas.group.affine.posts]
@@ -4412,6 +4504,7 @@ impl Solver {
                     let prev_self = self.pact_self.replace(pid);
                     // default bodies name the pact's associated types as
                     // their opaque stand-ins (r[impl mimas.pact.assoc-type])
+                    // and its own type parameters likewise (r[impl mimas.pact.params])
                     let assoc: FxHashMap<String, Ty> = pact
                         .items
                         .iter()
@@ -4421,6 +4514,9 @@ impl Solver {
                             }
                             _ => None,
                         })
+                        .chain(pact.params.iter().map(|(name, _)| {
+                            (name.lexeme.clone(), Ty::Param(Self::param_id_of(name)))
+                        }))
                         .collect();
                     self.assoc_scope.push(assoc);
                     for item in pact.items.iter() {
@@ -5796,6 +5892,20 @@ impl Solver {
             .map(|(_, pid)| Ty::Param(*pid))
             .collect();
         Some(Ty::Adt(aid, args))
+    }
+
+    /// The type an impl on `aid` calls `Self`, outside the impl: a
+    /// primitive for its library adt, else the adt over its own params.
+    pub(crate) fn adt_self_ty(&self, aid: AdtId) -> Ty {
+        if let Some(prim) = self.primitive_of(aid) {
+            return prim;
+        }
+        let args = self.adts[aid]
+            .type_params
+            .iter()
+            .map(|(_, pid)| Ty::Param(*pid))
+            .collect();
+        Ty::Adt(aid, args)
     }
 
     /// Resolves a function/closure parameter's type into an `FnParam` for the `FnHeader`: takes

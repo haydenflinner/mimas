@@ -2081,3 +2081,34 @@ pub struct AtomOutsideSet {
     #[help]
     pub help: Option<String>,
 }
+
+/// A pact's type arguments that do not fit its parameters: too many, one
+/// missing with no default, or arguments on a pact that declares none
+/// (r[impl mimas.pact.params]).
+#[derive(Error, Debug, Diagnostic)]
+#[error("{msg}")]
+#[diagnostic(code(pact_args))]
+pub struct PactArgs {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("{label}")]
+    pub at: SourceSpan,
+    pub msg: String,
+    pub label: String,
+}
+
+/// A call or an operator on a type with several impls of one pact, where
+/// the argument's type does not pick one (r[impl mimas.pact.params.pick]).
+#[derive(Error, Debug, Diagnostic)]
+#[error("`{member}` on `{ty}` could be any of {count} impls: {impls}")]
+#[diagnostic(help("give the argument a type that picks one, for example with `let x: T = …`"))]
+pub struct AmbiguousImpl {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("which impl's `{member}`?")]
+    pub at: SourceSpan,
+    pub member: String,
+    pub ty: String,
+    pub count: usize,
+    pub impls: String,
+}

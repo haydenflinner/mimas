@@ -1934,13 +1934,40 @@ impl<'s> Parser<'s> {
             let name = p.require_ident();
             let mut bounds = vec![];
             if p.eat(TokKind::Colon) {
-                bounds.push(p.require_ident());
+                bounds.push(p.bound());
                 while p.eat(TokKind::Plus) {
-                    bounds.push(p.require_ident());
+                    bounds.push(p.bound());
                 }
             }
             TypeParam::new(name, bounds)
         })
+    }
+
+    /// One pact bound: `Draw`, `Mul<float>`, `Add<Out = T>`, `Add<int, Out = int>`.
+    /// Inside the `<>`, `Name = T` pins an associated type and anything else is
+    /// an argument for the pact's next type parameter (r[impl mimas.pact.params]
+    /// r[impl mimas.pact.assoc-bound]).
+    fn bound(&mut self) -> Bound {
+        let name = self.require_ident();
+        let mut bound = Bound::from(name);
+        if self.eat(TokKind::Less) {
+            let items = self.list(TokKind::Greater, TokKind::starts_annotation, |p| {
+                if matches!(p.peek(), TokKind::Ident(_)) && p.nth(1) == TokKind::Equal {
+                    let n = p.require_ident();
+                    p.bump(TokKind::Equal);
+                    Err((n, p.annotation()))
+                } else {
+                    Ok(p.annotation())
+                }
+            });
+            for item in items {
+                match item {
+                    Ok(a) => bound.args.push(a),
+                    Err(pin) => bound.assoc.push(pin),
+                }
+            }
+        }
+        bound
     }
 
     /// The span covering a `<...>` list already parsed, for rejecting it in positions that
@@ -2152,26 +2179,34 @@ impl<'s> Parser<'s> {
     fn pact_decl(&mut self) -> Pact {
         self.bump(TokKind::Pact);
         let pact_name = self.require_ident();
-        // No `<T>` production follows the name: a pact never takes type
-        // parameters. Relations between two parameters are declined; the
-        // spellings that cover them are a concrete operand, an overload,
-        // `rmul`, or a dedicated solver.
-        // r[impl mimas.pact.no-params]
+        // `pact Add<Rhs = Self>`: the pact's own type parameters, each with an
+        // optional default that may name `Self` or an earlier parameter
+        // (r[impl mimas.pact.params])
+        let mut params = vec![];
+        if self.eat(TokKind::Less) {
+            params = self.list(TokKind::Greater, TokKind::is_ident, |p| {
+                let name = p.require_ident();
+                let default = p.eat(TokKind::Equal).then(|| p.annotation());
+                (name, default)
+            });
+        }
         // `pact A: B + C` -- A requires B and C: every implementer of A must
         // also implement them, and their members are reachable through an
         // `A` bound. Same `+` spelling as a param bound.
         // r[impl mimas.pact.requires]
         let mut requires = vec![];
         if self.eat(TokKind::Colon) {
-            requires.push(self.require_ident());
+            requires.push(self.bound());
             while self.eat(TokKind::Plus) {
-                requires.push(self.require_ident());
+                requires.push(self.bound());
             }
         }
         let mut items = vec![];
         let mut laws = vec![];
         if !self.expect(TokKind::LeftBrace) {
-            return Pact::new(pact_name, requires, items);
+            let mut pact = Pact::new(pact_name, requires, items);
+            pact.params = params;
+            return pact;
         }
         while !self.eat(TokKind::RightBrace) {
             let start = self.next_start();
@@ -2251,6 +2286,7 @@ impl<'s> Parser<'s> {
         }
         let mut pact = Pact::new(pact_name, requires, items);
         pact.laws = laws;
+        pact.params = params;
         pact
     }
 
@@ -2316,7 +2352,7 @@ impl<'s> Parser<'s> {
             role: FnRole::Fn,
             type_params: vec![TypeParam::new(
                 Ident::new("__Law", at),
-                vec![Ident::new(pact.lexeme.clone(), at)],
+                vec![Ident::new(pact.lexeme.clone(), at).into()],
             )],
             parameters: bindings,
             wheres: vec![],
@@ -2895,13 +2931,35 @@ impl<'s> Parser<'s> {
         // `impl Foo<T: Bound>` bounds the type's own parameter; a param with
         // no bound would be a specialization, which stays refused
         // (r[impl mimas.generic.impl-bound])
-        let generics = self.type_params();
+        // `impl Mul<float> for Vec2`: arguments for the pact's own type
+        // parameters (r[impl mimas.pact.params]). A `<` that opens `T: Bound`
+        // is the bounded form below.
+        let mut pact_args = vec![];
+        let generics = if self.at(TokKind::Less)
+            && !(matches!(self.nth(1), TokKind::Ident(_)) && self.nth(2) == TokKind::Colon)
+        {
+            let args_start = self.next_start();
+            self.bump(TokKind::Less);
+            pact_args = self.list(TokKind::Greater, TokKind::starts_annotation, |p| p.annotation());
+            if !self.at(TokKind::For) && !pact_args.is_empty() {
+                self.error(ImplTypeParams {
+                    src: self.src(),
+                    at: self.location(args_start).into(),
+                    name: first.lexeme.clone(),
+                    params: pact_args.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(", "),
+                });
+            }
+            vec![]
+        } else {
+            self.type_params()
+        };
         let mut bounds = vec![];
         if !generics.is_empty() && generics.iter().all(|g| !g.bounds.is_empty()) {
             bounds = generics;
         } else {
             self.reject_impl_params(&first, &generics);
         }
+        let mut target_params = vec![];
         // `impl Foo {}` (inherent) vs `impl Pact for Foo {}` (pact impl). After the first ident,
         // a `for` token disambiguates -- first becomes the pact, second becomes the target.
         let mut shape = None;
@@ -2953,6 +3011,11 @@ impl<'s> Parser<'s> {
             let generics = self.type_params();
             if !generics.is_empty() && generics.iter().all(|g| !g.bounds.is_empty()) {
                 bounds = generics;
+            } else if !generics.is_empty() && generics.iter().all(|g| g.bounds.is_empty()) {
+                // `impl Add<T> for Stream<T>`: the target's own parameters,
+                // restated so the pact's arguments can name them; the checker
+                // holds them to the declared names (r[impl mimas.pact.params])
+                target_params = generics.into_iter().map(|g| g.name).collect();
             } else {
                 self.reject_impl_params(&target, &generics);
             }
@@ -2975,10 +3038,10 @@ impl<'s> Parser<'s> {
         let mut assoc = vec![];
         // a via impl may carry no braces at all
         if via.is_some() && !self.at(TokKind::LeftBrace) {
-            return { let mut imp = Impl::new(target, pact, via, items); imp.bounds = bounds; imp.assoc = assoc; imp.shape = shape; imp };
+            return { let mut imp = Impl::new(target, pact, via, items); imp.bounds = bounds; imp.assoc = assoc; imp.shape = shape; imp.pact_args = pact_args; imp.target_params = target_params; imp };
         }
         if !self.expect(TokKind::LeftBrace) {
-            return { let mut imp = Impl::new(target, pact, via, items); imp.bounds = bounds; imp.assoc = assoc; imp.shape = shape; imp };
+            return { let mut imp = Impl::new(target, pact, via, items); imp.bounds = bounds; imp.assoc = assoc; imp.shape = shape; imp.pact_args = pact_args; imp.target_params = target_params; imp };
         }
         while !self.eat(TokKind::RightBrace) {
             let kind = if self.at(TokKind::Pub) {
@@ -3038,7 +3101,7 @@ impl<'s> Parser<'s> {
                 }),
             }
         }
-        { let mut imp = Impl::new(target, pact, via, items); imp.bounds = bounds; imp.assoc = assoc; imp.shape = shape; imp }
+        { let mut imp = Impl::new(target, pact, via, items); imp.bounds = bounds; imp.assoc = assoc; imp.shape = shape; imp.pact_args = pact_args; imp.target_params = target_params; imp }
     }
 
     /// A function up to its body. A pact's signatures don't get `defaults`. Returns the

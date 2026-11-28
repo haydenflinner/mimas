@@ -232,8 +232,15 @@ pub(crate) fn op_dispatch(
     for (recv_ty, name, arg, swap) in [(lhs, names.0, right, false), (rhs, names.1, left, true)] {
         // a primitive's `+` is built in; a named operator has no built-in
         // meaning, so on a primitive it is the method an impl gives it
-        // (`impl Approx for float` is what makes `0.1 + 0.2 ≈ 0.3` work)
-        if (is_primitive(recv_ty) || is_dec(solver, recv_ty)) && !is_named_method(names.0) {
+        // (`impl Approx for float` is what makes `0.1 + 0.2 ≈ 0.3` work).
+        // `2.0 * v` with `v` a struct is `impl Mul<Vec2> for float`'s, when
+        // the left is the receiver (r[impl mimas.op.pact])
+        let other = if swap { lhs } else { rhs };
+        let struct_operand = !swap && matches!(other, Ty::Adt(..) | Ty::Identity(..));
+        if (is_primitive(recv_ty) || is_dec(solver, recv_ty))
+            && !is_named_method(names.0)
+            && !struct_operand
+        {
             continue;
         }
         let (aid, args) = match recv_ty {
@@ -260,6 +267,7 @@ pub(crate) fn op_dispatch(
                 candidates.push((field.dec, f));
             }
         }
+        ambiguous_impls(solver, aid, name, arg, &candidates, location)?;
         for (dec, f) in candidates {
             // source methods carry `self` in parameters[0]; a native sig bound its
             // receiver during `instantiate_native`, so its params are all operands
@@ -281,6 +289,106 @@ pub(crate) fn op_dispatch(
         }
     }
     Ok(None)
+}
+
+/// Among the instances of one pact a bounded receiver's pacts hold, the one
+/// whose operand the call's one argument fits. `None` when the pacts that
+/// give `name` are not all instances of one template, or there is no call.
+fn pick_instance(
+    solver: &mut Solver,
+    access: NodeId,
+    name: &str,
+    recv: &Ty,
+    location: Location,
+) -> Result<Option<(shared::PactId, FnHeader)>> {
+    let pids = solver.pacts_of(recv).unwrap_or_default();
+    let owners: Vec<shared::PactId> = pids
+        .into_iter()
+        .filter(|p| solver.pacts[p].functions.contains_key(name))
+        .collect();
+    let bases: Vec<shared::PactId> = owners
+        .iter()
+        .filter_map(|p| solver.inst_of.get(p).map(|(b, _)| *b))
+        .collect();
+    if bases.len() != owners.len() || bases.windows(2).any(|w| w[0] != w[1]) {
+        return Ok(None);
+    }
+    let Some(arg) = solver.call_args.get(&access).cloned() else {
+        return Ok(None);
+    };
+    let arg_ty = arg.query(solver)?.normalized(solver);
+    if matches!(arg_ty, Ty::Vid(_)) {
+        let impls: Vec<String> = owners.iter().map(|p| format!("`{}`", solver.pacts[p].name)).collect();
+        return Err(crate::errors::AmbiguousImpl {
+            src: solver.src(location),
+            at: location.into(),
+            member: name.to_string(),
+            ty: recv.to_string(),
+            count: impls.len(),
+            impls: impls.join(", "),
+        }
+        .into());
+    }
+    // an operand of exactly the argument's type first, then one it fits
+    for strict in [true, false] {
+        for p in &owners {
+            let (header, _) = solver.pacts[p].functions[name].clone();
+            let Ty::Fn(f) = solver.instantiate_pact_fn(&header, recv) else { continue };
+            let [_, operand] = f.parameters.as_slice() else { continue };
+            let operand = operand.ty.clone().normalized(solver);
+            let fits = if strict {
+                crate::pact_params::same_ty(&operand, &arg_ty)
+            } else {
+                crate::pact_params::loose_eq(solver, &operand, &arg_ty)
+                    && !matches!(operand, Ty::Vid(_))
+            };
+            if fits {
+                return Ok(Some((*p, header)));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Several impls of one pact give `name` (`impl Mul<Vec2> for Vec2` and
+/// `impl Mul<float> for Vec2`), and the argument's type is still open: no
+/// impl is picked, so say which could be (r[impl mimas.pact.params.pick]).
+fn ambiguous_impls(
+    solver: &mut Solver,
+    aid: AdtId,
+    name: &str,
+    arg: &Expr,
+    candidates: &[(crate::components::DecId, FnHeader)],
+    location: Location,
+) -> Result<()> {
+    if candidates.len() < 2 {
+        return Ok(());
+    }
+    let pacts: Vec<shared::PactId> = candidates
+        .iter()
+        .filter_map(|(d, _)| solver.member_pact.get(d).copied())
+        .filter(|p| solver.inst_of.contains_key(p))
+        .collect();
+    if pacts.len() < 2 {
+        return Ok(());
+    }
+    let arg_ty = arg.query(solver)?.normalized(solver);
+    if !matches!(arg_ty, Ty::Vid(_)) {
+        return Ok(());
+    }
+    let impls: Vec<String> = pacts
+        .iter()
+        .map(|p| format!("`impl {} for {}`", solver.pacts[*p].name, solver.adts[aid].name))
+        .collect();
+    Err(crate::errors::AmbiguousImpl {
+        src: solver.src(location),
+        at: location.into(),
+        member: name.to_string(),
+        ty: solver.adts[aid].name.clone(),
+        count: impls.len(),
+        impls: impls.join(", "),
+    }
+    .into())
 }
 
 /// `xs + ys`/`xs - ys` — the Z-set list forms, dispatched to `[T]`'s
@@ -838,6 +946,16 @@ impl Solve for Access {
                             }
                         }
 
+                        // several instances of one pact give the name (`T: Plus<T> +
+                        // Plus<float>`): the call's argument picks
+                        // (r[impl mimas.pact.params.pick])
+                        if matches > 1
+                            && con.is_none()
+                            && let Some((p, h)) = pick_instance(solver, id, name, &lhs, location)?
+                        {
+                            fun = Some((p, h));
+                            matches = 1;
+                        }
                         if matches > 1 {
                             return Err(AmbiguousPactMember {
                                 src: solver.src(right.location()),
@@ -1152,6 +1270,14 @@ impl Solve for Call {
         // a failed call whose argument is a comma-grouped number written with
         // no space (`clamp(x,100,200)`) says so: grouping applies in a call
         // too, so `100,200` was one number (r[impl mimas.num.group-hint])
+        // `x.plus(a)` on `x: T` with two instances of one pact among its
+        // bounds: the argument picks (r[impl mimas.pact.params.pick])
+        if let ExprKind::Access(Access::Dot { .. }) = self.left.kind()
+            && let [arg] = self.arguments.as_slice()
+            && arg.name.is_none()
+        {
+            solver.call_args.insert(self.left.id(), arg.value.clone());
+        }
         let ty = solve_call(self, id, location, solver)
             .map_err(|e| grouped_number_hint(self, solver, e))?;
         solver
@@ -3678,21 +3804,12 @@ impl Solve for Impl {
             })?
         };
 
-        let mut pact = if let Some(name) = self.pact.as_ref() {
-            let ty = solver.resolve_name(name, name.location)?;
-            let Some(pid) = ty.as_single_pact() else {
-                return Err(NotAPact {
-                    src: solver.src(name.location),
-                    at: name.location.into(),
-                    ty: ty.to_string(),
-                }
-                .into());
-            };
-
+        // `impl Mul<float> for Vec2`: the instance the arguments name
+        // (r[impl mimas.pact.params])
+        let mut pact = match solver.impl_pact(self, aid)? {
             // we clone because we're going to remove the fields to ensure they are all covered
-            Some((solver.pacts[pid].clone(), pid))
-        } else {
-            None
+            Some(pid) => Some((solver.pacts[pid].clone(), pid)),
+            None => None,
         };
 
         // r[impl mimas.show.self] the impl's own `show` writes its type built-in
@@ -3894,8 +4011,15 @@ impl Solve for Impl {
                 solver.adts[aid].name.as_str(),
                 "int" | "float" | "dec" | "DataFrame"
             );
+            // the numbers' `*`, `/` and `mod`, and a native type's registered
+            // operators (`Vec2`'s), answer the operator pacts the same way
+            // (r[impl mimas.op.pact-std])
+            let numeric = matches!(solver.adts[aid].name.as_str(), "int" | "float" | "dec");
+            let native_ops = solver.adts[aid].flags.contains(AdtFlags::HAS_OPS);
             let own = |key: &str, h: &FnHeader| {
                 (builtin_ops && matches!(key, "add" | "sub" | "neg"))
+                    || (numeric && matches!(key, "mul" | "div" | "rem"))
+                    || (native_ops && matches!(key, "add" | "sub" | "neg" | "mul" | "div"))
                     || solver.adts[aid].impls.get(key).is_some_and(|f| {
                     // a native's signature binds its receiver apart, so only
                     // a source method's arity is compared here
@@ -5129,6 +5253,14 @@ fn pick_source_overload(
         let sig = solver.specialize(&field.ty, aid, recv_args);
         candidates.push((field.dec, sig));
     }
+    let headers: Vec<(crate::components::DecId, FnHeader)> = candidates
+        .iter()
+        .filter_map(|(d, t)| match t {
+            Ty::Fn(h) => Some((*d, h.clone())),
+            _ => None,
+        })
+        .collect();
+    ambiguous_impls(solver, aid, name, &arg.value, &headers, call.left.location())?;
     for (dec, sig) in &candidates {
         let Ty::Fn(f) = sig else { continue };
         let [_, operand] = f.parameters.as_slice() else {
@@ -5172,22 +5304,25 @@ fn pact_binary_dispatch(
         let Some(pids) = solver.pacts_of(recv_ty) else {
             continue;
         };
-        // the pact that declares the name, and its overload group
-        let Some((pid, keys)) = pids.iter().find_map(|pid| {
-            let pact = &solver.pacts[pid];
-            if !pact.functions.contains_key(name) {
-                return None;
-            }
-            let keys = solver
-                .pact_groups
-                .get(&(*pid, name.to_string()))
-                .cloned()
-                .unwrap_or_else(|| vec![name.to_string()]);
-            Some((*pid, keys))
-        }) else {
-            continue;
-        };
-        for key in keys {
+        // each pact that declares the name, with its overload group: `T:
+        // Mul<float> + Mul<T>` has two, and the operand picks
+        // (r[impl mimas.pact.params.pick])
+        let owners: Vec<(shared::PactId, Vec<String>)> = pids
+            .iter()
+            .filter(|pid| solver.pacts[*pid].functions.contains_key(name))
+            .map(|pid| {
+                let keys = solver
+                    .pact_groups
+                    .get(&(*pid, name.to_string()))
+                    .cloned()
+                    .unwrap_or_else(|| vec![name.to_string()]);
+                (*pid, keys)
+            })
+            .collect();
+        for (pid, key) in owners
+            .into_iter()
+            .flat_map(|(pid, keys)| keys.into_iter().map(move |k| (pid, k)))
+        {
             let (header, _) = solver.pacts[&pid].functions[&key].clone();
             let Ty::Fn(f) = solver.instantiate_pact_fn(&header, recv_ty) else {
                 continue;
@@ -5199,10 +5334,13 @@ fn pact_binary_dispatch(
                 continue;
             }
             solver.check_vis(solver.pact_members[&(pid, key.clone())], location)?;
+            // the chosen pact first: runtime dispatch reads its member key first
+            let mut ordered = vec![pid];
+            ordered.extend(pids.iter().copied().filter(|p| *p != pid));
             solver.pact_ops.insert(
                 id,
                 crate::PactOp {
-                    pids: pids.clone(),
+                    pids: ordered,
                     method: key,
                     swap,
                 },

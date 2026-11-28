@@ -387,6 +387,32 @@ impl ResolvedAdt {
             .iter()
             .filter_map(|(p, a)| (*a == aid).then_some(*p))
             .collect();
+        // an instance's impl also answers its template, so a default body
+        // (solved once, against the template) dispatches on the type
+        // (r[impl mimas.pact.params])
+        // an instance a sibling impl answers (`impl Add<T> for Box<T>` for a
+        // bound's `Add<int>`) dispatches to that impl
+        // (r[impl mimas.pact.params.generic-target])
+        let aliased: Vec<(PactId, PactId)> = solver
+            .inst_alias
+            .iter()
+            .filter(|((_, a), _)| *a == aid)
+            .map(|((j, _), i)| (*j, *i))
+            .collect();
+        for (j, _) in &aliased {
+            if !implements.contains(j) {
+                implements.push(*j);
+            }
+        }
+        let bases: Vec<PactId> = implements
+            .iter()
+            .filter_map(|p| solver.inst_of.get(p).map(|(b, _)| *b))
+            .collect();
+        for b in bases {
+            if !implements.contains(&b) {
+                implements.push(b);
+            }
+        }
         implements.sort_by_key(|p| p.index());
 
         // a fn that implements a pact member sits under the member's key (an
@@ -401,7 +427,7 @@ impl ResolvedAdt {
                 _ => vec![(name.to_string(), dec)],
             }
         };
-        let methods = adt
+        let mut methods: FxIndexMap<String, DecId> = adt
             .impls
             .iter()
             .filter(|(_, field)| matches!(solver.decs[field.dec].kind, DecKind::Item { .. }))
@@ -421,6 +447,19 @@ impl ResolvedAdt {
                     .flat_map(|(name, dec)| slots(name, dec)),
             )
             .collect();
+        for (j, i) in aliased {
+            for k in solver.pacts[j].functions.keys() {
+                let (Some(mj), Some(mi)) = (
+                    solver.pact_members.get(&(j, k.clone())),
+                    solver.pact_members.get(&(i, k.clone())),
+                ) else {
+                    continue;
+                };
+                if let Some(&dec) = methods.get(&solver.decs[*mi].name) {
+                    methods.insert(solver.decs[*mj].name.clone(), dec);
+                }
+            }
+        }
 
         let dispatch_ids = if adt.flags.contains(AdtFlags::IS_ENUM) {
             adt.variants.values().filter_map(Variant::layout).collect()

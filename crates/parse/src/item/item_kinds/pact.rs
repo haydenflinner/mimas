@@ -14,19 +14,28 @@ pub struct Pact {
     /// The pacts this one requires: `pact Drag: Slots` declares that every
     /// implementer of `Drag` also implements `Slots`, and that `Slots`'
     /// members are reachable through a `Drag` bound (`mimas.pact.requires`).
-    pub requires: Vec<Ident>,
+    pub requires: Vec<crate::components::Bound>,
     pub items: Vec<PactItem>,
+    /// `pact Add<Rhs = Self>`: the pact's own type parameters, each with an
+    /// optional default (`mimas.pact.params`). A bound or an impl names the
+    /// arguments; a missing one takes its default.
+    pub params: Vec<(Ident, Option<Annotation>)>,
     /// The pact's laws, its `check |x| …` lines (`mimas.pact.law`). Each was
     /// lowered to a top-level `fn` whose parameters are the pact's values;
     /// every impl runs it over its type's samples (`expand_laws`).
     pub laws: Vec<Law>,
 }
 impl Pact {
-    pub(crate) fn new(name: Ident, requires: Vec<Ident>, items: Vec<PactItem>) -> Self {
+    pub(crate) fn new(
+        name: Ident,
+        requires: Vec<crate::components::Bound>,
+        items: Vec<PactItem>,
+    ) -> Self {
         Self {
             name,
             requires,
             items,
+            params: vec![],
             laws: vec![],
         }
     }
@@ -60,12 +69,25 @@ impl std::fmt::Display for Pact {
         } else {
             format!(": {}", self.requires.iter().join(" + "))
         };
+        let params = if self.params.is_empty() {
+            String::new()
+        } else {
+            let ps = self
+                .params
+                .iter()
+                .map(|(n, d)| match d {
+                    Some(d) => format!("{n} = {d}"),
+                    None => n.to_string(),
+                })
+                .join(", ");
+            format!("<{ps}>")
+        };
+        let name = format!("{}{params}", self.name);
         if self.items.is_empty() {
-            f.pad(&format!("pact {}{requires} {{}}", self.name))
+            f.pad(&format!("pact {name}{requires} {{}}"))
         } else {
             f.pad(&format!(
-                "pact {}{requires} {{ {} }}",
-                self.name,
+                "pact {name}{requires} {{ {} }}",
                 self.items.iter().join(" ")
             ))
         }

@@ -2462,11 +2462,18 @@ fn dispatch_pact_method(
         Native(NativeId),
         Op(&'static str),
     }
+    // `impl Mul for int {}` and `impl Mul<float> for Vec2 {}` declare no
+    // method: the built-in operator answers (r[impl mimas.op.pact-std])
     let builtin = |m: &str| -> Option<&'static str> {
+        // a member noted by its instance key (`add@Add<Self>`) is still `add`
+        let m = m.split('@').next().unwrap_or(m);
         Some(match m {
             "add" => "add",
             "sub" => "sub",
             "neg" => "neg",
+            "mul" => "mul",
+            "div" => "div",
+            "rem" => "rem",
             _ => return None,
         })
     };
@@ -2518,7 +2525,13 @@ fn dispatch_pact_method(
             Arm::Native(nid) => ir.current().call_native(*nid, args.to_vec()),
             Arm::Op("neg") => ir.current().unary(UnaryOp::Negative, args[0]),
             Arm::Op(op) => {
-                let op = if *op == "add" { BinOp::Add } else { BinOp::Sub };
+                let op = match *op {
+                    "add" => BinOp::Add,
+                    "mul" => BinOp::Mult,
+                    "div" => BinOp::Div,
+                    "rem" => BinOp::Mod,
+                    _ => BinOp::Sub,
+                };
                 ir.current().bin(op, args[0], args[1], OperandKind::Generic)
             }
         }
