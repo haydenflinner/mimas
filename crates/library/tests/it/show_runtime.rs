@@ -62,3 +62,21 @@ fn a_show_that_recurses_faults_or_loops_falls_back() {
     assert!(out[2].starts_with("[Slow { x: 3 } (show failed: this program ran too long"), "{}", out[2]);
     assert_eq!(out[3], "after");
 }
+
+// Inside `impl Show for T`'s `show`, a `T` displays in its built-in form,
+// at compile time and at run time alike: `f"<{self}>"` decorates the
+// default text, `[self]` holds it, and another `T` is built-in too.
+// r[verify mimas.show.self]
+#[test]
+fn a_show_writes_its_own_type_built_in() {
+    let src = "struct P { x: int }\nimpl Show for P { fn show(self) -> str { f\"<{self}>\" } }\n\
+               print(P { x: 1 })\nprint([P { x: 2 }])\n\
+               struct L { x: int }\nimpl Show for L { fn show(self) -> str { f\"L{[self]}\" } }\n\
+               print(L { x: 3 })\n\
+               struct O { x: int }\nimpl Show for O { fn show(self) -> str { let o = O { x: self.x + 1 }; f\"{self.x}/{o}/{[o]}\" } }\n\
+               print(O { x: 4 })\n";
+    assert_eq!(
+        printed(src),
+        ["<P { x: 1 }>", "[<P { x: 2 }>]", "L[L { x: 3 }]", "4/O { x: 5 }/[O { x: 5 }]"]
+    );
+}

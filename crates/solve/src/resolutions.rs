@@ -39,6 +39,11 @@ pub struct Resolutions {
     pub shown_units: FxIndexMap<shared::units::Dim, shared::units::Shown>,
     /// `__shown`: a value rendered by a shape, for an f-string hole.
     pub shown_native: Option<NativeId>,
+    /// f-string holes inside `impl Show for T`'s `show`, with `T`
+    /// (r[impl mimas.show.self]).
+    pub built_in_holes: rustc_hash::FxHashMap<NodeId, AdtId>,
+    /// `__shown_as`: an f-string hole rendered with one type's `show` held off.
+    pub shown_as_native: Option<NativeId>,
     /// Values a failing check's message names, with the unit to name them in.
     pub check_units: rustc_hash::FxHashMap<NodeId, shared::units::Shown>,
     /// Numbers with units written in a check, as written (`47lb`).
@@ -560,6 +565,12 @@ impl From<Solver> for Resolutions {
             .filter(|(id, _)| solver.dec_to_native.contains_key(id))
             .find(|(_, dec)| dec.name == "__in_unit")
             .map(|(id, _)| solver.dec_to_native[&id].id);
+        let shown_as_native = solver
+            .decs
+            .iter()
+            .filter(|(id, _)| solver.dec_to_native.contains_key(id))
+            .find(|(_, dec)| dec.name == "__shown_as")
+            .map(|(id, _)| solver.dec_to_native[&id].id);
         let shown_native = solver
             .decs
             .iter()
@@ -685,6 +696,8 @@ impl From<Solver> for Resolutions {
             hole_shapes: solver.hole_shapes,
             shown_units: solver.shown_units,
             shown_native,
+            built_in_holes: solver.built_in_holes,
+            shown_as_native,
             check_units: solver.check_units,
             check_texts: solver.check_texts,
             dec_scales: solver.dec_scales,

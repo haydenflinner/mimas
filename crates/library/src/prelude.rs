@@ -36,6 +36,7 @@ pub(crate) fn install<'gc>(api: &mut Api<'_, 'gc>) {
     api.add(echo);
     api.add(__in_unit);
     api.add(__shown);
+    api.add(__shown_as);
     api.add(__contract_fail);
     api.add(__check_operand);
     api.add(__check_miss);
@@ -529,6 +530,26 @@ fn __check_verdict<'gc>(ctx: Ctx<'gc>, name: &str) -> Result<bool, RtErr> {
         Some(message) => Err(RtErr::Custom(format!("panic: {message}"))),
         None => Ok(true),
     }
+}
+
+#[native]
+#[effects()]
+/// An f-string hole inside `impl Show for T`'s `show`: rendered with `T`'s
+/// `show` held off, so a `T` (`self` or another) writes its built-in form
+/// (r[impl mimas.show.self]). `adt` is `T`'s adt index. Not for user code.
+fn __shown_as<'gc>(ctx: Ctx<'gc>, val: anon::T<'gc>, shape: i64, adt: i64) -> Result<String, RtErr> {
+    let shapes = ctx.fixture::<DisplayShapes>();
+    let shape = shapes.hole(shape as usize);
+    let body = shapes.show_bodies.borrow().get(adt as usize).copied().flatten();
+    let calls = ctx.fixture::<vm::fixtures::ShowCalls>();
+    if let Some(b) = body {
+        calls.running.borrow_mut().push(b);
+    }
+    let out = ctx.render_shaped(val.0, &shape, false);
+    if body.is_some() {
+        calls.running.borrow_mut().pop();
+    }
+    out
 }
 
 #[native]

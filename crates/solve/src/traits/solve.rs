@@ -3313,6 +3313,11 @@ impl Solve for FString {
             if let FStringPart::Expr(expr) = part {
                 let ty = expr.query(solver)?.normalized(solver);
                 shows |= solver.shows(&ty);
+                // inside `T`'s `show`, every `T` this hole holds writes its
+                // built-in form at run time too (r[impl mimas.show.self])
+                if let Some(aid) = solver.show_self {
+                    solver.built_in_holes.insert(expr.id(), aid);
+                }
             }
         }
         // a part whose type implements `Show` writes `part.show()`
@@ -3690,6 +3695,8 @@ impl Solve for Impl {
             None
         };
 
+        // r[impl mimas.show.self] the impl's own `show` writes its type built-in
+        let impl_shows = pact.as_ref().is_some_and(|(p, _)| p.name == "Show");
         solver.ribs.push_impl(aid);
         // member signatures/annotations see the target's own declared params (`impl List` is
         // `impl List<T>` -- there's no specialization syntax)
@@ -3757,7 +3764,16 @@ impl Solve for Impl {
             // visit_stmt, but impl method items only flow through here so we have to do it
             // ourselves.
             if solver.touch_node(item.id()) {
-                let ty = function.solve(item.id(), item.location(), solver)?;
+                // inside `impl Show for T`'s `show`, a `T` displays in its
+                // built-in form, never through `show` again
+                // (r[impl mimas.show.self])
+                let outer_show = solver.show_self;
+                if impl_shows && function.name.lexeme == "show" {
+                    solver.show_self = Some(aid);
+                }
+                let solved = function.solve(item.id(), item.location(), solver);
+                solver.show_self = outer_show;
+                let ty = solved?;
                 let vid = solver.node_vid(item.id());
                 solver
                     .register_sub(vid, ty)

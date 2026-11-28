@@ -847,7 +847,8 @@ impl<'gc> Ctx<'gc> {
         let Val::Instance(i) = value else { return false };
         let key = Gc::as_ptr(i.0) as *const ();
         let calls = self.fixture::<crate::fixtures::ShowCalls>();
-        if calls.running.borrow().contains(&key) {
+        // r[impl mimas.show.self] inside `T`'s own `show`, a `T` is built-in
+        if calls.running.borrow().contains(&body) {
             return false;
         }
         let fresh = calls.op.get() == self.state.fixtures.get::<crate::fixtures::Trace>().ops_total.get();

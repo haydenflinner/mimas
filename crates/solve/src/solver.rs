@@ -58,6 +58,12 @@ pub struct Solver {
     pub(crate) pact_impls: Shared<FxHashSet<(PactId, AdtId)>>,
     pub(crate) pact_members: Shared<FxHashMap<(PactId, String), DecId>>,
     pub(crate) pact_self: Option<PactId>,
+    /// While the body of `impl Show for T`'s `show` solves: `T`, whose
+    /// values display built-in there (r[impl mimas.show.self]).
+    pub(crate) show_self: Option<AdtId>,
+    /// f-string holes inside `impl Show for T`'s `show`, with `T`: emit
+    /// renders them with `T`'s `show` held off (r[impl mimas.show.self]).
+    pub(crate) built_in_holes: FxHashMap<NodeId, AdtId>,
     pub(crate) node_to_vid: FxIndexMap<NodeId, Vid>,
     pub(crate) node_decs: FxIndexMap<NodeId, DecId>,
     pub(crate) rewrites: FxIndexMap<NodeId, Expr>,
@@ -477,6 +483,8 @@ impl Solver {
             pact_impls: Shared::default(),
             pact_members: Shared::default(),
             pact_self: None,
+            show_self: None,
+            built_in_holes: FxHashMap::default(),
             node_to_vid: FxIndexMap::default(),
             node_decs: FxIndexMap::default(),
             rewrites: FxIndexMap::default(),
@@ -6019,7 +6027,10 @@ impl Solver {
     /// Whether a value of `ty` writes itself through `Show` (a user adt that
     /// implements it; the built-in scalars keep their own display).
     pub(crate) fn shows(&self, ty: &Ty) -> bool {
-        matches!(ty, Ty::Adt(aid, _) | Ty::Identity(aid, _) if self.implements_named(*aid, "Show"))
+        // inside `T`'s own `show`, a `T` writes its built-in form
+        // (r[impl mimas.show.self])
+        matches!(ty, Ty::Adt(aid, _) | Ty::Identity(aid, _)
+            if self.implements_named(*aid, "Show") && self.show_self != Some(*aid))
     }
 
     /// Lists a hoisted item among its module's exports. An item of a named

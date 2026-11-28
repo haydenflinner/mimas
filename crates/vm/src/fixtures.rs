@@ -933,15 +933,17 @@ pub enum ShowText {
 /// here. Missing, it records the value in `pending` and the display fails
 /// with `RtErr::ShowPending`; the dispatch loop runs each pending `show` on
 /// a thread of its own, keeps the text in `texts`, and replays the op,
-/// which then finds them. `running` holds the values whose `show` is on the
-/// stack, so a `show` that prints itself (or a cycle of them) gets the
-/// built-in form. `State::show_replay` is on only while the loop can
+/// which then finds them. `running` holds the `show` bodies on the stack:
+/// inside `T`'s `show` every `T` gets the built-in form, the rule the
+/// compile-time rewrite follows too. `State::show_replay` is on only while the loop can
 /// replay the op.
 #[derive(Default)]
 pub struct ShowCalls {
     pub texts: RefCell<HashMap<*const (), ShowText>>,
     pub pending: RefCell<Vec<(*const (), crate::Stashed, BodyId)>>,
-    pub running: RefCell<Vec<*const ()>>,
+    /// The `show` bodies on the stack: while `T`'s `show` runs, every `T`
+    /// displays built-in (r[impl mimas.show.self]).
+    pub running: RefCell<Vec<BodyId>>,
     /// The op count (`Trace::ops_total`) of the replayed op: the texts are
     /// good for that op alone.
     pub op: Cell<u64>,

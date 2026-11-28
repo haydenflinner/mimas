@@ -1587,6 +1587,26 @@ impl Emit for FString {
                             let text = ir.current().call_native(nid, vec![value, k, name]);
                             parts.push(FormatPart::Value(text));
                         }
+                        // a hole inside `T`'s own `show` renders with `T`'s
+                        // `show` held off (r[impl mimas.show.self])
+                        _ if let (Some(adt), Some(nid)) = (
+                            ir.resolutions.built_in_holes.get(&expr.id()).copied(),
+                            ir.resolutions.shown_as_native,
+                        ) =>
+                        {
+                            let shape = ir.resolutions.hole_shapes.get(&expr.id()).cloned().unwrap_or_default();
+                            let i = match ir.hole_shapes.iter().position(|s| *s == shape) {
+                                Some(i) => i,
+                                None => {
+                                    ir.hole_shapes.push(shape);
+                                    ir.hole_shapes.len() - 1
+                                }
+                            } as i64;
+                            let k = ir.current().constant(Constant::Int(i));
+                            let a = ir.current().constant(Constant::Int(adt.index() as i64));
+                            let text = ir.current().call_native(nid, vec![value, k, a]);
+                            parts.push(FormatPart::Value(text));
+                        }
                         // a hole whose static shape says more than its value
                         // (a tuple, a unit) renders through `__shown`
                         // (r[impl mimas.display.one])

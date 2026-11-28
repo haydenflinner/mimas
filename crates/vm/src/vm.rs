@@ -1937,7 +1937,7 @@ fn run_shows<'gc>(
             crate::fixtures::ShowText::Failed(e.to_string())
         } else {
             nested.set(nested.get() + 1);
-            calls.running.borrow_mut().push(key);
+            calls.running.borrow_mut().push(body);
             let previous_cleanups = ctx.state().active_cleanups.get();
             ctx.state().active_cleanups.set(&ctx, child.cleanups);
             let ran = run_dispatch(
