@@ -20,19 +20,16 @@
 
 /// An abelian group: a zero, `+`, `-` and negation, where the order of
 /// `+` does not matter. This is the abelian group the Z-set docs name.
-/// The zero comes from a value, `x.zero()`, because a table's zero keeps
-/// the table's columns.
+/// `+`, `-` and `-a` are std's operator pacts, each with its result the
+/// type itself, so a type joins with `impl Add for T`, `impl Sub for T`
+/// and `impl Neg for T` beside `impl AbelianGroup for T`. The zero comes
+/// from a value, `x.zero()`, because a table's zero keeps the table's
+/// columns.
 /// r[impl mimas.group.pact]
-pact AbelianGroup {
+pact AbelianGroup: Add<Out = Self> + Sub<Out = Self> + Neg<Out = Self> {
     /// The zero of the group this value is in: `x + x.zero() == x`. The
     /// default is `x - x`.
     fn zero(self) -> Self { self - self }
-    /// `a + b`.
-    fn add(self, o: Self) -> Self;
-    /// `a - b`, which is `a + -b`.
-    fn sub(self, o: Self) -> Self;
-    /// `-a`: `a + -a` is the zero.
-    fn neg(self) -> Self;
     /// `k` copies of this value added up, `-k` copies negated. Every
     /// abelian group has this integer scaling (it is a Z-module); an impl
     /// may write a faster one.
@@ -56,9 +53,9 @@ pact AbelianGroup {
 }
 
 /// Whole numbers under `+`. `int`'s `+`, `-` and `-x` are built in, and
-/// answer the pact's `add`, `sub` and `neg`; the zero and `times` are the
-/// pact's defaults. The impl declares no method, so a page's own pact may
-/// still give `int` an `add`.
+/// answer `Add`, `Sub` and `Neg`; the zero and `times` are the pact's
+/// defaults. The impl declares no method, so a page's own pact may still
+/// give `int` an `add`.
 impl AbelianGroup for int {}
 
 /// Floats under `+`. Rounding breaks the laws for most values, so the
@@ -147,36 +144,6 @@ impl Stream {
 
     /// The last step: for `∫ s`, the running total after every change.
     fn last(self) -> T { self.items[self.items.len() - 1] }
-
-    /// `s + o`: step by step, over the steps both streams have.
-    fn add(self, o: Stream<T>) -> Stream<T> {
-        let out: [T] = [];
-        for i in 0..self.items.len().min(o.items.len()) { out.push(self.items[i] + o.items[i]); }
-        Stream { items: out }
-    }
-
-    /// `s + z`: `z` added to every step.
-    fn add(self, z: T) -> Stream<T> { Stream { items: self.items.map(|x: T| x + z) } }
-
-    /// `s - o`: step by step, over the steps both streams have.
-    fn sub(self, o: Stream<T>) -> Stream<T> {
-        let out: [T] = [];
-        for i in 0..self.items.len().min(o.items.len()) { out.push(self.items[i] - o.items[i]); }
-        Stream { items: out }
-    }
-
-    /// `s - z`: `z` taken from every step.
-    fn sub(self, z: T) -> Stream<T> { Stream { items: self.items.map(|x: T| x - z) } }
-
-    /// `-s`: every step negated.
-    fn neg(self) -> Stream<T> { Stream { items: self.items.map(|x: T| -x) } }
-
-    /// `s * k`: every step `k` times over.
-    fn mul(self, k: int) -> Stream<T> { Stream { items: self.items.map(|x: T| x.times(k)) } }
-
-    /// `s * k` with a real `k`: each step must take a real factor (a float,
-    /// a quantity, a weighted table).
-    fn mul(self, k: float) -> Stream<T> { Stream { items: __stream_each("*", self.items, [], k) } }
 
     /// `k * s`.
     fn rmul(self, k: int) -> Stream<T> { self.mul(k) }
@@ -389,18 +356,8 @@ struct Post<T: AbelianGroup> { at: T }
 fn post<T: AbelianGroup>(x: T) -> Post<T> { Post { at: x } }
 
 impl Post {
-    /// `p - q`: the panel from post `q` to post `p`.
-    /// r[impl mimas.group.affine.sub-posts]
-    fn sub(self, o: Post<T>) -> T { self.at - o.at }
-
-    /// `p - d`: the post one panel `d` back.
-    fn sub(self, d: T) -> Post<T> { Post { at: self.at - d } }
-
-    /// `p + d`: the post one panel `d` on.
-    /// r[impl mimas.group.affine.add-panel]
-    fn add(self, d: T) -> Post<T> { Post { at: self.at + d } }
-
-    /// `d + p`: `p + d`.
+    /// `d + p`: `p + d`. A primitive left operand would need `impl Add<Post<T>>
+    /// for T`, which a generic `T` cannot write, so this stays a method.
     fn radd(self, d: T) -> Post<T> { Post { at: self.at + d } }
 }
 
@@ -688,26 +645,35 @@ impl Tally {
 }
 
 /// Tallies under `+`: the empty tally is the zero.
-impl AbelianGroup for Tally {
-    /// The empty tally.
-    fn zero(self) -> Tally<T> { Tally { w: {:}, sum_w: 0, sum_abs: 0 } }
-
-    /// `a + b`: the weights of equal items add.
+/// `a + b`: the weights of equal items add.
+impl Add for Tally {
+    type Out = Tally<T>;
     fn add(self, o: Tally<T>) -> Tally<T> {
         let t = self.copy();
         for (x, n) in o.w { t.put(x, n); }
         t
     }
+}
 
-    /// `a - b`: `a + -b`.
+/// `a - b`: `a + -b`.
+impl Sub for Tally {
+    type Out = Tally<T>;
     fn sub(self, o: Tally<T>) -> Tally<T> {
         let t = self.copy();
         for (x, n) in o.w { t.put(x, -n); }
         t
     }
+}
 
-    /// `-t`: every weight negated, the change undone.
+/// `-t`: every weight negated, the change undone.
+impl Neg for Tally {
+    type Out = Tally<T>;
     fn neg(self) -> Tally<T> { self.times(-1) }
+}
+
+impl AbelianGroup for Tally {
+    /// The empty tally.
+    fn zero(self) -> Tally<T> { Tally { w: {:}, sum_w: 0, sum_abs: 0 } }
 
     /// `k * t`: every weight times `k`.
     fn times(self, k: int) -> Tally<T> {
@@ -717,6 +683,79 @@ impl AbelianGroup for Tally {
         t
     }
 
+}
+
+/// `s + o`: step by step, over the steps both streams have.
+/// r[impl mimas.std.ops.std-types]
+impl Add for Stream {
+    type Out = Stream<T>;
+    fn add(self, o: Stream<T>) -> Stream<T> {
+        let out: [T] = [];
+        for i in 0..self.items.len().min(o.items.len()) { out.push(self.items[i] + o.items[i]); }
+        Stream { items: out }
+    }
+}
+
+/// `s + z`: `z` added to every step.
+impl Add<T> for Stream<T> {
+    type Out = Stream<T>;
+    fn add(self, z: T) -> Stream<T> { Stream { items: self.items.map(|x: T| x + z) } }
+}
+
+/// `s - o`: step by step, over the steps both streams have.
+impl Sub for Stream {
+    type Out = Stream<T>;
+    fn sub(self, o: Stream<T>) -> Stream<T> {
+        let out: [T] = [];
+        for i in 0..self.items.len().min(o.items.len()) { out.push(self.items[i] - o.items[i]); }
+        Stream { items: out }
+    }
+}
+
+/// `s - z`: `z` taken from every step.
+impl Sub<T> for Stream<T> {
+    type Out = Stream<T>;
+    fn sub(self, z: T) -> Stream<T> { Stream { items: self.items.map(|x: T| x - z) } }
+}
+
+/// `-s`: every step negated.
+impl Neg for Stream {
+    type Out = Stream<T>;
+    fn neg(self) -> Stream<T> { Stream { items: self.items.map(|x: T| -x) } }
+}
+
+/// `s * k`: every step `k` times over. `k * s` is the stream's `rmul`.
+impl Mul<int> for Stream<T> {
+    type Out = Stream<T>;
+    fn mul(self, k: int) -> Stream<T> { Stream { items: self.items.map(|x: T| x.times(k)) } }
+}
+
+/// `s * k` with a real `k`: each step must take a real factor (a float,
+/// a quantity, a weighted table).
+impl Mul<float> for Stream<T> {
+    type Out = Stream<T>;
+    fn mul(self, k: float) -> Stream<T> { Stream { items: __stream_each("*", self.items, [], k) } }
+}
+
+/// `p - q`: the panel from post `q` to post `p`.
+/// r[impl mimas.group.affine.sub-posts]
+impl Sub for Post {
+    type Out = T;
+    fn sub(self, o: Post<T>) -> T { self.at - o.at }
+}
+
+/// `p - d`: the post one panel `d` back.
+impl Sub<T> for Post<T> {
+    type Out = Post<T>;
+    fn sub(self, d: T) -> Post<T> { Post { at: self.at - d } }
+}
+
+/// `p + d`: the post one panel `d` on. Two posts do not add: there is no
+/// `impl Add for Post`.
+/// r[impl mimas.group.affine.add-panel]
+impl Add<T> for Post<T> {
+    type Out = Post<T>;
+    fn add(self, d: T) -> Post<T> { Post { at: self.at + d } }
 }
 
 impl Iter for Stream {

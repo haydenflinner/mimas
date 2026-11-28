@@ -94,3 +94,25 @@ fn an_open_operand_takes_the_left_type() {
     assert_eq!(test_runner::render(&format!("{V}\nfn f(o) {{ a * o }}"), "f(b).y"), "10.0");
     rejected(&format!("{V}\nfn g(o) {{ a.mul(o) }}"), "could be any of 2 impls");
 }
+
+// std's own types implement the operator pacts: the vectors (native
+// operators), `Stream` (a stream plus a stream, a stream plus a step, a
+// stream times a number), `Post` (a post minus a post is a panel).
+// r[verify mimas.std.ops.std-types]
+#[test]
+fn std_types_implement_the_operator_pacts() {
+    let vec = "use std::math::Vec2;\nlet p = Vec2::new(1.0, 2.0)\nlet q = Vec2::new(3.0, 4.0)";
+    assert_eq!(test_runner::render(&format!("{vec}\n{V}"), "sum([p, q]).y"), "6.0");
+    assert_eq!(test_runner::render(&format!("{vec}\n{V}"), "scale(p).x"), "2.0");
+    assert_eq!(test_runner::render(&format!("{vec}\n{V}"), "flip(q).y"), "-4.0");
+    assert_eq!(test_runner::render(&format!("{vec}\n{V}"), "(2.0 * p).y"), "4.0");
+    let s = "let s = stream([1, 2, 3])";
+    assert_eq!(test_runner::render(s, "(s + s).list()"), "[2, 4, 6]");
+    assert_eq!(test_runner::render(s, "(s + 10).list()"), "[11, 12, 13]");
+    assert_eq!(test_runner::render(s, "(s - 1).list()"), "[0, 1, 2]");
+    assert_eq!(test_runner::render(s, "(s * 2).list()"), "[2, 4, 6]");
+    assert_eq!(test_runner::render(s, "(2 * s).list()"), "[2, 4, 6]");
+    assert_eq!(test_runner::render(s, "(-s).list()"), "[-1, -2, -3]");
+    assert_eq!(test_runner::render("let a = post(5)\nlet b = post(2)", "a - b"), "3");
+    assert_eq!(test_runner::render("let a = post(5)", "(a + 1).at"), "6");
+}

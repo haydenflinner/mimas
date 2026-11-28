@@ -12,6 +12,9 @@ use std::polars::DataFrame;
 /// and answer the pact's members. A plain table has no weights, so `+` on
 /// one is the error that says to lift it with `query z { t }`.
 /// r[impl mimas.group.pact]
+impl Add for DataFrame { type Out = DataFrame; }
+impl Sub for DataFrame { type Out = DataFrame; }
+impl Neg for DataFrame { type Out = DataFrame; }
 impl AbelianGroup for DataFrame {}
 
 /// A few Z-sets, with removals, for the laws of `AbelianGroup`.

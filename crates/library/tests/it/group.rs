@@ -54,26 +54,28 @@ test_run!(
     "5.times(13) == 65 && tally([\"x\"]).times(13).weight(\"x\") == 13" => "true",
 );
 
-// A page's own impl gets the pact's laws as checks, like any pact's.
+// A page's own impl gets the pact's laws as checks, like any pact's. Its
+// `+`, `-` and `-x` are the operator pacts `AbelianGroup` requires.
 // r[verify mimas.group.pact]
+// r[verify mimas.group.pact.ops]
 #[test]
 fn a_page_impl_gets_the_group_laws() {
     let src = "
         struct Money { c: int }
         impl Money { fn samples() -> [Money] { [Money { c: 0 }, Money { c: 5 }, Money { c: -3 }] } }
+        impl Add for Money { type Out = Money; fn add(self, o: Money) -> Money { Money { c: self.c + o.c } } }
+        impl Sub for Money { type Out = Money; fn sub(self, o: Money) -> Money { Money { c: self.c - o.c } } }
+        impl Neg for Money { type Out = Money; fn neg(self) -> Money { Money { c: -self.c } } }
         impl AbelianGroup for Money {
             fn zero(self) -> Money { Money { c: 0 } }
-            fn add(self, o: Money) -> Money { Money { c: self.c + o.c } }
-            fn sub(self, o: Money) -> Money { Money { c: self.c - o.c } }
-            fn neg(self) -> Money { Money { c: -self.c } }
         }
         struct Bad { c: int }
         impl Bad { fn samples() -> [Bad] { [Bad { c: 1 }, Bad { c: 2 }] } }
+        impl Add for Bad { type Out = Bad; fn add(self, o: Bad) -> Bad { Bad { c: self.c - o.c } } }
+        impl Sub for Bad { type Out = Bad; fn sub(self, o: Bad) -> Bad { Bad { c: self.c - o.c } } }
+        impl Neg for Bad { type Out = Bad; fn neg(self) -> Bad { Bad { c: -self.c } } }
         impl AbelianGroup for Bad {
             fn zero(self) -> Bad { Bad { c: 0 } }
-            fn add(self, o: Bad) -> Bad { Bad { c: self.c - o.c } }
-            fn sub(self, o: Bad) -> Bad { Bad { c: self.c - o.c } }
-            fn neg(self) -> Bad { Bad { c: -self.c } }
         }";
     let mut vm = vm::Vm::compile(src, library::std).unwrap_or_else(|e| panic!("{e:?}"));
     vm.run().unwrap();
@@ -391,4 +393,27 @@ fn zipping_misaligned_streams_is_refused() {
     };
     assert!(err.contains("these streams have 3 and 2 steps"), "{err}");
     assert!(err.contains("ps.after().zip(∇ ps)"), "{err}");
+}
+
+// `AbelianGroup` requires `Add<Out = Self>`, `Sub<Out = Self>` and
+// `Neg<Out = Self>`: an impl without them is refused, and a `T:
+// AbelianGroup` body adds through `Add`.
+// r[verify mimas.group.pact.ops]
+#[test]
+fn the_group_requires_the_operator_pacts() {
+    let err = test_runner::try_execute(
+        "struct M { c: int }\nimpl AbelianGroup for M { fn zero(self) -> M { M { c: 0 } } }",
+    )
+    .expect_err("an impl without `Add` is refused");
+    assert!(format!("{err:?}").contains("which `AbelianGroup` requires"), "{err:?}");
+    let src = "struct M { c: int }
+impl Add for M { type Out = M; fn add(self, o: M) -> M { M { c: self.c + o.c } } }
+impl Sub for M { type Out = M; fn sub(self, o: M) -> M { M { c: self.c - o.c } } }
+impl Neg for M { type Out = M; fn neg(self) -> M { M { c: -self.c } } }
+impl M { fn samples() -> [M] { [M { c: 0 }, M { c: 2 }] } }
+impl AbelianGroup for M { fn zero(self) -> M { M { c: 0 } } }
+fn total<T: AbelianGroup>(xs: [T]) -> T { let t = xs[0].zero(); for x in xs { t = t + x }; t }";
+    assert_eq!(test_runner::render(src, "total([M { c: 2 }, M { c: 3 }]).c"), "5");
+    assert_eq!(test_runner::render(src, "total([1, 2, 3])"), "6");
+    assert_eq!(test_runner::render(src, "(∫ stream([M { c: 1 }, M { c: 2 }])).last().c"), "3");
 }
