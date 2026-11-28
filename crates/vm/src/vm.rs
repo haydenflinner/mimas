@@ -1659,15 +1659,10 @@ fn run_dispatch_inner<'gc>(
                 };
                 // SAFETY: all pointers borrow live driver state; the BodyFn
                 // contract requires `*env.out` to be written before return.
-                // A generated body cannot replay an op, so its displays of
-                // `Show` values keep the built-in form.
-                ctx.state().show_replay.set(false);
-                let r = unsafe {
+                unsafe {
                     f(&env);
                     slot.assume_init()
-                };
-                ctx.state().show_replay.set(true);
-                r
+                }
             }
             None => {
                 fuel -= 1;

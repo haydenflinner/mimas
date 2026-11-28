@@ -1,0 +1,13 @@
+pact Show { fn show(self) -> str; }
+struct Dot { x: int }
+impl Show for Dot { fn show(self) -> str { f"dot {self.x}" } }
+struct Box { d: Dot, n: int }
+fn label(ds: [Dot]) -> str { f"{ds}" }
+let ds = [Dot { x: 1 }, Dot { x: 2 }]
+let a = label(ds)
+keep(a)
+let b = f"{Box { d: Dot { x: 3 }, n: 4 }}"
+keep(b)
+let total = ""
+for i in 0..3 { total = total + f"{[Dot { x: i }]}" }
+let TEST_VALUE = f"{a}|{b}|{total}"

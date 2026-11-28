@@ -1,0 +1,12 @@
+pact Sz { fn sz(self) -> int; }
+impl Sz for int { fn sz(self) -> int { self } }
+impl Sz for str { fn sz(self) -> int { 100 } }
+impl Sz for [T] { fn sz(self) -> int { 1000 } }
+struct P { n: int }
+impl Sz for P { fn sz(self) -> int { self.n } }
+fn one<T: Sz>(x: T) -> int { x.sz() }
+let a = one(P { n: 4 }) + one(7)
+keep(a)
+let b = one("hi") + one([1, 2])
+keep(b)
+let TEST_VALUE = a * 10000 + b

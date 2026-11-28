@@ -2001,8 +2001,10 @@ fn emit_op(
             wln!("code.ip = {next};");
         }
         Op::IsInstance { dst, src, adt } => {
+            // the interpreter's own test: a pact's arm may name a built-in
+            // receiver (`int`, `str`, a list, a dict), not only a struct
             wln!(
-                "let m = matches!(rd(regs, {}), Val::Instance(i) if i.0.borrow().struct_id == {}u32);",
+                "let m = val_is_instance(&rd(regs, {}), {}u32);",
                 reg(*src),
                 adt.index()
             );

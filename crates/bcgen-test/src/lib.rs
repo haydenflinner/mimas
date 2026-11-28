@@ -19,4 +19,10 @@ pub mod generated {
     pub mod mixed {
         include!(concat!(env!("OUT_DIR"), "/mixed.rs"));
     }
+    pub mod pact_prim {
+        include!(concat!(env!("OUT_DIR"), "/pact_prim.rs"));
+    }
+    pub mod show {
+        include!(concat!(env!("OUT_DIR"), "/show.rs"));
+    }
 }

@@ -93,3 +93,28 @@ fn specialized_run_produces_values() {
     assert!(matches!(test_value, Some(Captured::Int(208))));
     assert_eq!(kept.len(), 2);
 }
+
+// A program that prints `Show` values nested in lists and fields prints the
+// same text on the interpreter and on bcgen bodies: a generated body's
+// display op stops for the pending `show`s and resumes at that op, as an
+// interpreted one does (r[verify mimas.show.runtime]).
+#[test]
+fn show_parity() {
+    let source = include_str!("../fixtures/show.mimas");
+    let interpreted = run(source, None);
+    assert!(
+        matches!(&interpreted.0, Some(Captured::Str(s)) if s.starts_with("[dot 1, dot 2]|Box { d: dot 3, n: 4 }|")),
+        "{interpreted:?}"
+    );
+    assert_eq!(interpreted, run(source, Some(generated::show::bodies())));
+}
+
+// Pact dispatch whose arms include built-in receivers (`int`, `str`, a
+// list) runs the same on bcgen bodies as on the interpreter.
+#[test]
+fn pact_dispatch_on_built_ins_parity() {
+    let source = include_str!("../fixtures/pact_prim.mimas");
+    let interpreted = run(source, None);
+    assert!(matches!(interpreted.0, Some(Captured::Int(111100))), "{interpreted:?}");
+    assert_eq!(interpreted, run(source, Some(generated::pact_prim::bodies())));
+}
