@@ -468,6 +468,9 @@ impl TokKind<'_> {
                     | TokKind::Dollar
                     // `#1.10`, an exact literal; the parser checks a number follows
                     | TokKind::Hash
+                    // `.Down`, a variant of the expected enum; the parser checks
+                    // a name hugs the `.` (r[impl mimas.enum.dot])
+                    | TokKind::Dot
                     | TokKind::Pipe
                     | TokKind::DoublePipe
                     | TokKind::Loop
@@ -504,8 +507,12 @@ impl TokKind<'_> {
         Literal::try_from(self).is_ok()
             || matches!(
                 self,
-                // `#` opens an atom arm (`#EmptyList =>`)
-                TokKind::Ident(_) | TokKind::LeftParenthesis | TokKind::Minus | TokKind::Hash
+                // `#` opens an atom arm (`#EmptyList =>`), `.` a variant arm (`.Down =>`)
+                TokKind::Ident(_)
+                    | TokKind::LeftParenthesis
+                    | TokKind::Minus
+                    | TokKind::Hash
+                    | TokKind::Dot
             )
     }
 

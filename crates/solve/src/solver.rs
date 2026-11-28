@@ -3950,7 +3950,7 @@ impl Solver {
                     // `#Name`: the scrutinee's enum's variant, or the `atom` one
                     // r[impl mimas.atom.pattern]
                     ExprKind::Atom(atom) => {
-                        let (adt, name) = self.atom_arm(&atom.name, &ty)?;
+                        let (adt, name) = self.atom_arm(&atom.name, &ty, atom.dot)?;
                         (adt, Some(name))
                     }
                     ExprKind::Ident(ident) => {

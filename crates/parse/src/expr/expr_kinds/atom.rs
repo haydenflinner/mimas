@@ -10,6 +10,10 @@ pub struct Atom {
     /// The name without its `#`, located over the whole `#Name`.
     pub name: Ident,
     pub payload: AtomPayload,
+    /// `.Down`: a variant of the enum the slot expects, never a free atom.
+    /// With no enum expected it is an error that names the enums with the
+    /// variant (r[impl mimas.enum.dot]).
+    pub dot: bool,
 }
 
 /// What an atom carries. One form per atom: positional values or named
@@ -38,7 +42,11 @@ impl AtomPayload {
 
 impl Atom {
     pub(crate) fn new(name: Ident, payload: AtomPayload) -> Self {
-        Self { name, payload }
+        Self {
+            name,
+            payload,
+            dot: false,
+        }
     }
 }
 
@@ -53,14 +61,16 @@ impl IntoExpr for Atom {}
 impl std::fmt::Display for Atom {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let name = &self.name.lexeme;
+        let sigil = if self.dot { "." } else { "#" };
+        let name = &format!("{sigil}{name}");
         match &self.payload {
-            AtomPayload::None => f.pad(&format!("#{name}")),
+            AtomPayload::None => f.pad(name),
             AtomPayload::Positional(values) => f.pad(&format!(
-                "#{name}({})",
+                "{name}({})",
                 values.iter().map(ToString::to_string).join(", ")
             )),
             AtomPayload::Named(fields) => f.pad(&format!(
-                "#{name}({})",
+                "{name}({})",
                 fields
                     .iter()
                     .map(|(k, v)| format!("{}: {v}", k.lexeme))

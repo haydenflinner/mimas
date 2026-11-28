@@ -2112,3 +2112,18 @@ pub struct AmbiguousImpl {
     pub count: usize,
     pub impls: String,
 }
+
+/// `.Down` where no enum is expected: the shorthand needs a slot whose type
+/// is an enum (r[impl mimas.enum.dot.no-slot]).
+#[derive(Error, Debug, Diagnostic)]
+#[error("`.{name}` needs a place that expects an enum")]
+pub struct DotVariantNeedsEnum {
+    #[source_code]
+    pub src: NamedSource<Arc<str>>,
+    #[label("{label}")]
+    pub at: SourceSpan,
+    pub name: String,
+    pub label: String,
+    #[help]
+    pub help: String,
+}

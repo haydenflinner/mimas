@@ -66,6 +66,7 @@ mod regions;
 mod pact_keys;
 mod struct_forms;
 mod enum_defaults;
+mod enum_dot;
 mod cell;
 mod protocols;
 mod sort_ord;

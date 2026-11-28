@@ -276,6 +276,7 @@ impl Solver {
         &mut self,
         name: &parse::Ident,
         scrut: &Ty,
+        dot: bool,
     ) -> Result<(AdtId, String)> {
         let lexeme = name.lexeme.clone();
         if let Ty::Adt(eid, _) | Ty::Identity(eid, _) = scrut.clone().normalized(self)
@@ -283,28 +284,75 @@ impl Solver {
             && self.adts[eid].flags.contains(AdtFlags::IS_ENUM)
         {
             let Some(variant) = self.adts[eid].variants.get(&lexeme).cloned() else {
-                Err(self.not_in_enum(&lexeme, eid, name.location))?
+                Err(self.not_in_enum(&lexeme, eid, name.location, dot))?
             };
             if let Some(dec) = variant.dec() {
                 self.node_decs.insert(name.id, dec);
             }
             return Ok((eid, lexeme));
         }
+        if dot {
+            return Err(self.dot_needs_enum(&lexeme, name.location).into());
+        }
         self.atom_variant(&lexeme, None, name.location, true)?;
         self.atoms.arms.push((lexeme.clone(), name.location));
         Ok((self.atom_adt(), lexeme))
     }
 
-    fn not_in_enum(&self, name: &str, eid: AdtId, at: Location) -> AtomNotInEnum {
+    fn not_in_enum(&self, name: &str, eid: AdtId, at: Location, dot: bool) -> AtomNotInEnum {
+        let sigil = if dot { "." } else { "#" };
         let names: Vec<String> = self.adts[eid].variants.keys().cloned().collect();
         AtomNotInEnum {
             src: self.src(at),
             at: at.into(),
-            atom: format!("#{name}"),
+            atom: format!("{sigil}{name}"),
             enum_name: self.adts[eid].name.clone(),
-            variants: names.iter().map(|n| format!("`#{n}`")).join(", "),
+            variants: names.iter().map(|n| format!("`{sigil}{n}`")).join(", "),
             help: nearest(name, names.iter().map(String::as_str))
-                .map(|n| format!("did you mean `#{n}`?")),
+                .map(|n| format!("did you mean `{sigil}{n}`?")),
+        }
+    }
+
+    /// `.Down` with no enum expected: name the declared enums that have a
+    /// variant `Down`, so the fix is one of their full names
+    /// (r[impl mimas.enum.dot.no-slot]).
+    pub(crate) fn dot_needs_enum(&self, name: &str, at: Location) -> crate::errors::DotVariantNeedsEnum {
+        let mut owners: Vec<String> = self
+            .adts
+            .iter()
+            .filter(|(aid, adt)| {
+                adt.flags.contains(AdtFlags::IS_ENUM)
+                    && !self.is_atom_adt(*aid)
+                    && adt.enum_of.is_none()
+                    && adt.variants.contains_key(name)
+            })
+            .map(|(_, adt)| adt.name.clone())
+            .collect();
+        owners.sort();
+        owners.dedup();
+        let (label, help) = match owners.as_slice() {
+            [] => (
+                "no enum here, and no declared enum has this variant".to_string(),
+                format!("write the enum's name, `E::{name}`, or `#{name}` for an atom"),
+            ),
+            [one] => (
+                format!("no enum is expected here; `{one}` has `{name}`"),
+                format!("write `{one}::{name}`, or give the place a type: `let x: {one} = .{name}`"),
+            ),
+            many => (
+                format!(
+                    "no enum is expected here; {} have `{name}`",
+                    many.iter().map(|e| format!("`{e}`")).join(", ")
+                ),
+                format!("write one of {}", many.iter().map(|e| format!("`{e}::{name}`")).join(", ")),
+            ),
+        };
+        crate::errors::DotVariantNeedsEnum {
+            src: self.src(at),
+            at: at.into(),
+            name: name.to_string(),
+            label,
+            help,
         }
     }
 }
@@ -328,6 +376,10 @@ impl Solve for parse::Atom {
             && solver.adts[eid].flags.contains(AdtFlags::IS_ENUM)
         {
             return fit_enum(self, id, location, eid, solver);
+        }
+        // `.Down` is never a free atom (r[impl mimas.enum.dot.no-slot])
+        if self.dot {
+            return Err(solver.dot_needs_enum(&name, location).into());
         }
 
         let shape = Shape::of(&self.payload);
@@ -366,7 +418,7 @@ fn fit_enum(
 ) -> Result<Ty> {
     let name = atom.name.lexeme.clone();
     let Some(variant) = solver.adts[eid].variants.get(&name).cloned() else {
-        Err(solver.not_in_enum(&name, eid, location))?
+        Err(solver.not_in_enum(&name, eid, location, atom.dot))?
     };
     if let Some(dec) = variant.dec() {
         solver.node_decs.insert(atom.name.id, dec);

@@ -5282,7 +5282,7 @@ impl<'s> Parser<'s> {
         }
         // `#EmptyList`: an atom, a name no declaration introduces
         // (r[impl mimas.atom.literal])
-        if self.at_atom() {
+        if self.at_atom() || self.at_dot_variant() {
             return self.atom_expr();
         }
         // `#1.10`: an exact decimal, a `dec` wherever it stands. The `#`
@@ -5369,6 +5369,16 @@ impl<'s> Parser<'s> {
             let fresh_line = self.group_depth == 0 && self.at_line_start();
             expr = match self.peek() {
                 TokKind::LeftParenthesis | TokKind::LeftSquare | TokKind::Bang if fresh_line => {
+                    break expr;
+                }
+                // `.Down` opening a line is a new value, an enum variant, not a
+                // field of the line above: a capital after the `.` on a fresh
+                // line (r[impl mimas.enum.dot.line])
+                TokKind::Dot
+                    if fresh_line
+                        && self.at_dot_variant()
+                        && matches!(self.nth(1), TokKind::Ident(n) if n.starts_with(|c: char| c.is_uppercase())) =>
+                {
                     break expr;
                 }
                 TokKind::LeftParenthesis if self.spaced_paren_ends && !self.glued() => break expr,
@@ -7229,13 +7239,19 @@ impl<'s> Parser<'s> {
                 self.advance();
                 self.range_tail(literal, start)
             }
-            TokKind::Ident(_) | TokKind::Hash => {
+            TokKind::Ident(_) | TokKind::Hash | TokKind::Dot
+                if kind != TokKind::Dot || self.at_dot_variant() =>
+            {
                 // `#Name`: an atom arm, the payload in the same shapes a
-                // variant's (r[impl mimas.atom.pattern])
-                let atom = kind == TokKind::Hash;
+                // variant's (r[impl mimas.atom.pattern]); `.Name`: a variant
+                // of the scrutinee's enum (r[impl mimas.enum.dot])
+                let atom = kind == TokKind::Hash || kind == TokKind::Dot;
                 let (first, mut head_expr) = if atom {
+                    let dot = kind == TokKind::Dot;
                     let name = self.atom_name();
-                    let head = self.new_expr(Atom::new(name.clone(), AtomPayload::None), start);
+                    let mut a = Atom::new(name.clone(), AtomPayload::None);
+                    a.dot = dot;
+                    let head = self.new_expr(a, start);
                     (name, head)
                 } else {
                     // walk path: ident (:: ident)*
@@ -7492,10 +7508,24 @@ impl<'s> Parser<'s> {
             && self.meta_at(1).glued
     }
 
+    /// `.Down`: a `.` glued to a name where an expression or a pattern
+    /// starts is a variant of the enum the slot expects. `..`, `..=` and
+    /// `..base` are their own tokens, and a postfix `.x` never reaches a
+    /// starting position (r[impl mimas.enum.dot]).
+    fn at_dot_variant(&self) -> bool {
+        self.peek() == TokKind::Dot
+            && matches!(self.nth(1), TokKind::Ident(_))
+            && self.next + 1 < self.tokens.len()
+            && self.meta_at(1).glued
+    }
+
     /// The `#Name` head of an atom, its ident located over the `#` too.
     fn atom_name(&mut self) -> Ident {
         let start = self.next_start();
-        self.bump(TokKind::Hash);
+        // `#Name` or `.Name`: the sigil is all that differs
+        if !self.eat(TokKind::Dot) {
+            self.bump(TokKind::Hash);
+        }
         let name = self.require_ident();
         Ident {
             location: self.location(start),
@@ -7509,6 +7539,7 @@ impl<'s> Parser<'s> {
     /// (r[impl mimas.atom.payload]).
     fn atom_expr(&mut self) -> Expr {
         let start = self.next_start();
+        let dot = self.at(TokKind::Dot);
         let name = self.atom_name();
         let mut payload = AtomPayload::None;
         if self.at(TokKind::LeftParenthesis) && self.glued() {
@@ -7542,7 +7573,9 @@ impl<'s> Parser<'s> {
                 AtomPayload::Positional(entries.into_iter().map(|(_, v)| v).collect())
             };
         }
-        self.new_expr(Atom::new(name, payload), start)
+        let mut atom = Atom::new(name, payload);
+        atom.dot = dot;
+        self.new_expr(atom, start)
     }
 
     /// `#1.10`: a `#` glued to a number opens an exact literal, not an

@@ -2389,3 +2389,20 @@ fn owner_alone_is_not_a_path() {
     let (_, errors) = crate::tests::utils::parse("let p = @devon;");
     assert!(!errors.is_empty(), "@devon alone should not parse as a value");
 }
+
+// a `.Capital` that opens a line starts a new statement; a lowercase name
+// continues the line above as a method call
+// r[verify mimas.enum.dot.line]
+#[test]
+fn dot_variant_opens_a_line() {
+    let parse = |src: &str| {
+        let (ast, errs) = crate::Parser::new(crate::lex::Lexer::new(src, 0, "test".into())).into_ast();
+        assert!(errs.is_empty(), "{src}: {errs:?}");
+        ast.stmts().len()
+    };
+    assert_eq!(parse("let a = x\n.Down"), 2);
+    assert_eq!(parse("let a = x\n.len();"), 1);
+    let lexer = crate::lex::Lexer::new(".Left(3)", 0, "test".into());
+    let expr = crate::Parser::new(lexer).expr();
+    assert_eq!(expr.to_string(), ".Left(3)");
+}

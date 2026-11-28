@@ -1011,3 +1011,17 @@ test_fail!(
     an_unknown_attribute_on_a_method_still_fails,
     "impl S {\n    #[nope]\n    fn f(self) -> int { 1 }\n}"
 );
+
+// `.Name` opens a variant of the expected enum where an expression or a
+// pattern starts; `..`, `..=` and `..base` keep their meaning
+// r[verify mimas.enum.dot] r[verify mimas.enum.dot.lex]
+test_ok!(
+    dot_variant_forms,
+    "let d: Dir = .Down;",
+    "f(.Up, .Left(3), .Jump(h: 2));",
+    "match d { .Up => 1, .Left(k) => k, .Jump { h } => h, _ => 0 }",
+    "let m = Move { d: .Up, ..base };",
+    "for i in 0..5 { }",
+    "let r = 0..=5;",
+    "d == .Down;"
+);

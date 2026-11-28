@@ -232,3 +232,19 @@ test_vm!(
      let l = Light::On {}.flip();",
     "l.is_on()" => Bool(false),
 );
+
+// `.Name`: a variant of the enum the slot expects, in an arm, an argument,
+// a field, a `let` with a type, a return and beside `==`
+// r[verify mimas.enum.dot]
+test_vm!(
+    match_dot_variant,
+    "enum Dir { Up, Down, Left(int) }
+struct Move { d: Dir }
+fn f(d: Dir) -> int { match d { .Up => 1, .Down => 2, .Left(k) => k } }
+fn g() -> Dir { .Down }",
+    "f(.Left(7))" => Int(7),
+    "f(g())" => Int(2),
+    "f(Move { d: .Up }.d)" => Int(1),
+    "{ let d: Dir = .Down; d == .Down }" => Bool(true),
+    "{ let ds: [Dir] = [.Up, .Left(4)]; f(ds[1]) }" => Int(4),
+);
