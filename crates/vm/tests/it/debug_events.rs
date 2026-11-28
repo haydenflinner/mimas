@@ -149,6 +149,41 @@ fn debug_step_collects_garbage() {
     );
 }
 
+/// `yield_frame`-style native: latches the cooperative pause.
+fn yield_frame<'gc>(ctx: vm::Ctx<'gc>) {
+    ctx.state().paused.set(true);
+}
+
+// `run_frame` paid the arena's debt only between FUEL batches. A game
+// frame that pauses inside its first batch (pong: about 380 ops) never
+// reached that point, so the garbage of every frame stayed until the
+// memory budget's settle: the wasm game instance grew by about 140 MB
+// in ten minutes of pong, and never gave it back.
+#[test]
+fn run_frame_collects_garbage() {
+    let mut vm = Vm::compile(
+        "let i = 0;
+         let junk = [];
+         while i >= 0 { junk = [i, i, i]; i += 1; yield_frame(); }",
+        |api| api.add_named("yield_frame", yield_frame),
+    )
+    .expect("source should compile");
+    let mut mid = 0usize;
+    for frame in 0..60_000 {
+        vm.set_op_budget(100_000);
+        assert!(!vm.run_frame().expect("frame should not fault"), "the loop never ends");
+        if frame == 30_000 {
+            mid = vm.gc_count();
+        }
+    }
+    let end = vm.gc_count();
+    assert!(mid > 0, "loop should be live mid-run, saw {mid} objects");
+    assert!(
+        end <= mid + 1000,
+        "arena kept growing across frames: {mid} -> {end} live GC objects"
+    );
+}
+
 /// A struct local the optimizer dissolves into registers (SSA + field phis, or slot SROA)
 /// still shows in the frame view, rebuilt from its shadow registers, and changes as the
 /// program rebinds or mutates it.

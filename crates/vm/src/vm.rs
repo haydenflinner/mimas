@@ -774,6 +774,12 @@ impl Vm {
                 Ok::<(bool, bool), Error>((done, state.paused.get()))
             })?;
             if done || paused {
+                // A frame that pauses inside its first FUEL batch (most
+                // game frames: a few hundred ops) never reaches the
+                // `collect_boundary` below. Pay the arena's debt here, or
+                // a 60 Hz game collects only when the budget's settle
+                // fires, after some hundred MB of garbage.
+                self.arena.collect_debt();
                 return Ok(done);
             }
             self.collect_boundary();
