@@ -3814,6 +3814,22 @@ impl Vm {
             };
             results.push(TestResult { name, error, operands, ops, not_reached });
         }
+        // a block check whose entry ran before any test reached it may have
+        // been reached by a later one: ask again once every test ran
+        // (r[impl check.block.unreached])
+        for r in results.iter_mut().filter(|r| r.not_reached) {
+            let _ = self.fixture::<crate::fixtures::BlockChecks>().take_unreached();
+            let ran = self.call_fn_result(&r.name);
+            if self.fixture::<crate::fixtures::BlockChecks>().take_unreached() {
+                continue;
+            }
+            r.not_reached = false;
+            r.error = match ran {
+                Err(e) => Some(format!("{e}")),
+                Ok(Captured::Bool(true)) => None,
+                Ok(other) => Some(format!("check produced {other:?}, expected a bool")),
+            };
+        }
         self.reset_to_entry();
         results
     }

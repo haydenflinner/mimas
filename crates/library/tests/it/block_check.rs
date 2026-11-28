@@ -117,3 +117,18 @@ fn a_block_check_no_run_reached_is_not_reached() {
     let results = run("fn g(x: int) -> int { check x < 100; x }\nlet b = g(200)\n");
     assert!(find(&results, "x < 100").failed(), "{results:?}");
 }
+
+// A block check whose entry runs before the check that reaches it is
+// asked again once every test ran: reached by a later top-level check, it
+// passes or fails, not "not reached".
+// r[verify check.block.unreached]
+#[test]
+fn a_later_check_that_reaches_a_block_check_settles_it() {
+    let src = "fn half(n: int) -> int {\n    check n mod 2 == 0\n    n ~/ 2\n}\ncheck half(4) == 2\n";
+    let results = run(src);
+    let inner = find(&results, "n mod 2 == 0");
+    assert!(inner.passed() && !inner.not_reached, "{results:?}");
+    let results = run("fn half(n: int) -> int {\n    check n mod 2 == 0\n    n ~/ 2\n}\ncheck half(3) == 1\ncheck half(4) == 2\n");
+    assert!(find(&results, "n mod 2 == 0").failed(), "{results:?}");
+    assert!(find(&results, "half(4) == 2").passed(), "{results:?}");
+}
