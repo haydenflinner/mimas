@@ -1325,6 +1325,38 @@ fn grouped_number_hint(call: &Call, solver: &Solver, e: Error) -> Error {
     }
 }
 
+/// The arguments of `f(…)` packed as one `Args` when `f`'s type implements
+/// std's `Callable` (its `call` is a `Callable` member) or is a param a
+/// `Callable` bounds: none is `()`, one is itself, more are a tuple. `None`
+/// leaves the plain `call` rewrite (L12) or an ordinary call.
+fn callable_args(solver: &Solver, ty: &Ty, call: &Call, location: Location) -> Option<Expr> {
+    let is_callable = |p: &shared::PactId| {
+        let base = solver.inst_of.get(p).map(|(b, _)| *b).unwrap_or(*p);
+        solver.pacts[base].name == "Callable"
+    };
+    let ok = match ty {
+        Ty::Adt(aid, _) | Ty::Identity(aid, _) => solver.adts[*aid]
+            .impls
+            .get("call")
+            .and_then(|f| solver.member_pact.get(&f.dec))
+            .is_some_and(is_callable),
+        Ty::Param(p) => solver
+            .param_bounds
+            .get(p)
+            .is_some_and(|bs| bs.iter().any(|b| solver.pact_closure(*b).iter().any(is_callable))),
+        _ => false,
+    };
+    if !ok || call.arguments.iter().any(|a| a.name.is_some()) {
+        return None;
+    }
+    let mut args: Vec<Expr> = call.arguments.iter().map(|a| a.value.clone()).collect();
+    Some(match args.len() {
+        0 => Expr::new(ExprKind::Literal(Literal::Unit), location),
+        1 => args.pop().unwrap(),
+        _ => Expr::new(ExprKind::Literal(Literal::Tuple(args)), location),
+    })
+}
+
 fn solve_call(this: &Call, id: NodeId, location: Location, solver: &mut Solver) -> Result<Ty> {
         // `v(…)` on a value whose type has `fn call(this, …)` is `v.call(…)`;
         // a type name called stays its constructor (r[impl mimas.call.call-method])
@@ -1336,6 +1368,29 @@ fn solve_call(this: &Call, id: NodeId, location: Location, solver: &mut Solver) 
             )
         {
             let ty = this.left.query(solver)?.normalized(solver);
+            // `f(a, b)` on a value whose type implements `Callable<(A, B)>`, or
+            // on `f: F` under `F: Callable<…>`: `f.call((a, b))`, the arguments
+            // packed as the pact's one `Args` (r[impl mimas.callable])
+            if let Some(packed) = callable_args(solver, &ty, this, location) {
+                let at = location;
+                let rewritten = Expr::new(
+                    ExprKind::Call(Call {
+                        left: Expr::new(
+                            ExprKind::Access(Access::Dot {
+                                left: this.left.clone(),
+                                right: Expr::new(ExprKind::Ident(Ident::new("call", at)), at),
+                                kind: parse::AccessKind::Direct,
+                            }),
+                            at,
+                        ),
+                        arguments: vec![Argument { name: None, value: packed }],
+                    }),
+                    at,
+                );
+                let ty = rewritten.query(solver)?;
+                solver.rewrites.insert(id, rewritten);
+                return Ok(ty);
+            }
             if let Ty::Adt(aid, _) | Ty::Identity(aid, _) = ty
                 && solver.adts[aid].impls.get("call").is_some_and(|f| {
                     matches!(&f.ty, Ty::Fn(h) if h.is_method)

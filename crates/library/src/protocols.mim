@@ -446,3 +446,15 @@ impl Div<float> for Vec3 { type Out = Vec3; }
 impl Neg for Vec3 { type Out = Vec3; }
 
 impl Mul for Quat { type Out = Quat; }
+
+/// A value called like a function: `f(a, b)` is `f.call((a, b))` when
+/// `f`'s type implements `Callable<(A, B)>`. `Args` is the arguments as
+/// one value: a tuple for two or more, the type itself for one, `()` for
+/// none, so the pact reads like the function type `(A, B) -> Out`. A
+/// bound takes a callable value: `fn twice<F: Callable<int, Out = int>>(f:
+/// F, x: int) -> int { f(f(x)) }`. A type with an inherent `fn call(self,
+/// …)` and no impl keeps the plain rewrite. r[impl mimas.callable]
+pact Callable<Args> {
+    type Out;
+    fn call(self, args: Args) -> Out;
+}

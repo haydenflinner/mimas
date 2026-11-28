@@ -111,3 +111,28 @@ fn unspaced_lists_split_and_grouped_numbers_hint() {
     );
     assert!(err.contains("`100,200,300` is one number here; write `100, 200,300` for two"), "{err}");
 }
+
+// `pact Callable<Args>`: `f(a, b)` is `f.call((a, b))`, the arguments packed
+// as one `Args` (a tuple, the one value, or `()`), on a concrete type and
+// through a bound.
+// r[verify mimas.callable]
+#[test]
+fn a_callable_value_takes_its_arguments_as_one() {
+    let src = "struct Adder { k: int }
+impl Callable<(int, int)> for Adder { type Out = int; fn call(self, args: (int, int)) -> int { args.0 + args.1 + self.k } }
+struct Inc { k: int }
+impl Callable<int> for Inc { type Out = int; fn call(self, x: int) -> int { x + self.k } }
+struct Zero {}
+impl Callable<()> for Zero { type Out = int; fn call(self, u: ()) -> int { 0 } }
+fn twice<F: Callable<int, Out = int>>(f: F, x: int) -> int { f(f(x)) }
+let add = Adder { k: 100 }
+let inc = Inc { k: 1 }
+let z = Zero {}";
+    assert_eq!(crate::test_runner::render(src, "add(1, 2)"), "103");
+    assert_eq!(crate::test_runner::render(src, "inc(5)"), "6");
+    assert_eq!(crate::test_runner::render(src, "z()"), "0");
+    assert_eq!(crate::test_runner::render(src, "twice(inc, 5)"), "7");
+    // the old spelling, an inherent `call` with spread parameters, stays
+    let old = "struct M { k: int }\nimpl M { fn call(self, a: int, b: int) -> int { a * b + self.k } }\nlet m = M { k: 1 }";
+    assert_eq!(crate::test_runner::render(old, "m(2, 3)"), "7");
+}
