@@ -568,7 +568,7 @@ impl Hoist for Impl {
                     let header = ctx.solver.pacts[pid].functions[&name].0.clone();
                     let ty = ctx
                         .solver
-                        .instantiate_pact_fn(&header, &ctx.solver.impl_target_ty().unwrap());
+                        .graft_pact_fn(&header, &ctx.solver.impl_target_ty().unwrap());
                     let dec = ctx.solver.pact_members[&(pid, name.clone())];
                     // the name is taken (an inherent member or another pact's): the
                     // default lands under `name@Pact` (C3) r[impl mimas.pact.member-key]
@@ -660,11 +660,18 @@ impl Hoist for Pact {
                 }
                 PactItem::Fn {
                     name,
+                    generics,
                     parameters,
                     return_type,
                     default: body,
                     ..
                 } => {
+                    // the member's own `<U>`: params a call instantiates
+                    // fresh (r[impl mimas.pact.member-generic])
+                    for (_, p) in ctx.solver.declare_type_params(generics) {
+                        ctx.solver.member_params.insert(p);
+                    }
+                    ctx.solver.push_type_params(generics);
                     let is_method = parameters
                         .first()
                         .and_then(|b| b.left.as_ident())
@@ -673,7 +680,9 @@ impl Hoist for Pact {
                     let default = body.as_ref().map(|v| Ty::Vid(ctx.solver.node_vid(v.id())));
 
                     let header =
-                        hoist_fn_header(ctx.solver, parameters, return_type, is_method, false)?;
+                        hoist_fn_header(ctx.solver, parameters, return_type, is_method, false);
+                    ctx.solver.pop_type_params();
+                    let header = header?;
                     // r[impl mimas.pact.overload]
                     // A second fn of one name is an overload when both are operator-shaped
                     // (`self` + one operand with a written type) and the operands differ —

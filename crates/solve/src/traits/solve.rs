@@ -1282,6 +1282,16 @@ fn solve_call(this: &Call, id: NodeId, location: Location, solver: &mut Solver) 
             let own = match &recv_ty {
                 Ty::Adt(aid, _) | Ty::Identity(aid, _) => solver.adts[*aid].impls.contains_key(&name),
                 Ty::Array(..) => true,
+                // a bound whose pact declares the member: dispatch through
+                // it, so an impl's own `map` answers
+                Ty::Param(p) => solver.param_bounds.get(p).is_some_and(|bounds| {
+                    bounds.iter().any(|b| {
+                        solver
+                            .pact_closure(*b)
+                            .into_iter()
+                            .any(|q| solver.pacts[q].functions.contains_key(&name))
+                    })
+                }),
                 other => solver
                     .builtin_adt(other)
                     .is_some_and(|aid| solver.adts[aid].impls.contains_key(&name)),

@@ -92,6 +92,9 @@ pub enum PactItem {
     /// ret { body }`. Parameters may not have default values in a pact signature.
     Fn {
         name: Ident,
+        /// `fn map<U>(self, f: (Item) -> U) -> () -> U?`: the member's own
+        /// type parameters, fresh at each call (`mimas.pact.member-generic`).
+        generics: Vec<crate::components::TypeParam>,
         parameters: Vec<Binding>,
         return_type: Option<Annotation>,
         /// `Some(body)` if the pact provides a default implementation. Impls may omit this method
@@ -164,15 +167,21 @@ impl std::fmt::Display for PactItem {
             } => f.pad(&format!("const {}: {};", name, annotation)),
             PactItem::Fn {
                 name,
+                generics,
                 parameters,
                 return_type,
                 default,
                 ..
             } => {
                 let param_str = parameters.iter().join(", ");
+                let tps = if generics.is_empty() {
+                    String::new()
+                } else {
+                    format!("<{}>", generics.iter().map(|g| g.name.lexeme.as_str()).join(", "))
+                };
                 let sig = match return_type {
-                    Some(ret) => format!("fn {}({param_str}) -> {}", name, ret),
-                    None => format!("fn {}({param_str})", name),
+                    Some(ret) => format!("fn {}{tps}({param_str}) -> {}", name, ret),
+                    None => format!("fn {}{tps}({param_str})", name),
                 };
                 match default {
                     Some(body) => f.pad(&format!("{sig} {body}")),

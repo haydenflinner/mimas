@@ -133,6 +133,10 @@ pub struct Solver {
     /// The shape of the `impl … for [T]`/`{K: V}` being read, its params
     /// in scope; `None` outside one.
     pub(crate) impl_shape: Option<Ty>,
+    /// Pact members' own type parameters (`U` in `fn map<U>`).
+    pub(crate) member_params: FxHashSet<ParamId>,
+    /// Set while grafting a pact default onto an impl: member params stay.
+    pub(crate) keep_member_params: bool,
     /// A `T::Item` read where `T` was still open: (owner, stand-in, the
     /// vid that stands for the item), settled after each call.
     pub(crate) assoc_pending: Vec<(Ty, ParamId, Ty)>,
@@ -494,6 +498,8 @@ impl Solver {
             assoc_of_param: FxHashMap::default(),
             assoc_owner: FxHashMap::default(),
             impl_shape: None,
+            member_params: FxHashSet::default(),
+            keep_member_params: false,
             assoc_pending: vec![],
             impl_shapes: FxHashMap::default(),
             pact_assoc: FxHashMap::default(),
@@ -1871,6 +1877,16 @@ impl Solver {
     ///
     /// The header's `Self` becomes `self_ty` -- the impl target when checking or grafting an impl,
     /// the bound when calling through one, or `Self` itself inside a default body.
+    /// A pact default's signature as an impl member: `Self` filled in, but a
+    /// member's own `<U>` kept as a param, so each call still gets its own
+    /// (r[impl mimas.pact.member-generic]).
+    pub(crate) fn graft_pact_fn(&mut self, header: &FnHeader, self_ty: &Ty) -> Ty {
+        let prev = std::mem::replace(&mut self.keep_member_params, true);
+        let ty = self.instantiate_pact_fn(header, self_ty);
+        self.keep_member_params = prev;
+        ty
+    }
+
     pub(crate) fn instantiate_pact_fn(&mut self, header: &FnHeader, self_ty: &Ty) -> Ty {
         let mut memo: FxHashMap<Vid, Vid> = FxHashMap::default();
         self.fresh_vids(&Ty::Fn(header.clone()), self_ty, &mut memo)
@@ -1884,6 +1900,41 @@ impl Solver {
             // a pact's associated type: what the receiver's impl fixes it to;
             // a bounded parameter's own opaque `T::Item`; itself inside a
             // default body (r[impl mimas.pact.assoc-type])
+            // a pact member's own `<U>`: fresh at each call, one var per
+            // param, and its bound owed there (r[impl mimas.pact.member-generic])
+            Ty::Param(p) if self.member_params.contains(&p) && !self.keep_member_params => {
+                let key = Vid::from(u32::MAX - p.index() as u32);
+                let fresh = match memo.get(&key) {
+                    Some(v) => *v,
+                    None => {
+                        let v = self.vid();
+                        memo.insert(key, v);
+                        self.owe_bounds(p, &Ty::Vid(v));
+                        v
+                    }
+                };
+                Ty::Vid(fresh)
+            }
+            // `O::Item` of a member's own `<O: Iter>`: read through `O`'s
+            // fresh var, settled once the call fixes `O`
+            Ty::Param(p)
+                if !self.keep_member_params
+                    && self
+                        .assoc_owner
+                        .get(&p)
+                        .is_some_and(|(owner, _)| self.member_params.contains(owner)) =>
+            {
+                let (owner, item) = self.assoc_owner[&p];
+                let owner_ty = self.fresh_vids(&Ty::Param(owner), self_ty, memo);
+                match self.assoc_for(item, &owner_ty) {
+                    Some(t) => t,
+                    None => {
+                        let v = Ty::Vid(self.vid());
+                        self.assoc_pending.push((owner_ty, item, v.clone()));
+                        v
+                    }
+                }
+            }
             Ty::Param(p) if self.assoc_params.contains_key(&p) => {
                 match self.assoc_for(p, self_ty) {
                     Some(t) => t,
@@ -3034,7 +3085,7 @@ impl Solver {
                     continue;
                 }
                 let header = self.pacts[pid].functions[&name].0.clone();
-                let ty = self.instantiate_pact_fn(&header, &target_ty);
+                let ty = self.graft_pact_fn(&header, &target_ty);
                 let dec = self.pact_members[&(pid, name.clone())];
                 self.adts[adt]
                     .impls
@@ -4367,6 +4418,7 @@ impl Solver {
                     for item in pact.items.iter() {
                         let PactItem::Fn {
                             default: Some(body),
+                            generics,
                             parameters,
                             return_type,
                             ..
@@ -4375,6 +4427,9 @@ impl Solver {
                             continue;
                         };
 
+                        // the member's own `<U>` is rigid in its default body
+                        // (r[impl mimas.pact.member-generic])
+                        self.push_type_params(generics);
                         self.ribs.push_function();
                         for binding in parameters {
                             let param = self.bind_parameter(binding)?;
@@ -4405,6 +4460,7 @@ impl Solver {
                             body.fulfill_ty(expected, self)?;
                         }
                         self.ribs.pop();
+                        self.pop_type_params();
                     }
                     self.assoc_scope.pop();
                     self.pact_self = prev_self;

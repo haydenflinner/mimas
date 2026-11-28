@@ -18,6 +18,32 @@ pact Show {
 pact Iter {
     type Item;
     fn iter(self) -> () -> Item?;
+
+    // The combinators, lazy where they answer a walk: each pulls from
+    // `iter` only when its own pull is called. A list keeps its own
+    // `map`, `filter` and `fold`, which answer lists.
+    // r[impl mimas.iter.pact-combinators]
+
+    /// A pull over `f(x)` for each item.
+    fn map<U>(self, f: (Item) -> U) -> () -> U? { __pull_map(self.iter(), f) }
+    /// A pull over the items `p` keeps.
+    fn filter(self, p: (Item) -> bool) -> () -> Item? { __pull_filter(self.iter(), p) }
+    /// `f(f(init, x0), x1) …` over every item.
+    fn fold<A>(self, init: A, f: (A, Item) -> A) -> A { __pull_fold(self.iter(), init, f) }
+    /// The first item `p` keeps, or `null`.
+    fn find(self, p: (Item) -> bool) -> Item? { __pull_find(self.iter(), p) }
+    /// Whether `p` keeps any item.
+    fn any(self, p: (Item) -> bool) -> bool { __pull_any(self.iter(), p) }
+    /// Whether `p` keeps every item.
+    fn all(self, p: (Item) -> bool) -> bool { __pull_all(self.iter(), p) }
+    /// A pull over `(i, x)`, counting from 0.
+    fn enumerate(self) -> () -> (int, Item)? { __pull_enumerate(self.iter()) }
+    /// A pull over pairs, one from each walk, until either ends.
+    fn zip<O: Iter>(self, o: O) -> () -> (Item, O::Item)? { __pull_zip(self.iter(), o.iter()) }
+    /// A pull over every item of each `f(x)`.
+    fn flat_map<U>(self, f: (Item) -> [U]) -> () -> U? { __pull_flat_map(self.iter(), f) }
+    /// The items as a list.
+    fn to_list(self) -> [Item] { __pull_to_list(self.iter()) }
 }
 
 // The built-in shapes walk the way `for` walks them, so a list, a `str`

@@ -125,3 +125,56 @@ fn an_associated_type_path_reads_in_a_signature() {
     // a parameter typed `T::Item` checks against the list's item
     rejected(&format!("{PATHS}\nlet a = has([1, 2], \"x\");"), "int");
 }
+
+// r[verify mimas.pact.member-generic]
+#[test]
+fn a_pact_member_takes_its_own_type_parameters() {
+    let pre = "pact Boxy {
+        fn get(self) -> int;
+        fn with<U>(self, u: U) -> (int, U) { (self.get(), u) }
+    }
+    struct B { n: int }
+    impl Boxy for B { fn get(self) -> int { self.n } }
+    let b = B { n: 4 }";
+    // each call picks its own `U`
+    assert_eq!(test_runner::render(pre, "b.with(\"s\").1.len() + b.with(2).1"), "3");
+    // in the default body `U` is rigid: it is not an `int`
+    rejected(
+        "pact P {\n    fn get(self) -> int;\n    fn bad<U>(self, u: U) -> int { u + 1 }\n}",
+        "U",
+    );
+    // a member's own bound is owed at the call
+    rejected(
+        "struct S { cards: [str] }\nimpl Iter for S {\n    type Item = str;\n    fn iter(self) -> () -> str? { __list_pull(self.cards) }\n}\nlet z = S { cards: [] }.zip(5);",
+        "Iter",
+    );
+}
+
+// r[verify mimas.iter.pact-combinators]
+#[test]
+fn the_combinators_are_iter_methods() {
+    let pre = format!(
+        "{DECK}
+struct Echo {{ xs: [int] }}
+impl Iter for Echo {{
+    type Item = int;
+    fn iter(self) -> () -> int? {{ __list_pull(self.xs) }}
+    fn map<U>(self, f: (int) -> U) -> () -> U? {{ __pull_map(__list_pull([0]), f) }}
+}}
+fn sevens<T: Iter>(xs: T) -> [int] {{ xs.map(|_x| 7).to_list() }}"
+    );
+    let run = |src: &str| test_runner::render(&pre, src);
+    assert_eq!(run("d.fold(0, |a, c| a + c.len())"), "11");
+    // `zip`'s other side is any `Iter`, each call its own
+    assert_eq!(run("d.zip([1, 2]).to_list().len()"), "2");
+    assert_eq!(run("d.zip([1, 2]).to_list()[1].0.len() + d.zip([1, 2]).to_list()[1].1"), "5");
+    assert_eq!(run("d.zip(0..10).to_list().len()"), "3");
+    assert_eq!(run("d.enumerate().to_list()[2].0"), "2");
+    // an impl's own member answers, directly and through a bound
+    assert_eq!(run("Echo { xs: [1, 2] }.map(|x| x + 1).to_list()"), "[1]");
+    assert_eq!(run("sevens(Echo { xs: [1, 2] })"), "[7]");
+    // a list keeps its own `map`, which answers a list; through a bound it walks
+    assert_eq!(run("[1, 2].map(|x| x * 10)"), "[10, 20]");
+    assert_eq!(run("sevens([1, 2, 3])"), "[7, 7, 7]");
+    assert_eq!(run("\"abc\".to_list()"), "[\"a\", \"b\", \"c\"]");
+}

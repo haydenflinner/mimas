@@ -744,6 +744,7 @@ stmt_test!(
         ident!("Foo"),
         vec![],
         vec![PactItem::Fn {
+            generics: vec![],
             name: ident!("foo"),
             parameters: vec![],
             return_type: None,
@@ -761,6 +762,7 @@ stmt_test!(
         ident!("Foo"),
         vec![],
         vec![PactItem::Fn {
+            generics: vec![],
             name: ident!("foo"),
             parameters: vec![],
             return_type: Some(Annotation::Unit),
@@ -778,6 +780,7 @@ stmt_test!(
         ident!("Foo"),
         vec![],
         vec![PactItem::Fn {
+            generics: vec![],
             name: ident!("foo"),
             parameters: vec![],
             return_type: None,
@@ -816,6 +819,7 @@ stmt_test!(
                 location: shared::Location::default(),
             },
             PactItem::Fn {
+                generics: vec![],
                 name: ident!("name"),
                 parameters: vec![],
                 return_type: Some(Annotation::Kw(TyKw::Str)),
@@ -823,6 +827,7 @@ stmt_test!(
                 location: shared::Location::default(),
             },
             PactItem::Fn {
+                generics: vec![],
                 name: ident!("cost"),
                 parameters: vec![],
                 return_type: Some(Annotation::Kw(TyKw::Int)),

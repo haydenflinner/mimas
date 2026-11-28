@@ -1957,15 +1957,6 @@ impl<'s> Parser<'s> {
         }
     }
 
-    fn reject_type_params(&mut self, params: &[TypeParam]) {
-        if let (Some(first), Some(last)) = (params.first(), params.last()) {
-            self.error(GenericsNotAllowed {
-                src: self.src(),
-                at: first.location.span.until(last.location.span).into(),
-            });
-        }
-    }
-
     // r[impl mimas.struct.alias]
     /// `struct V {…}` — and its `class`/`record` spellings, which
     /// [Parser::struct_alias_intro] dispatched on. `struct_decl` eats
@@ -2220,8 +2211,9 @@ impl<'s> Parser<'s> {
                     });
                 }
                 TokKind::Fn => {
+                    // a member may take type parameters of its own
+                    // (r[impl mimas.pact.member-generic])
                     let (name, generics, parameters, return_type) = self.function_sig(false, None);
-                    self.reject_type_params(&generics);
                     // optional default body -- `{ ... }` after the sig. when present, the trailing
                     // `;` is dropped (block-terminated, like normal fns).
                     let default = self.at(TokKind::LeftBrace).then(|| self.block());
@@ -2232,6 +2224,7 @@ impl<'s> Parser<'s> {
                     }
                     items.push(PactItem::Fn {
                         name,
+                        generics,
                         parameters,
                         return_type,
                         default,
