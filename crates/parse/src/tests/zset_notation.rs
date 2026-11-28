@@ -30,8 +30,9 @@ tok_test!(zset_postfix_glyphs: "z⁺ z⁻ ‖z‖ a ⋈ b" => Ident("z"), SupPlu
 // r[verify mimas.query.zset.incremental]
 tok_test!(incremental_postfix: "q^Δ" => Ident("q"), Incremental);
 tok_test!(incremental_after_paren: "(q)^Δ" => LeftParenthesis, Ident("q"), RightParenthesis, Incremental);
-// `x^2` still superscripts a name, and so does a `^Δ` with more name after it
-tok_test!(caret_names_stay: "x^2 x^Δt" => Ident("x^2"), Ident("x^Δt"));
+// `^` is the power: `x^2` is three tokens, and a `^Δ` with more name after
+// it is the power of the name `Δt` (r[verify mimas.op.pow])
+tok_test!(caret_is_an_operator: "x^2 x^Δt" => Ident("x"), Caret, Int(2), Ident("x"), Caret, Ident("Δt"));
 
 // r[verify mimas.query.zset.stream-ops]
 #[test]

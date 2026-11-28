@@ -719,23 +719,57 @@ expr_test!(
     Evaluation::new(ident_expr!("a"), EvaluationOp::Xor, ident_expr!("b"))
 );
 
-// `^` joined identifier continuation: `x^2` is one name (the editor
-// typesets it raised), not `x` xor `2`.
+// `^` is the power, never part of a name: `x^2 + 1` is `(x ^ 2) + 1`
+// r[verify mimas.op.pow] r[verify mimas.ident.symbols]
 expr_test!(
-    caret_joins_ident,
+    caret_is_power,
     "x^2 + 1",
-    Evaluation::new(ident_expr!("x^2"), EvaluationOp::Plus, int!(1),)
+    Evaluation::new(
+        Evaluation::new(ident_expr!("x"), EvaluationOp::Pow, int!(2)).into_expr(),
+        EvaluationOp::Plus,
+        int!(1),
+    )
 );
 
-// The retired spellings report a misdirection and parse on as xor.
+// spaced or glued, the same operator, and no misdirection
 #[test]
-fn spaced_caret_is_old_xor() {
-    let lexer = crate::lex::Lexer::new("a ^ b", 0, "test".into());
-    let mut parser = crate::Parser::new(lexer);
-    let expr = parser.expr();
-    assert_eq!(expr.to_string(), "a ⊕ b");
-    assert_eq!(parser.errors().len(), 1);
+fn spaced_caret_is_power() {
+    for src in ["a ^ b", "a^b"] {
+        let lexer = crate::lex::Lexer::new(src, 0, "test".into());
+        let mut parser = crate::Parser::new(lexer);
+        let expr = parser.expr();
+        assert_eq!(expr.to_string(), "a ^ b");
+        assert!(parser.errors().is_empty(), "{src}: {:?}", parser.errors());
+    }
 }
+
+// right-associative, tighter than unary minus and `*`
+expr_test!(
+    caret_groups_right,
+    "a ^ b ^ c",
+    Evaluation::new(
+        ident_expr!("a"),
+        EvaluationOp::Pow,
+        Evaluation::new(ident_expr!("b"), EvaluationOp::Pow, ident_expr!("c")).into_expr(),
+    )
+);
+expr_test!(
+    caret_binds_tighter_than_minus,
+    "-a ^ 2",
+    Unary::new(
+        UnaryOp::Negative,
+        Evaluation::new(ident_expr!("a"), EvaluationOp::Pow, int!(2)).into_expr(),
+    )
+);
+expr_test!(
+    caret_binds_tighter_than_star,
+    "2 * a ^ 2",
+    Evaluation::new(
+        int!(2),
+        EvaluationOp::Multiply,
+        Evaluation::new(ident_expr!("a"), EvaluationOp::Pow, int!(2)).into_expr(),
+    )
+);
 
 // `lit ^ lit` reads as a power — both sides are const, so the fold
 // happens at desugar and no error fires.
@@ -753,20 +787,22 @@ expr_test!(
 );
 // `-2^2` reads as `-(2^2)` per math convention; the parenthesized
 // `(-2)^2` squares the negative.
-expr_test!(caret_neg_base_hoists, "-2^2", Literal::Int(-4));
+expr_test!(
+    caret_neg_base_hoists,
+    "-2^2",
+    Unary::new(UnaryOp::Negative, int!(4))
+);
 expr_test!(caret_paren_neg_base, "(-2)^2", Literal::Int(4));
 expr_test!(caret_paren_neg_cube, "(-2)^3", Literal::Int(-8));
 
-// With a non-literal side the `^` still reads as the retired xor — the
-// diagnostic points at `.pow`, and recovery parses on as xor.
+// a non-literal side keeps the power for the checker to type
 #[test]
-fn caret_after_number_suggests_pow() {
+fn caret_after_number_is_power() {
     let lexer = crate::lex::Lexer::new("2 ^ x", 0, "test".into());
     let mut parser = crate::Parser::new(lexer);
     let expr = parser.expr();
-    assert_eq!(expr.to_string(), "2 ⊕ x");
-    assert_eq!(parser.errors().len(), 1);
-    assert!(parser.errors()[0].to_string().contains("pow"));
+    assert_eq!(expr.to_string(), "2 ^ x");
+    assert!(parser.errors().is_empty());
 }
 
 expr_test!(

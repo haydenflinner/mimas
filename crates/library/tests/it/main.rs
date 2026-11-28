@@ -55,6 +55,7 @@ mod plain_messages;
 mod parquet;
 mod place_generators;
 mod positional;
+mod pow_op;
 mod prelude;
 mod prepared;
 mod propagate;

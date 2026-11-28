@@ -403,3 +403,16 @@ impl Mul for float { type Out = float; }
 impl Div for float { type Out = float; }
 impl Rem for float { type Out = float; }
 impl Neg for float { type Out = float; }
+
+/// `a ^ b`, the power: right-associative and tighter than unary minus,
+/// so `-x^2` is `-(x^2)` and `2^3^2` is `512`. `x.pow(y)` is the same call.
+/// `int ^ int` is an `int`; a negative literal int exponent, or any
+/// `float` operand, gives a `float`. r[impl mimas.op.pow]
+pact Pow<Rhs = Self> {
+    type Out;
+    fn pow(self, o: Rhs) -> Out;
+}
+
+// the numbers' own `pow`s answer, as they did before `^` existed
+impl Pow for int { type Out = int; }
+impl Pow for float { type Out = float; }

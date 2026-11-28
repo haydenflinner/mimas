@@ -596,8 +596,10 @@ impl<'s> Lex<'s, Tok<TokKind<'s>>, TokKind<'s>> for Lexer<'s> {
                 stream.reset_peeks();
                 break;
             }
+            // `^` is the power operator, never part of a name: `x^2` is
+            // `x ^ 2` (r[impl mimas.op.pow] r[impl mimas.ident.symbols])
             if can_extend
-                && stream.match_peek_with(|c: char| c == '-' || c == '^')
+                && stream.match_peek_with(|c: char| c == '-')
                 && stream.match_peek_with(is_continue)
             {
                 continue;

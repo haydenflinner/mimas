@@ -169,6 +169,8 @@ impl From<EvaluationOp> for BinOp {
             | EvaluationOp::Approx => {
                 unreachable!("named operator `{value}` has no builtin lowering")
             }
+            // the checker rewrites `a ^ b` to a `pow` call (r[impl mimas.op.pow])
+            EvaluationOp::Pow => unreachable!("`^` lowers as its `pow` call"),
         }
     }
 }

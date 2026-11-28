@@ -216,7 +216,8 @@ fn numeric_join(op: EvaluationOp, a: &Option<Ty>, b: &Option<Ty>) -> Option<Ty> 
         | EvaluationOp::Uplus
         | EvaluationOp::Boxplus
         | EvaluationOp::Boxminus
-        | EvaluationOp::Approx => None,
+        | EvaluationOp::Approx
+        | EvaluationOp::Pow => None,
     }
 }
 

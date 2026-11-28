@@ -61,6 +61,9 @@ op!(
         Uplus => Uplus,
         // `≈`: binds like `==`, and only its method gives it meaning (r[impl mimas.op.approx])
         Approx => Approx,
+        // `a ^ b`: the power, right-associative and tighter than unary minus;
+        // `Parser::unary` takes it, never the infix loop (r[impl mimas.op.pow])
+        Caret => Pow,
     }
 );
 

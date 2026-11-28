@@ -966,7 +966,7 @@ impl<'s> Parser<'s> {
                     self.error_here(Misdirection {
                         src: self.src(),
                         at: self.next_location().into(),
-                        msg: "xor-assign is `x ⊕= y` — `^` superscripts a name now, as in `x^2`"
+                        msg: "xor-assign is `x ⊕= y` — `^` is the power, as in `x^2`"
                             .into(),
                         label: "write `⊕=` here".into(),
                     });
@@ -3774,44 +3774,6 @@ impl<'s> Parser<'s> {
                 left = self.op_expr(BinaryOp::Eval(EvaluationOp::Modulo), left, right, start);
                 continue;
             }
-            // A `^` reaching here is the retired xor — contiguous `x^2`
-            // already folded into the name at lex time, so this is always
-            // spaced (or after a number, where the intent was `pow`). Teach
-            // `⊕`/`xor`/`.pow` and keep parsing as if xor were written.
-            if self.at(TokKind::Caret) && self.infix_binds() {
-                let caret = self.next_location();
-                let pow = matches!(
-                    left.kind(),
-                    ExprKind::Literal(Literal::Int(_) | Literal::Float(_))
-                );
-                self.advance();
-                let right = self.binary(5);
-                // `2^10` is spelled like math, not xor — both sides are
-                // const, so the value's known at desugar: fold it. `x ^ 2`
-                // with a name stays the misdirection (`x^2` superscripts).
-                if let Some(folded) = caret_pow(&left, &right) {
-                    left = self.new_expr(folded, start);
-                    continue;
-                }
-                // `error`, not `error_here`: the right side already parsed,
-                // so at EOF the Misdirection itself would never emit.
-                self.error(Misdirection {
-                    src: self.src(),
-                    at: caret.into(),
-                    msg: if pow {
-                        "`^` isn't an operator — exponents are `x.pow(n)` and xor is `a ⊕ b`; `x^2` superscripts a name".into()
-                    } else {
-                        "xor is `a ⊕ b` (or `a xor b`) — `^` superscripts a name, as in `x^2`".into()
-                    },
-                    label: if pow {
-                        "write `.pow(…)`".into()
-                    } else {
-                        "write `⊕` here".into()
-                    },
-                });
-                left = self.op_expr(BinaryOp::Eval(EvaluationOp::Xor), left, right, start);
-                continue;
-            }
             // in a comma-optional sequence a `-` glued to a number opens
             // the next element: `[0 -1]` is `[0, -1]`, while `a - 1`
             // and `a -x` keep the infix read
@@ -4125,7 +4087,8 @@ impl<'s> Parser<'s> {
         } else if let Ok(op) = self.peek().try_into() {
             op
         } else {
-            return self.fstring();
+            let base = self.fstring();
+            return self.power(base, start);
         };
         self.advance();
         // `----...` recurses here without passing back through `expr`
@@ -4133,6 +4096,24 @@ impl<'s> Parser<'s> {
             .nested(Self::unary)
             .unwrap_or_else(|| self.poison_expr(self.cursor()));
         self.new_expr(Unary::new(operator, right), start)
+    }
+
+    /// `base ^ e`: the power binds tighter than a unary minus and than `*`,
+    /// and groups to the right, so `-x^2` is `-(x^2)` and `2^3^2` is `2^9`.
+    /// The exponent is a unary operand, so `2^-1` reads. Two number
+    /// literals fold now. r[impl mimas.op.pow]
+    fn power(&mut self, base: Expr, start: usize) -> Expr {
+        if !self.at(TokKind::Caret) || !self.infix_binds() {
+            return base;
+        }
+        self.advance();
+        let exp = self
+            .nested(Self::unary)
+            .unwrap_or_else(|| self.poison_expr(self.cursor()));
+        if let Some(folded) = caret_pow(&base, &exp) {
+            return self.new_expr(folded, start);
+        }
+        self.new_expr(Evaluation::new(base, EvaluationOp::Pow, exp), start)
     }
 
     fn fstring(&mut self) -> Expr {
@@ -7066,7 +7047,7 @@ impl<'s> Parser<'s> {
     fn stray_stmt_token(&self) -> shared::Error {
         let kind = self.peek();
         let infix = BinaryOp::of(kind).is_some()
-            || matches!(kind, TokKind::Percent | TokKind::DoubleHook | TokKind::Absolve);
+            || matches!(kind, TokKind::Percent | TokKind::DoubleHook | TokKind::Absolve | TokKind::Caret);
         if infix && self.at_line_start() {
             return Misdirection {
                 src: self.src(),
@@ -8045,6 +8026,10 @@ impl BinaryOp {
             return Some((Self::Eval(op), 4));
         }
         let op = EvaluationOp::try_from(kind).ok()?;
+        // `^` binds tighter than any infix: `Parser::unary` takes it
+        if op == EvaluationOp::Pow {
+            return None;
+        }
         // `a ≈ b` compares, so it binds like `==` (r[impl mimas.op.approx])
         if op == EvaluationOp::Approx {
             return Some((Self::Eval(op), 2));

@@ -145,6 +145,7 @@ fn op_method_names(op: EvaluationOp) -> (&'static str, &'static str) {
         EvaluationOp::Ominus => ("ominus", "rominus"),
         EvaluationOp::Uplus => ("uplus", "ruplus"),
         EvaluationOp::Approx => ("approx", "rapprox"),
+        EvaluationOp::Pow => ("pow", "rpow"),
     }
 }
 
@@ -2967,6 +2968,9 @@ impl Solve for Equality {
 
 impl Solve for Evaluation {
     fn solve(&self, id: NodeId, location: Location, solver: &mut Solver) -> Result<Ty> {
+        if self.op == EvaluationOp::Pow {
+            return solve_pow(self, id, location, solver);
+        }
         solver.dec_literal_beside(&self.left, &self.right)?;
         fn eval(
             op: EvaluationOp,
@@ -3201,6 +3205,73 @@ impl Solve for Evaluation {
         }
         eval(self.op, &lhs_n, &rhs_n, location, solver)
     }
+}
+
+/// `a ^ b` is `a.pow(b)`, through the `Pow` pact (r[impl mimas.op.pow]).
+/// On the numbers the operands are made to fit the built-in `pow`s, which
+/// stay the fast path: `int ^ int` is an `int`, a negative literal int
+/// exponent or any `float` operand gives a `float`. A literal exponent stays
+/// a literal, so the dims pass reads `w ^ 2` as `px^2`.
+fn solve_pow(ev: &Evaluation, id: NodeId, location: Location, solver: &mut Solver) -> Result<Ty> {
+    let at = location;
+    let lhs = ev.left.query(solver)?.normalized(solver);
+    let rhs = ev.right.query(solver)?.normalized(solver);
+    // a literal int exponent, signed: `2`, `-1`
+    let lit = |e: &Expr| -> Option<i64> {
+        match e.kind() {
+            ExprKind::Literal(Literal::Int(n)) => Some(*n),
+            ExprKind::Unary(Unary { op: UnaryOp::Negative, right }) => match right.kind() {
+                ExprKind::Literal(Literal::Int(n)) => Some(-*n),
+                _ => None,
+            },
+            _ => None,
+        }
+    };
+    let to_float = |e: &Expr| -> Expr {
+        match lit(e) {
+            Some(n) => Expr::new(ExprKind::Literal(Literal::Float(n as f64)), e.location()),
+            None => Expr::new(
+                ExprKind::Call(Call {
+                    left: Expr::new(
+                        ExprKind::Access(Access::Dot {
+                            left: e.clone(),
+                            right: Expr::new(ExprKind::Ident(Ident::new("to_float", at)), at),
+                            kind: parse::AccessKind::Direct,
+                        }),
+                        at,
+                    ),
+                    arguments: vec![],
+                }),
+                at,
+            ),
+        }
+    };
+    let negative_lit = lit(&ev.right).is_some_and(|n| n < 0);
+    let (base, exp) = match (&lhs, &rhs) {
+        (Ty::Int, Ty::Int) if negative_lit => (to_float(&ev.left), to_float(&ev.right)),
+        (Ty::Int, Ty::Int) | (Ty::Float, Ty::Float) => (ev.left.clone(), ev.right.clone()),
+        (Ty::Float, Ty::Int) => (ev.left.clone(), to_float(&ev.right)),
+        (Ty::Int, Ty::Float) => (to_float(&ev.left), ev.right.clone()),
+        _ => (ev.left.clone(), ev.right.clone()),
+    };
+    let call = Expr::new(
+        ExprKind::Call(Call {
+            left: Expr::new(
+                ExprKind::Access(Access::Dot {
+                    left: base,
+                    right: Expr::new(ExprKind::Ident(Ident::new("pow", at)), at),
+                    kind: parse::AccessKind::Direct,
+                }),
+                at,
+            ),
+            arguments: vec![Argument { name: None, value: exp }],
+        }),
+        at,
+    );
+    solver.caret_pows.insert(call.id());
+    let ty = call.query(solver)?;
+    solver.rewrites.insert(id, call);
+    Ok(ty)
 }
 
 impl Solve for For {

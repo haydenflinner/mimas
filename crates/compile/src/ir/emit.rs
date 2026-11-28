@@ -2497,7 +2497,13 @@ fn dispatch_pact_method(
                     .get(&format!("{method}@{}", ir.resolutions.pact_names[*p]))
                     .copied()
             });
-            let target = match keyed.or_else(|| adt.methods.get(method).copied()) {
+            // a member noted by its instance key (`pow@Pow<int>`) falls back to
+            // the type's own method of the plain name (`int`'s native `pow`)
+            let plain = method.split('@').next().unwrap_or(method);
+            let target = match keyed
+                .or_else(|| adt.methods.get(method).copied())
+                .or_else(|| adt.methods.get(plain).copied())
+            {
                 Some(dec) => Ok(dec),
                 None => Err(builtin(method)?),
             };

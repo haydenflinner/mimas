@@ -2487,6 +2487,20 @@ impl<'a> Pass<'a> {
                 match n {
                     Some(n) if n.fract() == 0.0 && n.abs() < 100.0 => D::Q(d.powi(n as i8)),
                     _ if d.is_none() => PLAIN,
+                    // `w ^ k` on a quantity: the unit's exponent must be known
+                    // (r[impl mimas.op.pow.units])
+                    _ if self.solver.caret_pows.contains(&e.id()) => {
+                        self.fail(
+                            e.location(),
+                            format!(
+                                "`^` on {} needs a whole-number literal exponent",
+                                Self::describe(d)
+                            ),
+                            "the unit's power must be known here".into(),
+                            "write a literal such as `w ^ 2`, or take the unit off first with `.to(1px)` (the unit `w` has)",
+                        );
+                        D::Any
+                    }
                     _ => D::Any,
                 }
             }

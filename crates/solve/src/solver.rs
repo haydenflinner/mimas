@@ -97,6 +97,9 @@ pub struct Solver {
     /// A one-argument method call's argument, by its callee access node:
     /// picks among a bound's instances of one pact.
     pub(crate) call_args: FxHashMap<NodeId, Expr>,
+    /// The `pow` calls `a ^ b` became: the dims pass holds their exponent
+    /// to an integer literal on a quantity (`mimas.op.pow.units`).
+    pub(crate) caret_pows: FxHashSet<NodeId>,
     /// (instance, adt) answered by an impl of a sibling instance
     /// (`impl Add<T> for Box<T>` for `Add<int>`): the impl's instance.
     pub(crate) inst_alias: FxHashMap<(PactId, AdtId), PactId>,
@@ -622,6 +625,7 @@ impl Solver {
             pact_params: FxHashMap::default(),
             pact_insts: FxHashMap::default(),
             call_args: FxHashMap::default(),
+            caret_pows: FxHashSet::default(),
             inst_alias: FxHashMap::default(),
             inst_of: FxHashMap::default(),
             bound_assoc: FxHashMap::default(),
