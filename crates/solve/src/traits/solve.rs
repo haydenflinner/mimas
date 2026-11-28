@@ -1152,7 +1152,12 @@ impl Solve for Call {
         // a failed call whose argument is a comma-grouped number written with
         // no space (`clamp(x,100,200)`) says so: grouping applies in a call
         // too, so `100,200` was one number (r[impl mimas.num.group-hint])
-        solve_call(self, id, location, solver).map_err(|e| grouped_number_hint(self, solver, e))
+        let ty = solve_call(self, id, location, solver)
+            .map_err(|e| grouped_number_hint(self, solver, e))?;
+        solver
+            .settle_assoc()
+            .map_err(|e| e.into_type_mismatch(solver, location))?;
+        Ok(ty)
     }
 }
 
@@ -1273,9 +1278,13 @@ fn solve_call(this: &Call, id: NodeId, location: Location, solver: &mut Solver) 
             let is_pull = |t: &Ty| {
                 matches!(t, Ty::Fn(h) if h.parameters.is_empty() && matches!(h.return_ty.as_ref(), Ty::Option(_)))
             };
+            // a type's own method of the name wins: a list keeps its `map`
             let own = match &recv_ty {
                 Ty::Adt(aid, _) | Ty::Identity(aid, _) => solver.adts[*aid].impls.contains_key(&name),
-                _ => false,
+                Ty::Array(..) => true,
+                other => solver
+                    .builtin_adt(other)
+                    .is_some_and(|aid| solver.adts[aid].impls.contains_key(&name)),
             };
             let source = if is_pull(&recv_ty) {
                 Some(recv.clone())
@@ -3674,10 +3683,11 @@ impl Solve for Impl {
         solver.ribs.push_impl(aid);
         // member signatures/annotations see the target's own declared params (`impl List` is
         // `impl List<T>` -- there's no specialization syntax)
-        let generic = solver.adts[aid].is_generic();
+        let generic = solver.adts[aid].is_generic() || self.shape.is_some();
         if generic {
             solver.push_adt_params(aid);
         }
+        solver.enter_impl_shape(&self.shape)?;
         // `type Item = Card;`: member bodies name the impl's associated
         // types (r[impl mimas.pact.assoc-type])
         let fixed: crate::FxHashMap<String, Ty> = match &pact {
@@ -3836,6 +3846,7 @@ impl Solve for Impl {
         });
 
         solver.assoc_scope.pop();
+        solver.impl_shape = None;
         result?;
         if generic {
             solver.pop_type_params();

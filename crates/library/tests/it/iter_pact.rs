@@ -83,3 +83,45 @@ fn a_default_body_names_the_associated_type() {
     // through a concrete receiver, `Item` is the impl's `int`
     assert_eq!(test_runner::render(pre, "Dice { faces: [6, 5] }.pair().0 + 1"), "7");
 }
+
+// r[verify mimas.std.iter.builtin]
+// r[verify mimas.impl.builtin-shape]
+#[test]
+fn the_built_in_shapes_meet_the_bound() {
+    let run = |src: &str| test_runner::render(DECK, src);
+    assert_eq!(run("count([1, 2, 3])"), "3");
+    // a `str` walks by character, a dict by `(key, value)` pair
+    assert_eq!(run("count(\"héllo\")"), "5");
+    assert_eq!(run("count({\"a\": 1, \"b\": 2})"), "2");
+    // the impl's `iter` is a method of its own on the shape
+    assert_eq!(run("{ let p = [5, 6].iter(); p() }"), "5");
+    // a list keeps its own `map`; a `str` walks through `iter`
+    assert_eq!(run("[1, 2].map(|x| x + 1)"), "[2, 3]");
+    assert_eq!(run("\"ab\".map(|c| c + \"!\").to_list()"), "[\"a!\", \"b!\"]");
+}
+
+const PATHS: &str = "fn first<T: Iter>(xs: T) -> T::Item? { let p = xs.iter(); p() }
+fn last<T: Iter>(xs: T) -> T::Item? {
+    let out: T::Item? = null
+    for x in xs { out = x }
+    out
+}
+fn has<T: Iter>(xs: T, want: T::Item) -> bool {
+    for x in xs { if x == want { return true } }
+    false
+}";
+
+// r[verify mimas.pact.assoc-path]
+#[test]
+fn an_associated_type_path_reads_in_a_signature() {
+    let run = |src: &str| test_runner::render(PATHS, src);
+    assert_eq!(run("first([3, 4])"), "3");
+    assert_eq!(run("first(\"xy\")"), "\"x\"");
+    // the caller reads the item's own type: `str` methods on a list's item
+    assert_eq!(run("first([\"ab\", \"c\"])!.len()"), "2");
+    assert_eq!(run("last(2..7)"), "6");
+    assert_eq!(run("has([1, 2], 2)"), "true");
+    assert_eq!(run("has(\"abc\", \"z\")"), "false");
+    // a parameter typed `T::Item` checks against the list's item
+    rejected(&format!("{PATHS}\nlet a = has([1, 2], \"x\");"), "int");
+}

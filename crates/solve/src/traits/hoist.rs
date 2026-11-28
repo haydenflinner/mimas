@@ -499,6 +499,13 @@ impl Hoist for Impl {
         // write `x: T` / `rest: List<T>` -- `impl List<int>`-style specializations are rejected
         // by the parser)
         ctx.solver.push_adt_params(adt);
+        // `impl Iter for [T]`: the shape's params and `Self`
+        // (r[impl mimas.impl.builtin-shape])
+        if let Some(shape) = ctx.solver.enter_impl_shape(&self.shape)?
+            && let Some(pid) = pid
+        {
+            ctx.solver.impl_shapes.insert((pid, adt), shape);
+        }
         // `type Item = Card;`: the impl fixes its pact's associated types,
         // and names them in its own members (r[impl mimas.pact.assoc-type])
         let fixed = match crate::traits::assoc_fixes(ctx.solver, self, adt, pid) {
@@ -590,6 +597,7 @@ impl Hoist for Impl {
 
         ctx.solver.hoisting_pact = prev_pact;
         ctx.solver.assoc_scope.pop();
+        ctx.solver.impl_shape = None;
         ctx.solver.pop_type_params();
         ctx.solver.ribs.pop();
 

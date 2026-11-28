@@ -20,6 +20,28 @@ pact Iter {
     fn iter(self) -> () -> Item?;
 }
 
+// The built-in shapes walk the way `for` walks them, so a list, a `str`
+// or a dict meets a `T: Iter` bound. A `for` over one keeps its own loop.
+// r[impl mimas.std.iter.builtin]
+
+impl Iter for [T] {
+    type Item = T;
+    /// A pull over the items, first to last.
+    fn iter(self) -> () -> T? { __list_pull(self) }
+}
+
+impl Iter for str {
+    type Item = str;
+    /// A pull over the characters, each a one-character `str`.
+    fn iter(self) -> () -> str? { __list_pull(self.chars()) }
+}
+
+impl Iter for {K: V} {
+    type Item = (K, V);
+    /// A pull over the `(key, value)` pairs, in the order they came.
+    fn iter(self) -> () -> (K, V)? { __list_pull(self.pairs()) }
+}
+
 /// A total order. `cmp` answers a negative number, zero or a positive
 /// number. `<`, `<=`, `>` and `>=` on a type that implements `Ord` and has
 /// no `lt` compare through it.

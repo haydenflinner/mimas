@@ -202,6 +202,10 @@ macro_rules! id {
                 /// arm through a sentinel the same way.
                 pub const PRIM_DEC: Self = Self(u32::MAX - 5);
                 pub const PRIM_FRAME: Self = Self(u32::MAX - 6);
+                /// A list and a dict are values of their own kind:
+                /// `impl Iter for [T]` takes its arm through these.
+                pub const PRIM_LIST: Self = Self(u32::MAX - 7);
+                pub const PRIM_DICT: Self = Self(u32::MAX - 8);
 
                 /// The primitive sentinel for a library namespace adt's name.
                 pub fn primitive(name: &str) -> Option<Self> {
@@ -212,12 +216,14 @@ macro_rules! id {
                         "bool" => Some(Self::PRIM_BOOL),
                         "dec" => Some(Self::PRIM_DEC),
                         "DataFrame" => Some(Self::PRIM_FRAME),
+                        "array" => Some(Self::PRIM_LIST),
+                        "dict" => Some(Self::PRIM_DICT),
                         _ => None,
                     }
                 }
 
                 pub fn is_primitive_sentinel(self) -> bool {
-                    self.0 >= u32::MAX - 6 && self.0 != u32::MAX
+                    self.0 >= u32::MAX - 8 && self.0 != u32::MAX
                 }
 
                 pub fn index(self) -> usize {

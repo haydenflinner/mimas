@@ -130,6 +130,15 @@ pub struct Solver {
     /// param per (owner param, stand-in param), and the reverse lookup.
     pub(crate) assoc_of_param: FxHashMap<(ParamId, ParamId), ParamId>,
     pub(crate) assoc_owner: FxHashMap<ParamId, (ParamId, ParamId)>,
+    /// The shape of the `impl … for [T]`/`{K: V}` being read, its params
+    /// in scope; `None` outside one.
+    pub(crate) impl_shape: Option<Ty>,
+    /// A `T::Item` read where `T` was still open: (owner, stand-in, the
+    /// vid that stands for the item), settled after each call.
+    pub(crate) assoc_pending: Vec<(Ty, ParamId, Ty)>,
+    /// Each built-in-shape impl's shape, `(pact, array) → [T]`, so an
+    /// associated type binding reads `T` off the concrete list.
+    pub(crate) impl_shapes: FxHashMap<(PactId, AdtId), Ty>,
     /// Each pact's associated type names.
     pub(crate) pact_assoc: FxHashMap<PactId, Vec<String>>,
     /// Each impl member a pact owns: its dec and the pact (C3). A member whose
@@ -484,6 +493,9 @@ impl Solver {
             assoc_bindings: FxHashMap::default(),
             assoc_of_param: FxHashMap::default(),
             assoc_owner: FxHashMap::default(),
+            impl_shape: None,
+            assoc_pending: vec![],
+            impl_shapes: FxHashMap::default(),
             pact_assoc: FxHashMap::default(),
             member_pact: FxHashMap::default(),
             ambiguous_members: FxHashMap::default(),
@@ -1938,7 +1950,42 @@ impl Solver {
         };
         let (aid, args) = concrete?;
         let bound = self.assoc_bindings.get(&(pid, aid, name)).cloned()?;
+        // `impl Iter for [T]`: read `T` off the concrete list
+        if let Some(shape) = self.impl_shapes.get(&(pid, aid)).cloned() {
+            let mut map = FxHashMap::default();
+            bind_shape(&shape, &owner.clone().normalized(self), &mut map);
+            return Some(self.substitute_params(&bound, &mut map));
+        }
         Some(self.specialize(&bound, aid, &args))
+    }
+
+    /// Pending `T::Item`s whose `T` has settled: unify each with what
+    /// `T`'s impl fixes. Runs after every call and before the bound check.
+    // r[impl mimas.pact.assoc-path]
+    pub(crate) fn settle_assoc(&mut self) -> std::result::Result<(), UnificationError> {
+        if self.assoc_pending.is_empty() {
+            return Ok(());
+        }
+        for (owner, item, mut v) in std::mem::take(&mut self.assoc_pending) {
+            let owner = owner.normalized(self);
+            match self.assoc_for(item, &owner) {
+                Some(mut t) => v.fulfill_ty(&mut t, self)?,
+                None if matches!(owner, Ty::Vid(_)) => self.assoc_pending.push((owner, item, v)),
+                None => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// The stand-in param of the associated type `name` that one of
+    /// `owner`'s bounds declares (`Item` for `T: Iter`), if any.
+    pub(crate) fn assoc_named(&self, owner: ParamId, name: &str) -> Option<ParamId> {
+        let bounds = self.param_bounds.get(&owner)?;
+        let pacts: Vec<PactId> = bounds.iter().flat_map(|b| self.pact_closure(*b)).collect();
+        self.assoc_params
+            .iter()
+            .find(|(_, (pid, n))| n == name && pacts.contains(pid))
+            .map(|(p, _)| *p)
     }
 
     /// `T::Item` for a bounded param `T`: one opaque param per (owner,
@@ -2740,6 +2787,13 @@ impl Solver {
                 .impls
                 .get("iter")
                 .is_some_and(|f| matches!(&f.ty, Ty::Fn(h) if one_receiver(h))),
+            // a built-in shape with `impl Iter` (`str`, a dict, a list)
+            Ty::Str | Ty::Dict(..) | Ty::Array(..) => self.builtin_adt(t).is_some_and(|aid| {
+                self.adts[aid]
+                    .impls
+                    .get("iter")
+                    .is_some_and(|f| matches!(&f.ty, Ty::Fn(h) if one_receiver(h)))
+            }),
             Ty::Param(p) => self.param_bounds.get(p).is_some_and(|bounds| {
                 bounds.iter().any(|b| {
                     self.pact_closure(*b).into_iter().any(|q| {
@@ -3337,6 +3391,28 @@ impl Solver {
         self.type_params.push(scope);
     }
 
+    /// `impl Iter for [T]`: the shape's own params join the innermost
+    /// type-param scope, and `Self` inside reads as the shape (`[T]`), not
+    /// the library's `array` namespace. Returns the shape's type.
+    // r[impl mimas.impl.builtin-shape]
+    pub(crate) fn enter_impl_shape(
+        &mut self,
+        shape: &Option<(parse::components::Annotation, Vec<parse::components::TypeParam>)>,
+    ) -> Result<Option<Ty>> {
+        let Some((ann, params)) = shape else {
+            self.impl_shape = None;
+            return Ok(None);
+        };
+        let declared = self.declare_type_params(params);
+        match self.type_params.last_mut() {
+            Some(scope) => scope.extend(declared),
+            None => self.type_params.push(declared.into_iter().collect()),
+        }
+        let ty = Ty::from_annotation(ann.clone(), self)?;
+        self.impl_shape = Some(ty.clone());
+        Ok(Some(ty))
+    }
+
     pub(crate) fn pop_type_params(&mut self) {
         self.type_params.pop();
     }
@@ -3409,6 +3485,22 @@ impl Solver {
     /// composite, including adt/identity type args.
     pub(crate) fn substitute_params(&mut self, t: &Ty, map: &mut FxHashMap<ParamId, Ty>) -> Ty {
         match t {
+            // `T::Item` read at a use site: what `T`'s own stand-in fixes it
+            // to, now or once `T` settles (r[impl mimas.pact.assoc-path])
+            Ty::Param(pid) if !map.contains_key(pid) && self.assoc_owner.contains_key(pid) => {
+                let (owner, item) = self.assoc_owner[pid];
+                let owner_ty = self.substitute_params(&Ty::Param(owner), map);
+                let ty = match self.assoc_for(item, &owner_ty) {
+                    Some(t) => t,
+                    None => {
+                        let v = Ty::Vid(self.vid());
+                        self.assoc_pending.push((owner_ty, item, v.clone()));
+                        v
+                    }
+                };
+                map.insert(*pid, ty.clone());
+                ty
+            }
             Ty::Param(pid) => match map.get(pid) {
                 Some(ty) => ty.clone(),
                 None => {
@@ -5623,6 +5715,12 @@ impl Solver {
     /// `Pair<A, B>` with the adt's own params in scope, not any single instantiation.
     pub(crate) fn impl_target_ty(&self) -> Option<Ty> {
         let aid = self.impl_target()?;
+        // `impl Iter for [T]`: `Self` is the shape the impl names
+        if let Some(shape) = &self.impl_shape
+            && self.builtin_adt(shape) == Some(aid)
+        {
+            return Some(shape.clone());
+        }
         // `impl Opp for bool`: inside, `Self` is the primitive, not the
         // library's `bool` namespace adt
         if let Some(prim) = self.primitive_of(aid) {
@@ -6332,4 +6430,20 @@ fn has_atom(expr: &Expr) -> bool {
     let mut find = Find(false);
     parse::walk_expr(expr, &mut find);
     find.0
+}
+
+/// Match a built-in shape (`[T]`, `{K: V}`) against a concrete type,
+/// recording what each of its params stands for.
+fn bind_shape(shape: &Ty, ty: &Ty, map: &mut FxHashMap<ParamId, Ty>) {
+    match (shape, ty) {
+        (Ty::Param(p), t) => {
+            map.insert(*p, t.clone());
+        }
+        (Ty::Array(a, _), Ty::Array(b, _)) => bind_shape(a, b, map),
+        (Ty::Dict(ak, av), Ty::Dict(bk, bv)) => {
+            bind_shape(ak, bk, map);
+            bind_shape(av, bv, map);
+        }
+        _ => {}
+    }
 }

@@ -329,6 +329,17 @@ impl TyExt for Ty {
                 solver.note(&ident, ty.clone(), dec);
                 Ok(ty)
             }
+            // `T::Item`: a bounded param's associated type, opaque here
+            // (r[impl mimas.pact.assoc-path])
+            Annotation::Path(segments)
+                if segments.len() == 2
+                    && let Some(owner) = solver.type_param(&segments[0])
+                    && let Some(item) = solver.assoc_named(owner, &segments[1].lexeme) =>
+            {
+                Ok(solver
+                    .assoc_for(item, &Ty::Param(owner))
+                    .expect("a bounded param always reads its associated type"))
+            }
             Annotation::Path(segments) => {
                 let mut iter = segments.into_iter();
                 let head = iter

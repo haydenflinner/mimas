@@ -24,6 +24,10 @@ pub struct Impl {
     /// `type Item = Card;`: the pact's associated types this impl fixes
     /// (`mimas.pact.assoc-type`).
     pub assoc: Vec<(Ident, crate::components::Annotation)>,
+    /// `impl Iter for [T]` / `impl Iter for {K: V}`: the built-in shape the
+    /// impl is for, with the parameters it names. The target is then the
+    /// library's `array` or `dict` (`mimas.impl.builtin-shape`).
+    pub shape: Option<(crate::components::Annotation, Vec<crate::components::TypeParam>)>,
 }
 impl Impl {
     pub(crate) fn new(
@@ -39,6 +43,7 @@ impl Impl {
             items,
             bounds: vec![],
             assoc: vec![],
+            shape: None,
         }
     }
 }

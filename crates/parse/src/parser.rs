@@ -2911,9 +2911,45 @@ impl<'s> Parser<'s> {
         }
         // `impl Foo {}` (inherent) vs `impl Pact for Foo {}` (pact impl). After the first ident,
         // a `for` token disambiguates -- first becomes the pact, second becomes the target.
+        let mut shape = None;
         let (pact, target) = if self.eat(TokKind::For) {
             // a pact may be implemented for a primitive (`impl Opp for bool`)
             let target = match self.peek() {
+                // `impl Iter for [T]` / `{K: V}`: a built-in shape whose
+                // parameters the impl names (r[impl mimas.impl.builtin-shape])
+                // a `{` is a shape only as `{K: V}`: `impl P for {}` is a
+                // missing target before the body
+                TokKind::LeftSquare | TokKind::LeftBrace
+                    if self.peek() == TokKind::LeftSquare
+                        || (matches!(self.nth(1), TokKind::Ident(_))
+                            && self.nth(2) == TokKind::Colon) =>
+                {
+                    let at = self.next_location();
+                    let ann = self.annotation();
+                    let param = |a: &Annotation| match a {
+                        Annotation::Ty(i) => Some(TypeParam::new(i.clone(), vec![])),
+                        _ => None,
+                    };
+                    let (name, params) = match &ann {
+                        Annotation::Array(inner, dims) if dims.is_empty() => {
+                            ("array", param(inner).into_iter().collect::<Vec<_>>())
+                        }
+                        Annotation::Map(k, v, _) => {
+                            ("dict", [param(k), param(v)].into_iter().flatten().collect())
+                        }
+                        _ => ("array", vec![]),
+                    };
+                    let want = if name == "array" { 1 } else { 2 };
+                    if params.len() != want {
+                        self.error(Expected {
+                            src: self.src(),
+                            at: at.into(),
+                            what: "a built-in shape that names its parameters, `[T]` or `{K: V}`",
+                        });
+                    }
+                    shape = Some((ann, params));
+                    Ident::new(name.to_string(), at)
+                }
                 TokKind::TyKw(ty) => {
                     let at = self.next_location();
                     self.advance();
@@ -2946,10 +2982,10 @@ impl<'s> Parser<'s> {
         let mut assoc = vec![];
         // a via impl may carry no braces at all
         if via.is_some() && !self.at(TokKind::LeftBrace) {
-            return { let mut imp = Impl::new(target, pact, via, items); imp.bounds = bounds; imp.assoc = assoc; imp };
+            return { let mut imp = Impl::new(target, pact, via, items); imp.bounds = bounds; imp.assoc = assoc; imp.shape = shape; imp };
         }
         if !self.expect(TokKind::LeftBrace) {
-            return { let mut imp = Impl::new(target, pact, via, items); imp.bounds = bounds; imp.assoc = assoc; imp };
+            return { let mut imp = Impl::new(target, pact, via, items); imp.bounds = bounds; imp.assoc = assoc; imp.shape = shape; imp };
         }
         while !self.eat(TokKind::RightBrace) {
             let kind = if self.at(TokKind::Pub) {
@@ -3009,7 +3045,7 @@ impl<'s> Parser<'s> {
                 }),
             }
         }
-        { let mut imp = Impl::new(target, pact, via, items); imp.bounds = bounds; imp.assoc = assoc; imp }
+        { let mut imp = Impl::new(target, pact, via, items); imp.bounds = bounds; imp.assoc = assoc; imp.shape = shape; imp }
     }
 
     /// A function up to its body. A pact's signatures don't get `defaults`. Returns the
