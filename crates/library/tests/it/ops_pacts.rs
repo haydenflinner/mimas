@@ -116,3 +116,28 @@ fn std_types_implement_the_operator_pacts() {
     assert_eq!(test_runner::render("let a = post(5)\nlet b = post(2)", "a - b"), "3");
     assert_eq!(test_runner::render("let a = post(5)", "(a + 1).at"), "6");
 }
+
+// The laws `+` keeps where they hold: associative and commutative on `int`
+// and on `Vec2` (samples whose float sums are exact), checked through the
+// `Add` pact in a generic fn, the way `group_laws` checks `AbelianGroup`.
+// `float`'s `+` is not associative for most values, so `float` keeps only
+// `Approx`: the last check shows the law failing there.
+// r[verify mimas.std.ops.laws]
+#[test]
+fn add_keeps_its_laws_where_they_hold() {
+    let laws = "use std::math::Vec2;
+fn add_laws<T: Add<Out = T>>(xs: [T]) -> bool {
+    for a in xs { for b in xs {
+        if a + b != b + a { return false; }
+        for c in xs { if (a + b) + c != a + (b + c) { return false; } }
+    } }
+    true
+}";
+    let run = |e: &str| test_runner::render(laws, e);
+    assert_eq!(run("add_laws([0, 1, -2, 7, 1000000])"), "true");
+    assert_eq!(
+        run("add_laws([Vec2::new(0.0, 0.0), Vec2::new(1.5, -2.0), Vec2::new(-0.25, 4.0)])"),
+        "true"
+    );
+    assert_eq!(run("add_laws([0.1, 0.2, 0.3])"), "false");
+}
